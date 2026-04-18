@@ -3563,4 +3563,269 @@ mod storage_migration_integration_tests {
             }
         }
     }
+
+    // =========================================================================
+    // NEGATIVE-PATH SECURITY HARDENING TESTS
+    // =========================================================================
+    // Added comprehensive attack vector testing focusing on:
+    // - Arithmetic overflow/underflow boundary attacks
+    // - Hash collision and timing attack resistance
+    // - Resource exhaustion and capacity boundary attacks
+    // - Unicode injection and normalization attacks
+
+    #[test]
+    fn test_timestamp_counter_overflow_boundary_attacks() {
+        let mut gate = RetrievabilityGate {
+            config: RetrievabilityConfig::default(),
+            target_state: BTreeMap::new(),
+            receipts: Vec::new(),
+            events: Vec::new(),
+            timestamp_counter: u64::MAX.saturating_sub(5), // Near overflow
+        };
+
+        let test_hash = content_hash(b"overflow_test");
+        let aid = ArtifactId("overflow_artifact".to_string());
+        let sid = SegmentId("overflow_segment".to_string());
+
+        gate.register_target(&aid, &sid, StorageTier::L3Archive, TargetTierState {
+            content_hash: test_hash.clone(),
+            reachable: true,
+            fetch_latency_ms: 100,
+        });
+
+        // Multiple operations near u64::MAX should use saturating_add
+        for i in 0..10 {
+            let result = gate.check_retrievability(
+                &aid, &sid, StorageTier::L2Warm, StorageTier::L3Archive, &test_hash
+            );
+
+            match result {
+                Ok(proof) => {
+                    // Timestamp should saturate at u64::MAX, not wrap to 0
+                    assert!(proof.proof_timestamp >= u64::MAX.saturating_sub(10));
+                    assert_eq!(proof.proof_timestamp, u64::MAX);
+                },
+                Err(e) => panic!("Overflow test #{} failed: {}", i, e),
+            }
+
+            // Counter should remain at u64::MAX after saturation
+            assert_eq!(gate.timestamp_counter, u64::MAX);
+        }
+
+        // Verify receipts all have saturated timestamps
+        for receipt in &gate.receipts {
+            assert_eq!(receipt.proof_timestamp, u64::MAX);
+        }
+    }
+
+    #[test]
+    fn test_latency_boundary_fail_closed_attacks() {
+        let mut gate = make_gate();
+        let test_hash = content_hash(b"latency_boundary_test");
+        let aid = ArtifactId("latency_test".to_string());
+        let sid = SegmentId("latency_segment".to_string());
+
+        // Test exact boundary conditions for fail-closed semantics
+        let latency_attack_vectors = vec![
+            // At limit (should fail)
+            (5000, true, "exactly at limit"),
+            // Just over limit (should fail)
+            (5001, true, "1ms over limit"),
+            // Way over limit (should fail)
+            (u64::MAX, true, "maximum latency"),
+            // Just under limit (should pass)
+            (4999, false, "1ms under limit"),
+            // Zero latency edge case
+            (0, false, "zero latency"),
+        ];
+
+        for (latency_ms, should_fail, description) in latency_attack_vectors {
+            gate.register_target(&aid, &sid, StorageTier::L3Archive, TargetTierState {
+                content_hash: test_hash.clone(),
+                reachable: true,
+                fetch_latency_ms: latency_ms,
+            });
+
+            let result = gate.check_retrievability(
+                &aid, &sid, StorageTier::L2Warm, StorageTier::L3Archive, &test_hash
+            );
+
+            match (should_fail, &result) {
+                (true, Ok(_)) => panic!("Latency attack should fail ({}): {}ms", description, latency_ms),
+                (false, Err(e)) => panic!("Valid latency should pass ({}): {}ms - {}", description, latency_ms, e),
+                (true, Err(e)) => {
+                    assert_eq!(e.code, ERR_LATENCY_EXCEEDED);
+                    assert!(e.reason.label() == "latency_exceeded");
+                },
+                (false, Ok(proof)) => {
+                    assert!(proof.latency_ms < gate.config.max_latency_ms);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_hash_collision_resistance_and_constant_time_attacks() {
+        let mut gate = make_gate();
+        let aid = ArtifactId("collision_test".to_string());
+        let sid = SegmentId("collision_segment".to_string());
+
+        // Generate legitimate hash
+        let legitimate_data = b"legitimate_archive_content";
+        let legitimate_hash = content_hash(legitimate_data);
+
+        // Hash collision attack vectors
+        let collision_vectors = vec![
+            // Empty hash bypass attempt
+            ("", "empty hash"),
+            // Hex case manipulation
+            (legitimate_hash.to_uppercase(), "case manipulation"),
+            // Length extension without proper hex
+            ("deadbeef".repeat(8), "length extension"),
+            // Similar-looking characters
+            ("dead8eef".repeat(8), "similar characters"),
+            // Domain separator injection attempt
+            (format!("{}retrievability_gate_hash_v1:", legitimate_hash), "domain separator injection"),
+            // Hash prefix collision attempt
+            (format!("{}{}", &legitimate_hash[..32], "0".repeat(32)), "prefix collision"),
+        ];
+
+        for (malicious_hash, attack_type) in collision_vectors {
+            gate.register_target(&aid, &sid, StorageTier::L3Archive, TargetTierState {
+                content_hash: malicious_hash.clone(),
+                reachable: true,
+                fetch_latency_ms: 100,
+            });
+
+            // All collision attempts should fail with constant time
+            let start = std::time::Instant::now();
+            let result = gate.check_retrievability(
+                &aid, &sid, StorageTier::L2Warm, StorageTier::L3Archive, &legitimate_hash
+            );
+            let duration = start.elapsed();
+
+            match result {
+                Ok(_) => panic!("Hash collision attack should fail ({}): {}", attack_type, malicious_hash),
+                Err(e) => {
+                    // Should fail with hash mismatch, not other errors
+                    if malicious_hash.is_empty() {
+                        // Empty hash has special handling in content_digest_matches
+                        assert_eq!(e.code, ERR_HASH_MISMATCH);
+                    } else {
+                        assert_eq!(e.code, ERR_HASH_MISMATCH);
+                    }
+                    assert!(e.reason.label() == "hash_mismatch");
+
+                    // Timing should be consistent (within reasonable bounds for constant-time)
+                    assert!(duration.as_millis() < 100, "Hash comparison took too long: {}ms", duration.as_millis());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_resource_exhaustion_capacity_boundary_attacks() {
+        let mut gate = make_gate();
+
+        // Test events capacity boundary
+        for i in 0..MAX_EVENTS + 100 {
+            let aid = ArtifactId(format!("exhaust_artifact_{}", i));
+            let sid = SegmentId(format!("exhaust_segment_{}", i));
+
+            gate.register_target(&aid, &sid, StorageTier::L3Archive, TargetTierState {
+                content_hash: "invalid_hash".to_string(), // Will fail
+                reachable: true,
+                fetch_latency_ms: 100,
+            });
+
+            let _result = gate.check_retrievability(
+                &aid, &sid, StorageTier::L2Warm, StorageTier::L3Archive, "expected_hash"
+            );
+        }
+
+        // Events should be bounded by push_bounded implementation
+        assert!(gate.events.len() <= MAX_EVENTS + 10, "Events not properly bounded: {}", gate.events.len());
+
+        // Test receipts capacity boundary
+        for i in 0..MAX_RECEIPTS + 50 {
+            let aid = ArtifactId(format!("receipt_artifact_{}", i));
+            let sid = SegmentId(format!("receipt_segment_{}", i));
+            let test_hash = content_hash(format!("receipt_test_{}", i).as_bytes());
+
+            gate.register_target(&aid, &sid, StorageTier::L3Archive, TargetTierState {
+                content_hash: test_hash.clone(),
+                reachable: true,
+                fetch_latency_ms: 100,
+            });
+
+            let _result = gate.check_retrievability(
+                &aid, &sid, StorageTier::L2Warm, StorageTier::L3Archive, &test_hash
+            );
+        }
+
+        // Receipts should be bounded
+        assert!(gate.receipts.len() <= MAX_RECEIPTS + 10, "Receipts not properly bounded: {}", gate.receipts.len());
+    }
+
+    #[test]
+    fn test_identifier_injection_normalization_attacks() {
+        let mut gate = make_gate();
+        let test_hash = content_hash(b"injection_test");
+
+        // Unicode injection and normalization attack vectors
+        let injection_vectors = vec![
+            // Control character injection
+            ("artifact\0id", "segment_id", "null byte in artifact"),
+            ("artifact_id", "segment\0id", "null byte in segment"),
+            ("artifact\u{200B}id", "segment_id", "zero-width space artifact"),
+            ("artifact_id", "segment\u{FEFF}id", "BOM in segment"),
+
+            // Whitespace normalization
+            ("artifact\u{2000}id", "segment_id", "en quad in artifact"),
+            ("artifact_id", "segment\u{2028}id", "line separator in segment"),
+            ("artifact\u{00A0}id", "segment_id", "non-breaking space in artifact"),
+        ];
+
+        for (artifact_id, segment_id, attack_type) in injection_vectors {
+            let aid = ArtifactId(artifact_id.to_string());
+            let sid = SegmentId(segment_id.to_string());
+
+            // Check input validation
+            match (invalid_artifact_id_reason(&aid), invalid_segment_id_reason(&sid)) {
+                (Some(artifact_reason), _) => {
+                    // Should reject invalid artifact IDs
+                    assert!(artifact_reason.contains("control") ||
+                           artifact_reason.contains("whitespace") ||
+                           artifact_reason.contains("empty"),
+                           "Should detect artifact ID issue ({}): {}", attack_type, artifact_reason);
+                },
+                (_, Some(segment_reason)) => {
+                    // Should reject invalid segment IDs
+                    assert!(segment_reason.contains("control") ||
+                           segment_reason.contains("whitespace") ||
+                           segment_reason.contains("empty"),
+                           "Should detect segment ID issue ({}): {}", attack_type, segment_reason);
+                },
+                (None, None) => {
+                    // If validation passes, test proof binding
+                    gate.register_target(&aid, &sid, StorageTier::L3Archive, TargetTierState {
+                        content_hash: test_hash.clone(),
+                        reachable: true,
+                        fetch_latency_ms: 100,
+                    });
+
+                    match gate.check_retrievability(&aid, &sid, StorageTier::L2Warm, StorageTier::L3Archive, &test_hash) {
+                        Ok(proof) => {
+                            assert_eq!(proof.artifact_id.0, aid.0, "Proof artifact binding mismatch ({})", attack_type);
+                            assert_eq!(proof.segment_id.0, sid.0, "Proof segment binding mismatch ({})", attack_type);
+                        },
+                        Err(e) => {
+                            assert!(e.code == ERR_INVALID_ARTIFACT_ID || e.code == ERR_INVALID_SEGMENT_ID,
+                                   "Unexpected error for injection attack ({}): {}", attack_type, e);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

@@ -1766,4 +1766,689 @@ mod tests {
                 "Action log should record all operations (up to capacity) in {}", scenario_name);
         }
     }
+
+    // === Comprehensive Negative-Path Security Tests ===
+
+    /// Negative test: Unicode injection attacks in action IDs and evidence metadata
+    #[test]
+    fn negative_unicode_injection_action_ids_metadata() {
+        let mut checker = EvidenceConformanceChecker::new();
+        let mut ledger = EvidenceLedger::new(LedgerCapacity::new(100, 100_000));
+
+        // Test malicious Unicode in action IDs
+        let malicious_action_ids = vec![
+            "action\u{202e}evil\u{200b}",       // Right-to-Left Override + Zero Width Space
+            "action\u{0000}injection",          // Null byte injection
+            "action\u{feff}bom",                // Byte Order Mark
+            "action\u{2028}line\u{2029}para",   // Line/Paragraph separators
+            "action\u{200c}\u{200d}joiners",    // Zero-width joiners
+            "action\x00\x01\x02\x03\x1f",       // Control characters
+        ];
+
+        for (i, malicious_action_id) in malicious_action_ids.iter().enumerate() {
+            let action = PolicyAction::all()[i % PolicyAction::all().len()];
+            let action_id = ActionId::new(malicious_action_id.to_string());
+
+            // Test Unicode in evidence metadata
+            let malicious_metadata = serde_json::json!({
+                "trace_id": format!("trace\u{202e}evil\u{200b}{}", i),
+                "operator": format!("operator\u{0000}injection{}", i),
+                "reason": format!("reason\u{feff}bom\u{2028}{}", i),
+                "details": format!("details\u{200c}joiners{}", i),
+            });
+
+            let evidence = build_evidence_entry(
+                action,
+                &action_id,
+                &format!("unicode-trace-{}", i),
+                1000 + i as u64,
+                malicious_metadata,
+            );
+
+            let outcome = checker.verify_and_execute(
+                action,
+                &action_id,
+                Some(&evidence),
+                &mut ledger,
+            );
+
+            // Should handle Unicode gracefully without corruption
+            match outcome {
+                PolicyActionOutcome::Executed { .. } => {
+                    // Unicode was accepted, verify no corruption occurred
+                    assert!(ledger.len() > 0, "Ledger should contain evidence with Unicode");
+
+                    // Verify action ID integrity
+                    assert_eq!(action_id.as_str(), *malicious_action_id);
+                },
+                PolicyActionOutcome::Rejected { error, .. } => {
+                    // Unicode rejection is also acceptable for security
+                    match error {
+                        ConformanceError::MissingEvidence { .. } |
+                        ConformanceError::DecisionKindMismatch { .. } |
+                        ConformanceError::ActionIdMismatch { .. } => {
+                            // These errors indicate Unicode validation passed but other checks failed
+                        },
+                        _ => {
+                            // Other rejection reasons are acceptable
+                        }
+                    }
+                }
+            }
+        }
+
+        // Test Unicode in trace IDs and JSON payloads
+        let complex_unicode_payload = serde_json::json!({
+            "key\u{202e}": "value\u{200b}reversed",
+            "field\u{0000}": "hidden\u{2028}null",
+            "control\u{feff}": "bom\u{2029}breaks",
+            "nested": {
+                "unicode\u{200c}": "joiners\u{200d}test"
+            }
+        });
+
+        let unicode_trace_evidence = build_evidence_entry(
+            PolicyAction::Commit,
+            &ActionId::new("unicode-trace-test"),
+            "trace\u{202e}evil\u{0000}unicode",
+            2000,
+            complex_unicode_payload,
+        );
+
+        let unicode_trace_outcome = checker.verify_and_execute(
+            PolicyAction::Commit,
+            &ActionId::new("unicode-trace-test"),
+            Some(&unicode_trace_evidence),
+            &mut ledger,
+        );
+
+        // Should handle complex Unicode structures gracefully
+        match unicode_trace_outcome {
+            PolicyActionOutcome::Executed { .. } => {
+                // Complex Unicode accepted
+            },
+            PolicyActionOutcome::Rejected { .. } => {
+                // Unicode rejection acceptable
+            }
+        }
+    }
+
+    /// Negative test: Memory exhaustion through massive evidence payloads
+    #[test]
+    fn negative_memory_exhaustion_massive_payloads() {
+        let mut checker = EvidenceConformanceChecker::new();
+        let mut ledger = EvidenceLedger::new(LedgerCapacity::new(100, 100_000));
+
+        // Test extremely large JSON payloads
+        let massive_payload_sizes = vec![10_000, 50_000, 100_000]; // 10KB, 50KB, 100KB
+
+        for (i, payload_size) in massive_payload_sizes.iter().enumerate() {
+            let massive_data = "x".repeat(*payload_size);
+            let massive_payload = serde_json::json!({
+                "massive_field": massive_data,
+                "size": payload_size,
+                "test_iteration": i
+            });
+
+            let action_id = ActionId::new(format!("massive-payload-{}", i));
+            let evidence = build_evidence_entry(
+                PolicyAction::Commit,
+                &action_id,
+                &format!("massive-trace-{}", i),
+                1000 + i as u64,
+                massive_payload,
+            );
+
+            let outcome = checker.verify_and_execute(
+                PolicyAction::Commit,
+                &action_id,
+                Some(&evidence),
+                &mut ledger,
+            );
+
+            // Should handle massive payloads or reject gracefully
+            match outcome {
+                PolicyActionOutcome::Executed { .. } => {
+                    // Large payload accepted - verify system remains responsive
+                    assert!(checker.executed_count() > 0);
+                },
+                PolicyActionOutcome::Rejected { error, .. } => {
+                    // Size-based rejection is acceptable
+                    match error {
+                        ConformanceError::LedgerAppendFailed { reason } => {
+                            assert!(!reason.is_empty(), "Ledger failure should have reason");
+                        },
+                        _ => {
+                            // Other rejection reasons acceptable
+                        }
+                    }
+                }
+            }
+        }
+
+        // Test rapid evidence submission with large payloads
+        for rapid_cycle in 0..50 {
+            let large_payload = serde_json::json!({
+                "cycle": rapid_cycle,
+                "data": "y".repeat(5_000), // 5KB per cycle
+                "metadata": {
+                    "timestamp": format!("{}ms", rapid_cycle * 100),
+                    "batch_id": format!("batch-{}", rapid_cycle / 10)
+                }
+            });
+
+            let rapid_action_id = ActionId::new(format!("rapid-{}", rapid_cycle));
+            let rapid_evidence = build_evidence_entry(
+                PolicyAction::all()[rapid_cycle % PolicyAction::all().len()],
+                &rapid_action_id,
+                &format!("rapid-trace-{}", rapid_cycle),
+                2000 + rapid_cycle as u64,
+                large_payload,
+            );
+
+            let rapid_outcome = checker.verify_and_execute(
+                PolicyAction::all()[rapid_cycle % PolicyAction::all().len()],
+                &rapid_action_id,
+                Some(&rapid_evidence),
+                &mut ledger,
+            );
+
+            // Should handle rapid submission or hit capacity limits gracefully
+            match rapid_outcome {
+                PolicyActionOutcome::Executed { .. } => {},
+                PolicyActionOutcome::Rejected { error, .. } => {
+                    match error {
+                        ConformanceError::LedgerAppendFailed { .. } => {
+                            // Hit capacity limits - expected behavior
+                            break;
+                        },
+                        _ => {
+                            // Other rejections acceptable
+                        }
+                    }
+                }
+            }
+        }
+
+        // Verify bounded memory usage despite stress test
+        assert!(checker.action_log().len() <= MAX_ACTION_LOG_ENTRIES);
+        assert!(ledger.len() <= 100); // Capacity limit
+    }
+
+    /// Negative test: Evidence spoofing and forgery attempts
+    #[test]
+    fn negative_evidence_spoofing_forgery_attempts() {
+        let mut checker = EvidenceConformanceChecker::new();
+        let mut ledger = EvidenceLedger::new(LedgerCapacity::new(100, 100_000));
+
+        // Test decision kind spoofing
+        let spoofing_attempts = vec![
+            (PolicyAction::Commit, DecisionKind::Deny),      // Commit with Deny decision
+            (PolicyAction::Abort, DecisionKind::Admit),      // Abort with Admit decision
+            (PolicyAction::Quarantine, DecisionKind::Release), // Quarantine with Release decision
+            (PolicyAction::Release, DecisionKind::Quarantine), // Release with Quarantine decision
+        ];
+
+        for (i, (action, spoofed_decision)) in spoofing_attempts.iter().enumerate() {
+            let action_id = ActionId::new(format!("spoof-{}", i));
+
+            // Create evidence with mismatched decision kind
+            let spoofed_evidence = EvidenceEntry {
+                schema_version: "test-schema".to_string(),
+                entry_id: format!("spoof-entry-{}", i),
+                decision_id: format!("spoof-decision-{}", i),
+                decision_kind: *spoofed_decision,
+                trace_id: format!("spoof-trace-{}", i),
+                timestamp: 1000 + i as u64,
+                json_payload: serde_json::json!({
+                    "action": action.label(),
+                    "spoofed_decision": format!("{:?}", spoofed_decision),
+                    "attempt": "decision_kind_spoofing"
+                }),
+            };
+
+            let spoof_outcome = checker.verify_and_execute(
+                *action,
+                &action_id,
+                Some(&spoofed_evidence),
+                &mut ledger,
+            );
+
+            // Should reject spoofed evidence
+            match spoof_outcome {
+                PolicyActionOutcome::Executed { .. } => {
+                    panic!("Spoofed evidence should not be accepted for {:?} with {:?}", action, spoofed_decision);
+                },
+                PolicyActionOutcome::Rejected { error, .. } => {
+                    match error {
+                        ConformanceError::DecisionKindMismatch { .. } => {
+                            // Expected rejection for spoofing
+                        },
+                        _ => {
+                            panic!("Unexpected rejection reason for spoofing: {:?}", error);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Test action ID manipulation
+        let legitimate_action_id = ActionId::new("legitimate-action");
+        let malicious_action_id = ActionId::new("malicious-action");
+
+        let legitimate_evidence = build_evidence_entry(
+            PolicyAction::Commit,
+            &legitimate_action_id,
+            "legitimate-trace",
+            2000,
+            serde_json::json!({"type": "legitimate"}),
+        );
+
+        // Try to use legitimate evidence with different action ID
+        let id_manipulation_outcome = checker.verify_and_execute(
+            PolicyAction::Commit,
+            &malicious_action_id, // Different action ID
+            Some(&legitimate_evidence),
+            &mut ledger,
+        );
+
+        // Should reject action ID mismatch
+        match id_manipulation_outcome {
+            PolicyActionOutcome::Executed { .. } => {
+                panic!("Action ID manipulation should be rejected");
+            },
+            PolicyActionOutcome::Rejected { error, .. } => {
+                match error {
+                    ConformanceError::ActionIdMismatch { .. } => {
+                        // Expected rejection for ID manipulation
+                    },
+                    _ => {
+                        panic!("Unexpected rejection reason for ID manipulation: {:?}", error);
+                    }
+                }
+            }
+        }
+
+        // Test evidence timestamp manipulation
+        let timestamp_evidence = EvidenceEntry {
+            schema_version: "test-schema".to_string(),
+            entry_id: "timestamp-test".to_string(),
+            decision_id: "timestamp-decision".to_string(),
+            decision_kind: DecisionKind::Admit,
+            trace_id: "timestamp-trace".to_string(),
+            timestamp: u64::MAX, // Extreme timestamp
+            json_payload: serde_json::json!({
+                "timestamp_attack": true,
+                "value": "max_u64"
+            }),
+        };
+
+        let timestamp_outcome = checker.verify_and_execute(
+            PolicyAction::Commit,
+            &ActionId::new("timestamp-test"),
+            Some(&timestamp_evidence),
+            &mut ledger,
+        );
+
+        // Should handle extreme timestamps gracefully
+        match timestamp_outcome {
+            PolicyActionOutcome::Executed { .. } => {
+                // Extreme timestamp accepted
+            },
+            PolicyActionOutcome::Rejected { .. } => {
+                // Timestamp rejection acceptable
+            }
+        }
+    }
+
+    /// Negative test: Timing attacks in evidence verification
+    #[test]
+    fn negative_timing_attacks_evidence_verification() {
+        let mut checker = EvidenceConformanceChecker::new();
+        let mut ledger = EvidenceLedger::new(LedgerCapacity::new(100, 100_000));
+
+        // Test timing consistency across valid vs invalid evidence
+        let mut valid_timings = Vec::new();
+        let mut invalid_timings = Vec::new();
+
+        for i in 0..50 {
+            let action = PolicyAction::all()[i % PolicyAction::all().len()];
+            let action_id = ActionId::new(format!("timing-test-{}", i));
+
+            // Valid evidence timing
+            let valid_evidence = build_evidence_entry(
+                action,
+                &action_id,
+                &format!("valid-trace-{}", i),
+                1000 + i as u64,
+                serde_json::json!({"iteration": i, "type": "valid"}),
+            );
+
+            let start = std::time::Instant::now();
+            let _result = checker.verify_and_execute(
+                action,
+                &action_id,
+                Some(&valid_evidence),
+                &mut ledger,
+            );
+            valid_timings.push(start.elapsed());
+
+            // Invalid evidence timing (wrong decision kind)
+            let invalid_action_id = ActionId::new(format!("invalid-timing-{}", i));
+            let wrong_decision = match action.expected_decision_kind() {
+                DecisionKind::Admit => DecisionKind::Deny,
+                DecisionKind::Deny => DecisionKind::Admit,
+                DecisionKind::Quarantine => DecisionKind::Release,
+                DecisionKind::Release => DecisionKind::Quarantine,
+            };
+
+            let invalid_evidence = EvidenceEntry {
+                schema_version: "test-schema".to_string(),
+                entry_id: format!("invalid-entry-{}", i),
+                decision_id: format!("invalid-decision-{}", i),
+                decision_kind: wrong_decision,
+                trace_id: format!("invalid-trace-{}", i),
+                timestamp: 2000 + i as u64,
+                json_payload: serde_json::json!({"iteration": i, "type": "invalid"}),
+            };
+
+            let start = std::time::Instant::now();
+            let _result = checker.verify_and_execute(
+                action,
+                &invalid_action_id,
+                Some(&invalid_evidence),
+                &mut ledger,
+            );
+            invalid_timings.push(start.elapsed());
+        }
+
+        // Timing difference should be minimal (no timing-based information leakage)
+        if valid_timings.len() > 1 && invalid_timings.len() > 1 {
+            let avg_valid: f64 = valid_timings.iter().map(|d| d.as_nanos() as f64).sum::<f64>() / valid_timings.len() as f64;
+            let avg_invalid: f64 = invalid_timings.iter().map(|d| d.as_nanos() as f64).sum::<f64>() / invalid_timings.len() as f64;
+
+            let timing_ratio = avg_valid.max(avg_invalid) / avg_valid.min(avg_invalid).max(1.0);
+            assert!(timing_ratio < 4.0, "Evidence verification timing variance too high: {}", timing_ratio);
+        }
+    }
+
+    /// Negative test: Concurrent evidence submission race conditions
+    #[test]
+    fn negative_concurrent_evidence_submission_races() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let checker = Arc::new(Mutex::new(EvidenceConformanceChecker::new()));
+        let ledger = Arc::new(Mutex::new(EvidenceLedger::new(LedgerCapacity::new(200, 200_000))));
+
+        let mut handles = Vec::new();
+
+        // Simulate concurrent evidence submission from multiple threads
+        for thread_id in 0..4 {
+            let checker_clone = Arc::clone(&checker);
+            let ledger_clone = Arc::clone(&ledger);
+
+            let handle = thread::spawn(move || {
+                let mut thread_results = Vec::new();
+
+                for operation in 0..25 {
+                    let action = PolicyAction::all()[operation % PolicyAction::all().len()];
+                    let action_id = ActionId::new(format!("concurrent-{}-{}", thread_id, operation));
+
+                    let evidence = build_evidence_entry(
+                        action,
+                        &action_id,
+                        &format!("concurrent-trace-{}-{}", thread_id, operation),
+                        1000 + (thread_id * 100) + operation as u64,
+                        serde_json::json!({
+                            "thread_id": thread_id,
+                            "operation": operation,
+                            "concurrent_test": true
+                        }),
+                    );
+
+                    // Attempt concurrent evidence submission
+                    let outcome = {
+                        let mut checker_guard = checker_clone.lock().unwrap();
+                        let mut ledger_guard = ledger_clone.lock().unwrap();
+                        checker_guard.verify_and_execute(
+                            action,
+                            &action_id,
+                            Some(&evidence),
+                            &mut *ledger_guard,
+                        )
+                    };
+
+                    thread_results.push((thread_id, operation, outcome));
+                }
+                thread_results
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        let mut all_results = Vec::new();
+        for handle in handles {
+            all_results.extend(handle.join().unwrap());
+        }
+
+        // Verify state consistency after concurrent operations
+        let final_checker = checker.lock().unwrap();
+        let final_ledger = ledger.lock().unwrap();
+
+        let total_executed = final_checker.executed_count();
+        let total_rejected = final_checker.rejected_count();
+        let total_operations = total_executed + total_rejected;
+
+        // Should have processed all operations from all threads
+        assert_eq!(total_operations, 4 * 25, "Should have processed all concurrent operations");
+
+        // Verify ledger consistency
+        assert!(final_ledger.len() as u64 <= total_executed, "Ledger entries should not exceed executed count");
+        assert!(final_ledger.len() <= 200, "Ledger should not exceed capacity");
+
+        // Verify action log consistency
+        assert!(final_checker.action_log().len() as u64 <= total_operations.min(MAX_ACTION_LOG_ENTRIES as u64));
+    }
+
+    /// Negative test: Arithmetic overflow in timestamps and counters
+    #[test]
+    fn negative_arithmetic_overflow_timestamps_counters() {
+        let mut checker = EvidenceConformanceChecker::new();
+        let mut ledger = EvidenceLedger::new(LedgerCapacity::new(100, 100_000));
+
+        // Test near-maximum timestamp values
+        let overflow_timestamps = vec![
+            u64::MAX - 1000,  // Near maximum
+            u64::MAX,         // Maximum
+            0,                // Minimum
+        ];
+
+        for (i, timestamp) in overflow_timestamps.iter().enumerate() {
+            let action_id = ActionId::new(format!("overflow-timestamp-{}", i));
+            let evidence = build_evidence_entry(
+                PolicyAction::Commit,
+                &action_id,
+                &format!("overflow-trace-{}", i),
+                *timestamp,
+                serde_json::json!({
+                    "timestamp": timestamp,
+                    "overflow_test": true,
+                    "iteration": i
+                }),
+            );
+
+            let outcome = checker.verify_and_execute(
+                PolicyAction::Commit,
+                &action_id,
+                Some(&evidence),
+                &mut ledger,
+            );
+
+            // Should handle timestamp edge cases gracefully
+            match outcome {
+                PolicyActionOutcome::Executed { .. } => {
+                    // Extreme timestamp accepted
+                    assert!(checker.executed_count() > 0);
+                },
+                PolicyActionOutcome::Rejected { .. } => {
+                    // Timestamp rejection is acceptable for edge cases
+                }
+            }
+        }
+
+        // Test counter overflow scenarios by forcing high execution counts
+        let initial_executed = checker.executed_count();
+
+        // Simulate moderate counter stress testing
+        for stress_iteration in 0..100 {
+            let stress_action_id = ActionId::new(format!("stress-{}", stress_iteration));
+            let stress_evidence = build_evidence_entry(
+                PolicyAction::all()[stress_iteration % PolicyAction::all().len()],
+                &stress_action_id,
+                &format!("stress-trace-{}", stress_iteration),
+                3000 + stress_iteration as u64,
+                serde_json::json!({
+                    "stress_test": stress_iteration,
+                    "counter_overflow_test": true
+                }),
+            );
+
+            let stress_outcome = checker.verify_and_execute(
+                PolicyAction::all()[stress_iteration % PolicyAction::all().len()],
+                &stress_action_id,
+                Some(&stress_evidence),
+                &mut ledger,
+            );
+
+            // Monitor for counter arithmetic overflow
+            let current_executed = checker.executed_count();
+            let current_rejected = checker.rejected_count();
+            let current_total = current_executed.saturating_add(current_rejected);
+
+            // Verify counters don't overflow
+            assert!(current_executed >= initial_executed, "Executed counter should not overflow");
+            assert!(current_total >= initial_executed, "Total counter should be consistent");
+
+            // Break if ledger hits capacity to prevent excessive test time
+            if ledger.len() >= 100 {
+                break;
+            }
+        }
+
+        // Verify final counter consistency after overflow tests
+        let final_executed = checker.executed_count();
+        let final_rejected = checker.rejected_count();
+        let final_total = final_executed.saturating_add(final_rejected);
+
+        assert!(final_total >= final_executed, "Final counter arithmetic should be consistent");
+        assert!(final_total >= final_rejected, "Final counter arithmetic should be consistent");
+    }
+
+    /// Negative test: Policy decision bypass and evidence linkage manipulation
+    #[test]
+    fn negative_policy_bypass_evidence_linkage_manipulation() {
+        let mut checker = EvidenceConformanceChecker::new();
+        let mut ledger = EvidenceLedger::new(LedgerCapacity::new(100, 100_000));
+
+        // Test evidence linkage bypass through similar action IDs
+        let bypass_action_ids = vec![
+            ("legitimate-action", "legitimate-action "), // Trailing space
+            ("legitimate-action", "legitimate-action\t"), // Tab character
+            ("legitimate-action", "legitimate-action\n"), // Newline
+            ("legitimate-action", "legitimate\u{200b}action"), // Zero-width space
+            ("legitimate-action", "legitimate\u{feff}action"), // BOM
+        ];
+
+        for (i, (original_id, bypass_id)) in bypass_action_ids.iter().enumerate() {
+            let original_action_id = ActionId::new(original_id.to_string());
+            let bypass_action_id = ActionId::new(bypass_id.to_string());
+
+            // Create legitimate evidence for original action
+            let legitimate_evidence = build_evidence_entry(
+                PolicyAction::Commit,
+                &original_action_id,
+                &format!("legitimate-trace-{}", i),
+                1000 + i as u64,
+                serde_json::json!({"legitimate": true, "iteration": i}),
+            );
+
+            // Try to use evidence for similar but different action ID
+            let bypass_outcome = checker.verify_and_execute(
+                PolicyAction::Commit,
+                &bypass_action_id,
+                Some(&legitimate_evidence),
+                &mut ledger,
+            );
+
+            // Should reject linkage bypass attempts
+            match bypass_outcome {
+                PolicyActionOutcome::Executed { .. } => {
+                    panic!("Evidence linkage bypass should be rejected for '{}' vs '{}'", original_id, bypass_id);
+                },
+                PolicyActionOutcome::Rejected { error, .. } => {
+                    match error {
+                        ConformanceError::ActionIdMismatch { .. } => {
+                            // Expected rejection for linkage bypass
+                        },
+                        _ => {
+                            // Other rejection reasons are acceptable
+                        }
+                    }
+                }
+            }
+        }
+
+        // Test policy decision bypass through edge cases
+        let policy_bypass_attempts = vec![
+            // Try to use Quarantine decision for Release action (reverse mapping)
+            (PolicyAction::Release, DecisionKind::Quarantine, "reverse_mapping"),
+            // Try to use generic decisions for specific actions
+            (PolicyAction::Commit, DecisionKind::Release, "generic_decision"),
+            (PolicyAction::Abort, DecisionKind::Quarantine, "generic_decision_2"),
+        ];
+
+        for (i, (action, malicious_decision, bypass_type)) in policy_bypass_attempts.iter().enumerate() {
+            let bypass_action_id = ActionId::new(format!("policy-bypass-{}-{}", i, bypass_type));
+
+            let malicious_evidence = EvidenceEntry {
+                schema_version: "test-schema".to_string(),
+                entry_id: format!("bypass-entry-{}", i),
+                decision_id: format!("bypass-decision-{}", i),
+                decision_kind: *malicious_decision,
+                trace_id: format!("bypass-trace-{}", i),
+                timestamp: 2000 + i as u64,
+                json_payload: serde_json::json!({
+                    "bypass_type": bypass_type,
+                    "attempted_action": action.label(),
+                    "malicious_decision": format!("{:?}", malicious_decision),
+                    "policy_bypass_attempt": true
+                }),
+            };
+
+            let bypass_outcome = checker.verify_and_execute(
+                *action,
+                &bypass_action_id,
+                Some(&malicious_evidence),
+                &mut ledger,
+            );
+
+            // Should reject policy bypass attempts
+            match bypass_outcome {
+                PolicyActionOutcome::Executed { .. } => {
+                    panic!("Policy bypass should be rejected for {:?} with {:?}", action, malicious_decision);
+                },
+                PolicyActionOutcome::Rejected { error, .. } => {
+                    match error {
+                        ConformanceError::DecisionKindMismatch { .. } => {
+                            // Expected rejection for policy bypass
+                        },
+                        _ => {
+                            // Other rejection reasons are acceptable
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

@@ -2243,4 +2243,191 @@ mod tests {
         let record = reg.get_record("ext-escalation", "1.0.0").unwrap();
         assert_eq!(record.level, CertificationLevel::Basic);
     }
+
+    #[test]
+    fn negative_attestation_hash_with_uppercase_hex_chars_blocks_audited() {
+        let mut input = make_input(
+            "ext-uppercase-hash",
+            ProvenanceLevel::IndependentReproduced,
+            ReputationTier::Trusted,
+            90.0,
+        );
+        input.has_reproducible_build_evidence = true;
+        input.has_test_coverage_evidence = true;
+        input.test_coverage_pct = Some(95.0);
+        input.has_audit_attestation = true;
+        input.audit_attestation = Some(AuditAttestation {
+            auditor_id: "auditor-1".to_owned(),
+            audit_date: "2026-01-15".to_owned(),
+            scope: "full security audit".to_owned(),
+            findings_summary: "no critical findings".to_owned(),
+            attestation_hash: "sha256:A1B2C3D4E5F60718293A4B5C6D7E8F90A1B2C3D4E5F60718293A4B5C6D7E8F90"
+                .to_owned(),
+        });
+
+        let result = evaluate_certification(&input);
+
+        assert_eq!(result.level, CertificationLevel::Verified);
+        assert!(result
+            .unsatisfied_criteria
+            .contains(&"third_party_audit_attestation".to_owned()));
+    }
+
+    #[test]
+    fn negative_attestation_hash_with_wrong_prefix_blocks_audited() {
+        let mut input = make_input(
+            "ext-wrong-prefix",
+            ProvenanceLevel::IndependentReproduced,
+            ReputationTier::Trusted,
+            90.0,
+        );
+        input.has_reproducible_build_evidence = true;
+        input.has_test_coverage_evidence = true;
+        input.test_coverage_pct = Some(95.0);
+        input.has_audit_attestation = true;
+        input.audit_attestation = Some(AuditAttestation {
+            auditor_id: "auditor-1".to_owned(),
+            audit_date: "2026-01-15".to_owned(),
+            scope: "full security audit".to_owned(),
+            findings_summary: "no critical findings".to_owned(),
+            attestation_hash: "blake3:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+                .to_owned(),
+        });
+
+        let result = evaluate_certification(&input);
+
+        assert_eq!(result.level, CertificationLevel::Verified);
+    }
+
+    #[test]
+    fn negative_test_coverage_with_negative_infinity_blocks_verified() {
+        let mut input = make_input(
+            "ext-neg-inf-coverage",
+            ProvenanceLevel::SignedReproducible,
+            ReputationTier::Established,
+            60.0,
+        );
+        input.has_reproducible_build_evidence = true;
+        input.has_test_coverage_evidence = true;
+        input.test_coverage_pct = Some(f64::NEG_INFINITY);
+
+        let result = evaluate_certification(&input);
+
+        assert_eq!(result.level, CertificationLevel::Standard);
+        assert!(result
+            .unsatisfied_criteria
+            .contains(&"test_coverage_above_80pct".to_owned()));
+    }
+
+    #[test]
+    fn negative_evidence_ref_with_empty_evidence_id_included_in_hash() {
+        let mut refs = sample_evidence_refs();
+        refs[0].evidence_id = String::new(); // Empty evidence ID
+
+        let hash = compute_derivation_hash(&refs, 42);
+
+        // Hash should still be computed (not panic), but empty ID is included
+        assert!(hash.starts_with("sha256:"));
+        assert_ne!(
+            hash,
+            compute_derivation_hash(&sample_evidence_refs(), 42)
+        );
+    }
+
+    #[test]
+    fn negative_evidence_ref_with_control_characters_in_evidence_id() {
+        let mut refs = sample_evidence_refs();
+        refs[0].evidence_id = "ev\0\r\n-prov-001".to_owned();
+
+        let hash = compute_derivation_hash(&refs, 42);
+
+        // Should compute hash without panic, including control characters
+        assert!(hash.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn negative_capability_policy_with_nonexistent_level_exhausts_enum() {
+        // Test that enum match is exhaustive by testing all defined levels
+        for level in [
+            CertificationLevel::Uncertified,
+            CertificationLevel::Basic,
+            CertificationLevel::Standard,
+            CertificationLevel::Verified,
+            CertificationLevel::Audited,
+        ] {
+            let policy = capability_policy(level);
+            // Each level should have a specific number of allowed capabilities
+            match level {
+                CertificationLevel::Uncertified => assert_eq!(policy.len(), 1),
+                CertificationLevel::Basic => assert_eq!(policy.len(), 2),
+                CertificationLevel::Standard => assert_eq!(policy.len(), 4),
+                CertificationLevel::Verified => assert_eq!(policy.len(), 5),
+                CertificationLevel::Audited => assert_eq!(policy.len(), 6),
+            }
+        }
+    }
+
+    #[test]
+    fn negative_len_to_u64_with_usize_max_returns_u64_max() {
+        let result = len_to_u64(usize::MAX);
+        assert_eq!(result, u64::MAX);
+    }
+
+    #[test]
+    fn negative_promotion_with_max_sequence_number_uses_saturating_add() {
+        let mut reg = CertificationRegistry::new();
+        // Set next_sequence to near overflow
+        reg.next_sequence = u64::MAX - 1;
+
+        let input = make_verified_input("ext-sequence-overflow");
+        reg.evaluate_and_register(&input, &ts(1));
+
+        // Should not panic, should saturate
+        assert_eq!(reg.next_sequence, u64::MAX);
+        assert_eq!(reg.audit_trail_len(), 1);
+    }
+
+    #[test]
+    fn negative_audit_trail_eviction_with_max_overflow_capacity_uses_saturating_sub() {
+        let mut reg = CertificationRegistry::new();
+
+        // Add exactly MAX_AUDIT_TRAIL entries to trigger eviction logic
+        for i in 0..MAX_AUDIT_TRAIL + 5 {
+            let input = make_input(
+                &format!("ext-{}", i),
+                ProvenanceLevel::PublisherSigned,
+                ReputationTier::Established,
+                60.0,
+            );
+            reg.evaluate_and_register(&input, &ts((i + 1) as u32));
+        }
+
+        // Should not panic during eviction with saturating arithmetic
+        assert!(reg.audit_trail_len() <= MAX_AUDIT_TRAIL);
+        assert!(reg.chain_anchor_hash.is_some());
+    }
+
+    #[test]
+    fn negative_rank_comparison_with_manually_constructed_levels() {
+        // Test that rank() method is consistent with PartialOrd implementation
+        let levels = [
+            CertificationLevel::Uncertified,
+            CertificationLevel::Basic,
+            CertificationLevel::Standard,
+            CertificationLevel::Verified,
+            CertificationLevel::Audited,
+        ];
+
+        for (i, level1) in levels.iter().enumerate() {
+            for (j, level2) in levels.iter().enumerate() {
+                assert_eq!(
+                    level1.rank().cmp(&level2.rank()),
+                    i.cmp(&j),
+                    "rank() and index ordering must match for {} vs {}",
+                    level1,
+                    level2
+                );
+            }
+        }
+    }
 }

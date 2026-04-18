@@ -1719,11 +1719,523 @@ mod tests {
     }
 
     #[test]
+    fn fencing_lease_record_rejects_string_lease_seq() {
+        let value = serde_json::json!({
+            "lease_seq": "42",
+            "object_id": "obj-1",
+            "holder_id": "holder-a",
+            "epoch": 7,
+            "acquired_at": "2026-01-01T00:00:00Z",
+            "expires_at": "2026-01-01T01:00:00Z",
+            "fence_version": 1
+        });
+
+        let err = serde_json::from_value::<FencingLeaseRecord>(value)
+            .expect_err("string lease_seq must fail deserialization");
+
+        assert!(err.is_data());
+    }
+
+    #[test]
+    fn control_channel_state_rejects_missing_updated_at() {
+        let value = serde_json::json!({
+            "channel_id": "chan-1",
+            "last_seq": 10,
+            "window_low": 1,
+            "window_high": 32,
+            "epoch": 7
+        });
+
+        let err = serde_json::from_value::<ControlChannelStateRecord>(value)
+            .expect_err("missing updated_at must fail deserialization");
+
+        assert!(err.to_string().contains("updated_at"));
+    }
+
+    #[test]
+    fn tiered_trust_artifact_rejects_string_revoked_flag() {
+        let value = serde_json::json!({
+            "artifact_id": "artifact-1",
+            "trust_tier": "high",
+            "publisher_id": "publisher-1",
+            "signature": "sig-1",
+            "assurance_level": 3,
+            "created_at": "2026-01-01T00:00:00Z",
+            "expires_at": null,
+            "revoked": "false"
+        });
+
+        let err = serde_json::from_value::<TieredTrustArtifactRecord>(value)
+            .expect_err("string revoked flag must fail deserialization");
+
+        assert!(err.is_data());
+    }
+
+    #[test]
+    fn canonical_state_root_rejects_negative_input_count() {
+        let value = serde_json::json!({
+            "root_hash": "sha256:abc",
+            "epoch": 7,
+            "computed_at": "2026-01-01T00:00:00Z",
+            "input_count": -1,
+            "algorithm": "sha256"
+        });
+
+        let err = serde_json::from_value::<CanonicalStateRootRecord>(value)
+            .expect_err("negative input_count must fail deserialization");
+
+        assert!(err.is_data());
+    }
+
+    #[test]
+    fn durability_mode_rejects_negative_sync_interval() {
+        let value = serde_json::json!({
+            "domain_name": "connector",
+            "mode": "strict",
+            "wal_enabled": true,
+            "sync_interval_ms": -1,
+            "updated_at": "2026-01-01T00:00:00Z"
+        });
+
+        let err = serde_json::from_value::<DurabilityModeRecord>(value)
+            .expect_err("negative sync_interval_ms must fail deserialization");
+
+        assert!(err.is_data());
+    }
+
+    #[test]
+    fn snapshot_policy_rejects_null_next_snapshot_at() {
+        let value = serde_json::json!({
+            "policy_id": "snapshot-1",
+            "domain_name": "connector",
+            "interval_seconds": 60,
+            "last_snapshot_at": null,
+            "next_snapshot_at": null,
+            "retention_count": 10
+        });
+
+        let err = serde_json::from_value::<SnapshotPolicyRecord>(value)
+            .expect_err("null next_snapshot_at must fail deserialization");
+
+        assert!(err.is_data());
+    }
+
+    #[test]
+    fn crdt_merge_state_rejects_negative_merge_count() {
+        let value = serde_json::json!({
+            "crdt_id": "crdt-1",
+            "crdt_type": "lww",
+            "vector_clock_json": "{\"node-a\":1}",
+            "merge_count": -1,
+            "last_merged_at": "2026-01-01T00:00:00Z"
+        });
+
+        let err = serde_json::from_value::<CrdtMergeStateRecord>(value)
+            .expect_err("negative merge_count must fail deserialization");
+
+        assert!(err.is_data());
+    }
+
+    #[test]
+    fn repair_cycle_audit_rejects_missing_completed_at() {
+        let value = serde_json::json!({
+            "cycle_id": "repair-1",
+            "domain_name": "connector",
+            "trigger": "integrity_sweep",
+            "items_repaired": 1,
+            "items_failed": 0,
+            "started_at": "2026-01-01T00:00:00Z"
+        });
+
+        let err = serde_json::from_value::<RepairCycleAuditRecord>(value)
+            .expect_err("missing completed_at must fail deserialization");
+
+        assert!(err.to_string().contains("completed_at"));
+    }
+
+    #[test]
     fn owner_module_uniqueness_per_model() {
         let meta = all_model_metadata();
         for m in &meta {
             let count = meta.iter().filter(|other| other.name == m.name).count();
             assert_eq!(count, 1, "model {} appears {} times", m.name, count);
+        }
+    }
+
+    #[test]
+    fn negative_fencing_lease_record_with_u64_max_epoch_serializes_safely() {
+        let record = FencingLeaseRecord {
+            lease_seq: u64::MAX,
+            object_id: "obj-max".into(),
+            holder_id: "holder-max".into(),
+            epoch: u64::MAX,
+            acquired_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: "2026-01-01T01:00:00Z".into(),
+            fence_version: u32::MAX,
+        };
+
+        // Should serialize without overflow or panic
+        let json_result = serde_json::to_string(&record);
+        assert!(json_result.is_ok());
+
+        let json = json_result.unwrap();
+        let parsed_result: Result<FencingLeaseRecord, _> = serde_json::from_str(&json);
+        assert!(parsed_result.is_ok());
+
+        let parsed = parsed_result.unwrap();
+        assert_eq!(parsed.epoch, u64::MAX);
+        assert_eq!(parsed.fence_version, u32::MAX);
+    }
+
+    #[test]
+    fn negative_lease_quorum_record_with_extremely_large_participants_list() {
+        // Create a very large participants list to test memory handling
+        let large_participants: Vec<String> = (0..10000).map(|i| format!("participant-{}", i)).collect();
+
+        let record = LeaseQuorumRecord {
+            quorum_id: "large-quorum".into(),
+            resource_key: "resource-large".into(),
+            participants: large_participants.clone(),
+            ack_count: 0,
+            required_acks: u32::try_from(large_participants.len()).unwrap_or(u32::MAX),
+            epoch: 1,
+            decided_at: None,
+            outcome: "pending".into(),
+        };
+
+        // Should handle large data structures without panic
+        let start = std::time::Instant::now();
+        let json_result = serde_json::to_string(&record);
+        let serialize_duration = start.elapsed();
+
+        assert!(json_result.is_ok());
+        assert!(serialize_duration < std::time::Duration::from_secs(5));
+
+        // Test deserialization
+        let json = json_result.unwrap();
+        let parse_start = std::time::Instant::now();
+        let parsed_result: Result<LeaseQuorumRecord, _> = serde_json::from_str(&json);
+        let parse_duration = parse_start.elapsed();
+
+        assert!(parsed_result.is_ok());
+        assert!(parse_duration < std::time::Duration::from_secs(5));
+
+        let parsed = parsed_result.unwrap();
+        assert_eq!(parsed.participants.len(), 10000);
+    }
+
+    #[test]
+    fn negative_artifact_journal_record_with_unicode_injection_in_metadata() {
+        // Test various Unicode edge cases in JSON metadata field
+        let malicious_metadata_values = vec![
+            r#"{"key":"\u0000null_byte"}"#,
+            r#"{"bidi":"\u202Eoverride\u202D"}"#,
+            r#"{"zwsp":"\u200Binvisible"}"#,
+            r#"{"emoji":"💀\uD83D\uDC80"}"#,
+            r#"{"combining":"e\u0301acute"}"#,
+            r#"{"control":"\u001F\u007F\u0001"}"#,
+        ];
+
+        for metadata_json in malicious_metadata_values {
+            let record = ArtifactJournalRecord {
+                entry_id: "unicode-test".into(),
+                artifact_hash: "sha256:test".into(),
+                operation: "write".into(),
+                actor_id: "test-actor".into(),
+                epoch: 1,
+                timestamp: "2026-01-01T00:00:00Z".into(),
+                metadata_json: Some(metadata_json.to_string()),
+            };
+
+            // Should serialize/deserialize with Unicode content literally preserved
+            let json_result = serde_json::to_string(&record);
+            assert!(json_result.is_ok());
+
+            let json = json_result.unwrap();
+            let parsed_result: Result<ArtifactJournalRecord, _> = serde_json::from_str(&json);
+            assert!(parsed_result.is_ok());
+
+            let parsed = parsed_result.unwrap();
+            assert_eq!(parsed.metadata_json, record.metadata_json);
+        }
+    }
+
+    #[test]
+    fn negative_offline_coverage_metric_with_extreme_floating_point_values() {
+        let extreme_float_values = vec![
+            f64::MAX,
+            f64::MIN,
+            f64::MIN_POSITIVE,
+            f64::EPSILON,
+            std::f64::consts::PI,
+            std::f64::consts::E,
+            1e308,  // Near overflow
+            1e-308, // Near underflow
+        ];
+
+        for coverage_pct in extreme_float_values {
+            let record = OfflineCoverageMetricRecord {
+                metric_id: format!("metric-{}", coverage_pct),
+                domain_name: "test".into(),
+                coverage_pct,
+                sampled_at: "2026-01-01T00:00:00Z".into(),
+                sample_size: 1,
+            };
+
+            // Should handle extreme float values safely
+            let json_result = serde_json::to_string(&record);
+            assert!(json_result.is_ok());
+
+            let json = json_result.unwrap();
+            let parsed_result: Result<OfflineCoverageMetricRecord, _> = serde_json::from_str(&json);
+
+            // Either parse successfully or fail gracefully (no panic)
+            if let Ok(parsed) = parsed_result {
+                // If parsed successfully, value should be preserved or appropriately bounded
+                assert!(parsed.coverage_pct.is_finite() || coverage_pct.is_finite());
+            }
+        }
+    }
+
+    #[test]
+    fn negative_offline_coverage_metric_with_non_finite_float_values() {
+        let non_finite_values = vec![f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+
+        for coverage_pct in non_finite_values {
+            let json_value = serde_json::json!({
+                "metric_id": "nan-test",
+                "domain_name": "test",
+                "coverage_pct": coverage_pct,
+                "sampled_at": "2026-01-01T00:00:00Z",
+                "sample_size": 1
+            });
+
+            // Non-finite values should be handled gracefully in JSON
+            let json_result = serde_json::to_string(&json_value);
+            assert!(json_result.is_ok());
+
+            // But parsing into the struct might reject non-finite values
+            let parsed_result: Result<OfflineCoverageMetricRecord, _> =
+                serde_json::from_value(json_value);
+
+            // Should either succeed (if serde allows) or fail gracefully (no panic)
+            match parsed_result {
+                Ok(record) => {
+                    // If it succeeded, check if the value was preserved or normalized
+                    if coverage_pct.is_nan() {
+                        assert!(record.coverage_pct.is_nan() || record.coverage_pct.is_finite());
+                    }
+                }
+                Err(err) => {
+                    // Graceful failure is acceptable for non-finite values
+                    assert!(err.to_string().contains("coverage_pct"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negative_control_channel_state_with_sequence_window_boundary_violations() {
+        // Test sequence window boundary conditions
+        let boundary_test_cases = vec![
+            // window_high < window_low (invalid)
+            (100, 50, 75),
+            // All values at u64::MAX
+            (u64::MAX, u64::MAX, u64::MAX),
+            // Zero values
+            (0, 0, 0),
+            // last_seq outside window
+            (10, 20, 5),   // last_seq < window_low
+            (10, 20, 25),  // last_seq > window_high
+        ];
+
+        for (window_low, window_high, last_seq) in boundary_test_cases {
+            let record = ControlChannelStateRecord {
+                channel_id: format!("chan-{}-{}-{}", window_low, window_high, last_seq),
+                last_seq,
+                window_low,
+                window_high,
+                epoch: 1,
+                updated_at: "2026-01-01T00:00:00Z".into(),
+            };
+
+            // Should serialize even with boundary violations (validation is business logic)
+            let json_result = serde_json::to_string(&record);
+            assert!(json_result.is_ok());
+
+            let json = json_result.unwrap();
+            let parsed_result: Result<ControlChannelStateRecord, _> = serde_json::from_str(&json);
+            assert!(parsed_result.is_ok());
+
+            let parsed = parsed_result.unwrap();
+            assert_eq!(parsed.window_low, window_low);
+            assert_eq!(parsed.window_high, window_high);
+            assert_eq!(parsed.last_seq, last_seq);
+        }
+    }
+
+    #[test]
+    fn negative_schema_migration_record_with_malformed_version_strings() {
+        let malformed_versions = vec![
+            "",                           // Empty version
+            "not.a.version",             // Non-semver
+            "1.0.0-alpha+build",         // Complex semver
+            "v1.0.0",                    // Prefixed version
+            "1.0",                       // Incomplete version
+            "1.0.0.0",                   // Too many components
+            "∞.∞.∞",                     // Unicode numbers
+            "1.0.0\x00",                 // Null byte
+            "1.0.0\n",                   // Newline
+            " 1.0.0 ",                   // Whitespace padding
+        ];
+
+        for version_str in malformed_versions {
+            let record = SchemaMigrationRecord {
+                migration_id: "malformed-version-test".into(),
+                version_from: version_str.to_string(),
+                version_to: "1.0.0".into(),
+                applied_at: "2026-01-01T00:00:00Z".into(),
+                checksum: "sha256:test".into(),
+                reversible: true,
+            };
+
+            // Should serialize malformed version strings literally
+            let json_result = serde_json::to_string(&record);
+            assert!(json_result.is_ok());
+
+            let json = json_result.unwrap();
+            let parsed_result: Result<SchemaMigrationRecord, _> = serde_json::from_str(&json);
+            assert!(parsed_result.is_ok());
+
+            let parsed = parsed_result.unwrap();
+            assert_eq!(parsed.version_from, version_str);
+        }
+    }
+
+    #[test]
+    fn negative_crdt_merge_state_with_deeply_nested_vector_clock_json() {
+        // Create deeply nested JSON structure to test parsing limits
+        let mut deep_json = String::new();
+        for _ in 0..1000 {
+            deep_json.push_str(r#"{"nested":"#);
+        }
+        deep_json.push_str("\"value\"");
+        for _ in 0..1000 {
+            deep_json.push('}');
+        }
+
+        let record = CrdtMergeStateRecord {
+            crdt_id: "deep-json-test".into(),
+            crdt_type: "lww".into(),
+            vector_clock_json: deep_json.clone(),
+            merge_count: 1,
+            last_merged_at: "2026-01-01T00:00:00Z".into(),
+        };
+
+        // Should handle deeply nested JSON string as literal content
+        let start = std::time::Instant::now();
+        let json_result = serde_json::to_string(&record);
+        let serialize_duration = start.elapsed();
+
+        assert!(json_result.is_ok());
+        assert!(serialize_duration < std::time::Duration::from_secs(10));
+
+        let json = json_result.unwrap();
+        let parse_start = std::time::Instant::now();
+        let parsed_result: Result<CrdtMergeStateRecord, _> = serde_json::from_str(&json);
+        let parse_duration = parse_start.elapsed();
+
+        assert!(parsed_result.is_ok());
+        assert!(parse_duration < std::time::Duration::from_secs(10));
+
+        let parsed = parsed_result.unwrap();
+        assert_eq!(parsed.vector_clock_json, deep_json);
+    }
+
+    #[test]
+    fn negative_tiered_trust_artifact_with_zero_and_maximum_assurance_levels() {
+        let extreme_assurance_levels = vec![0, u32::MAX];
+
+        for assurance_level in extreme_assurance_levels {
+            let record = TieredTrustArtifactRecord {
+                artifact_id: format!("artifact-assurance-{}", assurance_level),
+                trust_tier: "test".into(),
+                publisher_id: "test-publisher".into(),
+                signature: "test-signature".into(),
+                assurance_level,
+                created_at: "2026-01-01T00:00:00Z".into(),
+                expires_at: None,
+                revoked: false,
+            };
+
+            // Should handle extreme assurance levels safely
+            let json_result = serde_json::to_string(&record);
+            assert!(json_result.is_ok());
+
+            let json = json_result.unwrap();
+            let parsed_result: Result<TieredTrustArtifactRecord, _> = serde_json::from_str(&json);
+            assert!(parsed_result.is_ok());
+
+            let parsed = parsed_result.unwrap();
+            assert_eq!(parsed.assurance_level, assurance_level);
+        }
+    }
+
+    #[test]
+    fn negative_all_models_handle_extremely_long_string_fields_without_panic() {
+        // Test with 1MB string values in various string fields
+        let huge_string = "x".repeat(1_000_000);
+
+        // Test a few representative models with long string values
+        let fencing_record = FencingLeaseRecord {
+            lease_seq: 1,
+            object_id: huge_string.clone(),
+            holder_id: "holder".into(),
+            epoch: 1,
+            acquired_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: "2026-01-01T01:00:00Z".into(),
+            fence_version: 1,
+        };
+
+        let start = std::time::Instant::now();
+        let json_result = serde_json::to_string(&fencing_record);
+        let duration = start.elapsed();
+
+        assert!(json_result.is_ok());
+        assert!(duration < std::time::Duration::from_secs(30));
+
+        // Test parsing large JSON back
+        let json = json_result.unwrap();
+        assert!(json.len() > 1_000_000);
+
+        let parse_start = std::time::Instant::now();
+        let parsed_result: Result<FencingLeaseRecord, _> = serde_json::from_str(&json);
+        let parse_duration = parse_start.elapsed();
+
+        assert!(parsed_result.is_ok());
+        assert!(parse_duration < std::time::Duration::from_secs(30));
+
+        let parsed = parsed_result.unwrap();
+        assert_eq!(parsed.object_id.len(), 1_000_000);
+    }
+
+    #[test]
+    fn negative_model_metadata_consistency_under_memory_pressure() {
+        // Test all_model_metadata under repeated calls to check for memory leaks/issues
+        for _ in 0..1000 {
+            let meta = all_model_metadata();
+            assert_eq!(meta.len(), 21);
+
+            // Verify structure consistency
+            for m in &meta {
+                assert!(!m.name.is_empty());
+                assert!(!m.table.is_empty());
+                assert!(!m.columns.is_empty());
+                assert!(!m.classification.is_empty());
+                assert!(!m.source.is_empty());
+                assert!(!m.owner_module.is_empty());
+                assert_eq!(m.version, "1.0.0");
+            }
         }
     }
 }

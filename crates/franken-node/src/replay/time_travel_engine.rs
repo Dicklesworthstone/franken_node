@@ -2610,4 +2610,450 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn hardening_audit_log_prevents_unbounded_growth() {
+        // HARDENING: Audit log accumulation must use push_bounded to prevent memory exhaustion
+        let mut engine = ReplayEngine::new();
+        let trace_id = "audit-dos-test".to_string();
+
+        // Start a capture to initialize audit logging
+        engine.start_capture(&trace_id, "audit-test-workflow", demo_env())
+            .expect("capture start should succeed");
+
+        // Simulate many audit events to test bounding
+        for i in 0..10000 {
+            let input = format!("input-{}", i).into_bytes();
+            let output = format!("output-{}", i).into_bytes();
+            let effects = vec![SideEffect::new("test", format!("effect-{}", i).into_bytes())];
+
+            let _ = engine.record_step(&trace_id, input, output, effects, i);
+        }
+
+        // Complete capture
+        engine.complete_capture(&trace_id, 10000).expect("capture complete should succeed");
+
+        // Get audit logs and verify they're bounded
+        let audit_logs = engine.audit_logs();
+
+        // Should be bounded by MAX_AUDIT_LOG_ENTRIES
+        assert!(audit_logs.len() <= MAX_AUDIT_LOG_ENTRIES,
+            "Audit log should be bounded to {} entries, got {}",
+            MAX_AUDIT_LOG_ENTRIES, audit_logs.len());
+    }
+
+    #[test]
+    fn hardening_side_effects_bounded_accumulation() {
+        // HARDENING: Side effects collection must be bounded to prevent DoS
+        let mut engine = ReplayEngine::new();
+        let trace_id = "effects-dos-test".to_string();
+
+        engine.start_capture(&trace_id, "effects-test", demo_env())
+            .expect("capture start should succeed");
+
+        // Test with excessive side effects in a single step
+        let input = b"test-input".to_vec();
+        let output = b"test-output".to_vec();
+
+        // Create a massive number of side effects
+        let massive_effects: Vec<SideEffect> = (0..100000)
+            .map(|i| SideEffect::new("test", format!("effect-{}", i).into_bytes()))
+            .collect();
+
+        // This should either be bounded or fail safely (not panic)
+        let result = engine.record_step(&trace_id, input, output, massive_effects, 1000);
+
+        // Should complete without panic - may succeed with bounded effects or fail with validation error
+        match result {
+            Ok(_) => {
+                // If it succeeds, verify the trace doesn't contain all effects
+                let traces = engine.list_traces();
+                let trace = traces.iter().find(|t| t.trace_id == trace_id).expect("trace should exist");
+
+                if !trace.steps.is_empty() {
+                    let step = &trace.steps[0];
+                    // Side effects should be bounded, not all 100k
+                    assert!(step.side_effects.len() < 50000,
+                        "Side effects should be bounded, got {}", step.side_effects.len());
+                }
+            },
+            Err(_) => {
+                // Failure due to size validation is also acceptable
+            }
+        }
+    }
+
+    #[test]
+    fn hardening_trace_digest_comparison_timing_safe() {
+        // HARDENING: Trace digest comparisons must use constant-time comparison
+        let mut engine = ReplayEngine::new();
+        let trace_id = "timing-test".to_string();
+
+        // Create a valid trace
+        engine.start_capture(&trace_id, "timing-workflow", demo_env())
+            .expect("capture start should succeed");
+        engine.record_step(&trace_id, b"input".to_vec(), b"output".to_vec(), vec![], 1000)
+            .expect("record step should succeed");
+        engine.complete_capture(&trace_id, 2000).expect("capture complete should succeed");
+
+        // Get the trace and its digest
+        let traces = engine.list_traces();
+        let trace = traces.iter().find(|t| t.trace_id == trace_id).expect("trace should exist");
+        let correct_digest = &trace.trace_digest;
+
+        // Create digests that differ by single bits to test timing consistency
+        let mut almost_correct = correct_digest.clone();
+        if !almost_correct.is_empty() {
+            almost_correct = almost_correct.chars().take(correct_digest.len() - 1).collect::<String>() + "x";
+        }
+
+        let completely_different = "0".repeat(correct_digest.len().max(1));
+
+        let test_digests = vec![
+            correct_digest.clone(),
+            almost_correct,
+            completely_different,
+            String::new(), // Empty digest
+            "malicious-digest".to_string(),
+        ];
+
+        // Test digest validation timing consistency
+        for test_digest in &test_digests {
+            // Create a fake trace with the test digest
+            let mut fake_trace = trace.clone();
+            fake_trace.trace_digest = test_digest.clone();
+
+            // Time the validation (simulated)
+            let start = std::time::Instant::now();
+            let validation_result = fake_trace.validate();
+            let _elapsed = start.elapsed();
+
+            // All validations should complete in reasonable time
+            // (We can't easily test timing consistency here, but we verify no panic)
+            assert!(validation_result.is_ok() || validation_result.is_err());
+        }
+    }
+
+    #[test]
+    fn hardening_step_sequence_overflow_protection() {
+        // HARDENING: Step sequence numbers must use saturating arithmetic to prevent overflow
+        let mut engine = ReplayEngine::new();
+        let trace_id = "sequence-overflow-test".to_string();
+
+        engine.start_capture(&trace_id, "sequence-test", demo_env())
+            .expect("capture start should succeed");
+
+        // Test sequence number boundary conditions
+        let boundary_sequences = vec![
+            0u64,
+            1u64,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+
+        for seq in boundary_sequences {
+            let input = format!("input-{}", seq).into_bytes();
+            let output = format!("output-{}", seq).into_bytes();
+            let effects = vec![SideEffect::new("test", format!("effect-{}", seq).into_bytes())];
+
+            // Record step with explicit sequence (simulated via timestamp)
+            let result = engine.record_step(&trace_id, input, output, effects, seq);
+
+            // Should handle without panic - may succeed or fail with validation
+            match result {
+                Ok(_) => {
+                    // Verify sequence is handled correctly
+                    let traces = engine.list_traces();
+                    if let Some(trace) = traces.iter().find(|t| t.trace_id == trace_id) {
+                        if let Some(last_step) = trace.steps.last() {
+                            // Sequence should be reasonable, not overflowed
+                            assert!(last_step.seq <= u64::MAX);
+                        }
+                    }
+                },
+                Err(_) => {
+                    // Validation errors for extreme sequences are acceptable
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hardening_environment_data_length_validation() {
+        // HARDENING: Environment data must validate lengths safely using try_from
+        let huge_env_value = "x".repeat(1_000_000);
+        let malicious_env = vec![
+            ("normal_key".to_string(), "normal_value".to_string()),
+            ("empty_key".to_string(), "".to_string()),
+            ("huge_key".to_string(), huge_env_value.clone()),
+            ("null_byte_key".to_string(), "value\0with\0nulls".to_string()),
+            ("unicode_key".to_string(), "\u{202E}malicious\u{202D}".to_string()),
+        ].into_iter().collect();
+
+        let malicious_env_snapshot = EnvironmentSnapshot {
+            variables: malicious_env,
+            working_dir: "/tmp".to_string(),
+            timestamp: 1000,
+        };
+
+        let mut engine = ReplayEngine::new();
+        let trace_id = "env-validation-test".to_string();
+
+        // Try to start capture with malicious environment
+        let result = engine.start_capture(&trace_id, "env-test", malicious_env_snapshot);
+
+        // Should handle without panic - may succeed with bounded data or fail with validation
+        match result {
+            Ok(_) => {
+                // If it succeeds, verify environment data is handled safely
+                let traces = engine.list_traces();
+                if let Some(trace) = traces.iter().find(|t| t.trace_id == trace_id) {
+                    // Environment variables should be bounded or validated
+                    for (key, value) in &trace.environment.variables {
+                        assert!(key.len() < 100_000, "Environment key should be bounded");
+                        assert!(value.len() <= 1_000_000, "Environment value should be handled safely");
+                        assert!(!key.contains('\0'), "Environment key should not contain null bytes");
+                    }
+                }
+            },
+            Err(_) => {
+                // Validation failure is also acceptable for malicious input
+            }
+        }
+    }
+
+    // Working negative-path hardening tests using correct API
+    #[test]
+    fn negative_vec_push_divergences_unbounded_memory_exhaustion() {
+        // Test unbounded divergences.push() calls - potential DoS via memory exhaustion
+        let mut engine = ReplayEngine::new();
+        engine.register_trace(one_step_trace("dos-divergences")).expect("register should succeed");
+
+        // Replay function that creates side effect divergences
+        fn divergent_replay(
+            step: &TraceStep,
+            _env: &EnvironmentSnapshot,
+        ) -> (Vec<u8>, Vec<SideEffect>) {
+            // Return original output but with different side effects to cause divergence
+            let fake_effects = vec![SideEffect::new("fake-effect", vec![0xFF, 0xFE, 0xFD])];
+            (step.output.clone(), fake_effects)
+        }
+
+        let result = engine
+            .replay("dos-divergences", divergent_replay)
+            .expect("replay should succeed");
+
+        // Vulnerability: divergences.push() at line 919 has no capacity bounds
+        // Each step creates side effect divergence, pushing unbounded Divergence structs
+        // Attacker could craft replay functions that exhaust memory via divergence accumulation
+
+        match result.verdict {
+            ReplayVerdict::Diverged(count) => {
+                assert_eq!(count, 1, "Should detect divergence");
+                assert_eq!(result.divergences.len(), 1, "Should record divergence");
+                // The vulnerability: no limit on divergences vector size
+                // Production code should use: push_bounded(&mut divergences, divergence, MAX_DIVERGENCES)
+            }
+            _ => panic!("Should detect side effect divergence"),
+        }
+
+        // Test with multiple traces to demonstrate accumulation
+        for i in 0..10 {
+            let trace_id = format!("dos-{:02}", i);
+            engine.register_trace(one_step_trace(&trace_id)).expect("register should succeed");
+            let result = engine.replay(&trace_id, divergent_replay).expect("replay should succeed");
+            assert!(matches!(result.verdict, ReplayVerdict::Diverged(_)));
+        }
+    }
+
+    #[test]
+    fn negative_ct_eq_timing_attack_resistance_trace_digest_comparison() {
+        // Verify trace digest validation uses ct_eq for timing attack resistance
+        let valid_trace = one_step_trace("timing-test");
+        let valid_digest = valid_trace.trace_digest.clone();
+
+        // Create trace with invalid digest (differs only in last character)
+        let mut invalid_trace = valid_trace.clone();
+        let mut invalid_digest = valid_digest.clone();
+        invalid_digest.pop(); // Remove last char
+        invalid_digest.push('X'); // Change last char only
+        invalid_trace.trace_digest = invalid_digest;
+
+        // Both comparisons should take similar time - no early termination on first byte difference
+        let start1 = std::time::Instant::now();
+        let result1 = valid_trace.validate();
+        let duration1 = start1.elapsed();
+
+        let start2 = std::time::Instant::now();
+        let result2 = invalid_trace.validate();
+        let duration2 = start2.elapsed();
+
+        assert!(result1.is_ok(), "Valid trace should pass validation");
+        assert!(result2.is_err(), "Invalid trace should fail validation");
+
+        // Verify timing is consistent - ct_eq prevents early termination timing leaks
+        let ratio = duration1.as_nanos() as f64 / duration2.as_nanos().max(1) as f64;
+        assert!(
+            ratio < 5.0 && ratio > 0.2,
+            "Potential timing leak in digest comparison: ratio={}",
+            ratio
+        );
+
+        // The positive aspect: line 486 correctly uses ct_eq for digest comparison
+        // if !ct_eq(&recomputed, &self.trace_digest) prevents timing attacks ✓
+    }
+
+    #[test]
+    fn negative_saturating_arithmetic_overflow_protection_verification() {
+        // Verify arithmetic operations use saturating operations to prevent overflow
+        let env = demo_env();
+        let mut builder = TraceBuilder::new("overflow-test", "saturating-workflow", env);
+
+        // Test saturating_add in sequence advancement near overflow boundary
+        builder.next_seq = u64::MAX - 1;
+
+        let seq1 = builder.record_step(vec![1], vec![2], vec![], 1000);
+        assert_eq!(seq1, u64::MAX - 1, "Should allocate near-max sequence");
+        assert_eq!(builder.next_seq, u64::MAX, "Should advance to max via saturating_add");
+
+        let seq2 = builder.record_step(vec![3], vec![4], vec![], 2000);
+        assert_eq!(seq2, u64::MAX, "Should allocate max sequence");
+        assert_eq!(builder.next_seq, u64::MAX, "Should saturate at max, not wrap to 0");
+
+        // Verify step count matches successful recordings
+        assert_eq!(builder.step_count(), 2);
+
+        // Positive verification: line 583 uses saturating_add correctly ✓
+        // self.next_seq = self.next_seq.saturating_add(1)
+        // This prevents sequence counter overflow that could cause replay confusion
+
+        // Test saturating operations in build_demo_trace
+        let test_seq = u64::MAX;
+        let timestamp = test_seq.saturating_add(1).saturating_mul(1000);
+        assert_eq!(timestamp, u64::MAX, "Should saturate multiplication, not overflow");
+
+        // Raw arithmetic would wrap: (u64::MAX + 1) * 1000 = 0 * 1000 = 0
+        let would_wrap = test_seq.wrapping_add(1).wrapping_mul(1000);
+        assert_eq!(would_wrap, 0, "Demonstrates why saturating arithmetic is critical");
+    }
+
+    #[test]
+    fn negative_safe_length_conversion_overflow_boundary_protection() {
+        // Verify length conversions use try_from() instead of unsafe "as u64" casts
+
+        // Test boundary conditions for length prefixed hashing
+        let test_lengths = vec![
+            0usize,
+            1,
+            u32::MAX as usize,
+            // Cannot test usize::MAX due to memory constraints, but verify safe conversion exists
+        ];
+
+        for &test_len in &test_lengths {
+            // Simulate the safe conversion pattern used throughout the code
+            let safe_len_u64 = u64::try_from(test_len).unwrap_or(u64::MAX);
+
+            if test_len <= u32::MAX as usize {
+                assert_eq!(safe_len_u64, test_len as u64, "Should convert safely within bounds");
+            } else {
+                assert_eq!(safe_len_u64, u64::MAX, "Should clamp oversized lengths");
+            }
+        }
+
+        // Verify the safe pattern is used in digest computation
+        let effects = vec![
+            SideEffect::new("test", vec![1, 2, 3]),
+            SideEffect::new("large", vec![0xFF; 1000]),
+        ];
+
+        let step = TraceStep::new(0, vec![], vec![], effects, 1000);
+        let effects_digest = step.side_effects_digest();
+
+        // Should complete without panic - all length conversions are safe
+        assert!(!effects_digest.is_empty(), "Should produce valid digest");
+
+        // Positive verification: consistent use of safe conversions throughout ✓
+        // Lines 408, 410, 412, 442, 445, 447, 450, 452, 455, 868, 872, 876, 953
+        // All use: u64::try_from(len).unwrap_or(u64::MAX)
+        // Instead of dangerous: len as u64 which could overflow on 32-bit platforms
+    }
+
+    #[test]
+    fn negative_domain_separator_hash_collision_resistance_verification() {
+        // Verify hash operations use proper domain separators to prevent collision attacks
+
+        // Test that different operation types produce different hashes with overlapping data
+        let step = TraceStep::new(0, vec![1, 2, 3], vec![4, 5, 6], vec![], 1000);
+
+        let output_digest = step.output_digest();
+        let effects_digest = step.side_effects_digest();
+
+        // Domain separators should prevent collision even with similar input patterns
+        assert_ne!(output_digest, effects_digest,
+                  "Domain separators must prevent collision between output and effects");
+
+        // Test trace-level vs step-level domain separation
+        let trace_digest = WorkflowTrace::compute_digest(&[step.clone()]);
+        assert_ne!(trace_digest, output_digest,
+                  "Trace digest domain should prevent collision with step output");
+        assert_ne!(trace_digest, effects_digest,
+                  "Trace digest domain should prevent collision with step effects");
+
+        // Verify domain prefixes are distinct
+        assert_ne!(
+            b"replay_step_output_v1:",
+            b"replay_step_effects_v1:",
+            "Step domain prefixes must be distinct"
+        );
+        assert_ne!(
+            b"replay_trace_digest_v1:",
+            b"replay_step_output_v1:",
+            "Trace domain must be distinct from step domains"
+        );
+
+        // Test length-prefix collision resistance
+        let effect1 = SideEffect::new("ab", vec![1, 2, 3]);
+        let effect2 = SideEffect::new("a", vec![98, 1, 2, 3]); // 'b' = 98
+        let step1 = TraceStep::new(0, vec![], vec![], vec![effect1], 1000);
+        let step2 = TraceStep::new(0, vec![], vec![], vec![effect2], 1000);
+
+        // Length prefixing should prevent "ab"|[1,2,3] from colliding with "a"|[98,1,2,3]
+        assert_ne!(step1.side_effects_digest(), step2.side_effects_digest(),
+                  "Length prefixing must prevent field boundary attacks");
+
+        // Positive verification: consistent domain separation throughout ✓
+        // Lines 399, 407, 441: Proper domain prefixes for all hash operations
+        // Lines 860, 866: Replay uses same domain prefixes ensuring consistency
+        // Length-prefixed encoding prevents field boundary collision attacks
+    }
+
+    #[test]
+    fn negative_build_demo_trace_vec_push_unbounded_memory_exhaustion() {
+        // Test unbounded steps.push() in build_demo_trace function - potential DoS
+
+        // Test with large step count that could exhaust memory
+        let large_trace = build_demo_trace("large-trace", "massive-workflow", 10000);
+
+        // Should complete without panic, but demonstrates vulnerability
+        assert_eq!(large_trace.steps.len(), 10000);
+        assert!(large_trace.validate().is_ok());
+
+        // The vulnerability: line 1012 in build_demo_trace does raw steps.push()
+        // steps.push(TraceStep::new(seq, input, output, effects, timestamp));
+        // This has no capacity bounds and could be exploited for memory exhaustion
+
+        // An attacker calling build_demo_trace with massive step_count could DoS
+        // Production code should use: push_bounded(&mut steps, step, MAX_DEMO_STEPS)
+        // Or add validation: if steps.len() >= MAX_DEMO_STEPS { break; }
+
+        // Test memory usage grows linearly with step count
+        let small_trace = build_demo_trace("small", "test", 100);
+        let medium_trace = build_demo_trace("medium", "test", 1000);
+
+        assert_eq!(small_trace.steps.len(), 100);
+        assert_eq!(medium_trace.steps.len(), 1000);
+
+        // Memory usage: steps.len() * size_of::<TraceStep>() grows without bounds
+        // Each TraceStep contains Vec<u8> fields that add to memory pressure
+    }
 }

@@ -1004,4 +1004,442 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn negative_publisher_id_with_unicode_normalization_attacks() {
+        let mut ledger = StakingLedger::new();
+
+        // Test various Unicode normalization attack vectors
+        let unicode_publisher_ids = vec![
+            ("café", "NFC normalized (single é codepoint)"),
+            ("cafe\u{0301}", "NFD normalized (e + combining accent)"),
+            ("İstanbul", "Turkish capital I with dot above"),
+            ("istanbul", "ASCII lowercase"),
+            ("test\u{200B}publisher", "Zero-width space injection"),
+            ("test\u{FEFF}publisher", "BOM character injection"),
+            ("test\u{202E}reversed\u{202D}", "BiDi override attack"),
+            ("test\u{00A0}publisher", "Non-breaking space"),
+            ("test\u{2060}publisher", "Word joiner (invisible)"),
+        ];
+
+        let mut successful_deposits = 0;
+
+        for (publisher_id, description) in unicode_publisher_ids {
+            let result = ledger.deposit(publisher_id, 50, RiskTier::Medium, successful_deposits + 1);
+
+            match result {
+                Ok(stake_id) => {
+                    successful_deposits += 1;
+
+                    // Verify the publisher ID is stored exactly as provided (no normalization)
+                    let account = ledger.get_account(publisher_id);
+                    assert!(account.is_some(), "Account should exist for: {}", description);
+
+                    let stake = ledger.get_stake(stake_id);
+                    assert!(stake.is_some(), "Stake should exist for: {}", description);
+
+                    // Test that similar but different Unicode forms are treated as separate publishers
+                    if description.contains("NFC") {
+                        let nfd_result = ledger.deposit("cafe\u{0301}", 50, RiskTier::Medium, successful_deposits + 100);
+                        // Should either create separate account or reject based on normalization policy
+                        match nfd_result {
+                            Ok(_) => {
+                                // If accepted, should be separate account
+                                assert_ne!(ledger.get_account("café").unwrap().stakes.len(),
+                                          ledger.get_account("cafe\u{0301}").unwrap().stakes.len());
+                            }
+                            Err(_) => {
+                                // Graceful rejection is acceptable
+                            }
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Some Unicode forms may be rejected - this is acceptable
+                }
+            }
+        }
+
+        assert!(successful_deposits > 0, "Should accept at least some Unicode publisher IDs");
+    }
+
+    #[test]
+    fn negative_stake_id_wraparound_and_collision_resistance() {
+        let mut ledger = StakingLedger::new();
+
+        // Force stake ID counter to near maximum to test wraparound behavior
+        // Note: This tests the robustness of ID generation
+
+        let mut created_stakes = Vec::new();
+        let test_iterations = 1000;
+
+        for i in 0..test_iterations {
+            let publisher_id = format!("publisher_wraparound_{}", i);
+
+            match ledger.deposit(&publisher_id, 20, RiskTier::Low, i + 1) {
+                Ok(stake_id) => {
+                    // Verify stake ID is unique
+                    assert!(!created_stakes.contains(&stake_id),
+                           "Stake ID collision detected: {:?}", stake_id);
+                    created_stakes.push(stake_id);
+
+                    // Verify stake can be retrieved
+                    let stake = ledger.get_stake(stake_id);
+                    assert!(stake.is_some(), "Stake {:?} should be retrievable", stake_id);
+
+                    // Verify account reference
+                    let account = ledger.get_account(&publisher_id);
+                    assert!(account.is_some(), "Account should exist for {}", publisher_id);
+                }
+                Err(err) => {
+                    // Some failures may be acceptable due to resource constraints
+                    panic!("Unexpected deposit failure at iteration {}: {:?}", i, err);
+                }
+            }
+
+            // Periodic cleanup to avoid excessive memory usage
+            if i > 0 && i % 100 == 0 {
+                // Test that operations still work on earlier stakes
+                if let Some(&first_stake) = created_stakes.first() {
+                    let stake = ledger.get_stake(first_stake);
+                    assert!(stake.is_some(), "Earlier stake should remain accessible");
+                }
+            }
+        }
+
+        // Verify all created stakes are still accessible and unique
+        assert_eq!(created_stakes.len(), test_iterations);
+
+        // Test operations on stakes created throughout the process
+        for (idx, &stake_id) in created_stakes.iter().enumerate() {
+            let stake = ledger.get_stake(stake_id);
+            assert!(stake.is_some(), "Stake at index {} should be accessible", idx);
+
+            if idx % 100 == 0 {
+                // Test slash operation on periodic stakes
+                let slash_result = ledger.slash(stake_id, evidence(&format!("test_{}", idx)), 2000 + idx as u64);
+                match slash_result {
+                    Ok(_) => {
+                        // Successful slash
+                        let updated_stake = ledger.get_stake(stake_id).unwrap();
+                        assert_eq!(updated_stake.state, StakeState::Slashed);
+                    }
+                    Err(_) => {
+                        // May fail due to policy constraints - acceptable
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negative_capability_stake_gate_with_corrupted_account_state() {
+        let mut ledger = StakingLedger::new();
+        let gate = CapabilityStakeGate::new(StakePolicy::default_policy());
+
+        // Create normal account first
+        let stake_id = ledger.deposit("corrupted-test", 100, RiskTier::Medium, 1).unwrap();
+
+        // Test gate checks under various potentially corrupted account states
+
+        // Test 1: Normal case (baseline)
+        let (allowed_normal, _, _) = gate.check_stake(&ledger, "corrupted-test", &RiskTier::Medium, 100);
+        assert!(allowed_normal, "Normal case should allow stake");
+
+        // Test 2: After slashing (but before appeal resolution)
+        ledger.slash(stake_id, evidence("corruption-test"), 200).unwrap();
+        let (allowed_slashed, event_code, detail) = gate.check_stake(&ledger, "corrupted-test", &RiskTier::Medium, 300);
+        assert!(!allowed_slashed, "Slashed stake should be rejected");
+        assert!(detail.contains("unresolved slash"));
+
+        // Test 3: With extreme epoch values
+        let (allowed_extreme, _, _) = gate.check_stake(&ledger, "corrupted-test", &RiskTier::Medium, u64::MAX);
+        assert!(!allowed_extreme, "Should handle extreme epoch values");
+
+        // Test 4: Non-existent publisher with extreme values
+        let (allowed_missing, _, _) = gate.check_stake(&ledger, "missing-publisher", &RiskTier::Critical, u64::MAX);
+        assert!(!allowed_missing, "Missing publisher should be rejected");
+    }
+
+    #[test]
+    fn negative_slash_evidence_collector_id_validation_bypass_attempts() {
+        let (mut ledger, stake_id) = low_stake_ledger();
+
+        // Test various collector ID bypass attempts
+        let malicious_collector_ids = vec![
+            "",                                    // Empty collector
+            " ",                                   // Whitespace only
+            "\0system",                           // Null byte injection
+            "collector\nsystem",                  // Newline injection
+            "collector\tsystem",                  // Tab injection
+            "collector;rm -rf /",                 // Command injection attempt
+            "../../system",                       // Path traversal
+            "collector\u{202E}system\u{202D}",   // BiDi override
+            "x".repeat(1000),                     // Very long collector ID
+            "\u{1F4A9}".repeat(10),              // Unicode emoji spam
+        ];
+
+        let mut slash_attempts = 0;
+
+        for collector_id in malicious_collector_ids {
+            let malicious_evidence = SlashEvidence::new(
+                ViolationType::SecurityViolation,
+                "collector bypass test",
+                &format!("payload_{}", slash_attempts),
+                collector_id,
+                300 + slash_attempts,
+            );
+
+            match ledger.slash(stake_id, malicious_evidence, 300 + slash_attempts) {
+                Ok(slash_event) => {
+                    // If accepted, collector ID should be stored safely
+                    assert!(!slash_event.evidence.collector.is_empty() || collector_id.trim().is_empty(),
+                           "Non-empty collector ID should not become empty");
+
+                    // Should not contain dangerous patterns in serialized form
+                    let serialized = format!("{:?}", slash_event.evidence);
+                    assert!(!serialized.contains("rm -rf"), "Should not contain shell commands");
+
+                    slash_attempts += 1;
+                    break; // Only one slash per stake
+                }
+                Err(StakingError::AlreadySlashed { .. }) => {
+                    // Expected after first slash
+                    break;
+                }
+                Err(_) => {
+                    // Other rejections are acceptable for malicious input
+                }
+            }
+        }
+
+        // At least one test case should have been processed
+        assert!(slash_attempts > 0 || ledger.state.slash_events.len() > 0,
+               "Should process at least one slash attempt");
+    }
+
+    #[test]
+    fn negative_appeal_justification_with_injection_attacks() {
+        let (mut ledger, stake_id) = low_stake_ledger();
+        let slash_event = ledger.slash(stake_id, evidence("appeal-injection-test"), 400).unwrap();
+
+        // Test various injection attack vectors in appeal justification
+        let injection_justifications = vec![
+            "<script>alert('xss')</script>",
+            "'; DROP TABLE stakes; --",
+            "$(rm -rf /)",
+            "javascript:alert(document.cookie)",
+            "\x00\x01\x02\x03", // Binary data
+            "\u{202E}justified\u{202D}", // BiDi override
+            "justified\nSELECT * FROM passwords", // SQL injection with newline
+            "justified\"; system(\"rm -rf /\")", // Command injection
+            format!("justified {}", "A".repeat(10000)), // Buffer overflow attempt
+        ];
+
+        let mut successful_appeals = 0;
+
+        for (idx, justification) in injection_justifications.iter().enumerate() {
+            let appeal_result = ledger.file_appeal(
+                stake_id,
+                slash_event.slash_id,
+                justification,
+                401 + idx as u64
+            );
+
+            match appeal_result {
+                Ok(appeal_event) => {
+                    // If accepted, justification should be stored safely
+                    assert_eq!(appeal_event.justification.len() <= justification.len(), true,
+                              "Justification should not expand in length");
+
+                    // Should not contain active script patterns
+                    let serialized = format!("{:?}", appeal_event);
+                    assert!(!serialized.contains("<script>"), "Should not preserve script tags");
+                    assert!(!serialized.contains("DROP TABLE"), "Should not preserve SQL injection");
+                    assert!(!serialized.contains("rm -rf"), "Should not preserve shell commands");
+
+                    successful_appeals += 1;
+                    break; // Only one appeal per slash
+                }
+                Err(StakingError::InvalidTransition { .. }) => {
+                    // Expected - already under appeal from previous iteration
+                    break;
+                }
+                Err(_) => {
+                    // Other errors may be acceptable for malicious input
+                }
+            }
+        }
+
+        assert!(successful_appeals > 0, "Should process at least one appeal");
+    }
+
+    #[test]
+    fn negative_staking_arithmetic_with_integer_boundary_conditions() {
+        let mut ledger = StakingLedger::new();
+
+        // Test arithmetic operations at integer boundaries
+        let boundary_test_cases = vec![
+            (u64::MAX, RiskTier::Critical, "maximum stake value"),
+            (u64::MAX - 1, RiskTier::Critical, "near maximum stake"),
+            (1, RiskTier::Low, "minimum nonzero stake"),
+            (0, RiskTier::Low, "zero stake"),
+        ];
+
+        for (stake_amount, tier, description) in boundary_test_cases {
+            let publisher_id = format!("boundary_{}", description.replace(" ", "_"));
+
+            let deposit_result = ledger.deposit(&publisher_id, stake_amount, tier, 500);
+
+            match deposit_result {
+                Ok(stake_id) => {
+                    let stake = ledger.get_stake(stake_id).unwrap();
+                    assert_eq!(stake.amount, stake_amount, "Stake amount should be preserved for {}", description);
+
+                    // Test slash percentage calculation with boundary values
+                    let test_evidence = SlashEvidence::new(
+                        ViolationType::PolicyViolation,
+                        &format!("boundary test {}", description),
+                        "boundary payload",
+                        "boundary-collector",
+                        600,
+                    );
+
+                    match ledger.slash(stake_id, test_evidence, 601) {
+                        Ok(slash_event) => {
+                            // Verify slash calculation doesn't overflow
+                            assert!(slash_event.slashed_amount <= stake_amount,
+                                   "Slashed amount should not exceed original stake for {}", description);
+
+                            // Test that remaining amount arithmetic is safe
+                            let remaining = stake_amount.saturating_sub(slash_event.slashed_amount);
+                            assert!(remaining <= stake_amount, "Remaining calculation should be safe for {}", description);
+                        }
+                        Err(_) => {
+                            // Some boundary cases may be rejected by policy - acceptable
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Some boundary values may be rejected - acceptable based on policy
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negative_concurrent_state_modification_simulation() {
+        let (mut ledger, stake_id) = low_stake_ledger();
+
+        // Simulate concurrent state modifications by rapidly alternating operations
+        let operations = vec![
+            ("first_slash", || ledger.slash(stake_id, evidence("concurrent_1"), 700)),
+            ("withdraw_attempt", || ledger.withdraw(stake_id, 701)),
+            ("second_slash", || ledger.slash(stake_id, evidence("concurrent_2"), 702)),
+            ("expire_attempt", || ledger.expire(stake_id, 703)),
+        ];
+
+        let mut operation_results = Vec::new();
+
+        for (operation_name, operation) in operations {
+            let result = operation();
+            operation_results.push((operation_name, result.is_ok()));
+
+            // Verify state consistency after each operation
+            let stake = ledger.get_stake(stake_id).unwrap();
+
+            // State should always be valid
+            match stake.state {
+                StakeState::Active => {
+                    assert!(stake.amount > 0, "Active stake should have positive amount");
+                }
+                StakeState::Slashed => {
+                    assert!(ledger.state.slash_events.len() > 0, "Slashed state should have slash events");
+                }
+                StakeState::Withdrawn => {
+                    // Withdrawn state should be terminal for most operations
+                }
+                StakeState::Expired => {
+                    // Expired state should be terminal
+                }
+                StakeState::UnderAppeal => {
+                    // Should only be reachable through appeal process
+                    assert!(ledger.state.slash_events.len() > 0, "Appeal state requires prior slash");
+                }
+            }
+        }
+
+        // Verify operation sequence made sense
+        let first_slash_succeeded = operation_results.iter().any(|(name, success)|
+            name.contains("slash") && *success);
+
+        if first_slash_succeeded {
+            // If slash succeeded, subsequent operations should have failed appropriately
+            let withdraw_failed = operation_results.iter()
+                .find(|(name, _)| *name == "withdraw_attempt")
+                .map(|(_, success)| !success)
+                .unwrap_or(true);
+
+            assert!(withdraw_failed, "Withdraw should fail after successful slash");
+        }
+    }
+
+    #[test]
+    fn negative_risk_tier_policy_consistency_under_modification() {
+        // Test that changing policies doesn't break existing stakes
+        let initial_policy = StakePolicy::default_policy();
+        let mut ledger = StakingLedger::with_policy(initial_policy.clone());
+
+        // Create stakes under initial policy
+        let stake_ids: Vec<_> = (0..5)
+            .map(|i| {
+                ledger.deposit(&format!("policy_test_{}", i), 100, RiskTier::Medium, i + 1).unwrap()
+            })
+            .collect();
+
+        // Modify policy to have different requirements
+        let mut modified_tiers = initial_policy.tiers.clone();
+        if let Some(medium_policy) = modified_tiers.get_mut(&RiskTier::Medium) {
+            medium_policy.minimum_stake = 500; // Increase requirement
+            medium_policy.cooldown_seconds = u64::MAX / 8; // Very long cooldown
+        }
+
+        let modified_policy = StakePolicy { tiers: modified_tiers };
+        let gate_with_modified_policy = CapabilityStakeGate::new(modified_policy);
+
+        // Test that existing stakes still work with new policy
+        for (idx, &stake_id) in stake_ids.iter().enumerate() {
+            let publisher_id = format!("policy_test_{}", idx);
+
+            // Existing stakes should still be valid for gate checks
+            let (allowed, _, detail) = gate_with_modified_policy.check_stake(
+                &ledger, &publisher_id, &RiskTier::Medium, 800
+            );
+
+            assert!(allowed, "Existing stake should remain valid despite policy change: {}", detail);
+
+            // Test operations on existing stakes
+            if idx == 0 {
+                // Test slash with modified policy
+                let slash_result = ledger.slash(stake_id, evidence("policy_change_test"), 801);
+                match slash_result {
+                    Ok(_) => {
+                        // Slash should work regardless of policy change
+                        let stake = ledger.get_stake(stake_id).unwrap();
+                        assert_eq!(stake.state, StakeState::Slashed);
+                    }
+                    Err(_) => {
+                        // May fail due to other constraints
+                    }
+                }
+            }
+        }
+
+        // New deposits should follow new policy
+        let new_deposit_low = ledger.deposit("new_under_policy", 100, RiskTier::Medium, 900);
+        assert!(new_deposit_low.is_err(), "New deposit below new minimum should fail");
+
+        let new_deposit_sufficient = ledger.deposit("new_meets_policy", 500, RiskTier::Medium, 901);
+        assert!(new_deposit_sufficient.is_ok(), "New deposit meeting new minimum should succeed");
+    }
 }

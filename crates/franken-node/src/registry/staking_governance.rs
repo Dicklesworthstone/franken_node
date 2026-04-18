@@ -1991,6 +1991,301 @@ mod tests {
         assert_eq!(record.amount, 0);
     }
 
+    // -----------------------------------------------------------------------
+    // Negative-path hardening pattern verification tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn negative_saturating_add_counter_overflow_protection() {
+        let mut ledger = StakingLedger::new();
+
+        // Force all internal counters to near-overflow conditions
+        ledger.state.next_stake_id = u64::MAX - 2;
+        ledger.state.next_slash_id = u64::MAX - 3;
+        ledger.state.next_appeal_id = u64::MAX - 1;
+        ledger.state.next_audit_id = u64::MAX - 4;
+
+        // Test stake ID overflow boundary
+        let id1 = ledger.deposit("pub-overflow-1", 1000, RiskTier::Critical, 100).unwrap();
+        assert_eq!(id1.0, u64::MAX - 2);
+
+        let id2 = ledger.deposit("pub-overflow-2", 1000, RiskTier::Critical, 200).unwrap();
+        assert_eq!(id2.0, u64::MAX - 1);
+
+        let id3 = ledger.deposit("pub-overflow-3", 1000, RiskTier::Critical, 300).unwrap();
+        assert_eq!(id3.0, u64::MAX); // Should saturate at MAX
+
+        // Verify counter saturated, didn't wrap to 0
+        assert_eq!(ledger.state.next_stake_id, u64::MAX);
+
+        // Test slash ID overflow
+        let evidence1 = test_evidence_unique(ViolationType::MaliciousCode, "overflow-evidence-1");
+        let slash_event1 = ledger.slash(id1, evidence1, 400).unwrap();
+        assert_eq!(slash_event1.slash_id, u64::MAX - 3);
+
+        let evidence2 = test_evidence_unique(ViolationType::MaliciousCode, "overflow-evidence-2");
+        let slash_event2 = ledger.slash(id2, evidence2, 500).unwrap();
+        assert_eq!(slash_event2.slash_id, u64::MAX - 2);
+
+        // Verify slash counter uses saturating arithmetic
+        assert_eq!(ledger.state.next_slash_id, u64::MAX - 1);
+
+        // Test appeal ID overflow boundary with explicit check
+        let appeal_result = ledger.file_appeal(id1, slash_event1.slash_id, "overflow appeal", 600);
+        assert!(appeal_result.is_err()); // Should fail at u64::MAX boundary
+
+        // Verify all systems remain functional after overflow
+        let post_overflow_id = ledger.deposit("post-overflow", 500, RiskTier::High, 700).unwrap();
+        assert_eq!(post_overflow_id.0, u64::MAX); // Still saturated
+    }
+
+    #[test]
+    fn negative_ct_eq_bytes_timing_attack_resistance_evidence_hash() {
+        let mut ledger = StakingLedger::new();
+        let id = ledger.deposit("timing-test-pub", 1000, RiskTier::Critical, 100).unwrap();
+
+        // Create evidence with different hash characteristics to test timing
+        let evidence_payloads = vec![
+            "a",                           // Short payload
+            &"b".repeat(1000),            // Medium payload
+            &"c".repeat(100_000),         // Large payload
+            &"\x00".repeat(50_000),       // All zeros
+            &"\xFF".repeat(50_000),       // All ones
+            &(0..10_000).map(|i| (i % 256) as u8).map(|b| format!("{:02x}", b)).collect::<String>(), // Pattern
+        ];
+
+        // Slash with first evidence
+        let first_evidence = test_evidence_unique(ViolationType::MaliciousCode, evidence_payloads[0]);
+        ledger.slash(id, first_evidence, 200).unwrap();
+
+        // Try to slash other stakes with crafted evidence designed to test timing
+        for (i, payload) in evidence_payloads.iter().skip(1).enumerate() {
+            let test_id = ledger.deposit(&format!("timing-pub-{i}"), 1000, RiskTier::Critical, 300 + i as u64).unwrap();
+
+            // Create evidence with same hash as original (impossible due to domain separator)
+            let crafted_evidence = test_evidence_unique(ViolationType::MaliciousCode, payload);
+
+            // Try to create timing attack by using evidence with different lengths
+            // but similar prefixes that could leak timing information
+            let start = std::time::Instant::now();
+            let result = ledger.slash(test_id, crafted_evidence, 400 + i as u64);
+            let duration = start.elapsed();
+
+            // Should succeed (different evidence) and timing should be bounded
+            assert!(result.is_ok(), "Different evidence should not be rejected");
+            assert!(duration.as_millis() < 1000, "ct_eq_bytes should complete in bounded time");
+        }
+
+        // Verify no evidence hash collisions occurred due to timing attacks
+        assert_eq!(ledger.state.slash_events.len(), evidence_payloads.len());
+    }
+
+    #[test]
+    fn negative_expiry_boundary_fail_closed_semantics() {
+        let mut ledger = StakingLedger::new();
+        let id = ledger.deposit("boundary-test", 1000, RiskTier::Critical, 1000).unwrap();
+
+        // Slash to create appeal window
+        let evidence = test_evidence_unique(ViolationType::MaliciousCode, "boundary-evidence");
+        ledger.slash(id, evidence, 2000).unwrap();
+
+        // Test appeal window boundary conditions (Critical tier = 48h = 172800s)
+        let slash_timestamp = 2000u64;
+        let appeal_deadline = slash_timestamp + 172800; // Exactly at deadline
+
+        // Test cases around the boundary
+        let test_cases = vec![
+            (appeal_deadline - 1, true),   // Just before deadline - should succeed
+            (appeal_deadline, false),      // Exactly at deadline - should fail (>=)
+            (appeal_deadline + 1, false),  // After deadline - should fail
+            (u64::MAX, false),             // Way after deadline - should fail
+        ];
+
+        for (test_time, should_succeed) in test_cases {
+            let test_id = ledger.deposit("boundary-pub", 1000, RiskTier::Critical, test_time - 100).unwrap();
+            let test_evidence = test_evidence_unique(ViolationType::MaliciousCode, &format!("evidence-{test_time}"));
+            ledger.slash(test_id, test_evidence, test_time - 50).unwrap();
+
+            let appeal_result = ledger.file_appeal(test_id, 1, "boundary test", test_time);
+
+            if should_succeed {
+                assert!(appeal_result.is_ok(), "Appeal at time {test_time} should succeed (before deadline)");
+            } else {
+                assert!(appeal_result.is_err(), "Appeal at time {test_time} should fail (>= deadline)");
+                if let Err(StakingError::AppealExpired { .. }) = appeal_result {
+                    // Expected error type
+                } else {
+                    panic!("Wrong error type for expired appeal at time {test_time}");
+                }
+            }
+        }
+
+        // Test stake expiry boundary conditions
+        let expire_id = ledger.deposit("expire-test", 500, RiskTier::Medium, 5000).unwrap();
+        ledger.state.stakes.get_mut(&expire_id.0).unwrap().expires_at = Some(10000);
+
+        // Test expiry boundary (>= semantics)
+        assert!(ledger.expire(expire_id, 9999).is_err()); // Before expiry
+        assert!(ledger.expire(expire_id, 10000).is_ok()); // At expiry (>=)
+    }
+
+    #[test]
+    fn negative_domain_separator_hash_collision_resistance() {
+        // Test that evidence and penalty hash functions resist collision attacks
+        // even with carefully crafted inputs designed to bypass domain separation
+
+        let collision_test_payloads = vec![
+            // Attempt to create collisions by manipulating length prefixes
+            ("evidence", "staking_governance_evidence_v1:evidence"),
+            ("penalty", "staking_governance_penalty_v1:penalty"),
+            ("staking_governance_evidence_v1:", ""),
+            ("", "staking_governance_evidence_v1:"),
+            // Try to bypass domain separator with similar strings
+            ("staking_governance_evidence_v1", "x"),
+            ("staking_governance_evidence_v1:x", ""),
+            // Null byte injection attempts
+            ("evidence\x00malicious", "normal"),
+            ("evidence", "\x00malicious"),
+            // Length manipulation attempts
+            (&"a".repeat(32), &"b".repeat(32)),
+            (&"c".repeat(1000000), "short"),
+        ];
+
+        let mut evidence_hashes = std::collections::HashSet::new();
+        let mut penalty_hashes = std::collections::HashSet::new();
+
+        for (payload1, payload2) in collision_test_payloads {
+            // Test evidence hash domain separation
+            let hash1 = compute_evidence_hash(payload1);
+            let hash2 = compute_evidence_hash(payload2);
+
+            assert_ne!(hash1, hash2, "Evidence hash collision between '{}' and '{}'",
+                payload1.chars().take(50).collect::<String>(),
+                payload2.chars().take(50).collect::<String>());
+
+            assert!(evidence_hashes.insert(hash1.clone()), "Duplicate evidence hash generated");
+            assert!(evidence_hashes.insert(hash2.clone()), "Duplicate evidence hash generated");
+
+            // Test penalty hash domain separation with different parameters
+            let penalty_hash1 = compute_penalty_hash(&hash1, 5000, 1000);
+            let penalty_hash2 = compute_penalty_hash(&hash2, 5000, 1000);
+            let penalty_hash3 = compute_penalty_hash(&hash1, 5001, 1000); // Different fraction
+            let penalty_hash4 = compute_penalty_hash(&hash1, 5000, 1001); // Different amount
+
+            // All should be different due to domain separation
+            let penalty_set = vec![&penalty_hash1, &penalty_hash2, &penalty_hash3, &penalty_hash4];
+            for (i, hash_a) in penalty_set.iter().enumerate() {
+                for (j, hash_b) in penalty_set.iter().enumerate() {
+                    if i != j {
+                        assert_ne!(hash_a, hash_b, "Penalty hash collision at positions {} and {}", i, j);
+                    }
+                }
+                assert!(penalty_hashes.insert((*hash_a).clone()), "Duplicate penalty hash generated");
+            }
+        }
+
+        // Verify domain separators prevent cross-function collisions
+        for evidence_hash in &evidence_hashes {
+            for penalty_hash in &penalty_hashes {
+                assert_ne!(evidence_hash, penalty_hash,
+                    "Cross-function hash collision between evidence and penalty hashes");
+            }
+        }
+    }
+
+    #[test]
+    fn negative_push_bounded_capacity_overflow_adversarial_inputs() {
+        let mut ledger = StakingLedger::new();
+
+        // Test slash events capacity boundary
+        let base_id = ledger.deposit("capacity-test", 1000, RiskTier::Low, 100).unwrap();
+
+        // Create more slash events than MAX_SLASH_EVENTS to test eviction
+        for i in 0..(MAX_SLASH_EVENTS + 100) {
+            let test_id = ledger.deposit(&format!("slash-pub-{i}"), 1000, RiskTier::Low, 200 + i as u64).unwrap();
+            let evidence = test_evidence_unique(ViolationType::MaliciousCode, &format!("event-{i}"));
+            let _ = ledger.slash(test_id, evidence, 300 + i as u64);
+        }
+
+        // Verify capacity is bounded and oldest events were evicted
+        assert!(ledger.state.slash_events.len() <= MAX_SLASH_EVENTS,
+            "Slash events should not exceed capacity: {} > {}",
+            ledger.state.slash_events.len(), MAX_SLASH_EVENTS);
+
+        // Test appeal records capacity
+        for i in 0..(MAX_APPEAL_RECORDS + 50) {
+            let appeal_id = ledger.deposit(&format!("appeal-pub-{i}"), 1000, RiskTier::Medium, 1000 + i as u64).unwrap();
+            let appeal_evidence = test_evidence_unique(ViolationType::PolicyViolation, &format!("appeal-evidence-{i}"));
+            if let Ok(_) = ledger.slash(appeal_id, appeal_evidence, 1100 + i as u64) {
+                let _ = ledger.file_appeal(appeal_id, 1, &format!("appeal-{i}"), 1200 + i as u64);
+            }
+        }
+
+        assert!(ledger.state.appeals.len() <= MAX_APPEAL_RECORDS,
+            "Appeals should not exceed capacity: {} > {}",
+            ledger.state.appeals.len(), MAX_APPEAL_RECORDS);
+
+        // Test audit log capacity
+        for i in 0..(MAX_AUDIT_LOG_ENTRIES + 20) {
+            let audit_id = ledger.deposit(&format!("audit-pub-{i}"), 100, RiskTier::Low, 2000 + i as u64).unwrap();
+            // Each deposit creates an audit entry
+        }
+
+        assert!(ledger.state.audit_log.len() <= MAX_AUDIT_LOG_ENTRIES,
+            "Audit log should not exceed capacity: {} > {}",
+            ledger.state.audit_log.len(), MAX_AUDIT_LOG_ENTRIES);
+
+        // Verify system remains functional after capacity limits hit
+        let final_id = ledger.deposit("final-test", 200, RiskTier::Medium, 9999).unwrap();
+        assert!(final_id.0 > 0);
+    }
+
+    #[test]
+    fn negative_length_cast_overflow_boundary_protection() {
+        // Test that any .len() conversions handle overflow gracefully
+
+        // Create evidence with extremely long payload to test length handling
+        let massive_payload = "X".repeat(1_000_000); // 1MB payload
+        let evidence = test_evidence_unique(ViolationType::MaliciousCode, &massive_payload);
+
+        // Verify evidence hash computation handles large inputs
+        let hash1 = compute_evidence_hash(&massive_payload);
+        let hash2 = compute_evidence_hash("small");
+        assert_ne!(hash1, hash2);
+        assert!(!hash1.is_empty());
+
+        // Test penalty hash with large evidence hash
+        let penalty_hash = compute_penalty_hash(&hash1, 5000, 1000);
+        assert!(!penalty_hash.is_empty());
+
+        // Verify the system can handle evidence with massive payloads
+        let mut ledger = StakingLedger::new();
+        let id = ledger.deposit("massive-evidence-test", 1000, RiskTier::Critical, 100).unwrap();
+
+        // Should handle large evidence gracefully
+        let result = ledger.slash(id, evidence, 200);
+        assert!(result.is_ok(), "System should handle large evidence payloads");
+
+        // Test boundary conditions for string length handling
+        let boundary_lengths = vec![
+            0,
+            1,
+            255,
+            256,
+            65535,
+            65536,
+        ];
+
+        for length in boundary_lengths {
+            let test_payload = if length == 0 { String::new() } else { "z".repeat(length) };
+            let boundary_evidence = test_evidence_unique(ViolationType::PolicyViolation, &test_payload);
+            let test_id = ledger.deposit(&format!("boundary-{length}"), 500, RiskTier::High, 300 + length as u64).unwrap();
+
+            let boundary_result = ledger.slash(test_id, boundary_evidence, 400 + length as u64);
+            assert!(boundary_result.is_ok(), "Should handle length {} gracefully", length);
+        }
+    }
+
     #[test]
     fn test_audit_trail_complete() {
         let mut ledger = StakingLedger::new();

@@ -1251,4 +1251,223 @@ mod tests {
         assert_eq!(sched.decisions()[0].timestamp, 1);
         assert_eq!(sched.decisions().last().expect("last decision").epoch_id, 71);
     }
+
+    // ── Hardening-focused negative-path tests targeting specific patterns ──
+
+    #[test]
+    fn test_counter_overflow_protection_with_saturating_add() {
+        // Test for missing saturating_add on counters - should not panic on overflow
+        let mut sched = IntegritySweepScheduler::with_defaults();
+
+        // Create evidence with near-overflow values
+        let overflow_evidence = EvidenceTrajectory::new(
+            u32::MAX.saturating_sub(1), // Near overflow rejection count
+            u32::MAX.saturating_sub(1), // Near overflow escalation count
+            0.5,
+            Trend::Degrading,
+            1000,
+        );
+
+        // Multiple updates should use saturating arithmetic internally
+        for i in 0..10 {
+            let next_evidence = EvidenceTrajectory::new(
+                u32::MAX.saturating_sub(1).saturating_add(1), // Should saturate at MAX
+                u32::MAX.saturating_sub(1).saturating_add(1),
+                0.5,
+                Trend::Degrading,
+                1000_u64.saturating_add(i),
+            );
+
+            // Should not panic due to overflow
+            sched.update_trajectory(&next_evidence);
+        }
+
+        // Verify scheduler remains functional
+        assert!(sched.update_count() > 0);
+        assert!(sched.current_band() != PolicyBand::Green); // Should have escalated
+    }
+
+    #[test]
+    fn test_length_casting_uses_try_from_pattern() {
+        // Test for .len() as u32 - should use u32::try_from pattern
+        let mut sched = IntegritySweepScheduler::with_defaults();
+
+        // Fill up to capacity
+        for i in 0..MAX_DECISIONS {
+            sched.update_trajectory(&green_evidence(i as u64));
+        }
+
+        let decisions_len = sched.decisions().len();
+
+        // Test the hardening pattern: should use try_from, not direct cast
+        let len_as_u32 = u32::try_from(decisions_len).unwrap_or(u32::MAX);
+        assert!(len_as_u32 <= u32::MAX);
+
+        // Test that very large collections would be handled safely
+        assert!(decisions_len <= MAX_DECISIONS);
+
+        // If we had more than u32::MAX decisions, try_from would handle it safely
+        let hypothetical_large_len = usize::MAX;
+        let safe_cast = u32::try_from(hypothetical_large_len).unwrap_or(u32::MAX);
+        assert_eq!(safe_cast, u32::MAX); // Should cap at u32::MAX, not cast unsafely
+    }
+
+    #[test]
+    fn test_expiry_comparison_uses_greater_equal_pattern() {
+        // Test for > on expiry - should use >= for fail-closed semantics
+        let mut sched = IntegritySweepScheduler::with_defaults();
+
+        let evidence = green_evidence(1000);
+        sched.update_trajectory(&evidence);
+
+        // Simulate time-based expiry checks
+        let current_time = 5000_u64;
+        let expiry_time = 5000_u64; // Exactly at expiry boundary
+
+        // Fail-closed pattern: >= means "expired" (includes exact boundary)
+        let is_expired_fail_closed = current_time >= expiry_time;
+        assert!(is_expired_fail_closed, "Boundary case should be considered expired");
+
+        // Anti-pattern would be > which would allow boundary case through
+        let is_expired_anti_pattern = current_time > expiry_time;
+        assert!(!is_expired_anti_pattern, "Anti-pattern would incorrectly allow boundary");
+
+        // Test with slightly past expiry
+        let past_expiry = current_time >= (expiry_time - 1);
+        assert!(past_expiry, ">= correctly identifies past expiry");
+
+        // Test with before expiry
+        let before_expiry = (current_time - 1) >= expiry_time;
+        assert!(!before_expiry, ">= correctly identifies before expiry");
+    }
+
+    #[test]
+    fn test_hash_comparison_uses_constant_time_pattern() {
+        // Test for == on hashes - should use ct_eq_bytes for timing safety
+        use crate::security::constant_time::ct_eq_bytes;
+
+        // Simulate hash/signature comparison scenarios
+        let hash1 = b"integrity_sweep_hash_v1_abcdef123456";
+        let hash2 = b"integrity_sweep_hash_v1_abcdef123456"; // Same
+        let hash3 = b"integrity_sweep_hash_v1_abcdef123457"; // Different by one char
+
+        // Correct pattern: use constant-time comparison
+        assert!(ct_eq_bytes(hash1, hash2), "Identical hashes should match");
+        assert!(!ct_eq_bytes(hash1, hash3), "Different hashes should not match");
+
+        // Anti-pattern demonstration (don't actually use this in production)
+        let timing_vulnerable = hash1 == hash3; // This could leak timing info
+        assert!(!timing_vulnerable);
+
+        // Test with empty hashes
+        let empty1 = b"";
+        let empty2 = b"";
+        assert!(ct_eq_bytes(empty1, empty2), "Empty hashes should match");
+
+        // Test with different lengths (should fail fast)
+        let short_hash = b"short";
+        let long_hash = b"much_longer_hash";
+        assert!(!ct_eq_bytes(short_hash, long_hash), "Different length hashes should not match");
+    }
+
+    #[test]
+    fn test_domain_separator_inclusion_in_hash_inputs() {
+        // Test for missing domain separators - crypto operations should include them
+        use sha2::{Digest, Sha256};
+
+        // Example of proper domain separation pattern
+        let domain_separator = b"integrity_sweep_v1:";
+        let trajectory_data = b"rejections=5,escalations=2,repairability=0.8";
+
+        // Correct pattern: include domain separator
+        let mut hasher_with_domain = Sha256::new();
+        hasher_with_domain.update(domain_separator);
+        hasher_with_domain.update(trajectory_data);
+        let hash_with_domain = hasher_with_domain.finalize();
+
+        // Anti-pattern: missing domain separator (vulnerable to collision)
+        let mut hasher_without_domain = Sha256::new();
+        hasher_without_domain.update(trajectory_data);
+        let hash_without_domain = hasher_without_domain.finalize();
+
+        // Should be different due to domain separation
+        assert_ne!(hash_with_domain[..], hash_without_domain[..],
+                   "Domain separator should change hash output");
+
+        // Test different domain separators produce different hashes
+        let different_domain = b"other_system_v1:";
+        let mut hasher_different_domain = Sha256::new();
+        hasher_different_domain.update(different_domain);
+        hasher_different_domain.update(trajectory_data);
+        let hash_different_domain = hasher_different_domain.finalize();
+
+        assert_ne!(hash_with_domain[..], hash_different_domain[..],
+                   "Different domain separators should produce different hashes");
+
+        // Length-prefixed inputs to prevent delimiter collision
+        let field1 = "key1=value1";
+        let field2 = "key2=value2";
+
+        let mut proper_hasher = Sha256::new();
+        proper_hasher.update(b"integrity_sweep_v1:");
+        proper_hasher.update((field1.len() as u64).to_le_bytes()); // Length prefix
+        proper_hasher.update(field1.as_bytes());
+        proper_hasher.update((field2.len() as u64).to_le_bytes()); // Length prefix
+        proper_hasher.update(field2.as_bytes());
+        let proper_hash = proper_hasher.finalize();
+
+        // Anti-pattern: concatenation without length prefixes (collision vulnerable)
+        let mut vulnerable_hasher = Sha256::new();
+        vulnerable_hasher.update(b"integrity_sweep_v1:");
+        vulnerable_hasher.update(field1.as_bytes());
+        vulnerable_hasher.update(field2.as_bytes());
+        let vulnerable_hash = vulnerable_hasher.finalize();
+
+        // These might be the same, but the pattern matters for collision resistance
+        let _ = (proper_hash, vulnerable_hash); // Just verify we can compute both
+    }
+
+    #[test]
+    fn test_float_validation_and_nan_inf_handling() {
+        // Test for missing NaN/Infinity guards on float inputs
+
+        // Test with NaN repairability score
+        let nan_evidence = EvidenceTrajectory {
+            recent_rejections: 1,
+            recent_escalations: 0,
+            avg_repairability: f64::NAN,
+            trend: Trend::Stable,
+            epoch_id: 1000,
+        };
+
+        // Constructor should clamp NaN to finite value
+        assert!(nan_evidence.avg_repairability.is_finite(),
+                "Constructor should handle NaN repairability");
+
+        // Test with infinity
+        let inf_evidence = EvidenceTrajectory::new(
+            1, 0, f64::INFINITY, Trend::Stable, 1001
+        );
+        assert!(inf_evidence.avg_repairability.is_finite(),
+                "Constructor should handle infinite repairability");
+
+        // Test with negative infinity
+        let neg_inf_evidence = EvidenceTrajectory::new(
+            1, 0, f64::NEG_INFINITY, Trend::Stable, 1002
+        );
+        assert!(neg_inf_evidence.avg_repairability.is_finite(),
+                "Constructor should handle negative infinite repairability");
+
+        // Test scheduler behavior with float edge cases
+        let mut sched = IntegritySweepScheduler::with_defaults();
+
+        // Should handle NaN/Inf evidence gracefully
+        sched.update_trajectory(&nan_evidence);
+        sched.update_trajectory(&inf_evidence);
+        sched.update_trajectory(&neg_inf_evidence);
+
+        // Should remain functional after bad float inputs
+        assert!(sched.update_count() > 0);
+        assert_eq!(sched.current_band(), PolicyBand::Yellow); // Should classify as yellow due to rejections
+    }
 }

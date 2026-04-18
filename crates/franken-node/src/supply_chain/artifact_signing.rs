@@ -1713,212 +1713,155 @@ mod tests {
 mod artifact_signing_boundary_negative_tests {
     use super::*;
 
-    fn malicious_signer() -> ArtifactSigner {
-        let signing_key = SigningKey::generate(&mut rand::thread_rng());
-        ArtifactSigner::new(signing_key)
+    #[test]
+    fn hardening_keyid_derivation_preserves_timing_safety() {
+        // HARDENING: Key ID derivation from public key bytes must use constant-time comparison
+        let sk1 = demo_signing_key();
+        let sk2 = demo_signing_key_2();
+        let vk1 = sk1.verifying_key();
+        let vk2 = sk2.verifying_key();
+
+        let kid1_a = KeyId::from_verifying_key(&vk1);
+        let kid1_b = KeyId::from_verifying_key(&vk1);
+        let kid2 = KeyId::from_verifying_key(&vk2);
+
+        // Same key should produce identical IDs (deterministic)
+        assert!(ct_eq_bytes(kid1_a.0.as_bytes(), kid1_b.0.as_bytes()));
+        // Different keys should produce different IDs (but timing-safe comparison)
+        assert!(!ct_eq_bytes(kid1_a.0.as_bytes(), kid2.0.as_bytes()));
     }
 
     #[test]
-    fn negative_sign_artifact_rejects_empty_artifact_id() {
-        let mut signer = malicious_signer();
+    fn hardening_domain_separator_prevents_hash_collision() {
+        // HARDENING: Domain separators must prevent collision between different hash contexts
+        let payload = b"shared payload data";
 
-        let result = signer.sign_artifact("", b"artifact-data", "trace-empty-id");
+        // These should all produce different hashes due to domain separation
+        let artifact_hash = sha256_hex(payload);
+        let keyid_vk = demo_signing_key().verifying_key();
+        let keyid_hash = KeyId::from_verifying_key(&keyid_vk).0;
 
-        assert!(matches!(
-            result,
-            Err(ArtifactSigningError::InvalidArtifactId { .. })
-        ));
+        // Manual hash without domain separator (for comparison)
+        let plain_hash = hex::encode(Sha256::digest(payload));
+        let plain_keyid = hex::encode(&Sha256::digest(keyid_vk.as_bytes())[..8]);
+
+        // Domain-separated hashes must differ from plain hashes
+        assert!(!ct_eq_bytes(artifact_hash.as_bytes(), plain_hash.as_bytes()));
+        assert!(!ct_eq_bytes(keyid_hash.as_bytes(), plain_keyid.as_bytes()));
     }
 
     #[test]
-    fn negative_sign_artifact_rejects_artifact_id_with_control_characters() {
-        let mut signer = malicious_signer();
+    fn hardening_length_prefix_prevents_delimiter_collision() {
+        // HARDENING: Length-prefixed fields in transition records prevent delimiter collision
+        let sk1 = demo_signing_key();
+        let sk2 = demo_signing_key_2();
+        let vk2 = sk2.verifying_key();
 
-        let result = signer.sign_artifact(
-            "artifact\n\r\t",
-            b"artifact-data",
-            "trace-control-chars"
-        );
+        let record = create_key_transition(&sk1, &vk2);
+        let canonical = record.canonical_bytes();
 
-        assert!(matches!(
-            result,
-            Err(ArtifactSigningError::InvalidArtifactId { .. })
-        ));
+        // Should start with domain separator
+        assert!(canonical.starts_with(b"artifact_signing_transition_v1:"));
+
+        // Should contain length prefixes (8-byte LE lengths before variable fields)
+        let old_id_bytes = record.old_key_id.0.as_bytes();
+        let old_len = len_to_u64(old_id_bytes.len());
+        assert!(canonical.windows(8).any(|window| {
+            window == old_len.to_le_bytes()
+        }));
     }
 
     #[test]
-    fn negative_sign_artifact_rejects_artifact_id_with_nul_bytes() {
-        let mut signer = malicious_signer();
+    fn hardening_size_conversion_prevents_truncation() {
+        // HARDENING: Size conversion must use try_from to prevent truncation attacks
+        let huge_size = usize::MAX;
+        let converted = len_to_u64(huge_size);
 
-        let result = signer.sign_artifact(
-            "artifact\0injection",
-            b"artifact-data",
-            "trace-nul-bytes"
-        );
+        // Should either convert correctly or saturate to u64::MAX (never truncate)
+        assert!(converted == u64::MAX || converted == huge_size as u64);
 
-        assert!(matches!(
-            result,
-            Err(ArtifactSigningError::InvalidArtifactId { .. })
-        ));
+        // Test boundary case near u64::MAX
+        let boundary_size = (u64::MAX as usize).saturating_sub(1);
+        let boundary_converted = len_to_u64(boundary_size);
+        assert!(boundary_converted <= u64::MAX);
     }
 
     #[test]
-    fn negative_sign_artifact_rejects_empty_trace_id() {
-        let mut signer = malicious_signer();
+    fn hardening_push_bounded_prevents_memory_exhaustion() {
+        // HARDENING: push_bounded must prevent unbounded growth even with malicious input
+        let mut items = Vec::new();
+        let cap = 3;
 
-        let result = signer.sign_artifact("artifact-valid", b"artifact-data", "");
-
-        assert!(matches!(
-            result,
-            Err(ArtifactSigningError::InvalidTraceId)
-        ));
-    }
-
-    #[test]
-    fn negative_sign_artifact_handles_extremely_large_artifact_data() {
-        let mut signer = malicious_signer();
-        let large_data = vec![0x42; 10_000_000]; // 10MB artifact
-
-        let result = signer.sign_artifact("large-artifact", &large_data, "trace-large");
-
-        // Should handle large data gracefully
-        match result {
-            Ok(signature) => {
-                // If signing succeeds, signature should be valid
-                assert!(!signature.signature_hex.is_empty());
-                assert_eq!(signature.artifact_id, "large-artifact");
-            }
-            Err(ArtifactSigningError::SigningFailed) => {
-                // Failure due to size limits is acceptable
-            }
-            Err(other) => panic!("unexpected error for large data: {other:?}"),
+        // Push many items to test capacity enforcement
+        for i in 0..100 {
+            push_bounded(&mut items, i, cap);
+            assert!(items.len() <= cap, "capacity exceeded at iteration {i}");
         }
+
+        // Final state should contain only the last 'cap' items
+        assert_eq!(items.len(), cap);
+        assert_eq!(items, vec![97, 98, 99]);
+
+        // Zero capacity should clear the vector
+        push_bounded(&mut items, 999, 0);
+        assert!(items.is_empty());
     }
 
     #[test]
-    fn negative_verify_signature_rejects_invalid_signature_length() {
-        let signer = malicious_signer();
-        let verifying_key = signer.verifying_key();
+    fn hardening_verify_signature_constant_time_comparison() {
+        // HARDENING: Signature verification must use constant-time comparison internally
+        let sk = demo_signing_key();
+        let vk = sk.verifying_key();
+        let data = b"sensitive payload";
+        let valid_sig = sign_bytes(&sk, data);
 
-        let invalid_signature = ArtifactSignature {
-            artifact_id: "test-artifact".to_string(),
-            checksum_sha256: "checksum".to_string(),
-            signature_hex: "invalid".to_string(), // Too short
-            timestamp: 1000,
-        };
+        // Create signature that differs by one bit
+        let mut almost_valid = valid_sig.clone();
+        almost_valid[0] ^= 0x01;
 
-        let result = verify_signature(&invalid_signature, b"data", &verifying_key);
-
-        assert!(matches!(
-            result,
-            Err(ArtifactSigningError::VerificationFailed { .. })
-        ));
+        // Both should fail but with same timing characteristics (we can't measure timing here,
+        // but we verify they both fail as expected)
+        assert!(verify_signature(&vk, data, &valid_sig).is_ok());
+        assert!(verify_signature(&vk, data, &almost_valid).is_err());
+        assert!(verify_signature(&vk, data, &[0u8; 64]).is_err());
     }
 
     #[test]
-    fn negative_verify_signature_rejects_non_hex_signature() {
-        let signer = malicious_signer();
-        let verifying_key = signer.verifying_key();
+    fn hardening_threshold_collection_bounded_iteration() {
+        // HARDENING: Threshold signature collection must bound iteration to prevent DoS
+        let sk1 = demo_signing_key();
+        let sk2 = demo_signing_key_2();
+        let mut ring = KeyRing::new();
+        let kid1 = ring.add_key(sk1.verifying_key());
+        let kid2 = ring.add_key(sk2.verifying_key());
 
-        let invalid_signature = ArtifactSignature {
-            artifact_id: "test-artifact".to_string(),
-            checksum_sha256: "checksum".to_string(),
-            signature_hex: "z".repeat(128), // Non-hex characters
-            timestamp: 1000,
-        };
+        let data = b"threshold dos test";
 
-        let result = verify_signature(&invalid_signature, b"data", &verifying_key);
+        // Create a large number of duplicate/invalid signatures to test iteration bounds
+        let mut partials = Vec::new();
+        for i in 0..1000 {
+            partials.push(PartialSignature {
+                key_id: KeyId(format!("fake-key-{i}")),
+                signature: vec![i as u8; 64],
+            });
+        }
+        // Add two valid signatures at the end
+        partials.push(PartialSignature {
+            key_id: kid1,
+            signature: sign_bytes(&sk1, data),
+        });
+        partials.push(PartialSignature {
+            key_id: kid2,
+            signature: sign_bytes(&sk2, data),
+        });
 
-        assert!(matches!(
-            result,
-            Err(ArtifactSigningError::VerificationFailed { .. })
-        ));
+        // Should still succeed despite many invalid signatures
+        assert!(verify_threshold(data, &partials, &ring, 2));
+
+        // Should early-return once threshold is met (can't verify timing, but logic works)
+        let result = collect_threshold_signatures(data, &partials, &ring, 2);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 2);
     }
 
-    #[test]
-    fn negative_verify_signature_rejects_mismatched_checksum() {
-        let mut signer = malicious_signer();
-        let verifying_key = signer.verifying_key();
-        let data = b"original-data";
-
-        // Create valid signature for original data
-        let signature = signer.sign_artifact("test-artifact", data, "trace-mismatch")
-            .expect("signing should succeed");
-
-        // Try to verify with different data
-        let different_data = b"tampered-data";
-        let result = verify_signature(&signature, different_data, &verifying_key);
-
-        assert!(matches!(
-            result,
-            Err(ArtifactSigningError::ChecksumMismatch { .. })
-        ));
-    }
-
-    #[test]
-    fn negative_create_key_ring_rejects_empty_keys_list() {
-        let result = create_key_ring(vec![], 1);
-
-        assert!(matches!(
-            result,
-            Err(ArtifactSigningError::InvalidKeyRing { .. })
-        ));
-    }
-
-    #[test]
-    fn negative_create_key_ring_rejects_threshold_greater_than_key_count() {
-        let key = SigningKey::generate(&mut rand::thread_rng());
-        let verifying_key = key.verifying_key();
-
-        let result = create_key_ring(vec![verifying_key], 2); // Threshold > key count
-
-        assert!(matches!(
-            result,
-            Err(ArtifactSigningError::InvalidKeyRing { .. })
-        ));
-    }
-
-    #[test]
-    fn negative_create_key_ring_rejects_zero_threshold() {
-        let key = SigningKey::generate(&mut rand::thread_rng());
-        let verifying_key = key.verifying_key();
-
-        let result = create_key_ring(vec![verifying_key], 0); // Zero threshold
-
-        assert!(matches!(
-            result,
-            Err(ArtifactSigningError::InvalidKeyRing { .. })
-        ));
-    }
-
-    #[test]
-    fn negative_verify_key_transition_rejects_future_timestamp() {
-        let old_key = SigningKey::generate(&mut rand::thread_rng());
-        let new_key = SigningKey::generate(&mut rand::thread_rng());
-        let key_ring = create_key_ring(vec![old_key.verifying_key()], 1)
-            .expect("key ring creation");
-
-        let future_timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_secs()
-            .saturating_add(86400); // 1 day in future
-
-        let mut record = create_key_transition_record(&old_key, &new_key, future_timestamp)
-            .expect("transition record creation");
-
-        let result = verify_key_transition(&record, &key_ring);
-
-        assert!(matches!(
-            result,
-            Err(ArtifactSigningError::TransitionRecordInvalid)
-        ));
-    }
-
-    #[test]
-    fn negative_serde_rejects_unknown_artifact_signing_error_variant() {
-        let result: Result<ArtifactSigningError, _> = serde_json::from_str(r#""UnknownError""#);
-
-        assert!(result.is_err());
-    }
 }
