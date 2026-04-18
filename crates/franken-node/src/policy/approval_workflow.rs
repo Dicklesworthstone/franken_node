@@ -140,6 +140,10 @@ pub struct PolicyChangeAuditEntry {
     pub entry_hash: String,
 }
 
+fn len_to_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
 /// Compute the SHA-256 hash for an audit entry (excluding entry_hash).
 fn compute_entry_hash(entry: &PolicyChangeAuditEntry) -> String {
     let mut hasher = Sha256::new();
@@ -155,7 +159,7 @@ fn compute_entry_hash(entry: &PolicyChangeAuditEntry) -> String {
         &entry.prev_hash,
         &entry.signature,
     ] {
-        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update(len_to_u64(field.len()).to_le_bytes());
         hasher.update(field.as_bytes());
     }
     let from_str = entry
@@ -164,9 +168,9 @@ fn compute_entry_hash(entry: &PolicyChangeAuditEntry) -> String {
         .map(|f| format!("{f:?}"))
         .unwrap_or_default();
     let to_str = format!("{:?}", entry.transition_to);
-    hasher.update((from_str.len() as u64).to_le_bytes());
+    hasher.update(len_to_u64(from_str.len()).to_le_bytes());
     hasher.update(from_str.as_bytes());
-    hasher.update((to_str.len() as u64).to_le_bytes());
+    hasher.update(len_to_u64(to_str.len()).to_le_bytes());
     hasher.update(to_str.as_bytes());
     format!("{:x}", hasher.finalize())
 }
@@ -731,10 +735,19 @@ impl PolicyChangeEngine {
         // the evicted entry instead of genesis.  Track the anchor hash so
         // the verifier knows which hash to expect for the retained head.
         if self.audit_ledger.len() >= MAX_AUDIT_LEDGER_ENTRIES {
-            let overflow = self.audit_ledger.len() - MAX_AUDIT_LEDGER_ENTRIES + 1;
+            let overflow = self
+                .audit_ledger
+                .len()
+                .saturating_sub(MAX_AUDIT_LEDGER_ENTRIES)
+                .saturating_add(1);
+            let eviction_end = overflow.min(self.audit_ledger.len());
+            let anchor_index = eviction_end.saturating_sub(1);
             // Save the entry_hash of the last entry being evicted as anchor.
-            self.chain_anchor_hash = Some(self.audit_ledger[overflow - 1].entry_hash.clone());
-            self.audit_ledger.drain(0..overflow);
+            self.chain_anchor_hash = self
+                .audit_ledger
+                .get(anchor_index)
+                .map(|entry| entry.entry_hash.clone());
+            self.audit_ledger.drain(0..eviction_end);
         }
         self.audit_ledger.push(entry);
     }
@@ -1361,6 +1374,50 @@ mod tests {
         assert_eq!(err.index, Some(1));
     }
 
+    #[test]
+    fn len_to_u64_handles_boundary_lengths_without_truncating() {
+        assert_eq!(len_to_u64(0), 0);
+        assert_eq!(len_to_u64(42), 42);
+        assert_eq!(
+            len_to_u64(usize::MAX),
+            u64::try_from(usize::MAX).unwrap_or(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn audit_ledger_eviction_boundary_uses_saturating_anchor_math() {
+        let mut engine = PolicyChangeEngine::new(1);
+        for i in 0..MAX_AUDIT_LEDGER_ENTRIES {
+            engine.append_audit(
+                POLICY_CHANGE_REVIEWED,
+                &format!("p-{i}"),
+                "reviewer",
+                Some(ProposalState::Proposed),
+                ProposalState::UnderReview,
+                "2026-01-15T01:00:00Z",
+                "boundary fill",
+            );
+        }
+        let evicted_anchor = engine.audit_ledger()[0].entry_hash.clone();
+
+        engine.append_audit(
+            POLICY_CHANGE_REVIEWED,
+            "p-overflow",
+            "reviewer",
+            Some(ProposalState::Proposed),
+            ProposalState::UnderReview,
+            "2026-01-15T01:00:00Z",
+            "one past capacity",
+        );
+
+        assert_eq!(engine.audit_ledger().len(), MAX_AUDIT_LEDGER_ENTRIES);
+        assert_eq!(
+            engine.chain_anchor_hash.as_deref(),
+            Some(evicted_anchor.as_str())
+        );
+        assert!(engine.verify_audit_chain().unwrap());
+    }
+
     /// Negative path: empty proposal ID should not be accepted
     #[test]
     fn empty_proposal_id_creates_valid_proposal_with_empty_key() {
@@ -1406,7 +1463,10 @@ mod tests {
         assert_eq!(state, ProposalState::UnderReview);
 
         let record = engine.get_proposal("p-time").unwrap();
-        assert_eq!(record.approvals[0].signed_at, "not-a-valid-rfc3339-timestamp");
+        assert_eq!(
+            record.approvals[0].signed_at,
+            "not-a-valid-rfc3339-timestamp"
+        );
     }
 
     /// Negative path: unicode and special characters in signer identity
@@ -1417,21 +1477,31 @@ mod tests {
         engine.propose(proposal).unwrap();
 
         // Unicode approver name is stored as-is
-        let state = engine.approve("p-unicode", ApprovalSignature {
-            signer: "🔐bob".to_owned(),
-            signature: "ed25519-sig-🔐bob".to_owned(),
-            signed_at: "2026-01-15T01:00:00Z".to_owned(),
-            comment: Some("Unicode test".to_owned()),
-        }).unwrap();
+        let state = engine
+            .approve(
+                "p-unicode",
+                ApprovalSignature {
+                    signer: "🔐bob".to_owned(),
+                    signature: "ed25519-sig-🔐bob".to_owned(),
+                    signed_at: "2026-01-15T01:00:00Z".to_owned(),
+                    comment: Some("Unicode test".to_owned()),
+                },
+            )
+            .unwrap();
         assert_eq!(state, ProposalState::UnderReview);
 
         // Case folding on unicode may behave unexpectedly
-        let err = engine.approve("p-unicode", ApprovalSignature {
-            signer: "🔐BOB".to_owned(), // Different case in emoji context
-            signature: "ed25519-sig-🔐BOB".to_owned(),
-            signed_at: "2026-01-15T01:00:00Z".to_owned(),
-            comment: None,
-        }).unwrap_err();
+        let err = engine
+            .approve(
+                "p-unicode",
+                ApprovalSignature {
+                    signer: "🔐BOB".to_owned(), // Different case in emoji context
+                    signature: "ed25519-sig-🔐BOB".to_owned(),
+                    signed_at: "2026-01-15T01:00:00Z".to_owned(),
+                    comment: None,
+                },
+            )
+            .unwrap_err();
         assert_eq!(err.code, ERR_INVALID_STATE_TRANSITION); // Treated as different approver
     }
 
@@ -1474,7 +1544,11 @@ mod tests {
 
         // Audit entries should have sequence u64::MAX - 1 and u64::MAX
         let entries = engine.audit_ledger();
-        assert!(entries.iter().any(|e| e.sequence == u64::MAX.saturating_sub(1)));
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.sequence == u64::MAX.saturating_sub(1))
+        );
         assert!(entries.iter().any(|e| e.sequence == u64::MAX));
     }
 
@@ -1491,7 +1565,7 @@ mod tests {
         let fields2 = ["a", "bcd"];
 
         for field in fields1.iter() {
-            hasher1.update((field.len() as u64).to_le_bytes());
+            hasher1.update(len_to_u64(field.len()).to_le_bytes());
             hasher1.update(field.as_bytes());
         }
 
@@ -1500,7 +1574,7 @@ mod tests {
         hasher2.update(42u64.to_le_bytes());
 
         for field in fields2.iter() {
-            hasher2.update((field.len() as u64).to_le_bytes());
+            hasher2.update(len_to_u64(field.len()).to_le_bytes());
             hasher2.update(field.as_bytes());
         }
 
@@ -1508,7 +1582,10 @@ mod tests {
         let hash2 = format!("{:x}", hasher2.finalize());
 
         // Length prefixing prevents collision between different field boundaries
-        assert_ne!(hash1, hash2, "Length prefixing should prevent hash collision");
+        assert_ne!(
+            hash1, hash2,
+            "Length prefixing should prevent hash collision"
+        );
     }
 }
 
@@ -1648,7 +1725,7 @@ mod policy_observability_integration_tests {
             let entry = make_evidence_entry(
                 &format!("audit-{}-{}", audit_entry.proposal_id, i),
                 kind,
-                (i + 1) as u64,
+                len_to_u64(i).saturating_add(1),
             );
             ledger.append(entry).unwrap();
         }
