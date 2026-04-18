@@ -1,7 +1,23 @@
 #![forbid(unsafe_code)]
 extern crate self as frankenengine_node;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Maximum help URLs to prevent memory exhaustion.
+const MAX_HELP_URLS: usize = 32;
+
+/// Add item to Vec with bounded capacity. When capacity is exceeded, removes oldest entries.
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ActionableError {
     message: String,
     fix_command: String,
@@ -18,7 +34,7 @@ impl ActionableError {
     }
 
     pub fn with_help_url(mut self, help_url: impl Into<String>) -> Self {
-        self.help_urls.push(help_url.into());
+        push_bounded(&mut self.help_urls, help_url.into(), MAX_HELP_URLS);
         self
     }
 }
@@ -37,7 +53,7 @@ impl std::error::Error for ActionableError {}
 
 #[cfg(test)]
 mod tests {
-    use super::ActionableError;
+    use super::{ActionableError, MAX_HELP_URLS};
 
     #[test]
     fn actionable_error_without_help_urls_omits_help_url_lines() {
@@ -342,17 +358,37 @@ mod tests {
             err = err.with_help_url(large_url);
         }
 
-        // Should handle large help URL lists without panic or excessive memory use
-        assert_eq!(err.help_urls.len(), 10000, "Should store all help URLs");
+        // Should handle large help URL lists without unbounded memory growth.
+        assert_eq!(
+            err.help_urls.len(),
+            MAX_HELP_URLS,
+            "Should retain only the bounded help URL window"
+        );
+        assert_eq!(
+            err.help_urls.first().map(String::as_str),
+            Some("https://example.com/help-9968-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+        );
+        assert_eq!(
+            err.help_urls.last().map(String::as_str),
+            Some("https://example.com/help-9999-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+        );
 
         // Rendering should complete despite large size
         let rendered = err.to_string();
         assert!(rendered.contains("fix_command=fix-command"), "Should render correctly despite size");
-        assert!(rendered.matches("help_url=").count() == 10000, "Should include all help URLs");
+        assert_eq!(
+            rendered.matches("help_url=").count(),
+            MAX_HELP_URLS,
+            "Should render only the bounded help URLs"
+        );
 
         // Clone should work efficiently
         let cloned = err.clone();
-        assert_eq!(cloned.help_urls.len(), 10000, "Clone should preserve all help URLs");
+        assert_eq!(
+            cloned.help_urls.len(),
+            MAX_HELP_URLS,
+            "Clone should preserve the bounded help URL window"
+        );
     }
 
     #[test]
@@ -505,8 +541,11 @@ mod tests {
         let rendered = current.to_string();
         assert!(rendered.contains("fix_command=base fix"),
                "Deeply cloned error should render correctly");
-        assert_eq!(current.help_urls.len(), 1000,
-                  "All help URLs should be preserved through deep cloning");
+        assert_eq!(
+            current.help_urls.len(),
+            MAX_HELP_URLS,
+            "Only the bounded help URL window should be preserved through deep cloning"
+        );
 
         // Verify memory usage is reasonable (no exponential growth)
         let final_rendered = current.to_string();
@@ -616,6 +655,33 @@ mod tests {
         let normal_rendered = normal_err.to_string();
         assert_eq!(normal_rendered, "normal error\nfix_command=normal fix",
                   "Normal functionality should remain intact after boundary testing");
+    }
+
+    #[test]
+    fn help_urls_are_bounded_to_prevent_memory_exhaustion() {
+        use super::MAX_HELP_URLS;
+
+        // Create an error and add more help URLs than the limit
+        let mut err = ActionableError::new("test error", "test fix");
+
+        // Add MAX_HELP_URLS + 5 help URLs
+        for i in 0..(MAX_HELP_URLS + 5) {
+            err = err.with_help_url(format!("https://example.invalid/{}", i));
+        }
+
+        // Should only keep the last MAX_HELP_URLS entries
+        assert_eq!(err.help_urls.len(), MAX_HELP_URLS);
+
+        // The first few URLs should have been dropped, last ones should remain
+        assert!(err.help_urls[0].contains(&(5).to_string())); // First kept URL (index 5)
+        assert!(err.help_urls[MAX_HELP_URLS - 1].contains(&(MAX_HELP_URLS + 4).to_string())); // Last URL
+
+        // Verify all URLs in final list are consecutive from the end
+        for (idx, url) in err.help_urls.iter().enumerate() {
+            let expected_index = 5 + idx; // Starting from URL 5 after dropping first 5
+            assert!(url.contains(&expected_index.to_string()),
+                   "URL at position {} should contain index {}, got: {}", idx, expected_index, url);
+        }
     }
 }
 
