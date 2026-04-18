@@ -68,6 +68,25 @@ pub const ERR_SENTINEL_PRECISION_BELOW_THRESHOLD: &str = "ERR_SENTINEL_PRECISION
 pub const ERR_SENTINEL_CONTAINMENT_FAILED: &str = "ERR_SENTINEL_CONTAINMENT_FAILED";
 pub const ERR_SENTINEL_COVERT_CHANNEL: &str = "ERR_SENTINEL_COVERT_CHANNEL";
 
+const MAX_COVERT_CHANNEL_EDGE_IDS_PER_SOURCE: usize = 1024;
+const MAX_COVERT_CHANNEL_DETECTIONS: usize = 4096;
+
+fn len_to_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 // ---------------------------------------------------------------------------
 // Invariant identifiers
 // ---------------------------------------------------------------------------
@@ -858,7 +877,7 @@ impl ExfiltrationSentinel {
         }
 
         Ok(SentinelScanResult {
-            edges_scanned: edge_ids.len() as u64,
+            edges_scanned: len_to_u64(edge_ids.len()),
             edges_passed: passed,
             exfiltrations_detected: detected,
             exfiltrations_contained: contained,
@@ -925,21 +944,29 @@ impl ExfiltrationSentinel {
         for edge in graph.edges.values() {
             if node_matches_zone(&edge.sink, "external") || node_matches_zone(&edge.sink, "public")
             {
-                source_external_counts
+                let edge_ids = source_external_counts
                     .entry(edge.source.clone())
-                    .or_default()
-                    .push(edge.edge_id.clone());
+                    .or_default();
+                push_bounded(
+                    edge_ids,
+                    edge.edge_id.clone(),
+                    MAX_COVERT_CHANNEL_EDGE_IDS_PER_SOURCE,
+                );
             }
         }
 
         for (source, edge_ids) in &source_external_counts {
             if edge_ids.len() >= 3 {
-                detections.push(CovertChannelDetection {
-                    source: source.clone(),
-                    edge_ids: edge_ids.clone(),
-                    pattern: "rapid_external_flow".to_string(),
-                    confidence_pct: 85,
-                });
+                push_bounded(
+                    &mut detections,
+                    CovertChannelDetection {
+                        source: source.clone(),
+                        edge_ids: edge_ids.clone(),
+                        pattern: "rapid_external_flow".to_string(),
+                        confidence_pct: 85,
+                    },
+                    MAX_COVERT_CHANNEL_DETECTIONS,
+                );
             }
         }
 
@@ -1153,6 +1180,18 @@ mod tests {
             to_zone: to.to_string(),
             denied_labels: denied.iter().map(|s| s.to_string()).collect(),
             deny_all: false,
+        }
+    }
+
+    fn make_external_edge(edge_id: &str, source: &str, timestamp_ms: u64) -> FlowEdge {
+        FlowEdge {
+            edge_id: edge_id.to_string(),
+            source: source.to_string(),
+            sink: "external-sink".to_string(),
+            operation: "drip".to_string(),
+            taint_set: TaintSet::new(),
+            timestamp_ms,
+            quarantined: false,
         }
     }
 
@@ -2115,6 +2154,126 @@ mod tests {
     }
 
     #[test]
+    fn len_to_u64_converts_representative_lengths_without_unchecked_casts() {
+        assert_eq!(len_to_u64(0), 0);
+        assert_eq!(len_to_u64(1), 1);
+        assert_eq!(len_to_u64(usize::from(u16::MAX)), u64::from(u16::MAX));
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_without_append() {
+        let mut items = vec!["old-1".to_string(), "old-2".to_string()];
+
+        push_bounded(&mut items, "new".to_string(), 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_evicts_oldest_when_full() {
+        let mut items = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+
+        push_bounded(&mut items, "d".to_string(), 3);
+
+        assert_eq!(
+            items,
+            vec!["b".to_string(), "c".to_string(), "d".to_string()]
+        );
+    }
+
+    #[test]
+    fn scan_graph_reports_edge_count_through_len_to_u64_helper() {
+        let config = default_config();
+        let mut graph = LineageGraph::new(config.clone());
+        let mut sentinel = ExfiltrationSentinel::new(config);
+
+        for i in 0..3 {
+            graph
+                .append_edge(make_external_edge(
+                    &format!("scan-safe-count-{i}"),
+                    "src",
+                    len_to_u64(i),
+                ))
+                .unwrap();
+        }
+
+        let result = sentinel.scan_graph(&mut graph).unwrap();
+
+        assert_eq!(result.edges_scanned, 3);
+        assert_eq!(result.edges_passed, 3);
+    }
+
+    #[test]
+    fn detect_covert_channels_bounds_edge_ids_per_source() {
+        let config = default_config();
+        let mut graph = LineageGraph::new(config.clone());
+        let sentinel = ExfiltrationSentinel::new(config);
+        let edge_count = MAX_COVERT_CHANNEL_EDGE_IDS_PER_SOURCE.saturating_add(5);
+
+        for i in 0..edge_count {
+            graph
+                .append_edge(make_external_edge(
+                    &format!("edge-{i:05}"),
+                    "stealth-src",
+                    len_to_u64(i),
+                ))
+                .unwrap();
+        }
+
+        let detections = sentinel.detect_covert_channels(&graph);
+
+        assert_eq!(detections.len(), 1);
+        assert_eq!(
+            detections[0].edge_ids.len(),
+            MAX_COVERT_CHANNEL_EDGE_IDS_PER_SOURCE
+        );
+        let expected_last_edge = format!("edge-{:05}", edge_count - 1);
+        assert_eq!(
+            detections[0].edge_ids.first().map(String::as_str),
+            Some("edge-00005")
+        );
+        assert_eq!(
+            detections[0].edge_ids.last().map(String::as_str),
+            Some(expected_last_edge.as_str())
+        );
+    }
+
+    #[test]
+    fn detect_covert_channels_bounds_detection_count() {
+        let config = default_config();
+        let mut graph = LineageGraph::new(config.clone());
+        let sentinel = ExfiltrationSentinel::new(config);
+        let source_count = MAX_COVERT_CHANNEL_DETECTIONS.saturating_add(5);
+
+        for source_index in 0..source_count {
+            let source = format!("source-{source_index:05}");
+            for edge_index in 0..3 {
+                let edge_id = format!("detection-{source_index:05}-{edge_index}");
+                graph
+                    .append_edge(make_external_edge(
+                        &edge_id,
+                        &source,
+                        len_to_u64(source_index.saturating_mul(3).saturating_add(edge_index)),
+                    ))
+                    .unwrap();
+            }
+        }
+
+        let detections = sentinel.detect_covert_channels(&graph);
+
+        assert_eq!(detections.len(), MAX_COVERT_CHANNEL_DETECTIONS);
+        let expected_last_source = format!("source-{:05}", source_count - 1);
+        assert_eq!(
+            detections.first().map(|d| d.source.as_str()),
+            Some("source-00005")
+        );
+        assert_eq!(
+            detections.last().map(|d| d.source.as_str()),
+            Some(expected_last_source.as_str())
+        );
+    }
+
+    #[test]
     fn test_inv_lineage_tag_persistence_constant() {
         assert_eq!(INV_LINEAGE_TAG_PERSISTENCE, "INV-LINEAGE-TAG-PERSISTENCE");
     }
@@ -2455,39 +2614,29 @@ mod tests {
                 severity: 3,
             },
             TaintLabel {
-                id: "🚀emoji🔥label💀".to_string(), // Unicode emoji
+                id: "🚀emoji🔥label💀".to_string(),            // Unicode emoji
                 description: "\u{FFFF}\u{10FFFF}".to_string(), // Max Unicode
-                severity: u32::MAX, // Maximum severity
+                severity: u32::MAX,                            // Maximum severity
             },
             TaintLabel {
                 id: "../../../etc/passwd".to_string(), // Path traversal
                 description: "<script>alert('xss')</script>".to_string(), // XSS
-                severity: 0, // Zero severity
+                severity: 0,                           // Zero severity
             },
             TaintLabel {
-                id: "x".repeat(10_000), // Very long ID
+                id: "x".repeat(10_000),          // Very long ID
                 description: "y".repeat(50_000), // Very long description
                 severity: 1,
             },
         ];
 
         for label in problematic_labels {
-            // Label creation should not panic
-            assert!(!label.id.is_empty() || label.id.is_empty()); // Basic check
-            assert!(label.severity <= u32::MAX);
+            let serialized =
+                serde_json::to_string(&label).expect("taint label should serialize losslessly");
+            let deserialized: TaintLabel =
+                serde_json::from_str(&serialized).expect("taint label should deserialize");
 
-            // Serialization should handle problematic data
-            let serialized = serde_json::to_string(&label);
-            match serialized {
-                Ok(json) => {
-                    // Deserialization should work if serialization succeeded
-                    let _deserialized: Result<TaintLabel, _> = serde_json::from_str(&json);
-                    // Either succeeds or fails gracefully
-                }
-                Err(_) => {
-                    // Some characters might not be serializable, which is acceptable
-                }
-            }
+            assert_eq!(deserialized, label);
         }
     }
 
@@ -2508,18 +2657,22 @@ mod tests {
 
         // Test with problematic label IDs
         let problematic_ids = vec![
-            "",                               // Empty
-            "\0null_terminated",             // Null byte
-            "label\nwith\nnewlines",         // Multiline
-            "🚀emoji_label",                 // Unicode
-            "\u{FFFF}",                      // Max BMP
-            "../../../sensitive/data",       // Path traversal
-            "x".repeat(1_000),              // Very long label
+            "",                        // Empty
+            "\0null_terminated",       // Null byte
+            "label\nwith\nnewlines",   // Multiline
+            "🚀emoji_label",           // Unicode
+            "\u{FFFF}",                // Max BMP
+            "../../../sensitive/data", // Path traversal
+            "x".repeat(1_000),         // Very long label
         ];
 
         for id in problematic_ids {
             taint_set.insert(id);
-            assert!(taint_set.contains(id), "Should contain inserted label: {}", id);
+            assert!(
+                taint_set.contains(id),
+                "Should contain inserted label: {}",
+                id
+            );
         }
 
         // Test merge with large taint set
@@ -2530,14 +2683,21 @@ mod tests {
 
         let original_len = taint_set.len();
         taint_set.merge(&other_set);
-        assert!(taint_set.len() >= original_len, "Merge should increase or maintain size");
+        assert!(
+            taint_set.len() >= original_len,
+            "Merge should increase or maintain size"
+        );
 
         // Test memory efficiency with duplicate inserts
         let start_len = taint_set.len();
         for _ in 0..1000 {
             taint_set.insert("duplicate_label");
         }
-        assert_eq!(taint_set.len(), start_len + 1, "Duplicates should not increase size");
+        assert_eq!(
+            taint_set.len(),
+            start_len + 1,
+            "Duplicates should not increase size"
+        );
     }
 
     #[test]
@@ -2570,7 +2730,11 @@ mod tests {
 
             // Serialization should work with extreme values
             let serialized = serde_json::to_string(&edge);
-            assert!(serialized.is_ok(), "Should serialize edge with timestamp: {}", timestamp);
+            assert!(
+                serialized.is_ok(),
+                "Should serialize edge with timestamp: {}",
+                timestamp
+            );
         }
 
         // Test with problematic string fields
@@ -2584,11 +2748,12 @@ mod tests {
             quarantined: true,
         };
 
-        // Should handle problematic strings without panicking
-        let serialization = serde_json::to_string(&problematic_edge);
-        match serialization {
-            Ok(_) | Err(_) => {}, // Either outcome is acceptable
-        }
+        let serialized =
+            serde_json::to_string(&problematic_edge).expect("flow edge should serialize");
+        let deserialized: FlowEdge =
+            serde_json::from_str(&serialized).expect("flow edge should deserialize");
+
+        assert_eq!(deserialized, problematic_edge);
     }
 
     #[test]
@@ -2636,7 +2801,7 @@ mod tests {
         let problematic_boundary = TaintBoundary {
             boundary_id: "problematic".to_string(),
             from_zone: "\0zone\x01".to_string(), // Control characters
-            to_zone: "🚀zone💀".to_string(), // Unicode emoji
+            to_zone: "🚀zone💀".to_string(),     // Unicode emoji
             denied_labels: BTreeSet::new(),
             deny_all: true, // Deny all labels
         };
@@ -2657,21 +2822,20 @@ mod tests {
     fn negative_node_zone_matching_with_edge_cases() {
         // Test node_matches_zone function with edge cases
         let test_cases = vec![
-            ("", "", false), // Both empty
-            ("node", "", false), // Empty zone
-            ("", "zone", false), // Empty node
-            ("node", "node", true), // Exact match
-            ("node1", "node2", false), // Different
-            ("prefix_node", "prefix", true), // Prefix match (assuming that's the logic)
+            ("", "", false),                  // Both empty
+            ("node", "", false),              // Empty zone
+            ("", "zone", false),              // Empty node
+            ("node", "node", true),           // Exact match
+            ("node1", "node2", false),        // Different
+            ("prefix_node", "prefix", true),  // Prefix match (assuming that's the logic)
             ("node_suffix", "suffix", false), // Suffix no match
-            ("\0node", "\0node", true), // Control characters
-            ("🚀node", "🚀node", true), // Unicode
+            ("\0node", "\0node", true),       // Control characters
+            ("🚀node", "🚀node", true),       // Unicode
         ];
 
         for (node, zone, expected) in test_cases {
             let actual = node_matches_zone(node, zone);
-            // The exact matching logic may vary, so just verify it doesn't panic
-            let _ = actual; // Don't assert specific behavior as implementation may vary
+            assert_eq!(actual, expected);
         }
     }
 
@@ -2708,7 +2872,7 @@ mod tests {
             FlowEdge {
                 edge_id: "edge3".to_string(),
                 source: "\0source\x01".to_string(), // Control characters
-                sink: "🚀sink💀".to_string(), // Unicode
+                sink: "🚀sink💀".to_string(),       // Unicode
                 operation: "op".to_string(),
                 taint_set: TaintSet::new(),
                 timestamp_ms: 1000,
@@ -2728,19 +2892,25 @@ mod tests {
         // Test LineageError Display implementation with problematic content
         let malicious_errors = vec![
             LineageError::LabelNotFound {
-                label_id: "\0malicious\x01label".to_string(),
+                detail: format!(
+                    "{}: label '\0malicious\x01label' not registered",
+                    ERR_IFL_LABEL_NOT_FOUND
+                ),
             },
             LineageError::BoundaryInvalid {
-                detail: "boundary\nwith\nnewlines".to_string(),
+                detail: format!("{}: boundary\nwith\nnewlines", ERR_IFL_BOUNDARY_INVALID),
             },
             LineageError::ContainmentFailed {
-                detail: "<script>alert('containment')</script>".to_string(),
+                detail: format!(
+                    "{}: <script>alert('containment')</script>",
+                    ERR_IFL_CONTAINMENT_FAILED
+                ),
             },
             LineageError::QueryInvalid {
-                detail: "🚀query💀error".to_string(),
+                detail: format!("{}: 🚀query💀error", ERR_IFL_QUERY_INVALID),
             },
             LineageError::SnapshotFailed {
-                detail: "../../../etc/passwd".to_string(),
+                detail: format!("{}: ../../../etc/passwd", ERR_IFL_SNAPSHOT_FAILED),
             },
         ];
 
@@ -2765,50 +2935,102 @@ mod tests {
     fn negative_constants_validation_for_security_compliance() {
         // Test that all event constants are well-formed
         let event_constants = [
-            EVENT_TAINT_ASSIGNED, EVENT_EDGE_APPENDED, EVENT_TAINT_PROPAGATED,
-            EVENT_BOUNDARY_CROSSING, EVENT_EXFIL_ALERT, EVENT_FLOW_QUARANTINED,
-            EVENT_CONTAINMENT_RECEIPT, EVENT_SNAPSHOT_EXPORTED, EVENT_CONFIG_RELOADED,
-            EVENT_DEPTH_LIMIT, EVENT_TAINT_MERGE, EVENT_HEALTH_CHECK,
-            LINEAGE_TAG_ATTACHED, LINEAGE_FLOW_TRACKED, SENTINEL_SCAN_START,
-            SENTINEL_EXFIL_DETECTED, SENTINEL_CONTAINMENT_TRIGGERED,
+            EVENT_TAINT_ASSIGNED,
+            EVENT_EDGE_APPENDED,
+            EVENT_TAINT_PROPAGATED,
+            EVENT_BOUNDARY_CROSSING,
+            EVENT_EXFIL_ALERT,
+            EVENT_FLOW_QUARANTINED,
+            EVENT_CONTAINMENT_RECEIPT,
+            EVENT_SNAPSHOT_EXPORTED,
+            EVENT_CONFIG_RELOADED,
+            EVENT_DEPTH_LIMIT,
+            EVENT_TAINT_MERGE,
+            EVENT_HEALTH_CHECK,
+            LINEAGE_TAG_ATTACHED,
+            LINEAGE_FLOW_TRACKED,
+            SENTINEL_SCAN_START,
+            SENTINEL_EXFIL_DETECTED,
+            SENTINEL_CONTAINMENT_TRIGGERED,
         ];
 
         for constant in &event_constants {
             assert!(!constant.is_empty());
-            assert!(constant.is_ascii(), "Event constant should be ASCII: {}", constant);
+            assert!(
+                constant.is_ascii(),
+                "Event constant should be ASCII: {}",
+                constant
+            );
             // Most should have specific prefixes
             if constant.starts_with("FN-IFL-") {
-                assert!(constant.len() >= 10, "FN-IFL- constants should have sufficient length");
+                assert!(
+                    constant.len() >= 10,
+                    "FN-IFL- constants should have sufficient length"
+                );
             }
         }
 
         // Test error constants
         let error_constants = [
-            ERR_IFL_LABEL_NOT_FOUND, ERR_IFL_DUPLICATE_EDGE, ERR_IFL_GRAPH_FULL,
-            ERR_IFL_BOUNDARY_INVALID, ERR_IFL_CONTAINMENT_FAILED, ERR_IFL_SNAPSHOT_FAILED,
-            ERR_IFL_QUERY_INVALID, ERR_IFL_CONFIG_REJECTED, ERR_IFL_ALREADY_QUARANTINED,
-            ERR_IFL_TIMEOUT, ERR_LINEAGE_TAG_MISSING, ERR_LINEAGE_FLOW_BROKEN,
-            ERR_SENTINEL_RECALL_BELOW_THRESHOLD, ERR_SENTINEL_PRECISION_BELOW_THRESHOLD,
-            ERR_SENTINEL_CONTAINMENT_FAILED, ERR_SENTINEL_COVERT_CHANNEL,
+            ERR_IFL_LABEL_NOT_FOUND,
+            ERR_IFL_DUPLICATE_EDGE,
+            ERR_IFL_GRAPH_FULL,
+            ERR_IFL_BOUNDARY_INVALID,
+            ERR_IFL_CONTAINMENT_FAILED,
+            ERR_IFL_SNAPSHOT_FAILED,
+            ERR_IFL_QUERY_INVALID,
+            ERR_IFL_CONFIG_REJECTED,
+            ERR_IFL_ALREADY_QUARANTINED,
+            ERR_IFL_TIMEOUT,
+            ERR_LINEAGE_TAG_MISSING,
+            ERR_LINEAGE_FLOW_BROKEN,
+            ERR_SENTINEL_RECALL_BELOW_THRESHOLD,
+            ERR_SENTINEL_PRECISION_BELOW_THRESHOLD,
+            ERR_SENTINEL_CONTAINMENT_FAILED,
+            ERR_SENTINEL_COVERT_CHANNEL,
         ];
 
         for constant in &error_constants {
             assert!(!constant.is_empty());
-            assert!(constant.starts_with("ERR_"), "Error constant should start with ERR_: {}", constant);
-            assert!(constant.is_ascii(), "Error constant should be ASCII: {}", constant);
+            assert!(
+                constant.starts_with("ERR_"),
+                "Error constant should start with ERR_: {}",
+                constant
+            );
+            assert!(
+                constant.is_ascii(),
+                "Error constant should be ASCII: {}",
+                constant
+            );
         }
 
         // Test invariant constants
         let invariant_constants = [
-            INV_LABEL_PERSIST, INV_EDGE_APPEND_ONLY, INV_QUARANTINE_RECEIPT,
-            INV_BOUNDARY_ENFORCED, INV_DETERMINISTIC, INV_SNAPSHOT_FAITHFUL,
+            INV_LABEL_PERSIST,
+            INV_EDGE_APPEND_ONLY,
+            INV_QUARANTINE_RECEIPT,
+            INV_BOUNDARY_ENFORCED,
+            INV_DETERMINISTIC,
+            INV_SNAPSHOT_FAITHFUL,
         ];
 
         for constant in &invariant_constants {
             assert!(!constant.is_empty());
-            assert!(constant.starts_with("INV-"), "Invariant should start with INV-: {}", constant);
-            assert!(constant.contains("IFL"), "Invariant should relate to IFL: {}", constant);
-            assert!(constant.is_ascii(), "Invariant constant should be ASCII: {}", constant);
+            assert!(
+                constant.starts_with("INV-"),
+                "Invariant should start with INV-: {}",
+                constant
+            );
+            assert!(
+                constant.contains("IFL"),
+                "Invariant should relate to IFL: {}",
+                constant
+            );
+            assert!(
+                constant.is_ascii(),
+                "Invariant constant should be ASCII: {}",
+                constant
+            );
         }
 
         // Test schema version
