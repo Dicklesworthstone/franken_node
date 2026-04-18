@@ -100,6 +100,155 @@ impl Default for ReconciliationConfig {
     }
 }
 
+#[cfg(test)]
+mod compute_delta_batch_bound_regression_tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    fn config(max_delta_batch: usize, proof_required: bool) -> ReconciliationConfig {
+        ReconciliationConfig {
+            max_delta_batch,
+            proof_required,
+            ..Default::default()
+        }
+    }
+
+    fn record(id: &str, epoch: u64, recorded_at_ms: u64, origin_node_id: &str) -> TrustRecord {
+        TrustRecord {
+            id: id.to_string(),
+            epoch,
+            recorded_at_ms,
+            origin_node_id: origin_node_id.to_string(),
+            payload: format!("payload:{id}:{epoch}").into_bytes(),
+            mmr_pos: 0,
+            inclusion_proof: None,
+            marker_hash: format!("marker:{id}"),
+        }
+    }
+
+    fn dummy_root() -> MmrRoot {
+        MmrRoot {
+            tree_size: 0,
+            root_hash: String::new(),
+        }
+    }
+
+    #[test]
+    fn compute_delta_stops_at_batch_overflow_sentinel_for_missing_records() {
+        let reconciler = AntiEntropyReconciler::new(config(3, false)).unwrap();
+        let local = TrustState::new(1);
+        let mut remote = TrustState::new(1);
+        for idx in 0..10 {
+            assert!(remote.insert(record(&format!("r{idx:03}"), 1, idx, "remote")));
+        }
+
+        let delta = reconciler.compute_delta(&local, &remote);
+        let ids: Vec<&str> = delta.iter().map(|record| record.id.as_str()).collect();
+
+        assert_eq!(delta.len(), 4);
+        assert_eq!(ids, vec!["r000", "r001", "r002", "r003"]);
+    }
+
+    #[test]
+    fn compute_delta_stops_at_batch_overflow_sentinel_for_replacements() {
+        let reconciler = AntiEntropyReconciler::new(config(2, false)).unwrap();
+        let mut local = TrustState::new(2);
+        let mut remote = TrustState::new(2);
+        for idx in 0..8 {
+            let id = format!("replace-{idx:03}");
+            assert!(local.insert(record(&id, 1, idx, "local")));
+            assert!(remote.insert(record(&id, 2, idx, "remote")));
+        }
+
+        let delta = reconciler.compute_delta(&local, &remote);
+
+        assert_eq!(delta.len(), 3);
+        assert!(delta.iter().all(|record| record.epoch == 2));
+    }
+
+    #[test]
+    fn compute_delta_skips_lower_precedence_records_without_filling_sentinel() {
+        let reconciler = AntiEntropyReconciler::new(config(3, false)).unwrap();
+        let mut local = TrustState::new(2);
+        let mut remote = TrustState::new(2);
+        for idx in 0..10 {
+            let id = format!("lower-{idx:03}");
+            assert!(local.insert(record(&id, 2, idx, "local")));
+            assert!(remote.insert(record(&id, 1, idx, "remote")));
+        }
+
+        let delta = reconciler.compute_delta(&local, &remote);
+
+        assert!(delta.is_empty());
+    }
+
+    #[test]
+    fn reconcile_reports_batch_exceeded_before_proof_validation() {
+        let mut reconciler = AntiEntropyReconciler::new(config(2, true)).unwrap();
+        let mut local = TrustState::new(1);
+        let mut remote = TrustState::new(1);
+        for idx in 0..5 {
+            assert!(remote.insert(record(&format!("no-proof-{idx:03}"), 1, idx, "remote")));
+        }
+
+        let err = reconciler
+            .reconcile(
+                &mut local,
+                &remote,
+                &dummy_root(),
+                &AtomicBool::new(false),
+            )
+            .expect_err("oversized delta should fail before proof checks");
+
+        assert_eq!(
+            err,
+            ReconciliationError::BatchExceeded { delta: 3, max: 2 }
+        );
+    }
+
+    #[test]
+    fn reconcile_batch_exceeded_leaves_local_state_unchanged() {
+        let mut reconciler = AntiEntropyReconciler::new(config(2, false)).unwrap();
+        let mut local = TrustState::new(1);
+        assert!(local.insert(record("keep", 1, 1, "local")));
+        let mut remote = TrustState::new(1);
+        for idx in 0..5 {
+            assert!(remote.insert(record(&format!("remote-{idx:03}"), 1, idx, "remote")));
+        }
+
+        let err = reconciler
+            .reconcile(
+                &mut local,
+                &remote,
+                &dummy_root(),
+                &AtomicBool::new(false),
+            )
+            .expect_err("oversized delta should fail atomically");
+
+        assert_eq!(
+            err,
+            ReconciliationError::BatchExceeded { delta: 3, max: 2 }
+        );
+        assert_eq!(local.len(), 1);
+        assert!(local.contains("keep"));
+        assert!(!local.contains("remote-000"));
+    }
+
+    #[test]
+    fn compute_delta_exact_batch_limit_does_not_emit_overflow_sentinel() {
+        let reconciler = AntiEntropyReconciler::new(config(3, false)).unwrap();
+        let local = TrustState::new(1);
+        let mut remote = TrustState::new(1);
+        for idx in 0..3 {
+            assert!(remote.insert(record(&format!("exact-{idx:03}"), 1, idx, "remote")));
+        }
+
+        let delta = reconciler.compute_delta(&local, &remote);
+
+        assert_eq!(delta.len(), 3);
+    }
+}
+
 impl ReconciliationConfig {
     pub fn validate(&self) -> Result<(), ReconciliationError> {
         if self.max_delta_batch == 0 {

@@ -1305,17 +1305,13 @@ mod tests {
 
             install_process_start(future_offset, future_time.to_rfc3339());
 
-            let status_result = get_status(&identity, &trace);
-            assert!(status_result.is_ok(), "Should handle future process start time");
-
-            let status = status_result.unwrap();
+            let status = get_status(&identity, &trace)
+                .expect("Should handle future process start time");
             // Uptime should saturate to 0 for future timestamps
             assert_eq!(status.data.uptime_seconds, 0);
 
-            let rollout_result = get_rollout(&identity, &trace);
-            assert!(rollout_result.is_ok(), "Rollout should handle future process start");
-
-            let rollout = rollout_result.unwrap();
+            let rollout = get_rollout(&identity, &trace)
+                .expect("Rollout should handle future process start");
             assert_eq!(rollout.data.last_transition, future_time.to_rfc3339());
 
             // Test with process start at epoch boundaries
@@ -1330,10 +1326,8 @@ mod tests {
             for &boundary_offset in &epoch_boundaries {
                 install_process_start(boundary_offset, "2000-01-01T00:00:00Z".to_string());
 
-                let boundary_status = get_status(&identity, &trace);
-                assert!(boundary_status.is_ok(), "Should handle boundary offset: {}", boundary_offset);
-
-                let boundary_result = boundary_status.unwrap();
+                let boundary_result = get_status(&identity, &trace)
+                    .expect(&format!("Should handle boundary offset: {}", boundary_offset));
                 assert!(boundary_result.data.uptime_seconds <= u64::MAX);
             }
         }
@@ -1355,17 +1349,13 @@ mod tests {
             };
 
             // Should serialize safely without breaking JSON structure
-            let serialized_result = serde_json::to_string(&malicious_node_status);
-            assert!(serialized_result.is_ok(), "Should serialize malicious node status safely");
-
-            let serialized = serialized_result.unwrap();
+            let serialized = serde_json::to_string(&malicious_node_status)
+                .expect("Should serialize malicious node status safely");
             assert!(!serialized.contains("\"malicious\":\"payload\""), "Should escape injection attempts");
 
             // Verify round-trip integrity
-            let deserialized_result: Result<NodeStatus, _> = serde_json::from_str(&serialized);
-            assert!(deserialized_result.is_ok(), "Should deserialize safely");
-
-            let deserialized = deserialized_result.unwrap();
+            let deserialized: NodeStatus = serde_json::from_str(&serialized)
+                .expect("Should deserialize safely");
             assert_eq!(deserialized.node_id, malicious_node_status.node_id);
             assert_eq!(deserialized.version, malicious_node_status.version);
         }

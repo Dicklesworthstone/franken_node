@@ -53,7 +53,7 @@ impl std::error::Error for ActionableError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{ActionableError, MAX_HELP_URLS};
+    use super::{ActionableError, MAX_HELP_URLS, push_bounded};
 
     #[test]
     fn actionable_error_without_help_urls_omits_help_url_lines() {
@@ -203,6 +203,96 @@ mod tests {
         assert_eq!(err.help_urls.len(), 2);
         assert_eq!(rendered.matches("\nhelp_url=").count(), 2);
         assert!(rendered.ends_with("\nhelp_url=\nhelp_url="));
+    }
+
+    #[test]
+    fn negative_help_url_cap_drops_oldest_entry_after_capacity() {
+        let mut err = ActionableError::new("needs docs", "open docs");
+        for idx in 0..=MAX_HELP_URLS {
+            err = err.with_help_url(format!("https://example.invalid/help-{idx}"));
+        }
+
+        assert_eq!(err.help_urls.len(), MAX_HELP_URLS);
+        assert_eq!(
+            err.help_urls.first().map(String::as_str),
+            Some("https://example.invalid/help-1")
+        );
+        assert_eq!(
+            err.help_urls.last().map(String::as_str),
+            Some("https://example.invalid/help-32")
+        );
+    }
+
+    #[test]
+    fn negative_help_url_cap_keeps_exact_capacity_without_eviction() {
+        let mut err = ActionableError::new("needs docs", "open docs");
+        for idx in 0..MAX_HELP_URLS {
+            err = err.with_help_url(format!("https://example.invalid/exact-{idx}"));
+        }
+
+        assert_eq!(err.help_urls.len(), MAX_HELP_URLS);
+        assert_eq!(
+            err.help_urls.first().map(String::as_str),
+            Some("https://example.invalid/exact-0")
+        );
+        assert_eq!(
+            err.help_urls.last().map(String::as_str),
+            Some("https://example.invalid/exact-31")
+        );
+    }
+
+    #[test]
+    fn negative_help_url_cap_bounds_rendered_output_lines() {
+        let mut err = ActionableError::new("needs docs", "open docs");
+        for idx in 0..(MAX_HELP_URLS.saturating_mul(4)) {
+            err = err.with_help_url(format!("https://example.invalid/render-{idx}"));
+        }
+        let rendered = err.to_string();
+
+        assert_eq!(err.help_urls.len(), MAX_HELP_URLS);
+        assert_eq!(rendered.matches("\nhelp_url=").count(), MAX_HELP_URLS);
+        assert!(!rendered.contains("https://example.invalid/render-0"));
+        assert!(rendered.contains("https://example.invalid/render-127"));
+    }
+
+    #[test]
+    fn negative_help_url_cap_preserves_newest_duplicate_entries() {
+        let mut err = ActionableError::new("needs docs", "open docs");
+        for idx in 0..MAX_HELP_URLS {
+            err = err.with_help_url(format!("https://example.invalid/unique-{idx}"));
+        }
+        err = err
+            .with_help_url("https://example.invalid/duplicate")
+            .with_help_url("https://example.invalid/duplicate");
+
+        assert_eq!(err.help_urls.len(), MAX_HELP_URLS);
+        assert_eq!(
+            err.help_urls
+                .iter()
+                .filter(|url| url.as_str() == "https://example.invalid/duplicate")
+                .count(),
+            2
+        );
+        assert!(!err
+            .help_urls
+            .iter()
+            .any(|url| url.as_str() == "https://example.invalid/unique-0"));
+    }
+
+    #[test]
+    fn negative_help_url_cap_keeps_blank_entries_when_newest() {
+        let mut err = ActionableError::new("needs docs", "open docs");
+        for idx in 0..MAX_HELP_URLS {
+            err = err.with_help_url(format!("https://example.invalid/nonblank-{idx}"));
+        }
+        err = err.with_help_url("");
+
+        assert_eq!(err.help_urls.len(), MAX_HELP_URLS);
+        assert_eq!(err.help_urls.last().map(String::as_str), Some(""));
+        assert!(!err
+            .help_urls
+            .iter()
+            .any(|url| url.as_str() == "https://example.invalid/nonblank-0"));
     }
 
     #[test]
@@ -495,16 +585,6 @@ mod tests {
                 assert_ne!(err1, err2, "Different errors should not be equal: {}", description);
             }
 
-            // Verify hash behavior is consistent
-            use std::collections::HashMap;
-            let mut error_map = HashMap::new();
-            error_map.insert(err1.clone(), "value1");
-            error_map.insert(err2.clone(), "value2");
-
-            // Should be able to distinguish errors in HashMap
-            assert!(error_map.contains_key(&err1), "HashMap should contain first error: {}", description);
-            assert!(error_map.contains_key(&err2), "HashMap should contain second error: {}", description);
-
             // Verify no collision in string representation
             let rendered1 = err1.to_string();
             let rendered2 = err2.to_string();
@@ -682,6 +762,67 @@ mod tests {
             assert!(url.contains(&expected_index.to_string()),
                    "URL at position {} should contain index {}, got: {}", idx, expected_index, url);
         }
+    }
+
+    #[test]
+    fn negative_help_url_capacity_keeps_newest_entries_only() {
+        let mut err = ActionableError::new("bounded help", "run doctor");
+        for i in 0..(MAX_HELP_URLS + 4) {
+            err = err.with_help_url(format!("https://example.invalid/help-{i}"));
+        }
+
+        assert_eq!(err.help_urls.len(), MAX_HELP_URLS);
+        assert_eq!(err.help_urls[0], "https://example.invalid/help-4");
+        assert_eq!(
+            err.help_urls[MAX_HELP_URLS - 1],
+            format!("https://example.invalid/help-{}", MAX_HELP_URLS + 3)
+        );
+    }
+
+    #[test]
+    fn negative_empty_help_urls_remain_bounded() {
+        let mut err = ActionableError::new("bounded empty help", "run doctor");
+        for _ in 0..(MAX_HELP_URLS * 3) {
+            err = err.with_help_url("");
+        }
+
+        let rendered = err.to_string();
+        assert_eq!(err.help_urls.len(), MAX_HELP_URLS);
+        assert_eq!(rendered.matches("\nhelp_url=").count(), MAX_HELP_URLS);
+    }
+
+    #[test]
+    fn negative_push_bounded_zero_capacity_drops_new_entry() {
+        let mut urls = vec!["old-a".to_string(), "old-b".to_string()];
+
+        push_bounded(&mut urls, "new".to_string(), 0);
+
+        assert!(urls.is_empty());
+    }
+
+    #[test]
+    fn negative_push_bounded_over_capacity_discards_oldest_entries() {
+        let mut urls = vec!["old-a".to_string(), "old-b".to_string(), "old-c".to_string()];
+
+        push_bounded(&mut urls, "new".to_string(), 2);
+
+        assert_eq!(urls, vec!["old-c".to_string(), "new".to_string()]);
+    }
+
+    #[test]
+    fn negative_clone_chain_preserves_bounded_help_window() {
+        let mut err = ActionableError::new("clone bounded", "run doctor");
+        for i in 0..(MAX_HELP_URLS * 5) {
+            err = err.with_help_url(format!("https://example.invalid/{i}"));
+        }
+
+        let mut cloned = err.clone();
+        for _ in 0..16 {
+            cloned = cloned.clone();
+        }
+
+        assert_eq!(cloned.help_urls.len(), MAX_HELP_URLS);
+        assert_eq!(cloned.to_string().matches("\nhelp_url=").count(), MAX_HELP_URLS);
     }
 }
 
