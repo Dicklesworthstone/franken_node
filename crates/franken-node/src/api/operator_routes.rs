@@ -1163,18 +1163,14 @@ mod tests {
 
                 let identity = test_identity();
                 let trace = test_trace();
-                let status_result = get_status(&identity, &trace);
-                assert!(status_result.is_ok(), "Should handle extreme offset: {}", extreme_offset);
-
-                let status = status_result.unwrap();
+                let status = get_status(&identity, &trace)
+                    .expect(&format!("Should handle extreme offset: {}", extreme_offset));
                 // Uptime should saturate gracefully, not overflow
                 assert!(status.data.uptime_seconds <= u64::MAX);
 
                 // Test rollout endpoint timing calculations
-                let rollout_result = get_rollout(&identity, &trace);
-                assert!(rollout_result.is_ok(), "Rollout should handle extreme timing");
-
-                let rollout = rollout_result.unwrap();
+                let rollout = get_rollout(&identity, &trace)
+                    .expect("Rollout should handle extreme timing");
                 assert!(!rollout.data.last_transition.is_empty());
             }
         }
@@ -1207,15 +1203,12 @@ mod tests {
             };
 
             // Serialization should handle large payloads
-            let serialized_result = serde_json::to_string(&massive_health);
-            assert!(serialized_result.is_ok(), "Should serialize massive health check");
+            let serialized = serde_json::to_string(&massive_health)
+                .expect("Should serialize massive health check");
 
             // Deserialization should handle large payloads
-            let serialized = serialized_result.unwrap();
-            let deserialized_result: Result<HealthCheck, _> = serde_json::from_str(&serialized);
-            assert!(deserialized_result.is_ok(), "Should deserialize massive health check");
-
-            let deserialized = deserialized_result.unwrap();
+            let deserialized: HealthCheck = serde_json::from_str(&serialized)
+                .expect("Should deserialize massive health check");
             assert_eq!(deserialized.checks.len(), massive_component_count);
         }
 

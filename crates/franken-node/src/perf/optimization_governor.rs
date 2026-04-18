@@ -609,11 +609,11 @@ impl GovernorGate {
             },
             MAX_AUDIT_TRAIL_ENTRIES,
         );
-        Err(format!(
+        return Err(format!(
             "{}: cannot adjust engine-core internal '{}'",
             error_codes::ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION,
             internal_name,
-        ))
+        ));
 
         // Inline negative-path tests
         #[cfg(test)]

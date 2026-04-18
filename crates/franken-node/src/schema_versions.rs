@@ -1103,8 +1103,8 @@ mod tests {
             }
 
             // Verify timing variations are not excessive (potential timing attack resistance)
-            let min_time = timings.iter().map(|(_, t)| *t).min().unwrap();
-            let max_time = timings.iter().map(|(_, t)| *t).max().unwrap();
+            let min_time = timings.iter().map(|(_, t)| *t).min().expect("timings should not be empty");
+            let max_time = timings.iter().map(|(_, t)| *t).max().expect("timings should not be empty");
 
             // Allow for some variation but ensure it's not excessive
             let time_ratio = max_time.as_nanos() as f64 / min_time.as_nanos() as f64;

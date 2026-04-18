@@ -443,20 +443,21 @@ mod remote_module_negative_tests {
         let serialized2 = serde_json::to_string(&config2).unwrap();
 
         // Hash the serialized configurations
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        use sha2::{Digest, Sha256};
 
-        let mut hasher1 = DefaultHasher::new();
-        let mut hasher2 = DefaultHasher::new();
-        serialized1.hash(&mut hasher1);
-        serialized2.hash(&mut hasher2);
+        let mut hasher1 = Sha256::new();
+        let mut hasher2 = Sha256::new();
+        hasher1.update(b"remote_config_v1:");
+        hasher2.update(b"remote_config_v1:");
+        hasher1.update(serialized1.as_bytes());
+        hasher2.update(serialized2.as_bytes());
 
-        let hash1 = hasher1.finish();
-        let hash2 = hasher2.finish();
+        let hash1 = hasher1.finalize();
+        let hash2 = hasher2.finalize();
 
         // Convert hashes to byte arrays for testing
-        let hash_bytes1 = hash1.to_le_bytes();
-        let hash_bytes2 = hash2.to_le_bytes();
+        let hash_bytes1 = hash1.as_slice();
+        let hash_bytes2 = hash2.as_slice();
 
         // Store in map to test hash collision resistance
         fault_checksums.insert(hash_bytes1, "config1");
@@ -475,13 +476,14 @@ mod remote_module_negative_tests {
         };
 
         let similar_serialized = serde_json::to_string(&similar_config).unwrap();
-        let mut similar_hasher = DefaultHasher::new();
-        similar_serialized.hash(&mut similar_hasher);
-        let similar_hash = similar_hasher.finish().to_le_bytes();
+        let mut similar_hasher = Sha256::new();
+        similar_hasher.update(b"remote_config_v1:");
+        similar_hasher.update(similar_serialized.as_bytes());
+        let similar_hash = similar_hasher.finalize();
 
         // Even tiny differences should be detectable
         if similar_config != config1 {
-            assert_ne!(similar_hash, hash_bytes1, "Tiny differences should be detected in hash comparison");
+            assert_ne!(similar_hash.as_slice(), hash_bytes1, "Tiny differences should be detected in hash comparison");
         }
 
         // Note: In production code, these hash comparisons should use ct_eq_bytes
@@ -613,8 +615,7 @@ mod remote_module_negative_tests {
     fn negative_domain_separation_required_for_hash_inputs() {
         // Test that hash operations include domain separators to prevent collision attacks
         // Without domain separation, different data types can produce identical hashes
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        use sha2::{Digest, Sha256};
 
         // Test proper domain separation in fault configuration hashing
         let base_config = FaultConfig {
@@ -633,11 +634,11 @@ mod remote_module_negative_tests {
 
         // Create hash without domain separator (vulnerable approach)
         let mut hasher_without_domain = Sha256::new();
-        base_config.hash(&mut hasher_without_domain);
-        let hash_without_domain = hasher_without_domain.finish();
+        hasher_without_domain.update(config_json.as_bytes());
+        let hash_without_domain = hasher_without_domain.finalize();
 
         // Hashes should be different when domain separator is included
-        assert_ne!(hash_with_domain, hash_without_domain,
+        assert_ne!(hash_with_domain.as_slice(), hash_without_domain.as_slice(),
                   "Domain separator should change hash value");
 
         // Test domain separation prevents collision between different data types
@@ -648,31 +649,33 @@ mod remote_module_negative_tests {
         };
 
         // Hash fault config with domain separator
-        let mut config_hasher = DefaultHasher::new();
-        "fault_config:".hash(&mut config_hasher);
-        base_config.hash(&mut config_hasher);
-        let config_hash = config_hasher.finish();
+        let mut config_hasher = Sha256::new();
+        config_hasher.update(b"fault_config:");
+        let config_json = serde_json::to_string(&base_config).expect("config serialization");
+        config_hasher.update(config_json.as_bytes());
+        let config_hash = config_hasher.finalize();
 
         // Hash scheduled fault with different domain separator
-        let mut schedule_hasher = DefaultHasher::new();
-        "scheduled_fault:".hash(&mut schedule_hasher);
-        fault_schedule.hash(&mut schedule_hasher);
-        let schedule_hash = schedule_hasher.finish();
+        let mut schedule_hasher = Sha256::new();
+        schedule_hasher.update(b"scheduled_fault:");
+        let schedule_json = serde_json::to_string(&fault_schedule).expect("schedule serialization");
+        schedule_hasher.update(schedule_json.as_bytes());
+        let schedule_hash = schedule_hasher.finalize();
 
         // Different domain separators should prevent collisions
-        assert_ne!(config_hash, schedule_hash,
+        assert_ne!(config_hash.as_slice(), schedule_hash.as_slice(),
                   "Different domain separators should prevent hash collisions");
 
         // Test length-prefixed domain separation (even better)
-        let mut length_prefixed_hasher = DefaultHasher::new();
+        let mut length_prefixed_hasher = Sha256::new();
         let domain = "fault_config_v1";
-        length_prefixed_hasher.hash(&(domain.len() as u64).to_le_bytes());
-        domain.hash(&mut length_prefixed_hasher);
-        base_config.hash(&mut length_prefixed_hasher);
-        let length_prefixed_hash = length_prefixed_hasher.finish();
+        length_prefixed_hasher.update((domain.len() as u64).to_le_bytes());
+        length_prefixed_hasher.update(domain.as_bytes());
+        length_prefixed_hasher.update(config_json.as_bytes());
+        let length_prefixed_hash = length_prefixed_hasher.finalize();
 
         // Length-prefixed should be different from simple prefix
-        assert_ne!(length_prefixed_hash, hash_with_domain,
+        assert_ne!(length_prefixed_hash.as_slice(), hash_with_domain.as_slice(),
                   "Length-prefixed domain separation should differ from simple prefix");
 
         // In production code, all hash operations should include domain separators like:

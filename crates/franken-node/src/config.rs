@@ -7,6 +7,24 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+/// Maximum number of configuration merge decisions to track.
+/// Prevents memory exhaustion from adversarial config override patterns.
+const MAX_MERGE_DECISIONS: usize = 100;
+
+/// Push item to vector with bounded capacity to prevent memory exhaustion.
+/// When capacity is exceeded, removes oldest entries to maintain the limit.
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 /// Top-level configuration for franken_node.
 ///
 /// Loaded from `franken_node.toml` in the project root or a user-specified path.
@@ -322,11 +340,11 @@ impl Config {
         let mut selected_profile = Profile::Balanced;
         if let Some(profile) = document.profile {
             selected_profile = profile;
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::File,
                 "profile",
                 profile.to_string(),
-            ));
+            ), MAX_MERGE_DECISIONS);
         }
 
         if let Some(raw_profile) = env_lookup("FRANKEN_NODE_PROFILE") {
@@ -339,20 +357,20 @@ impl Config {
                         reason: "expected strict, balanced, or legacy-risky".to_string(),
                     })?;
             selected_profile = parsed;
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "profile",
                 parsed.to_string(),
-            ));
+            ), MAX_MERGE_DECISIONS);
         }
 
         if let Some(profile) = cli_overrides.profile {
             selected_profile = profile;
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Cli,
                 "profile",
                 profile.to_string(),
-            ));
+            ), MAX_MERGE_DECISIONS);
         }
 
         let mut config = Self::for_profile(selected_profile);
@@ -441,273 +459,273 @@ impl Config {
         if let Some(section) = &overrides.compatibility {
             if let Some(value) = section.mode {
                 self.compatibility.mode = value;
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "compatibility.mode",
                     value.to_string(),
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.emit_divergence_receipts {
                 self.compatibility.emit_divergence_receipts = value;
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "compatibility.emit_divergence_receipts",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.default_receipt_ttl_secs {
                 self.compatibility.default_receipt_ttl_secs = value;
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "compatibility.default_receipt_ttl_secs",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.gate_ttl_secs {
                 self.compatibility.gate_ttl_secs = Some(value);
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "compatibility.gate_ttl_secs",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
         }
 
         if let Some(section) = &overrides.migration {
             if let Some(value) = section.autofix {
                 self.migration.autofix = value;
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "migration.autofix",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.require_lockstep_validation {
                 self.migration.require_lockstep_validation = value;
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "migration.require_lockstep_validation",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.verification_threshold {
                 self.migration.verification_threshold = Some(value);
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "migration.verification_threshold",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.confidence_level {
                 self.migration.confidence_level = Some(value);
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "migration.confidence_level",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.determinism_rate {
                 self.migration.determinism_rate = Some(value);
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "migration.determinism_rate",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
         }
 
         if let Some(section) = &overrides.trust {
             if let Some(value) = section.risky_requires_fresh_revocation {
                 self.trust.risky_requires_fresh_revocation = value;
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "trust.risky_requires_fresh_revocation",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.dangerous_requires_fresh_revocation {
                 self.trust.dangerous_requires_fresh_revocation = value;
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "trust.dangerous_requires_fresh_revocation",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.quarantine_on_high_risk {
                 self.trust.quarantine_on_high_risk = value;
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "trust.quarantine_on_high_risk",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.card_cache_ttl_secs {
                 self.trust.card_cache_ttl_secs = Some(value);
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "trust.card_cache_ttl_secs",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.freshness_window_secs {
                 self.trust.freshness_window_secs = Some(value);
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "trust.freshness_window_secs",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.min_trust_score {
                 self.trust.min_trust_score = Some(value);
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "trust.min_trust_score",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.decay_factor {
                 self.trust.decay_factor = Some(value);
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "trust.decay_factor",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
         }
 
         if let Some(section) = &overrides.replay {
             if let Some(value) = section.persist_high_severity {
                 self.replay.persist_high_severity = value;
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "replay.persist_high_severity",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = &section.bundle_version {
                 self.replay.bundle_version = value.clone();
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "replay.bundle_version",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.max_replay_capsule_freshness_secs {
                 self.replay.max_replay_capsule_freshness_secs = value;
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "replay.max_replay_capsule_freshness_secs",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.capsule_freshness_secs {
                 self.replay.capsule_freshness_secs = Some(value);
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "replay.capsule_freshness_secs",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
         }
 
         if let Some(section) = &overrides.registry {
             if let Some(value) = section.require_signatures {
                 self.registry.require_signatures = value;
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "registry.require_signatures",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.require_provenance {
                 self.registry.require_provenance = value;
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "registry.require_provenance",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.minimum_assurance_level {
                 self.registry.minimum_assurance_level = value;
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "registry.minimum_assurance_level",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = &section.builder_identity {
                 self.registry.builder_identity = Some(value.clone());
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "registry.builder_identity",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
         }
 
         if let Some(section) = &overrides.fleet {
             if let Some(value) = &section.state_dir {
                 self.fleet.state_dir = Some(value.clone());
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "fleet.state_dir",
                     value.display(),
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = &section.node_id {
                 self.fleet.node_id = Some(value.clone());
-                decisions.push(MergeDecision::new(stage.clone(), "fleet.node_id", value));
+                push_bounded(&mut decisions, MergeDecision::new(stage.clone(), "fleet.node_id", value));
             }
             if let Some(value) = section.poll_interval_seconds {
                 self.fleet.poll_interval_seconds = Some(value);
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "fleet.poll_interval_seconds",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.convergence_timeout_seconds {
                 self.fleet.convergence_timeout_seconds = value;
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "fleet.convergence_timeout_seconds",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.barrier_timeout_ms {
                 self.fleet.barrier_timeout_ms = Some(value);
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "fleet.barrier_timeout_ms",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
         }
 
         if let Some(section) = &overrides.observability {
             if let Some(value) = &section.namespace {
                 self.observability.namespace = value.clone();
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "observability.namespace",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.emit_structured_audit_events {
                 self.observability.emit_structured_audit_events = value;
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "observability.emit_structured_audit_events",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.max_receipts {
                 self.observability.max_receipts = Some(value);
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "observability.max_receipts",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
         }
 
@@ -715,18 +733,18 @@ impl Config {
             && let Some(value) = section.idempotency_ttl_secs
         {
             self.remote.idempotency_ttl_secs = value;
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 stage.clone(),
                 "remote.idempotency_ttl_secs",
                 value,
-            ));
+            ), MAX_MERGE_DECISIONS);
         }
 
         if let Some(section) = &overrides.security
             && let Some(value) = section.max_degraded_duration_secs
         {
             self.security.max_degraded_duration_secs = value;
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 stage.clone(),
                 "security.max_degraded_duration_secs",
                 value,
@@ -736,7 +754,7 @@ impl Config {
             && let Some(value) = &section.decision_receipt_signing_key_path
         {
             self.security.decision_receipt_signing_key_path = Some(value.clone());
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 stage.clone(),
                 "security.decision_receipt_signing_key_path",
                 value.display(),
@@ -746,7 +764,7 @@ impl Config {
             && let Some(value) = &section.authorized_api_keys
         {
             self.security.authorized_api_keys = value.clone();
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 stage.clone(),
                 "security.authorized_api_keys",
                 format!("[{} keys configured]", value.len()),
@@ -757,7 +775,7 @@ impl Config {
             && let Some(value) = &section.binary_path
         {
             self.engine.binary_path = Some(value.clone());
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 stage.clone(),
                 "engine.binary_path",
                 value.display(),
@@ -767,34 +785,34 @@ impl Config {
         if let Some(section) = &overrides.runtime {
             if let Some(value) = section.preferred {
                 self.runtime.preferred = value;
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "runtime.preferred",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.remote_max_in_flight {
                 self.runtime.remote_max_in_flight = value;
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "runtime.remote_max_in_flight",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.bulkhead_retry_after_ms {
                 self.runtime.bulkhead_retry_after_ms = value;
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "runtime.bulkhead_retry_after_ms",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(lanes) = &section.lanes {
                 for (lane_name, lane_overrides) in lanes {
                     if let Some(target) = self.runtime.lanes.get_mut(lane_name) {
                         if let Some(value) = lane_overrides.max_concurrent {
                             target.max_concurrent = value;
-                            decisions.push(MergeDecision::new(
+                            push_bounded(&mut decisions, MergeDecision::new(
                                 stage.clone(),
                                 format!("runtime.lanes.{lane_name}.max_concurrent").as_str(),
                                 value,
@@ -802,7 +820,7 @@ impl Config {
                         }
                         if let Some(value) = lane_overrides.priority_weight {
                             target.priority_weight = value;
-                            decisions.push(MergeDecision::new(
+                            push_bounded(&mut decisions, MergeDecision::new(
                                 stage.clone(),
                                 format!("runtime.lanes.{lane_name}.priority_weight").as_str(),
                                 value,
@@ -810,7 +828,7 @@ impl Config {
                         }
                         if let Some(value) = lane_overrides.queue_limit {
                             target.queue_limit = value;
-                            decisions.push(MergeDecision::new(
+                            push_bounded(&mut decisions, MergeDecision::new(
                                 stage.clone(),
                                 format!("runtime.lanes.{lane_name}.queue_limit").as_str(),
                                 value,
@@ -818,7 +836,7 @@ impl Config {
                         }
                         if let Some(value) = lane_overrides.enqueue_timeout_ms {
                             target.enqueue_timeout_ms = value;
-                            decisions.push(MergeDecision::new(
+                            push_bounded(&mut decisions, MergeDecision::new(
                                 stage.clone(),
                                 format!("runtime.lanes.{lane_name}.enqueue_timeout_ms").as_str(),
                                 value,
@@ -826,7 +844,7 @@ impl Config {
                         }
                         if let Some(value) = lane_overrides.overflow_policy {
                             target.overflow_policy = value;
-                            decisions.push(MergeDecision::new(
+                            push_bounded(&mut decisions, MergeDecision::new(
                                 stage.clone(),
                                 format!("runtime.lanes.{lane_name}.overflow_policy").as_str(),
                                 value.to_string(),
@@ -837,54 +855,54 @@ impl Config {
             }
             if let Some(value) = section.drain_timeout_ms {
                 self.runtime.drain_timeout_ms = Some(value);
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "runtime.drain_timeout_ms",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
         }
 
         if let Some(section) = &overrides.thresholds {
             if let Some(value) = section.max_failure_rate {
                 self.thresholds.max_failure_rate = Some(value);
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "thresholds.max_failure_rate",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.min_quality_score {
                 self.thresholds.min_quality_score = Some(value);
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "thresholds.min_quality_score",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.max_variance_pct {
                 self.thresholds.max_variance_pct = Some(value);
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "thresholds.max_variance_pct",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.regression_threshold_pct {
                 self.thresholds.regression_threshold_pct = Some(value);
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "thresholds.regression_threshold_pct",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.min_resilience_score {
                 self.thresholds.min_resilience_score = Some(value);
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     stage.clone(),
                     "thresholds.min_resilience_score",
                     value,
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
         }
     }
@@ -911,7 +929,7 @@ impl Config {
                         reason: "expected strict, balanced, or legacy-risky".to_string(),
                     })?;
             self.compatibility.mode = parsed;
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "compatibility.mode",
                 parsed.to_string(),
@@ -921,7 +939,7 @@ impl Config {
             let parsed =
                 parse_env_u64("FRANKEN_NODE_COMPATIBILITY_DEFAULT_RECEIPT_TTL_SECS", &raw)?;
             self.compatibility.default_receipt_ttl_secs = parsed;
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "compatibility.default_receipt_ttl_secs",
                 parsed,
@@ -930,7 +948,7 @@ impl Config {
         if let Some(raw) = env_lookup("FRANKEN_NODE_COMPATIBILITY_GATE_TTL_SECS") {
             let parsed = parse_env_u64("FRANKEN_NODE_COMPATIBILITY_GATE_TTL_SECS", &raw)?;
             self.compatibility.gate_ttl_secs = Some(parsed);
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "compatibility.gate_ttl_secs",
                 parsed,
@@ -997,7 +1015,7 @@ impl Config {
         if let Some(raw) = env_lookup("FRANKEN_NODE_TRUST_CARD_CACHE_TTL_SECS") {
             let parsed = parse_env_u64("FRANKEN_NODE_TRUST_CARD_CACHE_TTL_SECS", &raw)?;
             self.trust.card_cache_ttl_secs = Some(parsed);
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "trust.card_cache_ttl_secs",
                 parsed,
@@ -1006,7 +1024,7 @@ impl Config {
         if let Some(raw) = env_lookup("FRANKEN_NODE_TRUST_FRESHNESS_WINDOW_SECS") {
             let parsed = parse_env_u64("FRANKEN_NODE_TRUST_FRESHNESS_WINDOW_SECS", &raw)?;
             self.trust.freshness_window_secs = Some(parsed);
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "trust.freshness_window_secs",
                 parsed,
@@ -1036,7 +1054,7 @@ impl Config {
         )?;
         if let Some(value) = env_lookup("FRANKEN_NODE_REPLAY_BUNDLE_VERSION") {
             self.replay.bundle_version = value.clone();
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "replay.bundle_version",
                 value,
@@ -1048,7 +1066,7 @@ impl Config {
                 &raw,
             )?;
             self.replay.max_replay_capsule_freshness_secs = parsed;
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "replay.max_replay_capsule_freshness_secs",
                 parsed,
@@ -1057,7 +1075,7 @@ impl Config {
         if let Some(raw) = env_lookup("FRANKEN_NODE_REPLAY_CAPSULE_FRESHNESS_SECS") {
             let parsed = parse_env_u64("FRANKEN_NODE_REPLAY_CAPSULE_FRESHNESS_SECS", &raw)?;
             self.replay.capsule_freshness_secs = Some(parsed);
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "replay.capsule_freshness_secs",
                 parsed,
@@ -1082,7 +1100,7 @@ impl Config {
         if let Some(raw) = env_lookup("FRANKEN_NODE_REGISTRY_MINIMUM_ASSURANCE_LEVEL") {
             let parsed = parse_env_u8("FRANKEN_NODE_REGISTRY_MINIMUM_ASSURANCE_LEVEL", &raw)?;
             self.registry.minimum_assurance_level = parsed;
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "registry.minimum_assurance_level",
                 parsed,
@@ -1098,7 +1116,7 @@ impl Config {
                 });
             }
             self.registry.builder_identity = Some(trimmed.to_string());
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "registry.builder_identity",
                 trimmed,
@@ -1116,7 +1134,7 @@ impl Config {
             }
             let parsed = PathBuf::from(trimmed);
             self.fleet.state_dir = Some(parsed.clone());
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "fleet.state_dir",
                 parsed.display(),
@@ -1132,7 +1150,7 @@ impl Config {
                 });
             }
             self.fleet.node_id = Some(trimmed.to_string());
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "fleet.node_id",
                 trimmed,
@@ -1141,7 +1159,7 @@ impl Config {
         if let Some(raw) = env_lookup("FRANKEN_NODE_FLEET_POLL_INTERVAL_SECONDS") {
             let parsed = parse_env_u64("FRANKEN_NODE_FLEET_POLL_INTERVAL_SECONDS", &raw)?;
             self.fleet.poll_interval_seconds = Some(parsed);
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "fleet.poll_interval_seconds",
                 parsed,
@@ -1150,7 +1168,7 @@ impl Config {
         if let Some(raw) = env_lookup("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS") {
             let parsed = parse_env_u64("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", &raw)?;
             self.fleet.convergence_timeout_seconds = parsed;
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "fleet.convergence_timeout_seconds",
                 parsed,
@@ -1159,7 +1177,7 @@ impl Config {
         if let Some(raw) = env_lookup("FRANKEN_NODE_FLEET_BARRIER_TIMEOUT_MS") {
             let parsed = parse_env_u64("FRANKEN_NODE_FLEET_BARRIER_TIMEOUT_MS", &raw)?;
             self.fleet.barrier_timeout_ms = Some(parsed);
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "fleet.barrier_timeout_ms",
                 parsed,
@@ -1168,7 +1186,7 @@ impl Config {
 
         if let Some(value) = env_lookup("FRANKEN_NODE_OBSERVABILITY_NAMESPACE") {
             self.observability.namespace = value.clone();
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "observability.namespace",
                 value,
@@ -1184,7 +1202,7 @@ impl Config {
         if let Some(raw) = env_lookup("FRANKEN_NODE_OBSERVABILITY_MAX_RECEIPTS") {
             let parsed = parse_env_usize("FRANKEN_NODE_OBSERVABILITY_MAX_RECEIPTS", &raw)?;
             self.observability.max_receipts = Some(parsed);
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "observability.max_receipts",
                 parsed,
@@ -1193,7 +1211,7 @@ impl Config {
         if let Some(raw) = env_lookup("FRANKEN_NODE_REMOTE_IDEMPOTENCY_TTL_SECS") {
             let parsed = parse_env_u64("FRANKEN_NODE_REMOTE_IDEMPOTENCY_TTL_SECS", &raw)?;
             self.remote.idempotency_ttl_secs = parsed;
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "remote.idempotency_ttl_secs",
                 parsed,
@@ -1202,7 +1220,7 @@ impl Config {
         if let Some(raw) = env_lookup("FRANKEN_NODE_SECURITY_MAX_DEGRADED_DURATION_SECS") {
             let parsed = parse_env_u64("FRANKEN_NODE_SECURITY_MAX_DEGRADED_DURATION_SECS", &raw)?;
             self.security.max_degraded_duration_secs = parsed;
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "security.max_degraded_duration_secs",
                 parsed,
@@ -1213,11 +1231,11 @@ impl Config {
             if !trimmed.is_empty() {
                 let path = PathBuf::from(trimmed);
                 self.security.decision_receipt_signing_key_path = Some(path.clone());
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     MergeStage::Env,
                     "security.decision_receipt_signing_key_path",
                     path.display(),
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
         }
 
@@ -1226,18 +1244,18 @@ impl Config {
             if !trimmed.is_empty() {
                 let path = PathBuf::from(trimmed);
                 self.engine.binary_path = Some(path.clone());
-                decisions.push(MergeDecision::new(
+                push_bounded(&mut decisions, MergeDecision::new(
                     MergeStage::Env,
                     "engine.binary_path",
                     path.display(),
-                ));
+                ), MAX_MERGE_DECISIONS);
             }
         }
 
         if let Some(raw) = env_lookup("FRANKEN_NODE_RUNTIME_REMOTE_MAX_IN_FLIGHT") {
             let parsed = parse_env_usize("FRANKEN_NODE_RUNTIME_REMOTE_MAX_IN_FLIGHT", &raw)?;
             self.runtime.remote_max_in_flight = parsed;
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "runtime.remote_max_in_flight",
                 parsed,
@@ -1246,7 +1264,7 @@ impl Config {
         if let Some(raw) = env_lookup("FRANKEN_NODE_RUNTIME_BULKHEAD_RETRY_AFTER_MS") {
             let parsed = parse_env_u64("FRANKEN_NODE_RUNTIME_BULKHEAD_RETRY_AFTER_MS", &raw)?;
             self.runtime.bulkhead_retry_after_ms = parsed;
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "runtime.bulkhead_retry_after_ms",
                 parsed,
@@ -1261,7 +1279,7 @@ impl Config {
                         reason: "expected auto, node, bun, or franken-engine".to_string(),
                     })?;
             self.runtime.preferred = parsed;
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "runtime.preferred",
                 parsed,
@@ -1270,7 +1288,7 @@ impl Config {
         if let Some(raw) = env_lookup("FRANKEN_NODE_RUNTIME_DRAIN_TIMEOUT_MS") {
             let parsed = parse_env_u64("FRANKEN_NODE_RUNTIME_DRAIN_TIMEOUT_MS", &raw)?;
             self.runtime.drain_timeout_ms = Some(parsed);
-            decisions.push(MergeDecision::new(
+            push_bounded(&mut decisions, MergeDecision::new(
                 MergeStage::Env,
                 "runtime.drain_timeout_ms",
                 parsed,
@@ -1499,7 +1517,7 @@ fn apply_env_field_bool(
     if let Some(raw) = env_lookup(key) {
         let parsed = parse_env_bool(key, &raw)?;
         *slot = parsed;
-        decisions.push(MergeDecision::new(MergeStage::Env, field, parsed));
+        push_bounded(&mut decisions, MergeDecision::new(MergeStage::Env, field, parsed), MAX_MERGE_DECISIONS);
     }
     Ok(())
 }
@@ -1576,7 +1594,7 @@ fn apply_env_field_opt_f64(
     if let Some(raw) = env_lookup(key) {
         let parsed = parse_env_f64(key, &raw)?;
         *slot = Some(parsed);
-        decisions.push(MergeDecision::new(MergeStage::Env, field, parsed));
+        push_bounded(&mut decisions, MergeDecision::new(MergeStage::Env, field, parsed), MAX_MERGE_DECISIONS);
     }
     Ok(())
 }

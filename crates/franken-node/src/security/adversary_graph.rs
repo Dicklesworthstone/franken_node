@@ -1978,7 +1978,10 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                             graph_guard.snapshot(format!("concurrent_snapshot_{}_{}", snapshot_id, i))
                         };
 
-                        snapshot_results_clone.lock().unwrap().push((snapshot_id, i, snapshot_result.posteriors.len()));
+                        {
+                            let mut results = snapshot_results_clone.lock().unwrap();
+                            push_bounded(&mut *results, (snapshot_id, i, snapshot_result.posteriors.len()), 100);
+                        }
                     }
                 }
             })
@@ -2295,7 +2298,7 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 ).unwrap();
 
                 if let Ok(posterior) = graph.ingest(&observation) {
-                    chain_hashes.push(posterior.evidence_hash.clone());
+                    push_bounded(&mut chain_hashes, posterior.evidence_hash.clone(), 20);
                 }
             }
 
@@ -2400,7 +2403,7 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 ).unwrap();
 
                 if let Ok(posterior) = graph.ingest(&observation) {
-                    posterior_progression.push(posterior.posterior);
+                    push_bounded(&mut posterior_progression, posterior.posterior, 50);
 
                     // Verify modeling resists manipulation
                     assert!(posterior.posterior.is_finite(),

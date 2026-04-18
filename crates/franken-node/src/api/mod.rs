@@ -519,8 +519,8 @@ mod tests {
     fn negative_utf8_prefix_cuts_between_regional_indicators_without_tail() {
         let value = "🇺🇸secret";
         let mut chars = value.chars();
-        let first = chars.next().unwrap();
-        let second = chars.next().unwrap();
+        let first = chars.next().expect("UTF-8 value should have at least one character");
+        let second = chars.next().expect("UTF-8 value should have at least two characters");
         let prefix = utf8_prefix(value, 1);
 
         assert_eq!(prefix, first.to_string());

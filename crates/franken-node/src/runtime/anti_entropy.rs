@@ -219,6 +219,19 @@ impl TrustRecord {
     }
 }
 
+fn push_delta_bounded_fn(
+    delta: &mut Vec<TrustRecord>,
+    record: TrustRecord,
+    max_delta_batch: usize,
+) -> bool {
+    if delta.len() > max_delta_batch {
+        return true;
+    }
+
+    delta.push(record);
+    delta.len() > max_delta_batch
+}
+
 // ---------------------------------------------------------------------------
 // Trust state (local node state)
 // ---------------------------------------------------------------------------
@@ -428,16 +441,30 @@ impl AntiEntropyReconciler {
                 continue;
             };
 
-            match local.get(&id) {
-                None => push_bounded_fn(&mut delta, remote_record.clone(), MAX_TRUST_RECORDS),
+            let delta_limit_exceeded = match local.get(&id) {
+                None => push_delta_bounded_fn(
+                    &mut delta,
+                    remote_record.clone(),
+                    self.config.max_delta_batch,
+                ),
                 Some(local_record) => {
                     if matches!(
                         Self::resolve_conflict(local_record, remote_record),
                         ConflictResolution::TakeRemote
                     ) {
-                        push_bounded_fn(&mut delta, remote_record.clone(), MAX_TRUST_RECORDS);
+                        push_delta_bounded_fn(
+                            &mut delta,
+                            remote_record.clone(),
+                            self.config.max_delta_batch,
+                        )
+                    } else {
+                        false
                     }
                 }
+            };
+
+            if delta_limit_exceeded {
+                break;
             }
         }
 
