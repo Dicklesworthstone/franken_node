@@ -13,6 +13,35 @@ const MAX_MARKERS: usize = 4096;
 /// Genesis sentinel hash for sequence 0 (no predecessor).
 const GENESIS_PREV_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
+/// Maximum divergence comparisons to prevent memory exhaustion during binary search.
+/// Limits memory usage when attackers control input to create large shared lengths.
+const MAX_DIVERGENCE_COMPARISONS: usize = 64;
+
+/// Push item to vector with bounded capacity to prevent memory exhaustion.
+/// When capacity is exceeded, removes oldest entries to maintain the limit.
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
+fn len_to_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+fn sequence_offset(base: u64, sequence: u64) -> Option<usize> {
+    if sequence < base {
+        return None;
+    }
+    usize::try_from(sequence - base).ok()
+}
+
 /// High-impact control event categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MarkerEventType {
@@ -88,11 +117,11 @@ impl Marker {
         sha2::Digest::update(&mut hasher, b"marker_stream_v1:");
         sha2::Digest::update(&mut hasher, sequence.to_le_bytes());
         for field in [event_type.label(), payload_hash, prev_hash] {
-            sha2::Digest::update(&mut hasher, (field.len() as u64).to_le_bytes());
+            sha2::Digest::update(&mut hasher, len_to_u64(field.len()).to_le_bytes());
             sha2::Digest::update(&mut hasher, field.as_bytes());
         }
         sha2::Digest::update(&mut hasher, timestamp.to_le_bytes());
-        sha2::Digest::update(&mut hasher, (trace_id.len() as u64).to_le_bytes());
+        sha2::Digest::update(&mut hasher, len_to_u64(trace_id.len()).to_le_bytes());
         sha2::Digest::update(&mut hasher, trace_id.as_bytes());
         format!("{:x}", sha2::Digest::finalize(hasher))
     }
@@ -155,12 +184,16 @@ fn compare_marker_hash_at(
     let remote_hash = &remote_marker.marker_hash;
     let matched = crate::security::constant_time::ct_eq(local_hash, remote_hash);
 
-    comparisons.push(DivergenceComparison {
-        sequence,
-        matched,
-        local_hash_prefix: hash_prefix(local_hash),
-        remote_hash_prefix: hash_prefix(remote_hash),
-    });
+    push_bounded(
+        comparisons,
+        DivergenceComparison {
+            sequence,
+            matched,
+            local_hash_prefix: hash_prefix(local_hash),
+            remote_hash_prefix: hash_prefix(remote_hash),
+        },
+        MAX_DIVERGENCE_COMPARISONS,
+    );
 
     matched
 }
@@ -175,8 +208,8 @@ fn compare_marker_hash_at(
 ///
 /// The comparison strategy is logarithmic over the shared prefix length.
 pub fn find_divergence_point(local: &MarkerStream, remote: &MarkerStream) -> DivergenceResult {
-    let local_len = local.len() as u64;
-    let remote_len = remote.len() as u64;
+    let local_len = len_to_u64(local.len());
+    let remote_len = len_to_u64(remote.len());
     let shared_len = local_len.min(remote_len);
     let mut comparisons = Vec::new();
 
@@ -431,10 +464,7 @@ impl MarkerStream {
     /// Get marker at a specific sequence number. O(1) lookup.
     pub fn get(&self, sequence: u64) -> Option<&Marker> {
         let base = self.markers.first().map_or(0, |m| m.sequence);
-        if sequence < base {
-            return None;
-        }
-        self.markers.get((sequence - base) as usize)
+        self.markers.get(sequence_offset(base, sequence)?)
     }
 
     /// Number of markers in the stream.
@@ -453,12 +483,14 @@ impl MarkerStream {
         let adj_start = if start < base {
             0
         } else {
-            (start - base) as usize
+            usize::try_from(start - base).unwrap_or(usize::MAX)
         };
         let adj_end = if end <= base {
             0
         } else {
-            ((end - base) as usize).min(self.markers.len())
+            usize::try_from(end - base)
+                .unwrap_or(usize::MAX)
+                .min(self.markers.len())
         };
         if adj_start >= adj_end {
             return &[];
@@ -474,10 +506,7 @@ impl MarkerStream {
     /// Returns `None` for out-of-range sequences without panicking.
     pub fn marker_by_sequence(&self, seq: u64) -> Option<&Marker> {
         let base = self.markers.first().map_or(0, |m| m.sequence);
-        if seq < base {
-            return None;
-        }
-        self.markers.get((seq - base) as usize)
+        self.markers.get(sequence_offset(base, seq)?)
     }
 
     /// O(log N) timestamp-to-sequence binary search (bd-129f).
@@ -530,7 +559,7 @@ impl MarkerStream {
     pub fn verify_integrity(&self) -> Result<(), MarkerStreamError> {
         let base_seq = self.markers.first().map_or(0, |m| m.sequence);
         for (i, marker) in self.markers.iter().enumerate() {
-            let expected_seq = base_seq.saturating_add(i as u64);
+            let expected_seq = base_seq.saturating_add(len_to_u64(i));
 
             // Dense sequence check
             if marker.sequence != expected_seq {
@@ -710,6 +739,119 @@ mod tests {
         } else {
             64 - (n - 1).leading_zeros()
         }
+    }
+
+    fn hash_without_marker_domain(
+        sequence: u64,
+        event_type: MarkerEventType,
+        payload_hash: &str,
+        prev_hash: &str,
+        timestamp: u64,
+        trace_id: &str,
+    ) -> String {
+        let mut hasher = sha2::Sha256::new();
+        sha2::Digest::update(&mut hasher, sequence.to_le_bytes());
+        for field in [event_type.label(), payload_hash, prev_hash] {
+            sha2::Digest::update(&mut hasher, len_to_u64(field.len()).to_le_bytes());
+            sha2::Digest::update(&mut hasher, field.as_bytes());
+        }
+        sha2::Digest::update(&mut hasher, timestamp.to_le_bytes());
+        sha2::Digest::update(&mut hasher, len_to_u64(trace_id.len()).to_le_bytes());
+        sha2::Digest::update(&mut hasher, trace_id.as_bytes());
+        format!("{:x}", sha2::Digest::finalize(hasher))
+    }
+
+    #[test]
+    fn len_to_u64_never_truncates_lengths() {
+        assert_eq!(len_to_u64(0), 0);
+        assert_eq!(len_to_u64(1), 1);
+        assert_eq!(len_to_u64(4096), 4096);
+        assert_eq!(
+            len_to_u64(usize::MAX),
+            u64::try_from(usize::MAX).unwrap_or(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn marker_hash_keeps_domain_separator() {
+        let canonical = Marker::compute_hash(
+            7,
+            MarkerEventType::PolicyChange,
+            "payload",
+            "prev",
+            1234,
+            "trace",
+        );
+        let without_domain = hash_without_marker_domain(
+            7,
+            MarkerEventType::PolicyChange,
+            "payload",
+            "prev",
+            1234,
+            "trace",
+        );
+
+        assert!(!crate::security::constant_time::ct_eq(
+            &canonical,
+            &without_domain
+        ));
+    }
+
+    #[test]
+    fn marker_hash_length_prefixes_reject_concat_ambiguity() {
+        let left = Marker::compute_hash(1, MarkerEventType::TrustDecision, "ab", "c", 99, "trace");
+        let right = Marker::compute_hash(1, MarkerEventType::TrustDecision, "a", "bc", 99, "trace");
+
+        assert!(!crate::security::constant_time::ct_eq(&left, &right));
+    }
+
+    #[test]
+    fn get_rejects_sequence_before_retained_base_after_eviction() {
+        let count = u64::try_from(MAX_MARKERS)
+            .expect("MAX_MARKERS fits u64")
+            .saturating_add(8);
+        let stream = build_shared_stream(count);
+        let first_retained = stream.first().expect("retained marker").sequence;
+
+        assert!(first_retained > 0);
+        assert!(stream.get(first_retained - 1).is_none());
+        assert!(stream.marker_by_sequence(first_retained - 1).is_none());
+    }
+
+    #[test]
+    fn huge_future_sequence_lookup_is_rejected_without_truncation() {
+        let stream = build_shared_stream(3);
+
+        assert!(stream.get(u64::MAX).is_none());
+        assert!(stream.marker_by_sequence(u64::MAX).is_none());
+    }
+
+    #[test]
+    fn range_before_retained_base_is_empty_after_eviction() {
+        let count = u64::try_from(MAX_MARKERS)
+            .expect("MAX_MARKERS fits u64")
+            .saturating_add(8);
+        let stream = build_shared_stream(count);
+        let first_retained = stream.first().expect("retained marker").sequence;
+
+        assert!(stream.range(0, first_retained).is_empty());
+    }
+
+    #[test]
+    fn range_with_huge_end_clamps_to_retained_window() {
+        let stream = build_shared_stream(5);
+        let all = stream.range(0, u64::MAX);
+
+        assert_eq!(all.len(), stream.len());
+        assert_eq!(all.first().expect("first marker").sequence, 0);
+        assert_eq!(all.last().expect("last marker").sequence, 4);
+    }
+
+    #[test]
+    fn range_with_huge_start_after_window_is_empty() {
+        let stream = build_shared_stream(5);
+
+        assert!(stream.range(u64::MAX - 1, u64::MAX).is_empty());
     }
 
     // ---- Basic append and retrieval ----
