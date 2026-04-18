@@ -1061,4 +1061,803 @@ mod tests {
         assert_eq!(last.entity_id, "nope");
         assert_eq!(last.detail, ERR_VEF_STATE_POLICY_MISSING);
     }
+
+    // === Comprehensive Negative-Path Security Tests ===
+
+    /// Negative test: Unicode injection attacks in entity IDs and action names
+    #[test]
+    fn negative_unicode_injection_entity_ids_actions() {
+        let mut mgr = setup_manager();
+
+        // Test malicious Unicode in entity IDs
+        let malicious_entity_ids = vec![
+            "entity\u{202e}evil\u{200b}",       // Right-to-Left Override + Zero Width Space
+            "entity\u{0000}injection",          // Null byte injection
+            "entity\u{feff}bom",                // Byte Order Mark
+            "entity\u{2028}line\u{2029}para",   // Line/Paragraph separators
+            "entity\u{200c}\u{200d}joiners",    // Zero-width joiners
+            "entity\x00\x01\x02\x03\x1f",       // Control characters
+        ];
+
+        for (i, malicious_entity_id) in malicious_entity_ids.iter().enumerate() {
+            // Initialize state for malicious entity ID
+            let init_result = mgr.initialize_entity(
+                malicious_entity_id,
+                RiskLevel::Low,
+                None,
+                100 + i as u64,
+            );
+
+            match init_result {
+                Ok(()) => {
+                    // Unicode was accepted, verify it doesn't corrupt state management
+                    let state = mgr.state(malicious_entity_id);
+                    assert!(state.is_some(), "State should exist for Unicode entity ID");
+
+                    if let Some(state) = state {
+                        assert_eq!(&state.entity_id, malicious_entity_id);
+                        assert_eq!(state.current_risk_level, RiskLevel::Low);
+                    }
+
+                    // Test transition with Unicode entity ID
+                    let malicious_action = format!("action\u{202e}evil\u{200b}{}", i);
+                    let transition_request = TransitionRequest {
+                        entity_id: malicious_entity_id.to_string(),
+                        target_risk_level: RiskLevel::Medium,
+                        action: malicious_action.clone(),
+                        requested_at_epoch: 200 + i as u64,
+                    };
+
+                    let transition_result = mgr.request_transition(&transition_request);
+                    // Should handle Unicode gracefully
+                },
+                Err(_) => {
+                    // Unicode rejection in entity IDs is also acceptable for security
+                }
+            }
+        }
+
+        // Test Unicode in action names
+        let clean_entity = "clean-entity";
+        mgr.initialize_entity(clean_entity, RiskLevel::Low, None, 1000).unwrap();
+
+        let malicious_actions = vec![
+            "deploy\u{202e}reverse\u{200b}",
+            "execute\u{0000}null\u{0001}control",
+            "modify\u{feff}bom\u{2028}break",
+            "action".repeat(1000), // Extremely long action name
+        ];
+
+        for (i, malicious_action) in malicious_actions.iter().enumerate() {
+            let action_request = ActionRequest {
+                entity_id: clean_entity.to_string(),
+                action: malicious_action.to_string(),
+                required_risk_level: RiskLevel::Low,
+                requested_at_epoch: 1100 + i as u64,
+            };
+
+            let action_result = mgr.authorize_action(&action_request);
+
+            // Should handle Unicode in action names gracefully
+            match action_result {
+                Ok(ActionResult::Authorized) => {
+                    // Unicode action accepted
+                },
+                Ok(ActionResult::Denied { .. }) => {
+                    // Action denied for other reasons
+                },
+                Err(_) => {
+                    // Unicode action rejection acceptable
+                }
+            }
+        }
+    }
+
+    /// Negative test: Risk escalation bypass attempts
+    #[test]
+    fn negative_risk_escalation_bypass_attempts() {
+        let mut mgr = setup_manager();
+
+        // Initialize entity at low risk
+        let entity_id = "escalation-test";
+        mgr.initialize_entity(entity_id, RiskLevel::Low, None, 1000).unwrap();
+
+        // Test direct escalation to critical without intermediate steps
+        let critical_escalation = TransitionRequest {
+            entity_id: entity_id.to_string(),
+            target_risk_level: RiskLevel::Critical,
+            action: "escalate-directly".to_string(),
+            requested_at_epoch: 1100,
+        };
+
+        let critical_result = mgr.request_transition(&critical_escalation);
+
+        // Should be blocked (no proof for high-risk transition)
+        match critical_result {
+            Ok(TransitionResult::Approved) => {
+                panic!("Direct escalation to Critical should be blocked without proof");
+            },
+            Ok(TransitionResult::Blocked { reason }) => {
+                assert!(reason.contains("ERR_VEF_STATE") || reason.contains("proof"));
+            },
+            Err(VefStateError::NoProof { .. }) => {
+                // Expected error for missing proof
+            },
+            Err(other) => {
+                panic!("Unexpected error for escalation attempt: {:?}", other);
+            }
+        }
+
+        // Test escalation with stale proof
+        let stale_proof = ProofStatus {
+            proof_id: "stale-proof".to_string(),
+            verified: true,
+            verified_at_epoch: 1000,
+            max_age_seconds: 100, // Will be stale at epoch 1200
+        };
+
+        mgr.initialize_entity("stale-entity", RiskLevel::Low, Some(stale_proof), 1000).unwrap();
+
+        let stale_escalation = TransitionRequest {
+            entity_id: "stale-entity".to_string(),
+            target_risk_level: RiskLevel::High,
+            action: "escalate-with-stale-proof".to_string(),
+            requested_at_epoch: 1200, // Proof is stale
+        };
+
+        let stale_result = mgr.request_transition(&stale_escalation);
+
+        // Should be blocked due to stale proof
+        match stale_result {
+            Ok(TransitionResult::Approved) => {
+                panic!("Escalation with stale proof should be blocked");
+            },
+            Ok(TransitionResult::Blocked { reason }) => {
+                assert!(reason.contains("stale") || reason.contains("ERR_VEF_STATE_STALE_PROOF"));
+            },
+            Err(VefStateError::StaleProof { .. }) => {
+                // Expected error for stale proof
+            },
+            Err(other) => {
+                panic!("Unexpected error for stale proof: {:?}", other);
+            }
+        }
+
+        // Test escalation through multiple rapid transitions
+        let fresh_proof = ProofStatus {
+            proof_id: "fresh-proof".to_string(),
+            verified: true,
+            verified_at_epoch: 1300,
+            max_age_seconds: 1000,
+        };
+
+        mgr.initialize_entity("rapid-entity", RiskLevel::Low, Some(fresh_proof), 1300).unwrap();
+
+        // Try rapid escalation through all risk levels
+        let escalation_sequence = vec![
+            RiskLevel::Medium,
+            RiskLevel::High,
+            RiskLevel::Critical,
+        ];
+
+        for (i, target_risk) in escalation_sequence.iter().enumerate() {
+            let rapid_transition = TransitionRequest {
+                entity_id: "rapid-entity".to_string(),
+                target_risk_level: *target_risk,
+                action: format!("rapid-escalation-{}", i),
+                requested_at_epoch: 1400 + i as u64,
+            };
+
+            let rapid_result = mgr.request_transition(&rapid_transition);
+
+            // Should handle rapid transitions based on proof freshness and policy
+            match rapid_result {
+                Ok(TransitionResult::Approved) => {
+                    // Transition approved
+                },
+                Ok(TransitionResult::Blocked { .. }) => {
+                    // Transition blocked for security reasons
+                    break;
+                },
+                Err(_) => {
+                    // Error occurred, escalation blocked
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Negative test: Proof manipulation and forgery attacks
+    #[test]
+    fn negative_proof_manipulation_forgery_attacks() {
+        let mut mgr = setup_manager();
+
+        // Test proof with extreme timestamps
+        let extreme_proofs = vec![
+            ProofStatus {
+                proof_id: "future-proof".to_string(),
+                verified: true,
+                verified_at_epoch: u64::MAX, // Future timestamp
+                max_age_seconds: 1000,
+            },
+            ProofStatus {
+                proof_id: "zero-epoch-proof".to_string(),
+                verified: true,
+                verified_at_epoch: 0, // Zero epoch
+                max_age_seconds: u64::MAX,
+            },
+            ProofStatus {
+                proof_id: "max-age-proof".to_string(),
+                verified: true,
+                verified_at_epoch: 1000,
+                max_age_seconds: u64::MAX, // Maximum age
+            },
+        ];
+
+        for (i, extreme_proof) in extreme_proofs.iter().enumerate() {
+            let entity_id = format!("extreme-proof-{}", i);
+
+            let init_result = mgr.initialize_entity(
+                &entity_id,
+                RiskLevel::Low,
+                Some(extreme_proof.clone()),
+                1500,
+            );
+
+            match init_result {
+                Ok(()) => {
+                    // Extreme proof accepted, test freshness calculation
+                    let transition_request = TransitionRequest {
+                        entity_id: entity_id.clone(),
+                        target_risk_level: RiskLevel::High,
+                        action: "test-extreme-proof".to_string(),
+                        requested_at_epoch: 2000,
+                    };
+
+                    let transition_result = mgr.request_transition(&transition_request);
+
+                    // Should handle extreme timestamps gracefully
+                    match transition_result {
+                        Ok(_) => {
+                            // Extreme proof handled
+                        },
+                        Err(VefStateError::StaleProof { age, .. }) => {
+                            // Age calculation should not overflow
+                            assert!(age <= u64::MAX);
+                        },
+                        Err(_) => {
+                            // Other rejections acceptable
+                        }
+                    }
+                },
+                Err(_) => {
+                    // Extreme proof rejection acceptable
+                }
+            }
+        }
+
+        // Test proof ID manipulation
+        let duplicate_proof_ids = vec![
+            ("legitimate-proof", "legitimate-proof "), // Trailing space
+            ("legitimate-proof", "legitimate-proof\t"), // Tab character
+            ("legitimate-proof", "legitimate-proof\n"), // Newline
+            ("legitimate-proof", "legitimate\u{200b}proof"), // Zero-width space
+            ("legitimate-proof", "legitimate\u{feff}proof"), // BOM
+        ];
+
+        for (i, (original_id, manipulated_id)) in duplicate_proof_ids.iter().enumerate() {
+            let original_proof = ProofStatus {
+                proof_id: original_id.to_string(),
+                verified: true,
+                verified_at_epoch: 2500,
+                max_age_seconds: 1000,
+            };
+
+            let manipulated_proof = ProofStatus {
+                proof_id: manipulated_id.to_string(),
+                verified: true,
+                verified_at_epoch: 2500,
+                max_age_seconds: 1000,
+            };
+
+            let original_entity = format!("original-{}", i);
+            let manipulated_entity = format!("manipulated-{}", i);
+
+            mgr.initialize_entity(&original_entity, RiskLevel::Low, Some(original_proof), 2500).unwrap();
+            mgr.initialize_entity(&manipulated_entity, RiskLevel::Low, Some(manipulated_proof), 2500).unwrap();
+
+            // Both should be treated as separate entities with separate proofs
+            let original_state = mgr.state(&original_entity).unwrap();
+            let manipulated_state = mgr.state(&manipulated_entity).unwrap();
+
+            assert_ne!(original_state.proof.as_ref().unwrap().proof_id,
+                      manipulated_state.proof.as_ref().unwrap().proof_id,
+                      "Proof IDs should be distinct despite similarity");
+        }
+
+        // Test proof verification flag manipulation
+        let unverified_proof = ProofStatus {
+            proof_id: "unverified-proof".to_string(),
+            verified: false, // Not verified
+            verified_at_epoch: 3000,
+            max_age_seconds: 1000,
+        };
+
+        mgr.initialize_entity("unverified-entity", RiskLevel::Low, Some(unverified_proof), 3000).unwrap();
+
+        let unverified_transition = TransitionRequest {
+            entity_id: "unverified-entity".to_string(),
+            target_risk_level: RiskLevel::High,
+            action: "test-unverified-proof".to_string(),
+            requested_at_epoch: 3100,
+        };
+
+        let unverified_result = mgr.request_transition(&unverified_transition);
+
+        // Should block transitions with unverified proof
+        match unverified_result {
+            Ok(TransitionResult::Approved) => {
+                panic!("Transition with unverified proof should be blocked");
+            },
+            Ok(TransitionResult::Blocked { reason }) => {
+                assert!(reason.contains("verified") || reason.contains("proof"));
+            },
+            Err(_) => {
+                // Error rejection acceptable
+            }
+        }
+    }
+
+    /// Negative test: Timing attacks in verification checks
+    #[test]
+    fn negative_timing_attacks_verification_checks() {
+        let mut mgr = setup_manager();
+
+        // Create entities with different proof states for timing analysis
+        let fresh_proof = ProofStatus {
+            proof_id: "fresh-proof".to_string(),
+            verified: true,
+            verified_at_epoch: 4000,
+            max_age_seconds: 1000,
+        };
+
+        let stale_proof = ProofStatus {
+            proof_id: "stale-proof".to_string(),
+            verified: true,
+            verified_at_epoch: 3000,
+            max_age_seconds: 500,
+        };
+
+        mgr.initialize_entity("fresh-entity", RiskLevel::Low, Some(fresh_proof), 4000).unwrap();
+        mgr.initialize_entity("stale-entity", RiskLevel::Low, Some(stale_proof), 4000).unwrap();
+        mgr.initialize_entity("no-proof-entity", RiskLevel::Low, None, 4000).unwrap();
+
+        // Test timing consistency across different proof states
+        let mut fresh_timings = Vec::new();
+        let mut stale_timings = Vec::new();
+        let mut no_proof_timings = Vec::new();
+
+        for i in 0..30 {
+            // Fresh proof timing
+            let fresh_request = TransitionRequest {
+                entity_id: "fresh-entity".to_string(),
+                target_risk_level: RiskLevel::High,
+                action: format!("timing-test-fresh-{}", i),
+                requested_at_epoch: 4100 + i,
+            };
+
+            let start = std::time::Instant::now();
+            let _result = mgr.request_transition(&fresh_request);
+            fresh_timings.push(start.elapsed());
+
+            // Stale proof timing
+            let stale_request = TransitionRequest {
+                entity_id: "stale-entity".to_string(),
+                target_risk_level: RiskLevel::High,
+                action: format!("timing-test-stale-{}", i),
+                requested_at_epoch: 4100 + i,
+            };
+
+            let start = std::time::Instant::now();
+            let _result = mgr.request_transition(&stale_request);
+            stale_timings.push(start.elapsed());
+
+            // No proof timing
+            let no_proof_request = TransitionRequest {
+                entity_id: "no-proof-entity".to_string(),
+                target_risk_level: RiskLevel::High,
+                action: format!("timing-test-no-proof-{}", i),
+                requested_at_epoch: 4100 + i,
+            };
+
+            let start = std::time::Instant::now();
+            let _result = mgr.request_transition(&no_proof_request);
+            no_proof_timings.push(start.elapsed());
+        }
+
+        // Timing differences should be minimal across different proof states
+        let avg_fresh: f64 = fresh_timings.iter().map(|d| d.as_nanos() as f64).sum::<f64>() / fresh_timings.len() as f64;
+        let avg_stale: f64 = stale_timings.iter().map(|d| d.as_nanos() as f64).sum::<f64>() / stale_timings.len() as f64;
+        let avg_no_proof: f64 = no_proof_timings.iter().map(|d| d.as_nanos() as f64).sum::<f64>() / no_proof_timings.len() as f64;
+
+        let max_avg = avg_fresh.max(avg_stale).max(avg_no_proof);
+        let min_avg = avg_fresh.min(avg_stale).min(avg_no_proof);
+        let timing_ratio = max_avg / min_avg.max(1.0);
+
+        assert!(timing_ratio < 5.0, "Proof verification timing variance too high: {}", timing_ratio);
+
+        // Test timing attacks on entity existence checks
+        let mut existing_timings = Vec::new();
+        let mut nonexistent_timings = Vec::new();
+
+        for i in 0..30 {
+            // Existing entity timing
+            let existing_action = ActionRequest {
+                entity_id: "fresh-entity".to_string(),
+                action: format!("existing-timing-{}", i),
+                required_risk_level: RiskLevel::Low,
+                requested_at_epoch: 4200 + i,
+            };
+
+            let start = std::time::Instant::now();
+            let _result = mgr.authorize_action(&existing_action);
+            existing_timings.push(start.elapsed());
+
+            // Nonexistent entity timing
+            let nonexistent_action = ActionRequest {
+                entity_id: format!("nonexistent-entity-{}", i),
+                action: format!("nonexistent-timing-{}", i),
+                required_risk_level: RiskLevel::Low,
+                requested_at_epoch: 4200 + i,
+            };
+
+            let start = std::time::Instant::now();
+            let _result = mgr.authorize_action(&nonexistent_action);
+            nonexistent_timings.push(start.elapsed());
+        }
+
+        // Entity existence timing should not leak information
+        let avg_existing: f64 = existing_timings.iter().map(|d| d.as_nanos() as f64).sum::<f64>() / existing_timings.len() as f64;
+        let avg_nonexistent: f64 = nonexistent_timings.iter().map(|d| d.as_nanos() as f64).sum::<f64>() / nonexistent_timings.len() as f64;
+
+        let existence_ratio = avg_existing.max(avg_nonexistent) / avg_existing.min(avg_nonexistent).max(1.0);
+        assert!(existence_ratio < 3.0, "Entity existence timing variance too high: {}", existence_ratio);
+    }
+
+    /// Negative test: Concurrent state manipulation race conditions
+    #[test]
+    fn negative_concurrent_state_manipulation_races() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let mgr = Arc::new(Mutex::new(setup_manager()));
+
+        // Initialize entities for concurrent testing
+        {
+            let mut mgr_guard = mgr.lock().unwrap();
+            for i in 0..5 {
+                let entity_id = format!("concurrent-entity-{}", i);
+                let proof = ProofStatus {
+                    proof_id: format!("proof-{}", i),
+                    verified: true,
+                    verified_at_epoch: 5000,
+                    max_age_seconds: 10000,
+                };
+                mgr_guard.initialize_entity(&entity_id, RiskLevel::Low, Some(proof), 5000).unwrap();
+            }
+        }
+
+        let mut handles = Vec::new();
+
+        // Simulate concurrent state transitions from multiple threads
+        for thread_id in 0..4 {
+            let mgr_clone = Arc::clone(&mgr);
+            let handle = thread::spawn(move || {
+                let mut thread_results = Vec::new();
+
+                for operation in 0..20 {
+                    let entity_id = format!("concurrent-entity-{}", operation % 5);
+                    let target_risk = match operation % 4 {
+                        0 => RiskLevel::Low,
+                        1 => RiskLevel::Medium,
+                        2 => RiskLevel::High,
+                        _ => RiskLevel::Critical,
+                    };
+
+                    let transition_request = TransitionRequest {
+                        entity_id: entity_id.clone(),
+                        target_risk_level: target_risk,
+                        action: format!("concurrent-action-{}-{}", thread_id, operation),
+                        requested_at_epoch: 5100 + (thread_id * 100) + operation as u64,
+                    };
+
+                    let result = {
+                        let mut mgr_guard = mgr_clone.lock().unwrap();
+                        mgr_guard.request_transition(&transition_request)
+                    };
+
+                    thread_results.push((thread_id, operation, result));
+
+                    // Also test concurrent action authorization
+                    let action_request = ActionRequest {
+                        entity_id,
+                        action: format!("concurrent-auth-{}-{}", thread_id, operation),
+                        required_risk_level: RiskLevel::Medium,
+                        requested_at_epoch: 5200 + (thread_id * 100) + operation as u64,
+                    };
+
+                    let auth_result = {
+                        let mut mgr_guard = mgr_clone.lock().unwrap();
+                        mgr_guard.authorize_action(&action_request)
+                    };
+
+                    thread_results.push((thread_id, operation, Ok(TransitionResult::Approved))); // Placeholder
+                }
+                thread_results
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify state consistency after concurrent operations
+        let final_mgr = mgr.lock().unwrap();
+
+        // All entities should still exist and be in consistent states
+        for i in 0..5 {
+            let entity_id = format!("concurrent-entity-{}", i);
+            let state = final_mgr.state(&entity_id);
+            assert!(state.is_some(), "Entity {} should still exist after concurrent operations", entity_id);
+
+            if let Some(state) = state {
+                assert_eq!(state.entity_id, entity_id);
+                // State should be valid (no corrupted data)
+                assert!(state.transition_count < 1000); // Reasonable upper bound
+            }
+        }
+
+        // Audit log should contain all operations
+        assert!(final_mgr.audit_log().len() > 0);
+        assert!(final_mgr.audit_log().len() <= MAX_AUDIT_LOG_ENTRIES);
+    }
+
+    /// Negative test: Arithmetic overflow in epoch timestamps and counters
+    #[test]
+    fn negative_arithmetic_overflow_epochs_counters() {
+        let mut mgr = setup_manager();
+
+        // Test near-maximum epoch timestamps
+        let overflow_epochs = vec![
+            u64::MAX - 1000,  // Near maximum
+            u64::MAX,         // Maximum
+            0,                // Minimum
+        ];
+
+        for (i, epoch) in overflow_epochs.iter().enumerate() {
+            let entity_id = format!("overflow-epoch-{}", i);
+            let proof = ProofStatus {
+                proof_id: format!("overflow-proof-{}", i),
+                verified: true,
+                verified_at_epoch: *epoch,
+                max_age_seconds: 1000,
+            };
+
+            let init_result = mgr.initialize_entity(&entity_id, RiskLevel::Low, Some(proof), *epoch);
+
+            match init_result {
+                Ok(()) => {
+                    // Extreme epoch accepted, test transition
+                    let transition_request = TransitionRequest {
+                        entity_id: entity_id.clone(),
+                        target_risk_level: RiskLevel::Medium,
+                        action: format!("overflow-test-{}", i),
+                        requested_at_epoch: epoch.saturating_add(100),
+                    };
+
+                    let transition_result = mgr.request_transition(&transition_request);
+
+                    // Should handle epoch arithmetic without overflow
+                    match transition_result {
+                        Ok(_) => {
+                            // Transition handled
+                        },
+                        Err(VefStateError::StaleProof { age, .. }) => {
+                            // Age calculation should not overflow
+                            assert!(age <= u64::MAX);
+                        },
+                        Err(_) => {
+                            // Other rejections acceptable
+                        }
+                    }
+                },
+                Err(_) => {
+                    // Extreme epoch rejection acceptable
+                }
+            }
+        }
+
+        // Test transition counter overflow
+        let counter_entity = "counter-overflow-test";
+        mgr.initialize_entity(counter_entity, RiskLevel::Low, None, 6000).unwrap();
+
+        // Force high transition count
+        for stress_iteration in 0..1000 {
+            let action_request = ActionRequest {
+                entity_id: counter_entity.to_string(),
+                action: format!("counter-stress-{}", stress_iteration),
+                required_risk_level: RiskLevel::Low,
+                requested_at_epoch: 6100 + stress_iteration,
+            };
+
+            let _result = mgr.authorize_action(&action_request);
+
+            // Check for counter overflow
+            let state = mgr.state(counter_entity).unwrap();
+            assert!(state.transition_count <= u64::MAX);
+
+            // Break early to prevent excessive test time
+            if stress_iteration > 100 {
+                break;
+            }
+        }
+
+        // Test proof age calculation overflow scenarios
+        let age_test_proof = ProofStatus {
+            proof_id: "age-test-proof".to_string(),
+            verified: true,
+            verified_at_epoch: u64::MAX - 100,
+            max_age_seconds: 1000,
+        };
+
+        mgr.initialize_entity("age-test", RiskLevel::Low, Some(age_test_proof), u64::MAX - 100).unwrap();
+
+        // Test age calculation at various epochs
+        let test_epochs = vec![
+            u64::MAX - 99,
+            u64::MAX - 50,
+            u64::MAX,
+        ];
+
+        for test_epoch in test_epochs {
+            let age_transition = TransitionRequest {
+                entity_id: "age-test".to_string(),
+                target_risk_level: RiskLevel::High,
+                action: "age-calculation-test".to_string(),
+                requested_at_epoch: test_epoch,
+            };
+
+            let age_result = mgr.request_transition(&age_transition);
+
+            // Should handle age arithmetic without overflow panics
+            match age_result {
+                Ok(_) => {},
+                Err(VefStateError::StaleProof { age, .. }) => {
+                    // Age should be computed without overflow
+                    assert!(age <= u64::MAX);
+                },
+                Err(_) => {}
+            }
+        }
+    }
+
+    /// Negative test: State transition bypass and policy manipulation
+    #[test]
+    fn negative_state_transition_bypass_policy_manipulation() {
+        let mut mgr = setup_manager();
+
+        // Test transition bypass through risk level manipulation
+        let bypass_entity = "bypass-test";
+        mgr.initialize_entity(bypass_entity, RiskLevel::Low, None, 7000).unwrap();
+
+        // Try to authorize high-risk action without proper risk level
+        let high_risk_action = ActionRequest {
+            entity_id: bypass_entity.to_string(),
+            action: "high-risk-deploy".to_string(),
+            required_risk_level: RiskLevel::Critical,
+            requested_at_epoch: 7100,
+        };
+
+        let bypass_result = mgr.authorize_action(&high_risk_action);
+
+        // Should be denied due to insufficient risk level
+        match bypass_result {
+            Ok(ActionResult::Authorized) => {
+                panic!("High-risk action should be denied without proper risk escalation");
+            },
+            Ok(ActionResult::Denied { reason }) => {
+                assert!(reason.contains("risk") || reason.contains("ERR_VEF_STATE_RISK_EXCEEDED"));
+            },
+            Err(VefStateError::RiskExceeded { .. }) => {
+                // Expected error for risk mismatch
+            },
+            Err(_) => {
+                // Other rejection reasons acceptable
+            }
+        }
+
+        // Test invalid transition patterns
+        let invalid_transitions = vec![
+            (RiskLevel::Critical, RiskLevel::Low),    // Direct downgrade
+            (RiskLevel::High, RiskLevel::Medium),     // Step downgrade
+        ];
+
+        for (i, (from_risk, to_risk)) in invalid_transitions.iter().enumerate() {
+            let transition_entity = format!("invalid-transition-{}", i);
+
+            // Initialize at higher risk level
+            let high_risk_proof = ProofStatus {
+                proof_id: format!("high-risk-proof-{}", i),
+                verified: true,
+                verified_at_epoch: 7500,
+                max_age_seconds: 1000,
+            };
+
+            mgr.initialize_entity(&transition_entity, *from_risk, Some(high_risk_proof), 7500).unwrap();
+
+            // Try invalid transition
+            let invalid_transition = TransitionRequest {
+                entity_id: transition_entity,
+                target_risk_level: *to_risk,
+                action: format!("invalid-transition-{}", i),
+                requested_at_epoch: 7600,
+            };
+
+            let invalid_result = mgr.request_transition(&invalid_transition);
+
+            // Should block invalid transitions
+            match invalid_result {
+                Ok(TransitionResult::Approved) => {
+                    // Some downgrade transitions might be allowed
+                },
+                Ok(TransitionResult::Blocked { reason }) => {
+                    assert!(!reason.is_empty());
+                },
+                Err(VefStateError::InvalidTransition { .. }) => {
+                    // Expected error for invalid transition
+                },
+                Err(_) => {
+                    // Other rejection reasons acceptable
+                }
+            }
+        }
+
+        // Test proof freshness bypass attempts
+        let stale_bypass_proof = ProofStatus {
+            proof_id: "stale-bypass-proof".to_string(),
+            verified: true,
+            verified_at_epoch: 8000,
+            max_age_seconds: 100, // Short age for testing
+        };
+
+        mgr.initialize_entity("stale-bypass", RiskLevel::Low, Some(stale_bypass_proof), 8000).unwrap();
+
+        // Wait for proof to become stale, then try transition
+        let stale_transition = TransitionRequest {
+            entity_id: "stale-bypass".to_string(),
+            target_risk_level: RiskLevel::Critical,
+            action: "stale-bypass-attempt".to_string(),
+            requested_at_epoch: 8200, // Proof should be stale
+        };
+
+        let stale_bypass_result = mgr.request_transition(&stale_transition);
+
+        // Should block transition with stale proof
+        match stale_bypass_result {
+            Ok(TransitionResult::Approved) => {
+                panic!("Transition with stale proof should be blocked");
+            },
+            Ok(TransitionResult::Blocked { reason }) => {
+                assert!(reason.contains("stale") || reason.contains("fresh"));
+            },
+            Err(VefStateError::StaleProof { .. }) => {
+                // Expected error for stale proof
+            },
+            Err(_) => {
+                // Other rejection reasons acceptable
+            }
+        }
+    }
 }

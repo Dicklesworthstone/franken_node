@@ -1359,4 +1359,353 @@ mod tests {
             event.event_code.as_str() == event_codes::VEF_PROOF_003_PROOF_GENERATED
         }));
     }
+
+    #[test]
+    fn negative_receipt_index_arithmetic_with_potential_overflow() {
+        // Test saturating arithmetic in envelope validation - lines 220, 286 use .saturating_add(1) as usize
+        // This tests potential issues with the usize cast after saturating arithmetic
+
+        let mut chain = ReceiptChain::new(ReceiptChainConfig {
+            checkpoint_every_entries: 100,
+            checkpoint_every_millis: 0,
+        });
+
+        // Add some receipts
+        for i in 0..5 {
+            chain.append(
+                receipt(ExecutionActionType::NetworkAccess, i),
+                1_705_000_000_000 + i,
+                "trace-overflow",
+            ).expect("append receipt");
+        }
+
+        let mut scheduler = VefProofScheduler::new(SchedulerPolicy::default());
+
+        // Test with extreme index values that could cause overflow issues
+        let extreme_windows = vec![
+            // Large but valid indices
+            ProofWindow {
+                window_id: "extreme-1".to_string(),
+                start_index: u64::MAX - 100,
+                end_index: u64::MAX - 50,
+                tier: WorkloadTier::Emergency,
+                aligned_checkpoint_id: None,
+            },
+            // Adjacent to max value
+            ProofWindow {
+                window_id: "extreme-2".to_string(),
+                start_index: u64::MAX - 1,
+                end_index: u64::MAX,
+                tier: WorkloadTier::Emergency,
+                aligned_checkpoint_id: None,
+            },
+            // Zero range but potentially problematic
+            ProofWindow {
+                window_id: "extreme-3".to_string(),
+                start_index: u64::MAX,
+                end_index: u64::MAX,
+                tier: WorkloadTier::Emergency,
+                aligned_checkpoint_id: None,
+            },
+        ];
+
+        for window in extreme_windows {
+            let job = ProofJob {
+                job_id: format!("job-{}", window.window_id),
+                window_id: window.window_id.clone(),
+                tier: window.tier,
+                trace_id: "trace-overflow".to_string(),
+                queued_at_millis: 1_705_000_000_000,
+                deadline_millis: 1_705_000_100_000,
+            };
+
+            // This should fail gracefully due to no matching entries, not due to arithmetic overflow
+            let result = ProofInputEnvelope::from_scheduler_job(
+                &job,
+                &window,
+                chain.entries(),
+                chain.checkpoints(),
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                vec!["test".to_string()],
+                BTreeMap::new(),
+            );
+
+            // Should fail with input error (no entries), not panic from arithmetic overflow
+            assert!(result.is_err());
+            if let Err(err) = result {
+                assert_eq!(err.code, error_codes::ERR_VEF_PROOF_INPUT);
+                assert!(err.message.contains("no entries") || err.message.contains("bounds"));
+            }
+        }
+    }
+
+    #[test]
+    fn negative_timestamp_arithmetic_without_saturating_operations() {
+        // Test timestamp calculations for potential overflow issues
+        // Line 842: `1_705_100_000_000 + idx as u64` uses direct addition without saturating_add
+
+        let mut chain = ReceiptChain::new(ReceiptChainConfig {
+            checkpoint_every_entries: 5,
+            checkpoint_every_millis: 0,
+        });
+
+        // Test with timestamps near overflow boundaries
+        let base_timestamps = vec![
+            u64::MAX - 1000,  // Near maximum
+            0,                // Minimum
+            u64::MAX / 2,     // Middle range
+        ];
+
+        for base_timestamp in base_timestamps {
+            // Create receipts with potentially problematic timestamp arithmetic
+            for i in 0..10_u64 {
+                let receipt_timestamp = base_timestamp.saturating_add(i * 1000);
+                let append_timestamp = base_timestamp.saturating_add(i * 1000 + 500);
+
+                let result = chain.append(
+                    ExecutionReceipt {
+                        schema_version: RECEIPT_SCHEMA_VERSION.to_string(),
+                        action_type: ExecutionActionType::NetworkAccess,
+                        capability_context: BTreeMap::new(),
+                        actor_identity: format!("actor-{i}"),
+                        artifact_identity: format!("artifact-{i}"),
+                        policy_snapshot_hash: format!("sha256:{i:064x}"),
+                        timestamp_millis: receipt_timestamp,
+                        sequence_number: i,
+                        witness_references: vec![],
+                        trace_id: "trace-timestamp".to_string(),
+                    },
+                    append_timestamp,
+                    "trace-timestamp",
+                );
+
+                // Should succeed - testing that timestamp arithmetic doesn't overflow internally
+                assert!(result.is_ok(), "Receipt append should handle extreme timestamps gracefully");
+            }
+
+            // Test proof generation with extreme timestamps
+            let mut scheduler = VefProofScheduler::new(SchedulerPolicy {
+                max_receipts_per_window: 3,
+                ..SchedulerPolicy::default()
+            });
+
+            let extreme_scheduling_timestamp = base_timestamp.saturating_add(10_000);
+            let windows_result = scheduler.select_windows(
+                chain.entries(),
+                chain.checkpoints(),
+                extreme_scheduling_timestamp,
+                "trace-timestamp",
+            );
+
+            // Should succeed or fail gracefully, not panic from timestamp overflow
+            assert!(windows_result.is_ok(), "Window selection should handle extreme timestamps");
+        }
+    }
+
+    #[test]
+    fn negative_proof_id_generation_with_unicode_truncation_vulnerabilities() {
+        // Test proof ID suffix generation using .chars().take(16) - lines 458, 543
+        // This tests potential unicode truncation and normalization issues
+
+        let (mut input, window, job) = sample_request();
+
+        // Test with various problematic hash formats that could cause unicode issues
+        let problematic_hashes = vec![
+            // Unicode in hex position (invalid but test boundary behavior)
+            "sha256:🔒bcdefghijklmnopqrstuvwxyz1234567890abcdef1234567890abcdef12345",
+            // Mixed case (should be lowercase)
+            "sha256:ABCDEfghijklmnopqrstuvwxyz1234567890abcdef1234567890abcdef12345",
+            // Truncated hash
+            "sha256:abc123",
+            // Extra long hash-like string
+            "sha256:0123456789abcdef".repeat(10),
+            // Hash with emoji in prefix area (first 16 chars after sha256:)
+            "sha256:🚨🔥💀☠️🚨🔥💀☠️abcdef1234567890abcdef1234567890abcdef",
+            // Null bytes in hash area
+            "sha256:000000000000000\x001234567890abcdef1234567890abcdef1234567",
+        ];
+
+        let backend = HashAttestationBackend::default();
+
+        for problematic_hash in problematic_hashes {
+            // Create input with problematic commitment that would be used for proof ID generation
+            input.policy_hash = problematic_hash.to_string();
+
+            // This should either succeed with a well-formed proof ID or fail validation
+            // It should NOT panic from unicode issues in .chars().take(16)
+            let generate_result = backend.generate(
+                &input,
+                1_705_300_000_000,
+                &BTreeMap::new(),
+            );
+
+            match generate_result {
+                Ok(proof_output) => {
+                    // If generation succeeded, proof ID should be well-formed
+                    assert!(proof_output.proof_id.len() > 0);
+                    assert!(!proof_output.proof_id.contains('\x00'));
+
+                    // The suffix extraction should handle unicode gracefully
+                    assert!(proof_output.proof_id.starts_with("proof-hash_attestation_v1-"));
+
+                    // Verify proof material is properly formatted
+                    assert!(proof_output.proof_material.starts_with("sha256:"));
+                }
+                Err(err) => {
+                    // If it failed, should be due to validation, not unicode panic
+                    assert!(err.code == error_codes::ERR_VEF_PROOF_INPUT ||
+                           err.code == error_codes::ERR_VEF_PROOF_VERIFY);
+                    assert!(err.message.len() > 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negative_schema_version_comparison_without_constant_time() {
+        // Test schema version validation for potential timing attack vulnerabilities
+        // Lines 263, 356 use != for schema version comparison
+
+        let (input, _, _) = sample_request();
+
+        // Test with various schema versions that could reveal timing differences
+        let schema_variants = vec![
+            // Correct schema
+            PROOF_SERVICE_SCHEMA_VERSION.to_string(),
+            // Empty schema
+            String::new(),
+            // Short schema with matching prefix
+            "vef".to_string(),
+            // Long schema with matching prefix
+            format!("{}-extended-with-extra-data", PROOF_SERVICE_SCHEMA_VERSION),
+            // Schema with null bytes
+            format!("{}\x00injected", PROOF_SERVICE_SCHEMA_VERSION),
+            // Schema with different case
+            PROOF_SERVICE_SCHEMA_VERSION.to_uppercase(),
+            // Very long schema string
+            "wrong-schema".repeat(1000),
+            // Schema with unicode characters
+            "vef-proof-service-v1-🔒-extended",
+        ];
+
+        for test_schema in schema_variants {
+            let mut test_input = input.clone();
+            test_input.schema_version = test_schema.clone();
+
+            let validation_result = test_input.validate();
+
+            if test_schema == PROOF_SERVICE_SCHEMA_VERSION {
+                assert!(validation_result.is_ok(), "Correct schema should validate");
+            } else {
+                // Wrong schema should fail validation
+                assert!(validation_result.is_err(), "Wrong schema '{}' should fail validation", test_schema);
+
+                if let Err(err) = validation_result {
+                    assert_eq!(err.code, error_codes::ERR_VEF_PROOF_INPUT);
+                    assert!(err.message.contains("schema_version"));
+                    assert!(err.message.contains("fail closed"));
+                }
+            }
+
+            // Test with output envelope validation too
+            let proof_output = ProofOutputEnvelope {
+                schema_version: test_schema.clone(),
+                proof_id: "test-proof".to_string(),
+                backend_id: ProofBackendId::HashAttestationV1,
+                backend_version: "test-v1".to_string(),
+                input_commitment_hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                proof_material: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                generated_at_millis: 1_705_300_000_000,
+                verification_metadata: BTreeMap::new(),
+                trace_id: input.trace_id.clone(),
+            };
+
+            let output_validation_result = proof_output.validate_against(&input);
+
+            if test_schema == PROOF_SERVICE_SCHEMA_VERSION {
+                // Should fail due to commitment hash mismatch, not schema mismatch
+                assert!(output_validation_result.is_err());
+                let err = output_validation_result.unwrap_err();
+                assert_eq!(err.code, error_codes::ERR_VEF_PROOF_VERIFY);
+            } else {
+                // Should fail due to schema mismatch
+                assert!(output_validation_result.is_err());
+                let err = output_validation_result.unwrap_err();
+                assert_eq!(err.code, error_codes::ERR_VEF_PROOF_MALFORMED_OUTPUT);
+                assert!(err.message.contains("schema_version"));
+            }
+        }
+
+        // The current implementation uses != for string comparison instead of constant-time
+        // This could potentially leak information about schema version validation through timing
+        // A hardened implementation might benefit from constant-time string comparison
+    }
+
+    #[test]
+    fn negative_hash_commitment_generation_without_length_prefixed_inputs() {
+        // Test commitment hash generation for potential collision vulnerabilities
+        // The sha256_json function concatenates fields without length prefixing
+
+        let (mut input, _, _) = sample_request();
+
+        // Test hash collision scenarios where different inputs could produce same hash
+        // due to lack of length prefixing in hash inputs
+
+        let collision_test_cases = vec![
+            // Test case 1: Different policy predicates that could collide
+            (
+                vec!["ab".to_string(), "cd".to_string()],
+                vec!["a".to_string(), "bcd".to_string()],
+            ),
+            // Test case 2: Empty vs single element
+            (
+                vec!["".to_string(), "test".to_string()],
+                vec!["test".to_string()],
+            ),
+            // Test case 3: Unicode boundary issues
+            (
+                vec!["test🔒".to_string(), "data".to_string()],
+                vec!["test".to_string(), "🔒data".to_string()],
+            ),
+        ];
+
+        for (predicates_a, predicates_b) in collision_test_cases {
+            input.policy_predicates = predicates_a;
+            let hash_a = input.commitment_hash().expect("hash A should succeed");
+
+            input.policy_predicates = predicates_b;
+            let hash_b = input.commitment_hash().expect("hash B should succeed");
+
+            // Different predicate arrays should produce different hashes
+            // If they're the same, it could indicate a hash collision vulnerability
+            if hash_a == hash_b {
+                // This might indicate a collision issue, but let's verify it's legitimate
+                // by checking if the sorted/deduped predicates are actually the same
+                let mut sorted_a = input.policy_predicates.clone();
+                sorted_a.sort();
+                sorted_a.dedup();
+
+                // Reset to first case for comparison
+                input.policy_predicates = predicates_a;
+                let mut sorted_original = input.policy_predicates.clone();
+                sorted_original.sort();
+                sorted_original.dedup();
+
+                if sorted_a != sorted_original {
+                    // This would be a real collision concern
+                    panic!("Hash collision detected: different policy predicate sets produced same hash: {}", hash_a);
+                }
+            }
+
+            // Both hashes should be well-formed SHA256 hashes
+            assert!(hash_a.starts_with("sha256:"));
+            assert!(hash_b.starts_with("sha256:"));
+            assert_eq!(hash_a.len(), 71); // "sha256:" + 64 hex chars
+            assert_eq!(hash_b.len(), 71);
+        }
+
+        // The current implementation uses canonical serialization with sorting/dedup
+        // but doesn't use length-prefixed inputs which could be a security concern
+        // A hardened implementation might use length-prefixed fields in hash inputs
+    }
 }

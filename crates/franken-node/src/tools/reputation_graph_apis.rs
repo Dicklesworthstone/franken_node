@@ -56,6 +56,10 @@ pub mod invariants {
 pub const SCHEMA_VERSION: &str = "rga-v1.0";
 pub const MIN_TRUST_SCORE: f64 = 0.6;
 pub const DECAY_FACTOR: f64 = 0.95;
+const MIN_BASE_SCORE: f64 = 0.0;
+const MAX_BASE_SCORE: f64 = 1.0;
+const MIN_EDGE_WEIGHT: f64 = -1.0;
+const MAX_EDGE_WEIGHT: f64 = 1.0;
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_EDGES: usize = 4096;
 
@@ -210,6 +214,14 @@ impl ReputationGraphApis {
             );
             return Err("base score must be finite".to_string());
         }
+        if !(MIN_BASE_SCORE..=MAX_BASE_SCORE).contains(&node.base_score) {
+            self.log(
+                event_codes::RGA_ERR_INVALID_NODE,
+                trace_id,
+                serde_json::json!({"node_id": &node.node_id, "reason": "out-of-range base_score"}),
+            );
+            return Err("base score must be between 0.0 and 1.0".to_string());
+        }
         if self.nodes.contains_key(&node.node_id) {
             self.log(
                 event_codes::RGA_ERR_DUPLICATE_NODE,
@@ -241,6 +253,14 @@ impl ReputationGraphApis {
                 serde_json::json!({"node_id": node_id, "reason": "non-finite base_score"}),
             );
             return Err("base score must be finite".to_string());
+        }
+        if !(MIN_BASE_SCORE..=MAX_BASE_SCORE).contains(&new_score) {
+            self.log(
+                event_codes::RGA_ERR_INVALID_NODE,
+                trace_id,
+                serde_json::json!({"node_id": node_id, "reason": "out-of-range base_score"}),
+            );
+            return Err("base score must be between 0.0 and 1.0".to_string());
         }
         let node = self
             .nodes
@@ -299,6 +319,14 @@ impl ReputationGraphApis {
                 serde_json::json!({"edge_id": &edge.edge_id, "reason": "non-finite weight"}),
             );
             return Err("edge weight must be finite".to_string());
+        }
+        if !(MIN_EDGE_WEIGHT..=MAX_EDGE_WEIGHT).contains(&edge.weight) {
+            self.log(
+                event_codes::RGA_ERR_INVALID_EDGE,
+                trace_id,
+                serde_json::json!({"edge_id": &edge.edge_id, "reason": "out-of-range weight"}),
+            );
+            return Err("edge weight must be between -1.0 and 1.0".to_string());
         }
         if edge.evidence.trim().is_empty() {
             self.log(
@@ -1256,5 +1284,258 @@ mod tests {
         let result: Result<RgaAuditRecord, _> = serde_json::from_value(raw);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn reputation_node_deserialize_rejects_null_node_type() {
+        let raw = serde_json::json!({
+            "node_id": "n-null-type",
+            "node_type": null,
+            "display_name": "null type",
+            "base_score": 0.8,
+            "created_at": "2026-04-17T00:00:00Z"
+        });
+
+        let result: Result<ReputationNode, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reputation_node_deserialize_rejects_missing_display_name() {
+        let raw = serde_json::json!({
+            "node_id": "n-missing-name",
+            "node_type": "operator",
+            "base_score": 0.8,
+            "created_at": "2026-04-17T00:00:00Z"
+        });
+
+        let result: Result<ReputationNode, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reputation_edge_deserialize_rejects_null_weight() {
+        let raw = serde_json::json!({
+            "edge_id": "e-null-weight",
+            "source": "n1",
+            "target": "n2",
+            "weight": null,
+            "evidence": "test-evidence",
+            "created_at": "2026-04-17T00:00:00Z"
+        });
+
+        let result: Result<ReputationEdge, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reputation_edge_deserialize_rejects_numeric_source() {
+        let raw = serde_json::json!({
+            "edge_id": "e-numeric-source",
+            "source": 7,
+            "target": "n2",
+            "weight": 0.5,
+            "evidence": "test-evidence",
+            "created_at": "2026-04-17T00:00:00Z"
+        });
+
+        let result: Result<ReputationEdge, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reputation_score_deserialize_rejects_null_threshold_flag() {
+        let raw = serde_json::json!({
+            "node_id": "n1",
+            "composite_score": 0.8,
+            "meets_threshold": null,
+            "edge_count": 1,
+            "content_hash": "a".repeat(64)
+        });
+
+        let result: Result<ReputationScore, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reputation_score_deserialize_rejects_negative_edge_count() {
+        let raw = serde_json::json!({
+            "node_id": "n1",
+            "composite_score": 0.8,
+            "meets_threshold": true,
+            "edge_count": -1,
+            "content_hash": "a".repeat(64)
+        });
+
+        let result: Result<ReputationScore, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn graph_snapshot_deserialize_rejects_string_node_count() {
+        let raw = serde_json::json!({
+            "snapshot_id": "snapshot-1",
+            "timestamp": "2026-04-17T00:00:00Z",
+            "schema_version": SCHEMA_VERSION,
+            "node_count": "1",
+            "edge_count": 0,
+            "content_hash": "a".repeat(64)
+        });
+
+        let result: Result<GraphSnapshot, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn audit_record_deserialize_rejects_numeric_event_code() {
+        let raw = serde_json::json!({
+            "record_id": "rga-audit-1",
+            "event_code": 7,
+            "timestamp": "2026-04-17T00:00:00Z",
+            "trace_id": "trace-1",
+            "details": {}
+        });
+
+        let result: Result<RgaAuditRecord, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_negative_base_score_rejected_without_insert() {
+        let mut g = ReputationGraphApis::default();
+        let mut node = sample_node("n-negative-score", NodeType::Operator);
+        node.base_score = -0.01;
+
+        let err = g.add_node(node, "trace-negative-score").unwrap_err();
+
+        assert!(err.contains("between 0.0 and 1.0"));
+        assert!(g.nodes().is_empty());
+        assert!(g.audit_log().iter().any(|record| record.event_code
+            == event_codes::RGA_ERR_INVALID_NODE
+            && record.details["reason"].as_str() == Some("out-of-range base_score")));
+    }
+
+    #[test]
+    fn add_base_score_above_one_rejected_without_insert() {
+        let mut g = ReputationGraphApis::default();
+        let mut node = sample_node("n-high-score", NodeType::Verifier);
+        node.base_score = 1.01;
+
+        let err = g.add_node(node, "trace-high-score").unwrap_err();
+
+        assert!(err.contains("between 0.0 and 1.0"));
+        assert!(g.nodes().is_empty());
+        assert!(g.audit_log().iter().any(|record| record.event_code
+            == event_codes::RGA_ERR_INVALID_NODE
+            && record.details["reason"].as_str() == Some("out-of-range base_score")));
+    }
+
+    #[test]
+    fn update_negative_base_score_rejected_without_mutation() {
+        let mut g = ReputationGraphApis::default();
+        g.add_node(sample_node("n1", NodeType::DataSource), &trace())
+            .unwrap();
+
+        let err = g
+            .update_node_score("n1", -0.25, "trace-update-negative")
+            .unwrap_err();
+
+        assert!(err.contains("between 0.0 and 1.0"));
+        assert!((g.nodes()["n1"].base_score - 0.8).abs() < f64::EPSILON);
+        assert!(g.audit_log().iter().any(|record| record.event_code
+            == event_codes::RGA_ERR_INVALID_NODE
+            && record.details["reason"].as_str() == Some("out-of-range base_score")));
+        assert!(
+            !g.audit_log()
+                .iter()
+                .any(|record| record.event_code == event_codes::RGA_NODE_UPDATED)
+        );
+    }
+
+    #[test]
+    fn update_base_score_above_one_rejected_without_mutation() {
+        let mut g = ReputationGraphApis::default();
+        g.add_node(sample_node("n1", NodeType::Infrastructure), &trace())
+            .unwrap();
+
+        let err = g
+            .update_node_score("n1", 1.25, "trace-update-high")
+            .unwrap_err();
+
+        assert!(err.contains("between 0.0 and 1.0"));
+        assert!((g.nodes()["n1"].base_score - 0.8).abs() < f64::EPSILON);
+        assert!(g.audit_log().iter().any(|record| record.event_code
+            == event_codes::RGA_ERR_INVALID_NODE
+            && record.details["reason"].as_str() == Some("out-of-range base_score")));
+    }
+
+    #[test]
+    fn add_edge_weight_above_one_rejected_without_insert() {
+        let mut g = ReputationGraphApis::default();
+        g.add_node(sample_node("n1", NodeType::Operator), &trace())
+            .unwrap();
+        g.add_node(sample_node("n2", NodeType::Extension), &trace())
+            .unwrap();
+
+        let err = g
+            .add_edge(sample_edge("e-too-high", "n1", "n2", 1.01), "trace-edge-high")
+            .unwrap_err();
+
+        assert!(err.contains("between -1.0 and 1.0"));
+        assert!(g.edges().is_empty());
+        assert!(g.audit_log().iter().any(|record| record.event_code
+            == event_codes::RGA_ERR_INVALID_EDGE
+            && record.details["reason"].as_str() == Some("out-of-range weight")));
+    }
+
+    #[test]
+    fn add_edge_weight_below_negative_one_rejected_without_insert() {
+        let mut g = ReputationGraphApis::default();
+        g.add_node(sample_node("n1", NodeType::Operator), &trace())
+            .unwrap();
+        g.add_node(sample_node("n2", NodeType::Extension), &trace())
+            .unwrap();
+
+        let err = g
+            .add_edge(
+                sample_edge("e-too-low", "n1", "n2", -1.01),
+                "trace-edge-low",
+            )
+            .unwrap_err();
+
+        assert!(err.contains("between -1.0 and 1.0"));
+        assert!(g.edges().is_empty());
+        assert!(g.audit_log().iter().any(|record| record.event_code
+            == event_codes::RGA_ERR_INVALID_EDGE
+            && record.details["reason"].as_str() == Some("out-of-range weight")));
+    }
+
+    #[test]
+    fn negative_boundary_score_and_edge_weight_remain_allowed() {
+        let mut g = ReputationGraphApis::default();
+        let mut node = sample_node("n-zero", NodeType::Operator);
+        node.base_score = 0.0;
+        g.add_node(node, &trace()).unwrap();
+        let mut target = sample_node("n-one", NodeType::Extension);
+        target.base_score = 1.0;
+        g.add_node(target, &trace()).unwrap();
+
+        g.add_edge(
+            sample_edge("e-negative-one", "n-zero", "n-one", -1.0),
+            "trace-edge-boundary",
+        )
+        .unwrap();
+
+        assert_eq!(g.nodes().len(), 2);
+        assert_eq!(g.edges().len(), 1);
+        assert!((g.edges()[0].weight - MIN_EDGE_WEIGHT).abs() < f64::EPSILON);
     }
 }

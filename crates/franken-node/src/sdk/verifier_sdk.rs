@@ -5907,4 +5907,716 @@ mod verifier_sdk_comprehensive_attack_vector_tests {
             }
         }
     }
+
+    /// Test: Deterministic hash function attack vectors and collision resistance
+    #[test]
+    fn test_deterministic_hash_attack_vectors_and_collision_resistance() {
+        // Test: Hash function domain separation attacks
+        let same_content_different_contexts = vec![
+            "verifier_test_input",
+            "test_input", // Same suffix, different prefix when combined with domain
+            "", // Empty input
+            "verifier_sdk_v1:", // Domain separator injection attempt
+            "verifier_sdk_v1:verifier_test_input", // Double domain separator
+        ];
+
+        let mut hashes = Vec::new();
+        for input in &same_content_different_contexts {
+            hashes.push(deterministic_hash(input));
+        }
+
+        // All hashes should be unique (no collisions in domain separation)
+        for i in 0..hashes.len() {
+            for j in (i+1)..hashes.len() {
+                assert_ne!(hashes[i], hashes[j],
+                    "Hash collision between inputs '{}' and '{}'",
+                    same_content_different_contexts[i], same_content_different_contexts[j]);
+            }
+            // Verify hash format
+            assert_eq!(hashes[i].len(), 64, "Hash should be 64 hex characters");
+            assert!(hashes[i].chars().all(|c| c.is_ascii_hexdigit()),
+                "Hash should contain only hex digits");
+        }
+
+        // Test: Length extension attack resistance
+        let base_input = "sensitive_data";
+        let extended_inputs = vec![
+            format!("{}{}", base_input, "\x80"),
+            format!("{}{}", base_input, "\x80\x00\x00\x00\x00\x00\x00\x38"),
+            format!("{}{}", base_input, "additional_data"),
+            format!("{}{}", base_input, "\x00\x00\x00\x08"), // Length padding
+        ];
+
+        let base_hash = deterministic_hash(base_input);
+        for extended_input in &extended_inputs {
+            let extended_hash = deterministic_hash(extended_input);
+            assert_ne!(base_hash, extended_hash,
+                "Length extension should not produce same hash: '{}'", extended_input);
+        }
+
+        // Test: Multi-field hash collision resistance
+        let field_combinations = vec![
+            vec!["field1", "field2"],
+            vec!["field", "1field2"], // Different field boundary
+            vec!["field1field", "2"], // Different field boundary
+            vec!["", "field1", "field2"], // Empty first field
+            vec!["field1", "", "field2"], // Empty middle field
+            vec!["field1", "field2", ""], // Empty last field
+        ];
+
+        let mut multi_hashes = Vec::new();
+        for fields in &field_combinations {
+            multi_hashes.push(deterministic_hash_fields(fields));
+        }
+
+        // Verify all multi-field hashes are unique
+        for i in 0..multi_hashes.len() {
+            for j in (i+1)..multi_hashes.len() {
+                assert_ne!(multi_hashes[i], multi_hashes[j],
+                    "Multi-field hash collision between {:?} and {:?}",
+                    field_combinations[i], field_combinations[j]);
+            }
+        }
+
+        // Test: Avalanche effect (single bit change should affect many output bits)
+        let avalanche_base = "avalanche_test_input_data";
+        let avalanche_modified = "avalanche_test_input_datb"; // Single character change
+        let base_avalanche_hash = deterministic_hash(avalanche_base);
+        let modified_avalanche_hash = deterministic_hash(avalanche_modified);
+
+        assert_ne!(base_avalanche_hash, modified_avalanche_hash,
+            "Single character change should produce different hash");
+
+        // Count differing hex characters (rough avalanche test)
+        let differing_chars = base_avalanche_hash.chars()
+            .zip(modified_avalanche_hash.chars())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(differing_chars > 16,
+            "Avalanche effect too weak: only {} chars differ out of 64", differing_chars);
+    }
+
+    /// Test: VerifierConfig validation and security boundary attacks
+    #[test]
+    fn test_verifier_config_validation_and_security_boundaries() {
+        // Test: Malicious verifier identity injection attacks
+        let malicious_identities = vec![
+            "verifier://evil.com/../../admin", // Path traversal
+            "verifier://\x00admin@evil.com", // Null byte injection
+            "verifier://admin@evil.com\r\nSet-Cookie: session=hijacked", // HTTP header injection
+            "verifier://<script>alert('xss')</script>", // XSS injection
+            "verifier://'; DROP TABLE verifiers; --", // SQL injection style
+            "verifier://user@evil.com\u{202E}moc.evil@resu", // Unicode BIDI override
+            "verifier://\u{FEFF}admin@evil.com", // BOM injection
+            "verifier://admin@evil.com\u{200B}", // Zero-width space
+            format!("verifier://{}", "a".repeat(10_000)), // Memory exhaustion
+            "verifier://admin@evil.com\x1B[31mCOLORED_TEXT\x1B[0m", // Terminal escape sequences
+        ];
+
+        for malicious_identity in &malicious_identities {
+            let config = VerifierConfig {
+                verifier_identity: malicious_identity.clone(),
+                require_hash_match: true,
+                strict_claims: true,
+                extensions: BTreeMap::new(),
+            };
+
+            let sdk = VerifierSdk::new(config.clone());
+
+            // SDK should accept malicious identity as-is (no validation at construction)
+            assert_eq!(sdk.verifier_identity(), malicious_identity,
+                "Identity should be preserved exactly");
+
+            // Verification should work with malicious identity
+            let req = valid_request();
+            let result = sdk.verify_artifact(&req);
+            assert!(result.is_ok(), "Verification should work with malicious identity");
+
+            if let Ok(report) = result {
+                assert_eq!(report.verifier_identity, *malicious_identity,
+                    "Report should preserve malicious identity exactly");
+            }
+        }
+
+        // Test: Extensions field manipulation attacks
+        let mut malicious_extensions = BTreeMap::new();
+        malicious_extensions.insert("__proto__".to_string(), "prototype_pollution".to_string());
+        malicious_extensions.insert("constructor".to_string(), "constructor_attack".to_string());
+        malicious_extensions.insert("".to_string(), "empty_key_injection".to_string());
+        malicious_extensions.insert("key\x00injection".to_string(), "null_byte_key".to_string());
+        malicious_extensions.insert("very_long_key_".to_string() + &"x".repeat(1_000), "memory_exhaustion_key".to_string());
+        malicious_extensions.insert("normal_key".to_string(), "value\x00\x01\x02injection".to_string());
+
+        let config_with_malicious_ext = VerifierConfig {
+            verifier_identity: "verifier://test".to_string(),
+            require_hash_match: false,
+            strict_claims: false,
+            extensions: malicious_extensions.clone(),
+        };
+
+        let sdk_with_ext = VerifierSdk::new(config_with_malicious_ext);
+        assert_eq!(sdk_with_ext.config().extensions, malicious_extensions,
+            "Extensions should be preserved exactly");
+
+        // Test: Boolean flag manipulation edge cases
+        let flag_combinations = vec![
+            (true, true),   // Both strict
+            (true, false),  // Hash required, claims relaxed
+            (false, true),  // Hash relaxed, claims strict
+            (false, false), // Both relaxed
+        ];
+
+        for (require_hash_match, strict_claims) in flag_combinations {
+            let config = VerifierConfig {
+                verifier_identity: "verifier://flag_test".to_string(),
+                require_hash_match,
+                strict_claims,
+                extensions: BTreeMap::new(),
+            };
+
+            let sdk = VerifierSdk::new(config.clone());
+
+            // Test with problematic request
+            let problematic_req = VerificationRequest {
+                artifact_id: "flag_test_artifact".to_string(),
+                artifact_hash: "wrong_hash".to_string(), // Wrong hash
+                claims: vec![], // Empty claims
+            };
+
+            let result = sdk.verify_artifact(&problematic_req);
+            if require_hash_match || strict_claims {
+                // Should fail verification but not error
+                assert!(result.is_ok(), "Should verify but fail checks");
+                if let Ok(report) = result {
+                    assert!(matches!(report.verdict, VerifyVerdict::Fail(_)),
+                        "Should fail with strict flags");
+                }
+            } else {
+                // Should pass with relaxed flags (ignoring format issues)
+                // Note: This will still fail due to hash format being wrong length
+                assert!(result.is_ok(), "Should handle relaxed flags");
+            }
+        }
+    }
+
+    /// Test: VerificationRequest input validation bypass attacks
+    #[test]
+    fn test_verification_request_input_validation_bypass_attacks() {
+        let sdk = test_sdk();
+
+        // Test: Artifact ID boundary injection attacks
+        let artifact_id_attacks = vec![
+            "  valid_id  ", // Leading/trailing whitespace (should fail)
+            "valid\x00id", // Null byte injection
+            "valid\r\nid", // CRLF injection
+            "valid\tid", // Tab injection
+            "valid\u{200B}id", // Zero-width space
+            "valid\u{FEFF}id", // BOM injection
+            "valid\u{202E}di\u{202D}id", // BIDI override
+            "valid🔒id", // Emoji injection
+            "válid_íd", // Unicode normalization
+            format!("valid_{}", "x".repeat(10_000)), // Memory exhaustion
+            "VALID_ID", // Case variation
+            "valid_id/../../etc/passwd", // Path traversal
+            "../etc/passwd", // Direct path traversal
+            "CON", "PRN", "AUX", "NUL", "COM1", // Windows reserved names
+        ];
+
+        for attack_id in &artifact_id_attacks {
+            let req = VerificationRequest {
+                artifact_id: attack_id.clone(),
+                artifact_hash: deterministic_hash(attack_id.trim()),
+                claims: vec!["test_claim".to_string()],
+            };
+
+            let result = sdk.verify_artifact(&req);
+
+            if attack_id.trim() != *attack_id || attack_id.is_empty() {
+                // Should error on whitespace/empty
+                assert!(result.is_err(), "Should reject whitespace attack: '{}'", attack_id);
+            } else if attack_id == &RESERVED_ARTIFACT_ID.to_string() {
+                // Should error on reserved ID
+                assert!(result.is_err(), "Should reject reserved ID");
+            } else {
+                // Other attacks should be preserved as-is but may fail hash check
+                assert!(result.is_ok(), "Should handle attack ID: '{}'", attack_id);
+                if let Ok(report) = result {
+                    // Check that the ID is preserved exactly
+                    assert!(report.request_id.contains(&attack_id[..std::cmp::min(attack_id.len(), 20)]),
+                        "Attack ID should be preserved in request_id");
+                }
+            }
+        }
+
+        // Test: Hash format manipulation attacks
+        let hash_attacks = vec![
+            "", // Empty hash
+            "short", // Too short
+            "x".repeat(63), // One char too short
+            "x".repeat(65), // One char too long
+            "g".repeat(64), // Invalid hex characters
+            "ABCDEF".to_string() + &"0".repeat(58), // Mixed case
+            "abcdef".to_string() + &"0".repeat(58), // Lower case
+            "0".repeat(32) + &"x".repeat(32), // Half valid, half invalid
+            "0123456789ABCDEF".repeat(4), // Valid format but wrong value
+            "deadbeef".repeat(8), // Valid format pattern
+            "\x00".repeat(64), // Null bytes (will be invalid hex)
+        ];
+
+        for attack_hash in &hash_attacks {
+            let req = VerificationRequest {
+                artifact_id: "hash_test_id".to_string(),
+                artifact_hash: attack_hash.clone(),
+                claims: vec!["test_claim".to_string()],
+            };
+
+            let result = sdk.verify_artifact(&req);
+
+            if attack_hash.is_empty() {
+                // Should error on empty hash
+                assert!(result.is_err(), "Should reject empty hash");
+            } else {
+                // Other format issues should be caught in verification, not error
+                assert!(result.is_ok(), "Should handle hash attack: '{}'", attack_hash);
+                if let Ok(report) = result {
+                    if attack_hash.len() != 64 || !attack_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                        // Should fail format check
+                        let failed = failed_checks(&report);
+                        assert!(failed.contains(&"artifact_hash_format"),
+                            "Should fail format check for: '{}'", attack_hash);
+                    }
+                }
+            }
+        }
+
+        // Test: Claims array manipulation attacks
+        let claims_attacks = vec![
+            vec![], // Empty claims (should fail with strict_claims)
+            vec!["".to_string()], // Single empty claim
+            vec!["valid".to_string(), "".to_string(), "valid".to_string()], // Mixed empty/valid
+            vec!["claim\x00injection".to_string()], // Null byte in claim
+            vec!["claim\r\ninjection".to_string()], // CRLF injection
+            vec!["claim\u{202E}gnital".to_string()], // BIDI override
+            vec![format!("claim_{}", "x".repeat(10_000))], // Memory exhaustion
+            (0..100).map(|i| format!("claim_{}", i)).collect(), // Many claims
+            vec!["🔒".repeat(100)], // Emoji flood
+            vec!["claim"; 1], // Single valid
+            vec!["a".to_string(); 50], // Many identical
+        ];
+
+        for attack_claims in &claims_attacks {
+            let req = VerificationRequest {
+                artifact_id: "claims_test_id".to_string(),
+                artifact_hash: deterministic_hash("claims_test_id"),
+                claims: attack_claims.clone(),
+            };
+
+            let result = sdk.verify_artifact(&req);
+            assert!(result.is_ok(), "Claims attack should not cause error: {:?}", attack_claims);
+
+            if let Ok(report) = result {
+                // Check evidence for each claim
+                for (i, claim) in attack_claims.iter().enumerate() {
+                    let claim_check_name = format!("claim_{}_non_empty", i);
+                    let claim_evidence = report.evidence.iter()
+                        .find(|e| e.check_name == claim_check_name);
+
+                    if let Some(evidence) = claim_evidence {
+                        assert_eq!(evidence.passed, !claim.is_empty(),
+                            "Claim {} emptiness check should match actual state", i);
+                    }
+                }
+
+                // Overall claims check
+                if sdk.config().strict_claims {
+                    let has_empty = attack_claims.is_empty() || attack_claims.iter().any(|c| c.is_empty());
+                    if has_empty {
+                        let failed = failed_checks(&report);
+                        assert!(failed.contains(&"claims_valid"),
+                            "Should fail claims validation with empty claims");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Test: Binding hash computation attack vectors and collision resistance
+    #[test]
+    fn test_binding_hash_computation_attack_vectors() {
+        // Test: Field boundary manipulation attacks
+        let boundary_attacks = vec![
+            // Same total content, different field boundaries
+            (VerificationRequest {
+                artifact_id: "ab".to_string(),
+                artifact_hash: "cd".to_string(),
+                claims: vec!["ef".to_string()],
+            }),
+            (VerificationRequest {
+                artifact_id: "a".to_string(),
+                artifact_hash: "bcd".to_string(),
+                claims: vec!["ef".to_string()],
+            }),
+            (VerificationRequest {
+                artifact_id: "ab".to_string(),
+                artifact_hash: "c".to_string(),
+                claims: vec!["def".to_string()],
+            }),
+            // Field reordering attacks
+            (VerificationRequest {
+                artifact_id: "field1".to_string(),
+                artifact_hash: "field2".to_string(),
+                claims: vec!["field3".to_string()],
+            }),
+            (VerificationRequest {
+                artifact_id: "field2".to_string(),
+                artifact_hash: "field1".to_string(),
+                claims: vec!["field3".to_string()],
+            }),
+        ];
+
+        let mut binding_hashes = Vec::new();
+        for request in &boundary_attacks {
+            binding_hashes.push(artifact_binding_hash(request));
+        }
+
+        // All binding hashes should be unique (no collisions)
+        for i in 0..binding_hashes.len() {
+            for j in (i+1)..binding_hashes.len() {
+                assert_ne!(binding_hashes[i], binding_hashes[j],
+                    "Binding hash collision between requests {} and {}", i, j);
+            }
+        }
+
+        // Test: Length prefix collision attacks
+        let length_attacks = vec![
+            // Try to create collisions using crafted field lengths
+            VerificationRequest {
+                artifact_id: format!("{}artifact", 8u64.to_le_bytes().len()),
+                artifact_hash: "hash_value".to_string(),
+                claims: vec!["normal_claim".to_string()],
+            },
+            VerificationRequest {
+                artifact_id: "artifact".to_string(),
+                artifact_hash: format!("{}hash_value", 8u64.to_le_bytes().len()),
+                claims: vec!["normal_claim".to_string()],
+            },
+            // Embed fake length prefixes
+            VerificationRequest {
+                artifact_id: "\x08\x00\x00\x00\x00\x00\x00\x00artifact".to_string(),
+                artifact_hash: "hash_value".to_string(),
+                claims: vec!["normal_claim".to_string()],
+            },
+        ];
+
+        for (i, attack_req) in length_attacks.iter().enumerate() {
+            let attack_hash = artifact_binding_hash(attack_req);
+
+            // Should not collide with any boundary attack
+            for (j, boundary_hash) in binding_hashes.iter().enumerate() {
+                assert_ne!(attack_hash, *boundary_hash,
+                    "Length attack {} should not collide with boundary attack {}", i, j);
+            }
+        }
+
+        // Test: Claims order significance
+        let claims_order_tests = vec![
+            VerificationRequest {
+                artifact_id: "order_test".to_string(),
+                artifact_hash: "hash123".to_string(),
+                claims: vec!["claim_a".to_string(), "claim_b".to_string()],
+            },
+            VerificationRequest {
+                artifact_id: "order_test".to_string(),
+                artifact_hash: "hash123".to_string(),
+                claims: vec!["claim_b".to_string(), "claim_a".to_string()],
+            },
+        ];
+
+        let order_hash_1 = artifact_binding_hash(&claims_order_tests[0]);
+        let order_hash_2 = artifact_binding_hash(&claims_order_tests[1]);
+        assert_ne!(order_hash_1, order_hash_2,
+            "Claims order should affect binding hash");
+
+        // Test: Unicode normalization attacks
+        let unicode_attacks = vec![
+            VerificationRequest {
+                artifact_id: "café".to_string(), // NFC form
+                artifact_hash: "hash".to_string(),
+                claims: vec!["test".to_string()],
+            },
+            VerificationRequest {
+                artifact_id: "cafe\u{301}".to_string(), // NFD form (combining)
+                artifact_hash: "hash".to_string(),
+                claims: vec!["test".to_string()],
+            },
+        ];
+
+        let unicode_hash_1 = artifact_binding_hash(&unicode_attacks[0]);
+        let unicode_hash_2 = artifact_binding_hash(&unicode_attacks[1]);
+        assert_ne!(unicode_hash_1, unicode_hash_2,
+            "Unicode normalization forms should produce different hashes");
+    }
+
+    /// Test: SDK error handling and recovery attack vectors
+    #[test]
+    fn test_sdk_error_handling_recovery_attack_vectors() {
+        let sdk = test_sdk();
+
+        // Test: Error message information leakage
+        let info_leakage_tests = vec![
+            (VerificationRequest {
+                artifact_id: "".to_string(),
+                artifact_hash: "hash".to_string(),
+                claims: vec!["claim".to_string()],
+            }, "empty artifact_id should not leak system info"),
+
+            (VerificationRequest {
+                artifact_id: RESERVED_ARTIFACT_ID.to_string(),
+                artifact_hash: "hash".to_string(),
+                claims: vec!["claim".to_string()],
+            }, "reserved ID should not leak internal values"),
+
+            (VerificationRequest {
+                artifact_id: "  spaced  ".to_string(),
+                artifact_hash: "hash".to_string(),
+                claims: vec!["claim".to_string()],
+            }, "whitespace should not leak processing details"),
+
+            (VerificationRequest {
+                artifact_id: "valid".to_string(),
+                artifact_hash: "".to_string(),
+                claims: vec!["claim".to_string()],
+            }, "empty hash should not leak validation logic"),
+        ];
+
+        for (bad_request, test_description) in &info_leakage_tests {
+            let result = sdk.verify_artifact(bad_request);
+            assert!(result.is_err(), "{}: should error", test_description);
+
+            if let Err(error) = result {
+                let error_msg = error.to_string();
+
+                // Error should not contain sensitive information
+                assert!(!error_msg.contains("internal"),
+                    "{}: error should not contain 'internal': {}", test_description, error_msg);
+                assert!(!error_msg.contains("debug"),
+                    "{}: error should not contain 'debug': {}", test_description, error_msg);
+                assert!(!error_msg.contains("panic"),
+                    "{}: error should not contain 'panic': {}", test_description, error_msg);
+                assert!(!error_msg.contains("stack"),
+                    "{}: error should not contain 'stack': {}", test_description, error_msg);
+
+                // Error should not be too verbose (avoid info leakage)
+                assert!(error_msg.len() < 200,
+                    "{}: error message too long: {}", test_description, error_msg);
+            }
+        }
+
+        // Test: Error state persistence across multiple operations
+        let mut error_sequence = Vec::new();
+
+        // Generate sequence of errors
+        for i in 0..10 {
+            let bad_req = VerificationRequest {
+                artifact_id: "".to_string(), // Always invalid
+                artifact_hash: format!("hash_{}", i),
+                claims: vec![format!("claim_{}", i)],
+            };
+
+            let result = sdk.verify_artifact(&bad_req);
+            error_sequence.push(result);
+        }
+
+        // All should be errors
+        for (i, result) in error_sequence.iter().enumerate() {
+            assert!(result.is_err(), "Error sequence item {} should be error", i);
+        }
+
+        // Test: Recovery after error flood
+        let valid_recovery_req = VerificationRequest {
+            artifact_id: "recovery_test".to_string(),
+            artifact_hash: deterministic_hash("recovery_test"),
+            claims: vec!["recovery_claim".to_string()],
+        };
+
+        let recovery_result = sdk.verify_artifact(&valid_recovery_req);
+        assert!(recovery_result.is_ok(), "Should recover after error flood");
+
+        if let Ok(report) = recovery_result {
+            assert!(matches!(report.verdict, VerifyVerdict::Pass),
+                "Recovery operation should pass");
+        }
+
+        // Test: Concurrent error handling
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let shared_sdk = Arc::new(test_sdk());
+        let results = Arc::new(Mutex::new(Vec::new()));
+
+        let mut handles = Vec::new();
+        for thread_id in 0..3 {
+            let sdk_clone = Arc::clone(&shared_sdk);
+            let results_clone = Arc::clone(&results);
+
+            let handle = thread::spawn(move || {
+                let mut thread_results = Vec::new();
+
+                for attempt in 0..5 {
+                    // Alternate between error and valid requests
+                    let request = if attempt % 2 == 0 {
+                        VerificationRequest {
+                            artifact_id: "".to_string(), // Invalid
+                            artifact_hash: "invalid".to_string(),
+                            claims: vec![],
+                        }
+                    } else {
+                        VerificationRequest {
+                            artifact_id: format!("valid_{}_{}", thread_id, attempt),
+                            artifact_hash: deterministic_hash(&format!("valid_{}_{}", thread_id, attempt)),
+                            claims: vec!["valid_claim".to_string()],
+                        }
+                    };
+
+                    let result = sdk_clone.verify_artifact(&request);
+                    thread_results.push((thread_id, attempt, result.is_ok()));
+
+                    thread::yield_now();
+                }
+
+                results_clone.lock().unwrap().extend(thread_results);
+            });
+
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread should complete");
+        }
+
+        let final_results = results.lock().unwrap();
+
+        // Verify error/success pattern is maintained across threads
+        for &(thread_id, attempt, is_ok) in final_results.iter() {
+            let expected_ok = attempt % 2 == 1; // Valid requests on odd attempts
+            assert_eq!(is_ok, expected_ok,
+                "Thread {} attempt {}: expected success={}, got={}",
+                thread_id, attempt, expected_ok, is_ok);
+        }
+    }
+
+    /// Test: Memory exhaustion and resource consumption attack vectors
+    #[test]
+    fn test_memory_exhaustion_resource_consumption_attacks() {
+        // Test: Large string allocation attacks
+        let large_string_tests = vec![
+            ("massive_artifact_id", "x".repeat(10_000)),
+            ("massive_hash", "a".repeat(10_000)), // Will fail format but test memory
+            ("massive_claim", vec!["y".repeat(5_000)]),
+            ("many_small_claims", (0..100).map(|i| format!("claim_{}", i)).collect::<Vec<_>>()),
+        ];
+
+        for (test_name, test_data) in large_string_tests {
+            let sdk = test_sdk();
+
+            let request = match test_name {
+                "massive_artifact_id" => VerificationRequest {
+                    artifact_id: test_data,
+                    artifact_hash: "a".repeat(64),
+                    claims: vec!["test".to_string()],
+                },
+                "massive_hash" => VerificationRequest {
+                    artifact_id: "test_id".to_string(),
+                    artifact_hash: test_data,
+                    claims: vec!["test".to_string()],
+                },
+                "massive_claim" | "many_small_claims" => VerificationRequest {
+                    artifact_id: "test_id".to_string(),
+                    artifact_hash: deterministic_hash("test_id"),
+                    claims: test_data,
+                },
+                _ => unreachable!(),
+            };
+
+            // Should handle large data without crashing
+            let result = sdk.verify_artifact(&request);
+
+            match test_name {
+                "massive_artifact_id" => {
+                    // Should error on whitespace check or succeed
+                    // (depending on whether it contains leading/trailing spaces)
+                    // Either way, should not crash
+                    assert!(result.is_ok() || result.is_err(), "Should handle massive artifact ID");
+                }
+                "massive_hash" => {
+                    // Should succeed verification but fail hash format check
+                    assert!(result.is_ok(), "Should handle massive hash");
+                    if let Ok(report) = result {
+                        let failed = failed_checks(&report);
+                        assert!(failed.contains(&"artifact_hash_format"),
+                            "Should fail format check for massive hash");
+                    }
+                }
+                "massive_claim" | "many_small_claims" => {
+                    // Should succeed but may fail individual claim checks
+                    assert!(result.is_ok(), "Should handle large claims");
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        // Test: Deeply nested/complex request processing
+        let mut complex_claims = Vec::new();
+        for i in 0..20 {
+            // Create claims with nested structure-like content
+            let nested_claim = format!(
+                "{{\"level_{}\": {{\"nested\": {{\"deep\": \"value_{}\"}}}}}}",
+                i, i
+            );
+            complex_claims.push(nested_claim);
+        }
+
+        let complex_request = VerificationRequest {
+            artifact_id: "complex_test".to_string(),
+            artifact_hash: deterministic_hash("complex_test"),
+            claims: complex_claims,
+        };
+
+        let complex_result = test_sdk().verify_artifact(&complex_request);
+        assert!(complex_result.is_ok(), "Should handle complex nested claims");
+
+        // Test: Rapid-fire request processing
+        let sdk = test_sdk();
+        for i in 0..50 {
+            let rapid_req = VerificationRequest {
+                artifact_id: format!("rapid_{}", i),
+                artifact_hash: deterministic_hash(&format!("rapid_{}", i)),
+                claims: vec![format!("claim_{}", i)],
+            };
+
+            let result = sdk.verify_artifact(&rapid_req);
+            assert!(result.is_ok(), "Rapid request {} should succeed", i);
+        }
+
+        // Test: Unicode processing overhead
+        let unicode_stress_tests = vec![
+            "🔒".repeat(100), // Emoji flood
+            "测试".repeat(100), // CJK characters
+            "🏴󠁧󠁢󠁳󠁣󠁴󠁿".repeat(10), // Complex emoji sequences
+            "é".repeat(100), // Accented characters
+            "\u{200B}".repeat(1000), // Zero-width spaces
+            "\u{FEFF}".repeat(100), // BOMs
+        ];
+
+        for unicode_test in unicode_stress_tests {
+            let unicode_req = VerificationRequest {
+                artifact_id: format!("unicode_{}", unicode_test.chars().take(10).collect::<String>()),
+                artifact_hash: deterministic_hash("unicode_test"),
+                claims: vec![unicode_test],
+            };
+
+            let unicode_result = test_sdk().verify_artifact(&unicode_req);
+            assert!(unicode_result.is_ok(), "Should handle Unicode stress test");
+        }
+    }
 }

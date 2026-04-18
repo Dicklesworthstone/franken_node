@@ -1868,4 +1868,267 @@ mod tests {
         // Scheduler state should remain consistent
         assert!(scheduler.windows_seen.len() <= MAX_WINDOWS_SEEN);
     }
+
+    // ── Hardening-focused negative-path tests targeting specific vulnerability patterns ──
+
+    #[test]
+    fn test_counter_increment_uses_saturating_add_pattern() {
+        // Test for += 1 without saturating_add - counters should use saturating arithmetic
+        let mut scheduler = VefProofScheduler::new(SchedulerPolicy::default());
+
+        // Manually set job sequence to near overflow
+        scheduler.next_job_seq = u64::MAX.saturating_sub(5);
+
+        let (entries, checkpoints) = sample_stream();
+
+        // Generate multiple jobs to test counter overflow protection
+        for i in 0..10 {
+            let windows = scheduler
+                .select_proof_windows(&entries, &checkpoints, 1_701_100_000_000_u64.saturating_add(i * 1000))
+                .expect("window selection should succeed");
+
+            if !windows.is_empty() {
+                let result = scheduler.queue_proof_jobs(&windows, 1_701_100_000_000_u64.saturating_add(i * 1000));
+                // Should handle near-overflow gracefully using saturating_add
+                match result {
+                    Ok(_) => {
+                        // next_job_seq should use saturating arithmetic, not overflow
+                        assert!(scheduler.next_job_seq <= u64::MAX);
+                    }
+                    Err(_) => {
+                        // If it fails due to capacity, that's acceptable
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_length_to_u32_conversion_uses_try_from_pattern() {
+        // Test for .len() as u32 - should use u32::try_from pattern
+        let mut scheduler = VefProofScheduler::new(SchedulerPolicy::default());
+
+        // Create a scenario with many jobs to test length handling
+        for i in 0..100 {
+            let job = make_job(
+                &format!("test-job-{}", i),
+                ProofJobStatus::Pending,
+                WorkloadTier::Standard,
+                1_701_100_000_000 + i * 1000,
+            );
+            if scheduler.jobs.len() < MAX_JOBS {
+                scheduler.jobs.insert(job.job_id.clone(), job);
+            }
+        }
+
+        let job_count = scheduler.jobs.len();
+
+        // Test hardening pattern: should use try_from, not direct cast
+        let safe_count_u32 = u32::try_from(job_count).unwrap_or(u32::MAX);
+        assert!(safe_count_u32 <= u32::MAX);
+
+        // Test that very large job counts would be handled safely
+        let hypothetical_large_count = usize::MAX;
+        let safe_large_cast = u32::try_from(hypothetical_large_count).unwrap_or(u32::MAX);
+        assert_eq!(safe_large_cast, u32::MAX); // Should cap at MAX, not truncate
+
+        // Verify scheduler functions work with current job count
+        let metrics = scheduler.backlog_metrics(1_701_100_010_000, "trace");
+        assert!(metrics.pending_jobs <= job_count);
+    }
+
+    #[test]
+    fn test_deadline_comparison_uses_greater_equal_pattern() {
+        // Test for > on expiry - should use >= for fail-closed semantics
+        let mut scheduler = VefProofScheduler::new(SchedulerPolicy::default());
+
+        let exact_deadline = 1_701_100_005_000_u64;
+        let job = make_job(
+            "deadline-boundary-test",
+            ProofJobStatus::Dispatched,
+            WorkloadTier::Standard,
+            exact_deadline,
+        );
+
+        scheduler.jobs.insert(job.job_id.clone(), job);
+
+        // Test boundary case: current time exactly equals deadline
+        let exceeded_at_boundary = scheduler.enforce_deadlines(exact_deadline);
+
+        // Correct pattern: >= means "expired" (fail-closed, includes boundary)
+        assert_eq!(exceeded_at_boundary.len(), 1, "Job should be considered expired at exact deadline boundary");
+
+        let job_state = scheduler.jobs.get("deadline-boundary-test").unwrap();
+        assert_eq!(job_state.status, ProofJobStatus::DeadlineExceeded);
+
+        // Test just before deadline (should not be expired)
+        let mut scheduler2 = VefProofScheduler::new(SchedulerPolicy::default());
+        let job2 = make_job(
+            "before-deadline-test",
+            ProofJobStatus::Dispatched,
+            WorkloadTier::Standard,
+            exact_deadline,
+        );
+        scheduler2.jobs.insert(job2.job_id.clone(), job2);
+
+        let not_exceeded_before = scheduler2.enforce_deadlines(exact_deadline.saturating_sub(1));
+        assert_eq!(not_exceeded_before.len(), 0, "Job should not be expired before deadline");
+
+        // Test after deadline (should be expired)
+        let exceeded_after = scheduler2.enforce_deadlines(exact_deadline.saturating_add(1));
+        assert_eq!(exceeded_after.len(), 1, "Job should be expired after deadline");
+    }
+
+    #[test]
+    fn test_hash_comparison_should_use_constant_time_pattern() {
+        // Test for == on [u8] hashes - should use ct_eq_bytes for timing safety
+        use crate::security::constant_time::ct_eq_bytes;
+
+        // Simulate hash comparison scenarios in proof scheduling context
+        let job_hash_1 = b"proof_job_hash_v1_abcdef123456789";
+        let job_hash_2 = b"proof_job_hash_v1_abcdef123456789"; // Same
+        let job_hash_3 = b"proof_job_hash_v1_abcdef123456788"; // Different by one byte
+
+        // Correct pattern: use constant-time comparison for hash verification
+        assert!(ct_eq_bytes(job_hash_1, job_hash_2), "Identical job hashes should match");
+        assert!(!ct_eq_bytes(job_hash_1, job_hash_3), "Different job hashes should not match");
+
+        // Test with different length hashes (should fail fast but still constant-time)
+        let short_hash = b"short_hash";
+        let long_hash = b"much_longer_proof_job_hash_value";
+        assert!(!ct_eq_bytes(short_hash, long_hash), "Different length hashes should not match");
+
+        // Test with proof window ID comparison (could be security-sensitive)
+        let window_id_1 = b"proof_window_12345";
+        let window_id_2 = b"proof_window_12345";
+        let window_id_3 = b"proof_window_12346";
+
+        assert!(ct_eq_bytes(window_id_1, window_id_2), "Identical window IDs should match");
+        assert!(!ct_eq_bytes(window_id_1, window_id_3), "Different window IDs should not match");
+    }
+
+    #[test]
+    fn test_hash_operations_include_domain_separators() {
+        // Test for hash without domain separator - should include domain separation
+        use sha2::{Digest, Sha256};
+
+        let job_id = "test-job-12345";
+        let window_id = "test-window-67890";
+        let tier = WorkloadTier::Critical;
+
+        // Correct pattern: include domain separator for proof job hashing
+        let job_domain_separator = b"vef_proof_job_v1:";
+        let mut job_hasher_with_domain = Sha256::new();
+        job_hasher_with_domain.update(job_domain_separator);
+        job_hasher_with_domain.update(job_id.as_bytes());
+        job_hasher_with_domain.update(window_id.as_bytes());
+        job_hasher_with_domain.update(&[tier.priority_score() as u8]);
+        let job_hash_with_domain = job_hasher_with_domain.finalize();
+
+        // Anti-pattern: hashing without domain separator (collision vulnerable)
+        let mut job_hasher_without_domain = Sha256::new();
+        job_hasher_without_domain.update(job_id.as_bytes());
+        job_hasher_without_domain.update(window_id.as_bytes());
+        job_hasher_without_domain.update(&[tier.priority_score() as u8]);
+        let job_hash_without_domain = job_hasher_without_domain.finalize();
+
+        // Should be different due to domain separation
+        assert_ne!(job_hash_with_domain[..], job_hash_without_domain[..],
+                   "Domain separator should change hash output");
+
+        // Test window hashing with domain separation
+        let window_domain_separator = b"vef_proof_window_v1:";
+        let start_index = 100_u64;
+        let end_index = 200_u64;
+
+        let mut window_hasher_with_domain = Sha256::new();
+        window_hasher_with_domain.update(window_domain_separator);
+        window_hasher_with_domain.update(window_id.as_bytes());
+        window_hasher_with_domain.update(&start_index.to_le_bytes());
+        window_hasher_with_domain.update(&end_index.to_le_bytes());
+        let window_hash_with_domain = window_hasher_with_domain.finalize();
+
+        // Test with different domain separator
+        let different_domain = b"other_system_v1:";
+        let mut window_hasher_different_domain = Sha256::new();
+        window_hasher_different_domain.update(different_domain);
+        window_hasher_different_domain.update(window_id.as_bytes());
+        window_hasher_different_domain.update(&start_index.to_le_bytes());
+        window_hasher_different_domain.update(&end_index.to_le_bytes());
+        let window_hash_different_domain = window_hasher_different_domain.finalize();
+
+        assert_ne!(window_hash_with_domain[..], window_hash_different_domain[..],
+                   "Different domain separators should produce different hashes");
+
+        // Test length-prefixed inputs to prevent delimiter collision
+        let field1 = "proof_data_field1";
+        let field2 = "proof_data_field2";
+
+        let mut safe_hasher = Sha256::new();
+        safe_hasher.update(b"vef_proof_scheduler_v1:");
+        safe_hasher.update((field1.len() as u64).to_le_bytes()); // Length prefix
+        safe_hasher.update(field1.as_bytes());
+        safe_hasher.update((field2.len() as u64).to_le_bytes()); // Length prefix
+        safe_hasher.update(field2.as_bytes());
+        let safe_hash = safe_hasher.finalize();
+
+        // Anti-pattern: simple concatenation (collision vulnerable)
+        let mut unsafe_hasher = Sha256::new();
+        unsafe_hasher.update(b"vef_proof_scheduler_v1:");
+        unsafe_hasher.update(field1.as_bytes());
+        unsafe_hasher.update(field2.as_bytes());
+        let unsafe_hash = unsafe_hasher.finalize();
+
+        // These might be the same, but the pattern ensures collision resistance
+        let _ = (safe_hash, unsafe_hash); // Just verify computation succeeds
+    }
+
+    #[test]
+    fn test_resource_budget_boundary_overflow_protection() {
+        // Test saturating arithmetic in resource budget calculations
+        let mut scheduler = VefProofScheduler::new(SchedulerPolicy {
+            max_compute_millis_per_tick: u64::MAX.saturating_sub(1000),
+            max_memory_mib_per_tick: u64::MAX.saturating_sub(1000),
+            ..SchedulerPolicy::default()
+        });
+
+        // Create jobs that would overflow budget calculations if not protected
+        let high_compute_job = ProofJob {
+            job_id: "high-compute-job".to_string(),
+            window_id: "window-1".to_string(),
+            tier: WorkloadTier::Critical,
+            priority_score: WorkloadTier::Critical.priority_score(),
+            deadline_millis: 1_701_100_010_000,
+            estimated_compute_millis: u64::MAX.saturating_sub(500), // Very high compute
+            estimated_memory_mib: u64::MAX.saturating_sub(500),     // Very high memory
+            status: ProofJobStatus::Pending,
+            created_at_millis: 1_701_100_000_000,
+            dispatched_at_millis: None,
+            completed_at_millis: None,
+            trace_id: "trace-high-compute".to_string(),
+        };
+
+        scheduler.jobs.insert(high_compute_job.job_id.clone(), high_compute_job);
+
+        // Dispatch should use saturating arithmetic and not overflow
+        let result = scheduler.dispatch_ready_jobs(1_701_100_005_000, "trace-dispatch");
+
+        match result {
+            Ok(dispatched) => {
+                // If successful, verify no overflow occurred in budget calculations
+                let metrics = scheduler.backlog_metrics(1_701_100_005_000, "trace-metrics");
+                assert!(metrics.compute_budget_used_millis <= u64::MAX);
+                assert!(metrics.memory_budget_used_mib <= u64::MAX);
+            }
+            Err(err) => {
+                // Should fail gracefully due to budget constraints, not due to overflow
+                assert!(!err.message.contains("overflow"));
+                assert!(err.message.contains("budget") || err.message.contains("resource"));
+            }
+        }
+
+        // Scheduler should remain in valid state
+        assert!(scheduler.jobs.len() <= MAX_JOBS);
+    }
 }

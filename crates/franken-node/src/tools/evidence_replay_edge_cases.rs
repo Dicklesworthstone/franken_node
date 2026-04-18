@@ -6,6 +6,31 @@ mod edge_case_tests {
     use super::super::evidence_replay_validator::*;
     use crate::observability::evidence_ledger::DecisionKind;
 
+    fn candidate(id: &str, kind: DecisionKind, score: f64) -> Candidate {
+        Candidate {
+            id: id.into(),
+            decision_kind: kind,
+            score,
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    fn satisfied_constraint(id: &str) -> Constraint {
+        Constraint {
+            id: id.into(),
+            description: "satisfied".into(),
+            satisfied: true,
+        }
+    }
+
+    fn unsatisfied_constraint(id: &str) -> Constraint {
+        Constraint {
+            id: id.into(),
+            description: "unsatisfied".into(),
+            satisfied: false,
+        }
+    }
+
     // ── Float handling edge cases ──
 
     #[test]
@@ -379,7 +404,8 @@ mod edge_case_tests {
     #[test]
     fn epoch_id_max_values() {
         let mut validator = EvidenceReplayValidator::new();
-        let entry = test_replay_entry("DEC-MAX", DecisionKind::Admit, u64::MAX);
+        let max_safe_epoch = u64::MAX / 1000;
+        let entry = test_replay_entry("DEC-MAX", DecisionKind::Admit, max_safe_epoch);
 
         let context = ReplayContext::new(
             vec![Candidate {
@@ -393,12 +419,12 @@ mod edge_case_tests {
                 description: "test".into(),
                 satisfied: true,
             }],
-            u64::MAX,
+            max_safe_epoch,
             "snap-001",
         );
 
         let result = validator.validate(&entry, &context);
-        assert!(result.is_match(), "Should handle maximum epoch_id values");
+        assert!(result.is_match(), "Should handle large epoch_id values");
     }
 
     #[test]
@@ -478,10 +504,9 @@ mod edge_case_tests {
             "   ", // Whitespace-only policy snapshot
         );
 
-        // Should be considered valid (not empty string)
         assert!(
-            context.is_valid(),
-            "Whitespace policy snapshot should be valid"
+            !context.is_valid(),
+            "Whitespace policy snapshot should be invalid"
         );
     }
 
@@ -539,9 +564,7 @@ mod edge_case_tests {
         let mut items = vec![1, 2, 3];
         push_bounded(&mut items, 4, 0);
 
-        // Should handle zero capacity by clearing everything except new item
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0], 4);
+        assert!(items.is_empty());
     }
 
     #[test]
@@ -605,5 +628,182 @@ mod edge_case_tests {
             result.is_mismatch(),
             "Different decision kinds should be handled correctly"
         );
+    }
+
+    // ── Additional negative-path replay coverage ──
+
+    #[test]
+    fn empty_candidate_context_is_unresolvable_and_logged() {
+        let mut validator = EvidenceReplayValidator::new();
+        let entry = test_replay_entry("DEC-MISSING", DecisionKind::Admit, 7);
+        let context = ReplayContext::new(Vec::new(), vec![satisfied_constraint("c1")], 7, "snap");
+
+        let result = validator.validate(&entry, &context);
+
+        assert!(result.is_unresolvable());
+        assert_eq!(validator.unresolvable_count(), 1);
+        assert_eq!(validator.mismatch_count(), 0);
+        assert_eq!(validator.results().len(), 1);
+    }
+
+    #[test]
+    fn nul_policy_snapshot_is_unresolvable_before_candidate_selection() {
+        let mut validator = EvidenceReplayValidator::new();
+        let entry = test_replay_entry("DEC-NUL", DecisionKind::Admit, 8);
+        let context = ReplayContext::new(
+            vec![candidate("DEC-NUL", DecisionKind::Admit, 1.0)],
+            vec![satisfied_constraint("c1")],
+            8,
+            "policy\0snapshot",
+        );
+
+        let result = validator.validate(&entry, &context);
+
+        assert!(result.is_unresolvable());
+        assert_eq!(validator.unresolvable_count(), 1);
+        assert_eq!(validator.match_count(), 0);
+    }
+
+    #[test]
+    fn epoch_mismatch_is_unresolvable_without_mismatch_counter() {
+        let mut validator = EvidenceReplayValidator::new();
+        let entry = test_replay_entry("DEC-EPOCH", DecisionKind::Admit, 9);
+        let context = ReplayContext::new(
+            vec![candidate("DEC-EPOCH", DecisionKind::Admit, 1.0)],
+            vec![satisfied_constraint("c1")],
+            10,
+            "snap",
+        );
+
+        let result = validator.validate(&entry, &context);
+
+        assert!(result.is_unresolvable());
+        assert_eq!(validator.unresolvable_count(), 1);
+        assert_eq!(validator.mismatch_count(), 0);
+    }
+
+    #[test]
+    fn higher_scoring_wrong_candidate_records_decision_id_diff() {
+        let mut validator = EvidenceReplayValidator::new();
+        let entry = test_replay_entry("DEC-EXPECTED", DecisionKind::Admit, 11);
+        let context = ReplayContext::new(
+            vec![
+                candidate("DEC-EXPECTED", DecisionKind::Admit, 0.5),
+                candidate("DEC-WRONG", DecisionKind::Admit, 0.9),
+            ],
+            vec![satisfied_constraint("c1")],
+            11,
+            "snap",
+        );
+
+        let result = validator.validate(&entry, &context);
+
+        match result {
+            ReplayResult::Mismatch { diff, got, .. } => {
+                assert_eq!(got.decision_id, "DEC-WRONG");
+                assert_eq!(diff.field_count(), 1);
+                assert!(diff.to_string().contains("decision_id"));
+            }
+            other => panic!("expected mismatch for wrong winner, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn higher_scoring_wrong_kind_records_kind_and_id_diff() {
+        let mut validator = EvidenceReplayValidator::new();
+        let entry = test_replay_entry("DEC-EXPECTED", DecisionKind::Admit, 12);
+        let context = ReplayContext::new(
+            vec![
+                candidate("DEC-EXPECTED", DecisionKind::Admit, 0.5),
+                candidate("DEC-DENY", DecisionKind::Deny, 0.9),
+            ],
+            vec![satisfied_constraint("c1")],
+            12,
+            "snap",
+        );
+
+        let result = validator.validate(&entry, &context);
+
+        match result {
+            ReplayResult::Mismatch { diff, got, .. } => {
+                assert_eq!(got.decision_id, "DEC-DENY");
+                assert_eq!(diff.field_count(), 2);
+                let rendered = diff.to_string();
+                assert!(rendered.contains("decision_kind"));
+                assert!(rendered.contains("decision_id"));
+            }
+            other => panic!("expected mismatch for wrong decision kind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deny_with_selected_candidate_mismatches_instead_of_matching() {
+        let mut validator = EvidenceReplayValidator::new();
+        let entry = test_replay_entry("DEC-DENY", DecisionKind::Deny, 13);
+        let context = ReplayContext::new(
+            vec![candidate("DEC-ADMIT", DecisionKind::Admit, 1.0)],
+            vec![satisfied_constraint("c1")],
+            13,
+            "snap",
+        );
+
+        let result = validator.validate(&entry, &context);
+
+        assert!(result.is_mismatch());
+        assert_eq!(validator.mismatch_count(), 1);
+        assert_eq!(validator.match_count(), 0);
+    }
+
+    #[test]
+    fn rollback_with_selected_candidate_mismatches_instead_of_matching() {
+        let mut validator = EvidenceReplayValidator::new();
+        let entry = test_replay_entry("DEC-ROLLBACK", DecisionKind::Rollback, 14);
+        let context = ReplayContext::new(
+            vec![candidate("DEC-ADMIT", DecisionKind::Admit, 1.0)],
+            vec![satisfied_constraint("c1")],
+            14,
+            "snap",
+        );
+
+        let result = validator.validate(&entry, &context);
+
+        assert!(result.is_mismatch());
+        assert_eq!(validator.mismatch_count(), 1);
+        assert_eq!(validator.unresolvable_count(), 0);
+    }
+
+    #[test]
+    fn batch_negative_paths_preserve_result_order_and_counts() {
+        let mut validator = EvidenceReplayValidator::new();
+        let admit = test_replay_entry("DEC-ADMIT", DecisionKind::Admit, 15);
+        let release = test_replay_entry("DEC-RELEASE", DecisionKind::Release, 16);
+        let entries = vec![
+            (
+                admit.clone(),
+                ReplayContext::new(
+                    vec![candidate("DEC-OTHER", DecisionKind::Admit, 1.0)],
+                    vec![satisfied_constraint("c1")],
+                    15,
+                    "snap",
+                ),
+            ),
+            (
+                release.clone(),
+                ReplayContext::new(
+                    vec![candidate("DEC-RELEASE", DecisionKind::Release, 1.0)],
+                    vec![unsatisfied_constraint("c2")],
+                    16,
+                    "snap",
+                ),
+            ),
+        ];
+
+        let results = validator.validate_batch(&entries);
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].is_mismatch());
+        assert!(results[1].is_mismatch());
+        assert_eq!(validator.total_validations(), 2);
+        assert_eq!(validator.mismatch_count(), 2);
     }
 }

@@ -19,8 +19,13 @@ use crate::observability::evidence_ledger::{DecisionKind, EvidenceEntry};
 use crate::capacity_defaults::aliases::{MAX_FIELDS, MAX_RESULTS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -117,7 +122,9 @@ impl ReplayContext {
 
     /// Check if context is minimally valid for replay.
     pub fn is_valid(&self) -> bool {
-        !self.candidates.is_empty() && !self.policy_snapshot_id.is_empty()
+        !self.candidates.is_empty()
+            && !self.policy_snapshot_id.trim().is_empty()
+            && !self.policy_snapshot_id.contains('\0')
     }
 }
 
@@ -1399,7 +1406,7 @@ mod tests {
                 Candidate {
                     id: "DEC-negative-score".into(),
                     decision_kind: DecisionKind::Admit,
-                    score: -5.0,  // Negative score
+                    score: -5.0, // Negative score
                     metadata: serde_json::json!({}),
                 },
                 Candidate {
@@ -1434,7 +1441,7 @@ mod tests {
             vec![Candidate {
                 id: "DEC-zero-score".into(),
                 decision_kind: DecisionKind::Quarantine,
-                score: 0.0,  // Exactly zero score
+                score: 0.0, // Exactly zero score
                 metadata: serde_json::json!({}),
             }],
             vec![Constraint {
@@ -1448,7 +1455,11 @@ mod tests {
 
         let result = v.validate(&e, &c);
 
-        assert!(result.is_match(), "Zero score should be valid but got: {:?}", result);
+        assert!(
+            result.is_match(),
+            "Zero score should be valid but got: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -1457,7 +1468,7 @@ mod tests {
         let e = test_replay_entry("", DecisionKind::Throttle, 1); // Empty decision_id
         let c = ReplayContext::new(
             vec![Candidate {
-                id: "".into(),  // Empty candidate id
+                id: "".into(), // Empty candidate id
                 decision_kind: DecisionKind::Throttle,
                 score: 1.0,
                 metadata: serde_json::json!({}),
@@ -1473,7 +1484,11 @@ mod tests {
 
         let result = v.validate(&e, &c);
 
-        assert!(result.is_match(), "Empty decision_id should be handled: {:?}", result);
+        assert!(
+            result.is_match(),
+            "Empty decision_id should be handled: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -1514,7 +1529,11 @@ mod tests {
 
         let result = v.validate(&e, &c);
 
-        assert!(result.is_match(), "Large epoch should be handled: {:?}", result);
+        assert!(
+            result.is_match(),
+            "Large epoch should be handled: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -1526,7 +1545,7 @@ mod tests {
                 Candidate {
                     id: "DEC-neg-inf".into(),
                     decision_kind: DecisionKind::Release,
-                    score: f64::NEG_INFINITY,  // Negative infinity
+                    score: f64::NEG_INFINITY, // Negative infinity
                     metadata: serde_json::json!({}),
                 },
                 Candidate {
@@ -1564,12 +1583,13 @@ mod tests {
             }],
             vec![],
             1,
-            "   ",  // Whitespace-only policy snapshot
+            "   ", // Whitespace-only policy snapshot
         );
 
-        // Note: current implementation only checks for empty string, not whitespace
-        // This test documents the behavior - whitespace-only is considered valid
-        assert!(ctx.is_valid(), "Whitespace-only policy snapshot is currently considered valid");
+        assert!(
+            !ctx.is_valid(),
+            "whitespace-only policy snapshots must fail closed"
+        );
     }
 
     #[test]
@@ -1592,7 +1612,7 @@ mod tests {
                 Constraint {
                     id: "c2".into(),
                     description: "unsatisfied constraint".into(),
-                    satisfied: false,  // One unsatisfied constraint blocks all
+                    satisfied: false, // One unsatisfied constraint blocks all
                 },
                 Constraint {
                     id: "c3".into(),
@@ -1611,5 +1631,107 @@ mod tests {
             assert_eq!(got.decision_kind, "none");
             assert_eq!(got.decision_id, "none");
         }
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_existing_items_and_drops_new() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_on_empty_vec_drops_new_item() {
+        let mut items: Vec<&str> = Vec::new();
+
+        push_bounded(&mut items, "discarded", 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn replay_context_with_tab_newline_policy_snapshot_invalid() {
+        let ctx = ReplayContext::new(
+            vec![Candidate {
+                id: "c1".into(),
+                decision_kind: DecisionKind::Admit,
+                score: 1.0,
+                metadata: serde_json::json!({}),
+            }],
+            vec![],
+            1,
+            "\t\n",
+        );
+
+        assert!(!ctx.is_valid());
+    }
+
+    #[test]
+    fn replay_context_with_nul_policy_snapshot_invalid() {
+        let ctx = ReplayContext::new(
+            vec![Candidate {
+                id: "c1".into(),
+                decision_kind: DecisionKind::Admit,
+                score: 1.0,
+                metadata: serde_json::json!({}),
+            }],
+            vec![],
+            1,
+            "snapshot\0hidden",
+        );
+
+        assert!(!ctx.is_valid());
+    }
+
+    #[test]
+    fn validate_whitespace_policy_snapshot_records_unresolvable_result() {
+        let mut v = EvidenceReplayValidator::new();
+        let e = test_replay_entry("DEC-whitespace-snapshot", DecisionKind::Admit, 1);
+        let c = ReplayContext::new(
+            vec![Candidate {
+                id: "DEC-whitespace-snapshot".into(),
+                decision_kind: DecisionKind::Admit,
+                score: 1.0,
+                metadata: serde_json::json!({}),
+            }],
+            vec![],
+            1,
+            " \r\n ",
+        );
+
+        let result = v.validate(&e, &c);
+
+        assert!(result.is_unresolvable());
+        assert_eq!(v.total_validations(), 1);
+        assert_eq!(v.unresolvable_count(), 1);
+        assert_eq!(v.results().len(), 1);
+        assert_eq!(v.results()[0].0, "DEC-whitespace-snapshot");
+    }
+
+    #[test]
+    fn validate_nul_policy_snapshot_records_unresolvable_result() {
+        let mut v = EvidenceReplayValidator::new();
+        let e = test_replay_entry("DEC-nul-snapshot", DecisionKind::Release, 1);
+        let c = ReplayContext::new(
+            vec![Candidate {
+                id: "DEC-nul-snapshot".into(),
+                decision_kind: DecisionKind::Release,
+                score: 1.0,
+                metadata: serde_json::json!({}),
+            }],
+            vec![],
+            1,
+            "snapshot\0shadow",
+        );
+
+        let result = v.validate(&e, &c);
+
+        assert!(result.is_unresolvable());
+        assert_eq!(v.total_validations(), 1);
+        assert_eq!(v.unresolvable_count(), 1);
+        assert_eq!(v.results().len(), 1);
+        assert_eq!(v.results()[0].0, "DEC-nul-snapshot");
     }
 }

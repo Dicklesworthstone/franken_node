@@ -32,9 +32,13 @@ use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_BUNDLES: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
-        items.drain(0..overflow);
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
@@ -1138,5 +1142,141 @@ mod tests {
             c1.content_hash, c2.content_hash,
             "Different type distribution must change catalog hash"
         );
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_without_inserting_new_bundle() {
+        let mut items = vec![DatasetBundle {
+            bundle_id: "old".to_string(),
+            datasets: vec!["ds-old".to_string()],
+            total_records: 1,
+            bundle_hash: "a".repeat(64),
+            schema_version: SCHEMA_VERSION.to_string(),
+            published_at: "2026-01-01T00:00:00Z".to_string(),
+        }];
+        let replacement = DatasetBundle {
+            bundle_id: "new".to_string(),
+            datasets: vec!["ds-new".to_string()],
+            total_records: 2,
+            bundle_hash: "b".repeat(64),
+            schema_version: SCHEMA_VERSION.to_string(),
+            published_at: "2026-01-01T00:00:01Z".to_string(),
+        };
+
+        push_bounded(&mut items, replacement, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn register_rejects_fullwidth_hex_content_hash_without_insert() {
+        let mut engine = ReproducibleDatasets::default();
+        let mut entry = sample_entry("ds-fullwidth-hash", DatasetType::TrustEvidence, 500);
+        entry.content_hash = format!("{}ＡＡ", "aa".repeat(31));
+
+        let err = engine
+            .register_dataset(entry, "trace-fullwidth-hash")
+            .unwrap_err();
+
+        assert!(err.contains("Invalid content hash"));
+        assert!(engine.datasets().is_empty());
+        assert!(engine.audit_log().iter().any(|record| {
+            record.event_code == event_codes::RDS_ERR_INTEGRITY
+                && matches!(
+                    record.details["reason"].as_str(),
+                    Some("invalid content hash")
+                )
+        }));
+    }
+
+    #[test]
+    fn register_rejects_zero_width_separator_content_hash_without_insert() {
+        let mut engine = ReproducibleDatasets::default();
+        let mut entry = sample_entry("ds-zwsp-hash", DatasetType::SecurityIncident, 500);
+        entry.content_hash = format!("{}{}", "aa".repeat(16), "\u{200b}aa".repeat(16));
+
+        let err = engine
+            .register_dataset(entry, "trace-zwsp-hash")
+            .unwrap_err();
+
+        assert!(err.contains("Invalid content hash"));
+        assert!(engine.datasets().is_empty());
+    }
+
+    #[test]
+    fn register_rejects_replay_hash_with_embedded_newline_without_insert() {
+        let mut engine = ReproducibleDatasets::default();
+        let mut entry = sample_entry("ds-bad-replay-newline", DatasetType::BenchmarkBaseline, 500);
+        entry.replay_instructions.expected_hash =
+            format!("{}\n{}", "bb".repeat(16), "bb".repeat(16));
+
+        let err = engine
+            .register_dataset(entry, "trace-replay-newline")
+            .unwrap_err();
+
+        assert!(err.contains("Replay expected hash"));
+        assert!(engine.datasets().is_empty());
+    }
+
+    #[test]
+    fn dataset_type_deserialize_rejects_unknown_variant() {
+        let err = serde_json::from_str::<DatasetType>(r#""incident_replay""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn dataset_entry_deserialize_rejects_string_record_count() {
+        let mut value =
+            serde_json::to_value(sample_entry("ds-string-records", DatasetType::TrustEvidence, 500))
+                .expect("sample dataset entry should serialize");
+        value["record_count"] = serde_json::json!("500");
+
+        let err = serde_json::from_value::<DatasetEntry>(value).unwrap_err();
+
+        assert!(err.to_string().contains("record_count"));
+    }
+
+    #[test]
+    fn replay_instructions_deserialize_rejects_non_array_commands() {
+        let value = serde_json::json!({
+            "environment": "franken_node v2.0.0",
+            "commands": "cargo test --release",
+            "expected_hash": "b".repeat(64),
+            "deterministic": true
+        });
+
+        let err = serde_json::from_value::<ReplayInstructions>(value).unwrap_err();
+
+        assert!(err.to_string().contains("commands"));
+    }
+
+    #[test]
+    fn dataset_config_deserialize_rejects_negative_min_records() {
+        let value = serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "min_records_per_dataset": -1,
+            "require_replay_instructions": true
+        });
+
+        let err = serde_json::from_value::<DatasetConfig>(value).unwrap_err();
+
+        assert!(err.to_string().contains("min_records_per_dataset"));
+    }
+
+    #[test]
+    fn dataset_bundle_deserialize_rejects_string_total_records() {
+        let value = serde_json::json!({
+            "bundle_id": "bundle-1",
+            "datasets": ["ds-1"],
+            "total_records": "500",
+            "bundle_hash": "a".repeat(64),
+            "schema_version": SCHEMA_VERSION,
+            "published_at": "2026-01-01T00:00:00Z"
+        });
+
+        let err = serde_json::from_value::<DatasetBundle>(value).unwrap_err();
+
+        assert!(err.to_string().contains("total_records"));
     }
 }

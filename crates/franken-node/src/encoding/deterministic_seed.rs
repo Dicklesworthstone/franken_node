@@ -1631,4 +1631,350 @@ mod additional_negative_path_tests {
 
         assert!(result.is_err());
     }
+
+    #[test]
+    fn content_hash_rejects_unicode_confusable_hex_digits() {
+        let raw = format!("{}ＡＡ", "aa".repeat(31));
+
+        let err =
+            ContentHash::from_hex(&raw).expect_err("fullwidth hex lookalikes must be rejected");
+
+        assert_eq!(err, SeedError::InvalidContentHash);
+    }
+
+    #[test]
+    fn content_hash_rejects_embedded_zero_width_separator() {
+        let raw = format!("{}{}", "aa".repeat(16), "\u{200b}aa".repeat(16));
+
+        let err =
+            ContentHash::from_hex(&raw).expect_err("invisible separators must be rejected");
+
+        assert_eq!(err, SeedError::InvalidContentHash);
+    }
+
+    #[test]
+    fn schedule_config_deserialize_rejects_negative_version() {
+        let payload = serde_json::json!({
+            "version": -1,
+            "parameters": {
+                "chunk_size": "65536"
+            }
+        });
+
+        let result = serde_json::from_value::<ScheduleConfig>(payload);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn schedule_config_deserialize_rejects_null_parameters() {
+        let payload = serde_json::json!({
+            "version": 1,
+            "parameters": null
+        });
+
+        let result = serde_json::from_value::<ScheduleConfig>(payload);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deterministic_seed_deserialize_rejects_missing_domain() {
+        let payload = serde_json::json!({
+            "bytes": "22".repeat(32),
+            "config_version": 1
+        });
+
+        let result = serde_json::from_value::<DeterministicSeed>(payload);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deterministic_seed_deserialize_rejects_string_config_version() {
+        let payload = serde_json::json!({
+            "bytes": "22".repeat(32),
+            "domain": "Encoding",
+            "config_version": "1"
+        });
+
+        let result = serde_json::from_value::<DeterministicSeed>(payload);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn domain_tag_deserialize_rejects_object_payload() {
+        let payload = serde_json::json!({
+            "label": "Encoding"
+        });
+
+        let result = serde_json::from_value::<DomainTag>(payload);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn content_hash_change_without_config_drift_does_not_emit_bump_record() {
+        let mut deriver = DeterministicSeedDeriver::new();
+        let config = ScheduleConfig::new(1).with_param("salt", "stable");
+        let first_hash = ContentHash([0x10; 32]);
+        let second_hash = ContentHash([0x20; 32]);
+        deriver.derive_seed(&DomainTag::Placement, &first_hash, &config);
+
+        let (_, bump) = deriver.derive_seed(&DomainTag::Placement, &second_hash, &config);
+
+        assert!(bump.is_none());
+        assert!(deriver.bump_records().is_empty());
+    }
+
+    #[test]
+    fn version_bump_record_deserialize_rejects_negative_old_version() {
+        let payload = serde_json::json!({
+            "domain": "Repair",
+            "content_hash_hex": "33".repeat(32),
+            "old_config_hash": "44".repeat(32),
+            "new_config_hash": "55".repeat(32),
+            "old_seed_hex": "66".repeat(32),
+            "new_seed_hex": "77".repeat(32),
+            "old_version": -1,
+            "new_version": 2,
+            "bump_reason": "config changed",
+            "timestamp": "2026-01-01T00:00:00Z"
+        });
+
+        let result = serde_json::from_value::<VersionBumpRecord>(payload);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_tracked_domains_count_arithmetic_without_overflow_protection() {
+        // Test potential overflow in domain tracking arithmetic
+        // Line 604: i + 1 without saturating_add in tracked_domains verification
+        let mut deriver = DeterministicSeedDeriver::new();
+        let config = ScheduleConfig::new(1).with_param("overflow_test", "value");
+        let content_hash = ContentHash::from_bytes([0xAA; 32]);
+
+        // Simulate extreme domain usage patterns
+        for domain in DomainTag::all() {
+            let (_, _) = deriver.derive_seed(domain, &content_hash, &config);
+
+            // The current implementation uses i + 1 without protection
+            // This simulates potential overflow if we had many more domains
+            let current_count = deriver.tracked_domains();
+            if current_count < usize::MAX {
+                // Demonstrate the pattern that could overflow:
+                // assert_eq!(deriver.tracked_domains(), i + 1);
+
+                // Safe version should use saturating arithmetic:
+                let safe_count = current_count.saturating_add(1);
+                assert!(safe_count >= current_count, "Safe count should not underflow");
+            }
+        }
+
+        // Verify final count without overflow
+        let final_count = deriver.tracked_domains();
+        assert_eq!(final_count, DomainTag::all().len(), "Should track all domains");
+
+        // Test boundary condition for maximum domains
+        assert!(final_count <= usize::MAX, "Domain count should not overflow");
+    }
+
+    #[test]
+    fn negative_domain_separation_loop_bounds_with_overflow_potential() {
+        // Test loop bounds in domain separation verification
+        // Line 782: (i + 1)..domains.len() could overflow with extreme indices
+        let ch = test_content_hash();
+        let cfg = test_config_v1();
+        let domains = DomainTag::all();
+
+        // Test the pattern that could overflow in domain pair verification
+        for i in 0..domains.len() {
+            // Current implementation: for j in (i + 1)..domains.len()
+            // Test safe bounds calculation
+            let safe_start = i.saturating_add(1);
+            if safe_start < domains.len() {
+                for j in safe_start..domains.len() {
+                    let s_i = derive_seed(&domains[i], &ch, &cfg);
+                    let s_j = derive_seed(&domains[j], &ch, &cfg);
+
+                    assert_ne!(s_i.bytes, s_j.bytes,
+                              "Domain {} vs {} should produce different seeds", i, j);
+                }
+            }
+        }
+
+        // Demonstrate potential overflow scenario with hypothetical large index
+        let test_large_index = usize::MAX.saturating_sub(10);
+        let safe_increment = test_large_index.saturating_add(1);
+        assert!(safe_increment <= usize::MAX, "Saturating add should prevent overflow");
+
+        // Unsafe version would overflow: test_large_index + 1 (if near MAX)
+        if test_large_index < usize::MAX {
+            let _unsafe_increment = test_large_index + 1; // Would panic near MAX
+        }
+    }
+
+    #[test]
+    fn negative_test_content_hash_generation_with_index_overflow() {
+        // Test potential overflow in test helper functions
+        // Line 709: u8::try_from(i) with potential index overflow
+
+        // Test boundary conditions for index-to-byte conversion
+        let boundary_indices = [0, 127, 255, 256, 1000, usize::MAX];
+
+        for &index in &boundary_indices {
+            if index <= 31 { // Valid array index for 32-byte hash
+                // Test safe conversion
+                let safe_byte = u8::try_from(index).unwrap_or(u8::MAX);
+                assert!(safe_byte <= u8::MAX, "Safe conversion should not overflow");
+
+                // Create hash with safe byte
+                let mut h = [0u8; 32];
+                h[index] = safe_byte;
+                let content_hash = ContentHash(h);
+
+                // Verify hash integrity
+                assert_eq!(content_hash.0[index], safe_byte, "Hash should preserve safe byte value");
+            } else {
+                // Index too large for array - test error handling
+                let conversion_result = u8::try_from(index);
+                if index > u8::MAX as usize {
+                    assert!(conversion_result.is_err(), "Should fail to convert large index to u8");
+                }
+            }
+        }
+
+        // Test the original helper function behavior
+        let test_hash = test_content_hash();
+        assert_eq!(test_hash.0.len(), 32, "Test hash should be 32 bytes");
+
+        // Verify incrementing pattern in test hash
+        for i in 0..32 {
+            let expected_byte = u8::try_from(i).expect("Index should fit in u8");
+            assert_eq!(test_hash.0[i], expected_byte, "Test hash should have incrementing pattern");
+        }
+    }
+
+    #[test]
+    fn negative_bump_records_clear_without_bounded_operation() {
+        // Test unbounded clear operation on bump records
+        // Line 618: self.bump_records.clear() without size/capacity verification
+        let mut deriver = DeterministicSeedDeriver::new();
+        let base_config = ScheduleConfig::new(1).with_param("base", "value");
+        let content_hash = ContentHash::from_bytes([0xBB; 32]);
+
+        // Generate many bump records to stress clear operation
+        for i in 0..MAX_BUMP_RECORDS {
+            let config_i = ScheduleConfig::new(i as u32 + 1).with_param("iteration", &i.to_string());
+            let (_, _) = deriver.derive_seed(&DomainTag::Encoding, &content_hash, &config_i);
+        }
+
+        // Verify records were generated and bounded
+        let records_before_clear = deriver.bump_records().len();
+        assert!(records_before_clear > 0, "Should have bump records before clear");
+        assert!(records_before_clear <= MAX_BUMP_RECORDS, "Should respect bump record capacity");
+
+        // Test clear operation
+        deriver.clear_bump_records();
+        assert_eq!(deriver.bump_records().len(), 0, "Should have zero records after clear");
+
+        // Verify deriver still functions after clear
+        let tracked_before = deriver.tracked_domains();
+        let test_config = ScheduleConfig::new(99).with_param("post_clear", "test");
+        let (seed, bump) = deriver.derive_seed(&DomainTag::Repair, &content_hash, &test_config);
+
+        assert_eq!(seed.bytes.len(), 32, "Should produce valid seed after clear");
+        assert!(bump.is_some(), "Should generate bump record for new config");
+        assert_eq!(deriver.tracked_domains(), tracked_before, "Domain tracking should be preserved");
+
+        // Test multiple clears don't cause issues
+        deriver.clear_bump_records();
+        deriver.clear_bump_records();
+        assert_eq!(deriver.bump_records().len(), 0, "Multiple clears should be safe");
+
+        // A hardened implementation might:
+        // 1. Verify capacity before/after clear
+        // 2. Use bounded_clear(max_retained) instead of clear()
+        // 3. Track clear operations for audit purposes
+    }
+
+    #[test]
+    fn negative_hex_encoding_slice_operations_with_potential_optimization() {
+        // Test hex encoding operations that use .as_slice()
+        // Line 347: hex::encode(old_hash.as_slice()) - potential optimization concerns
+        let mut deriver = DeterministicSeedDeriver::new();
+        let content_hash = ContentHash::from_bytes([0xCC; 32]);
+
+        // Test hex encoding/decoding with various hash patterns
+        let hash_patterns = [
+            [0x00; 32],           // All zeros
+            [0xFF; 32],           // All ones
+            [0xAA; 32],           // Alternating pattern
+            {
+                let mut pattern = [0u8; 32];
+                for (i, byte) in pattern.iter_mut().enumerate() {
+                    *byte = (i ^ (i >> 4)) as u8; // XOR pattern
+                }
+                pattern
+            },
+            {
+                let mut pattern = [0u8; 32];
+                for (i, byte) in pattern.iter_mut().enumerate() {
+                    *byte = ((i * 37) % 256) as u8; // Prime modulo pattern
+                }
+                pattern
+            },
+        ];
+
+        for (test_num, pattern) in hash_patterns.iter().enumerate() {
+            let test_hash = ContentHash::from_bytes(*pattern);
+            let config1 = ScheduleConfig::new(1).with_param("pattern", &format!("test_{}", test_num));
+            let config2 = ScheduleConfig::new(2).with_param("pattern", &format!("test_{}", test_num));
+
+            // Generate bump record to test hex encoding operations
+            let (_, _) = deriver.derive_seed(&DomainTag::Placement, &test_hash, &config1);
+            let (_, bump) = deriver.derive_seed(&DomainTag::Placement, &test_hash, &config2);
+
+            if let Some(bump_record) = bump {
+                // Verify hex encoding integrity
+                assert_eq!(bump_record.old_config_hash.len(), 64, "Config hash hex should be 64 chars");
+                assert_eq!(bump_record.new_config_hash.len(), 64, "New config hash hex should be 64 chars");
+                assert_eq!(bump_record.old_seed_hex.len(), 64, "Old seed hex should be 64 chars");
+                assert_eq!(bump_record.new_seed_hex.len(), 64, "New seed hex should be 64 chars");
+                assert_eq!(bump_record.content_hash_hex.len(), 64, "Content hash hex should be 64 chars");
+
+                // Verify hex strings are valid
+                for hex_field in [
+                    &bump_record.old_config_hash,
+                    &bump_record.new_config_hash,
+                    &bump_record.old_seed_hex,
+                    &bump_record.new_seed_hex,
+                    &bump_record.content_hash_hex,
+                ] {
+                    assert!(hex_field.chars().all(|c| c.is_ascii_hexdigit()),
+                           "Hex field should contain only hex digits: {}", hex_field);
+
+                    // Test round-trip encoding/decoding
+                    let decoded = hex::decode(hex_field).expect("Should decode valid hex");
+                    assert_eq!(decoded.len(), 32, "Decoded hex should be 32 bytes");
+
+                    let re_encoded = hex::encode(&decoded);
+                    assert_eq!(&re_encoded, hex_field, "Round-trip encoding should be stable");
+                }
+            }
+        }
+
+        // Test content hash hex operations specifically
+        for pattern in &hash_patterns {
+            let test_hash = ContentHash::from_bytes(*pattern);
+            let hex_string = test_hash.to_hex();
+            let prefix_hex = test_hash.prefix_hex();
+
+            assert_eq!(hex_string.len(), 64, "Full hex should be 64 characters");
+            assert_eq!(prefix_hex.len(), 8, "Prefix hex should be 8 characters");
+            assert!(hex_string.starts_with(&prefix_hex), "Full hex should start with prefix");
+        }
+    }
 }

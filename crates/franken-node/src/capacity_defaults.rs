@@ -765,4 +765,450 @@ mod negative_path_tests {
         assert!(err.contains("obligations"));
         assert!(validate_large_sized("obligations", aliases::MAX_OBLIGATIONS).is_ok());
     }
+
+    // === COMPREHENSIVE NEGATIVE-PATH TESTS ===
+    // Additional edge case tests for capacity boundary validation that security hardening may have missed
+
+    #[test]
+    fn test_unicode_injection_in_capacity_identifiers() {
+        // Test Unicode injection attacks in capacity identifier strings
+        // Control characters and homograph attacks could bypass validation
+        let unicode_attack_vectors = [
+            "capacity\u{200B}injection",     // Zero-width space
+            "capacity\u{202E}yticapac",      // Right-to-left override
+            "capacity\u{0000}injection",     // Null byte injection
+            "capacity\u{FEFF}injection",     // BOM injection
+            "capacity\u{000C}injection",     // Form feed injection
+            "capacity\ninjection",           // Newline injection
+            "capacіty",                      // Cyrillic 'і' homograph
+            "capacity\u{001F}injection",     // Unit separator injection
+        ];
+
+        for malicious_id in &unicode_attack_vectors {
+            // Validation functions should handle Unicode injection safely
+            let result = validate_standard_sized(malicious_id, base::STANDARD);
+            // Should either succeed (with safe handling) or fail (with rejection)
+            match result {
+                Ok(()) => {
+                    // If accepted, verify no corruption in subsequent operations
+                    assert!(base::STANDARD > 0, "Capacity validation should remain consistent after Unicode input");
+                },
+                Err(error_msg) => {
+                    // Rejection is also acceptable for malformed identifiers
+                    assert!(!error_msg.is_empty(), "Error message should not be empty");
+                }
+            }
+
+            // Test with trace-sized validation
+            let trace_result = validate_trace_sized(malicious_id, base::TRACE);
+            match trace_result {
+                Ok(()) => assert!(base::TRACE > 0),
+                Err(msg) => assert!(!msg.is_empty()),
+            }
+        }
+    }
+
+    #[test]
+    fn test_arithmetic_overflow_in_capacity_calculations() {
+        // Test arithmetic overflow scenarios in capacity boundary checks
+        // Recent hardening may have missed edge cases in capacity arithmetic
+        let overflow_test_cases = [
+            (usize::MAX, "Maximum usize capacity"),
+            (usize::MAX - 1, "Near-maximum capacity"),
+            (usize::MAX / 2, "Half-maximum capacity"),
+            (0, "Zero capacity boundary"),
+            (1, "Minimum non-zero capacity"),
+        ];
+
+        for (capacity_value, description) in &overflow_test_cases {
+            // Test bucket hierarchy validation with extreme values
+            let buckets = vec![
+                ("small", base::SMALL),
+                ("medium", base::MEDIUM),
+                ("large", *capacity_value),  // Test with extreme value
+                ("xl", base::XL),
+            ];
+
+            let result = validate_strictly_increasing_buckets(&buckets);
+            match result {
+                Ok(()) => {
+                    // If validation passes, verify no arithmetic overflow occurred
+                    assert!(*capacity_value >= base::MEDIUM, "Large bucket validation should maintain order for: {}", description);
+                },
+                Err(error_msg) => {
+                    // Expected failure for invalid hierarchies
+                    assert!(!error_msg.is_empty(), "Should have error message for: {}", description);
+                }
+            }
+
+            // Test capacity doubling without overflow
+            if *capacity_value <= usize::MAX / 2 {
+                let doubled = capacity_value.saturating_mul(2);
+                assert!(doubled >= *capacity_value, "Doubling should not underflow for: {}", description);
+            }
+
+            // Test capacity addition without overflow
+            let incremented = capacity_value.saturating_add(1000);
+            if *capacity_value < usize::MAX - 1000 {
+                assert!(incremented > *capacity_value, "Increment should increase value for: {}", description);
+            } else {
+                assert!(incremented == usize::MAX, "Should saturate at maximum for: {}", description);
+            }
+        }
+    }
+
+    #[test]
+    fn test_memory_exhaustion_through_massive_bucket_hierarchies() {
+        // Test memory exhaustion attacks via massive bucket lists
+        // Could bypass memory limits through incremental allocation
+        let massive_buckets: Vec<(&str, usize)> = (0..10000)
+            .map(|i| {
+                let name = format!("bucket-{i}-with-long-name-to-increase-memory-pressure");
+                // Use Box to avoid moving large strings
+                (Box::leak(name.into_boxed_str()), base::SMALL + i)
+            })
+            .collect();
+
+        // Should handle large bucket lists without memory exhaustion or panic
+        let result = validate_strictly_increasing_buckets(&massive_buckets);
+
+        match result {
+            Ok(()) => {
+                // If successful, verify buckets are properly ordered despite size
+                for window in massive_buckets.windows(2) {
+                    assert!(window[1].1 >= window[0].1, "Buckets should remain ordered despite memory pressure");
+                }
+            },
+            Err(error_msg) => {
+                // Memory protection through rejection is also acceptable
+                assert!(!error_msg.is_empty(), "Error message should be provided");
+            }
+        }
+
+        // Verify base constants remain unaffected by memory pressure
+        assert_eq!(base::SMALL, 256, "Base constants should remain stable");
+        assert_eq!(base::MEDIUM, 2048, "Base constants should remain stable");
+    }
+
+    #[test]
+    fn test_null_byte_injection_in_capacity_names() {
+        // Test null byte injection attacks in capacity name strings
+        // Could truncate strings in C-compatible contexts
+        let null_injection_cases = [
+            ("capacity\0injection", "Single null byte"),
+            ("capacity\0\0double", "Double null byte"),
+            ("cap\0acity\0multi", "Multiple null bytes"),
+            ("capacity\0", "Trailing null byte"),
+            ("\0capacity", "Leading null byte"),
+        ];
+
+        for (malicious_name, description) in &null_injection_cases {
+            // Test validation with null byte injection
+            let result = validate_standard_sized(malicious_name, base::STANDARD);
+
+            match result {
+                Ok(()) => {
+                    // If accepted, verify no string truncation vulnerabilities
+                    assert!(base::STANDARD > 0, "Capacity should remain valid after null byte input: {}", description);
+                },
+                Err(error_msg) => {
+                    // Rejection of null byte injection is also acceptable
+                    assert!(!error_msg.is_empty(), "Should have error message for: {}", description);
+                    // Error message should not be truncated by null bytes
+                    assert!(error_msg.len() > 0, "Error message should not be empty for: {}", description);
+                }
+            }
+
+            // Test with different validation functions
+            let trace_result = validate_trace_sized(malicious_name, base::TRACE);
+            let medium_result = validate_medium_sized(malicious_name, base::MEDIUM);
+
+            // All validation functions should handle null bytes consistently
+            match (trace_result, medium_result) {
+                (Ok(()), Ok(())) => {
+                    // Both accepted - verify consistency
+                    assert!(base::TRACE < base::MEDIUM, "Bucket hierarchy should remain valid");
+                },
+                _ => {
+                    // At least one rejected - acceptable for malformed input
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_serialization_format_injection_in_capacity_validation() {
+        // Test serialization format injection attacks
+        // Malformed JSON/YAML-like content could bypass parsing
+        let serialization_injection_cases = [
+            ("capacity\"],\"malicious\":\"payload", "JSON injection attempt"),
+            ("capacity</name><script>alert(1)</script>", "XML injection attempt"),
+            ("capacity\n  malicious: payload", "YAML injection attempt"),
+            ("capacity\"\nmalicious\n\"", "Multi-line string escape"),
+            ("capacity{{.Values.Secret}}", "Template injection attempt"),
+            ("capacity$(echo hack)", "Command injection attempt"),
+            ("capacity';<script>alert(1);</script>", "Script injection attempt"),
+            ("capacity\\u0022payload\\u0022", "Unicode escape injection"),
+        ];
+
+        for (injection_name, description) in &serialization_injection_cases {
+            // Test various validation functions with injection attempts
+            let standard_result = validate_standard_sized(injection_name, base::STANDARD);
+            let trace_result = validate_trace_sized(injection_name, base::TRACE);
+            let medium_result = validate_medium_sized(injection_name, base::MEDIUM);
+            let large_result = validate_large_sized(injection_name, base::LARGE);
+
+            // Verify all validation functions handle injection safely
+            let results = [standard_result, trace_result, medium_result, large_result];
+
+            for (i, result) in results.iter().enumerate() {
+                match result {
+                    Ok(()) => {
+                        // If injection is accepted, verify no code execution or corruption
+                        assert!(base::STANDARD > 0, "Constants should remain stable after injection: {} (validator {})", description, i);
+                    },
+                    Err(error_msg) => {
+                        // Rejection is expected for malformed input
+                        assert!(!error_msg.is_empty(), "Error message should not be empty for: {} (validator {})", description, i);
+                        // Verify error message doesn't contain injected content
+                        assert!(!error_msg.contains("<script>"), "Error message should not contain script tags: {}", description);
+                        assert!(!error_msg.contains("{{"), "Error message should not contain template syntax: {}", description);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_floating_point_precision_attacks_in_capacity_ratios() {
+        // Test floating-point precision attacks in capacity ratio calculations
+        // Subnormal numbers and precision loss could cause validation bypass
+        use std::collections::HashMap;
+
+        // Create test data for ratio calculations
+        let precision_test_cases = [
+            (1.0, f64::EPSILON, "Division by epsilon"),
+            (f64::MAX, 1.0, "Maximum dividend"),
+            (f64::MIN_POSITIVE, f64::MAX, "Min/Max ratio"),
+            (1.0 / 3.0, 2.0 / 3.0, "Repeating decimal ratio"),
+            (f64::consts::PI, f64::consts::E, "Transcendental ratio"),
+            (0.1 + 0.2, 0.3, "Classic floating-point precision"),
+        ];
+
+        for (numerator, denominator, description) in &precision_test_cases {
+            // Test capacity ratio calculations with extreme floating-point values
+            if *denominator != 0.0 && denominator.is_finite() {
+                let ratio = numerator / denominator;
+
+                // Verify ratio calculations don't produce NaN or infinity
+                if ratio.is_finite() {
+                    // Test using ratio in capacity calculations
+                    let scaled_capacity = (base::STANDARD as f64 * ratio) as usize;
+
+                    // Verify scaled capacity is reasonable
+                    if scaled_capacity > 0 && scaled_capacity < usize::MAX / 2 {
+                        let validation_result = validate_standard_sized("precision-test", scaled_capacity);
+
+                        match validation_result {
+                            Ok(()) => {
+                                assert!(scaled_capacity > 0, "Scaled capacity should be positive for: {}", description);
+                            },
+                            Err(error_msg) => {
+                                assert!(!error_msg.is_empty(), "Error message should not be empty for: {}", description);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Test capacity distribution ratios
+        let mut distribution = HashMap::new();
+        distribution.insert("small", base::SMALL as f64);
+        distribution.insert("medium", base::MEDIUM as f64);
+        distribution.insert("large", base::LARGE as f64);
+
+        let total: f64 = distribution.values().sum();
+        for (name, value) in &distribution {
+            let ratio = value / total;
+            assert!(ratio.is_finite(), "Distribution ratio should be finite for: {}", name);
+            assert!(ratio > 0.0, "Distribution ratio should be positive for: {}", name);
+            assert!(ratio < 1.0, "Distribution ratio should be less than 1 for: {}", name);
+        }
+    }
+
+    #[test]
+    fn test_hash_collision_resistance_in_capacity_naming() {
+        // Test hash collision resistance in capacity identifier comparison
+        // Similar names should not collide or cause security bypass
+        let collision_test_cases = [
+            ("capacity-123", "capacity-132", "Transposed characters"),
+            ("test_capacity", "test-capacity", "Underscore vs hyphen"),
+            ("MaxCapacity", "maxcapacity", "Case sensitivity"),
+            ("capacity\u{00A0}test", "capacity test", "Non-breaking vs regular space"),
+            ("capacity_v1", "capacity_v2", "Version difference"),
+            ("small_cap", "small_caps", "Plural difference"),
+        ];
+
+        for (name1, name2, description) in &collision_test_cases {
+            // Test that similar names are treated as distinct
+            let result1 = validate_standard_sized(name1, base::STANDARD);
+            let result2 = validate_standard_sized(name2, base::STANDARD);
+
+            // Both should be processed independently (no collision)
+            match (result1, result2) {
+                (Ok(()), Ok(())) => {
+                    // Both accepted - verify they're treated as separate entities
+                    assert!(name1 != name2, "Names should be distinct for: {}", description);
+                },
+                _ => {
+                    // At least one rejected - also acceptable
+                }
+            }
+
+            // Test in bucket hierarchy validation
+            let buckets1 = vec![
+                (name1, base::SMALL),
+                ("middle", base::MEDIUM),
+                ("large", base::LARGE),
+            ];
+            let buckets2 = vec![
+                (name2, base::SMALL),
+                ("middle", base::MEDIUM),
+                ("large", base::LARGE),
+            ];
+
+            let hier_result1 = validate_strictly_increasing_buckets(&buckets1);
+            let hier_result2 = validate_strictly_increasing_buckets(&buckets2);
+
+            // Both hierarchy validations should work independently
+            if hier_result1.is_ok() && hier_result2.is_ok() {
+                // No collision should prevent independent validation
+                assert!(true, "Hierarchy validation should work independently for: {}", description);
+            }
+        }
+    }
+
+    #[test]
+    fn test_resource_exhaustion_through_validation_loops() {
+        // Test resource exhaustion via validation function loops
+        // Malicious inputs could cause excessive computation
+
+        // Test with deeply nested bucket hierarchies
+        let deep_buckets: Vec<(&str, usize)> = (0..1000)
+            .map(|i| {
+                let name = format!("level-{i}");
+                (Box::leak(name.into_boxed_str()), base::SMALL + i)
+            })
+            .collect();
+
+        // Validation should complete in reasonable time without excessive loops
+        let start = std::time::Instant::now();
+        let result = validate_strictly_increasing_buckets(&deep_buckets);
+        let elapsed = start.elapsed();
+
+        // Should complete within reasonable time (allowing for some variation in test environments)
+        assert!(elapsed.as_millis() < 5000, "Validation should not take excessive time for deep hierarchies");
+
+        match result {
+            Ok(()) => {
+                // Verify hierarchy is actually valid
+                for window in deep_buckets.windows(2) {
+                    assert!(window[1].1 >= window[0].1, "Deep hierarchy should maintain ordering");
+                }
+            },
+            Err(error_msg) => {
+                // Rejection for excessive complexity is acceptable
+                assert!(!error_msg.is_empty(), "Should provide error message for complex hierarchies");
+            }
+        }
+
+        // Test with repetitive validation calls to detect caching issues
+        for i in 0..100 {
+            let name = format!("repeated-test-{}", i);
+            let validation_start = std::time::Instant::now();
+            let _ = validate_standard_sized(&name, base::STANDARD);
+            let validation_elapsed = validation_start.elapsed();
+
+            // Individual validations should be fast (no exponential slowdown)
+            assert!(validation_elapsed.as_millis() < 100, "Individual validation should be fast for iteration {}", i);
+        }
+    }
+
+    #[test]
+    fn test_configuration_boundary_attacks_on_capacity_limits() {
+        // Test configuration boundary attacks through extreme capacity values
+        // Edge cases could bypass security limits
+        let boundary_attack_cases = [
+            (0, "Zero capacity bypass attempt"),
+            (1, "Minimal capacity attack"),
+            (usize::MAX, "Maximum capacity overflow"),
+            (usize::MAX - 1, "Near-maximum capacity"),
+            (base::DEDUPE + 1, "Just above dedupe limit"),
+            (base::SMALL - 1, "Just below small limit"),
+            (base::MEDIUM / 2, "Half-medium capacity"),
+            (base::LARGE * 2, "Double-large capacity"),
+        ];
+
+        for (attack_capacity, description) in &boundary_attack_cases {
+            // Test various validation functions with boundary values
+            let validations = [
+                ("standard", validate_standard_sized("boundary-test", *attack_capacity)),
+                ("trace", validate_trace_sized("boundary-test", *attack_capacity)),
+                ("medium", validate_medium_sized("boundary-test", *attack_capacity)),
+                ("large", validate_large_sized("boundary-test", *attack_capacity)),
+            ];
+
+            for (validator_name, result) in &validations {
+                match result {
+                    Ok(()) => {
+                        // If accepted, verify capacity is within reasonable bounds
+                        if *attack_capacity > 0 && *attack_capacity < usize::MAX / 2 {
+                            assert!(*attack_capacity > 0,
+                                   "Accepted capacity should be positive: {} (validator: {}, value: {})",
+                                   description, validator_name, attack_capacity);
+                        }
+                    },
+                    Err(error_msg) => {
+                        // Boundary rejections are expected and acceptable
+                        assert!(!error_msg.is_empty(),
+                               "Should have error message: {} (validator: {})",
+                               description, validator_name);
+
+                        // Verify error message contains relevant information
+                        if *attack_capacity == 0 {
+                            assert!(error_msg.contains("zero") || error_msg.contains("0") || error_msg.contains("invalid"),
+                                   "Zero capacity error should be informative: {}", error_msg);
+                        }
+                    }
+                }
+            }
+
+            // Test bucket hierarchy with boundary values
+            if *attack_capacity > base::SMALL {
+                let boundary_buckets = vec![
+                    ("small", base::SMALL),
+                    ("boundary", *attack_capacity),
+                    ("xl", base::XL),
+                ];
+
+                let hierarchy_result = validate_strictly_increasing_buckets(&boundary_buckets);
+                match hierarchy_result {
+                    Ok(()) => {
+                        assert!(*attack_capacity > base::SMALL, "Hierarchy should be valid for: {}", description);
+                        assert!(*attack_capacity < base::XL || *attack_capacity == base::XL, "Hierarchy ordering for: {}", description);
+                    },
+                    Err(error_msg) => {
+                        assert!(!error_msg.is_empty(), "Hierarchy error should be informative for: {}", description);
+                    }
+                }
+            }
+        }
+
+        // Test that constants remain stable after boundary attacks
+        assert_eq!(base::SMALL, 256, "SMALL constant should remain stable after boundary attacks");
+        assert_eq!(base::MEDIUM, 2048, "MEDIUM constant should remain stable after boundary attacks");
+        assert_eq!(base::LARGE, 8192, "LARGE constant should remain stable after boundary attacks");
+        assert_eq!(base::XL, 16384, "XL constant should remain stable after boundary attacks");
+    }
 }

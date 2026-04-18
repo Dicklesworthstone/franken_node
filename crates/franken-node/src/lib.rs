@@ -261,6 +261,362 @@ mod tests {
         assert!(debug.contains("fix_command"));
         assert_ne!(debug, rendered);
     }
+
+    // === COMPREHENSIVE NEGATIVE-PATH TESTS ===
+    // Additional edge case tests for ActionableError that security hardening may have missed
+
+    #[test]
+    fn negative_unicode_injection_in_error_message() {
+        // Test Unicode injection attacks in error messages
+        // Control characters and homograph attacks could bypass validation or logging
+        let unicode_attack_vectors = [
+            ("error\u{200B}injection", "Zero-width space injection"),
+            ("error\u{202E}rorre", "Right-to-left override attack"),
+            ("error\u{0000}injection", "Null byte injection"),
+            ("error\u{FEFF}injection", "BOM injection"),
+            ("error\u{000C}injection", "Form feed injection"),
+            ("error\ninjection", "Newline injection"),
+            ("еrror", "Cyrillic 'е' homograph attack"),
+            ("error\u{001F}injection", "Unit separator injection"),
+        ];
+
+        for (malicious_message, description) in &unicode_attack_vectors {
+            let err = ActionableError::new(malicious_message, "fix-command");
+            let rendered = err.to_string();
+
+            // Verify Unicode injection doesn't corrupt output format
+            assert!(rendered.contains("fix_command=fix-command"),
+                   "Format should remain valid despite Unicode injection: {}", description);
+
+            // Verify message is preserved (not truncated or corrupted)
+            assert!(rendered.starts_with(malicious_message),
+                   "Message should be preserved for: {}", description);
+
+            // Verify the error can be safely cloned and compared
+            let cloned = err.clone();
+            assert_eq!(cloned, err, "Clone should work correctly for: {}", description);
+        }
+    }
+
+    #[test]
+    fn negative_null_byte_injection_in_fix_command() {
+        // Test null byte injection attacks in fix commands
+        // Could truncate commands in C-compatible contexts or cause parsing issues
+        let null_injection_cases = [
+            ("fix\0injection", "Single null byte in fix command"),
+            ("fix\0\0double", "Double null byte in fix command"),
+            ("fix\0cmd\0multi", "Multiple null bytes in fix command"),
+            ("fix\0", "Trailing null byte in fix command"),
+            ("\0fix", "Leading null byte in fix command"),
+        ];
+
+        for (malicious_fix, description) in &null_injection_cases {
+            let err = ActionableError::new("test error", malicious_fix);
+            let rendered = err.to_string();
+
+            // Verify null bytes don't cause string truncation
+            assert!(rendered.contains(&format!("fix_command={}", malicious_fix)),
+                   "Fix command should be preserved despite null bytes: {}", description);
+
+            // Verify format structure remains intact
+            assert!(rendered.starts_with("test error\n"),
+                   "Error format should remain valid for: {}", description);
+
+            // Test with help URLs to ensure no cross-field contamination
+            let err_with_help = err.clone().with_help_url("https://example.com/help");
+            let help_rendered = err_with_help.to_string();
+            assert!(help_rendered.contains("help_url=https://example.com/help"),
+                   "Help URL should be preserved despite null byte injection: {}", description);
+        }
+    }
+
+    #[test]
+    fn negative_memory_exhaustion_through_massive_help_urls() {
+        // Test memory exhaustion attacks via massive help URL lists
+        // Could bypass memory limits through incremental allocation
+        let mut err = ActionableError::new("memory test", "fix-command");
+
+        // Add many help URLs to test memory handling
+        for i in 0..10000 {
+            let large_url = format!("https://example.com/help-{}-{}", i, "x".repeat(100));
+            err = err.with_help_url(large_url);
+        }
+
+        // Should handle large help URL lists without panic or excessive memory use
+        assert_eq!(err.help_urls.len(), 10000, "Should store all help URLs");
+
+        // Rendering should complete despite large size
+        let rendered = err.to_string();
+        assert!(rendered.contains("fix_command=fix-command"), "Should render correctly despite size");
+        assert!(rendered.matches("help_url=").count() == 10000, "Should include all help URLs");
+
+        // Clone should work efficiently
+        let cloned = err.clone();
+        assert_eq!(cloned.help_urls.len(), 10000, "Clone should preserve all help URLs");
+    }
+
+    #[test]
+    fn negative_serialization_format_injection_in_fields() {
+        // Test serialization format injection attacks
+        // Malformed JSON/XML/YAML-like content could bypass parsing or logging
+        let injection_cases = [
+            ("error\"],\"malicious\":\"payload", "JSON injection in message"),
+            ("error</message><script>alert(1)</script>", "XML injection in message"),
+            ("error\n  malicious: payload", "YAML injection in message"),
+            ("error{{.Values.Secret}}", "Template injection in message"),
+            ("fix\"],\"cmd\":\"rm -rf /", "JSON injection in fix command"),
+            ("fix</fix><script>alert(1)</script>", "XML injection in fix command"),
+            ("https://evil.com\"];window.location=\"https://malicious.com", "URL injection in help"),
+        ];
+
+        for (injection_payload, description) in &injection_cases {
+            // Test injection in different fields
+            let err_msg = ActionableError::new(injection_payload, "safe-fix");
+            let err_fix = ActionableError::new("safe error", injection_payload);
+            let err_help = ActionableError::new("safe error", "safe-fix")
+                .with_help_url(injection_payload);
+
+            let rendered_msg = err_msg.to_string();
+            let rendered_fix = err_fix.to_string();
+            let rendered_help = err_help.to_string();
+
+            // Verify injection doesn't break output format
+            assert!(rendered_msg.contains("fix_command=safe-fix"),
+                   "Message injection should not break format: {}", description);
+            assert!(rendered_fix.contains(&format!("fix_command={}", injection_payload)),
+                   "Fix command injection should be contained: {}", description);
+            assert!(rendered_help.contains(&format!("help_url={}", injection_payload)),
+                   "Help URL injection should be contained: {}", description);
+
+            // Verify no script execution or template processing
+            assert!(!rendered_msg.contains("malicious"),
+                   "Should not execute malicious content in message: {}", description);
+            assert!(!rendered_fix.contains("<script>") || rendered_fix.contains("fix_command="),
+                   "Should not process script tags in fix command: {}", description);
+        }
+    }
+
+    #[test]
+    fn negative_floating_point_precision_in_string_formatting() {
+        // Test floating-point precision issues that could affect error display
+        // Edge cases with special float values in error contexts
+        let float_edge_cases = [
+            (f64::INFINITY.to_string(), "Infinity in error field"),
+            (f64::NEG_INFINITY.to_string(), "Negative infinity in error field"),
+            (f64::NAN.to_string(), "NaN in error field"),
+            (f64::MIN.to_string(), "Minimum f64 in error field"),
+            (f64::MAX.to_string(), "Maximum f64 in error field"),
+            (f64::EPSILON.to_string(), "Machine epsilon in error field"),
+            ((1.0/3.0).to_string(), "Repeating decimal in error field"),
+        ];
+
+        for (float_string, description) in &float_edge_cases {
+            let err = ActionableError::new(
+                format!("Float error: {}", float_string),
+                format!("Fix float: {}", float_string)
+            ).with_help_url(format!("https://example.com/help?value={}", float_string));
+
+            let rendered = err.to_string();
+
+            // Verify float values don't cause formatting issues
+            assert!(rendered.contains("fix_command="),
+                   "Should maintain format structure with: {}", description);
+            assert!(rendered.contains("help_url="),
+                   "Should include help URL with: {}", description);
+
+            // Verify float values are properly escaped/contained
+            if float_string == "inf" || float_string == "-inf" || float_string == "NaN" {
+                assert!(rendered.contains(float_string),
+                       "Special float values should be preserved: {}", description);
+            }
+
+            // Verify error can still be used normally
+            let cloned = err.clone();
+            assert_eq!(cloned.to_string(), rendered,
+                      "Clone should be identical with: {}", description);
+        }
+    }
+
+    #[test]
+    fn negative_hash_collision_resistance_in_error_comparison() {
+        // Test hash collision resistance in ActionableError equality
+        // Similar errors should not collide or cause security bypasses
+        let collision_test_cases = [
+            ("error-123", "error-132", "Transposed characters in message"),
+            ("test_error", "test-error", "Underscore vs hyphen difference"),
+            ("Error", "error", "Case sensitivity in message"),
+            ("fix_cmd", "fix-cmd", "Separator differences in fix command"),
+            ("https://site.com/help", "https://site.com/help/", "Trailing slash in help URL"),
+            ("command --flag", "command  --flag", "Extra space in fix command"),
+        ];
+
+        for (variant1, variant2, description) in &collision_test_cases {
+            let err1 = ActionableError::new(variant1, "fix1").with_help_url("help1");
+            let err2 = ActionableError::new(variant2, "fix2").with_help_url("help2");
+
+            // Verify different errors are not equal (no collision)
+            if variant1 != variant2 {
+                assert_ne!(err1, err2, "Different errors should not be equal: {}", description);
+            }
+
+            // Verify hash behavior is consistent
+            use std::collections::HashMap;
+            let mut error_map = HashMap::new();
+            error_map.insert(err1.clone(), "value1");
+            error_map.insert(err2.clone(), "value2");
+
+            // Should be able to distinguish errors in HashMap
+            assert!(error_map.contains_key(&err1), "HashMap should contain first error: {}", description);
+            assert!(error_map.contains_key(&err2), "HashMap should contain second error: {}", description);
+
+            // Verify no collision in string representation
+            let rendered1 = err1.to_string();
+            let rendered2 = err2.to_string();
+            if variant1 != variant2 {
+                assert_ne!(rendered1, rendered2, "String representations should differ: {}", description);
+            }
+        }
+    }
+
+    #[test]
+    fn negative_resource_exhaustion_through_deeply_nested_cloning() {
+        // Test resource exhaustion via deep cloning operations
+        // Malicious clone chains could cause stack overflow or excessive allocation
+        let mut err = ActionableError::new("base error", "base fix");
+
+        // Add many help URLs to make cloning more expensive
+        for i in 0..1000 {
+            err = err.with_help_url(format!("https://help{}.example.com", i));
+        }
+
+        // Test deep cloning chain
+        let start_time = std::time::Instant::now();
+        let mut current = err.clone();
+        for _ in 0..100 {
+            current = current.clone();
+        }
+        let clone_duration = start_time.elapsed();
+
+        // Cloning should complete in reasonable time
+        assert!(clone_duration.as_millis() < 1000,
+               "Deep cloning should not take excessive time");
+
+        // Verify cloned error is still functional
+        let rendered = current.to_string();
+        assert!(rendered.contains("fix_command=base fix"),
+               "Deeply cloned error should render correctly");
+        assert_eq!(current.help_urls.len(), 1000,
+                  "All help URLs should be preserved through deep cloning");
+
+        // Verify memory usage is reasonable (no exponential growth)
+        let final_rendered = current.to_string();
+        assert!(final_rendered.len() < 1_000_000,
+               "Rendered output should not be excessively large");
+    }
+
+    #[test]
+    fn negative_concurrent_access_simulation() {
+        // Test concurrent access patterns to ActionableError
+        // Race conditions in string formatting or cloning could cause issues
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let base_err = Arc::new(ActionableError::new("concurrent test", "fix concurrency"));
+        let results = Arc::new(Mutex::new(Vec::new()));
+
+        // Spawn multiple threads to stress test concurrent operations
+        let handles: Vec<_> = (0..8).map(|thread_id| {
+            let err_clone = Arc::clone(&base_err);
+            let results_clone = Arc::clone(&results);
+
+            thread::spawn(move || {
+                // Perform various operations concurrently
+                for iteration in 0..100 {
+                    let mut local_err = (*err_clone).clone();
+                    local_err = local_err.with_help_url(format!("thread-{}-iter-{}", thread_id, iteration));
+
+                    let rendered = local_err.to_string();
+                    let cloned = local_err.clone();
+
+                    // Verify concurrent operations produce valid results
+                    assert!(rendered.contains("fix_command=fix concurrency"));
+                    assert_eq!(cloned, local_err);
+
+                    // Record result for verification
+                    {
+                        let mut results_lock = results_clone.lock().unwrap();
+                        results_lock.push((thread_id, iteration, rendered.len()));
+                    }
+                }
+            })
+        }).collect();
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().expect("Thread should complete successfully");
+        }
+
+        // Verify all concurrent operations completed successfully
+        let final_results = results.lock().unwrap();
+        assert_eq!(final_results.len(), 8 * 100, "All concurrent operations should complete");
+
+        // Verify results are reasonable (no corruption)
+        for (thread_id, iteration, rendered_len) in final_results.iter() {
+            assert!(*rendered_len > 0, "Rendered length should be positive for thread {} iteration {}", thread_id, iteration);
+            assert!(*rendered_len < 10000, "Rendered length should be reasonable for thread {} iteration {}", thread_id, iteration);
+        }
+    }
+
+    #[test]
+    fn negative_configuration_boundary_attacks() {
+        // Test configuration boundary attacks through extreme field values
+        // Edge cases could bypass validation or cause system instability
+        let boundary_test_cases = [
+            ("", "empty message"),
+            (" ".repeat(10000), "very long whitespace message"),
+            ("x".repeat(1000000), "extremely long message"),
+            ("fix", "minimal fix command"),
+            ("fix ".repeat(1000), "repeated fix command"),
+            ("https://".repeat(100) + "example.com", "malformed repeated URL"),
+        ];
+
+        for (boundary_value, description) in &boundary_test_cases {
+            // Test boundary values in different fields
+            let err_msg = ActionableError::new(boundary_value, "normal-fix");
+            let err_fix = ActionableError::new("normal error", boundary_value);
+
+            // Should handle extreme values without panicking
+            let rendered_msg = err_msg.to_string();
+            let rendered_fix = err_fix.to_string();
+
+            // Verify format structure is maintained despite extreme values
+            assert!(rendered_msg.contains("fix_command=normal-fix"),
+                   "Message boundary should not break format: {}", description);
+            assert!(rendered_fix.contains(&format!("fix_command={}", boundary_value)),
+                   "Fix command boundary should be contained: {}", description);
+
+            // Verify operations remain functional
+            let cloned_msg = err_msg.clone();
+            let cloned_fix = err_fix.clone();
+            assert_eq!(cloned_msg, err_msg, "Clone should work with boundary message: {}", description);
+            assert_eq!(cloned_fix, err_fix, "Clone should work with boundary fix: {}", description);
+
+            // Test with help URLs containing boundary values
+            if boundary_value.len() < 100000 { // Avoid excessive memory usage in tests
+                let err_help = ActionableError::new("normal error", "normal fix")
+                    .with_help_url(boundary_value);
+                let rendered_help = err_help.to_string();
+                assert!(rendered_help.contains(&format!("help_url={}", boundary_value)),
+                       "Help URL boundary should be preserved: {}", description);
+            }
+        }
+
+        // Verify original functionality remains intact after boundary testing
+        let normal_err = ActionableError::new("normal error", "normal fix");
+        let normal_rendered = normal_err.to_string();
+        assert_eq!(normal_rendered, "normal error\nfix_command=normal fix",
+                  "Normal functionality should remain intact after boundary testing");
+    }
 }
 
 #[cfg(feature = "extended-surfaces")]

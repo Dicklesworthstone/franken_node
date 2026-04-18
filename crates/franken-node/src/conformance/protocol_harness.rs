@@ -830,4 +830,106 @@ mod tests {
         let parsed: HarnessReport = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.verdict, "PASS");
     }
+
+    #[test]
+    fn gate_error_code_deserialize_rejects_lowercase_variant() {
+        let parsed: Result<GateErrorCode, _> = serde_json::from_str("\"override_expired\"");
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn gate_error_code_deserialize_rejects_unknown_variant() {
+        let parsed: Result<GateErrorCode, _> = serde_json::from_str("\"OVERRIDE_UNKNOWN\"");
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn policy_override_deserialize_rejects_scalar_scope() {
+        let raw = serde_json::json!({
+            "override_id": "OVERRIDE-TEST-001",
+            "connector_id": "test-conn",
+            "reason": "temporary exception",
+            "authorized_by": "admin",
+            "expires_at": "2030-01-01T00:00:00Z",
+            "scope": "METHOD_MISSING:handshake"
+        });
+
+        let parsed: Result<PolicyOverride, _> = serde_json::from_value(raw);
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn policy_override_deserialize_rejects_missing_authorized_by() {
+        let raw = serde_json::json!({
+            "override_id": "OVERRIDE-TEST-001",
+            "connector_id": "test-conn",
+            "reason": "temporary exception",
+            "expires_at": "2030-01-01T00:00:00Z",
+            "scope": ["METHOD_MISSING:handshake"]
+        });
+
+        let parsed: Result<PolicyOverride, _> = serde_json::from_value(raw);
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn gate_error_deserialize_rejects_missing_message() {
+        let raw = serde_json::json!({
+            "code": "OVERRIDE_INVALID"
+        });
+
+        let parsed: Result<GateError, _> = serde_json::from_value(raw);
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn publication_gate_result_deserialize_rejects_string_override_flag() {
+        let raw = serde_json::json!({
+            "connector_id": "test-conn",
+            "conformance_verdict": "FAIL",
+            "gate_decision": "BLOCK",
+            "override_applied": "false",
+            "errors": []
+        });
+
+        let parsed: Result<PublicationGateResult, _> = serde_json::from_value(raw);
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn harness_report_deserialize_rejects_string_total_connectors() {
+        let raw = serde_json::json!({
+            "total_connectors": "1",
+            "passed": 0,
+            "blocked": 1,
+            "overridden": 0,
+            "results": [],
+            "verdict": "FAIL"
+        });
+
+        let parsed: Result<HarnessReport, _> = serde_json::from_value(raw);
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn harness_report_deserialize_rejects_missing_results() {
+        let raw = serde_json::json!({
+            "total_connectors": 1,
+            "passed": 0,
+            "blocked": 1,
+            "overridden": 0,
+            "verdict": "FAIL"
+        });
+
+        let parsed: Result<HarnessReport, _> = serde_json::from_value(raw);
+
+        assert!(parsed.is_err());
+    }
 }
