@@ -110,3 +110,24 @@ find_panics.py
 # Alternate build target directories
 /target_crimson/
 target_*/
+
+# Patch reject / original artifacts from failed merges
+*.orig
+*.rej
+
+# Shell redirect junk (accidental `cmd >, 2>=300`, etc.)
+/,
+/=*
+
+# Agent runtime state dirs
+/.claude/
+/.codex
+/.franken-node/
+/.ntm/
+
+# Root-level scratch harness files (the real homes are
+# crates/franken-node/src/**/test_*_hardening.rs and
+# crates/franken-node/tests/*_conformance.rs)
+/security_conformance_tests.rs
+/test_adversary_graph_hardening.rs
+/test_bocpd_hardening_fixes.rs
