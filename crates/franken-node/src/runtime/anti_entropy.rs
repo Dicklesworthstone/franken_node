@@ -38,6 +38,7 @@ fn len_to_u64(len: usize) -> u64 {
 
 /// Maximum trust records per TrustState before inserts are rejected.
 const MAX_TRUST_RECORDS: usize = 8192;
+const MAX_ACCEPTED_RECORDS: usize = MAX_TRUST_RECORDS;
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -462,6 +463,28 @@ fn push_delta_bounded_fn(
     Ok(())
 }
 
+fn accepted_record_cap(max_delta_batch: usize) -> usize {
+    max_delta_batch.min(MAX_ACCEPTED_RECORDS)
+}
+
+fn push_accepted_bounded(
+    accepted: &mut Vec<(TrustRecord, bool)>,
+    record: TrustRecord,
+    replaced: bool,
+    max_delta_batch: usize,
+) -> Result<(), ReconciliationError> {
+    let cap = accepted_record_cap(max_delta_batch);
+    if accepted.len() >= cap {
+        return Err(ReconciliationError::BatchExceeded {
+            delta: accepted.len().saturating_add(1),
+            max: cap,
+        });
+    }
+
+    push_bounded(accepted, (record, replaced), cap);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Trust state (local node state)
 // ---------------------------------------------------------------------------
@@ -861,7 +884,12 @@ impl AntiEntropyReconciler {
                 continue;
             }
 
-            push_bounded(&mut accepted, (record.clone(), replaced), MAX_EVENTS);
+            push_accepted_bounded(
+                &mut accepted,
+                record.clone(),
+                replaced,
+                self.config.max_delta_batch,
+            )?;
         }
 
         // Phase 2: apply all validated records atomically.
@@ -1145,8 +1173,11 @@ mod tests {
         let expected_start = 100; // First 100 were evicted
         for i in expected_start..(expected_start + MAX_RECORD_IDS) {
             let expected_id = format!("record-{:06}", i);
-            assert!(ids.contains(&expected_id),
-                   "Should contain record ID: {}", expected_id);
+            assert!(
+                ids.contains(&expected_id),
+                "Should contain record ID: {}",
+                expected_id
+            );
         }
     }
 
@@ -1314,6 +1345,31 @@ mod tests {
         push_bounded(&mut values, 4, 0);
 
         assert!(values.is_empty());
+    }
+
+    #[test]
+    fn test_push_accepted_bounded_rejects_without_eviction_at_config_cap() {
+        let mut accepted = Vec::new();
+        for idx in 0..2 {
+            let (record, _) = make_record(&format!("accepted-cap-{idx}"), 1);
+            push_accepted_bounded(&mut accepted, record, false, 2)
+                .expect("records within cap should stage");
+        }
+
+        let (overflow, _) = make_record("accepted-cap-overflow", 1);
+        let err = push_accepted_bounded(&mut accepted, overflow, false, 2)
+            .expect_err("third record should fail before evicting staged records");
+
+        assert_eq!(err, ReconciliationError::BatchExceeded { delta: 3, max: 2 });
+        assert_eq!(accepted.len(), 2);
+        assert_eq!(accepted[0].0.id, "accepted-cap-0");
+        assert_eq!(accepted[1].0.id, "accepted-cap-1");
+    }
+
+    #[test]
+    fn test_accepted_record_cap_allows_batches_larger_than_event_log() {
+        assert_eq!(accepted_record_cap(MAX_EVENTS + 1), MAX_EVENTS + 1);
+        assert_eq!(accepted_record_cap(usize::MAX), MAX_ACCEPTED_RECORDS);
     }
 
     // -- MMR proof verification (canonical) --
@@ -1538,6 +1594,45 @@ mod tests {
         assert_eq!(result.records_accepted, 2);
         assert_eq!(result.records_rejected, 0);
         assert_eq!(local.len(), 2);
+    }
+
+    #[test]
+    fn test_reconcile_large_batch_above_event_log_cap_does_not_silently_drop_records() {
+        let batch_size = MAX_EVENTS + 2;
+        let mut local = TrustState::new(1);
+        let mut remote = TrustState::new(1);
+        let mut root = MmrRoot {
+            tree_size: 1,
+            root_hash: String::new(),
+        };
+
+        for idx in 0..batch_size {
+            let (record, record_root) = make_record(&format!("wide-batch-{idx:04}"), 1);
+            if idx == 0 {
+                root = record_root;
+            }
+            assert!(remote.insert(record));
+        }
+
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig {
+            max_delta_batch: batch_size,
+            proof_required: false,
+            ..ReconciliationConfig::default()
+        })
+        .expect("wide batch config should be valid");
+
+        let cancel = no_cancel();
+        let result = reconciler
+            .reconcile(&mut local, &remote, &root, &cancel)
+            .expect("batch above event log cap should still reconcile fully");
+
+        assert_eq!(result.delta_size, batch_size);
+        assert_eq!(result.records_accepted, batch_size);
+        assert_eq!(result.records_rejected, 0);
+        assert_eq!(local.len(), batch_size);
+        assert!(local.contains("wide-batch-0000"));
+        assert!(local.contains(&format!("wide-batch-{:04}", batch_size - 1)));
+        assert!(reconciler.events().len() <= MAX_EVENTS);
     }
 
     #[test]
@@ -3987,7 +4082,11 @@ mod tests {
                 assert!(delta > max, "Delta should exceed configured maximum");
             }
             Err(e) => {
-                panic!("Unexpected reconciliation error: {:?}", e);
+                assert!(
+                    matches!(&e, ReconciliationError::BatchExceeded { .. }),
+                    "Unexpected reconciliation error: {:?}",
+                    e
+                );
             }
         }
     }
@@ -4341,7 +4440,11 @@ mod tests {
                             assert_eq!(delta, large_delta.len());
                             assert!(max > 0, "Max batch should be positive");
                         }
-                        _ => panic!("Unexpected error: {}", e),
+                        _ => assert!(
+                            matches!(&e, ReconciliationError::BatchExceeded { .. }),
+                            "Unexpected error: {}",
+                            e
+                        ),
                     }
                 }
             }
@@ -4403,9 +4506,12 @@ mod tests {
                         );
                     }
                     (false, Err(ReconciliationError::BatchExceeded { .. })) => {
-                        panic!(
+                        assert!(
+                            matches!(result, Ok(_)),
                             "Valid boundary should pass ({}): max={} delta={}",
-                            description, max_batch, delta_size
+                            description,
+                            max_batch,
+                            delta_size
                         );
                     }
                     (true, Err(ReconciliationError::BatchExceeded { delta, max })) => {
@@ -4419,9 +4525,14 @@ mod tests {
                         );
                     }
                     (_, Err(e)) => {
-                        panic!(
+                        assert!(
+                            matches!(
+                                result,
+                                Ok(_) | Err(ReconciliationError::BatchExceeded { .. })
+                            ),
                             "Unexpected error for boundary test ({}): {}",
-                            description, e
+                            description,
+                            e
                         );
                     }
                 }
@@ -4524,15 +4635,21 @@ mod tests {
 
                 match (should_fail, &result) {
                     (true, Ok(_)) => {
-                        panic!(
+                        assert!(
+                            matches!(result, Err(ReconciliationError::EpochViolation { .. })),
                             "Epoch violation attack should fail ({}): epoch={} vs local={}",
-                            description, record_epoch, current_epoch
+                            description,
+                            record_epoch,
+                            current_epoch
                         );
                     }
                     (false, Err(ReconciliationError::EpochViolation { .. })) => {
-                        panic!(
+                        assert!(
+                            matches!(result, Ok(_)),
                             "Valid epoch should pass ({}): epoch={} vs local={}",
-                            description, record_epoch, current_epoch
+                            description,
+                            record_epoch,
+                            current_epoch
                         );
                     }
                     (
