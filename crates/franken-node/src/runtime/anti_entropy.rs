@@ -3288,9 +3288,9 @@ mod tests {
             let digest1 = {
                 let mut hasher = Sha256::new();
                 hasher.update(RECORD_DIGEST_DOMAIN);
-                hasher.update((record1.id.len() as u64).to_le_bytes());
+                hasher.update(len_to_u64(record1.id.len()).to_le_bytes());
                 hasher.update(record1.id.as_bytes());
-                hasher.update((record1.payload.len() as u64).to_le_bytes());
+                hasher.update(len_to_u64(record1.payload.len()).to_le_bytes());
                 hasher.update(&record1.payload);
                 hex::encode(hasher.finalize())
             };
@@ -3298,9 +3298,9 @@ mod tests {
             let digest2 = {
                 let mut hasher = Sha256::new();
                 hasher.update(RECORD_DIGEST_DOMAIN);
-                hasher.update((record2.id.len() as u64).to_le_bytes());
+                hasher.update(len_to_u64(record2.id.len()).to_le_bytes());
                 hasher.update(record2.id.as_bytes());
-                hasher.update((record2.payload.len() as u64).to_le_bytes());
+                hasher.update(len_to_u64(record2.payload.len()).to_le_bytes());
                 hasher.update(&record2.payload);
                 hex::encode(hasher.finalize())
             };
