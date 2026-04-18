@@ -551,9 +551,13 @@ impl TrustState {
         self.records.contains_key(id)
     }
 
-    /// Get all record IDs.
+    /// Get record IDs (bounded to prevent memory exhaustion).
     pub fn record_ids(&self) -> BTreeSet<String> {
-        self.records.keys().cloned().collect()
+        let mut ids = Vec::new();
+        for id in self.records.keys() {
+            push_bounded(&mut ids, id.clone(), MAX_RECORD_IDS);
+        }
+        ids.into_iter().collect()
     }
 
     /// Count records.
@@ -1118,6 +1122,32 @@ mod tests {
         let ids = state.record_ids();
         assert!(ids.contains("r1"));
         assert!(ids.contains("r2"));
+    }
+
+    #[test]
+    fn test_trust_state_record_ids_bounded_to_prevent_memory_exhaustion() {
+        use super::MAX_RECORD_IDS;
+
+        let mut state = TrustState::new(1);
+
+        // Insert more records than the limit to test bounding
+        for i in 0..(MAX_RECORD_IDS + 100) {
+            let (record, _) = make_record(&format!("record-{:06}", i), 1);
+            assert!(state.insert(record));
+        }
+
+        // Should only return MAX_RECORD_IDS entries due to bounding
+        let ids = state.record_ids();
+        assert_eq!(ids.len(), MAX_RECORD_IDS);
+
+        // Verify the IDs are the most recent ones (LRU eviction from push_bounded)
+        // Since push_bounded removes from the front, we should have the last MAX_RECORD_IDS
+        let expected_start = 100; // First 100 were evicted
+        for i in expected_start..(expected_start + MAX_RECORD_IDS) {
+            let expected_id = format!("record-{:06}", i);
+            assert!(ids.contains(&expected_id),
+                   "Should contain record ID: {}", expected_id);
+        }
     }
 
     #[test]
