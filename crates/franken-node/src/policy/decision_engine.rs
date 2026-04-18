@@ -20,6 +20,15 @@ use std::fmt;
 use super::bayesian_diagnostics::{CandidateRef, RankedCandidate};
 use super::guardrail_monitor::{GuardrailMonitorSet, GuardrailVerdict, SystemState};
 
+/// Hardening: Push with bounded capacity to prevent memory exhaustion attacks
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -179,18 +188,18 @@ impl DecisionEngine {
             // System-level blocks apply to all candidates.
             if has_system_blocks {
                 for (_name, gid, reason) in &system_blocks {
-                    blocking_ids.push(gid.clone());
-                    blocking_reasons.push(reason.clone());
+                    push_bounded(&mut blocking_ids, gid.clone(), 50);
+                    push_bounded(&mut blocking_reasons, reason.clone(), 50);
                 }
             }
 
             // Per-candidate guardrail filter.
             if candidate.guardrail_filtered {
-                blocking_ids.push(GuardrailId::new("per_candidate_guardrail"));
-                blocking_reasons.push(format!(
+                push_bounded(&mut blocking_ids, GuardrailId::new("per_candidate_guardrail"), 50);
+                push_bounded(&mut blocking_reasons, format!(
                     "candidate {} blocked by guardrail filter",
                     candidate.candidate_ref.0
-                ));
+                ), 50);
             }
 
             if blocking_ids.is_empty() {
@@ -202,12 +211,12 @@ impl DecisionEngine {
                 // [EVD-DECIDE-002] candidate blocked
                 let _event = EVD_DECIDE_002;
 
-                blocked.push(BlockedCandidate {
+                push_bounded(&mut blocked, BlockedCandidate {
                     candidate: candidate.candidate_ref.clone(),
                     blocked_by: blocking_ids,
                     bayesian_rank: rank,
                     reasons: blocking_reasons,
-                });
+                }, 100);
             }
         }
 
@@ -1214,7 +1223,7 @@ mod tests {
         let mut outcomes = Vec::new();
         for _ in 0..1000 {
             let outcome = engine.decide(&candidates, &monitors, &state);
-            outcomes.push(outcome);
+            push_bounded(&mut outcomes, outcome, 1500);
         }
 
         // All outcomes should be identical (determinism requirement)
@@ -1395,11 +1404,11 @@ mod tests {
         // Attempt memory exhaustion through massive candidate sets
         let mut large_candidate_set = vec![];
         for i in 0..100_000 {
-            large_candidate_set.push(ranked(
+            push_bounded(&mut large_candidate_set, ranked(
                 &format!("candidate_{}", i),
                 0.5 + (i as f64 / 200_000.0),  // Varying posteriors
                 false
-            ));
+            ), 10000);
         }
 
         // Should either handle gracefully or reject
@@ -1624,14 +1633,14 @@ mod tests {
                 let monitors = default_monitors();
                 engine_clone.decide(&candidates, &monitors, &system_state)
             });
-            handles.push(handle);
+            push_bounded(&mut handles, handle, 200);
         }
 
         // Collect results
         let mut results = vec![];
         for handle in handles {
             let result = handle.join().expect("thread should not panic");
-            results.push(result);
+            push_bounded(&mut results, result, 200);
         }
 
         // Verify all decisions completed successfully
@@ -1676,14 +1685,14 @@ mod tests {
         // Candidates with extreme rankings
         let mut extreme_candidates = vec![];
         for i in 0..1000 {
-            extreme_candidates.push(RankedCandidate {
+            push_bounded(&mut extreme_candidates, RankedCandidate {
                 candidate_ref: c(&format!("candidate_{}", i)),
                 posterior_prob: 0.5,
                 prior_prob: 0.5,
                 observation_count: usize::MAX,  // Extreme observation count
                 confidence_interval: (0.0, 1.0),
                 guardrail_filtered: false,
-            });
+            }, 2000);
         }
 
         let decision = engine.decide(&extreme_candidates, &monitors, &extreme_state);
