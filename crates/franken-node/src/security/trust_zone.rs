@@ -2488,4 +2488,189 @@ mod tests {
                    "Invalid isolation level '{}' should fail deserialization", invalid);
         }
     }
+
+    #[test]
+    fn negative_trace_id_generation_with_event_count_overflow() {
+        // Test event trace ID generation with potential integer overflow
+        // emit_event() uses self.events.len() directly without saturating_add
+        let mut engine = ZoneSegmentationEngine::new();
+
+        // Create a zone to emit events against
+        engine.register_zone(ZonePolicy::new("test-zone", 80, 5, IsolationLevel::Strict)).unwrap();
+
+        // Simulate high event count by pre-filling events vector to near capacity
+        // MAX_EVENTS prevents actual overflow, but trace ID calculation could still wrap
+        let initial_events = std::cmp::min(MAX_EVENTS.saturating_sub(100), usize::MAX / 2);
+
+        for i in 0..initial_events {
+            engine.events.push(ZoneAuditEvent {
+                code: "TEST-001".to_string(),
+                zone_id: "test-zone".to_string(),
+                detail: format!("stress-event-{}", i),
+                trace_id: format!("trace-{}", i),
+            });
+        }
+
+        // Now emit more events through emit_event()
+        for _ in 0..50 {
+            engine.emit_event("TEST-002", "test-zone", "overflow-test");
+        }
+
+        // Verify trace IDs are still well-formed despite high event count
+        let events = engine.events();
+        for event in events.iter().rev().take(10) {
+            assert!(event.trace_id.starts_with("trace-"));
+            assert!(event.trace_id.len() > 6); // "trace-" + number
+        }
+    }
+
+    #[test]
+    fn negative_authorization_proof_timing_attack_vulnerable_comparison() {
+        // Test authorization proof comparison for timing attack vulnerability
+        // Current implementation uses trim().is_empty() and contains() - NOT constant-time
+        let mut engine = ZoneSegmentationEngine::new();
+
+        // Set up zones with cross-zone allowance
+        let mut source_zone = ZonePolicy::new("source", 80, 5, IsolationLevel::Strict);
+        source_zone.allow_cross_zone("target");
+        engine.register_zone(source_zone).unwrap();
+        engine.register_zone(ZonePolicy::new("target", 80, 5, IsolationLevel::Strict)).unwrap();
+
+        // Test different proof lengths/patterns that could reveal timing differences
+        let timing_test_proofs = vec![
+            "",  // Empty - should fail fast
+            " ",  // Whitespace - should fail after trim
+            "a",  // Single char
+            "short-proof",  // Short proof
+            "a".repeat(1024),  // Long proof - same first char as "a"
+            "b".repeat(1024),  // Long proof - different first char
+            "valid-authorization-proof-12345",  // Realistic proof
+            "\x00invalid-proof-with-null",  // Proof with null bytes
+            "proof\nwith\nnewlines",  // Multi-line proof
+        ];
+
+        for (i, proof) in timing_test_proofs.iter().enumerate() {
+            let req = CrossZoneRequest::new(
+                "source", "target",
+                format!("timing-test-{}", i),
+                "attacker",
+                proof
+            );
+
+            let result = engine.authorize_cross_zone(&req);
+
+            // Empty/whitespace proofs should fail with BridgeAuthIncomplete
+            if proof.trim().is_empty() {
+                assert_eq!(result, Err(SegmentationError::BridgeAuthIncomplete));
+            } else {
+                // Non-empty proofs should succeed (no actual proof verification implemented)
+                assert!(result.is_ok(), "Non-empty proof '{}' should succeed", proof);
+            }
+        }
+
+        // The fact that all non-empty proofs succeed reveals that there's no actual
+        // cryptographic proof verification - this is a security hardening gap
+        assert!(engine.event_count(ZTS_003_CROSS_ZONE_AUTHORIZED) > 0);
+    }
+
+    #[test]
+    fn negative_freshness_validity_without_timestamp_based_expiry() {
+        // Test freshness gate with missing timestamp-based expiry logic
+        // Current implementation uses simple boolean, not actual time-based freshness
+        let mut engine = ZoneSegmentationEngine::new();
+
+        // Register zone when freshness is valid
+        engine.set_freshness_valid(true);
+        engine.register_zone(ZonePolicy::new("fresh-zone", 80, 5, IsolationLevel::Strict)).unwrap();
+
+        // Delete should work when freshness is valid
+        let delete_success = engine.delete_zone("fresh-zone");
+        assert!(delete_success.is_ok());
+
+        // Re-register zone
+        engine.register_zone(ZonePolicy::new("stale-zone", 80, 5, IsolationLevel::Strict)).unwrap();
+
+        // Set freshness invalid (simulating expired timestamp)
+        engine.set_freshness_valid(false);
+
+        // Delete should fail when freshness is stale
+        let delete_fail = engine.delete_zone("stale-zone");
+        assert_eq!(delete_fail, Err(SegmentationError::FreshnessStale));
+
+        // Zone should still exist after failed delete
+        assert!(engine.get_zone("stale-zone").is_some());
+
+        // The current implementation lacks actual timestamp comparison logic
+        // A real freshness check should use:
+        // - now >= expires_at for fail-closed semantics
+        // - Domain-separated timestamp hash verification
+        // - Saturating arithmetic for timestamp calculations
+
+        // Test that freshness validity can flip without any time passing
+        engine.set_freshness_valid(true);
+        assert!(engine.delete_zone("stale-zone").is_ok());
+
+        // This reveals that freshness is not actually time-based - hardening gap
+    }
+
+    #[test]
+    fn negative_zone_id_length_casting_without_overflow_protection() {
+        // Test zone ID and string length operations for unsafe casting patterns
+        let mut engine = ZoneSegmentationEngine::new();
+
+        // Test with various zone ID lengths that could cause issues in length calculations
+        let test_zone_ids = vec![
+            // Normal length
+            "normal-zone",
+            // Very long zone ID
+            "z".repeat(4096),
+            // Unicode zone ID with multi-byte characters
+            "zone-🔒-🛡️-🔐".repeat(100),
+            // Zone ID with embedded nulls (if improperly handled)
+            format!("zone{}\x00embedded-null", "a".repeat(100)),
+            // Maximum reasonable length
+            "a".repeat(65535),
+        ];
+
+        for (i, zone_id) in test_zone_ids.iter().enumerate() {
+            let policy = ZonePolicy::new(zone_id, 80, 5, IsolationLevel::Strict);
+            let register_result = engine.register_zone(policy);
+
+            // Very long or problematic zone IDs should register successfully
+            // (unless there are length limits enforced elsewhere)
+            if zone_id.len() < 65536 && !zone_id.contains('\x00') {
+                assert!(register_result.is_ok(), "Zone ID length {} should register", zone_id.len());
+
+                // Check zone retrieval works
+                assert!(engine.get_zone(zone_id).is_some());
+
+                // Test operations that might involve length calculations
+                engine.bind_key_to_zone("test-key", zone_id);
+                assert!(engine.is_key_bound_to_zone("test-key", zone_id));
+
+                // Clean up for next iteration
+                engine.set_freshness_valid(true);
+                let _ = engine.delete_zone(zone_id);
+            }
+        }
+
+        // Test the emit_event trace ID generation with high event counts
+        // This tests the pattern: format!("trace-{}", self.events.len())
+        engine.register_zone(ZonePolicy::new("trace-test", 80, 5, IsolationLevel::Strict)).unwrap();
+
+        // Generate events up to near the limit
+        for i in 0..(MAX_EVENTS / 2) {
+            engine.emit_event("TRACE-TEST", "trace-test", &format!("event-{}", i));
+        }
+
+        let final_event_count = engine.events().len();
+        assert!(final_event_count > 1000, "Should have generated substantial events");
+
+        // Verify trace ID format is still correct at high counts
+        let last_event = engine.events().last().unwrap();
+        assert!(last_event.trace_id.starts_with("trace-"));
+
+        // The current implementation doesn't use saturating_add for event count operations
+        // This is a potential hardening gap if event counts could theoretically overflow
+    }
 }

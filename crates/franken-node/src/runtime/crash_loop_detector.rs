@@ -1363,6 +1363,272 @@ mod tests {
         assert_eq!(incidents[1].trace_id, "tr-3");
     }
 
+    // ── Negative-path edge case tests for crash loop detection gaps ──
+
+    #[test]
+    fn test_crash_loop_with_maximum_crash_count_boundary() {
+        // Test edge case: crash count at u32::MAX boundary
+        let mut detector = CrashLoopDetector::new(CrashLoopConfig {
+            max_crashes: u32::MAX,
+            window_secs: 60,
+            cooldown_secs: 30,
+        });
+
+        // Should handle maximum crash count without overflow
+        let crash = CrashEvent {
+            connector_id: "max-crashes".to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            reason: "overflow test".to_string(),
+        };
+
+        detector.record_crash(crash);
+
+        let decision = detector.evaluate_rollback("max-crashes", 1000000, "trace", &[trusted_pin()]);
+
+        // Should not crash due to overflow
+        assert!(!decision.triggered, "Should not trigger with single crash even with max threshold");
+        assert!(decision.crash_count < u32::MAX, "Crash count should be reasonable");
+    }
+
+    #[test]
+    fn test_crash_loop_with_zero_window_seconds() {
+        // Test edge case: zero window duration
+        let mut detector = CrashLoopDetector::new(CrashLoopConfig {
+            max_crashes: 3,
+            window_secs: 0, // Zero window
+            cooldown_secs: 30,
+        });
+
+        let crash = CrashEvent {
+            connector_id: "zero-window".to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            reason: "zero window test".to_string(),
+        };
+
+        detector.record_crash(crash);
+
+        let decision = detector.evaluate_rollback("zero-window", 1000000, "trace", &[trusted_pin()]);
+
+        // Should handle zero window gracefully without division by zero
+        assert_eq!(decision.window_secs, 0);
+        assert!(!decision.triggered, "Zero window should effectively disable detection");
+    }
+
+    #[test]
+    fn test_crash_loop_with_empty_connector_id() {
+        // Test edge case: empty connector ID
+        let mut detector = CrashLoopDetector::new(config());
+
+        let crash_empty_id = CrashEvent {
+            connector_id: "".to_string(), // Empty connector ID
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            reason: "empty id test".to_string(),
+        };
+
+        detector.record_crash(crash_empty_id);
+
+        let decision = detector.evaluate_rollback("", 1000000, "trace", &[trusted_pin()]);
+
+        // Should handle empty connector ID gracefully
+        assert_eq!(decision.connector_id, "");
+        assert!(!decision.rollback_allowed, "Empty connector ID should not allow rollback");
+    }
+
+    #[test]
+    fn test_crash_loop_with_invalid_timestamp_format() {
+        // Test edge case: malformed timestamp strings
+        let mut detector = CrashLoopDetector::new(config());
+
+        let malformed_timestamps = [
+            "", // Empty timestamp
+            "invalid", // Non-ISO format
+            "2026-13-45T99:99:99Z", // Invalid date components
+            "not-a-timestamp-at-all", // Completely invalid
+            "2026-01-01", // Missing time component
+            "\0", // Null byte
+            "2026-01-01T00:00:00Z\0extra", // Null byte in middle
+        ];
+
+        for (i, &bad_timestamp) in malformed_timestamps.iter().enumerate() {
+            let crash = CrashEvent {
+                connector_id: format!("malformed-{}", i),
+                timestamp: bad_timestamp.to_string(),
+                reason: "timestamp test".to_string(),
+            };
+
+            // Should not panic when recording crashes with bad timestamps
+            detector.record_crash(crash);
+
+            let decision = detector.evaluate_rollback(
+                &format!("malformed-{}", i),
+                1000000,
+                "trace",
+                &[trusted_pin_for(&format!("malformed-{}", i))],
+            );
+
+            // Should handle gracefully without crashing
+            assert_eq!(decision.connector_id, format!("malformed-{}", i));
+        }
+    }
+
+    #[test]
+    fn test_crash_loop_with_extremely_large_window_duration() {
+        // Test edge case: very large window duration that could cause overflow
+        let mut detector = CrashLoopDetector::new(CrashLoopConfig {
+            max_crashes: 3,
+            window_secs: u64::MAX, // Maximum possible window
+            cooldown_secs: 30,
+        });
+
+        let crash = CrashEvent {
+            connector_id: "large-window".to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            reason: "large window test".to_string(),
+        };
+
+        detector.record_crash(crash);
+
+        let decision = detector.evaluate_rollback("large-window", u64::MAX, "trace", &[trusted_pin()]);
+
+        // Should handle extreme window size without overflow
+        assert_eq!(decision.window_secs, u64::MAX);
+        assert!(!decision.triggered, "Single crash should not trigger in very large window");
+    }
+
+    #[test]
+    fn test_crash_loop_with_pin_hash_collision_attempts() {
+        // Test edge case: multiple pins with same hash but different trust levels
+        let mut detector = CrashLoopDetector::new(config());
+
+        record_threshold_crashes(&mut detector, "hash-collision", 1000000);
+
+        let conflicting_pins = vec![
+            KnownGoodPin {
+                connector_id: "hash-collision".to_string(),
+                version: "1.0.0".to_string(),
+                pin_hash: "abc123".to_string(),
+                trusted: true,
+            },
+            KnownGoodPin {
+                connector_id: "hash-collision".to_string(),
+                version: "2.0.0".to_string(),
+                pin_hash: "abc123".to_string(), // Same hash!
+                trusted: false,
+            },
+            KnownGoodPin {
+                connector_id: "hash-collision".to_string(),
+                version: "3.0.0".to_string(),
+                pin_hash: "abc123".to_string(), // Same hash again!
+                trusted: true,
+            },
+        ];
+
+        let decision = detector.evaluate_rollback("hash-collision", 1000060, "trace", &conflicting_pins);
+
+        // Should handle hash collision gracefully and prefer trusted pins
+        assert!(decision.triggered);
+        if let Some(ref target) = decision.rollback_target {
+            assert!(target.trusted, "Should prefer trusted pin even with hash collision");
+        }
+    }
+
+    #[test]
+    fn test_crash_loop_with_concurrent_modification_simulation() {
+        // Test edge case: simulate concurrent access patterns
+        let mut detector = CrashLoopDetector::new(config());
+
+        let connector_id = "concurrent-test";
+
+        // Simulate rapid concurrent crash recording
+        for i in 0..10 {
+            let crash = CrashEvent {
+                connector_id: connector_id.to_string(),
+                timestamp: format!("2026-01-01T00:{}:00Z", i.min(59)),
+                reason: format!("concurrent crash {}", i),
+            };
+            detector.record_crash(crash);
+        }
+
+        // Simulate concurrent evaluations
+        let decision1 = detector.evaluate_rollback(connector_id, 1000000, "trace1", &[trusted_pin()]);
+        let decision2 = detector.evaluate_rollback(connector_id, 1000001, "trace2", &[trusted_pin()]);
+
+        // Should maintain consistency across concurrent-like operations
+        assert_eq!(decision1.triggered, decision2.triggered);
+        assert!(decision1.crash_count > 0 && decision2.crash_count > 0);
+    }
+
+    #[test]
+    fn test_crash_loop_with_memory_pressure_simulation() {
+        // Test edge case: behavior under memory pressure
+        let mut detector = CrashLoopDetector::new(CrashLoopConfig {
+            max_crashes: 3,
+            window_secs: 60,
+            cooldown_secs: 30,
+        });
+
+        // Create many crashes to potentially stress memory usage
+        for i in 0..10000 {
+            let crash = CrashEvent {
+                connector_id: format!("connector-{}", i % 100), // Cycle through 100 connectors
+                timestamp: format!("2026-01-01T{:02}:{:02}:{:02}Z", i / 3600, (i / 60) % 60, i % 60),
+                reason: format!("memory pressure test crash {}", i),
+            };
+            detector.record_crash(crash);
+        }
+
+        // Should still function correctly under memory pressure
+        let decision = detector.evaluate_rollback("connector-0", 2000000, "trace", &[trusted_pin_for("connector-0")]);
+
+        assert_eq!(decision.connector_id, "connector-0");
+        assert!(decision.crash_count > 0, "Should have recorded crashes for connector-0");
+
+        // Verify that incidents are bounded properly
+        let incidents = detector.list_incidents();
+        assert!(incidents.len() <= DEFAULT_MAX_INCIDENTS, "Incidents should be bounded to prevent memory exhaustion");
+    }
+
+    #[test]
+    fn test_crash_loop_with_unicode_and_special_characters_in_ids() {
+        // Test edge case: Unicode and special characters in identifiers
+        let mut detector = CrashLoopDetector::new(config());
+
+        let special_ids = [
+            "connector-with-emoji-🚀",
+            "connector/with/slashes",
+            "connector with spaces",
+            "connector\nwith\nnewlines",
+            "connector\0with\0nulls",
+            "connector-with-very-very-very-long-name-that-might-cause-issues-in-some-systems",
+            "连接器-中文-名称", // Chinese characters
+            "コネクター-日本語", // Japanese characters
+            "соединитель-русский", // Cyrillic characters
+        ];
+
+        for special_id in &special_ids {
+            let crash = CrashEvent {
+                connector_id: special_id.to_string(),
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                reason: "unicode test".to_string(),
+            };
+
+            // Should handle special characters without crashing
+            detector.record_crash(crash);
+
+            let pin = KnownGoodPin {
+                connector_id: special_id.to_string(),
+                version: "1.0.0".to_string(),
+                pin_hash: "abc123".to_string(),
+                trusted: true,
+            };
+
+            let decision = detector.evaluate_rollback(special_id, 1000000, "trace", &[pin]);
+
+            // Should handle gracefully
+            assert_eq!(decision.connector_id, *special_id);
+        }
+    }
+
     /// Comprehensive negative-path test module covering edge cases and attack vectors.
     ///
     /// These tests validate robustness against malicious inputs, resource exhaustion,

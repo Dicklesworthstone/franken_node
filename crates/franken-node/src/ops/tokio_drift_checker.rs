@@ -1738,4 +1738,234 @@ mod tokio_drift_checker_boundary_negative_tests {
 
         assert!(result.is_err());
     }
+
+    #[test]
+    fn negative_violations_vector_unbounded_growth_during_mass_scanning() {
+        // Test unbounded Vec::push operations on violations
+        // Lines 234, 255, 300, 417, 441 use violations.push() without bounds checking
+        let temp_dir = tempfile::tempdir().expect("temp dir creation");
+
+        // Create many files with violations to stress the violations vector
+        for i in 0..5000 {
+            let violation_file = temp_dir.path().join(format!("violation_{:04}.rs", i));
+            let content = format!(
+                "// This file has multiple violations\n\
+                 use tokio::runtime::Runtime;\n\
+                 #[tokio::main]\n\
+                 async fn main() {{\n\
+                     Runtime::new().unwrap();\n\
+                     Builder::new_multi_thread().enable_all().build();\n\
+                 }}"
+            );
+            std::fs::write(&violation_file, content).expect("write violation file");
+        }
+
+        // Add Cargo.toml with tokio dependency violation
+        let cargo_toml = temp_dir.path().join("Cargo.toml");
+        std::fs::write(&cargo_toml, "[dependencies]\ntokio = \"1.0\"").expect("write Cargo.toml");
+
+        // Run drift check - this will stress the violations vector
+        let result = check_tokio_drift(temp_dir.path());
+
+        // Verify that checking completes without memory exhaustion
+        assert!(result.violations.len() > 1000, "Should find many violations");
+        assert!(result.files_scanned > 100, "Should scan many files");
+
+        // Verify all violations have valid data
+        for (i, violation) in result.violations.iter().enumerate().take(100) {
+            assert!(!violation.pattern.is_empty(), "Violation {} should have pattern", i);
+            assert!(!violation.reason.is_empty(), "Violation {} should have reason", i);
+            assert!(violation.line_number > 0, "Violation {} should have valid line number", i);
+        }
+
+        // The current implementation has no bounds on violations vector growth
+        // A hardened version might use push_bounded(&mut violations, violation, MAX_VIOLATIONS)
+        // or implement early termination when violation count exceeds a threshold
+    }
+
+    #[test]
+    fn negative_file_collection_recursive_depth_without_bounds() {
+        // Test unbounded recursion in collect_source_files_recursive
+        // Line 476: recursive call without depth limits could cause stack overflow
+        let temp_dir = tempfile::tempdir().expect("temp dir creation");
+
+        // Create deeply nested directory structure
+        let mut deep_path = temp_dir.path().to_path_buf();
+        for level in 0..200 {
+            deep_path = deep_path.join(format!("level_{:03}", level));
+            std::fs::create_dir_all(&deep_path).expect("create deep directory");
+
+            // Add a rust file at each level
+            let rust_file = deep_path.join("deep.rs");
+            std::fs::write(&rust_file, "// Deep file content").expect("write deep file");
+
+            // Stop at reasonable depth to avoid actual stack overflow in tests
+            if level > 50 {
+                break;
+            }
+        }
+
+        // Collect source files - this will recurse deeply
+        let collected_files = collect_source_files(temp_dir.path());
+
+        // Verify collection completes without stack overflow
+        assert!(collected_files.len() > 10, "Should collect files from deep structure");
+
+        // Verify all collected files are valid
+        for file_path in &collected_files {
+            assert!(file_path.exists(), "Collected file should exist: {:?}", file_path);
+            assert!(file_path.extension().unwrap_or_default() == "rs",
+                   "Should only collect .rs files");
+        }
+
+        // The current implementation has no recursion depth limits
+        // A hardened version might implement:
+        // - Maximum recursion depth counter
+        // - Early termination for excessively deep structures
+        // - Stack size monitoring
+    }
+
+    #[test]
+    fn negative_line_indexing_with_array_bounds_edge_cases() {
+        // Test array indexing safety in preceding line access
+        // Lines 336, 412, 436, 516, 559 use lines[idx - 1] with checks
+        let temp_dir = tempfile::tempdir().expect("temp dir creation");
+        let test_file = temp_dir.path().join("bounds_test.rs");
+
+        // Create file with edge case line structures
+        let problematic_content = vec![
+            "", // Empty first line - idx=0 case
+            "// TOKIO_DRIFT_EXCEPTION(bd-test): justified", // Exception marker
+            "#[tokio::main]", // Violation on line that references line 1 (idx=2, idx-1=1)
+            "", // Another empty line
+            "#[tokio::test]", // Another violation on line 5 (idx=4, idx-1=3)
+        ].join("\n");
+
+        std::fs::write(&test_file, problematic_content).expect("write bounds test file");
+
+        // Check for violations
+        let result = check_tokio_drift(temp_dir.path());
+
+        // Verify bounds checking works correctly
+        for violation in &result.violations {
+            // Should handle line number edge cases correctly
+            assert!(violation.line_number > 0, "Line number should be positive");
+            assert!(violation.line_number <= 10, "Line number should be reasonable");
+
+            // Pattern should be non-empty
+            assert!(!violation.pattern.is_empty(), "Pattern should be detected");
+        }
+
+        // Exception should be honored for the first violation
+        assert!(result.exceptions_honored >= 1, "Should honor at least one exception");
+
+        // Test with single-line file (edge case)
+        let single_line_file = temp_dir.path().join("single.rs");
+        std::fs::write(&single_line_file, "#[tokio::main]").expect("write single line");
+
+        let single_result = check_tokio_drift(temp_dir.path());
+
+        // Should handle single-line files without bounds errors
+        let single_violations: Vec<_> = single_result.violations.iter()
+            .filter(|v| v.file.file_name().unwrap() == "single.rs")
+            .collect();
+        assert!(!single_violations.is_empty(), "Should detect violation in single-line file");
+    }
+
+    #[test]
+    fn negative_string_literal_detection_with_escaped_quotes() {
+        // Test string literal detection with complex escape scenarios
+        // Line 194: uses before.as_bytes()[i - 1] != b'\\' for escape detection
+        let test_lines = vec![
+            r#"let pattern = "tokio::runtime::Runtime"; // Should not trigger"#,
+            r#"let escaped = "He said \"tokio::runtime::Runtime\" works"; // Should not trigger"#,
+            r#"let double_escaped = "Path\\\"tokio::runtime::Runtime\\\""; // Should not trigger"#,
+            r#"let complex = r#"Raw string with tokio::runtime::Runtime"#; // Should not trigger"#,
+            r#"actual_runtime_code(); tokio::runtime::Runtime::new(); // Should trigger"#,
+            r#"// Comment with "quoted tokio::runtime::Runtime" - should trigger"#,
+        ];
+
+        for (line_idx, test_line) in test_lines.iter().enumerate() {
+            let is_in_string_first = is_inside_string_literal(test_line, "tokio::runtime::Runtime");
+            let is_in_string_second = is_inside_string_literal(test_line, "tokio::runtime");
+
+            match line_idx {
+                0..=3 => {
+                    // These should be detected as inside string literals
+                    assert!(is_in_string_first || test_line.starts_with("//"),
+                           "Line {} should detect string literal: {}", line_idx, test_line);
+                }
+                4..=5 => {
+                    // These should NOT be detected as inside string literals
+                    assert!(!is_in_string_first,
+                           "Line {} should NOT detect string literal: {}", line_idx, test_line);
+                }
+                _ => {}
+            }
+        }
+
+        // Test edge cases for quote counting
+        let edge_cases = vec![
+            r#""#, // Single quote
+            r#"""#, // Two quotes
+            r#""""#, // Three quotes
+            r#"\" "#, // Escaped quote at start
+            r#" \""#, // Escaped quote at end
+            r#"\"\"tokio::runtime\"\"Runtime"#, // Multiple escapes
+        ];
+
+        for edge_case in edge_cases {
+            // Should not panic on malformed quote patterns
+            let _ = is_inside_string_literal(edge_case, "tokio");
+            let _ = is_inside_string_literal(edge_case, "runtime");
+        }
+    }
+
+    #[test]
+    fn negative_brace_counting_arithmetic_overflow_protection() {
+        // Test brace counting with potential arithmetic overflow
+        // Lines 174-176: use saturating_add and saturating_sub for brace counting
+        let extreme_brace_patterns = vec![
+            "{".repeat(1000), // Many opening braces
+            "}".repeat(1000), // Many closing braces
+            "{{{{}}}}}".repeat(100), // Mixed braces
+            "{".repeat(500) + &"}".repeat(500), // Balanced but extreme
+            format!("{}{}{}", "{".repeat(usize::MAX / 1000), "content", "}".repeat(usize::MAX / 1000)),
+        ];
+
+        for pattern in extreme_brace_patterns {
+            let delta = brace_delta(&pattern);
+
+            // Should handle extreme cases without overflow
+            assert!(delta.abs() <= pattern.len() as isize,
+                   "Brace delta should not exceed line length");
+
+            // Test in context detection with extreme nesting
+            let lines = vec![
+                "#[cfg(test)]",
+                &pattern,
+                "more content",
+            ];
+            let line_refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+
+            let in_test_context = is_in_test_context(&line_refs, 2);
+            // Should not panic on extreme brace counts
+        }
+
+        // Test depth tracking with saturation
+        let mut test_depth = 0isize;
+        for _ in 0..10000 {
+            test_depth = test_depth.saturating_add(1);
+        }
+        assert_eq!(test_depth, 10000, "Saturating add should work for reasonable values");
+
+        // Test saturation at boundaries
+        let mut extreme_depth = isize::MAX - 1;
+        extreme_depth = extreme_depth.saturating_add(10);
+        assert_eq!(extreme_depth, isize::MAX, "Should saturate at isize::MAX");
+
+        let mut negative_depth = isize::MIN + 1;
+        negative_depth = negative_depth.saturating_sub(10);
+        assert_eq!(negative_depth, isize::MIN, "Should saturate at isize::MIN");
+    }
 }

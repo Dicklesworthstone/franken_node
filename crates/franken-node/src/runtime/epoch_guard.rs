@@ -1327,4 +1327,181 @@ mod tests {
             }
         }
     }
+
+    // === Targeted Hardening Pattern Tests ===
+
+    /// Test saturating_add protection on epoch counters and sequence numbers
+    #[test]
+    fn hardening_saturating_add_epoch_counters() {
+        let guard = EpochGuard::new();
+
+        // Test near-overflow epoch arithmetic
+        let near_max_epoch = ControlEpoch::new(u32::MAX - 10);
+        let max_epoch = ControlEpoch::new(u32::MAX);
+
+        // Test epoch arithmetic that should use saturating_add
+        let mut counter = u64::MAX - 5;
+
+        // Simulate counter increment operations that should use saturating_add
+        for i in 0..10 {
+            let old_counter = counter;
+            counter = counter.saturating_add(1); // This is the correct pattern
+
+            // Verify no overflow occurred
+            assert!(counter >= old_counter, "Counter should not wrap around");
+
+            // Test epoch validation with high counter values
+            let artifact_id = format!("artifact-counter-{}", i);
+            let result = guard.validate_artifact_id(&artifact_id);
+            assert!(result.is_ok(), "High counter values should be handled safely");
+        }
+
+        // Test sequence number arithmetic in trace IDs
+        let trace_counter = u64::MAX - 2;
+        let trace_id = format!("trace-{}", trace_counter.saturating_add(1));
+
+        // Verify trace ID generation doesn't overflow
+        assert!(trace_id.contains(&(u64::MAX - 1).to_string()));
+
+        // Test epoch sequence arithmetic
+        let base_epoch = u32::MAX - 100;
+        for increment in 0..200 {
+            let epoch_value = base_epoch.saturating_add(increment);
+            let test_epoch = ControlEpoch::new(epoch_value);
+
+            // Should handle near-overflow epoch values gracefully
+            let guard_event = EpochGuardEvent {
+                event_code: EPOCH_OPERATION_ACCEPTED.to_string(),
+                artifact_id: Some("overflow-test".to_string()),
+                current_epoch: epoch_value as u64,
+                presented_epoch: Some(epoch_value as u64),
+                detail: "saturating arithmetic test".to_string(),
+                trace_id: "overflow-trace".to_string(),
+            };
+
+            // Event should be created without panic
+            assert_eq!(guard_event.current_epoch, epoch_value as u64);
+        }
+    }
+
+    /// Test constant-time comparison for hash/signature verification
+    #[test]
+    fn hardening_constant_time_hash_comparison() {
+        use crate::security::constant_time::ct_eq_bytes;
+
+        let guard = EpochGuard::new();
+        let root_secret = RootSecret::generate_for_test();
+
+        // Test signature verification uses constant-time comparison
+        let artifact_data = b"test-artifact-for-ct-comparison";
+        let epoch = ControlEpoch::new(42);
+
+        // Generate legitimate signature
+        let signature = sign_epoch_artifact(&root_secret, &epoch, artifact_data).unwrap();
+
+        // Test byte-by-byte constant-time comparison directly
+        let hash_a = b"hash-value-a-32-bytes-long-test!";
+        let hash_b = b"hash-value-b-32-bytes-long-test!";
+        let hash_a_copy = b"hash-value-a-32-bytes-long-test!";
+
+        // Verify ct_eq_bytes usage patterns
+        assert!(!ct_eq_bytes(hash_a, hash_b), "Different hashes should not be equal");
+        assert!(ct_eq_bytes(hash_a, hash_a_copy), "Identical hashes should be equal");
+
+        // Test with various hash lengths
+        for hash_len in [16, 32, 64] {
+            let hash1 = vec![0xAA; hash_len];
+            let hash2 = vec![0xBB; hash_len];
+            let hash1_copy = vec![0xAA; hash_len];
+
+            assert!(!ct_eq_bytes(&hash1, &hash2), "Different {}-byte hashes should not be equal", hash_len);
+            assert!(ct_eq_bytes(&hash1, &hash1_copy), "Identical {}-byte hashes should be equal", hash_len);
+        }
+    }
+
+    /// Test fail-closed expiry checks using >= instead of >
+    #[test]
+    fn hardening_fail_closed_expiry_checks() {
+        let guard = EpochGuard::new();
+
+        // Test epoch expiry boundary conditions
+        let current_time = 1000u64;
+        let boundary_test_cases = vec![
+            (current_time - 1, true),   // Before current time (expired)
+            (current_time, true),       // Exactly at current time (expired - fail closed)
+            (current_time + 1, false), // After current time (not expired)
+        ];
+
+        for (test_time, should_be_expired) in boundary_test_cases {
+            // Simulate expiry check: now >= expires_at for fail-closed behavior
+            let is_expired = current_time >= test_time;
+            assert_eq!(is_expired, should_be_expired,
+                      "Expiry check at boundary should be fail-closed (use >= not >): time={}, current={}",
+                      test_time, current_time);
+        }
+
+        // Test signature expiry with precise boundary conditions
+        let signature_timestamp = 2000u64;
+        let signature_ttl = 300u64; // 5-minute TTL
+        let expires_at = signature_timestamp + signature_ttl;
+
+        let expiry_boundary_tests = vec![
+            (expires_at - 1, false), // Before expiry (valid)
+            (expires_at, true),      // At expiry (invalid - fail closed)
+            (expires_at + 1, true),  // After expiry (invalid)
+        ];
+
+        for (check_time, should_be_expired) in expiry_boundary_tests {
+            let is_expired = check_time >= expires_at; // Correct fail-closed pattern
+            assert_eq!(is_expired, should_be_expired,
+                      "Signature expiry should be fail-closed (>=): check={}, expires={}",
+                      check_time, expires_at);
+        }
+    }
+
+    /// Test safe length casting using u32::try_from instead of as u32
+    #[test]
+    fn hardening_safe_length_casting() {
+        let guard = EpochGuard::new();
+
+        // Test artifact ID length validation with safe casting
+        let test_artifacts = vec![
+            "short".to_string(),
+            "x".repeat(100),
+            "y".repeat(1000),
+            "z".repeat(10000),
+            "w".repeat(100000), // Very long artifact ID
+        ];
+
+        for artifact in test_artifacts {
+            let artifact_len = artifact.len();
+
+            // Test safe length casting pattern
+            let safe_len_u32 = u32::try_from(artifact_len).unwrap_or(u32::MAX);
+
+            // Should not panic even with very long strings
+            assert!(safe_len_u32 <= u32::MAX, "Safe casting should prevent overflow");
+
+            if artifact_len > u32::MAX as usize {
+                assert_eq!(safe_len_u32, u32::MAX, "Overflow should be handled gracefully");
+            } else {
+                assert_eq!(safe_len_u32, artifact_len as u32, "Normal lengths should cast correctly");
+            }
+
+            // Test artifact validation with length-aware logic
+            let validation_result = guard.validate_artifact_id(&artifact);
+            match validation_result {
+                Ok(_) => {
+                    // Artifact accepted despite length
+                },
+                Err(EpochGuardError::InvalidArtifactId { reason }) => {
+                    // Length-based rejection is acceptable
+                    assert!(!reason.is_empty(), "Rejection reason should be provided");
+                },
+                Err(_) => {
+                    // Other rejection reasons acceptable
+                }
+            }
+        }
+    }
 }

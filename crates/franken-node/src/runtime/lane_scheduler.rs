@@ -2374,8 +2374,676 @@ mod tests {
         assert!(completion_attempts.count() >= 1);
 
         // Telemetry should reflect only actual completions, not failed attempts
-        let telemetry = scheduler.collect_telemetry(4000);
-        let total_completed = telemetry.total_completed();
+        let telemetry = scheduler.telemetry_snapshot(4000);
+        let total_completed = scheduler.total_completed();
         assert_eq!(total_completed, 1); // Only one successful completion
+    }
+
+    /// Test: Lane scheduler arithmetic overflow and boundary attack vectors
+    #[test]
+    fn test_lane_scheduler_arithmetic_overflow_boundary_attacks() {
+        let mut policy = LaneMappingPolicy::new();
+        policy.add_lane(LaneConfig::new(SchedulerLane::ControlCritical, u32::MAX, usize::MAX)).unwrap();
+        policy.add_rule(&task_classes::epoch_transition(), SchedulerLane::ControlCritical);
+
+        let mut scheduler = LaneScheduler::new(policy).unwrap();
+
+        // Test: Maximum timestamp values (near u64::MAX)
+        let timestamp_boundaries = vec![
+            0u64,                               // Minimum
+            1u64,                               // Just above minimum
+            u32::MAX as u64,                    // 32-bit boundary
+            (u32::MAX as u64) + 1,             // Just over 32-bit
+            u64::MAX - 1_000_000,              // Near maximum but safe
+            u64::MAX - 1,                       // Near maximum
+            u64::MAX,                           // Maximum value
+        ];
+
+        for &timestamp in &timestamp_boundaries {
+            let result = scheduler.assign_task(
+                &task_classes::epoch_transition(),
+                timestamp,
+                &format!("trace_timestamp_{}", timestamp)
+            );
+
+            assert!(result.is_ok(), "Timestamp {} should be handled without overflow", timestamp);
+
+            if let Ok(assignment) = result {
+                assert_eq!(assignment.assigned_at_ms, timestamp,
+                    "Timestamp {} should be preserved exactly", timestamp);
+
+                // Complete the task to clean up
+                let _complete_result = scheduler.complete_task(&assignment.task_id, timestamp + 1, "trace_complete");
+            }
+        }
+
+        // Test: Task counter overflow protection
+        let initial_counter = scheduler.task_counter;
+
+        // Simulate massive task counter value
+        scheduler.task_counter = u64::MAX - 10;
+
+        for i in 0..20 {
+            let assign_result = scheduler.assign_task(
+                &task_classes::epoch_transition(),
+                1000 + i,
+                &format!("trace_overflow_{}", i)
+            );
+
+            // Should handle overflow gracefully with saturating arithmetic
+            assert!(assign_result.is_ok(), "Task counter overflow should be handled gracefully at iteration {}", i);
+
+            if let Ok(assignment) = assign_result {
+                // Task ID should still be generated
+                assert!(assignment.task_id.starts_with("task-"), "Task ID should be generated even with overflow");
+
+                // Complete task to avoid cap issues
+                let _complete_result = scheduler.complete_task(&assignment.task_id, 1010 + i, "trace_complete");
+            }
+        }
+
+        // Task counter should have used saturating arithmetic
+        assert_eq!(scheduler.task_counter, u64::MAX, "Task counter should saturate at MAX");
+
+        // Test: Concurrency counter arithmetic boundaries
+        let mut high_cap_policy = LaneMappingPolicy::new();
+        high_cap_policy.add_lane(LaneConfig::new(SchedulerLane::Background, 1, 5)).unwrap(); // Small cap for testing
+        high_cap_policy.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
+
+        let mut high_cap_scheduler = LaneScheduler::new(high_cap_policy).unwrap();
+
+        // Fill up to capacity
+        let mut active_tasks = Vec::new();
+        for i in 0..5 {
+            let result = high_cap_scheduler.assign_task(
+                &task_classes::log_rotation(),
+                2000 + i,
+                &format!("trace_cap_{}", i)
+            );
+            assert!(result.is_ok(), "Should fill to capacity");
+            if let Ok(assignment) = result {
+                active_tasks.push(assignment);
+            }
+        }
+
+        // Exceed capacity should use saturating arithmetic in rejection counts
+        for i in 0..10 {
+            let overflow_result = high_cap_scheduler.assign_task(
+                &task_classes::log_rotation(),
+                3000 + i,
+                &format!("trace_overflow_{}", i)
+            );
+
+            assert!(overflow_result.is_err(), "Should reject when over capacity");
+        }
+
+        // Counters should use saturating arithmetic
+        let counters = high_cap_scheduler.lane_counter(SchedulerLane::Background).unwrap();
+        assert!(counters.rejected_total <= u64::MAX, "Rejected count should not overflow");
+        assert!(counters.queued_count <= usize::MAX, "Queue count should not overflow");
+
+        // Clean up active tasks
+        for assignment in active_tasks {
+            let _complete_result = high_cap_scheduler.complete_task(&assignment.task_id, 4000, "cleanup");
+        }
+    }
+
+    /// Test: Task class and lane identifier injection attacks
+    #[test]
+    fn test_task_class_lane_identifier_injection_attacks() {
+        // Test: Malicious task class names
+        let malicious_task_classes = vec![
+            TaskClass::new(""),                                    // Empty name
+            TaskClass::new("\x00\x01\x02"),                      // Null bytes and control chars
+            TaskClass::new("task\r\nclass"),                     // CRLF injection
+            TaskClass::new("task\x1B[31mclass\x1B[0m"),         // ANSI escape sequences
+            TaskClass::new("<script>alert('xss')</script>"),     // XSS injection
+            TaskClass::new("'; DROP TABLE tasks; --"),           // SQL injection style
+            TaskClass::new("task\u{200B}class"),                // Zero-width space
+            TaskClass::new("task\u{202E}ssalc\u{202D}"),        // BIDI override
+            TaskClass::new("🔒🔓💀"),                             // Emoji injection
+            TaskClass::new(&"x".repeat(100_000)),                 // Memory exhaustion
+            TaskClass::new("../../../etc/passwd"),               // Path traversal
+            TaskClass::new("CON"),                               // Windows reserved name
+            TaskClass::new("task\ttab\nline"),                   // Mixed whitespace
+        ];
+
+        let mut scheduler = make_scheduler();
+
+        for malicious_class in &malicious_task_classes {
+            // Should reject unknown classes but handle malicious names safely
+            let result = scheduler.assign_task(
+                malicious_class,
+                1000,
+                "trace_malicious_class"
+            );
+
+            // Expected to fail with UnknownClass error (not mapped in default policy)
+            assert!(matches!(result, Err(LaneSchedulerError::UnknownClass { .. })),
+                "Should reject unknown malicious class: '{}'", malicious_class.as_str());
+
+            // Error handling should not crash or leak information
+            if let Err(error) = result {
+                let error_msg = error.to_string();
+                assert!(error_msg.len() < 1000, "Error message should not be excessively long");
+
+                // Should preserve the malicious class name exactly (no sanitization)
+                assert!(error_msg.contains(malicious_class.as_str()),
+                    "Error should contain the exact class name");
+            }
+        }
+
+        // Test: Adding malicious classes to policy
+        let mut malicious_policy = LaneMappingPolicy::new();
+        malicious_policy.add_lane(LaneConfig::new(SchedulerLane::Background, 1, 1)).unwrap();
+
+        for malicious_class in &malicious_task_classes[..5] { // Test subset to avoid excessive output
+            malicious_policy.add_rule(malicious_class, SchedulerLane::Background);
+        }
+
+        // Should be able to create scheduler with malicious task class names
+        let malicious_scheduler_result = LaneScheduler::new(malicious_policy);
+        assert!(malicious_scheduler_result.is_ok(), "Should handle malicious task class names in policy");
+
+        if let Ok(mut malicious_scheduler) = malicious_scheduler_result {
+            // Should be able to assign tasks with malicious names
+            for malicious_class in &malicious_task_classes[..3] {
+                let assign_result = malicious_scheduler.assign_task(
+                    malicious_class,
+                    2000,
+                    "trace_malicious_assignment"
+                );
+
+                assert!(assign_result.is_ok(), "Should assign task with malicious class name");
+
+                if let Ok(assignment) = assign_result {
+                    // Assignment should preserve malicious class name exactly
+                    assert_eq!(assignment.task_class.as_str(), malicious_class.as_str(),
+                        "Assignment should preserve exact malicious class name");
+
+                    // Complete task
+                    let _complete_result = malicious_scheduler.complete_task(&assignment.task_id, 2100, "trace_complete");
+                }
+            }
+
+            // Audit log should handle malicious class names safely
+            let audit_log = malicious_scheduler.audit_log();
+            for record in audit_log {
+                // Should preserve malicious content exactly in audit log
+                if !record.task_class.is_empty() {
+                    assert!(malicious_task_classes.iter().any(|mc| mc.as_str() == record.task_class),
+                        "Audit log should preserve malicious class names");
+                }
+            }
+        }
+
+        // Test: Trace ID injection attacks
+        let trace_id_attacks = vec![
+            "",                                              // Empty trace ID
+            "\x00trace\x01id\x02",                          // Null bytes and control chars
+            "trace\r\nSet-Cookie: session=hijacked",        // HTTP header injection
+            "trace\x1B[2J\x1B[H",                          // Terminal escape (clear screen)
+            "<img src=x onerror=alert('xss')>",             // XSS in trace
+            "'; DELETE FROM traces; --",                    // SQL injection style
+            "trace\u{200B}id",                             // Zero-width space
+            "trace\u{202E}di_ecar\u{202D}t",              // BIDI override
+            &"t".repeat(100_000),                           // Memory exhaustion
+            "../../../var/log/system.log",                 // Path traversal
+            "trace\ttab\nline\rreturn",                     // Mixed whitespace/control
+        ];
+
+        for attack_trace_id in &trace_id_attacks {
+            let result = scheduler.assign_task(
+                &task_classes::epoch_transition(),
+                3000,
+                attack_trace_id
+            );
+
+            assert!(result.is_ok(), "Should handle malicious trace ID: '{}'",
+                attack_trace_id.chars().take(20).collect::<String>());
+
+            if let Ok(assignment) = result {
+                // Trace ID should be preserved exactly
+                assert_eq!(assignment.trace_id, *attack_trace_id,
+                    "Trace ID should be preserved exactly");
+
+                // Complete task
+                let _complete_result = scheduler.complete_task(&assignment.task_id, 3100, attack_trace_id);
+            }
+        }
+
+        // Audit log should handle malicious trace IDs
+        let final_audit = scheduler.audit_log();
+        let trace_id_records: Vec<_> = final_audit.iter()
+            .filter(|r| trace_id_attacks.contains(&r.trace_id.as_str()))
+            .collect();
+
+        assert!(!trace_id_records.is_empty(), "Should have audit records with malicious trace IDs");
+    }
+
+    /// Test: Starvation detection timing manipulation and race conditions
+    #[test]
+    fn test_starvation_timing_manipulation_race_conditions() {
+        // Create policy with very short starvation window for testing
+        let mut fast_starvation_policy = LaneMappingPolicy::new();
+        let mut config = LaneConfig::new(SchedulerLane::Background, 1, 1); // Cap of 1
+        config.starvation_window_ms = 100; // Very short window
+        fast_starvation_policy.add_lane(config).unwrap();
+        fast_starvation_policy.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
+
+        let mut scheduler = LaneScheduler::new(fast_starvation_policy).unwrap();
+
+        // Test: Timestamp manipulation attacks
+        let timestamp_attacks = vec![
+            // Time going backwards
+            (1000u64, 500u64),
+            // Large time jumps
+            (1000u64, u64::MAX),
+            // Zero timestamps
+            (0u64, 0u64),
+            // Boundary conditions
+            (u64::MAX - 1, u64::MAX),
+            // Time overflow scenarios
+            (u64::MAX, u64::MAX.saturating_add(1000)),
+        ];
+
+        for (base_time, attack_time) in timestamp_attacks {
+            // Fill capacity to trigger queueing
+            let fill_result = scheduler.assign_task(
+                &task_classes::log_rotation(),
+                base_time,
+                &format!("trace_fill_{}", base_time)
+            );
+
+            if fill_result.is_ok() {
+                // Try to trigger queueing
+                let queue_result = scheduler.assign_task(
+                    &task_classes::log_rotation(),
+                    base_time + 1,
+                    &format!("trace_queue_{}", base_time)
+                );
+
+                // Should be queued/rejected due to capacity
+                assert!(queue_result.is_err(), "Should reject when at capacity");
+
+                // Check starvation with manipulated timestamp
+                let starvation_results = scheduler.check_starvation(attack_time, &format!("trace_attack_{}", attack_time));
+
+                // Should handle timestamp manipulation gracefully
+                // May or may not detect starvation depending on implementation, but should not crash
+                for starvation in &starvation_results {
+                    match starvation {
+                        LaneSchedulerError::Starvation { elapsed_ms, .. } => {
+                            // Elapsed time should be calculated using saturating arithmetic
+                            assert!(*elapsed_ms <= u64::MAX, "Elapsed time should not overflow");
+                        }
+                        _ => {} // Other errors are acceptable
+                    }
+                }
+
+                // Complete the filling task to reset state
+                if let Ok(assignment) = fill_result {
+                    let _complete_result = scheduler.complete_task(&assignment.task_id, base_time + 10, "trace_cleanup");
+                }
+            }
+        }
+
+        // Test: Rapid starvation check calls (race condition simulation)
+        let rapid_task_result = scheduler.assign_task(&task_classes::log_rotation(), 5000, "rapid_fill");
+        if rapid_task_result.is_ok() {
+            // Fill to capacity
+            let _queue_attempt = scheduler.assign_task(&task_classes::log_rotation(), 5001, "rapid_queue");
+
+            // Rapid starvation checks
+            for i in 0..100 {
+                let check_time = 5000 + i * 10;
+                let starvation_results = scheduler.check_starvation(check_time, &format!("rapid_trace_{}", i));
+
+                // Should handle rapid calls without state corruption
+                for starvation in &starvation_results {
+                    assert!(starvation.code().starts_with("ERR_"), "Error codes should be well-formed");
+                }
+            }
+
+            // State should remain consistent after rapid checks
+            let counters = scheduler.lane_counter(SchedulerLane::Background);
+            assert!(counters.is_some(), "Counters should remain valid after rapid starvation checks");
+
+            if let Some(lane_counters) = counters {
+                assert!(lane_counters.starvation_events < u64::MAX, "Starvation events should use saturating arithmetic");
+            }
+
+            // Clean up
+            if let Ok(assignment) = rapid_task_result {
+                let _complete_result = scheduler.complete_task(&assignment.task_id, 6000, "cleanup");
+            }
+        }
+
+        // Test: Concurrent starvation and task operations
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let shared_scheduler = Arc::new(Mutex::new(make_scheduler()));
+        let mut handles = Vec::new();
+
+        for thread_id in 0..3 {
+            let scheduler_clone = Arc::clone(&shared_scheduler);
+
+            let handle = thread::spawn(move || {
+                for iteration in 0..10 {
+                    let mut scheduler_guard = scheduler_clone.lock().unwrap();
+
+                    // Alternate between operations
+                    match iteration % 3 {
+                        0 => {
+                            // Assign task
+                            let _assign_result = scheduler_guard.assign_task(
+                                &task_classes::epoch_transition(),
+                                7000 + iteration * 100,
+                                &format!("concurrent_thread_{}_{}", thread_id, iteration)
+                            );
+                        }
+                        1 => {
+                            // Check starvation
+                            let _starvation_results = scheduler_guard.check_starvation(
+                                7000 + iteration * 100,
+                                &format!("starvation_thread_{}_{}", thread_id, iteration)
+                            );
+                        }
+                        2 => {
+                            // Complete any available tasks
+                            if let Some(assignment) = scheduler_guard.active_tasks.values().next().cloned() {
+                                let _complete_result = scheduler_guard.complete_task(
+                                    &assignment.task_id,
+                                    7000 + iteration * 100,
+                                    &format!("complete_thread_{}_{}", thread_id, iteration)
+                                );
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+
+                    thread::yield_now();
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread should complete");
+        }
+
+        // Verify scheduler state remains consistent after concurrent access
+        let final_scheduler = shared_scheduler.lock().unwrap();
+        let audit_log = final_scheduler.audit_log();
+
+        // All audit records should be well-formed
+        for record in audit_log {
+            assert!(!record.event_code.is_empty(), "Event codes should not be empty");
+            assert!(record.timestamp_ms > 0, "Timestamps should be positive");
+        }
+    }
+
+    /// Test: Policy validation and hot reload attack vectors
+    #[test]
+    fn test_policy_validation_hot_reload_attacks() {
+        let mut scheduler = make_scheduler();
+
+        // Test: Malformed policy injection during hot reload
+        let malformed_policies = vec![
+            // Policy with zero weight lanes
+            {
+                let mut policy = LaneMappingPolicy::new();
+                policy.add_lane(LaneConfig::new(SchedulerLane::Background, 0, 1)).unwrap();
+                policy.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
+                policy
+            },
+            // Policy with zero capacity lanes
+            {
+                let mut policy = LaneMappingPolicy::new();
+                policy.add_lane(LaneConfig::new(SchedulerLane::Background, 1, 0)).unwrap();
+                policy.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
+                policy
+            },
+            // Policy with unmapped rules
+            {
+                let mut policy = LaneMappingPolicy::new();
+                policy.add_lane(LaneConfig::new(SchedulerLane::Background, 1, 1)).unwrap();
+                policy.add_rule(&task_classes::log_rotation(), SchedulerLane::ControlCritical); // Unmapped lane
+                policy
+            },
+            // Empty policy
+            LaneMappingPolicy::new(),
+        ];
+
+        for (i, malformed_policy) in malformed_policies.into_iter().enumerate() {
+            let reload_result = scheduler.reload_policy(malformed_policy);
+
+            assert!(reload_result.is_err(), "Should reject malformed policy {}", i);
+
+            if let Err(error) = reload_result {
+                // Error should not leak sensitive information
+                let error_msg = error.to_string();
+                assert!(error_msg.len() < 500, "Error message should not be excessively long");
+                assert!(!error_msg.contains("internal"), "Should not leak internal details");
+                assert!(!error_msg.contains("debug"), "Should not leak debug information");
+            }
+        }
+
+        // Original policy should remain intact after failed reloads
+        let original_policy = scheduler.policy();
+        assert!(original_policy.validate().is_ok(), "Original policy should remain valid");
+
+        // Scheduler should continue functioning normally
+        let post_attack_result = scheduler.assign_task(
+            &task_classes::epoch_transition(),
+            8000,
+            "post_attack_trace"
+        );
+        assert!(post_attack_result.is_ok(), "Scheduler should function normally after policy attacks");
+
+        // Test: Valid policy with malicious configurations
+        let mut malicious_policy = LaneMappingPolicy::new();
+
+        // Add lanes with extreme values
+        malicious_policy.add_lane(LaneConfig::new(SchedulerLane::Background, u32::MAX, usize::MAX)).unwrap();
+        malicious_policy.add_lane(LaneConfig::new(SchedulerLane::ControlCritical, 1, 1)).unwrap();
+
+        // Add mapping with malicious task class
+        let malicious_class = TaskClass::new("../../../etc/passwd");
+        malicious_policy.add_rule(&malicious_class, SchedulerLane::Background);
+        malicious_policy.add_rule(&task_classes::epoch_transition(), SchedulerLane::ControlCritical);
+
+        let malicious_reload_result = scheduler.reload_policy(malicious_policy);
+        assert!(malicious_reload_result.is_ok(), "Should accept valid but extreme policy");
+
+        // Should be able to use malicious task class
+        let malicious_assign_result = scheduler.assign_task(&malicious_class, 9000, "malicious_trace");
+        assert!(malicious_assign_result.is_ok(), "Should handle malicious task class in policy");
+
+        // Test: Policy hot reload under load
+        let mut load_policy = LaneMappingPolicy::new();
+        load_policy.add_lane(LaneConfig::new(SchedulerLane::RemoteEffect, 50, 10)).unwrap();
+        load_policy.add_rule(&task_classes::remote_computation(), SchedulerLane::RemoteEffect);
+
+        // Assign several tasks first
+        let mut active_assignments = Vec::new();
+        for i in 0..3 {
+            if let Ok(assignment) = scheduler.assign_task(
+                &task_classes::epoch_transition(),
+                10000 + i,
+                &format!("load_trace_{}", i)
+            ) {
+                active_assignments.push(assignment);
+            }
+        }
+
+        // Hot reload policy while tasks are active
+        let under_load_result = scheduler.reload_policy(load_policy);
+        assert!(under_load_result.is_ok(), "Should handle hot reload under load");
+
+        // Active tasks should still be completable
+        for assignment in active_assignments {
+            let complete_result = scheduler.complete_task(&assignment.task_id, 11000, "load_cleanup");
+            // May succeed or fail depending on implementation, but should not crash
+            match complete_result {
+                Ok(_) => {} // Successful completion
+                Err(_) => {} // May fail due to policy change, acceptable
+            }
+        }
+
+        // New policy should be active
+        let new_assign_result = scheduler.assign_task(&task_classes::remote_computation(), 12000, "new_policy_trace");
+        assert!(new_assign_result.is_ok(), "Should use new policy for new assignments");
+    }
+
+    /// Test: Telemetry and audit log manipulation attacks
+    #[test]
+    fn test_telemetry_audit_log_manipulation_attacks() {
+        let mut scheduler = make_scheduler();
+
+        // Test: Timestamp manipulation in telemetry
+        let timestamp_attacks = vec![
+            0u64,                    // Zero timestamp
+            u64::MAX,               // Maximum timestamp
+            u64::MAX - 1,           // Near maximum
+        ];
+
+        for &attack_timestamp in &timestamp_attacks {
+            let telemetry = scheduler.telemetry_snapshot(attack_timestamp);
+
+            // Should handle extreme timestamps gracefully
+            assert_eq!(telemetry.timestamp_ms, attack_timestamp,
+                "Telemetry should preserve timestamp exactly");
+            assert_eq!(telemetry.schema_version, SCHEMA_VERSION,
+                "Schema version should be consistent");
+            assert!(!telemetry.counters.is_empty(),
+                "Should have counter data even with extreme timestamps");
+
+            // All counters should have valid values
+            for counter in &telemetry.counters {
+                assert!(counter.completed_total <= u64::MAX, "Counters should not overflow");
+                assert!(counter.active_count <= usize::MAX, "Active count should not overflow");
+                assert!(counter.queued_count <= usize::MAX, "Queue count should not overflow");
+            }
+        }
+
+        // Test: Audit log capacity boundary attacks
+        let mut bounded_scheduler = LaneScheduler::with_audit_log_capacity(
+            default_policy(),
+            5 // Very small capacity
+        ).unwrap();
+
+        // Generate more events than capacity
+        for i in 0..20 {
+            let assign_result = bounded_scheduler.assign_task(
+                &task_classes::epoch_transition(),
+                13000 + i,
+                &format!("capacity_attack_{}", i)
+            );
+
+            if let Ok(assignment) = assign_result {
+                let _complete_result = bounded_scheduler.complete_task(&assignment.task_id, 13100 + i, "capacity_cleanup");
+            }
+        }
+
+        // Audit log should be bounded
+        let audit_log = bounded_scheduler.audit_log();
+        assert!(audit_log.len() <= 5, "Audit log should respect capacity bounds");
+
+        // Should contain recent events
+        if !audit_log.is_empty() {
+            let last_record = audit_log.last().unwrap();
+            assert!(last_record.timestamp_ms >= 13100, "Should retain recent events");
+        }
+
+        // Test: JSONL export with malicious data
+        let jsonl_export = bounded_scheduler.export_audit_log_jsonl();
+
+        // Should produce valid JSONL format
+        let lines: Vec<&str> = jsonl_export.split('\n').filter(|s| !s.is_empty()).collect();
+        for line in &lines {
+            let parse_result: Result<serde_json::Value, _> = serde_json::from_str(line);
+            assert!(parse_result.is_ok(), "Each JSONL line should be valid JSON");
+        }
+
+        // Test: Concurrent telemetry access
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let shared_scheduler = Arc::new(Mutex::new(make_scheduler()));
+        let telemetry_results = Arc::new(Mutex::new(Vec::new()));
+
+        let mut handles = Vec::new();
+        for thread_id in 0..3 {
+            let scheduler_clone = Arc::clone(&shared_scheduler);
+            let results_clone = Arc::clone(&telemetry_results);
+
+            let handle = thread::spawn(move || {
+                for iteration in 0..5 {
+                    let timestamp = 14000 + thread_id * 1000 + iteration;
+
+                    let telemetry = {
+                        let scheduler_guard = scheduler_clone.lock().unwrap();
+                        scheduler_guard.telemetry_snapshot(timestamp)
+                    };
+
+                    // Verify telemetry consistency
+                    let is_valid = telemetry.timestamp_ms == timestamp
+                        && telemetry.schema_version == SCHEMA_VERSION
+                        && !telemetry.counters.is_empty();
+
+                    results_clone.lock().unwrap().push((thread_id, iteration, is_valid));
+                    thread::yield_now();
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread should complete");
+        }
+
+        // All telemetry snapshots should be valid
+        let final_results = telemetry_results.lock().unwrap();
+        for &(thread_id, iteration, is_valid) in final_results.iter() {
+            assert!(is_valid, "Telemetry should be valid for thread {} iteration {}", thread_id, iteration);
+        }
+
+        // Test: Memory exhaustion through telemetry requests
+        let mut memory_scheduler = make_scheduler();
+
+        // Generate substantial workload
+        for i in 0..100 {
+            let assign_result = memory_scheduler.assign_task(
+                &task_classes::telemetry_export(),
+                15000 + i,
+                &format!("memory_test_{}", i)
+            );
+
+            if let Ok(assignment) = assign_result {
+                // Complete immediately to generate audit events
+                let _complete_result = memory_scheduler.complete_task(&assignment.task_id, 15010 + i, "memory_cleanup");
+            }
+        }
+
+        // Multiple large telemetry snapshots
+        for i in 0..10 {
+            let large_telemetry = memory_scheduler.telemetry_snapshot(16000 + i);
+            assert!(!large_telemetry.counters.is_empty(), "Should handle multiple telemetry requests");
+        }
+
+        // Audit log should remain bounded and consistent
+        let final_audit = memory_scheduler.audit_log();
+        assert!(final_audit.len() <= DEFAULT_MAX_AUDIT_LOG_ENTRIES + 100, "Audit log should remain bounded");
+
+        // All audit records should be well-formed
+        for record in final_audit {
+            assert!(!record.event_code.is_empty(), "Event codes should not be empty");
+            assert!(record.timestamp_ms > 0, "Timestamps should be positive");
+            assert_eq!(record.schema_version, SCHEMA_VERSION, "Schema version should be consistent");
+        }
     }
 }

@@ -2032,4 +2032,894 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         println!("Concurrent modification resistance test completed: {} threads, {} total operations",
             thread_count + 20 + 100, final_results.len() + snapshot_results_final.len() + 100000);
     }
+
+    #[test]
+    fn negative_bayesian_computation_mathematical_boundary_edge_case_attacks() {
+        let mut graph = AdversaryGraph::new();
+
+        // Test 1: Beta distribution edge cases and mathematical boundary conditions
+        let bayesian_edge_cases = vec![
+            // Extreme alpha/beta ratios that could cause numerical instability
+            (0.999999999999999, 1, "near_certainty_alpha"),
+            (0.000000000000001, 1, "near_zero_alpha"),
+            (0.5, u64::MAX / 2, "massive_beta_weight"),
+            (0.5, 1, "minimal_computation"),
+
+            // Values that test precision boundaries of f64
+            (1.0 - f64::EPSILON, 1, "just_below_one"),
+            (f64::MIN_POSITIVE, 1, "smallest_positive"),
+            (0.5 + f64::EPSILON/2.0, 1, "half_plus_epsilon"),
+            (0.9999999999999998, u64::MAX / 1000000, "near_one_massive_weight"),
+
+            // Sequences that could cause cumulative rounding errors
+            (1.0/3.0, 3, "repeating_decimal_weight"),
+            (std::f64::consts::PI / 4.0, 7, "irrational_likelihood"),
+            (std::f64::consts::E / 3.0, 11, "transcendental_likelihood"),
+        ];
+
+        for (likelihood, weight, test_name) in bayesian_edge_cases {
+            for iteration in 0..1000 {
+                let observation = AdversaryObservation::new(
+                    format!("bayesian_edge_{}", test_name),
+                    likelihood,
+                    weight,
+                    format!("evidence_{}_{}", test_name, iteration),
+                    format!("trace_{}_{}", test_name, iteration),
+                ).unwrap();
+
+                if let Ok(posterior) = graph.ingest(&observation) {
+                    // Verify mathematical properties remain valid
+                    assert!(posterior.posterior.is_finite(),
+                        "Posterior should remain finite for {} at iteration {}: {}", test_name, iteration, posterior.posterior);
+                    assert!((0.0..=1.0).contains(&posterior.posterior),
+                        "Posterior should stay in valid range for {} at iteration {}: {}", test_name, iteration, posterior.posterior);
+
+                    // Verify beta distribution parameters don't overflow
+                    assert!(posterior.alpha != u64::MAX || posterior.beta != u64::MAX,
+                        "Should use saturating arithmetic for {} at iteration {}", test_name, iteration);
+
+                    // Verify evidence accumulation is consistent
+                    assert!(posterior.evidence_count == (iteration + 1) as u64,
+                        "Evidence count should match iterations for {}: {} != {}", test_name, posterior.evidence_count, iteration + 1);
+                }
+            }
+        }
+
+        // Test 2: Beta function approximation attacks and convergence manipulation
+        let convergence_attack_sequences = vec![
+            // Alternating extreme values to test convergence stability
+            vec![(0.999, 1), (0.001, 1), (0.999, 1), (0.001, 1)],
+            // Exponentially decreasing likelihood with increasing weight
+            (0..20).map(|i| (0.5_f64.powi(i), (2_u64).pow(i as u32).min(1000))).collect(),
+            // Sine wave likelihood pattern to test periodic convergence
+            (0..100).map(|i| ((((i as f64) * 0.1).sin().abs()), (i % 10) + 1)).collect(),
+            // Fibonacci-weighted observations
+            vec![(0.618, 1), (0.618, 1), (0.618, 2), (0.618, 3), (0.618, 5), (0.618, 8), (0.618, 13)],
+        ];
+
+        for (seq_idx, sequence) in convergence_attack_sequences.iter().enumerate() {
+            let principal_id = format!("convergence_attack_{}", seq_idx);
+
+            for (obs_idx, (likelihood, weight)) in sequence.iter().enumerate() {
+                let observation = AdversaryObservation::new(
+                    principal_id.clone(),
+                    *likelihood,
+                    *weight,
+                    format!("conv_evidence_{}_{}", seq_idx, obs_idx),
+                    format!("conv_trace_{}_{}", seq_idx, obs_idx),
+                ).unwrap();
+
+                if let Ok(posterior) = graph.ingest(&observation) {
+                    // Verify convergence properties
+                    assert!(posterior.posterior.is_finite(),
+                        "Convergence sequence {} observation {} should produce finite posterior", seq_idx, obs_idx);
+
+                    // Check that posterior changes are reasonable (no wild swings)
+                    if obs_idx > 0 {
+                        let posteriors = graph.posteriors();
+                        let current_posterior = posteriors.iter().find(|p| p.principal_id == principal_id).unwrap();
+
+                        // With enough evidence, posterior should stabilize (not change drastically)
+                        if obs_idx > 10 {
+                            assert!(current_posterior.posterior >= 0.01 && current_posterior.posterior <= 0.99,
+                                "Large evidence sets should avoid extreme posteriors for sequence {}: {}", seq_idx, current_posterior.posterior);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Test 3: Precision loss and numerical stability under extreme computation
+        let precision_stress_principal = "precision_stress_test";
+
+        // Add many tiny observations to test cumulative precision loss
+        for i in 0..50000 {
+            let tiny_likelihood = 1e-12; // Very small but non-zero
+            let observation = AdversaryObservation::new(
+                precision_stress_principal,
+                tiny_likelihood,
+                1,
+                format!("tiny_evidence_{}", i),
+                format!("tiny_trace_{}", i),
+            ).unwrap();
+
+            if let Ok(posterior) = graph.ingest(&observation) {
+                if i % 10000 == 0 {
+                    assert!(posterior.posterior.is_finite(),
+                        "Precision should not degrade to non-finite at iteration {}", i);
+                    assert!(posterior.posterior < 1e-6,
+                        "Many tiny likelihoods should keep posterior very low at iteration {}: {}", i, posterior.posterior);
+                }
+            }
+        }
+
+        // Add a few high-likelihood observations to test rapid convergence
+        for i in 0..10 {
+            let high_likelihood = 0.9999;
+            let observation = AdversaryObservation::new(
+                precision_stress_principal,
+                high_likelihood,
+                1000,
+                format!("high_evidence_{}", i),
+                format!("high_trace_{}", i),
+            ).unwrap();
+
+            if let Ok(posterior) = graph.ingest(&observation) {
+                assert!(posterior.posterior.is_finite(),
+                    "High likelihood observations should maintain finite posterior at iteration {}", i);
+                if i > 5 {
+                    assert!(posterior.posterior > 0.9,
+                        "Strong evidence should rapidly increase posterior at iteration {}: {}", i, posterior.posterior);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negative_evidence_chaining_cryptographic_hash_manipulation_advanced_attacks() {
+        let mut graph = AdversaryGraph::new();
+
+        // Test 1: Advanced hash collision and preimage attacks
+        let cryptographic_attack_vectors = vec![
+            // Length extension attack attempts
+            ("evidence", "trace", "evidence\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x08", "trace"),
+            // Hash function state manipulation
+            ("a".repeat(55), "trace1", "a".repeat(56), "trace1"), // MD5 block boundary
+            ("b".repeat(63), "trace2", "b".repeat(64), "trace2"), // SHA-256 block boundary
+
+            // Unicode normalization attacks on evidence content
+            ("café", "trace", "cafe\u{0301}", "trace"), // NFC vs NFD
+            ("²", "trace", "\u{00B2}", "trace"), // Different Unicode representations
+            ("🚀", "trace", "\u{1F680}", "trace"), // Emoji vs codepoint
+
+            // Null byte and control character injection in evidence
+            ("evidence\x00hidden", "trace", "evidence", "trace\x00hidden"),
+            ("evi\rdence", "tr\nace", "evi\ndence", "tr\race"),
+
+            // JSON/XML structure injection in evidence content
+            ("{\"malicious\":\"evidence\"}", "trace", "evidence", "{\"malicious\":\"trace\"}"),
+            ("<evidence>attack</evidence>", "trace", "evidence", "<trace>attack</trace>"),
+
+            // Binary data and encoding edge cases
+            ("\xFF\xFE\xFD\xFC", "trace", "evidence", "\xFF\xFE\xFD\xFC"),
+            ("evidence", "\xC0\x80", "evidence", "\xE0\x80\x80"), // Overlong UTF-8
+        ];
+
+        let mut seen_hashes = std::collections::HashSet::new();
+
+        for (evidence1, trace1, evidence2, trace2) in cryptographic_attack_vectors {
+            // Test first evidence/trace combination
+            let obs1 = AdversaryObservation::new(
+                "hash_attack_test",
+                0.3,
+                100,
+                evidence1,
+                trace1,
+            ).unwrap();
+
+            // Test second evidence/trace combination
+            let obs2 = AdversaryObservation::new(
+                "hash_attack_test",
+                0.7,
+                100,
+                evidence2,
+                trace2,
+            ).unwrap();
+
+            let result1 = graph.ingest(&obs1).unwrap();
+            let result2 = graph.ingest(&obs2).unwrap();
+
+            // Verify hash uniqueness
+            assert!(seen_hashes.insert(result1.evidence_hash.clone()),
+                "Hash collision detected for evidence1: '{}' + '{}'", evidence1.escape_debug(), trace1.escape_debug());
+            assert!(seen_hashes.insert(result2.evidence_hash.clone()),
+                "Hash collision detected for evidence2: '{}' + '{}'", evidence2.escape_debug(), trace2.escape_debug());
+
+            // Verify different evidence produces different hashes
+            if evidence1 != evidence2 || trace1 != trace2 {
+                assert_ne!(result1.evidence_hash, result2.evidence_hash,
+                    "Different evidence should produce different hashes: ('{}' + '{}') vs ('{}' + '{}')",
+                    evidence1.escape_debug(), trace1.escape_debug(), evidence2.escape_debug(), trace2.escape_debug());
+            }
+
+            // Verify hash format and characteristics
+            assert!(!result2.evidence_hash.is_empty(), "Hash should not be empty");
+            assert!(result2.evidence_hash.len() >= 32, "Hash should be reasonable length: {}", result2.evidence_hash.len());
+            assert!(result2.evidence_hash.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "Hash should contain safe characters: {}", result2.evidence_hash);
+        }
+
+        // Test 2: Hash chain ordering and dependency attacks
+        let chain_manipulation_sequences = vec![
+            // Forward then reverse evidence chain
+            vec![("evidence_a", "trace_1"), ("evidence_b", "trace_2"), ("evidence_c", "trace_3")],
+            vec![("evidence_c", "trace_3"), ("evidence_b", "trace_2"), ("evidence_a", "trace_1")],
+
+            // Interleaved evidence chains
+            vec![("evidence_1", "trace_a"), ("evidence_2", "trace_b"), ("evidence_1", "trace_c"), ("evidence_2", "trace_d")],
+
+            // Duplicate evidence with different traces
+            vec![("same_evidence", "trace_1"), ("same_evidence", "trace_2"), ("same_evidence", "trace_3")],
+
+            // Evidence with hash-confusing content
+            vec![("prefix_suffix", "trace"), ("prefix", "_suffixetrace"), ("prefi", "x_suffixetrace")],
+        ];
+
+        for (chain_idx, sequence) in chain_manipulation_sequences.iter().enumerate() {
+            let principal_id = format!("chain_test_{}", chain_idx);
+            let mut chain_hashes = Vec::new();
+
+            for (evidence, trace) in sequence {
+                let observation = AdversaryObservation::new(
+                    principal_id.clone(),
+                    0.5,
+                    50,
+                    evidence,
+                    trace,
+                ).unwrap();
+
+                if let Ok(posterior) = graph.ingest(&observation) {
+                    chain_hashes.push(posterior.evidence_hash.clone());
+                }
+            }
+
+            // Verify chain produces consistent hash progression
+            if chain_hashes.len() > 1 {
+                // Each step should produce a different hash (evidence chaining)
+                for i in 1..chain_hashes.len() {
+                    assert_ne!(chain_hashes[i-1], chain_hashes[i],
+                        "Chain sequence {} step {} should produce different hash", chain_idx, i);
+                }
+            }
+        }
+
+        // Test 3: Large-scale hash distribution and clustering attacks
+        let mut hash_prefixes = std::collections::HashMap::new();
+        let distribution_test_count = 10000;
+
+        for i in 0..distribution_test_count {
+            let evidence = format!("distribution_evidence_{}", i);
+            let trace = format!("distribution_trace_{}", i);
+
+            let observation = AdversaryObservation::new(
+                format!("distribution_principal_{}", i % 100), // Cluster principals
+                (i as f64) / (distribution_test_count as f64),
+                (i % 1000) + 1,
+                &evidence,
+                &trace,
+            ).unwrap();
+
+            if let Ok(posterior) = graph.ingest(&observation) {
+                // Check hash distribution properties
+                let hash_prefix = if posterior.evidence_hash.len() >= 4 {
+                    &posterior.evidence_hash[..4]
+                } else {
+                    &posterior.evidence_hash
+                };
+
+                *hash_prefixes.entry(hash_prefix.to_string()).or_insert(0) += 1;
+            }
+        }
+
+        // Verify reasonable hash distribution (no excessive clustering)
+        let max_prefix_count = hash_prefixes.values().max().unwrap_or(&0);
+        let min_prefix_count = hash_prefixes.values().min().unwrap_or(&0);
+        let prefix_count = hash_prefixes.len();
+
+        assert!(prefix_count >= 200, "Should have diverse hash prefixes: {}", prefix_count);
+        assert!(*max_prefix_count <= distribution_test_count / 50,
+            "Hash clustering should be limited: max {} in {}", max_prefix_count, distribution_test_count);
+
+        println!("Hash distribution test completed: {} prefixes, max cluster {}, min cluster {}",
+            prefix_count, max_prefix_count, min_prefix_count);
+    }
+
+    #[test]
+    fn negative_adversary_modeling_policy_validation_bypass_and_manipulation_attacks() {
+        let mut graph = AdversaryGraph::new();
+
+        // Test 1: Adversary behavior modeling edge cases and policy bypass attempts
+        let adversary_modeling_attack_scenarios = vec![
+            // Gradual trust building then rapid exploitation
+            ("gradual_exploit", vec![
+                (0.01, 10), (0.02, 10), (0.05, 10), (0.1, 10), (0.2, 10), // Build trust
+                (0.95, 1000), (0.99, 1000), (0.999, 1000) // Exploit trust
+            ]),
+
+            // Oscillating behavior to confuse modeling
+            ("oscillating", vec![
+                (0.9, 100), (0.1, 100), (0.9, 100), (0.1, 100), (0.9, 100), (0.1, 100)
+            ]),
+
+            // Threshold probing (finding policy boundaries)
+            ("threshold_probe", vec![
+                (0.49, 100), (0.50, 100), (0.51, 100), (0.499, 100), (0.501, 100)
+            ]),
+
+            // Volume-based manipulation (small changes with massive weight)
+            ("volume_manipulation", vec![
+                (0.45, 1), (0.455, 10000), (0.46, 1), (0.465, 10000)
+            ]),
+
+            // Time-diluted attacks (consistent low-level malicious behavior)
+            ("time_dilution", (0..1000).map(|_| (0.55, 1)).collect()),
+
+            // Mixed signal injection (alternating benign/malicious at different rates)
+            ("mixed_signal", vec![
+                (0.01, 100), (0.01, 100), (0.99, 1), (0.01, 100), (0.01, 100), (0.99, 1)
+            ]),
+        ];
+
+        for (scenario_name, sequence) in adversary_modeling_attack_scenarios {
+            let principal_id = format!("adversary_model_{}", scenario_name);
+            let mut posterior_progression = Vec::new();
+
+            for (step_idx, (likelihood, weight)) in sequence.iter().enumerate() {
+                let observation = AdversaryObservation::new(
+                    principal_id.clone(),
+                    *likelihood,
+                    *weight,
+                    format!("{}_evidence_{}", scenario_name, step_idx),
+                    format!("{}_trace_{}", scenario_name, step_idx),
+                ).unwrap();
+
+                if let Ok(posterior) = graph.ingest(&observation) {
+                    posterior_progression.push(posterior.posterior);
+
+                    // Verify modeling resists manipulation
+                    assert!(posterior.posterior.is_finite(),
+                        "Scenario {} step {} should maintain finite posterior", scenario_name, step_idx);
+                    assert!((0.0..=1.0).contains(&posterior.posterior),
+                        "Scenario {} step {} should keep posterior in valid range: {}", scenario_name, step_idx, posterior.posterior);
+                }
+            }
+
+            // Analyze posterior progression for resistance to manipulation
+            if posterior_progression.len() > 10 {
+                let initial_avg = posterior_progression[..5].iter().sum::<f64>() / 5.0;
+                let final_avg = posterior_progression[posterior_progression.len()-5..].iter().sum::<f64>() / 5.0;
+
+                match scenario_name {
+                    "gradual_exploit" => {
+                        // Should show gradual increase but not wild swings
+                        assert!(final_avg > initial_avg,
+                            "Gradual exploit should increase posterior: {} -> {}", initial_avg, final_avg);
+                        assert!(final_avg < 0.98,
+                            "Should resist complete trust exploitation: {}", final_avg);
+                    },
+                    "oscillating" => {
+                        // Should converge to middle ground, not oscillate wildly
+                        let variance = posterior_progression.iter()
+                            .map(|p| (p - 0.5).powi(2))
+                            .sum::<f64>() / posterior_progression.len() as f64;
+                        assert!(variance < 0.1,
+                            "Oscillating behavior should not cause high variance: {}", variance);
+                    },
+                    "time_dilution" => {
+                        // Should slowly drift toward true likelihood
+                        assert!(final_avg > 0.5 && final_avg < 0.65,
+                            "Time dilution should converge near true likelihood: {}", final_avg);
+                    },
+                    _ => {
+                        // General resistance checks for other scenarios
+                        assert!(final_avg >= 0.001 && final_avg <= 0.999,
+                            "Scenario {} should avoid extreme posteriors: {}", scenario_name, final_avg);
+                    }
+                }
+            }
+        }
+
+        // Test 2: Policy threshold manipulation and boundary condition attacks
+        let policy_boundary_tests = vec![
+            // Boundary values around common policy thresholds
+            (0.0, "zero_threshold"),
+            (0.001, "near_zero"),
+            (0.1, "low_threshold"),
+            (0.25, "quarter_threshold"),
+            (0.5, "half_threshold"),
+            (0.75, "three_quarter_threshold"),
+            (0.9, "high_threshold"),
+            (0.99, "very_high_threshold"),
+            (0.999, "near_one"),
+            (1.0, "one_threshold"),
+        ];
+
+        for (threshold_likelihood, test_name) in policy_boundary_tests {
+            let principal_id = format!("policy_boundary_{}", test_name);
+
+            // Test approach to boundary from below
+            for i in 1..=100 {
+                let below_threshold = threshold_likelihood - (0.001 * (101 - i) as f64 / 100.0);
+                let bounded_likelihood = below_threshold.max(0.0).min(1.0);
+
+                if bounded_likelihood >= 0.0 && bounded_likelihood <= 1.0 {
+                    let observation = AdversaryObservation::new(
+                        principal_id.clone(),
+                        bounded_likelihood,
+                        100,
+                        format!("below_evidence_{}_{}", test_name, i),
+                        format!("below_trace_{}_{}", test_name, i),
+                    ).unwrap();
+
+                    if let Ok(posterior) = graph.ingest(&observation) {
+                        assert!(posterior.posterior.is_finite(),
+                            "Below-boundary test {} iteration {} should be finite", test_name, i);
+                    }
+                }
+            }
+
+            // Test approach to boundary from above
+            for i in 1..=100 {
+                let above_threshold = threshold_likelihood + (0.001 * (101 - i) as f64 / 100.0);
+                let bounded_likelihood = above_threshold.max(0.0).min(1.0);
+
+                if bounded_likelihood >= 0.0 && bounded_likelihood <= 1.0 {
+                    let observation = AdversaryObservation::new(
+                        principal_id.clone(),
+                        bounded_likelihood,
+                        100,
+                        format!("above_evidence_{}_{}", test_name, i),
+                        format!("above_trace_{}_{}", test_name, i),
+                    ).unwrap();
+
+                    if let Ok(posterior) = graph.ingest(&observation) {
+                        assert!(posterior.posterior.is_finite(),
+                            "Above-boundary test {} iteration {} should be finite", test_name, i);
+                    }
+                }
+            }
+        }
+
+        // Test 3: Multi-principal coordinated attack simulation
+        let coordinated_attack_principals = (0..20).map(|i| format!("coordinated_principal_{}", i)).collect::<Vec<_>>();
+
+        // Phase 1: Establish benign baseline for all principals
+        for principal in &coordinated_attack_principals {
+            for i in 0..50 {
+                let observation = AdversaryObservation::new(
+                    principal.clone(),
+                    0.1, // Low malicious likelihood
+                    10,
+                    format!("benign_evidence_{}_{}", principal, i),
+                    format!("benign_trace_{}_{}", principal, i),
+                ).unwrap();
+                let _ = graph.ingest(&observation);
+            }
+        }
+
+        // Phase 2: Coordinated escalation (simulating coordinated attack)
+        for escalation_step in 0..10 {
+            let escalated_likelihood = 0.1 + (escalation_step as f64 * 0.08); // Gradually increase to 0.82
+
+            for principal in &coordinated_attack_principals {
+                let observation = AdversaryObservation::new(
+                    principal.clone(),
+                    escalated_likelihood,
+                    100, // Higher weight for attack phase
+                    format!("coordinated_evidence_{}_{}", principal, escalation_step),
+                    format!("coordinated_trace_{}_{}", principal, escalation_step),
+                ).unwrap();
+                let _ = graph.ingest(&observation);
+            }
+        }
+
+        // Verify system maintains stability under coordinated attack
+        let final_posteriors = graph.posteriors();
+        let coordinated_posteriors: Vec<_> = final_posteriors.iter()
+            .filter(|p| p.principal_id.starts_with("coordinated_principal_"))
+            .collect();
+
+        assert_eq!(coordinated_posteriors.len(), 20, "Should track all coordinated principals");
+
+        for posterior in &coordinated_posteriors {
+            assert!(posterior.posterior.is_finite(),
+                "Coordinated attack should not break posterior computation for {}", posterior.principal_id);
+            assert!(posterior.posterior >= 0.3 && posterior.posterior <= 0.9,
+                "Coordinated attack should produce reasonable posteriors for {}: {}", posterior.principal_id, posterior.posterior);
+            assert_eq!(posterior.evidence_count, 60, "Should accumulate all evidence for {}", posterior.principal_id);
+        }
+
+        // Verify the graph didn't become unstable
+        assert!(final_posteriors.len() <= 200, "Graph should not have excessive principals: {}", final_posteriors.len());
+    }
+
+    #[test]
+    fn negative_resource_exhaustion_memory_consumption_pattern_and_denial_of_service_attacks() {
+        // Test 1: Memory exhaustion through large graph construction
+        let mut memory_stress_graph = AdversaryGraph::new();
+
+        // Large number of unique principals (memory consumption test)
+        let principal_count = 10000;
+        let observations_per_principal = 100;
+
+        for principal_id in 0..principal_count {
+            for obs_id in 0..observations_per_principal {
+                let observation = AdversaryObservation::new(
+                    format!("memory_principal_{}", principal_id),
+                    ((obs_id as f64) / (observations_per_principal as f64)) * 0.8 + 0.1, // 0.1 to 0.9
+                    (obs_id % 100) + 1,
+                    format!("memory_evidence_{}_{}", principal_id, obs_id),
+                    format!("memory_trace_{}_{}", principal_id, obs_id),
+                ).unwrap();
+
+                if let Ok(posterior) = memory_stress_graph.ingest(&observation) {
+                    // Periodic validation that system remains stable
+                    if principal_id % 1000 == 0 && obs_id % 50 == 0 {
+                        assert!(posterior.posterior.is_finite(),
+                            "Memory stress should not corrupt posteriors at principal {} obs {}", principal_id, obs_id);
+                        assert!((0.0..=1.0).contains(&posterior.posterior),
+                            "Memory stress should not break posterior bounds at principal {} obs {}", principal_id, obs_id);
+                    }
+                }
+            }
+
+            // Periodic memory usage check
+            if principal_id % 2000 == 0 {
+                let current_posteriors = memory_stress_graph.posteriors();
+                assert_eq!(current_posteriors.len(), (principal_id + 1) as usize,
+                    "Should track exactly the right number of principals: {} != {}", current_posteriors.len(), principal_id + 1);
+
+                // Verify no memory corruption
+                for posterior in &current_posteriors {
+                    assert!(!posterior.principal_id.is_empty(),
+                        "Principal ID should not be corrupted");
+                    assert!(posterior.evidence_count <= observations_per_principal as u64,
+                        "Evidence count should be reasonable: {}", posterior.evidence_count);
+                }
+            }
+        }
+
+        // Test 2: Snapshot generation under memory pressure
+        let large_snapshot = memory_stress_graph.snapshot("2026-04-17T15:00:00Z");
+        assert_eq!(large_snapshot.posteriors.len(), principal_count as usize,
+            "Large snapshot should contain all principals");
+
+        // Test serialization of large snapshot (memory pressure test)
+        let serialization_result = serde_json::to_string(&large_snapshot);
+        match serialization_result {
+            Ok(json_string) => {
+                assert!(json_string.len() > 1000000, "Large snapshot should produce substantial JSON");
+
+                // Test partial deserialization doesn't crash
+                let truncated_json = &json_string[..100000.min(json_string.len())];
+                let partial_parse_result: Result<serde_json::Value, _> = serde_json::from_str(truncated_json);
+                // Partial parse may fail, but should not crash
+            },
+            Err(_) => {
+                // Large serialization may fail due to memory limits - this is acceptable
+            }
+        }
+
+        // Test 3: Computational complexity attack (algorithmic complexity)
+        let mut complexity_graph = AdversaryGraph::new();
+
+        // Create principals with similar names to stress hash table performance
+        let similar_principal_patterns = vec![
+            "principal", "principal_", "principal__", "principal_1", "principal_a",
+            "_principal", "__principal", "1_principal", "a_principal", "principal1",
+        ];
+
+        for base_pattern in &similar_principal_patterns {
+            for suffix_id in 0..1000 {
+                let principal_id = format!("{}_{}", base_pattern, suffix_id);
+
+                // Add observations with computationally expensive likelihood patterns
+                for computation_step in 0..100 {
+                    // Use computationally expensive likelihood calculation
+                    let complex_likelihood = ((computation_step as f64).sin().abs() +
+                                            (computation_step as f64 / 3.0).cos().abs()) / 2.0;
+
+                    let observation = AdversaryObservation::new(
+                        principal_id.clone(),
+                        complex_likelihood,
+                        computation_step + 1,
+                        format!("complexity_evidence_{}_{}_{}", base_pattern, suffix_id, computation_step),
+                        format!("complexity_trace_{}_{}_{}", base_pattern, suffix_id, computation_step),
+                    ).unwrap();
+
+                    if let Ok(posterior) = complexity_graph.ingest(&observation) {
+                        // Verify computation remains stable despite complexity
+                        assert!(posterior.posterior.is_finite(),
+                            "Complex computation should remain finite for {} step {}", principal_id, computation_step);
+                    }
+                }
+            }
+        }
+
+        // Test 4: Rapid observation ingestion (throughput stress test)
+        let mut throughput_graph = AdversaryGraph::new();
+        let rapid_fire_count = 100000;
+
+        let start_time = std::time::Instant::now();
+
+        for rapid_id in 0..rapid_fire_count {
+            let observation = AdversaryObservation::new(
+                format!("rapid_principal_{}", rapid_id % 100), // Cluster for stress
+                ((rapid_id % 1000) as f64) / 1000.0,
+                1,
+                format!("rapid_evidence_{}", rapid_id),
+                format!("rapid_trace_{}", rapid_id),
+            ).unwrap();
+
+            if let Ok(posterior) = throughput_graph.ingest(&observation) {
+                // Spot check for stability
+                if rapid_id % 10000 == 0 {
+                    assert!(posterior.posterior.is_finite(),
+                        "Rapid ingestion should maintain finite posteriors at iteration {}", rapid_id);
+                    assert!(posterior.evidence_count > 0,
+                        "Rapid ingestion should maintain evidence count at iteration {}", rapid_id);
+                }
+            }
+        }
+
+        let ingestion_duration = start_time.elapsed();
+        let throughput = rapid_fire_count as f64 / ingestion_duration.as_secs_f64();
+
+        // Verify reasonable performance (should process at least 1000 observations/second)
+        assert!(throughput > 1000.0, "Throughput should be reasonable: {} obs/sec", throughput);
+
+        // Verify final state integrity after rapid ingestion
+        let final_posteriors = throughput_graph.posteriors();
+        assert_eq!(final_posteriors.len(), 100, "Should have exactly 100 principals after rapid ingestion");
+
+        for posterior in &final_posteriors {
+            assert!(posterior.posterior.is_finite(),
+                "All final posteriors should be finite: {}", posterior.posterior);
+            assert!(posterior.evidence_count == 1000,
+                "Evidence count should match rapid fire pattern: {}", posterior.evidence_count);
+        }
+
+        println!("Resource exhaustion test completed: {} principals, {} observations, {:.2} obs/sec throughput",
+            final_posteriors.len(), rapid_fire_count, throughput);
+    }
+
+    #[test]
+    fn negative_advanced_unicode_encoding_normalization_bypass_and_homograph_attacks() {
+        let mut graph = AdversaryGraph::new();
+
+        // Test 1: Advanced Unicode normalization attacks and encoding bypass
+        let unicode_normalization_attacks = vec![
+            // NFC vs NFD normalization attacks
+            ("café", "cafe\u{0301}", "nfc_vs_nfd"),
+            ("naïve", "nai\u{0308}ve", "nfc_vs_nfd_diaeresis"),
+
+            // Unicode combining character attacks
+            ("base", "base\u{0300}\u{0301}\u{0302}", "combining_stacking"),
+            ("test", "te\u{0300}st", "combining_middle"),
+
+            // Different Unicode representations of same glyph
+            ("Ω", "\u{2126}", "ohm_vs_omega"), // Ohm symbol vs Greek capital omega
+            ("K", "\u{212A}", "kelvin_vs_k"), // Kelvin symbol vs Latin K
+            ("Å", "A\u{030A}", "angstrom_vs_a_ring"),
+
+            // Width and spacing character attacks
+            ("test", "test\u{3000}", "ideographic_space"),
+            ("data", "data\u{2000}", "en_quad_space"),
+            ("info", "info\u{200B}", "zero_width_space"),
+
+            // BiDi (bidirectional text) override attacks
+            ("admin", "\u{202E}nimda\u{202D}", "bidi_override"),
+            ("user", "us\u{202E}re\u{202D}r", "bidi_middle"),
+
+            // Invisible and non-printing character attacks
+            ("hidden", "hid\u{FEFF}den", "zero_width_no_break"),
+            ("secret", "sec\u{200C}ret", "zero_width_non_joiner"),
+            ("stealth", "ste\u{200D}alth", "zero_width_joiner"),
+
+            // Homograph attacks (different scripts, same appearance)
+            ("admin", "аdmin", "cyrillic_a"), // Cyrillic а instead of Latin a
+            ("test", "tеst", "cyrillic_e"), // Cyrillic е instead of Latin e
+            ("user", "usеr", "cyrillic_e_user"), // Cyrillic е in user
+
+            // Mixed script attacks
+            ("login", "lοgin", "greek_omicron"), // Greek omicron instead of Latin o
+            ("access", "ассess", "mixed_cyrillic"), // Cyrillic ас instead of Latin ac
+
+            // Confusing Unicode blocks
+            ("data", "𝖉𝖆𝖙𝖆", "mathematical_bold_fraktur"), // Mathematical bold fraktur
+            ("info", "𝐢𝐧𝐟𝐨", "mathematical_bold"), // Mathematical bold
+            ("test", "𝓽𝓮𝓼𝓽", "mathematical_script"), // Mathematical script
+        ];
+
+        for (normal_form, attack_form, attack_name) in unicode_normalization_attacks {
+            // Test normal form
+            let normal_obs = AdversaryObservation::new(
+                format!("unicode_normal_{}", attack_name),
+                0.3,
+                100,
+                normal_form,
+                format!("trace_normal_{}", attack_name),
+            ).unwrap();
+
+            // Test attack form
+            let attack_obs = AdversaryObservation::new(
+                format!("unicode_attack_{}", attack_name),
+                0.7,
+                100,
+                attack_form,
+                format!("trace_attack_{}", attack_name),
+            ).unwrap();
+
+            let normal_result = graph.ingest(&normal_obs).unwrap();
+            let attack_result = graph.ingest(&attack_obs).unwrap();
+
+            // Verify both forms are handled without corruption
+            assert!(normal_result.posterior.is_finite(),
+                "Normal Unicode form should be handled for {}: {}", attack_name, normal_form.escape_debug());
+            assert!(attack_result.posterior.is_finite(),
+                "Attack Unicode form should be handled for {}: {}", attack_name, attack_form.escape_debug());
+
+            // Verify principal IDs are preserved exactly
+            assert_eq!(normal_result.principal_id, format!("unicode_normal_{}", attack_name),
+                "Normal form principal ID should be preserved for {}", attack_name);
+            assert_eq!(attack_result.principal_id, format!("unicode_attack_{}", attack_name),
+                "Attack form principal ID should be preserved for {}", attack_name);
+
+            // Verify evidence hashes differ for different forms
+            if normal_form != attack_form {
+                assert_ne!(normal_result.evidence_hash, attack_result.evidence_hash,
+                    "Different Unicode forms should produce different evidence hashes for {}: '{}' vs '{}'",
+                    attack_name, normal_form.escape_debug(), attack_form.escape_debug());
+            }
+        }
+
+        // Test 2: Overlong encoding and malformed UTF-8 attacks
+        let encoding_bypass_attacks = vec![
+            // Overlong UTF-8 sequences
+            "normal_a", // vs \xC1\x81 (overlong encoding of 'A')
+            "normal_slash", // vs \xC0\xAF (overlong encoding of '/')
+
+            // Surrogate pair attacks in UTF-16
+            "surrogate_test",
+
+            // Invalid UTF-8 sequences
+            "replacement_char",
+        ];
+
+        for (idx, test_case) in encoding_bypass_attacks.iter().enumerate() {
+            // Create observations with potentially problematic content
+            let observation = AdversaryObservation::new(
+                format!("encoding_test_{}", idx),
+                0.5,
+                50,
+                test_case,
+                format!("encoding_trace_{}", idx),
+            ).unwrap();
+
+            let result = graph.ingest(&observation);
+            match result {
+                Ok(posterior) => {
+                    assert!(posterior.posterior.is_finite(),
+                        "Encoding test {} should produce finite posterior", idx);
+                    assert!(!posterior.evidence_hash.is_empty(),
+                        "Encoding test {} should produce valid evidence hash", idx);
+                },
+                Err(error) => {
+                    // Some encoding attacks may be rejected - ensure error is meaningful
+                    assert!(!error.to_string().is_empty(),
+                        "Encoding error should be meaningful for test {}: {:?}", idx, error);
+                }
+            }
+        }
+
+        // Test 3: Unicode injection in trace IDs and evidence references
+        let injection_vectors = vec![
+            // Control character injection
+            ("evidence\x00injection", "trace\r\ninjection"),
+            ("evidence\x1Bmanipulation", "trace\x1Battack"),
+
+            // Unicode category manipulation
+            ("evidence\u{061C}rtl", "trace\u{061C}attack"), // Arabic letter mark
+            ("evidence\u{2066}isolate", "trace\u{2069}pop"), // Directional isolate
+
+            // Private use area characters
+            ("evidence\u{E000}private", "trace\u{F8FF}private"),
+            ("evidence\u{10FFFF}plane16", "trace\u{EFFFF}plane15"),
+
+            // Noncharacters
+            ("evidence\u{FFFE}nonchar", "trace\u{FFFF}nonchar"),
+            ("evidence\u{FDD0}nonchar", "trace\u{FDEF}nonchar"),
+        ];
+
+        for (evidence_content, trace_content) in injection_vectors {
+            let observation = AdversaryObservation::new(
+                "unicode_injection_test",
+                0.4,
+                75,
+                evidence_content,
+                trace_content,
+            ).unwrap();
+
+            if let Ok(posterior) = graph.ingest(&observation) {
+                // Verify content is preserved exactly (no normalization corruption)
+                assert_eq!(posterior.last_trace_id, trace_content,
+                    "Trace ID should be preserved exactly: '{}'", trace_content.escape_debug());
+
+                // Verify hash generation works despite Unicode content
+                assert!(!posterior.evidence_hash.is_empty(),
+                    "Evidence hash should be generated despite Unicode injection");
+                assert!(posterior.evidence_hash.len() >= 16,
+                    "Evidence hash should be reasonable length despite injection: {}", posterior.evidence_hash.len());
+            }
+        }
+
+        // Test 4: Large-scale Unicode homograph collision detection
+        let homograph_sets = vec![
+            // Latin vs Cyrillic confusables
+            vec!["a", "а"], // Latin a vs Cyrillic а
+            vec!["e", "е"], // Latin e vs Cyrillic е
+            vec!["o", "о"], // Latin o vs Cyrillic о
+            vec!["p", "р"], // Latin p vs Cyrillic р
+            vec!["c", "с"], // Latin c vs Cyrillic с
+            vec!["x", "х"], // Latin x vs Cyrillic х
+
+            // Greek vs Latin confusables
+            vec!["A", "Α"], // Latin A vs Greek Alpha
+            vec!["B", "Β"], // Latin B vs Greek Beta
+            vec!["O", "Ο"], // Latin O vs Greek Omicron
+            vec!["P", "Ρ"], // Latin P vs Greek Rho
+
+            // Mathematical vs normal characters
+            vec!["A", "𝐀", "𝐴", "𝖠"], // Various mathematical A's
+            vec!["a", "𝐚", "𝑎", "𝖆"], // Various mathematical a's
+        ];
+
+        let mut homograph_hashes = std::collections::HashMap::new();
+
+        for (set_idx, homograph_set) in homograph_sets.iter().enumerate() {
+            for (variant_idx, variant) in homograph_set.iter().enumerate() {
+                let observation = AdversaryObservation::new(
+                    format!("homograph_principal_{}", variant),
+                    0.6,
+                    100,
+                    format!("homograph_evidence_{}_{}", set_idx, variant_idx),
+                    format!("homograph_trace_{}", variant),
+                ).unwrap();
+
+                if let Ok(posterior) = graph.ingest(&observation) {
+                    // Track hash for collision detection
+                    let hash_key = (posterior.principal_id.clone(), posterior.evidence_hash.clone());
+                    homograph_hashes.insert(hash_key, variant.to_string());
+
+                    // Verify distinct handling of visually similar characters
+                    assert!(posterior.posterior.is_finite(),
+                        "Homograph variant '{}' should produce finite posterior", variant.escape_debug());
+                }
+            }
+        }
+
+        // Verify all homograph variants are treated as distinct
+        let unique_principals: std::collections::HashSet<String> = graph.posteriors()
+            .iter()
+            .filter(|p| p.principal_id.starts_with("homograph_principal_"))
+            .map(|p| p.principal_id.clone())
+            .collect();
+
+        let total_homograph_variants: usize = homograph_sets.iter().map(|set| set.len()).sum();
+        assert!(unique_principals.len() >= total_homograph_variants - 5, // Allow some tolerance
+            "Should distinguish most homograph variants: {} >= {}", unique_principals.len(), total_homograph_variants - 5);
+
+        println!("Unicode attack resistance test completed: {} normalization attacks, {} encoding tests, {} homograph variants",
+            unicode_normalization_attacks.len(), encoding_bypass_attacks.len(), total_homograph_variants);
+    }
 }
