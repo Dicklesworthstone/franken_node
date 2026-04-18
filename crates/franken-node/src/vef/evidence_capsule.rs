@@ -836,28 +836,35 @@ mod tests {
     fn negative_hash_comparison_must_use_constant_time() {
         // Test that hash comparisons use ct_eq_bytes instead of == operator
         // Direct == on hash bytes is vulnerable to timing attacks
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        use sha2::{Digest, Sha256};
 
         let evidence1 = test_evidence();
         let mut evidence2 = test_evidence();
         evidence2.proof_id = "proof-2".into(); // Different proof ID
 
-        // Create hash representations for comparison testing
-        let mut hasher1 = DefaultHasher::new();
-        let mut hasher2 = DefaultHasher::new();
+        // Create hash representations for comparison testing using secure SHA-256
+        let mut hasher1 = Sha256::new();
+        let mut hasher2 = Sha256::new();
 
-        evidence1.hash(&mut hasher1);
-        evidence2.hash(&mut hasher2);
+        // Domain separation for security
+        hasher1.update(b"evidence_v1:");
+        hasher2.update(b"evidence_v1:");
 
-        let hash1_bytes = hasher1.finish().to_le_bytes();
-        let hash2_bytes = hasher2.finish().to_le_bytes();
+        // Serialize evidence for hashing (deterministic)
+        let evidence1_json = serde_json::to_string(&evidence1).expect("evidence1 serialization");
+        let evidence2_json = serde_json::to_string(&evidence2).expect("evidence2 serialization");
+
+        hasher1.update(evidence1_json.as_bytes());
+        hasher2.update(evidence2_json.as_bytes());
+
+        let hash1_bytes = hasher1.finalize();
+        let hash2_bytes = hasher2.finalize();
 
         // Test timing-resistant comparison patterns
         // In production code, these should use crate::security::constant_time::ct_eq_bytes
 
         // Demonstrate vulnerable comparison (what NOT to do)
-        let vulnerable_equal = hash1_bytes == hash2_bytes;  // Timing attack vulnerable
+        let vulnerable_equal = hash1_bytes.as_slice() == hash2_bytes.as_slice();  // Timing attack vulnerable
 
         // Demonstrate safe comparison pattern (what SHOULD be done)
         // Note: This is a simulation - real code should use ct_eq_bytes
@@ -868,18 +875,20 @@ mod tests {
 
         // Both should produce same result, but safe version resists timing attacks
         assert_eq!(vulnerable_equal, safe_equal, "Results should match");
-        assert_ne!(hash1_bytes, hash2_bytes, "Different evidence should have different hashes");
+        assert_ne!(hash1_bytes.as_slice(), hash2_bytes.as_slice(), "Different evidence should have different hashes");
 
         // Test with very similar hashes (high timing attack potential)
         let mut similar_evidence = evidence1.clone();
         similar_evidence.receipt_chain_commitment = "commit-abd".into(); // Only last char different
 
-        let mut similar_hasher = DefaultHasher::new();
-        similar_evidence.hash(&mut similar_hasher);
-        let similar_hash_bytes = similar_hasher.finish().to_le_bytes();
+        let mut similar_hasher = Sha256::new();
+        similar_hasher.update(b"evidence_v1:");
+        let similar_evidence_json = serde_json::to_string(&similar_evidence).expect("similar_evidence serialization");
+        similar_hasher.update(similar_evidence_json.as_bytes());
+        let similar_hash_bytes = similar_hasher.finalize();
 
         // Even tiny differences should be detectable without timing leaks
-        assert_ne!(hash1_bytes, similar_hash_bytes, "Tiny differences should be detected");
+        assert_ne!(hash1_bytes.as_slice(), similar_hash_bytes.as_slice(), "Tiny differences should be detected");
 
         // Production code should use: ct_eq_bytes(&hash1_bytes, &hash2_bytes) ✓
         // NOT: hash1_bytes == hash2_bytes ✗ (timing attack vulnerable)
@@ -1010,57 +1019,58 @@ mod tests {
     fn negative_hash_operations_must_include_domain_separators() {
         // Test that hash operations include domain separators to prevent collision attacks
         // Without domain separation, different data types can produce identical hashes
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        use sha2::{Digest, Sha256};
 
         let evidence = test_evidence();
         let capsule = sealed_capsule();
 
         // Create hash with domain separator (proper approach)
-        let mut hasher_with_domain = DefaultHasher::new();
-        "vef_evidence_v1:".hash(&mut hasher_with_domain);  // Domain separator
-        evidence.hash(&mut hasher_with_domain);
-        let evidence_hash_with_domain = hasher_with_domain.finish();
+        let mut hasher_with_domain = Sha256::new();
+        hasher_with_domain.update(b"vef_evidence_v1:");  // Domain separator
+        let evidence_json = serde_json::to_string(&evidence).expect("evidence serialization");
+        hasher_with_domain.update(evidence_json.as_bytes());
+        let evidence_hash_with_domain = hasher_with_domain.finalize();
 
         // Create hash without domain separator (vulnerable approach)
-        let mut hasher_without_domain = DefaultHasher::new();
-        evidence.hash(&mut hasher_without_domain);
-        let evidence_hash_without_domain = hasher_without_domain.finish();
+        let mut hasher_without_domain = Sha256::new();
+        hasher_without_domain.update(evidence_json.as_bytes());
+        let evidence_hash_without_domain = hasher_without_domain.finalize();
 
         // Domain separator should change the hash value
-        assert_ne!(evidence_hash_with_domain, evidence_hash_without_domain,
+        assert_ne!(evidence_hash_with_domain.as_slice(), evidence_hash_without_domain.as_slice(),
                   "Domain separator should change hash value");
 
         // Test different domain separators for different types
-        let mut capsule_hasher = DefaultHasher::new();
-        "evidence_capsule_v1:".hash(&mut capsule_hasher);  // Different domain
-        capsule.hash(&mut capsule_hasher);
-        let capsule_hash = capsule_hasher.finish();
+        let mut capsule_hasher = Sha256::new();
+        capsule_hasher.update(b"evidence_capsule_v1:");  // Different domain
+        let capsule_json = serde_json::to_string(&capsule).expect("capsule serialization");
+        capsule_hasher.update(capsule_json.as_bytes());
+        let capsule_hash = capsule_hasher.finalize();
 
         // Different types with different domains should not collide
-        assert_ne!(evidence_hash_with_domain, capsule_hash,
+        assert_ne!(evidence_hash_with_domain.as_slice(), capsule_hash.as_slice(),
                   "Different types should have different hash domains");
 
         // Test length-prefixed domain separation (even better)
-        let mut length_prefixed_hasher = DefaultHasher::new();
+        let mut length_prefixed_hasher = Sha256::new();
         let domain = "vef_evidence_v1";
-        length_prefixed_hasher.hash(&(domain.len() as u64).to_le_bytes());
-        domain.hash(&mut length_prefixed_hasher);
-        evidence.hash(&mut length_prefixed_hasher);
-        let length_prefixed_hash = length_prefixed_hasher.finish();
+        length_prefixed_hasher.update((domain.len() as u64).to_le_bytes());
+        length_prefixed_hasher.update(domain.as_bytes());
+        length_prefixed_hasher.update(evidence_json.as_bytes());
+        let length_prefixed_hash = length_prefixed_hasher.finalize();
 
         // Length-prefixed should differ from simple prefix
-        assert_ne!(length_prefixed_hash, evidence_hash_with_domain,
+        assert_ne!(length_prefixed_hash.as_slice(), evidence_hash_with_domain.as_slice(),
                   "Length-prefixed domain separation should be distinct");
 
         // Test schema version as domain separator
-        let mut schema_domain_hasher = DefaultHasher::new();
-        SCHEMA_VERSION.hash(&mut schema_domain_hasher);
-        evidence.hash(&mut schema_domain_hasher);
-        let schema_domain_hash = schema_domain_hasher.finish();
+        let mut schema_domain_hasher = Sha256::new();
+        schema_domain_hasher.update(SCHEMA_VERSION.as_bytes());
+        schema_domain_hasher.update(evidence_json.as_bytes());
+        let schema_domain_hash = schema_domain_hasher.finalize();
 
         // Schema version domain should be different
-        assert_ne!(schema_domain_hash, evidence_hash_with_domain,
+        assert_ne!(schema_domain_hash.as_slice(), evidence_hash_with_domain.as_slice(),
                   "Schema version domain should create distinct hash");
 
         // Production code should use domain separators like:

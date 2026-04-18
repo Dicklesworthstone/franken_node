@@ -625,13 +625,14 @@ mod remote_module_negative_tests {
         };
 
         // Create hash with domain separator (proper approach)
-        let mut hasher_with_domain = DefaultHasher::new();
-        "fault_config_v1:".hash(&mut hasher_with_domain);  // Domain separator
-        base_config.hash(&mut hasher_with_domain);
-        let hash_with_domain = hasher_with_domain.finish();
+        let mut hasher_with_domain = Sha256::new();
+        hasher_with_domain.update(b"fault_config_v1:");  // Domain separator
+        let config_json = serde_json::to_string(&base_config).expect("config serialization");
+        hasher_with_domain.update(config_json.as_bytes());
+        let hash_with_domain = hasher_with_domain.finalize();
 
         // Create hash without domain separator (vulnerable approach)
-        let mut hasher_without_domain = DefaultHasher::new();
+        let mut hasher_without_domain = Sha256::new();
         base_config.hash(&mut hasher_without_domain);
         let hash_without_domain = hasher_without_domain.finish();
 

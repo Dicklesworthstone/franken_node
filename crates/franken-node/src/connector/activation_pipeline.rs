@@ -368,8 +368,8 @@ pub fn activate(input: &ActivationInput, executor: &dyn StageExecutor) -> Activa
         }
     }
 
-    // Stage 2: SecretMount (fail-closed: > ensures rejection beyond capacity)
-    if input.secret_refs.len() > MAX_MOUNTED_SECRETS {
+    // Stage 2: SecretMount (fail-closed: >= ensures rejection at capacity boundary)
+    if input.secret_refs.len() >= MAX_MOUNTED_SECRETS {
         stages.push(StageResult {
             stage: ActivationStage::SecretMount,
             success: false,
@@ -847,23 +847,28 @@ mod tests {
         );
     }
 
-    /// Regression test for boundary condition bug: exactly MAX_MOUNTED_SECRETS should be allowed
+    /// Regression test for boundary condition: exactly MAX_MOUNTED_SECRETS should be rejected for fail-closed semantics
     #[test]
-    fn max_secrets_boundary_condition_allowed() {
+    fn max_secrets_boundary_condition_rejected() {
         // Create input with exactly MAX_MOUNTED_SECRETS secret refs
         let mut input = test_input();
         input.secret_refs = (0..MAX_MOUNTED_SECRETS)
             .map(|i| format!("secret-{}", i))
             .collect();
 
-        // This should succeed, not fail at the boundary
+        // This should fail at the boundary for fail-closed semantics
         let t = activate(&input, &DefaultExecutor);
         assert!(
-            t.completed,
-            "activation with exactly MAX_MOUNTED_SECRETS should succeed"
+            !t.completed,
+            "activation with exactly MAX_MOUNTED_SECRETS should fail for fail-closed semantics"
         );
-        assert_eq!(t.stages.len(), 4);
-        assert!(t.stages.iter().all(|s| s.success));
+        assert_eq!(t.stages.len(), 2); // SandboxCreate succeeds, SecretMount fails
+        assert!(t.stages[0].success);
+        assert!(!t.stages[1].success);
+        assert_eq!(
+            t.stages[1].error.as_ref().unwrap().code(),
+            "ACT_SECRET_MOUNT_FAILED"
+        );
     }
 
     /// Test that exceeding MAX_MOUNTED_SECRETS is properly rejected
@@ -1700,7 +1705,7 @@ mod tests {
         ];
 
         for malicious_input in malicious_inputs {
-            let validation_result = validate_input(&malicious_input);
+            let validation_result = validate_activation_input(&malicious_input);
 
             match validation_result {
                 Ok(_) => {
@@ -1769,7 +1774,7 @@ mod tests {
         ];
 
         for exhaustion_input in exhaustion_inputs {
-            let validation_result = validate_input(&exhaustion_input);
+            let validation_result = validate_activation_input(&exhaustion_input);
 
             match validation_result {
                 Ok(_) => {
@@ -1895,7 +1900,7 @@ mod tests {
         ];
 
         for bypass_input in bypass_inputs {
-            let validation_result = validate_input(&bypass_input);
+            let validation_result = validate_activation_input(&bypass_input);
 
             match validation_result {
                 Ok(_) => {
@@ -1955,7 +1960,7 @@ mod tests {
         ];
 
         for limit_input in limit_test_inputs {
-            let validation_result = validate_input(&limit_input);
+            let validation_result = validate_activation_input(&limit_input);
             let is_over_limit = limit_input.secret_refs.len() > MAX_MOUNTED_SECRETS ||
                               limit_input.capabilities.len() > MAX_CAPABILITIES;
 
@@ -2090,7 +2095,7 @@ mod tests {
                 timestamp: "2026-01-01T00:00:00Z".to_string(),
             };
 
-            let validation_result = validate_input(&injection_input);
+            let validation_result = validate_activation_input(&injection_input);
 
             match validation_result {
                 Ok(_) => {
@@ -2212,7 +2217,7 @@ mod tests {
                 timestamp: malicious_timestamp.to_string(),
             };
 
-            let validation_result = validate_input(&timestamp_input);
+            let validation_result = validate_activation_input(&timestamp_input);
 
             match validation_result {
                 Ok(_) => {

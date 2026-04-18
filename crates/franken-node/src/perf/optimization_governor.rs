@@ -38,6 +38,7 @@
 //! - `INV-GOVERNOR-ENGINE-BOUNDARY`
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use crate::capacity_defaults::aliases::MAX_AUDIT_TRAIL_ENTRIES;
 
@@ -75,10 +76,12 @@ pub struct GovernorGate {
 impl GovernorGate {
     /// Create a new gate wrapping an [`OptimizationGovernor`].
     pub fn new(governor: OptimizationGovernor) -> Self {
-        Self {
+        let gate = Self {
             inner: governor,
             audit_trail: Vec::new(),
-        }
+        };
+
+        return gate;
 
         // Inline negative-path tests
         #[cfg(test)]
@@ -245,7 +248,7 @@ impl GovernorGate {
             GovernorDecision::ShadowOnly => {}
         }
 
-        decision
+        return decision;
 
         // Inline negative-path tests
         #[cfg(test)]
@@ -314,7 +317,7 @@ impl GovernorGate {
                     proposal_id: format!("rapid-{}", i),
                     knob: RuntimeKnob::RetryBudget,
                     old_value: i as u64,
-                    new_value: (i + 1) as u64,
+                    new_value: (i as u64).saturating_add(1),
                     predicted_metrics: PredictedMetrics { latency_p99_ms: 100, throughput_rps: 1000, cpu_util_pct: 50, memory_mb: 512 },
                 };
                 let _decision = gate.submit(rapid_proposal);
@@ -413,7 +416,7 @@ impl GovernorGate {
                 MAX_AUDIT_TRAIL_ENTRIES,
             );
         }
-        reverted
+        return reverted;
 
         // Inline negative-path tests
         #[cfg(test)]
@@ -429,7 +432,7 @@ impl GovernorGate {
             };
             let reverted = gate.live_check(&extreme_metrics);
             // Should handle extreme values without panicking
-            assert!(reverted.len() >= 0, "extreme metrics should be handled gracefully");
+            // Function should complete without panicking - the call itself is the test
 
             // Test: live_check with all-zero metrics
             let mut gate = Self::with_defaults();
@@ -440,7 +443,7 @@ impl GovernorGate {
                 memory_mb: 0,
             };
             let reverted = gate.live_check(&zero_metrics);
-            assert!(reverted.len() >= 0, "zero metrics should be handled gracefully");
+            // Function should complete without panicking - the call itself is the test
 
             // Test: live_check generates audit events for each reversion
             let mut gate = Self::with_defaults();
@@ -525,7 +528,7 @@ impl GovernorGate {
 
             for (i, metrics) in boundary_test_cases.iter().enumerate() {
                 let reverted = gate.live_check(metrics);
-                assert!(reverted.len() >= 0, "boundary test case {} should complete without error", i);
+                // Function should complete without panicking for boundary test case - the call itself is the test
             }
 
             // Test: live_check audit detail contains expected message
@@ -551,7 +554,7 @@ impl GovernorGate {
             // Test: live_check handles audit trail overflow gracefully
             let mut gate = Self::with_defaults();
             // Pre-fill audit trail close to capacity
-            for i in 0..(MAX_AUDIT_TRAIL_ENTRIES - 5) {
+            for i in 0..MAX_AUDIT_TRAIL_ENTRIES.saturating_sub(5) {
                 push_bounded(
                     &mut gate.audit_trail,
                     GateAuditEntry {
@@ -3727,7 +3730,7 @@ mod tests {
             "\x00\x01\x02\x03\x04\x05\x06\x07", // Control characters
             "🔥💀☠️⚠️🚨", // Emoji that might affect encoding
             "\u{200B}\u{200C}\u{200D}\u{FEFF}", // Zero-width characters
-            "\\\"\n\r\t\b\f/", // JSON escape sequence attacks
+            "\\\"\n\r\t\x08\x0C/", // JSON escape sequence attacks (backspace and form feed)
         ];
 
         for attack_string in json_attacks {
@@ -4300,7 +4303,7 @@ mod tests {
                 "\x00\x01\x02\x03\x04\x05\x06\x07", // NULL and control chars
                 "\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F", // Backspace, tab, newline, etc.
                 "\x10\x11\x12\x13\x14\x15\x16\x17", // More control chars
-                "\x7F\x80\x81\x82\x83\x84\x85\x86", // DEL and extended ASCII
+                "\x7F", // DEL character (removed invalid extended ASCII)
                 "\u{200B}\u{200C}\u{200D}\u{FEFF}", // Zero-width chars, BOM
                 "\u{202A}\u{202B}\u{202C}\u{202D}", // Text direction overrides
             ];
@@ -5008,7 +5011,7 @@ mod tests {
                     predicted_metrics: PredictedMetrics {
                         throughput: 100.0,
                         latency_p99: 50.0,
-                        memory_usage: byte_value as usize,
+                        memory_usage: usize::try_from(byte_value).unwrap_or(usize::MAX),
                     },
                 };
                 let _ = gate.submit(endian_proposal);
@@ -5021,12 +5024,12 @@ mod tests {
                     proposal_id: format!("serialization_consistency_{}", consistency_round),
                     knob: RuntimeKnob::RetryBudget,
                     old_value: consistency_round,
-                    new_value: consistency_round + 1,
+                    new_value: consistency_round.saturating_add(1),
                     predicted_metrics: PredictedMetrics {
                         // Use values that might have different JSON representations
                         throughput: (consistency_round as f64) + 0.1,
                         latency_p99: (consistency_round as f64) * 1.1 + 0.01,
-                        memory_usage: consistency_round * 100 + 1,
+                        memory_usage: consistency_round.saturating_mul(100).saturating_add(1),
                     },
                 };
                 let _ = gate.submit(consistency_proposal);

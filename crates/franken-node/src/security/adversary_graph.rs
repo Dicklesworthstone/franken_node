@@ -9,6 +9,15 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Hardening: Push with bounded capacity to prevent memory exhaustion attacks
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 pub const ADVERSARY_GRAPH_SCHEMA_VERSION: &str = "adversary-graph-state-v1";
 pub const EVD_ADV_GRAPH_001: &str = "EVD-ADV-GRAPH-001";
 pub const EVD_ADV_GRAPH_002: &str = "EVD-ADV-GRAPH-002";
@@ -199,7 +208,11 @@ fn split_weight(likelihood: f64, evidence_weight: u64) -> (u64, u64) {
     if !rounded.is_finite() {
         return (0, evidence_weight);
     }
-    let successes = (rounded as u64).min(evidence_weight);
+    let successes = if rounded >= 0.0 {
+        (rounded as u64).min(evidence_weight)
+    } else {
+        0
+    };
     let failures = evidence_weight.saturating_sub(successes);
     (successes, failures)
 }
@@ -214,11 +227,11 @@ fn chain_evidence_hash(
     // Hardening: length-prefixed hash inputs to prevent collision attacks
     let mut hasher = Sha256::new();
     hasher.update(b"adversary_graph_evidence_chain_v1:"); // domain separator
-    hasher.update((previous_hash.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(previous_hash.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(previous_hash.as_bytes());
-    hasher.update((evidence_ref.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(evidence_ref.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(evidence_ref.as_bytes());
-    hasher.update((trace_id.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(trace_id.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(trace_id.as_bytes());
     hasher.update(likelihood.to_le_bytes());
     hasher.update(evidence_weight.to_le_bytes());
@@ -301,10 +314,10 @@ mod tests {
         for edge in edges {
             let weight = clamp_edge_weight(edge.weight);
             if weight > 0.0 {
-                adjacency
+                let adjacency_list = adjacency
                     .entry(edge.from)
-                    .or_default()
-                    .push((edge.to, weight));
+                    .or_default();
+                push_bounded(adjacency_list, (edge.to, weight), 1000);
             }
         }
         adjacency
@@ -1443,7 +1456,10 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                     graph_guard.ingest(&observation)
                 };
 
-                results_clone.lock().unwrap().push((principal, result));
+                {
+                    let mut results = results_clone.lock().unwrap();
+                    push_bounded(&mut *results, (principal, result), 100);
+                }
             })
         }).collect();
 
@@ -1625,7 +1641,7 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             let graph = graph_result.unwrap();
             let posteriors = graph.posteriors();
 
-            replay_results.push(posteriors);
+            push_bounded(&mut replay_results, posteriors, 50);
         }
 
         // All permutations should produce identical results
@@ -1687,7 +1703,7 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                     format!("volume_evidence_{}_{}", principal_id, obs_id),
                     format!("volume_trace_{}_{}", principal_id, obs_id),
                 ).unwrap();
-                volume_observations.push(observation);
+                push_bounded(&mut volume_observations, observation, 10000);
             }
         }
 
@@ -1895,7 +1911,7 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                         graph_guard.ingest(&observation)
                     };
 
-                    thread_results.push((thread_id, obs_id, result.is_ok()));
+                    push_bounded(&mut thread_results, (thread_id, obs_id, result.is_ok()), 150);
                 }
 
                 results_clone.lock().unwrap().extend(thread_results);

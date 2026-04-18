@@ -1765,18 +1765,18 @@ mod tests {
 
         for malicious_content in injection_attempts {
             let error_variants = vec![
-                CapsuleError::SignatureInvalid(malicious_content.clone()),
-                CapsuleError::SchemaMismatch(malicious_content.clone()),
-                CapsuleError::AccessDenied(malicious_content.clone()),
-                CapsuleError::EmptyPayload(malicious_content.clone()),
-                CapsuleError::ManifestIncomplete(malicious_content.clone()),
+                CapsuleError::SignatureInvalid(malicious_content.to_string()),
+                CapsuleError::SchemaMismatch(malicious_content.to_string()),
+                CapsuleError::AccessDenied(malicious_content.to_string()),
+                CapsuleError::EmptyPayload(malicious_content.to_string()),
+                CapsuleError::ManifestIncomplete(malicious_content.to_string()),
                 CapsuleError::ReplayDiverged {
-                    expected: malicious_content.clone(),
+                    expected: malicious_content.to_string(),
                     actual: "legitimate".to_string()
                 },
                 CapsuleError::VerdictMismatch {
                     expected: "Pass".to_string(),
-                    actual: malicious_content.clone()
+                    actual: malicious_content.to_string()
                 },
             ];
 
@@ -1785,7 +1785,7 @@ mod tests {
 
                 // Error should contain the malicious content but in a safe way
                 // (Display trait should not process escape codes, just include them as-is)
-                assert!(error_string.contains(malicious_content.as_str()) ||
+                assert!(error_string.contains(malicious_content) ||
                        error_string.contains(&malicious_content.escape_debug().to_string()),
                        "Error display should include malicious content safely");
 
@@ -2000,7 +2000,7 @@ mod tests {
         // Analyze timing differences for patterns indicating non-constant-time comparison
         let medians: Vec<f64> = timing_results.values().map(|(median, _, _, _)| *median).collect();
         let mean_median = medians.iter().sum::<f64>() / medians.len() as f64;
-        let max_median = medians.iter().fold(0.0, |acc, &x| acc.max(x));
+        let max_median = medians.iter().fold(0.0_f64, |acc, &x| acc.max(x));
         let min_median = medians.iter().fold(f64::INFINITY, |acc, &x| acc.min(x));
 
         let timing_variance_ratio = (max_median - min_median) / mean_median;
@@ -2104,7 +2104,7 @@ mod tests {
             "verifier_sdk_capsule_signing_v1:test_data",
 
             // Binary injection of domain separator
-            format!("{}test_data", std::str::from_utf8(b"verifier_sdk_capsule_v1:").unwrap()),
+            "verifier_sdk_capsule_v1:test_data",
         ];
 
         for injection_attempt in separator_injection_attempts {
@@ -2212,7 +2212,7 @@ mod tests {
         // Analyze timing relationships to detect Unicode normalization side channels
         let medians: Vec<f64> = unicode_timings.values().map(|(median, _, _)| *median).collect();
         let mean_median = medians.iter().sum::<f64>() / medians.len() as f64;
-        let max_median = medians.iter().fold(0.0, |acc, &x| acc.max(x));
+        let max_median = medians.iter().fold(0.0_f64, |acc, &x| acc.max(x));
         let min_median = medians.iter().fold(f64::INFINITY, |acc, &x| acc.min(x));
 
         let unicode_timing_variance = (max_median - min_median) / mean_median;
@@ -2339,7 +2339,7 @@ mod tests {
             (format!("{}F", &reference_string[..63]), "case_diff_last"),
 
             // Identical case
-            (reference_string.clone(), "identical"),
+            (reference_string.to_string(), "identical"),
         ];
 
         let mut detailed_timings = std::collections::HashMap::new();
@@ -2380,7 +2380,7 @@ mod tests {
         // Statistical analysis for constant-time properties
         let means: Vec<f64> = detailed_timings.values().map(|(mean, _, _, _, _, _, _)| *mean).collect();
         let overall_mean = means.iter().sum::<f64>() / means.len() as f64;
-        let max_mean = means.iter().fold(0.0, |acc, &x| acc.max(x));
+        let max_mean = means.iter().fold(0.0_f64, |acc, &x| acc.max(x));
         let min_mean = means.iter().fold(f64::INFINITY, |acc, &x| acc.min(x));
 
         // Constant-time comparison should have very low variance across different inputs
