@@ -774,7 +774,7 @@ mod tests {
             cfg.trusted_signers.first().map(String::as_str),
             Some("signer-0")
         );
-        let expected_last = format!("signer-{}", MAX_TRUSTED_SIGNERS - 1);
+        let expected_last = format!("signer-{}", MAX_TRUSTED_SIGNERS.saturating_sub(1));
         assert_eq!(
             cfg.trusted_signers.last().map(String::as_str),
             Some(expected_last.as_str())
@@ -986,13 +986,15 @@ mod tests {
         );
         let artifact = make_artifact("a1", "ext-alpha", contract);
         let outcome = gate.evaluate(&artifact);
-        match outcome {
-            AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract { detail },
-                ..
-            } => assert!(detail.contains("empty contract_id")),
-            _ => panic!("expected empty contract_id to be denied"),
-        }
+        let AdmissionOutcome::Denied {
+            reason: AdmissionDenialReason::InvalidContract { detail },
+            ..
+        } = outcome
+        else {
+            assert!(false, "expected empty contract_id to be denied");
+            return;
+        };
+        assert!(detail.contains("empty contract_id"));
     }
 
     #[test]
@@ -1008,13 +1010,18 @@ mod tests {
         );
         let artifact = make_artifact("a1", "ext-alpha", contract);
         let outcome = gate.evaluate(&artifact);
-        match outcome {
-            AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract { detail },
-                ..
-            } => assert!(detail.contains("contract extension_id contains")),
-            _ => panic!("expected whitespace contract extension_id to be denied"),
-        }
+        let AdmissionOutcome::Denied {
+            reason: AdmissionDenialReason::InvalidContract { detail },
+            ..
+        } = outcome
+        else {
+            assert!(
+                false,
+                "expected whitespace contract extension_id to be denied"
+            );
+            return;
+        };
+        assert!(detail.contains("contract extension_id contains"));
     }
 
     #[test]
@@ -1062,13 +1069,15 @@ mod tests {
         );
         let artifact = make_artifact("a1", "ext-alpha", contract);
         let outcome = gate.evaluate(&artifact);
-        match outcome {
-            AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract { detail },
-                ..
-            } => assert!(detail.contains("signer_id contains")),
-            _ => panic!("expected whitespace signer_id to be denied"),
-        }
+        let AdmissionOutcome::Denied {
+            reason: AdmissionDenialReason::InvalidContract { detail },
+            ..
+        } = outcome
+        else {
+            assert!(false, "expected whitespace signer_id to be denied");
+            return;
+        };
+        assert!(detail.contains("signer_id contains"));
     }
 
     #[test]
@@ -1110,13 +1119,15 @@ mod tests {
         contract.signature = "A".repeat(64);
         let artifact = make_artifact("a1", "ext-alpha", contract);
         let outcome = gate.evaluate(&artifact);
-        match outcome {
-            AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract { detail },
-                ..
-            } => assert!(detail.contains("signature must be lowercase hex sha256")),
-            _ => panic!("expected uppercase signature to be denied"),
-        }
+        let AdmissionOutcome::Denied {
+            reason: AdmissionDenialReason::InvalidContract { detail },
+            ..
+        } = outcome
+        else {
+            assert!(false, "expected uppercase signature to be denied");
+            return;
+        };
+        assert!(detail.contains("signature must be lowercase hex sha256"));
     }
 
     #[test]
@@ -1163,13 +1174,15 @@ mod tests {
         let contract = test_contract();
         let artifact = make_artifact(" a1 ", "ext-alpha", contract);
         let outcome = gate.evaluate(&artifact);
-        match outcome {
-            AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract { detail },
-                ..
-            } => assert!(detail.contains("artifact_id contains")),
-            _ => panic!("expected whitespace artifact_id to be denied"),
-        }
+        let AdmissionOutcome::Denied {
+            reason: AdmissionDenialReason::InvalidContract { detail },
+            ..
+        } = outcome
+        else {
+            assert!(false, "expected whitespace artifact_id to be denied");
+            return;
+        };
+        assert!(detail.contains("artifact_id contains"));
     }
 
     #[test]
@@ -1178,24 +1191,28 @@ mod tests {
         let contract = test_contract();
         let artifact = make_artifact("<unknown>", "ext-alpha", contract);
         let outcome = gate.evaluate(&artifact);
-        match outcome {
-            AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract { detail },
-                ..
-            } => assert!(detail.contains("reserved")),
-            _ => panic!("expected reserved artifact_id to be denied"),
-        }
+        let AdmissionOutcome::Denied {
+            reason: AdmissionDenialReason::InvalidContract { detail },
+            ..
+        } = outcome
+        else {
+            assert!(false, "expected reserved artifact_id to be denied");
+            return;
+        };
+        assert!(detail.contains("reserved"));
 
         let contract = test_contract();
         let artifact = make_artifact(" <unknown> ", "ext-alpha", contract);
         let outcome = gate.evaluate(&artifact);
-        match outcome {
-            AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract { detail },
-                ..
-            } => assert!(detail.contains("reserved")),
-            _ => panic!("expected reserved artifact_id to be denied"),
-        }
+        let AdmissionOutcome::Denied {
+            reason: AdmissionDenialReason::InvalidContract { detail },
+            ..
+        } = outcome
+        else {
+            assert!(false, "expected reserved artifact_id to be denied");
+            return;
+        };
+        assert!(detail.contains("reserved"));
     }
 
     #[test]
@@ -1204,13 +1221,15 @@ mod tests {
         let contract = test_contract();
         let artifact = make_artifact("a1", "", contract);
         let outcome = gate.evaluate(&artifact);
-        match outcome {
-            AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract { detail },
-                ..
-            } => assert!(detail.contains("empty artifact extension_id")),
-            _ => panic!("expected empty artifact extension_id to be denied"),
-        }
+        let AdmissionOutcome::Denied {
+            reason: AdmissionDenialReason::InvalidContract { detail },
+            ..
+        } = outcome
+        else {
+            assert!(false, "expected empty artifact extension_id to be denied");
+            return;
+        };
+        assert!(detail.contains("empty artifact extension_id"));
     }
 
     #[test]
@@ -1219,13 +1238,18 @@ mod tests {
         let contract = test_contract();
         let artifact = make_artifact("a1", " ext-alpha ", contract);
         let outcome = gate.evaluate(&artifact);
-        match outcome {
-            AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract { detail },
-                ..
-            } => assert!(detail.contains("artifact extension_id contains")),
-            _ => panic!("expected whitespace artifact extension_id to be denied"),
-        }
+        let AdmissionOutcome::Denied {
+            reason: AdmissionDenialReason::InvalidContract { detail },
+            ..
+        } = outcome
+        else {
+            assert!(
+                false,
+                "expected whitespace artifact extension_id to be denied"
+            );
+            return;
+        };
+        assert!(detail.contains("artifact extension_id contains"));
     }
 
     #[test]
@@ -1234,24 +1258,28 @@ mod tests {
         let contract = test_contract();
         let artifact = make_artifact("a1", "<unknown>", contract);
         let outcome = gate.evaluate(&artifact);
-        match outcome {
-            AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract { detail },
-                ..
-            } => assert!(detail.contains("reserved")),
-            _ => panic!("expected reserved extension_id to be denied"),
-        }
+        let AdmissionOutcome::Denied {
+            reason: AdmissionDenialReason::InvalidContract { detail },
+            ..
+        } = outcome
+        else {
+            assert!(false, "expected reserved extension_id to be denied");
+            return;
+        };
+        assert!(detail.contains("reserved"));
 
         let contract = test_contract();
         let artifact = make_artifact("a1", " <unknown> ", contract);
         let outcome = gate.evaluate(&artifact);
-        match outcome {
-            AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract { detail },
-                ..
-            } => assert!(detail.contains("reserved")),
-            _ => panic!("expected reserved extension_id to be denied"),
-        }
+        let AdmissionOutcome::Denied {
+            reason: AdmissionDenialReason::InvalidContract { detail },
+            ..
+        } = outcome
+        else {
+            assert!(false, "expected reserved extension_id to be denied");
+            return;
+        };
+        assert!(detail.contains("reserved"));
     }
 
     #[test]
@@ -1293,13 +1321,15 @@ mod tests {
         let mut artifact = make_artifact("a1", "ext-alpha", contract);
         artifact.payload_hash = "a".repeat(63);
         let outcome = gate.evaluate(&artifact);
-        match outcome {
-            AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract { detail },
-                ..
-            } => assert!(detail.contains("payload_hash must be lowercase hex sha256")),
-            _ => panic!("expected short payload_hash to be denied"),
-        }
+        let AdmissionOutcome::Denied {
+            reason: AdmissionDenialReason::InvalidContract { detail },
+            ..
+        } = outcome
+        else {
+            assert!(false, "expected short payload_hash to be denied");
+            return;
+        };
+        assert!(detail.contains("payload_hash must be lowercase hex sha256"));
     }
 
     #[test]
@@ -1415,13 +1445,15 @@ mod tests {
         );
         let artifact = make_artifact("a1", "ext-alpha", contract);
         let outcome = gate.evaluate(&artifact);
-        match outcome {
-            AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidCapability { detail },
-                ..
-            } => assert!(detail.contains("duplicate capability_id")),
-            _ => panic!("expected duplicate capability_id to be denied"),
-        }
+        let AdmissionOutcome::Denied {
+            reason: AdmissionDenialReason::InvalidCapability { detail },
+            ..
+        } = outcome
+        else {
+            assert!(false, "expected duplicate capability_id to be denied");
+            return;
+        };
+        assert!(detail.contains("duplicate capability_id"));
     }
 
     #[test]
@@ -1561,12 +1593,12 @@ mod tests {
         let engine = EnforcementEngine::from_contract(&contract);
         let active = vec!["fs.read".to_string()]; // missing net.egress
         let result = engine.check_drift(&active);
-        if let DriftCheckResult::DriftDetected { missing, extra, .. } = result {
-            assert!(missing.contains(&"net.egress".to_string()));
-            assert!(extra.is_empty());
-        } else {
-            unreachable!("expected drift detected");
-        }
+        let DriftCheckResult::DriftDetected { missing, extra, .. } = result else {
+            assert!(false, "expected drift detected");
+            return;
+        };
+        assert!(missing.contains(&"net.egress".to_string()));
+        assert!(extra.is_empty());
     }
 
     #[test]
@@ -1579,12 +1611,12 @@ mod tests {
             "crypto.sign".to_string(),
         ];
         let result = engine.check_drift(&active);
-        if let DriftCheckResult::DriftDetected { missing, extra, .. } = result {
-            assert!(missing.is_empty());
-            assert!(extra.contains(&"crypto.sign".to_string()));
-        } else {
-            unreachable!("expected drift detected");
-        }
+        let DriftCheckResult::DriftDetected { missing, extra, .. } = result else {
+            assert!(false, "expected drift detected");
+            return;
+        };
+        assert!(missing.is_empty());
+        assert!(extra.contains(&"crypto.sign".to_string()));
     }
 
     #[test]
@@ -1597,12 +1629,12 @@ mod tests {
             "net.egress".to_string(),
         ];
         let result = engine.check_drift(&active);
-        if let DriftCheckResult::DriftDetected { missing, extra, .. } = result {
-            assert!(missing.is_empty());
-            assert!(extra.contains(&"fs.read".to_string()));
-        } else {
-            unreachable!("expected drift detected");
-        }
+        let DriftCheckResult::DriftDetected { missing, extra, .. } = result else {
+            assert!(false, "expected drift detected");
+            return;
+        };
+        assert!(missing.is_empty());
+        assert!(extra.contains(&"fs.read".to_string()));
     }
 
     #[test]
@@ -1611,19 +1643,102 @@ mod tests {
         let engine = EnforcementEngine::from_contract(&contract);
         let active = vec!["crypto.sign".to_string()];
         let result = engine.check_drift(&active);
-        if let DriftCheckResult::DriftDetected { missing, extra, .. } = result {
-            assert!(!missing.is_empty());
-            assert!(!extra.is_empty());
-        } else {
-            unreachable!("expected drift detected");
-        }
+        let DriftCheckResult::DriftDetected { missing, extra, .. } = result else {
+            assert!(false, "expected drift detected");
+            return;
+        };
+        assert!(!missing.is_empty());
+        assert!(!extra.is_empty());
     }
 
     #[test]
     fn contract_signature_is_deterministic() {
         let c1 = test_contract();
         let c2 = test_contract();
-        assert_eq!(c1.signature, c2.signature);
+        assert!(crate::security::constant_time::ct_eq(
+            &c1.signature,
+            &c2.signature,
+        ));
+    }
+
+    #[test]
+    fn len_to_u64_preserves_representable_lengths() {
+        assert_eq!(len_to_u64(0), 0);
+        assert_eq!(len_to_u64(64), 64);
+        assert_eq!(
+            len_to_u64(usize::MAX),
+            u64::try_from(usize::MAX).unwrap_or(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn contract_signature_length_prefixes_top_level_fields() {
+        let left = make_contract(
+            "ab",
+            "c",
+            test_capabilities(),
+            "signer-A",
+            SCHEMA_VERSION,
+            10_000,
+        );
+        let right = make_contract(
+            "a",
+            "bc",
+            test_capabilities(),
+            "signer-A",
+            SCHEMA_VERSION,
+            10_000,
+        );
+
+        assert!(!crate::security::constant_time::ct_eq(
+            &left.signature,
+            &right.signature,
+        ));
+    }
+
+    #[test]
+    fn contract_signature_length_prefixes_capability_fields() {
+        let left = make_contract(
+            "contract-prefix",
+            "ext-alpha",
+            vec![CapabilityEntry {
+                capability_id: "ab".to_string(),
+                scope: "c".to_string(),
+                max_calls_per_epoch: 1,
+            }],
+            "signer-A",
+            SCHEMA_VERSION,
+            10_000,
+        );
+        let right = make_contract(
+            "contract-prefix",
+            "ext-alpha",
+            vec![CapabilityEntry {
+                capability_id: "a".to_string(),
+                scope: "bc".to_string(),
+                max_calls_per_epoch: 1,
+            }],
+            "signer-A",
+            SCHEMA_VERSION,
+            10_000,
+        );
+
+        assert!(!crate::security::constant_time::ct_eq(
+            &left.signature,
+            &right.signature,
+        ));
+    }
+
+    #[test]
+    fn artifact_payload_hash_length_prefixes_identifier_fields() {
+        let contract = test_contract();
+        let left = make_artifact("ab", "c", contract.clone());
+        let right = make_artifact("a", "bc", contract);
+
+        assert!(!crate::security::constant_time::ct_eq(
+            &left.payload_hash,
+            &right.payload_hash,
+        ));
     }
 
     #[test]
@@ -1751,11 +1866,11 @@ mod tests {
             let gate = test_gate();
             let malicious_identifiers = [
                 "artifact\u{202E}deilav", // RLO override
-                "ext\u{200B}ension",     // Zero-width space
-                "id\u{FEFF}valid",       // BOM insertion
-                "name\u{2028}break",     // Line separator
-                "\u{1F4A9}payload",      // Non-ASCII emoji
-                "test\u{0000}null",      // Null byte injection
+                "ext\u{200B}ension",      // Zero-width space
+                "id\u{FEFF}valid",        // BOM insertion
+                "name\u{2028}break",      // Line separator
+                "\u{1F4A9}payload",       // Non-ASCII emoji
+                "test\u{0000}null",       // Null byte injection
             ];
 
             for malicious_id in malicious_identifiers {
@@ -1769,10 +1884,10 @@ mod tests {
                 );
                 let artifact = make_artifact(malicious_id, "ext-alpha", contract);
                 let outcome = gate.evaluate(&artifact);
-                assert!(matches!(
-                    outcome,
-                    AdmissionOutcome::Denied { .. }
-                ), "Unicode injection in identifier '{malicious_id:?}' should be rejected");
+                assert!(
+                    matches!(outcome, AdmissionOutcome::Denied { .. }),
+                    "Unicode injection in identifier '{malicious_id:?}' should be rejected"
+                );
             }
         }
 
@@ -1790,8 +1905,8 @@ mod tests {
                 CapabilityEntry {
                     capability_id: "net.egress".to_string(),
                     scope: "network:egress".to_string(),
-                    max_calls_per_epoch: u64::MAX - 1,
-                }
+                    max_calls_per_epoch: u64::MAX.saturating_sub(1),
+                },
             ];
 
             let contract = make_contract(
@@ -1807,7 +1922,10 @@ mod tests {
             // Should handle extreme values without panic
             let outcome = gate.evaluate(&artifact);
             // Even with extreme values, validation should proceed normally
-            assert!(matches!(outcome, AdmissionOutcome::Accepted { .. } | AdmissionOutcome::Denied { .. }));
+            assert!(matches!(
+                outcome,
+                AdmissionOutcome::Accepted { .. } | AdmissionOutcome::Denied { .. }
+            ));
         }
 
         #[test]
@@ -1836,7 +1954,10 @@ mod tests {
 
             // Should handle large capability lists without crashing
             let outcome = gate.evaluate(&artifact);
-            assert!(matches!(outcome, AdmissionOutcome::Accepted { .. } | AdmissionOutcome::Denied { .. }));
+            assert!(matches!(
+                outcome,
+                AdmissionOutcome::Accepted { .. } | AdmissionOutcome::Denied { .. }
+            ));
 
             // Test enforcement engine with massive admitted set
             if let AdmissionOutcome::Accepted { .. } = outcome {
@@ -1850,7 +1971,10 @@ mod tests {
                 }
 
                 let drift_result = engine.check_drift(&massive_active);
-                assert!(matches!(drift_result, DriftCheckResult::DriftDetected { .. } | DriftCheckResult::NoDrift { .. }));
+                assert!(matches!(
+                    drift_result,
+                    DriftCheckResult::DriftDetected { .. } | DriftCheckResult::NoDrift { .. }
+                ));
             }
         }
 
@@ -1860,7 +1984,8 @@ mod tests {
 
             // Fill to exact capacity
             for i in 0..MAX_TRUSTED_SIGNERS {
-                cfg.with_signer(format!("signer-{i}")).expect("should fit within capacity");
+                cfg.with_signer(format!("signer-{i}"))
+                    .expect("should fit within capacity");
             }
 
             // Test boundary conditions
@@ -1891,34 +2016,40 @@ mod tests {
             let gate = test_gate();
 
             // Create a valid contract first
-            let mut base_contract = test_contract();
+            let base_contract = test_contract();
             let original_sig = base_contract.signature.clone();
 
             // Test various signature tampering attacks
             let tampering_vectors = [
-                "0".repeat(64),                    // All zeros
-                "f".repeat(64),                    // All max values
-                original_sig[1..].to_string() + "0", // Bit shift
+                "0".repeat(64),                                 // All zeros
+                "f".repeat(64),                                 // All max values
+                original_sig[1..].to_string() + "0",            // Bit shift
                 original_sig.chars().rev().collect::<String>(), // Reverse
-                original_sig.replace("a", "b"),    // Single char mutation
-                format!("{original_sig}extra"),   // Append data
-                original_sig[..32].to_string(),    // Truncate
+                original_sig.replace("a", "b"),                 // Single char mutation
+                format!("{original_sig}extra"),                 // Append data
+                original_sig[..32].to_string(),                 // Truncate
             ];
 
             for tampered_sig in tampering_vectors {
-                if tampered_sig.len() == 64 && tampered_sig != original_sig {
+                if tampered_sig.len() == 64
+                    && !crate::security::constant_time::ct_eq(&tampered_sig, &original_sig)
+                {
                     let mut contract = base_contract.clone();
                     contract.signature = tampered_sig.clone();
                     let artifact = make_artifact("tamper-test", "ext-alpha", contract);
 
                     let outcome = gate.evaluate(&artifact);
-                    assert!(matches!(
-                        outcome,
-                        AdmissionOutcome::Denied {
-                            reason: AdmissionDenialReason::SignatureInvalid | AdmissionDenialReason::InvalidContract { .. },
-                            ..
-                        }
-                    ), "Tampered signature '{tampered_sig}' should be rejected");
+                    assert!(
+                        matches!(
+                            outcome,
+                            AdmissionOutcome::Denied {
+                                reason: AdmissionDenialReason::SignatureInvalid
+                                    | AdmissionDenialReason::InvalidContract { .. },
+                                ..
+                            }
+                        ),
+                        "Tampered signature '{tampered_sig}' should be rejected"
+                    );
                 }
             }
         }
@@ -1931,7 +2062,7 @@ mod tests {
             let injection_capabilities = vec![
                 CapabilityEntry {
                     capability_id: "fs.read\nfs.write".to_string(), // Newline injection
-                    scope: "filesystem:read",
+                    scope: "filesystem:read".to_string(),
                     max_calls_per_epoch: 100,
                 },
                 CapabilityEntry {
@@ -1941,7 +2072,7 @@ mod tests {
                 },
                 CapabilityEntry {
                     capability_id: "../fs.admin".to_string(), // Path traversal in capability ID
-                    scope: "filesystem:admin",
+                    scope: "filesystem:admin".to_string(),
                     max_calls_per_epoch: 100,
                 },
             ];
@@ -1959,7 +2090,10 @@ mod tests {
             // These should all be rejected due to invalid characters
             let outcome = gate.evaluate(&artifact);
             // The make_contract function will create a valid signature, but the validation should catch the malformed content
-            assert!(matches!(outcome, AdmissionOutcome::Accepted { .. } | AdmissionOutcome::Denied { .. }));
+            assert!(matches!(
+                outcome,
+                AdmissionOutcome::Accepted { .. } | AdmissionOutcome::Denied { .. }
+            ));
         }
 
         #[test]
@@ -1994,7 +2128,10 @@ mod tests {
             }
 
             let massive_result = engine.check_drift(&massive_extra);
-            assert!(matches!(massive_result, DriftCheckResult::DriftDetected { .. }));
+            assert!(matches!(
+                massive_result,
+                DriftCheckResult::DriftDetected { .. }
+            ));
         }
 
         #[test]
@@ -2004,36 +2141,77 @@ mod tests {
 
             // Create contracts with field content designed to cause delimiter confusion
             let malicious_contracts = [
-                make_contract("contract\x00id", "ext-alpha", test_capabilities(), "signer-A", SCHEMA_VERSION, 10_000),
-                make_contract("contract", "ext\x00alpha", test_capabilities(), "signer-A", SCHEMA_VERSION, 10_000),
-                make_contract("contract", "ext-alpha", test_capabilities(), "signer\x00A", SCHEMA_VERSION, 10_000),
+                make_contract(
+                    "contract\x00id",
+                    "ext-alpha",
+                    test_capabilities(),
+                    "signer-A",
+                    SCHEMA_VERSION,
+                    10_000,
+                ),
+                make_contract(
+                    "contract",
+                    "ext\x00alpha",
+                    test_capabilities(),
+                    "signer-A",
+                    SCHEMA_VERSION,
+                    10_000,
+                ),
+                make_contract(
+                    "contract",
+                    "ext-alpha",
+                    test_capabilities(),
+                    "signer\x00A",
+                    SCHEMA_VERSION,
+                    10_000,
+                ),
             ];
 
             // All should have different signatures due to length prefixing
             for (i, contract) in malicious_contracts.iter().enumerate() {
-                assert_ne!(contract.signature, base_contract.signature,
-                    "Malicious contract {i} should have different signature due to null bytes");
+                assert!(
+                    !crate::security::constant_time::ct_eq(
+                        &contract.signature,
+                        &base_contract.signature,
+                    ),
+                    "Malicious contract {i} should have different signature due to null bytes"
+                );
             }
 
             // Test that contracts with same logical content but different field lengths produce different signatures
-            let short_contract = make_contract("a", "b", vec![
-                CapabilityEntry {
+            let short_contract = make_contract(
+                "a",
+                "b",
+                vec![CapabilityEntry {
                     capability_id: "x".to_string(),
                     scope: "y".to_string(),
                     max_calls_per_epoch: 1,
-                }
-            ], "c", SCHEMA_VERSION, 1);
+                }],
+                "c",
+                SCHEMA_VERSION,
+                1,
+            );
 
-            let long_contract = make_contract("aaaa", "bbbb", vec![
-                CapabilityEntry {
+            let long_contract = make_contract(
+                "aaaa",
+                "bbbb",
+                vec![CapabilityEntry {
                     capability_id: "xxxx".to_string(),
                     scope: "yyyy".to_string(),
                     max_calls_per_epoch: 1,
-                }
-            ], "cccc", SCHEMA_VERSION, 1);
+                }],
+                "cccc",
+                SCHEMA_VERSION,
+                1,
+            );
 
-            assert_ne!(short_contract.signature, long_contract.signature,
-                "Contracts with different field lengths should have different signatures");
+            assert!(
+                !crate::security::constant_time::ct_eq(
+                    &short_contract.signature,
+                    &long_contract.signature,
+                ),
+                "Contracts with different field lengths should have different signatures"
+            );
         }
 
         #[test]
@@ -2041,25 +2219,28 @@ mod tests {
             let gate = test_gate();
 
             // Test hash collision resistance by creating many similar contracts
-            let mut signatures = std::collections::HashSet::new();
+            let mut signatures = BTreeSet::new();
 
             for i in 0..1000 {
+                let epoch_offset = len_to_u64(i);
                 let contract = make_contract(
                     &format!("contract-{i}"),
                     "ext-alpha",
                     vec![CapabilityEntry {
                         capability_id: format!("cap-{i}"),
                         scope: format!("scope-{i}"),
-                        max_calls_per_epoch: i as u64 + 1,
+                        max_calls_per_epoch: epoch_offset.saturating_add(1),
                     }],
                     "signer-A",
                     SCHEMA_VERSION,
-                    10_000 + i as u64,
+                    10_000_u64.saturating_add(epoch_offset),
                 );
 
                 // Each contract should have a unique signature
-                assert!(signatures.insert(contract.signature.clone()),
-                    "Contract {i} produced a signature collision");
+                assert!(
+                    signatures.insert(contract.signature.clone()),
+                    "Contract {i} produced a signature collision"
+                );
 
                 let artifact = make_artifact(&format!("artifact-{i}"), "ext-alpha", contract);
                 let outcome = gate.evaluate(&artifact);
@@ -2070,10 +2251,27 @@ mod tests {
             assert_eq!(signatures.len(), 1000, "Should have 1000 unique signatures");
 
             // Test that modifying any single field changes the signature
-            let base = make_contract("base", "ext-alpha", test_capabilities(), "signer-A", SCHEMA_VERSION, 10_000);
-            let modified = make_contract("base-modified", "ext-alpha", test_capabilities(), "signer-A", SCHEMA_VERSION, 10_000);
+            let base = make_contract(
+                "base",
+                "ext-alpha",
+                test_capabilities(),
+                "signer-A",
+                SCHEMA_VERSION,
+                10_000,
+            );
+            let modified = make_contract(
+                "base-modified",
+                "ext-alpha",
+                test_capabilities(),
+                "signer-A",
+                SCHEMA_VERSION,
+                10_000,
+            );
 
-            assert_ne!(base.signature, modified.signature, "Single character change should produce different signature");
+            assert!(
+                !crate::security::constant_time::ct_eq(&base.signature, &modified.signature),
+                "Single character change should produce different signature"
+            );
         }
     }
 }
