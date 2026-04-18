@@ -21,6 +21,10 @@ fn is_reserved_artifact_id(artifact_id: &str) -> bool {
     artifact_id.trim() == RESERVED_ARTIFACT_ID
 }
 
+fn len_to_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -643,15 +647,15 @@ pub fn compute_contract_signature(contract: &CapabilityContract) -> String {
         signer.as_str(),
         contract.schema_version.as_str(),
     ] {
-        buf.extend_from_slice(&(field.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&len_to_u64(field.len()).to_le_bytes());
         buf.extend_from_slice(field.as_bytes());
     }
     // Bind the full capability envelope so post-sign tampering is rejected.
-    buf.extend_from_slice(&(contract.capabilities.len() as u64).to_le_bytes());
+    buf.extend_from_slice(&len_to_u64(contract.capabilities.len()).to_le_bytes());
     for cap in &contract.capabilities {
-        buf.extend_from_slice(&(cap.capability_id.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&len_to_u64(cap.capability_id.len()).to_le_bytes());
         buf.extend_from_slice(cap.capability_id.as_bytes());
-        buf.extend_from_slice(&(cap.scope.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&len_to_u64(cap.scope.len()).to_le_bytes());
         buf.extend_from_slice(cap.scope.as_bytes());
         buf.extend_from_slice(&cap.max_calls_per_epoch.to_le_bytes());
     }
@@ -691,7 +695,7 @@ pub fn make_artifact(
     let mut hasher = Sha256::new();
     hasher.update(b"artifact_contract_digest_v1:");
     for field in [artifact_id, extension_id] {
-        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update(len_to_u64(field.len()).to_le_bytes());
         hasher.update(field.as_bytes());
     }
     let payload_hash = hex::encode(hasher.finalize());

@@ -120,6 +120,10 @@ fn is_reserved_artifact_id(artifact_id: &str) -> bool {
     artifact_id.trim() == RESERVED_ARTIFACT_ID
 }
 
+fn len_to_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
 // ---------------------------------------------------------------------------
 // Maximum capability scope
 // ---------------------------------------------------------------------------
@@ -291,15 +295,15 @@ impl CapabilityEnvelope {
         let mut hasher = Sha256::new();
         hasher.update(b"capability_artifact_digest_v2:");
         let repr = identity.canonical_repr();
-        hasher.update((repr.len() as u64).to_le_bytes());
+        hasher.update(len_to_u64(repr.len()).to_le_bytes());
         hasher.update(repr.as_bytes());
-        hasher.update((self.schema_version.len() as u64).to_le_bytes());
+        hasher.update(len_to_u64(self.schema_version.len()).to_le_bytes());
         hasher.update(self.schema_version.as_bytes());
-        hasher.update((self.requirements.len() as u64).to_le_bytes());
+        hasher.update(len_to_u64(self.requirements.len()).to_le_bytes());
         for (name, req) in &self.requirements {
-            hasher.update((name.len() as u64).to_le_bytes());
+            hasher.update(len_to_u64(name.len()).to_le_bytes());
             hasher.update(name.as_bytes());
-            hasher.update((req.justification.len() as u64).to_le_bytes());
+            hasher.update(len_to_u64(req.justification.len()).to_le_bytes());
             hasher.update(req.justification.as_bytes());
             hasher.update([req.mandatory as u8]);
         }
