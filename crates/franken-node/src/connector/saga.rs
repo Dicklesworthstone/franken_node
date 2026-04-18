@@ -28,8 +28,12 @@ const ERR_SAGA_CAPACITY_EXCEEDED: &str = "ERR_SAGA_CAPACITY_EXCEEDED";
 const ERR_SAGA_ID_REUSED: &str = "ERR_SAGA_ID_REUSED";
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -514,7 +518,7 @@ impl SagaExecutor {
                 outcome: StepOutcome::Compensated,
                 elapsed_ms: 0,
             };
-            comp_records.push(record.clone());
+            push_bounded(&mut comp_records, record.clone(), MAX_RECORDS_PER_SAGA);
             push_bounded(&mut saga.records, record, MAX_RECORDS_PER_SAGA);
         }
 
@@ -652,6 +656,24 @@ mod tests {
         StepOutcome::Success {
             result_data: vec![],
         }
+    }
+
+    #[test]
+    fn test_push_bounded_zero_capacity_clears_without_appending() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_push_bounded_evicts_oldest_at_capacity() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 3);
+
+        assert_eq!(items, vec![2, 3, 4]);
     }
 
     // 1. test_create_saga
@@ -2184,6 +2206,55 @@ mod tests {
             assert_eq!(record.step_index, 99 - i); // Reverse order
             assert_eq!(record.action, "compensate");
         }
+    }
+
+    #[test]
+    fn test_compensate_bounds_returned_trace_from_corrupt_oversized_records() {
+        let mut exec = SagaExecutor::new();
+        let saga_id = "saga-oversized-records".to_string();
+        let step_count = MAX_RECORDS_PER_SAGA.saturating_add(5);
+
+        let steps: Vec<SagaStepDef> = (0..step_count)
+            .map(|i| SagaStepDef {
+                name: format!("oversized_step_{i}"),
+                computation_name: None,
+                is_remote: false,
+                idempotency_key: None,
+            })
+            .collect();
+        let records: Vec<StepRecord> = (0..step_count)
+            .map(|i| StepRecord {
+                step_index: i,
+                step_name: format!("oversized_step_{i}"),
+                action: "forward".to_string(),
+                outcome: success_outcome(),
+                elapsed_ms: 1,
+            })
+            .collect();
+
+        exec.sagas.insert(
+            saga_id.clone(),
+            SagaInstance {
+                saga_id: saga_id.clone(),
+                state: SagaState::Running,
+                steps,
+                completed_steps: step_count,
+                records,
+            },
+        );
+
+        let trace = exec.compensate(&saga_id, "trace-oversized").unwrap();
+
+        assert_eq!(trace.compensated_steps.len(), MAX_RECORDS_PER_SAGA);
+        assert_eq!(
+            trace.compensated_steps.first().map(|r| r.step_index),
+            Some(MAX_RECORDS_PER_SAGA - 1)
+        );
+        assert_eq!(
+            trace.compensated_steps.last().map(|r| r.step_index),
+            Some(0)
+        );
+        assert!(exec.get_saga(&saga_id).unwrap().records.len() <= MAX_RECORDS_PER_SAGA);
     }
 
     #[test]
