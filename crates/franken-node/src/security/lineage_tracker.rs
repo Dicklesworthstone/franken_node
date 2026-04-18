@@ -2788,12 +2788,10 @@ mod tests {
             let result = boundary.validate();
             assert!(result.is_err(), "Should reject boundary with empty zones");
 
-            match result.unwrap_err() {
-                LineageError::BoundaryInvalid { detail } => {
-                    assert!(detail.contains(ERR_IFL_BOUNDARY_INVALID));
-                    assert!(detail.contains("non-empty"));
-                }
-                other => panic!("Expected BoundaryInvalid error, got {:?}", other),
+            assert!(matches!(&result, Err(LineageError::BoundaryInvalid { .. })));
+            if let Err(LineageError::BoundaryInvalid { detail }) = result {
+                assert!(detail.contains(ERR_IFL_BOUNDARY_INVALID));
+                assert!(detail.contains("non-empty"));
             }
         }
 
