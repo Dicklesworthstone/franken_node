@@ -39,9 +39,12 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, BTreeMap};
 
 use crate::capacity_defaults::aliases::MAX_AUDIT_TRAIL_ENTRIES;
+
+/// Maximum knobs to prevent memory exhaustion in knob enumeration.
+const MAX_KNOBS: usize = 64;
 
 // Re-export the core governor and its types from the runtime module.
 pub use crate::runtime::optimization_governor::{
@@ -1539,7 +1542,7 @@ impl DispatchHookPayload {
             assert_eq!(Self::env_key(&RuntimeKnob::RetryBudget), "FRANKEN_GOV_RETRY_BUDGET");
 
             // Test: environment variable names are unique
-            let mut seen_names = std::collections::HashSet::new();
+            let mut seen_names = std::collections::BTreeSet::new();
             for knob in [
                 RuntimeKnob::ConcurrencyLimit,
                 RuntimeKnob::BatchSize,
@@ -1601,14 +1604,14 @@ impl GovernorGate {
                 .find(|s| s.knob == knob)
                 .is_some_and(|s| s.locked);
 
-            knobs.push(KnobDescriptor {
+            push_bounded(&mut knobs, KnobDescriptor {
                 knob,
                 label: knob.as_str().to_string(),
                 current_value,
                 locked,
                 min_value,
                 max_value,
-            });
+            }, MAX_KNOBS);
         }
 
         push_bounded(
@@ -3876,10 +3879,10 @@ mod tests {
 
     #[test]
     fn test_knob_enumeration_hash_collision_birthday_attack_resistance() {
-        use std::collections::HashMap;
+        use std::collections::BTreeMap;
 
         // Extreme: Hash collision attacks against knob enumeration structures
-        let mut collision_attempts = HashMap::new();
+        let mut collision_attempts = BTreeMap::new();
         let mut gate = GovernorGate::new(OptimizationGovernor::with_defaults());
 
         // Generate proposals with deliberately colliding hash characteristics
@@ -3914,11 +3917,13 @@ mod tests {
             ];
 
             for proposal in proposals {
-                let result = gate.submit(proposal);
+                let result = gate.submit(&proposal);
 
-                // Track potential collisions using secure SHA-256 hash
+                // Track potential collisions using secure SHA-256 hash of actual proposal data
                 let mut hasher = Sha256::new();
-                hasher.update(b"collision_tracking");
+                hasher.update(b"collision_tracking_v1:");  // Domain separation
+                let proposal_json = serde_json::to_string(&proposal).expect("proposal serialization");
+                hasher.update(proposal_json.as_bytes());
                 let hash_key = format!("{:02x}", hasher.finalize());
                 *collision_attempts.entry(hash_key).or_insert(0) += 1;
             }
@@ -4543,7 +4548,7 @@ mod tests {
             }
 
             // Verify audit trail maintains chronological ordering
-            let mut last_seen_indices = HashMap::new();
+            let mut last_seen_indices = BTreeMap::new();
             for (trail_idx, entry) in gate.audit_trail().iter().enumerate() {
                 if entry.proposal_id.starts_with("rapid_") {
                     if let Some(last_idx) = last_seen_indices.get(&entry.proposal_id) {
@@ -4910,7 +4915,7 @@ mod tests {
                    "Audit trail should remain bounded under resource pressure");
 
             // Verify structural integrity of audit trail after stress test
-            let mut event_code_counts = HashMap::new();
+            let mut event_code_counts = BTreeMap::new();
             for entry in gate.audit_trail() {
                 assert!(!entry.event_code.is_empty(), "Event code should not be corrupted");
                 assert!(!entry.proposal_id.is_empty() || entry.event_code.contains("ERROR"),
