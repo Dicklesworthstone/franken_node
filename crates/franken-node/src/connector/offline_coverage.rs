@@ -1021,4 +1021,145 @@ mod tests {
         assert_eq!(before.repair_debt_count, after.repair_debt_count);
         assert_eq!(t.event_count(), 1);
     }
+
+    #[test]
+    fn invalid_empty_scope_after_valid_event_does_not_create_scope() {
+        let mut t = OfflineCoverageTracker::new();
+        t.record_event(ev("a1", true, 100, "prod")).unwrap();
+
+        let err = t.record_event(ev("a2", false, 101, "")).unwrap_err();
+
+        assert_eq!(err.code(), "OCT_INVALID_EVENT");
+        assert_eq!(t.event_count(), 1);
+        assert_eq!(t.scope_count(), 1);
+        assert!(t.compute_metrics("prod").is_ok());
+    }
+
+    #[test]
+    fn invalid_reserved_artifact_after_valid_event_preserves_metrics() {
+        let mut t = OfflineCoverageTracker::new();
+        t.record_event(ev("a1", true, 100, "prod")).unwrap();
+        let before = t.compute_metrics("prod").unwrap();
+
+        let err = t
+            .record_event(ev(RESERVED_ARTIFACT_ID, false, 101, "prod"))
+            .unwrap_err();
+        let after = t.compute_metrics("prod").unwrap();
+
+        assert_eq!(err.code(), "OCT_INVALID_EVENT");
+        assert_eq!(before.available_count, after.available_count);
+        assert_eq!(before.total_artifacts, after.total_artifacts);
+        assert_eq!(t.event_count(), 1);
+    }
+
+    #[test]
+    fn compute_metrics_rejects_scope_with_leading_whitespace() {
+        let mut t = OfflineCoverageTracker::new();
+        t.record_event(ev("a1", true, 100, "prod")).unwrap();
+
+        let err = t.compute_metrics(" prod").unwrap_err();
+
+        assert_eq!(
+            err,
+            CoverageError::ScopeUnknown {
+                scope: " prod".into()
+            }
+        );
+    }
+
+    #[test]
+    fn check_slos_rejects_case_mismatched_metric_name() {
+        let mut t = OfflineCoverageTracker::new();
+        t.record_event(ev("a1", true, 100, "prod")).unwrap();
+
+        let err = t
+            .check_slos(&[slo("Coverage", 0.9)], "prod", 200, "trace-case-metric")
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            CoverageError::UnknownMetric {
+                metric_name: "Coverage".into()
+            }
+        );
+    }
+
+    #[test]
+    fn check_slos_rejects_metric_name_with_trailing_whitespace() {
+        let mut t = OfflineCoverageTracker::new();
+        t.record_event(ev("a1", true, 100, "prod")).unwrap();
+
+        let err = t
+            .check_slos(
+                &[slo("availability ", 0.9)],
+                "prod",
+                200,
+                "trace-space-metric",
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            CoverageError::UnknownMetric {
+                metric_name: "availability ".into()
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_metric_first_prevents_partial_alert_success() {
+        let mut t = OfflineCoverageTracker::new();
+        t.record_event(ev("a1", false, 100, "prod")).unwrap();
+
+        let err = t
+            .check_slos(
+                &[slo("not_a_real_metric", 1.0), slo("coverage", 0.9)],
+                "prod",
+                200,
+                "trace-unknown-first",
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            CoverageError::UnknownMetric {
+                metric_name: "not_a_real_metric".into()
+            }
+        );
+    }
+
+    #[test]
+    fn availability_threshold_above_one_triggers_breach() {
+        let mut t = OfflineCoverageTracker::new();
+        t.record_event(ev("a1", true, 100, "prod")).unwrap();
+
+        let alerts = t
+            .check_slos(&[slo("availability", 1.01)], "prod", 200, "trace-over-one")
+            .unwrap();
+
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].slo_name, "availability");
+        assert_eq!(alerts[0].actual_value, 1.0);
+        assert_eq!(alerts[0].threshold, 1.01);
+    }
+
+    #[test]
+    fn repair_debt_threshold_just_below_actual_triggers_breach() {
+        let mut t = OfflineCoverageTracker::new();
+        t.record_event(ev("a1", false, 100, "prod")).unwrap();
+
+        let alerts = t
+            .check_slos(
+                &[slo("repair_debt", 0.999)],
+                "prod",
+                200,
+                "trace-debt-edge",
+            )
+            .unwrap();
+
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].slo_name, "repair_debt");
+        assert_eq!(alerts[0].actual_value, 1.0);
+        assert_eq!(alerts[0].threshold, 0.999);
+    }
 }

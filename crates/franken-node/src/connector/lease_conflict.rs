@@ -206,6 +206,13 @@ pub fn resolve_conflict(
     policy: &ConflictPolicy,
     leases: &[ActiveLease],
 ) -> Result<ConflictResolution, ConflictError> {
+    if conflict.lease_a == conflict.lease_b {
+        return Err(ConflictError::BothActive {
+            lease_a: conflict.lease_a.clone(),
+            lease_b: conflict.lease_b.clone(),
+        });
+    }
+
     // INV-OLC-DANGEROUS-HALT
     if conflict.tier == ConflictTier::Dangerous && policy.halt_on_dangerous {
         return Err(ConflictError::DangerousHalt {
@@ -1141,5 +1148,151 @@ mod tests {
         let conflicts = detect_conflicts(&leases, "r", 160);
 
         assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn negative_duplicate_active_lease_ids_are_not_resolved_as_winner_and_loser() {
+        let leases = vec![
+            lease("dup", "r", "Operation", 100, 60, "Standard"),
+            lease("dup", "r", "StateWrite", 110, 60, "Standard"),
+        ];
+        let conflict = &detect_conflicts(&leases, "r", 120)[0];
+
+        let err = resolve_conflict(conflict, &policy(), &leases).unwrap_err();
+
+        assert_eq!(
+            err,
+            ConflictError::BothActive {
+                lease_a: "dup".into(),
+                lease_b: "dup".into()
+            }
+        );
+    }
+
+    #[test]
+    fn negative_duplicate_active_lease_ids_surface_process_error_and_halt_log() {
+        let leases = vec![
+            lease("dup-process", "r", "Operation", 100, 60, "Standard"),
+            lease("dup-process", "r", "Operation", 110, 60, "Standard"),
+        ];
+
+        let (resolutions, logs, errors) =
+            process_conflicts(&leases, "r", 120, &policy(), "tr", "act", "ts");
+
+        assert!(resolutions.is_empty());
+        assert_eq!(logs.len(), 1);
+        assert!(logs[0].halted);
+        assert_eq!(logs[0].resolution_rule, "dangerous_halt");
+        assert_eq!(
+            errors,
+            vec![ConflictError::BothActive {
+                lease_a: "dup-process".into(),
+                lease_b: "dup-process".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn negative_duplicate_lease_id_dangerous_tier_still_fails_as_ambiguous_duplicate() {
+        let leases = vec![
+            lease("dup-danger", "r", "Operation", 100, 60, "Dangerous"),
+            lease("dup-danger", "r", "Operation", 110, 60, "Standard"),
+        ];
+        let conflict = &detect_conflicts(&leases, "r", 120)[0];
+
+        let err = resolve_conflict(conflict, &policy(), &leases).unwrap_err();
+
+        assert_eq!(
+            err,
+            ConflictError::BothActive {
+                lease_a: "dup-danger".into(),
+                lease_b: "dup-danger".into()
+            }
+        );
+    }
+
+    #[test]
+    fn negative_duplicate_lease_id_with_log_context_error_reports_both_failures() {
+        let leases = vec![
+            lease("dup-log", "r", "Operation", 100, 60, "Standard"),
+            lease("dup-log", "r", "Operation", 110, 60, "Standard"),
+        ];
+
+        let (resolutions, logs, errors) =
+            process_conflicts(&leases, "r", 120, &policy(), " ", "act", "ts");
+
+        assert!(resolutions.is_empty());
+        assert!(logs.is_empty());
+        assert_eq!(errors.len(), 2);
+        assert!(errors.iter().any(|err| {
+            matches!(
+                err,
+                ConflictError::ForkLogIncomplete { field } if field == "trace_id"
+            )
+        }));
+        assert!(errors.iter().any(|err| {
+            matches!(
+                err,
+                ConflictError::BothActive { lease_a, lease_b }
+                    if lease_a == "dup-log" && lease_b == "dup-log"
+            )
+        }));
+    }
+
+    #[test]
+    fn negative_duplicate_lease_id_entry_id_is_stable_but_resolution_fails() {
+        let conflict = LeaseConflict {
+            lease_a: "dup-stable".into(),
+            lease_b: "dup-stable".into(),
+            resource: "r".into(),
+            overlap_start: 100,
+            overlap_end: 160,
+            tier: ConflictTier::Standard,
+        };
+        let leases = vec![
+            lease("dup-stable", "r", "Operation", 100, 60, "Standard"),
+            lease("dup-stable", "r", "Operation", 110, 60, "Standard"),
+        ];
+
+        let entry = fork_log_entry(&conflict, None, "tr", "act", "ts").unwrap();
+        let err = resolve_conflict(&conflict, &policy(), &leases).unwrap_err();
+
+        assert!(entry.halted);
+        assert!(entry.entry_id.starts_with("fork-"));
+        assert_eq!(err.code(), "OLC_BOTH_ACTIVE");
+    }
+
+    #[test]
+    fn negative_duplicate_lease_id_error_display_contains_both_ids() {
+        let err = ConflictError::BothActive {
+            lease_a: "dup-a".into(),
+            lease_b: "dup-a".into(),
+        };
+        let rendered = err.to_string();
+
+        assert!(rendered.contains("OLC_BOTH_ACTIVE"));
+        assert!(rendered.contains("dup-a vs dup-a"));
+        assert_eq!(err.code(), "OLC_BOTH_ACTIVE");
+    }
+
+    #[test]
+    fn negative_duplicate_lease_id_hash_tiebreak_policy_still_fails_closed() {
+        let leases = vec![
+            lease("dup-hash", "r", "Operation", 100, 60, "Standard"),
+            lease("dup-hash", "r", "Operation", 110, 60, "Standard"),
+        ];
+        let mut p = policy();
+        p.prefer_earliest = false;
+        let conflict = &detect_conflicts(&leases, "r", 120)[0];
+
+        let err = resolve_conflict(conflict, &p, &leases).unwrap_err();
+
+        assert_eq!(
+            err,
+            ConflictError::BothActive {
+                lease_a: "dup-hash".into(),
+                lease_b: "dup-hash".into(),
+            }
+        );
     }
 }

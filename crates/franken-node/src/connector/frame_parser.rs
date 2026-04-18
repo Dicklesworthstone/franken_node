@@ -182,6 +182,12 @@ pub fn check_frame(
             reason: "frame_id must not be empty".into(),
         });
     }
+    if frame.frame_id.as_bytes().contains(&0) {
+        return Err(ParserError::MalformedFrame {
+            frame_id: "(invalid)".into(),
+            reason: "frame_id must not contain NUL bytes".into(),
+        });
+    }
 
     let mut violations = Vec::new();
 
@@ -845,9 +851,8 @@ mod frame_parser_additional_negative_tests {
 
     #[test]
     fn size_and_depth_violations_do_not_include_cpu() {
-        let (verdict, audit) =
-            check_frame(&frame("size-depth", 1000, 10, 49), &config(), "ts")
-                .expect("guardrail verdict");
+        let (verdict, audit) = check_frame(&frame("size-depth", 1000, 10, 49), &config(), "ts")
+            .expect("guardrail verdict");
 
         assert!(!verdict.allowed);
         assert_eq!(verdict.violations.len(), 2);
@@ -900,10 +905,7 @@ mod frame_parser_additional_negative_tests {
 
     #[test]
     fn batch_aborts_on_first_malformed_frame_before_later_resource_blocks() {
-        let frames = vec![
-            frame(" \t", 1, 1, 1),
-            frame("later-size-block", 1000, 1, 1),
-        ];
+        let frames = vec![frame(" \t", 1, 1, 1), frame("later-size-block", 1000, 1, 1)];
 
         let err = check_batch(&frames, &config(), "ts")
             .expect_err("first malformed frame must abort batch");
@@ -942,5 +944,102 @@ mod frame_parser_additional_negative_tests {
         assert!(rendered.contains("BPG_MALFORMED_FRAME"));
         assert!(rendered.contains("(empty)"));
         assert!(rendered.contains("frame_id must not be empty"));
+    }
+}
+
+#[cfg(test)]
+mod frame_parser_nul_frame_id_tests {
+    use super::*;
+
+    fn config() -> ParserConfig {
+        ParserConfig {
+            max_frame_bytes: 1000,
+            max_nesting_depth: 10,
+            max_decode_cpu_ms: 50,
+        }
+    }
+
+    fn frame(id: &str, bytes: u64, depth: u32, cpu: u64) -> FrameInput {
+        FrameInput {
+            frame_id: id.to_string(),
+            raw_bytes_len: bytes,
+            nesting_depth: depth,
+            decode_cpu_ms: cpu,
+        }
+    }
+
+    fn assert_nul_frame_error(err: ParserError) {
+        assert_eq!(err.code(), "BPG_MALFORMED_FRAME");
+        assert!(matches!(
+            err,
+            ParserError::MalformedFrame { ref frame_id, ref reason }
+                if frame_id == "(invalid)" && reason == "frame_id must not contain NUL bytes"
+        ));
+    }
+
+    #[test]
+    fn nul_only_frame_id_is_malformed() {
+        let err = check_frame(&frame("\0", 1, 1, 1), &config(), "ts")
+            .expect_err("NUL-only frame ID must fail closed");
+
+        assert_nul_frame_error(err);
+    }
+
+    #[test]
+    fn embedded_nul_frame_id_is_malformed() {
+        let err = check_frame(&frame("frame\0id", 1, 1, 1), &config(), "ts")
+            .expect_err("embedded NUL frame ID must fail closed");
+
+        assert_nul_frame_error(err);
+    }
+
+    #[test]
+    fn trailing_nul_frame_id_is_malformed_even_with_valid_resources() {
+        let err = check_frame(&frame("frame-id\0", 999, 9, 49), &config(), "ts")
+            .expect_err("trailing NUL frame ID must fail closed");
+
+        assert_nul_frame_error(err);
+    }
+
+    #[test]
+    fn nul_frame_id_error_display_uses_sanitized_placeholder() {
+        let err = check_frame(&frame("raw\0frame", 1, 1, 1), &config(), "ts")
+            .expect_err("NUL frame ID must fail");
+        let rendered = err.to_string();
+
+        assert!(rendered.contains("(invalid)"));
+        assert!(rendered.contains("frame_id must not contain NUL bytes"));
+        assert!(!rendered.contains("raw"));
+        assert!(!rendered.contains('\0'));
+    }
+
+    #[test]
+    fn nul_frame_id_precedes_resource_guardrail_violations() {
+        let err = check_frame(&frame("bad\0id", 1000, 10, 50), &config(), "ts")
+            .expect_err("malformed frame ID must preempt resource checks");
+
+        assert_nul_frame_error(err);
+    }
+
+    #[test]
+    fn batch_aborts_on_nul_frame_id_after_valid_prefix() {
+        let frames = vec![frame("ok", 1, 1, 1), frame("bad\0id", 1, 1, 1)];
+        let err = check_batch(&frames, &config(), "ts")
+            .expect_err("batch must abort on later NUL frame ID");
+
+        assert_nul_frame_error(err);
+    }
+
+    #[test]
+    fn batch_nul_frame_id_preempts_later_resource_blocks() {
+        let frames = vec![
+            frame("bad\0id", 1, 1, 1),
+            frame("later-size-block", 1000, 1, 1),
+            frame("later-depth-block", 1, 10, 1),
+        ];
+        let err = check_batch(&frames, &config(), "ts")
+            .expect_err("malformed frame ID must abort before later blocks");
+
+        assert_nul_frame_error(err);
     }
 }

@@ -338,12 +338,13 @@ impl ReciprocityEngine {
         // Check grace period
         if metrics.membership_age_seconds < self.config.grace_period_seconds {
             let tier = self.config.grace_period_tier;
+            let granted = tier != AccessTier::Blocked;
             let decision = AccessDecision {
                 participant_id: metrics.participant_id.clone(),
                 tier,
                 contribution_ratio: ratio,
                 quality_adjusted_ratio: quality_ratio,
-                granted: true,
+                granted,
                 reason: "grace period active".to_string(),
                 exception_applied: false,
                 grace_period_active: true,
@@ -1036,7 +1037,7 @@ mod tests {
             !decision
                 .accessible_feeds
                 .iter()
-                .any(|feed| feed.as_str() == "raw_signals")
+                .any(|feed| feed.contains("raw_signals"))
         );
         assert_eq!(decision.reason, "exception: approved");
     }
@@ -1056,7 +1057,7 @@ mod tests {
             !decision
                 .accessible_feeds
                 .iter()
-                .any(|feed| feed.as_str() == "raw_signals")
+                .any(|feed| feed.contains("raw_signals"))
         );
     }
 
@@ -2101,5 +2102,155 @@ mod atc_reciprocity_negative_path_tests {
         // Re-evaluating same batch should produce same hash
         let matrix2 = engine.evaluate_batch(&contradictory_participants, "contradiction_test", "2026-04-17T00:00:00Z");
         assert_eq!(matrix.content_hash, matrix2.content_hash);
+    }
+
+    fn hostile_threshold_metrics(id: &str, made: u64, consumed: u64) -> ContributionMetrics {
+        ContributionMetrics {
+            participant_id: id.to_string(),
+            contributions_made: made,
+            intelligence_consumed: consumed,
+            contribution_quality: 1.0,
+            membership_age_seconds: 86400 * 90,
+            has_exception: false,
+            exception_reason: None,
+            exception_expires_at: None,
+        }
+    }
+
+    #[test]
+    fn negative_blocked_grace_tier_does_not_mark_access_granted() {
+        let mut engine = ReciprocityEngine::new(ReciprocityConfig {
+            grace_period_tier: AccessTier::Blocked,
+            ..ReciprocityConfig::default()
+        });
+        let metrics = ContributionMetrics {
+            participant_id: "blocked-grace-tier".to_string(),
+            contributions_made: 0,
+            intelligence_consumed: 0,
+            contribution_quality: 1.0,
+            membership_age_seconds: 60,
+            has_exception: false,
+            exception_reason: None,
+            exception_expires_at: None,
+        };
+
+        let decision = engine.evaluate_access(&metrics, "2026-04-17T00:00:00Z");
+
+        assert!(decision.grace_period_active);
+        assert_eq!(decision.tier, AccessTier::Blocked);
+        assert!(!decision.granted);
+        assert!(decision.accessible_feeds.is_empty());
+    }
+
+    #[test]
+    fn negative_blocked_grace_batch_counts_freerider_without_feeds() {
+        let mut engine = ReciprocityEngine::new(ReciprocityConfig {
+            grace_period_tier: AccessTier::Blocked,
+            ..ReciprocityConfig::default()
+        });
+        let participants = [ContributionMetrics {
+            participant_id: "blocked-grace-batch".to_string(),
+            contributions_made: 0,
+            intelligence_consumed: 100,
+            contribution_quality: 1.0,
+            membership_age_seconds: 1,
+            has_exception: false,
+            exception_reason: None,
+            exception_expires_at: None,
+        }];
+
+        let matrix = engine.evaluate_batch(&participants, "blocked-grace", "2026-04-17T00:00:00Z");
+
+        assert_eq!(matrix.freeriders_blocked, 1);
+        assert_eq!(matrix.entries[0].tier, AccessTier::Blocked);
+        assert!(matrix.entries[0].grace_period_active);
+        assert_eq!(matrix.exceptions_active, 0);
+    }
+
+    #[test]
+    fn negative_nan_full_threshold_does_not_grant_raw_signal_access() {
+        let mut engine = ReciprocityEngine::new(ReciprocityConfig {
+            full_tier_min_ratio: f64::NAN,
+            ..ReciprocityConfig::default()
+        });
+        let metrics = hostile_threshold_metrics("nan-full-threshold", 100, 100);
+
+        let decision = engine.evaluate_access(&metrics, "2026-04-17T00:00:00Z");
+
+        assert_ne!(decision.tier, AccessTier::Full);
+        assert!(
+            !decision
+                .accessible_feeds
+                .iter()
+                .any(|feed| feed.contains("raw_signals"))
+        );
+    }
+
+    #[test]
+    fn negative_nan_standard_threshold_falls_back_to_limited_for_mid_ratio() {
+        let mut engine = ReciprocityEngine::new(ReciprocityConfig {
+            standard_tier_min_ratio: f64::NAN,
+            ..ReciprocityConfig::default()
+        });
+        let metrics = hostile_threshold_metrics("nan-standard-threshold", 30, 100);
+
+        let decision = engine.evaluate_access(&metrics, "2026-04-17T00:00:00Z");
+
+        assert_eq!(decision.tier, AccessTier::Limited);
+        assert!(decision.granted);
+        assert_eq!(decision.accessible_feeds, vec!["advisories".to_string()]);
+    }
+
+    #[test]
+    fn negative_nan_limited_threshold_blocks_low_ratio() {
+        let mut engine = ReciprocityEngine::new(ReciprocityConfig {
+            limited_tier_min_ratio: f64::NAN,
+            ..ReciprocityConfig::default()
+        });
+        let metrics = hostile_threshold_metrics("nan-limited-threshold", 1, 100);
+
+        let decision = engine.evaluate_access(&metrics, "2026-04-17T00:00:00Z");
+
+        assert_eq!(decision.tier, AccessTier::Blocked);
+        assert!(!decision.granted);
+        assert!(decision.accessible_feeds.is_empty());
+    }
+
+    #[test]
+    fn negative_full_threshold_above_one_prevents_raw_signal_access() {
+        let mut engine = ReciprocityEngine::new(ReciprocityConfig {
+            full_tier_min_ratio: 1.01,
+            ..ReciprocityConfig::default()
+        });
+        let metrics = hostile_threshold_metrics("full-threshold-above-one", u64::MAX, 0);
+
+        let decision = engine.evaluate_access(&metrics, "2026-04-17T00:00:00Z");
+
+        assert_eq!(decision.contribution_ratio, 1.0);
+        assert_ne!(decision.tier, AccessTier::Full);
+        assert!(
+            !decision
+                .accessible_feeds
+                .iter()
+                .any(|feed| feed.contains("raw_signals"))
+        );
+    }
+
+    #[test]
+    fn negative_all_thresholds_above_one_blocks_even_max_ratio() {
+        let mut engine = ReciprocityEngine::new(ReciprocityConfig {
+            full_tier_min_ratio: 1.5,
+            standard_tier_min_ratio: 1.4,
+            limited_tier_min_ratio: 1.3,
+            ..ReciprocityConfig::default()
+        });
+        let metrics = hostile_threshold_metrics("all-thresholds-above-one", 10, 0);
+
+        let decision = engine.evaluate_access(&metrics, "2026-04-17T00:00:00Z");
+
+        assert_eq!(decision.contribution_ratio, 1.0);
+        assert_eq!(decision.quality_adjusted_ratio, 1.0);
+        assert_eq!(decision.tier, AccessTier::Blocked);
+        assert!(!decision.granted);
     }
 }

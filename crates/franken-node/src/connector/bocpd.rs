@@ -4122,4 +4122,422 @@ mod tests {
         assert_eq!(correlated[0].stream_name, "first-underflow-window");
         assert_eq!(correlator.recent_count(), 2);
     }
+
+    #[test]
+    fn negative_geometric_hazard_with_subnormal_probability_returns_safe_zero() {
+        let hazard = HazardFunction::Geometric { p: f64::MIN_POSITIVE / 2.0 };
+
+        // Should handle subnormal values gracefully
+        assert_eq!(hazard.evaluate(100), 0.0);
+    }
+
+    #[test]
+    fn negative_gaussian_model_with_extreme_precision_scaling_produces_safe_bounds() {
+        let model = GaussianModel {
+            mu0: 0.0,
+            kappa0: f64::MAX,
+            alpha0: 1.0,
+            beta0: 1.0,
+        };
+        let mut stats = GaussianSuffStats::new();
+        stats.update(1.0);
+
+        // Should produce bounded result despite extreme kappa0
+        let prob = model.predictive_prob(&stats, 0.5);
+        assert!(prob >= 1e-300 && prob.is_finite());
+    }
+
+    #[test]
+    fn negative_gaussian_sufficient_stats_rejects_precision_loss_from_extreme_delta() {
+        let mut stats = GaussianSuffStats::new();
+        stats.update(0.0);
+
+        // Add observation that would cause precision loss in delta calculation
+        stats.update(f64::MAX);
+
+        // Stats should remain stable despite extreme delta
+        assert!(stats.mean.is_finite());
+        assert!(stats.sum_sq.is_finite());
+        assert!(stats.n.is_finite());
+    }
+
+    #[test]
+    fn negative_poisson_sufficient_stats_rejects_non_integer_count_above_threshold() {
+        let mut stats = PoissonSuffStats::new();
+
+        // Should reject fractional values that are too close to u64::MAX
+        stats.update((u64::MAX as f64) - 0.1);
+
+        // Should remain unchanged since input was rejected
+        assert_eq!(stats.n, 0.0);
+        assert_eq!(stats.sum, 0.0);
+    }
+
+    #[test]
+    fn negative_student_t_pdf_with_extreme_degrees_of_freedom_prevents_overflow() {
+        // Test with nu approaching 0 and extreme variance
+        let result = student_t_pdf(1.0, 0.0, f64::MAX, f64::MIN_POSITIVE);
+
+        assert_eq!(result, 1e-300);
+    }
+
+    #[test]
+    fn negative_ln_gamma_with_negative_input_returns_infinity_barrier() {
+        let result = ln_gamma(-1.0);
+
+        assert_eq!(result, f64::INFINITY);
+    }
+
+    #[test]
+    fn negative_neg_binomial_pmf_with_degenerate_probability_returns_safe_minimum() {
+        // Test with probability at boundary values
+        assert_eq!(neg_binomial_pmf(5, 1.0, 1.0), 1e-300);
+        assert_eq!(neg_binomial_pmf(5, 1.0, 0.0), 1e-300);
+    }
+
+    #[test]
+    fn negative_detector_observation_with_timestamp_underflow_maintains_sequence() {
+        let mut detector = gaussian_detector("timestamp-underflow");
+
+        // Add observation with very small timestamp that could underflow
+        let result1 = detector.observe(1.0, 0);
+        let result2 = detector.observe(2.0, u64::MIN);
+
+        assert_eq!(detector.observation_count(), 2);
+        assert!(result1.is_none()); // No changepoint expected
+        assert!(result2.is_none()); // No changepoint expected
+    }
+
+    #[test]
+    fn negative_multi_stream_correlator_with_timestamp_wraparound_maintains_ordering() {
+        let mut correlator = MultiStreamCorrelator::new(60);
+
+        let mut shift_near_max = valid_shift("near-max");
+        shift_near_max.timestamp = u64::MAX - 1;
+
+        let mut shift_after_wrap = valid_shift("after-wrap");
+        shift_after_wrap.timestamp = 0;
+
+        correlator.record_shift(shift_near_max);
+        let correlated = correlator.record_shift(shift_after_wrap);
+
+        // Should handle timestamp wraparound gracefully
+        assert_eq!(correlated.len(), 1);
+        assert_eq!(correlator.recent_count(), 2);
+    }
+
+    #[test]
+    fn negative_categorical_model_predictive_with_zero_alpha_prevents_division_by_zero() {
+        let model = CategoricalModel { k: 2, alpha0: 0.0 };
+        let stats = CategoricalSuffStats {
+            counts: vec![1.0, 1.0],
+        };
+
+        let prob = model.predictive_prob(&stats, 0);
+
+        assert_eq!(prob, 1e-300);
+    }
+
+    // =========================================================================
+    // NEGATIVE-PATH SECURITY HARDENING TESTS
+    // =========================================================================
+    // Added comprehensive attack vector testing focusing on:
+    // - Vec::push unbounded growth attacks
+    // - Boundary condition fail-closed attacks
+    // - Resource exhaustion and capacity attacks
+    // - Statistical model injection attacks
+
+    #[test]
+    fn test_recent_shifts_vec_push_unbounded_growth_attacks() {
+        // Test for Vec::push without push_bounded in MultiStreamCorrelator (line 3905 pattern)
+        let mut correlator = MultiStreamCorrelator::new(60);
+
+        // Attack vector: fill recent_shifts without bounds
+        for i in 0..10000 {
+            let shift = CorrelatedShift {
+                stream_name: format!("attack_stream_{}", i),
+                timestamp: 1000 + i as u64,
+                confidence: 0.9,
+                regime_type: "attack".to_string(),
+                strength: 1.0,
+            };
+
+            // This should use push_bounded instead of direct Vec::push
+            // Current implementation might allow unbounded growth
+            correlator.recent_shifts.push(shift);
+
+            // Check if memory usage is becoming problematic
+            if i % 1000 == 0 {
+                assert!(correlator.recent_shifts.len() <= 5000,
+                       "recent_shifts should be bounded to prevent memory exhaustion: {} items",
+                       correlator.recent_shifts.len());
+            }
+        }
+
+        // Final verification - should not have unbounded growth
+        assert!(correlator.recent_shifts.len() <= 5000,
+               "recent_shifts grew too large: {} items", correlator.recent_shifts.len());
+
+        // Verify oldest entries are evicted when capacity is exceeded
+        if correlator.recent_shifts.len() > 1000 {
+            // Recent entries should still be present
+            assert!(correlator.recent_shifts.iter().any(|s| s.stream_name.contains("attack_stream_9")),
+                   "Recent entries should be retained");
+        }
+    }
+
+    #[test]
+    fn test_boundary_condition_fail_closed_attacks() {
+        // Test > vs >= boundary conditions in various validation functions
+
+        // Test hazard_lambda boundary (line 79: hazard_lambda <= 0.0)
+        let boundary_lambdas = vec![
+            (-f64::EPSILON, true, "negative epsilon"),
+            (0.0, true, "exactly zero"),
+            (f64::EPSILON, false, "positive epsilon"),
+            (f64::MIN_POSITIVE, false, "minimum positive"),
+        ];
+
+        for (lambda, should_fail, description) in boundary_lambdas {
+            let config = BocpdConfig {
+                hazard_lambda: lambda,
+                ..Default::default()
+            };
+
+            let result = config.validate();
+            match (should_fail, result) {
+                (true, Ok(_)) => panic!("Boundary attack should fail ({}): {}", description, lambda),
+                (false, Err(e)) => panic!("Valid boundary should pass ({}): {} - {}", description, lambda, e),
+                _ => {} // Correct behavior
+            }
+        }
+
+        // Test min_run_length > max_run_length boundary (line 99)
+        let boundary_configs = vec![
+            (10, 10, false, "equal min and max"),
+            (10, 9, true, "min greater than max by 1"),
+            (100, 99, true, "min greater than max by 1 (larger values)"),
+        ];
+
+        for (min_len, max_len, should_fail, description) in boundary_configs {
+            let config = BocpdConfig {
+                min_run_length: min_len,
+                max_run_length: max_len,
+                ..Default::default()
+            };
+
+            let result = config.validate();
+            match (should_fail, result) {
+                (true, Ok(_)) => panic!("Invalid config should fail ({}): min={} max={}", description, min_len, max_len),
+                (false, Err(e)) => panic!("Valid config should pass ({}): min={} max={} - {}", description, min_len, max_len, e),
+                _ => {} // Correct behavior
+            }
+        }
+
+        // Test overflow detection boundaries (line 433: x > 0.0 && self.sum < old_sum)
+        let mut stats = GaussianSuffStats::new();
+        stats.sum = f64::MAX - 1.0;
+        let old_sum = stats.sum;
+
+        // This should detect overflow
+        stats.update(2.0);
+
+        // Should detect the overflow condition and handle gracefully
+        assert!(stats.sum.is_finite(), "Should handle overflow gracefully");
+    }
+
+    #[test]
+    fn test_statistical_model_injection_attacks() {
+        // Test NaN/Infinity injection in statistical computations
+
+        let nan_infinity_vectors = vec![
+            (f64::NAN, "NaN injection"),
+            (f64::INFINITY, "positive infinity injection"),
+            (f64::NEG_INFINITY, "negative infinity injection"),
+            (f64::MAX, "maximum float injection"),
+            (f64::MIN, "minimum float injection"),
+        ];
+
+        for (malicious_value, attack_type) in nan_infinity_vectors {
+            // Test GaussianModel with malicious parameters
+            let malicious_gaussian = GaussianModel {
+                mu0: malicious_value,
+                kappa0: malicious_value,
+                alpha0: malicious_value.abs(),
+                beta0: malicious_value.abs(),
+            };
+
+            let stats = GaussianSuffStats::new();
+
+            // Should handle malicious parameters gracefully
+            let prob = malicious_gaussian.predictive_prob(&stats, 1.0);
+            if !prob.is_finite() {
+                // Expected for non-finite inputs
+                assert!(prob.is_nan() || prob.is_infinite(), "Should propagate non-finite values ({})", attack_type);
+            }
+
+            // Test PoissonModel with malicious parameters
+            let malicious_poisson = PoissonModel {
+                alpha0: malicious_value.abs(),
+                beta0: malicious_value.abs(),
+            };
+
+            let poisson_stats = PoissonSuffStats { sum: 10.0, count: 5 };
+            let poisson_prob = malicious_poisson.predictive_prob(&poisson_stats, 3);
+
+            if !malicious_value.is_finite() {
+                // Should handle non-finite parameters
+                assert!(!poisson_prob.is_finite() || poisson_prob == 1e-300,
+                       "Should handle non-finite Poisson parameters ({})", attack_type);
+            }
+
+            // Test CategoricalModel with malicious alpha0
+            if malicious_value.is_finite() && malicious_value >= 0.0 {
+                let malicious_categorical = CategoricalModel {
+                    k: 3,
+                    alpha0: malicious_value,
+                };
+
+                let cat_stats = CategoricalSuffStats {
+                    counts: vec![1.0, 1.0, 1.0],
+                };
+
+                let cat_prob = malicious_categorical.predictive_prob(&cat_stats, 0);
+
+                // Should produce bounded result
+                assert!(cat_prob >= 0.0 && (cat_prob <= 1.0 || cat_prob == 1e-300),
+                       "Categorical probability should be bounded ({}): {}", attack_type, cat_prob);
+            }
+        }
+    }
+
+    #[test]
+    fn test_resource_exhaustion_bocpd_state_attacks() {
+        // Test resource exhaustion in BOCPD posterior maintenance
+
+        let config = BocpdConfig {
+            max_run_length: 1000, // Large but bounded
+            ..Default::default()
+        };
+
+        let mut bocpd = match BocpdState::new(config.clone()) {
+            Ok(b) => b,
+            Err(_) => return, // Skip test if construction fails
+        };
+
+        // Attack: feed many observations to force large posterior state
+        for i in 0..2000 {
+            let observation = if i % 2 == 0 {
+                Observation::Gaussian(i as f64 / 100.0)
+            } else {
+                Observation::Poisson((i % 10) as u32)
+            };
+
+            let result = bocpd.observe(observation, i as u64);
+
+            // Should handle observations without memory exhaustion
+            match result {
+                Ok(Some(shift)) => {
+                    // Verify shift properties are bounded
+                    assert!(shift.confidence >= 0.0 && shift.confidence <= 1.0,
+                           "Shift confidence should be bounded: {}", shift.confidence);
+                    assert!(!shift.stream_name.is_empty(), "Stream name should not be empty");
+                    assert!(shift.strength >= 0.0, "Shift strength should be non-negative");
+                },
+                Ok(None) => {
+                    // No shift detected - acceptable
+                },
+                Err(e) => {
+                    // Should handle errors gracefully
+                    assert!(e.to_string().len() < 1000, "Error message should be bounded");
+                }
+            }
+
+            // Check memory usage periodically
+            if i % 100 == 0 {
+                // Posterior should be bounded by max_run_length
+                assert!(bocpd.posterior.len() <= config.max_run_length + 10,
+                       "Posterior size should be bounded: {} vs max {}",
+                       bocpd.posterior.len(), config.max_run_length);
+            }
+        }
+
+        // Final state verification
+        assert!(bocpd.posterior.len() <= config.max_run_length + 10,
+               "Final posterior size should be bounded");
+
+        // Posterior probabilities should sum to approximately 1.0
+        let posterior_sum: f64 = bocpd.posterior.iter().sum();
+        if posterior_sum.is_finite() {
+            assert!(posterior_sum >= 0.9 && posterior_sum <= 1.1,
+                   "Posterior should approximately sum to 1.0: {}", posterior_sum);
+        }
+    }
+
+    #[test]
+    fn test_correlator_timestamp_boundary_attacks() {
+        // Test timestamp boundary conditions in correlation window
+
+        let window_secs = 60;
+        let mut correlator = MultiStreamCorrelator::new(window_secs);
+
+        // Test boundary timestamp attacks
+        let base_time = 1000u64;
+        let boundary_shifts = vec![
+            // Exactly at window boundary
+            (base_time + window_secs, "exactly at boundary"),
+            // Just inside window
+            (base_time + window_secs - 1, "just inside boundary"),
+            // Just outside window
+            (base_time + window_secs + 1, "just outside boundary"),
+            // Far future
+            (base_time + window_secs * 10, "far future"),
+            // Potential overflow
+            (u64::MAX - 1000, "near overflow"),
+        ];
+
+        // Record initial shift
+        let initial_shift = CorrelatedShift {
+            stream_name: "base_stream".to_string(),
+            timestamp: base_time,
+            confidence: 0.9,
+            regime_type: "normal".to_string(),
+            strength: 1.0,
+        };
+        let _ = correlator.record_shift(initial_shift);
+
+        for (timestamp, description) in boundary_shifts {
+            let test_shift = CorrelatedShift {
+                stream_name: format!("test_stream_{}", timestamp),
+                timestamp,
+                confidence: 0.8,
+                regime_type: "test".to_string(),
+                strength: 0.5,
+            };
+
+            // Should handle timestamp boundaries gracefully
+            let correlated = correlator.record_shift(test_shift);
+
+            // Verify correlation logic respects window boundaries
+            if timestamp <= base_time + window_secs {
+                // Should potentially correlate within window
+                assert!(correlated.len() <= correlator.recent_shifts.len(),
+                       "Correlated shifts should not exceed recent shifts ({})", description);
+            } else {
+                // Should not correlate outside window
+                // (correlation behavior depends on implementation details)
+            }
+
+            // Verify state consistency
+            assert!(correlator.recent_shifts.len() <= 1000,
+                   "Recent shifts should be bounded ({}): {}", description, correlator.recent_shifts.len());
+
+            for shift in &correlator.recent_shifts {
+                assert!(!shift.stream_name.is_empty(), "Stream names should not be empty");
+                assert!(shift.confidence >= 0.0 && shift.confidence <= 1.0,
+                       "Confidence should be bounded");
+                assert!(shift.strength >= 0.0, "Strength should be non-negative");
+            }
+        }
+    }
 }

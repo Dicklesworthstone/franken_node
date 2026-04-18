@@ -1051,6 +1051,132 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_trace_id_with_fullwidth_hex_lookalikes() {
+        let mut c = ctx(None);
+        c.trace_id = format!("{}ＡＡ", "aa".repeat(15));
+
+        let err = c.validate().unwrap_err();
+
+        assert_eq!(err.code(), "TRC_INVALID_FORMAT");
+        assert!(err.to_string().contains("trace_id must be 32 hex chars"));
+    }
+
+    #[test]
+    fn validate_rejects_span_id_with_embedded_zero_width_space() {
+        let mut c = ctx(None);
+        c.span_id = format!("{}{}{}", "0".repeat(7), "\u{200b}", "0".repeat(8));
+
+        let err = c.validate().unwrap_err();
+
+        assert_eq!(err.code(), "TRC_INVALID_FORMAT");
+        assert!(err.to_string().contains("span_id must be 16 hex chars"));
+    }
+
+    #[test]
+    fn validate_rejects_parent_span_id_with_control_character() {
+        let mut c = ctx(None);
+        c.parent_span_id = Some(format!("{}{}{}", "0".repeat(7), "\n", "0".repeat(8)));
+
+        let err = c.validate().unwrap_err();
+
+        assert_eq!(err.code(), "TRC_INVALID_FORMAT");
+        assert!(
+            err.to_string()
+                .contains("parent_span_id must be 16 hex chars")
+        );
+    }
+
+    #[test]
+    fn stitch_does_not_normalize_uppercase_trace_id_queries() {
+        let mut store = TraceStore::new();
+        let mut c = ctx(None);
+        c.trace_id = c.trace_id.to_uppercase();
+        store.record(&c).unwrap();
+
+        assert!(store.stitch(&tid()).is_empty());
+        assert_eq!(store.stitch(&c.trace_id).len(), 1);
+    }
+
+    #[test]
+    fn conformance_uses_first_valid_trace_after_invalid_context() {
+        let mut invalid = ctx(None);
+        invalid.trace_id = "short".into();
+        let second = TraceContext {
+            trace_id: "ffffffffffffffffffffffffffffffff".to_string(),
+            span_id: sid(3),
+            parent_span_id: None,
+            timestamp: "ts-second".into(),
+        };
+        let arts = vec![
+            TracedArtifact {
+                artifact_id: "invalid-context".into(),
+                artifact_type: "invoke".into(),
+                trace_context: Some(invalid),
+            },
+            TracedArtifact {
+                artifact_id: "first-valid".into(),
+                artifact_type: "receipt".into(),
+                trace_context: Some(second),
+            },
+        ];
+
+        let report = TraceStore::check_conformance(&arts);
+
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(report.trace_id, "ffffffffffffffffffffffffffffffff");
+        assert_eq!(report.violations.len(), 1);
+        assert_eq!(report.violations[0].artifact_id, "invalid-context");
+    }
+
+    #[test]
+    fn conformance_rejects_artifact_id_whitespace_before_context_format() {
+        let mut bad_context = ctx(None);
+        bad_context.span_id = "short".into();
+        let arts = vec![TracedArtifact {
+            artifact_id: " artifact ".into(),
+            artifact_type: "invoke".into(),
+            trace_context: Some(bad_context),
+        }];
+
+        let report = TraceStore::check_conformance(&arts);
+
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(report.trace_id, "");
+        assert_eq!(report.violations.len(), 1);
+        assert!(report.violations[0].reason.contains("whitespace"));
+        assert!(!report.violations[0].reason.contains("TRC_INVALID_FORMAT"));
+    }
+
+    #[test]
+    fn conformance_rejects_uppercase_trace_id_mismatch_without_normalization() {
+        let upper = TraceContext {
+            trace_id: tid().to_uppercase(),
+            span_id: sid(4),
+            parent_span_id: None,
+            timestamp: "ts-upper".into(),
+        };
+        let arts = vec![
+            TracedArtifact {
+                artifact_id: "lower".into(),
+                artifact_type: "invoke".into(),
+                trace_context: Some(ctx(None)),
+            },
+            TracedArtifact {
+                artifact_id: "upper".into(),
+                artifact_type: "receipt".into(),
+                trace_context: Some(upper),
+            },
+        ];
+
+        let report = TraceStore::check_conformance(&arts);
+
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(report.trace_id, tid());
+        assert_eq!(report.violations.len(), 1);
+        assert!(report.violations[0].reason.contains("TRC_CONFORMANCE_FAILED"));
+    }
+
+    #[test]
     fn all_error_codes_present() {
         let errors = [
             TraceError::MissingTraceId,

@@ -250,6 +250,13 @@ impl FenceState {
         }
 
         // Check object linkage
+        if self.object_id != write.target_object_id {
+            return Err(FencingError::LeaseObjectMismatch {
+                lease_object: self.object_id.clone(),
+                target_object: write.target_object_id.clone(),
+            });
+        }
+
         if lease.object_id != write.target_object_id {
             return Err(FencingError::LeaseObjectMismatch {
                 lease_object: lease.object_id.clone(),
@@ -1204,6 +1211,213 @@ mod tests {
                 write_seq: 1,
                 lease_seq: 1,
                 current_seq: 0
+            }
+        );
+    }
+
+    #[test]
+    fn negative_foreign_zero_sequence_lease_cannot_write_other_object() {
+        let fs = FenceState::new("obj-local-zero".into());
+        let foreign_lease = Lease {
+            lease_seq: 0,
+            object_id: "obj-foreign-zero".into(),
+            epoch: ControlEpoch::GENESIS,
+            holder_id: "writer-foreign".into(),
+            acquired_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: "2030-01-01T00:00:00Z".into(),
+        };
+        let write = FencedWrite {
+            fence_seq: Some(0),
+            target_object_id: "obj-foreign-zero".into(),
+            payload: json!({}),
+        };
+
+        let err = fs
+            .validate_write(&write, &foreign_lease, "2026-06-01T00:00:00Z")
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            FencingError::LeaseObjectMismatch {
+                lease_object: "obj-local-zero".into(),
+                target_object: "obj-foreign-zero".into()
+            }
+        );
+    }
+
+    #[test]
+    fn negative_foreign_current_sequence_lease_cannot_pivot_target_object() {
+        let mut fs = FenceState::new("obj-local-current".into());
+        let _local_lease = fs.acquire_lease(
+            "writer-local".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "2030-01-01T00:00:00Z".into(),
+        );
+        let foreign_lease = Lease {
+            lease_seq: 1,
+            object_id: "obj-foreign-current".into(),
+            epoch: ControlEpoch::GENESIS,
+            holder_id: "writer-foreign".into(),
+            acquired_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: "2030-01-01T00:00:00Z".into(),
+        };
+        let write = FencedWrite {
+            fence_seq: Some(1),
+            target_object_id: "obj-foreign-current".into(),
+            payload: json!({}),
+        };
+
+        let err = fs
+            .validate_write(&write, &foreign_lease, "2026-06-01T00:00:00Z")
+            .unwrap_err();
+
+        assert!(matches!(err, FencingError::LeaseObjectMismatch { .. }));
+    }
+
+    #[test]
+    fn negative_empty_target_object_rejected_even_with_matching_forged_lease() {
+        let mut fs = FenceState::new("obj-nonempty".into());
+        let _local_lease = fs.acquire_lease(
+            "writer-local".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "2030-01-01T00:00:00Z".into(),
+        );
+        let forged_lease = Lease {
+            lease_seq: 1,
+            object_id: String::new(),
+            epoch: ControlEpoch::GENESIS,
+            holder_id: "writer-forged".into(),
+            acquired_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: "2030-01-01T00:00:00Z".into(),
+        };
+        let write = FencedWrite {
+            fence_seq: Some(1),
+            target_object_id: String::new(),
+            payload: json!({}),
+        };
+
+        let err = fs
+            .validate_write(&write, &forged_lease, "2026-06-01T00:00:00Z")
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            FencingError::LeaseObjectMismatch {
+                lease_object: "obj-nonempty".into(),
+                target_object: String::new()
+            }
+        );
+    }
+
+    #[test]
+    fn negative_epoch_scoped_foreign_target_rejected_after_epoch_acceptance() {
+        let mut fs = FenceState::new("obj-epoch-local".into());
+        let _local_lease = fs.acquire_lease_with_epoch(
+            "writer-local".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "2030-01-01T00:00:00Z".into(),
+            ControlEpoch::new(5),
+        );
+        let foreign_lease = Lease {
+            lease_seq: 1,
+            object_id: "obj-epoch-foreign".into(),
+            epoch: ControlEpoch::new(5),
+            holder_id: "writer-foreign".into(),
+            acquired_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: "2030-01-01T00:00:00Z".into(),
+        };
+        let write = FencedWrite {
+            fence_seq: Some(1),
+            target_object_id: "obj-epoch-foreign".into(),
+            payload: json!({}),
+        };
+        let policy = ValidityWindowPolicy::new(ControlEpoch::new(5), 0);
+
+        let err = fs
+            .validate_write_epoch_scoped(
+                &write,
+                &foreign_lease,
+                "2026-06-01T00:00:00Z",
+                &policy,
+                "trace-epoch-foreign",
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            FencingError::LeaseObjectMismatch {
+                lease_object: "obj-epoch-local".into(),
+                target_object: "obj-epoch-foreign".into()
+            }
+        );
+    }
+
+    #[test]
+    fn negative_expired_foreign_lease_still_fails_closed_at_expiry_boundary() {
+        let mut fs = FenceState::new("obj-expired-local".into());
+        let _local_lease = fs.acquire_lease(
+            "writer-local".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "2030-01-01T00:00:00Z".into(),
+        );
+        let foreign_lease = Lease {
+            lease_seq: 1,
+            object_id: "obj-expired-foreign".into(),
+            epoch: ControlEpoch::GENESIS,
+            holder_id: "writer-foreign".into(),
+            acquired_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: "2026-06-01T00:00:00Z".into(),
+        };
+        let write = FencedWrite {
+            fence_seq: Some(1),
+            target_object_id: "obj-expired-foreign".into(),
+            payload: json!({}),
+        };
+
+        let err = fs
+            .validate_write(&write, &foreign_lease, "2026-06-01T00:00:00Z")
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            FencingError::LeaseExpired {
+                expires_at: "2026-06-01T00:00:00Z".into(),
+                current_time: "2026-06-01T00:00:00Z".into()
+            }
+        );
+    }
+
+    #[test]
+    fn negative_state_object_mismatch_precedes_forged_lease_object_mismatch() {
+        let mut fs = FenceState::new("obj-state".into());
+        let _local_lease = fs.acquire_lease(
+            "writer-local".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "2030-01-01T00:00:00Z".into(),
+        );
+        let forged_lease = Lease {
+            lease_seq: 1,
+            object_id: "obj-lease".into(),
+            epoch: ControlEpoch::GENESIS,
+            holder_id: "writer-forged".into(),
+            acquired_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: "2030-01-01T00:00:00Z".into(),
+        };
+        let write = FencedWrite {
+            fence_seq: Some(1),
+            target_object_id: "obj-target".into(),
+            payload: json!({}),
+        };
+
+        let err = fs
+            .validate_write(&write, &forged_lease, "2026-06-01T00:00:00Z")
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            FencingError::LeaseObjectMismatch {
+                lease_object: "obj-state".into(),
+                target_object: "obj-target".into()
             }
         );
     }

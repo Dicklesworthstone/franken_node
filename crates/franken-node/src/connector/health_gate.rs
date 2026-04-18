@@ -871,4 +871,105 @@ mod tests {
 
         assert!(err.to_string().contains("rejection"));
     }
+
+    #[test]
+    fn malformed_health_check_null_name_is_rejected() {
+        let payload = serde_json::json!({
+            "name": null,
+            "required": true,
+            "passed": true,
+            "message": null
+        });
+
+        assert!(serde_json::from_value::<HealthCheck>(payload).is_err());
+    }
+
+    #[test]
+    fn malformed_health_check_missing_passed_flag_is_rejected() {
+        let payload = serde_json::json!({
+            "name": "liveness",
+            "required": true,
+            "message": null
+        });
+
+        assert!(serde_json::from_value::<HealthCheck>(payload).is_err());
+    }
+
+    #[test]
+    fn malformed_health_check_object_message_is_rejected() {
+        let payload = serde_json::json!({
+            "name": "readiness",
+            "required": true,
+            "passed": false,
+            "message": {"detail": "probe failed"}
+        });
+
+        assert!(serde_json::from_value::<HealthCheck>(payload).is_err());
+    }
+
+    #[test]
+    fn malformed_health_gate_error_scalar_failing_checks_is_rejected() {
+        let payload = serde_json::json!({
+            "code": "HEALTH_GATE_FAILED",
+            "failing_checks": "readiness",
+            "message": "Health gate failed"
+        });
+
+        assert!(serde_json::from_value::<HealthGateError>(payload).is_err());
+    }
+
+    #[test]
+    fn malformed_epoch_policy_numeric_policy_id_is_rejected() {
+        let payload = serde_json::json!({
+            "policy_id": 7,
+            "policy_epoch": ControlEpoch::new(7),
+            "checks": standard_checks(true, true, true, true),
+            "trace_id": "trace-numeric-policy"
+        });
+
+        assert!(serde_json::from_value::<EpochScopedHealthPolicy>(payload).is_err());
+    }
+
+    #[test]
+    fn malformed_epoch_policy_missing_trace_id_is_rejected() {
+        let payload = serde_json::json!({
+            "policy_id": "health-policy-missing-trace",
+            "policy_epoch": ControlEpoch::new(7),
+            "checks": standard_checks(true, true, true, true)
+        });
+
+        assert!(serde_json::from_value::<EpochScopedHealthPolicy>(payload).is_err());
+    }
+
+    #[test]
+    fn malformed_epoch_scope_log_null_artifact_epoch_is_rejected() {
+        let payload = serde_json::json!({
+            "event_code": epoch_event_codes::EPOCH_SCOPE_LOGGED,
+            "artifact_type": "health_gate_policy",
+            "artifact_id": "health-policy-null-epoch",
+            "artifact_epoch": null,
+            "current_epoch": ControlEpoch::new(7),
+            "trace_id": "trace-null-artifact-epoch"
+        });
+
+        assert!(serde_json::from_value::<EpochScopeLog>(payload).is_err());
+    }
+
+    #[test]
+    fn malformed_epoch_result_null_gate_result_is_rejected() {
+        let policy = EpochScopedHealthPolicy::new(
+            "health-policy-null-gate-result".to_string(),
+            ControlEpoch::new(7),
+            standard_checks(true, true, true, true),
+            "trace-null-gate-result".to_string(),
+        );
+        let validity = ValidityWindowPolicy::new(ControlEpoch::new(7), 2);
+        let mut payload = serde_json::to_value(
+            evaluate_epoch_scoped_policy(&policy, &validity).expect("valid fixture"),
+        )
+        .expect("epoch result serializes");
+        payload["gate_result"] = serde_json::Value::Null;
+
+        assert!(serde_json::from_value::<EpochScopedHealthResult>(payload).is_err());
+    }
 }

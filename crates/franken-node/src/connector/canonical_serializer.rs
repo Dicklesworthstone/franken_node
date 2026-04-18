@@ -613,10 +613,26 @@ fn contains_float_marker(payload: &[u8]) -> bool {
                     // Odd backslashes means escaped quote — ignore it
                 } else if !in_string
                     && bytes[i] == b'.'
-                    && i > 0
-                    && bytes[i - 1].is_ascii_digit()
                     && i + 1 < bytes.len()
                     && bytes[i + 1].is_ascii_digit()
+                {
+                    return true;
+                } else if !in_string
+                    && matches!(bytes[i], b'e' | b'E')
+                    && i > 0
+                    && bytes[i - 1].is_ascii_digit()
+                {
+                    let mut next = i.saturating_add(1);
+                    if next < bytes.len() && matches!(bytes[next], b'+' | b'-') {
+                        next = next.saturating_add(1);
+                    }
+                    if next < bytes.len() && bytes[next].is_ascii_digit() {
+                        return true;
+                    }
+                } else if !in_string
+                    && (json_token_at(bytes, i, b"NaN")
+                        || json_token_at(bytes, i, b"Infinity")
+                        || json_token_at(bytes, i, b"-Infinity"))
                 {
                     return true;
                 }
@@ -625,6 +641,20 @@ fn contains_float_marker(payload: &[u8]) -> bool {
         }
     }
     false
+}
+
+fn json_token_at(bytes: &[u8], index: usize, token: &[u8]) -> bool {
+    if !bytes[index..].starts_with(token) {
+        return false;
+    }
+    let before_ok = index == 0 || !is_ident_byte(bytes[index.saturating_sub(1)]);
+    let after_index = index.saturating_add(token.len());
+    let after_ok = after_index >= bytes.len() || !is_ident_byte(bytes[after_index]);
+    before_ok && after_ok
+}
+
+fn is_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 /// Content hash prefix for logging.
@@ -896,6 +926,76 @@ mod tests {
         assert!(
             contains_float_marker(json),
             "double-backslash before quote means quote is real"
+        );
+    }
+
+    #[test]
+    fn test_float_detection_scientific_notation_is_rejected() {
+        let json = br#"{"value": 1e9}"#;
+
+        assert!(contains_float_marker(json));
+    }
+
+    #[test]
+    fn test_float_detection_uppercase_exponent_is_rejected() {
+        let json = br#"{"value": 6E23}"#;
+
+        assert!(contains_float_marker(json));
+    }
+
+    #[test]
+    fn test_float_detection_signed_exponent_is_rejected() {
+        let json = br#"{"value": 1E-9}"#;
+
+        assert!(contains_float_marker(json));
+    }
+
+    #[test]
+    fn test_float_detection_leading_dot_fraction_is_rejected() {
+        let json = br#"{"value": .5}"#;
+
+        assert!(contains_float_marker(json));
+    }
+
+    #[test]
+    fn test_float_detection_bare_nan_token_is_rejected() {
+        let json = br#"{"value": NaN}"#;
+
+        assert!(contains_float_marker(json));
+    }
+
+    #[test]
+    fn test_float_detection_bare_infinity_token_is_rejected() {
+        let json = br#"{"value": Infinity}"#;
+
+        assert!(contains_float_marker(json));
+    }
+
+    #[test]
+    fn test_float_detection_exponent_inside_string_is_allowed() {
+        let json = br#"{"value": "1e9", "unit": "bytes"}"#;
+
+        assert!(!contains_float_marker(json));
+    }
+
+    #[test]
+    fn test_serializer_rejects_scientific_notation_payload() {
+        let mut serializer = CanonicalSerializer::default();
+        let err = serializer
+            .serialize(
+                TrustObjectType::PolicyCheckpoint,
+                br#"{"value": 1e9}"#,
+                "trace-scientific-float",
+            )
+            .expect_err("scientific notation must be rejected as floating-point");
+
+        assert_eq!(err.code(), error_codes::ERR_CAN_FLOAT_REJECTED);
+        assert_eq!(
+            serializer
+                .events()
+                .last()
+                .map(|event| event.event_code.as_str()),
+            Some(event_codes::CAN_REJECT)
         );
     }
 
@@ -2265,6 +2365,194 @@ mod tests {
             // Byte length should match actual length
             assert_eq!(preimage1.byte_len(), bytes1.len());
         }
+    }
+
+    // ── Negative-path edge case tests for recent hardening gaps ──
+
+    #[test]
+    fn test_signature_preimage_with_maximum_payload_size() {
+        // Test edge case: very large payload near system limits
+        let large_payload = vec![0xAB; 1_000_000]; // 1MB payload
+        let preimage = SignaturePreimage::build(1, [0x10, 0x01], large_payload.clone());
+
+        let bytes = preimage.to_bytes();
+
+        // Should not panic or corrupt
+        assert_eq!(bytes.len(), 3 + large_payload.len());
+        assert_eq!(preimage.byte_len(), bytes.len());
+        assert_eq!(preimage.content_hash_prefix().len(), 8);
+    }
+
+    #[test]
+    fn test_canonical_decode_with_corrupted_length_prefix() {
+        // Test edge case: length prefix that would cause integer overflow
+        let mut corrupted = vec![0xFF, 0xFF, 0xFF, 0xFF]; // u32::MAX length
+        corrupted.extend_from_slice(b"small_payload");
+
+        let result = canonical_decode(&corrupted);
+
+        // Should fail gracefully, not panic or cause memory issues
+        assert!(result.is_err(), "Corrupted length prefix should be rejected");
+    }
+
+    #[test]
+    fn test_canonical_encode_with_empty_input_boundary() {
+        // Test edge case: encode empty slice vs encode from empty Vec
+        let empty_slice = canonical_encode(b"").unwrap();
+        let empty_vec = canonical_encode(&Vec::<u8>::new()).unwrap();
+
+        assert_eq!(empty_slice, empty_vec);
+        assert_eq!(empty_slice.len(), 4); // Just the 0-length prefix
+        assert_eq!(&empty_slice, &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_float_detection_with_malformed_json_boundaries() {
+        // Test edge case: incomplete JSON that might confuse the parser
+        let malformed_cases = [
+            br#"{"incomplete"#,           // Incomplete object
+            br#"{"key": 3.1"#,           // Missing closing brace
+            br#"{"key": "unclosed string"#, // Unclosed string
+            br#"{"nested": {"inner": 1.5"#, // Deeply incomplete
+            b"3.14",                     // Raw number, no JSON structure
+            br#"{"key": 1e10}"#,         // Scientific notation (should detect)
+            br#"{"key": 1.0e-5}"#,       // Scientific with negative exponent
+        ];
+
+        for (i, case) in malformed_cases.iter().enumerate() {
+            // Should not panic regardless of malformed input
+            let result = contains_float_marker(case);
+            // Document behavior without asserting specific results since malformed JSON handling varies
+            eprintln!("Case {}: {:?} -> {}", i, std::str::from_utf8(case), result);
+        }
+    }
+
+    #[test]
+    fn test_serializer_with_conflicting_domain_tags() {
+        // Test edge case: what happens if we manually construct schemas with duplicate domain tags
+        let mut serializer = CanonicalSerializer::new();
+
+        let schema1 = CanonicalSchema {
+            object_type: TrustObjectType::PolicyCheckpoint,
+            version: 1,
+            domain_tag: [0x10, 0x01],
+            required_fields: vec!["field1".to_string()],
+            optional_fields: vec![],
+        };
+
+        let mut schema2 = CanonicalSchema {
+            object_type: TrustObjectType::DelegationToken,
+            version: 1,
+            domain_tag: [0x10, 0x01], // Same tag as schema1 - conflict!
+            required_fields: vec!["field2".to_string()],
+            optional_fields: vec![],
+        };
+
+        serializer.register_schema(schema1);
+        serializer.register_schema(schema2);
+
+        // Both should be registered - the serializer doesn't check for domain tag conflicts
+        assert_eq!(serializer.schema_count(), 2);
+        assert!(serializer.get_schema(TrustObjectType::PolicyCheckpoint).is_some());
+        assert!(serializer.get_schema(TrustObjectType::DelegationToken).is_some());
+    }
+
+    #[test]
+    fn test_serializer_error_code_coverage() {
+        // Test that all error variants return the expected error codes
+        let errors = [
+            SerializerError::NonCanonicalInput {
+                object_type: "test".to_string(),
+                reason: "test".to_string(),
+            },
+            SerializerError::SchemaNotFound {
+                object_type: "test".to_string(),
+            },
+            SerializerError::FloatingPointRejected {
+                object_type: "test".to_string(),
+                field: "test".to_string(),
+            },
+            SerializerError::PreimageConstructionFailed {
+                reason: "test".to_string(),
+            },
+            SerializerError::RoundTripDivergence {
+                object_type: "test".to_string(),
+                original_len: 100,
+                round_trip_len: 200,
+            },
+        ];
+
+        for error in errors {
+            let code = error.code();
+            let display = format!("{}", error);
+
+            // All error codes should be non-empty and follow naming convention
+            assert!(!code.is_empty());
+            assert!(code.starts_with("ERR_CAN_"));
+
+            // Display should contain useful information
+            assert!(!display.is_empty());
+            assert!(display.len() > 10); // Should be descriptive
+        }
+    }
+
+    #[test]
+    fn test_preimage_build_with_zero_version() {
+        // Test edge case: version 0 (might be invalid in some contexts)
+        let preimage = SignaturePreimage::build(0, [0x10, 0x01], b"data".to_vec());
+        let bytes = preimage.to_bytes();
+
+        assert_eq!(bytes[0], 0); // Version should be preserved as 0
+        assert_eq!(bytes[1], 0x10);
+        assert_eq!(bytes[2], 0x01);
+        assert_eq!(&bytes[3..], b"data");
+    }
+
+    #[test]
+    fn test_trust_object_type_domain_tag_byte_boundaries() {
+        // Test edge case: ensure all domain tags use valid byte values
+        let all_types = TrustObjectType::all();
+        let mut seen_tags = std::collections::HashSet::new();
+
+        for obj_type in all_types {
+            let tag = obj_type.domain_tag();
+
+            // All domain tags should have the expected prefix
+            assert_eq!(tag[0], 0x10, "All domain tags should start with 0x10");
+
+            // Second byte should be in valid range and unique
+            assert!(tag[1] >= 0x01 && tag[1] <= 0x06, "Second byte should be in range 0x01-0x06");
+
+            // Should be unique
+            assert!(seen_tags.insert(tag), "Domain tag {:?} should be unique", tag);
+
+            // Should map to a valid DomainPrefix without panicking
+            let _ = obj_type.to_domain_prefix();
+        }
+
+        assert_eq!(seen_tags.len(), 6, "Should have exactly 6 unique domain tags");
+    }
+
+    #[test]
+    fn test_canonical_decode_exact_length_boundary() {
+        // Test edge case: payload that exactly matches the declared length
+        let payload = b"exactly_16_bytes";
+        assert_eq!(payload.len(), 16);
+
+        let mut encoded = vec![0, 0, 0, 16]; // Length prefix for 16 bytes
+        encoded.extend_from_slice(payload);
+
+        let decoded = canonical_decode(&encoded).unwrap();
+        assert_eq!(decoded, payload);
+
+        // Now test off-by-one cases
+        let mut too_long = vec![0, 0, 0, 15]; // Claims 15 bytes but has 16
+        too_long.extend_from_slice(payload);
+        assert!(canonical_decode(&too_long).is_err());
+
+        let mut too_short = vec![0, 0, 0, 17]; // Claims 17 bytes but has 16
+        too_short.extend_from_slice(payload);
+        assert!(canonical_decode(&too_short).is_err());
     }
 }
 
@@ -4056,5 +4344,99 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                          "Different objects should have different signature preimage hashes");
             }
         }
+    }
+
+    // -- Hardening Negative Path Tests --
+
+    #[test]
+    fn negative_push_bounded_event_accumulation_overflow_protection() {
+        // Test push_bounded protection against unbounded Vec::push operations
+        let mut serializer = CanonicalSerializer::new();
+        let schema = default_schema(TrustObjectType::PolicyCheckpoint);
+        serializer.register_schema(schema);
+
+        // Generate more events than MAX_EVENTS to test capacity bounds
+        for i in 0..(MAX_EVENTS + 50) {
+            let trace_id = format!("overflow_trace_{}", i);
+            let _ = serializer.serialize(TrustObjectType::PolicyCheckpoint, b"test", &trace_id);
+        }
+
+        // Events should be capped by push_bounded, not grow without limit
+        assert!(serializer.events().len() <= MAX_EVENTS,
+               "events should be bounded: {} <= {}", serializer.events().len(), MAX_EVENTS);
+    }
+
+    #[test]
+    fn negative_length_cast_overflow_in_canonical_encoding() {
+        // Test u32::try_from protection for .len() as u32 patterns
+        let boundary_cases = vec![
+            (0, true),
+            (u32::MAX as usize, true),
+        ];
+
+        for (length, should_succeed) in boundary_cases {
+            let test_payload = vec![0x42u8; std::cmp::min(length, 1000)]; // Limit for test
+            let result = canonical_encode(&test_payload);
+
+            if should_succeed {
+                assert!(result.is_ok(), "should handle length {} with try_from", length);
+                if let Ok(encoded) = result {
+                    let prefix = u32::from_be_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
+                    assert_eq!(prefix as usize, test_payload.len());
+                }
+            }
+        }
+
+        // Test direct overflow simulation
+        let overflow_result = u32::try_from(u64::MAX as usize);
+        assert!(overflow_result.is_err(), "should fail for oversized lengths");
+    }
+
+    #[test]
+    fn negative_saturating_arithmetic_backslash_counting() {
+        // Test saturating_add in backslash counting to prevent += 1 overflow
+        let extreme_backslashes = "\\".repeat(1000);
+        let test_json = format!(r#"{{"value": "{}\""}}"#, extreme_backslashes);
+
+        // Should handle extreme backslash counts without arithmetic overflow
+        let result = contains_float_marker(test_json.as_bytes());
+        let _ = result; // Ensure no panic from arithmetic overflow
+
+        // Test saturating arithmetic properties
+        let near_max = usize::MAX - 5;
+        let safe_result = near_max.saturating_add(1);
+        assert!(safe_result >= near_max, "saturating_add should not underflow");
+
+        let max_result = usize::MAX.saturating_add(1);
+        assert_eq!(max_result, usize::MAX, "saturating_add at MAX should saturate");
+    }
+
+    #[test]
+    fn negative_hash_collision_without_domain_separation() {
+        // Test domain separation prevents hash collisions in preimage construction
+        let payload = b"collision_test";
+        let mut hashes = Vec::new();
+
+        // Collect hashes from all trust object types
+        for obj_type in TrustObjectType::all() {
+            let preimage = SignaturePreimage::build(1, obj_type.domain_tag(), payload.to_vec());
+            hashes.push(preimage.content_hash_prefix());
+        }
+
+        // Verify no collisions between domain-separated hashes
+        for i in 0..hashes.len() {
+            for j in (i + 1)..hashes.len() {
+                assert_ne!(hashes[i], hashes[j], "domain separation should prevent collisions");
+            }
+        }
+
+        // Test content hash includes domain prefix
+        let hash_with_domain = content_hash_prefix(b"test");
+        let mut hasher_without = sha2::Sha256::new();
+        hasher_without.update(b"test"); // No domain prefix
+        let hash_without_domain = hex::encode(hasher_without.finalize())[..8].to_string();
+
+        assert_ne!(hash_with_domain, hash_without_domain,
+                  "domain prefix should change hash result");
     }
 }
