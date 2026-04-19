@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn negative_expiry_tampering_invalidates_receipt_signature() {
         let mut receipt = valid_receipt();
-        receipt.expires_epoch_ms = FUTURE_EPOCH_MS + 1;
+        receipt.expires_epoch_ms = FUTURE_EPOCH_MS.saturating_add(1);
 
         let decision = executor().evaluate_activation(
             SpeculationTransform::CacheWarmup,
@@ -150,7 +150,7 @@ mod tests {
             SpeculationTransform::ParallelProbe,
             APPROVED_INTERFACE,
             ACCEPTED_SIGNER,
-            NOW_EPOCH_MS - 1,
+            NOW_EPOCH_MS.saturating_sub(1),
             "trace-expired-transform",
         );
 

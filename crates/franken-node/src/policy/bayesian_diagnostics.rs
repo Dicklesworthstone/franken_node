@@ -114,12 +114,12 @@ impl BetaState {
 
     fn update(&mut self, success: bool) {
         if success {
-            self.alpha = self.alpha + 1.0;
+            self.alpha = self.alpha.saturating_add(1.0);
             if !self.alpha.is_finite() {
                 self.alpha = f64::MAX;
             }
         } else {
-            self.beta = self.beta + 1.0;
+            self.beta = self.beta.saturating_add(1.0);
             if !self.beta.is_finite() {
                 self.beta = f64::MAX;
             }
@@ -129,7 +129,7 @@ impl BetaState {
 
     /// Mean of the beta distribution = alpha / (alpha + beta).
     fn mean(&self) -> f64 {
-        let n = self.alpha + self.beta;
+        let n = self.alpha.saturating_add(self.beta);
         if !self.alpha.is_finite()
             || !self.beta.is_finite()
             || self.alpha < 0.0
@@ -146,7 +146,7 @@ impl BetaState {
 
     /// 95% credible interval using the normal approximation for beta distribution.
     fn confidence_interval_95(&self) -> (f64, f64) {
-        let n = self.alpha + self.beta;
+        let n = self.alpha.saturating_add(self.beta);
         let mean = self.mean();
         if self.alpha >= f64::MAX
             || self.beta >= f64::MAX
@@ -156,7 +156,17 @@ impl BetaState {
         {
             return (0.0, 1.0);
         }
-        let variance = (self.alpha * self.beta) / (n * n * (n + 1.0));
+        // Safe arithmetic for variance calculation
+        let numerator = self.alpha.saturating_mul(self.beta);
+        let n_squared = n.saturating_mul(n);
+        let n_plus_one = n.saturating_add(1.0);
+        let denominator = n_squared.saturating_mul(n_plus_one);
+
+        if !numerator.is_finite() || !denominator.is_finite() || denominator == 0.0 {
+            return (0.0, 1.0);
+        }
+
+        let variance = numerator / denominator;
         if !variance.is_finite() || variance < 0.0 {
             return (0.0, 1.0);
         }
@@ -249,15 +259,17 @@ impl BayesianDiagnostics {
             .iter()
             .map(|c| {
                 let (posterior, prior, count, ci) = if let Some(state) = self.states.get(c) {
+                    let candidate_count_f64 = u32::try_from(candidates.len()).unwrap_or(u32::MAX) as f64;
                     (
                         state.mean(),
-                        1.0 / candidates.len() as f64,
+                        1.0 / candidate_count_f64,
                         state.observation_count,
                         state.confidence_interval_95(),
                     )
                 } else {
                     // No observations — uniform prior
-                    let prior = 1.0 / candidates.len() as f64;
+                    let candidate_count_f64 = u32::try_from(candidates.len()).unwrap_or(u32::MAX) as f64;
+                    let prior = 1.0 / candidate_count_f64;
                     (0.5, prior, 0, (0.0, 1.0))
                 };
                 (c.clone(), posterior, prior, count, ci)

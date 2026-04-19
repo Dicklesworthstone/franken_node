@@ -240,10 +240,10 @@ pub(crate) fn compute_freshness_state(
     if expires.with_timezone(&Utc) <= issued.with_timezone(&Utc) {
         return CompatibilityFreshnessState::InvalidTimestamp;
     }
-    if Utc::now() < expires.with_timezone(&Utc) {
-        CompatibilityFreshnessState::Fresh
-    } else {
+    if Utc::now() >= expires.with_timezone(&Utc) {
         CompatibilityFreshnessState::Stale
+    } else {
+        CompatibilityFreshnessState::Fresh
     }
 }
 
@@ -1910,19 +1910,22 @@ pub fn generate_compat_report(evaluator: &CompatGateEvaluator) -> CompatGateRepo
     let mut shims_by_risk: BTreeMap<String, usize> = BTreeMap::new();
 
     for entry in registry.all() {
-        *shims_by_band
+        let count = shims_by_band
             .entry(entry.band.label().to_string())
-            .or_insert(0) += 1;
-        *shims_by_risk
+            .or_insert(0);
+        *count = count.saturating_add(1);
+        let count = shims_by_risk
             .entry(entry.risk_category.label().to_string())
-            .or_insert(0) += 1;
+            .or_insert(0);
+        *count = count.saturating_add(1);
     }
 
     let mut decisions_summary: BTreeMap<String, usize> = BTreeMap::new();
     for result in &evaluator.audit_log {
-        *decisions_summary
+        let count = decisions_summary
             .entry(result.decision.label().to_string())
-            .or_insert(0) += 1;
+            .or_insert(0);
+        *count = count.saturating_add(1);
     }
 
     CompatGateReport {
@@ -2247,7 +2250,7 @@ mod tests {
         for band in &bands {
             for mode in &modes {
                 let _ = divergence_action(*band, *mode);
-                count += 1;
+                count = count.saturating_add(1);
             }
         }
         assert_eq!(count, 12);

@@ -598,8 +598,15 @@ impl RuntimeOracle {
                 message: "no runtimes registered".to_string(),
             });
         }
-        let quorum_required =
-            ((total as f64) * (self.quorum_threshold_percent as f64 / 100.0)).ceil() as usize;
+        let total_f64 = total as f64;
+        let percentage_f64 = self.quorum_threshold_percent as f64 / 100.0;
+        if !total_f64.is_finite() || !percentage_f64.is_finite() {
+            return Err(OracleError {
+                code: error_codes::ERR_NVO_QUORUM_FAILED,
+                message: "invalid quorum calculation: non-finite values".to_string(),
+            });
+        }
+        let quorum_required = (total_f64 * percentage_f64).ceil() as usize;
 
         // Count how many runtimes agree with the most common output.
         let mut output_counts: BTreeMap<&[u8], usize> = BTreeMap::new();
