@@ -81,8 +81,8 @@ impl fmt::Display for ConnectivityMode {
 /// Scope of a capability token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteScope {
-    pub operations: Vec<RemoteOperation>,
-    pub endpoint_prefixes: Vec<String>,
+    operations: Vec<RemoteOperation>,
+    endpoint_prefixes: Vec<String>,
 }
 
 impl RemoteScope {
@@ -94,6 +94,16 @@ impl RemoteScope {
         };
         scope.normalize();
         scope
+    }
+
+    #[must_use]
+    pub fn operations(&self) -> &[RemoteOperation] {
+        &self.operations
+    }
+
+    #[must_use]
+    pub fn endpoint_prefixes(&self) -> &[String] {
+        &self.endpoint_prefixes
     }
 
     #[must_use]
@@ -768,16 +778,25 @@ fn canonical_payload(
     scope: &RemoteScope,
     single_use: bool,
 ) -> String {
-    let operations = encode_scope_entries(scope.operations.iter().map(|entry| entry.as_str()));
-    let endpoints = encode_scope_entries(scope.endpoint_prefixes.iter().map(String::as_str));
+    let operations = encode_scope_entries(scope.operations().iter().map(|entry| entry.as_str()));
+    let endpoints = encode_scope_entries(scope.endpoint_prefixes().iter().map(String::as_str));
+
+    // Length-prefixed encoding prevents hash collision attacks via delimiter injection
     format!(
-        "v1|token={token_id}|issuer={issuer_identity}|issued={issued_at_epoch_secs}|expires={expires_at_epoch_secs}|ops={operations}|endpoints={endpoints}|single_use={single_use}"
+        "v1|{}:{}|{}:{}|issued={}|expires={}|ops={}|endpoints={}|single_use={}",
+        token_id.len(), token_id,
+        issuer_identity.len(), issuer_identity,
+        issued_at_epoch_secs,
+        expires_at_epoch_secs,
+        operations,
+        endpoints,
+        single_use
     )
 }
 
 fn scope_fingerprint(scope: &RemoteScope) -> String {
-    let operations = encode_scope_entries(scope.operations.iter().map(|entry| entry.as_str()));
-    let endpoints = encode_scope_entries(scope.endpoint_prefixes.iter().map(String::as_str));
+    let operations = encode_scope_entries(scope.operations().iter().map(|entry| entry.as_str()));
+    let endpoints = encode_scope_entries(scope.endpoint_prefixes().iter().map(String::as_str));
     format!("ops={operations};endpoints={endpoints}")
 }
 
@@ -2457,5 +2476,4 @@ mod remote_cap_comprehensive_negative_tests {
         assert!(substitution_result.is_err(), "Signature substitution should be detected");
         assert_eq!(substitution_result.unwrap_err().code(), "REMOTECAP_INVALID");
     }
-}
 }
