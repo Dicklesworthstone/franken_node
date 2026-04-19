@@ -117,6 +117,18 @@ pub struct ActivationInput {
     pub timestamp: String,
 }
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 /// Tracks ephemeral secrets mounted during activation for cleanup.
 #[derive(Debug, Default)]
 pub struct EphemeralSecretTracker {
@@ -132,7 +144,7 @@ impl EphemeralSecretTracker {
                 MAX_MOUNTED_SECRETS
             ));
         }
-        self.mounted.push(secret_ref.to_string());
+        push_bounded(&mut self.mounted, secret_ref.to_string(), MAX_MOUNTED_SECRETS);
         self.cleaned = false;
         Ok(())
     }
@@ -246,7 +258,7 @@ fn validate_mounted_secret_set(requested: &[String], mounted: &[String]) -> Resu
     for (secret, expected_count) in &requested_counts {
         let actual_count = mounted_counts.get(secret).copied().unwrap_or(0);
         if actual_count < *expected_count {
-            missing.push((*secret).to_string());
+            push_bounded(&mut missing, (*secret).to_string(), MAX_MOUNTED_SECRETS);
         }
     }
 
@@ -254,7 +266,7 @@ fn validate_mounted_secret_set(requested: &[String], mounted: &[String]) -> Resu
     for (secret, actual_count) in &mounted_counts {
         let expected_count = requested_counts.get(secret).copied().unwrap_or(0);
         if *actual_count > expected_count {
-            unexpected.push((*secret).to_string());
+            push_bounded(&mut unexpected, (*secret).to_string(), MAX_MOUNTED_SECRETS);
         }
     }
 
@@ -1743,12 +1755,12 @@ mod tests {
 
                     // Unicode should not create privileged identifiers
                     assert!(
-                        !ct_eq(transcript.input.connector_id.as_bytes(), b"admin"),
+                        !ct_eq(transcript.connector_id.as_bytes(), b"admin"),
                         "Unicode injection should not create admin connector"
                     );
 
                     // Check secret refs and capabilities don't contain dangerous content
-                    for secret_ref in &transcript.input.secret_refs {
+                    for secret_ref in &malicious_input.secret_refs {
                         assert!(
                             !ct_eq(secret_ref.as_bytes(), b"admin"),
                             "Unicode injection should not create admin secrets"
@@ -1759,7 +1771,7 @@ mod tests {
                         );
                     }
 
-                    for capability in &transcript.input.capabilities {
+                    for capability in &malicious_input.capabilities {
                         assert!(
                             !ct_eq(capability.as_bytes(), b"root"),
                             "Unicode injection should not create root capabilities"
@@ -1831,11 +1843,11 @@ mod tests {
                         Ok(transcript) => {
                             // If activation succeeded, verify resource limits were respected
                             assert!(
-                                transcript.input.capabilities.len() <= MAX_CAPABILITIES,
+                                exhaustion_input.capabilities.len() <= MAX_CAPABILITIES,
                                 "Capability count should be within limits"
                             );
                             assert!(
-                                transcript.input.secret_refs.len() <= MAX_MOUNTED_SECRETS,
+                                exhaustion_input.secret_refs.len() <= MAX_MOUNTED_SECRETS,
                                 "Secret count should be within limits"
                             );
 
@@ -1987,12 +1999,12 @@ mod tests {
                     }
 
                     // Null bytes should not appear in transcript
-                    assert!(!transcript.input.connector_id.contains('\0'));
-                    assert!(!transcript.input.trace_id.contains('\0'));
-                    for secret_ref in &transcript.input.secret_refs {
+                    assert!(!transcript.connector_id.contains('\0'));
+                    assert!(!transcript.trace_id.contains('\0'));
+                    for secret_ref in &bypass_input.secret_refs {
                         assert!(!secret_ref.contains('\0'));
                     }
-                    for capability in &transcript.input.capabilities {
+                    for capability in &bypass_input.capabilities {
                         assert!(!capability.contains('\0'));
                     }
                 }
@@ -2070,8 +2082,8 @@ mod tests {
                         let transcript = activate(&limit_input, &DefaultExecutor);
 
                         // Should not exceed documented limits
-                        assert!(transcript.input.secret_refs.len() <= MAX_MOUNTED_SECRETS);
-                        assert!(transcript.input.capabilities.len() <= MAX_CAPABILITIES);
+                        assert!(limit_input.secret_refs.len() <= MAX_MOUNTED_SECRETS);
+                        assert!(limit_input.capabilities.len() <= MAX_CAPABILITIES);
                     }
                     Err(_) => {
                         // Rejection at the limit is also acceptable for safety
@@ -2307,7 +2319,7 @@ mod tests {
 
             // Verify input integrity
             assert!(
-                transcript.input.connector_id.contains(&i.to_string()),
+                transcript.connector_id.contains(&i.to_string()),
                 "Connector ID should be preserved"
             );
         }
@@ -2362,7 +2374,7 @@ mod tests {
 
                     // Verify timestamp is preserved safely
                     assert!(
-                        !transcript.input.timestamp.contains('\0'),
+                        !timestamp_input.timestamp.contains('\0'),
                         "Timestamp should not contain null bytes"
                     );
 

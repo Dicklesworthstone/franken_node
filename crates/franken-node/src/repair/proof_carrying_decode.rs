@@ -4191,7 +4191,7 @@ mod tests {
                     if let Some(proof) = decode_result.proof {
                         // Proof structure should remain valid
                         assert!(!proof.algorithm_id.is_empty());
-                        assert_eq!(proof.fragment_count, fragments.len() as u32);
+                        assert_eq!(proof.fragment_count, u32::try_from(fragments.len()).unwrap_or(u32::MAX));
                     }
                 }
                 Err(_) => {
@@ -6195,15 +6195,15 @@ mod proof_carrying_decode_comprehensive_attack_resistance_tests {
 
                 // Verify that only legitimate proofs succeeded
                 if proof_idx == 1 { // Hash mismatch proof
-                    hash_mismatches_accepted += 1;
+                    hash_mismatches_accepted = hash_mismatches_accepted.saturating_add(1);
                     panic!("SECURITY VIOLATION: Proof with hash mismatch was accepted in concurrent context!");
                 }
                 if proof_idx == 2 { // Fragment mismatch proof
-                    fragment_mismatches_accepted += 1;
+                    fragment_mismatches_accepted = fragment_mismatches_accepted.saturating_add(1);
                     panic!("SECURITY VIOLATION: Proof with fragment mismatch was accepted in concurrent context!");
                 }
             } else {
-                failed_attacks += 1;
+                failed_attacks = failed_attacks.saturating_add(1);
             }
         }
 

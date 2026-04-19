@@ -147,6 +147,7 @@ impl CanonicalObject {
         let content_hash = {
             let mut hasher = Sha256::new();
             hasher.update(b"retroactive_hardening_content_v1:");
+            hasher.update((content.len() as u64).to_le_bytes());
             hasher.update(&content);
             let result = hasher.finalize();
             let mut hash = [0u8; 32];
@@ -362,6 +363,7 @@ impl RetroactiveHardeningPipeline {
                 let mut hasher = Sha256::new();
                 hasher.update(b"retroactive_hardening_hash_v1:");
                 hasher.update(b"RETROHARDEN-CHECKSUM\x00");
+                hasher.update((object.content.len() as u64).to_le_bytes());
                 hasher.update(&object.content);
                 hasher.update(self.epoch_id.to_le_bytes());
                 hasher.finalize().to_vec()
@@ -464,12 +466,15 @@ pub fn measure_repairability(
             continue;
         }
         if seen.insert(artifact.artifact_type.label()) {
-            score += artifact.artifact_type.repairability_weight();
-            count = count.saturating_add(1);
+            let weight = artifact.artifact_type.repairability_weight();
+            if weight.is_finite() {
+                score += weight;
+                count = count.saturating_add(1);
+            }
         }
     }
 
-    let capped_score = score.min(1.0);
+    let capped_score = if score.is_finite() { score.min(1.0) } else { 0.0 };
 
     // [EVD-RETROHARDEN-004]
     let _event = EVD_RETROHARDEN_004;

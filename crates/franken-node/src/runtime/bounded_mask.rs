@@ -11,7 +11,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Digest};
+use sha2::Digest;
 
 use crate::capacity_defaults::aliases::MAX_EVENTS;
 
@@ -70,52 +70,51 @@ impl CapabilityContext {
             cx_id: cx_id.into(),
             principal: principal.into(),
             scopes: BTreeSet::new(),
-        };
-
-        // Inline negative-path tests for capability context creation
-        #[cfg(test)]
-        #[allow(unreachable_code)]
-        {
-            // Test: empty strings should be preserved exactly
-            let empty_ctx = Self::new("", "");
-            assert_eq!(empty_ctx.cx_id, "", "empty cx_id should be preserved");
-            assert_eq!(empty_ctx.principal, "", "empty principal should be preserved");
-            assert!(empty_ctx.scopes.is_empty(), "new context should have empty scopes");
-
-            // Test: Unicode and control characters should be preserved
-            let unicode_ctx = Self::new("cx\u{202E}rtl", "principal\x00null");
-            assert_eq!(unicode_ctx.cx_id, "cx\u{202E}rtl", "Unicode in cx_id should be preserved");
-            assert_eq!(unicode_ctx.principal, "principal\x00null", "null bytes in principal should be preserved");
-
-            // Test: very long identifiers should be handled
-            let long_id = "x".repeat(100000);
-            let long_ctx = Self::new(&long_id, &long_id);
-            assert_eq!(long_ctx.cx_id.len(), 100000, "long cx_id should be preserved");
-            assert_eq!(long_ctx.principal.len(), 100000, "long principal should be preserved");
-
-            // Test: whitespace-only identifiers should be preserved
-            let whitespace_ctx = Self::new("   ", "\t\r\n");
-            assert_eq!(whitespace_ctx.cx_id, "   ", "whitespace cx_id should be preserved");
-            assert_eq!(whitespace_ctx.principal, "\t\r\n", "whitespace principal should be preserved");
-
-            // Test: scope access on new context should always return false
-            let test_ctx = Self::new("test-cx", "test-principal");
-            assert!(!test_ctx.has_scope("any_scope"), "new context should not have any scopes");
-            assert!(!test_ctx.has_scope(""), "new context should not have empty scope");
-
-            // Test: multiple contexts should be independent
-            let ctx1 = Self::new("ctx1", "prin1");
-            let ctx2 = Self::new("ctx2", "prin2");
-            assert_ne!(ctx1.cx_id, ctx2.cx_id, "contexts should have independent cx_ids");
-            assert_ne!(ctx1.principal, ctx2.principal, "contexts should have independent principals");
-
-            // Test: context should be cloneable and equal after clone
-            let original = Self::new("clone-test", "clone-principal");
-            let cloned = original.clone();
-            assert_eq!(original.cx_id, cloned.cx_id, "cloned cx_id should match");
-            assert_eq!(original.principal, cloned.principal, "cloned principal should match");
-            assert_eq!(original.scopes, cloned.scopes, "cloned scopes should match");
         }
+    }
+
+
+    #[cfg(test)]
+    fn test_capability_context_creation() {
+        // Test: empty strings should be preserved exactly
+        let empty_ctx = Self::new("", "");
+        assert_eq!(empty_ctx.cx_id, "", "empty cx_id should be preserved");
+        assert_eq!(empty_ctx.principal, "", "empty principal should be preserved");
+        assert!(empty_ctx.scopes.is_empty(), "new context should have empty scopes");
+
+        // Test: Unicode and control characters should be preserved
+        let unicode_ctx = Self::new("cx\u{202E}rtl", "principal\x00null");
+        assert_eq!(unicode_ctx.cx_id, "cx\u{202E}rtl", "Unicode in cx_id should be preserved");
+        assert_eq!(unicode_ctx.principal, "principal\x00null", "null bytes in principal should be preserved");
+
+        // Test: very long identifiers should be handled
+        let long_id = "x".repeat(100000);
+        let long_ctx = Self::new(&long_id, &long_id);
+        assert_eq!(long_ctx.cx_id.len(), 100000, "long cx_id should be preserved");
+        assert_eq!(long_ctx.principal.len(), 100000, "long principal should be preserved");
+
+        // Test: whitespace-only identifiers should be preserved
+        let whitespace_ctx = Self::new("   ", "\t\r\n");
+        assert_eq!(whitespace_ctx.cx_id, "   ", "whitespace cx_id should be preserved");
+        assert_eq!(whitespace_ctx.principal, "\t\r\n", "whitespace principal should be preserved");
+
+        // Test: scope access on new context should always return false
+        let test_ctx = Self::new("test-cx", "test-principal");
+        assert!(!test_ctx.has_scope("any_scope"), "new context should not have any scopes");
+        assert!(!test_ctx.has_scope(""), "new context should not have empty scope");
+
+        // Test: multiple contexts should be independent
+        let ctx1 = Self::new("ctx1", "prin1");
+        let ctx2 = Self::new("ctx2", "prin2");
+        assert_ne!(ctx1.cx_id, ctx2.cx_id, "contexts should have independent cx_ids");
+        assert_ne!(ctx1.principal, ctx2.principal, "contexts should have independent principals");
+
+        // Test: context should be cloneable and equal after clone
+        let original = Self::new("clone-test", "clone-principal");
+        let cloned = original.clone();
+        assert_eq!(original.cx_id, cloned.cx_id, "cloned cx_id should match");
+        assert_eq!(original.principal, cloned.principal, "cloned principal should match");
+        assert_eq!(original.scopes, cloned.scopes, "cloned scopes should match");
     }
 
     /// Construct a capability context and normalize scopes deterministically.
@@ -134,118 +133,117 @@ impl CapabilityContext {
             cx_id: cx_id.into(),
             principal: principal.into(),
             scopes: normalized,
-        };
-
-        // Inline negative-path tests for capability context with scopes
-        #[cfg(test)]
-        #[allow(unreachable_code)]
-        {
-            // Test: empty scopes collection should result in empty scope set
-            let empty_scopes: Vec<String> = vec![];
-            let ctx = Self::with_scopes("cx-empty", "prin-empty", empty_scopes);
-            assert!(ctx.scopes.is_empty(), "empty scopes should result in empty set");
-
-            // Test: whitespace-only scopes should be filtered out
-            let whitespace_scopes = vec![
-                "".to_string(),
-                " ".to_string(),
-                "\t".to_string(),
-                "\n".to_string(),
-                "\r\n".to_string(),
-                "   \t\r\n  ".to_string(),
-            ];
-            let ctx = Self::with_scopes("cx-whitespace", "prin-whitespace", whitespace_scopes);
-            assert!(ctx.scopes.is_empty(), "whitespace-only scopes should be filtered out");
-
-            // Test: mixed valid and invalid scopes should filter correctly
-            let mixed_scopes = vec![
-                "valid.scope".to_string(),
-                "".to_string(),
-                "  another.valid  ".to_string(),
-                "\t\r\n".to_string(),
-                " third.scope ".to_string(),
-            ];
-            let ctx = Self::with_scopes("cx-mixed", "prin-mixed", mixed_scopes);
-            assert_eq!(ctx.scopes.len(), 3, "should have 3 valid scopes");
-            assert!(ctx.has_scope("valid.scope"), "should have first valid scope");
-            assert!(ctx.has_scope("another.valid"), "should have trimmed second scope");
-            assert!(ctx.has_scope("third.scope"), "should have trimmed third scope");
-
-            // Test: duplicate scopes should be deduplicated
-            let duplicate_scopes = vec![
-                "duplicate.scope".to_string(),
-                "duplicate.scope".to_string(),
-                "  duplicate.scope  ".to_string(),
-                "unique.scope".to_string(),
-                "duplicate.scope".to_string(),
-            ];
-            let ctx = Self::with_scopes("cx-dupe", "prin-dupe", duplicate_scopes);
-            assert_eq!(ctx.scopes.len(), 2, "duplicates should be deduplicated");
-            assert!(ctx.has_scope("duplicate.scope"), "should have deduplicated scope");
-            assert!(ctx.has_scope("unique.scope"), "should have unique scope");
-
-            // Test: Unicode scopes should be preserved during normalization
-            let unicode_scopes = vec![
-                "unicode\u{202E}.scope".to_string(),
-                "  emoji\u{1F4A9}.scope  ".to_string(),
-                "null\x00byte.scope".to_string(),
-                "\u{FEFF}bom.scope".to_string(),
-            ];
-            let ctx = Self::with_scopes("cx-unicode", "prin-unicode", unicode_scopes);
-            assert_eq!(ctx.scopes.len(), 4, "should preserve all Unicode scopes");
-            assert!(ctx.has_scope("unicode\u{202E}.scope"), "should preserve RTL override");
-            assert!(ctx.has_scope("emoji\u{1F4A9}.scope"), "should preserve emoji after trim");
-            assert!(ctx.has_scope("null\x00byte.scope"), "should preserve null bytes");
-            assert!(ctx.has_scope("\u{FEFF}bom.scope"), "should preserve BOM");
-
-            // Test: very large scope collections should be handled efficiently
-            let large_scopes: Vec<String> = (0..10000)
-                .map(|i| format!("scope_{:05}", i))
-                .collect();
-            let ctx = Self::with_scopes("cx-large", "prin-large", large_scopes.clone());
-            assert_eq!(ctx.scopes.len(), 10000, "should handle large scope collection");
-            assert!(ctx.has_scope("scope_00000"), "should have first scope");
-            assert!(ctx.has_scope("scope_09999"), "should have last scope");
-            assert!(!ctx.has_scope("scope_10000"), "should not have out-of-range scope");
-
-            // Test: pathological scope patterns that might cause hash collisions
-            let collision_scopes = vec![
-                "ab".to_string(),
-                "ba".to_string(),
-                "abc".to_string(),
-                "acb".to_string(),
-                "bac".to_string(),
-                "bca".to_string(),
-                "cab".to_string(),
-                "cba".to_string(),
-            ];
-            let ctx = Self::with_scopes("cx-collision", "prin-collision", collision_scopes.clone());
-            assert_eq!(ctx.scopes.len(), collision_scopes.len(), "should handle collision patterns");
-            for scope in &collision_scopes {
-                assert!(ctx.has_scope(scope), "should have collision pattern scope: {}", scope);
-            }
-
-            // Test: scope normalization preserves deterministic ordering (BTreeSet)
-            let unordered_scopes = vec![
-                "z_last".to_string(),
-                "a_first".to_string(),
-                "m_middle".to_string(),
-            ];
-            let ctx1 = Self::with_scopes("cx1", "prin1", unordered_scopes.clone());
-            let ctx2 = Self::with_scopes("cx2", "prin2", unordered_scopes.into_iter().rev());
-
-            let scopes1: Vec<_> = ctx1.scopes.iter().collect();
-            let scopes2: Vec<_> = ctx2.scopes.iter().collect();
-            assert_eq!(scopes1, scopes2, "scope ordering should be deterministic regardless of input order");
         }
+    }
+
+    #[cfg(test)]
+    fn test_capability_context_with_scopes() {
+        // Test: empty scopes collection should result in empty scope set
+        let empty_scopes: Vec<String> = vec![];
+        let ctx = Self::with_scopes("cx-empty", "prin-empty", empty_scopes);
+        assert!(ctx.scopes.is_empty(), "empty scopes should result in empty set");
+
+        // Test: whitespace-only scopes should be filtered out
+        let whitespace_scopes = vec![
+            "".to_string(),
+            " ".to_string(),
+            "\t".to_string(),
+            "\n".to_string(),
+            "\r\n".to_string(),
+            "   \t\r\n  ".to_string(),
+        ];
+        let ctx = Self::with_scopes("cx-whitespace", "prin-whitespace", whitespace_scopes);
+        assert!(ctx.scopes.is_empty(), "whitespace-only scopes should be filtered out");
+
+        // Test: mixed valid and invalid scopes should filter correctly
+        let mixed_scopes = vec![
+            "valid.scope".to_string(),
+            "".to_string(),
+            "  another.valid  ".to_string(),
+            "\t\r\n".to_string(),
+            " third.scope ".to_string(),
+        ];
+        let ctx = Self::with_scopes("cx-mixed", "prin-mixed", mixed_scopes);
+        assert_eq!(ctx.scopes.len(), 3, "should have 3 valid scopes");
+        assert!(ctx.has_scope("valid.scope"), "should have first valid scope");
+        assert!(ctx.has_scope("another.valid"), "should have trimmed second scope");
+        assert!(ctx.has_scope("third.scope"), "should have trimmed third scope");
+
+        // Test: duplicate scopes should be deduplicated
+        let duplicate_scopes = vec![
+            "duplicate.scope".to_string(),
+            "duplicate.scope".to_string(),
+            "  duplicate.scope  ".to_string(),
+            "unique.scope".to_string(),
+            "duplicate.scope".to_string(),
+        ];
+        let ctx = Self::with_scopes("cx-dupe", "prin-dupe", duplicate_scopes);
+        assert_eq!(ctx.scopes.len(), 2, "duplicates should be deduplicated");
+        assert!(ctx.has_scope("duplicate.scope"), "should have deduplicated scope");
+        assert!(ctx.has_scope("unique.scope"), "should have unique scope");
+
+        // Test: Unicode scopes should be preserved during normalization
+        let unicode_scopes = vec![
+            "unicode\u{202E}.scope".to_string(),
+            "  emoji\u{1F4A9}.scope  ".to_string(),
+            "null\x00byte.scope".to_string(),
+            "\u{FEFF}bom.scope".to_string(),
+        ];
+        let ctx = Self::with_scopes("cx-unicode", "prin-unicode", unicode_scopes);
+        assert_eq!(ctx.scopes.len(), 4, "should preserve all Unicode scopes");
+        assert!(ctx.has_scope("unicode\u{202E}.scope"), "should preserve RTL override");
+        assert!(ctx.has_scope("emoji\u{1F4A9}.scope"), "should preserve emoji after trim");
+        assert!(ctx.has_scope("null\x00byte.scope"), "should preserve null bytes");
+        assert!(ctx.has_scope("\u{FEFF}bom.scope"), "should preserve BOM");
+
+        // Test: very large scope collections should be handled efficiently
+        let large_scopes: Vec<String> = (0..10000)
+            .map(|i| format!("scope_{:05}", i))
+            .collect();
+        let ctx = Self::with_scopes("cx-large", "prin-large", large_scopes.clone());
+        assert_eq!(ctx.scopes.len(), 10000, "should handle large scope collection");
+        assert!(ctx.has_scope("scope_00000"), "should have first scope");
+        assert!(ctx.has_scope("scope_09999"), "should have last scope");
+        assert!(!ctx.has_scope("scope_10000"), "should not have out-of-range scope");
+
+        // Test: pathological scope patterns that might cause hash collisions
+        let collision_scopes = vec![
+            "ab".to_string(),
+            "ba".to_string(),
+            "abc".to_string(),
+            "acb".to_string(),
+            "bac".to_string(),
+            "bca".to_string(),
+            "cab".to_string(),
+            "cba".to_string(),
+        ];
+        let ctx = Self::with_scopes("cx-collision", "prin-collision", collision_scopes.clone());
+        assert_eq!(ctx.scopes.len(), collision_scopes.len(), "should handle collision patterns");
+        for scope in &collision_scopes {
+            assert!(ctx.has_scope(scope), "should have collision pattern scope: {}", scope);
+        }
+
+        // Test: scope normalization preserves deterministic ordering (BTreeSet)
+        let unordered_scopes = vec![
+            "z_last".to_string(),
+            "a_first".to_string(),
+            "m_middle".to_string(),
+        ];
+        let ctx1 = Self::with_scopes("cx1", "prin1", unordered_scopes.clone());
+        let ctx2 = Self::with_scopes("cx2", "prin2", unordered_scopes.into_iter().rev());
+
+        let scopes1: Vec<_> = ctx1.scopes.iter().collect();
+        let scopes2: Vec<_> = ctx2.scopes.iter().collect();
+        assert_eq!(scopes1, scopes2, "scope ordering should be deterministic regardless of input order");
     }
 
     /// Check whether this context contains the requested scope.
     #[must_use]
     pub fn has_scope(&self, scope: &str) -> bool {
         self.scopes.contains(scope)
+    }
 
-        // Inline negative-path tests for scope checking security (unreachable)
+    // Inline negative-path tests for scope checking security (unreachable)
         // Note: This test code is unreachable because of the return above
         /*
         #[cfg(test)]
@@ -334,7 +332,6 @@ impl CapabilityContext {
             assert!(!boundary_ctx.has_scope("scope.admin.writ"), "truncated deep scope should not match");
         }
         */
-    }
 }
 
 /// Mutable cancellation state used by bounded masks.
@@ -922,7 +919,7 @@ fn emit_event(
         deferred_cancel_pending: outcome.deferred_cancel_pending,
     });
     if events.len() > MAX_EVENTS {
-        let overflow = events.len() - MAX_EVENTS;
+        let overflow = events.len().saturating_sub(MAX_EVENTS);
         events.drain(0..overflow);
     }
 

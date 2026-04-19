@@ -2404,9 +2404,9 @@ mod tests {
 
         for evidence in &report.evidence {
             if evidence.passed {
-                passed_checks += 1;
+                passed_checks = passed_checks.saturating_add(1);
             } else {
-                failed_checks += 1;
+                failed_checks = failed_checks.saturating_add(1);
             }
 
             // Each evidence entry should have meaningful detail
@@ -4739,13 +4739,14 @@ mod verifier_sdk_boundary_negative_tests {
                 strict_claims: false,
                 extensions: {
                     let mut ext = BTreeMap::new();
-                    ext.insert(
-                        String::from_utf8(vec![0xFF, 0xFE, 0xFD; 1000]).unwrap_or("fallback_key".to_string()),
-                        String::from_utf8(vec![0x00, 0x01, 0x02; 1000]).unwrap_or("fallback_value".to_string()),
-                    );
+                    let binary_key =
+                        String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD].repeat(1000)).into_owned();
+                    let binary_value =
+                        String::from_utf8_lossy(&[0x00, 0x01, 0x02].repeat(1000)).into_owned();
+                    ext.insert(binary_key, binary_value);
                     ext.insert(
                         "\x00\x01\x02binary_key".to_string(),
-                        "\xFF\xFE\xFDbinary_value".to_string(),
+                        String::from_utf8_lossy(b"\xFF\xFE\xFDbinary_value").into_owned(),
                     );
                     ext
                 },
@@ -5940,9 +5941,12 @@ mod verifier_sdk_comprehensive_attack_vector_tests {
 
         // Test: Length extension attack resistance
         let base_input = "sensitive_data";
+        let sha_padding = String::from_utf8_lossy(b"\x80").into_owned();
+        let sha_length_padding =
+            String::from_utf8_lossy(b"\x80\x00\x00\x00\x00\x00\x00\x38").into_owned();
         let extended_inputs = vec![
-            format!("{}{}", base_input, "\x80"),
-            format!("{}{}", base_input, "\x80\x00\x00\x00\x00\x00\x00\x38"),
+            format!("{}{}", base_input, sha_padding),
+            format!("{}{}", base_input, sha_length_padding),
             format!("{}{}", base_input, "additional_data"),
             format!("{}{}", base_input, "\x00\x00\x00\x08"), // Length padding
         ];

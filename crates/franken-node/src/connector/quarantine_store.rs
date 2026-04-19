@@ -353,7 +353,7 @@ mod tests {
         let mut store = QuarantineStore::new(config()).unwrap();
         for i in 0..5 {
             store
-                .ingest(&format!("obj{i}"), 10, "peer1", 1000 + i as u64)
+                .ingest(&format!("obj{i}"), 10, "peer1", 1000_u64.saturating_add(i as u64))
                 .unwrap();
         }
         // 6th object triggers quota eviction
@@ -529,7 +529,7 @@ mod tests {
         let mut store = QuarantineStore::new(config()).unwrap();
         for i in 0..5 {
             store
-                .ingest(&format!("obj{i}"), 10, "peer1", 1000 + i as u64)
+                .ingest(&format!("obj{i}"), 10, "peer1", 1000_u64.saturating_add(i as u64))
                 .unwrap();
         }
 

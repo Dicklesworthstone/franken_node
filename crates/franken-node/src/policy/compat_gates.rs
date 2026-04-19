@@ -197,9 +197,9 @@ pub(crate) fn explanation_digest(
     let mut hasher = Sha256::new();
     hasher.update(b"franken_node.policy.compat.explanation_digest.v1:");
     for segment in [reason_codes, attenuation_trace, scope_delta, recovery_hints] {
-        hasher.update((segment.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(segment.len()).unwrap_or(u64::MAX)).to_le_bytes());
         for item in segment {
-            hasher.update((item.len() as u64).to_le_bytes());
+            hasher.update((u64::try_from(item.len()).unwrap_or(u64::MAX)).to_le_bytes());
             hasher.update(item.as_bytes());
         }
     }
@@ -316,9 +316,9 @@ fn signature_preimage<T: Serialize>(domain: &str, value: &T) -> Result<Vec<u8>, 
     let canonical_payload = canonical_json_bytes(value)?;
     let mut preimage = Vec::with_capacity(16 + domain.len() + canonical_payload.len());
     preimage.extend_from_slice(b"compat_preimage_v1:");
-    preimage.extend_from_slice(&(domain.len() as u64).to_le_bytes());
+    preimage.extend_from_slice(&(u64::try_from(domain.len()).unwrap_or(u64::MAX)).to_le_bytes());
     preimage.extend_from_slice(domain.as_bytes());
-    preimage.extend_from_slice(&(canonical_payload.len() as u64).to_le_bytes());
+    preimage.extend_from_slice(&(u64::try_from(canonical_payload.len()).unwrap_or(u64::MAX)).to_le_bytes());
     preimage.extend_from_slice(&canonical_payload);
     Ok(preimage)
 }
@@ -392,11 +392,11 @@ fn authority_cache_key<T: Serialize>(
     let preimage = signature_preimage(domain, value)?;
     let mut hasher = Sha256::new();
     hasher.update(b"compat_authority_cache_v1:");
-    hasher.update((preimage.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(preimage.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(&preimage);
-    hasher.update((signature_hex.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(signature_hex.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(signature_hex.as_bytes());
-    hasher.update((key_id.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(key_id.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(key_id.as_bytes());
     Ok(hex::encode(hasher.finalize()))
 }

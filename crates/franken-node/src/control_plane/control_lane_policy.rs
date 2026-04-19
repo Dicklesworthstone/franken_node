@@ -710,11 +710,11 @@ impl ControlLanePolicy {
     pub fn class_counts_per_lane(&self) -> BTreeMap<ControlLane, usize> {
         let mut counts = BTreeMap::new();
         for lane in ControlLane::all() {
-            counts.insert(*lane, 0);
+            counts.insert(*lane, 0_usize);
         }
         for a in self.assignments.values() {
             let count = counts.entry(a.lane).or_insert(0);
-            *count = count.saturating_add(1);
+            *count = (*count).saturating_add(1_usize);
         }
         counts
     }

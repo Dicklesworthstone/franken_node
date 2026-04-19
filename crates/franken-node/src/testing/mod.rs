@@ -595,7 +595,7 @@ mod testing_module_negative_tests {
         for i in 0..1000 {
             match transport.send_message("n1", "n2", vec![i as u8]) {
                 Ok(_) => {
-                    message_count += 1;
+                    message_count = message_count.saturating_add(1);
                 }
                 Err(super::virtual_transport::VirtualTransportError::MessageIdExhausted) => {
                     exhausted = true;
@@ -622,7 +622,7 @@ mod testing_module_negative_tests {
             // Delivery should still work for existing messages
             let mut delivered = 0;
             while transport.deliver_next("n1->n2").unwrap().is_some() {
-                delivered += 1;
+                delivered = delivered.saturating_add(1);
                 if delivered > message_count + 10 { break; } // Safety valve
             }
             assert_eq!(delivered, message_count);
@@ -1963,7 +1963,7 @@ mod testing_module_negative_tests {
                     match builder.add_node(&node_id, &massive_description, NodeRole::Participant) {
                         Ok(new_builder) => {
                             builder = new_builder;
-                            node_count += 1;
+                            node_count = node_count.saturating_add(1);
                         }
                         Err(_) => {
                             // Hit memory/capacity limits - expected behavior
@@ -1985,7 +1985,7 @@ mod testing_module_negative_tests {
                     match builder.add_link(&link_id, &source, &target, true) {
                         Ok(new_builder) => {
                             builder = new_builder;
-                            link_count += 1;
+                            link_count = link_count.saturating_add(1);
                         }
                         Err(_) => {
                             // Hit capacity limits
@@ -2398,7 +2398,7 @@ mod testing_module_negative_tests {
                     match large_builder.add_node(&node_id, "Boundary Node", NodeRole::Participant) {
                         Ok(builder) => {
                             large_builder = builder;
-                            node_count += 1;
+                            node_count = node_count.saturating_add(1);
                         }
                         Err(_) => break, // Hit capacity boundary
                     }

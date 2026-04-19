@@ -465,10 +465,10 @@ impl GateEngine {
             } else {
                 // Roll to the next epoch so IDs remain unique even at counter boundaries.
                 self.next_trace = 1;
-                self.trace_epoch += 1;
+                self.trace_epoch = self.trace_epoch.saturating_add(1);
             }
         } else {
-            self.next_trace += 1;
+            self.next_trace = self.next_trace.saturating_add(1);
         }
 
         Ok(slot)

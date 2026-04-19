@@ -634,10 +634,10 @@ impl ReportingPipeline {
         now_secs: u64,
     ) -> Result<ShiftEvidence, CategoryShiftError> {
         let age = now_secs.saturating_sub(input.generated_at_secs);
-        let freshness = if age < self.config.freshness_window_secs {
-            FreshnessStatus::Fresh
-        } else {
+        let freshness = if age >= self.config.freshness_window_secs {
             FreshnessStatus::Stale
+        } else {
+            FreshnessStatus::Fresh
         };
 
         // Verify hash if content is provided.
@@ -757,8 +757,11 @@ pub struct EvidenceInput {
 
 /// Compute SHA-256 hex digest of bytes.
 pub fn sha256_hex(data: &[u8]) -> String {
-    let digest = Sha256::digest([b"category_shift_v1:" as &[u8], data].concat());
-    hex::encode(digest)
+    let mut hasher = Sha256::new();
+    hasher.update(b"category_shift_v1:");
+    hasher.update((data.len() as u64).to_le_bytes());
+    hasher.update(data);
+    hex::encode(hasher.finalize())
 }
 
 /// Evaluate threshold status.
@@ -1946,7 +1949,7 @@ mod tests {
         let evidence = EvidenceInput {
             artifact_path: "test.json".to_string(),
             sha256_hash: sha256_hex(content.as_bytes()),
-            generated_at_secs: now - DEFAULT_FRESHNESS_WINDOW_SECS,
+            generated_at_secs: now.saturating_sub(DEFAULT_FRESHNESS_WINDOW_SECS),
             content: Some(content.to_string()),
         };
         let result = pipeline
@@ -1958,7 +1961,7 @@ mod tests {
         let evidence2 = EvidenceInput {
             artifact_path: "test2.json".to_string(),
             sha256_hash: sha256_hex(content.as_bytes()),
-            generated_at_secs: now - DEFAULT_FRESHNESS_WINDOW_SECS - 1,
+            generated_at_secs: now.saturating_sub(DEFAULT_FRESHNESS_WINDOW_SECS).saturating_sub(1),
             content: Some(content.to_string()),
         };
         let result2 = pipeline

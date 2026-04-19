@@ -35,8 +35,15 @@ pub struct HealthDelta {
 
 impl HealthDelta {
     pub fn between(baseline: GraphHealthSnapshot, projected: GraphHealthSnapshot) -> Self {
+        let cascade_risk_delta =
+            if baseline.cascade_risk.is_finite() && projected.cascade_risk.is_finite() {
+                projected.cascade_risk - baseline.cascade_risk
+            } else {
+                f64::NAN
+            };
+
         Self {
-            cascade_risk_delta: projected.cascade_risk - baseline.cascade_risk,
+            cascade_risk_delta,
             new_fragility_findings: i64::from(projected.fragility_findings)
                 - i64::from(baseline.fragility_findings),
             new_articulation_points: i64::from(projected.articulation_points)
@@ -123,17 +130,23 @@ fn evaluate_policy(
 ) -> Vec<RejectionReason> {
     let mut reasons = Vec::new();
 
-    if !delta.cascade_risk_delta.is_finite()
-        || delta.cascade_risk_delta > thresholds.max_cascade_risk_delta
+    if !thresholds.max_cascade_risk_delta.is_finite()
+        || !delta.cascade_risk_delta.is_finite()
+        || delta.cascade_risk_delta >= thresholds.max_cascade_risk_delta
     {
-        let detail = if !delta.cascade_risk_delta.is_finite() {
+        let detail = if !thresholds.max_cascade_risk_delta.is_finite() {
+            format!(
+                "cascade risk threshold {} is not finite",
+                thresholds.max_cascade_risk_delta
+            )
+        } else if !delta.cascade_risk_delta.is_finite() {
             format!(
                 "cascade risk delta {} is not finite",
                 delta.cascade_risk_delta
             )
         } else {
             format!(
-                "cascade risk delta {:.4} exceeds max {:.4}",
+                "cascade risk delta {:.4} meets or exceeds max {:.4}",
                 delta.cascade_risk_delta, thresholds.max_cascade_risk_delta
             )
         };
@@ -143,21 +156,21 @@ fn evaluate_policy(
         });
     }
 
-    if delta.new_fragility_findings > i64::from(thresholds.max_new_fragility_findings) {
+    if delta.new_fragility_findings >= i64::from(thresholds.max_new_fragility_findings) {
         reasons.push(RejectionReason {
             code: "DGIS-MIGRATE-FRAGILITY-DELTA".to_string(),
             detail: format!(
-                "new fragility findings {} exceed max {}",
+                "new fragility findings {} meet or exceed max {}",
                 delta.new_fragility_findings, thresholds.max_new_fragility_findings
             ),
         });
     }
 
-    if delta.new_articulation_points > i64::from(thresholds.max_new_articulation_points) {
+    if delta.new_articulation_points >= i64::from(thresholds.max_new_articulation_points) {
         reasons.push(RejectionReason {
             code: "DGIS-MIGRATE-ARTICULATION-DELTA".to_string(),
             detail: format!(
-                "new articulation points {} exceed max {}",
+                "new articulation points {} meet or exceed max {}",
                 delta.new_articulation_points, thresholds.max_new_articulation_points
             ),
         });
@@ -727,6 +740,55 @@ mod tests {
     }
 
     #[test]
+    fn non_finite_risk_threshold_blocks_admission() {
+        let mut thresholds = MigrationGateThresholds::default();
+        thresholds.max_cascade_risk_delta = f64::NAN;
+        let evaluation = evaluate_admission(
+            "trace-nan-threshold",
+            baseline(),
+            GraphHealthSnapshot {
+                cascade_risk: 0.22,
+                fragility_findings: 4,
+                articulation_points: 2,
+            },
+            thresholds,
+            &[],
+        );
+
+        assert_eq!(evaluation.verdict, GateVerdict::Block);
+        assert!(
+            evaluation
+                .rejection_reasons
+                .iter()
+                .any(|r| r.detail.contains("threshold") && r.detail.contains("not finite"))
+        );
+    }
+
+    #[test]
+    fn exact_threshold_delta_blocks_admission_fail_closed() {
+        let thresholds = MigrationGateThresholds {
+            max_cascade_risk_delta: 0.10,
+            max_new_fragility_findings: 2,
+            max_new_articulation_points: 1,
+        };
+        let baseline = GraphHealthSnapshot {
+            cascade_risk: 0.0,
+            fragility_findings: 4,
+            articulation_points: 2,
+        };
+        let projected = GraphHealthSnapshot {
+            cascade_risk: 0.10,
+            fragility_findings: baseline.fragility_findings.saturating_add(2),
+            articulation_points: baseline.articulation_points.saturating_add(1),
+        };
+
+        let evaluation = evaluate_admission("trace-boundary", baseline, projected, thresholds, &[]);
+
+        assert_eq!(evaluation.verdict, GateVerdict::Block);
+        assert_eq!(evaluation.rejection_reasons.len(), 3);
+    }
+
+    #[test]
     fn cascade_risk_delta_just_over_threshold_blocks_admission() {
         let thresholds = MigrationGateThresholds {
             max_cascade_risk_delta: 0.10,
@@ -1010,9 +1072,12 @@ mod dgis_migration_gate_hardening_negative_tests {
         let mut bounded_reasons = Vec::new();
         for _ in 0..100 {
             if delta.cascade_risk_delta > thresholds.max_cascade_risk_delta {
-                push_bounded(&mut bounded_reasons,
-                    format!("cascade_risk_delta_violation_{}", bounded_reasons.len()),
-                    MAX_REJECTION_REASONS);
+                let reason_idx = bounded_reasons.len();
+                push_bounded(
+                    &mut bounded_reasons,
+                    format!("cascade_risk_delta_violation_{reason_idx}"),
+                    MAX_REJECTION_REASONS,
+                );
             }
         }
 
@@ -1059,10 +1124,11 @@ mod dgis_migration_gate_hardening_negative_tests {
         // Test the actual evaluate_policy function behavior on boundary
         let actual_reasons = evaluate_policy(boundary_delta, thresholds);
 
-        // Current implementation uses > which is vulnerable
-        // This test documents the current vulnerable behavior
-        assert!(actual_reasons.is_empty(),
-            "current implementation incorrectly allows boundary values - needs >= fix");
+        assert_eq!(
+            actual_reasons.len(),
+            3,
+            "boundary values must be rejected with fail-closed >= checks"
+        );
     }
 
     #[test]
@@ -1212,18 +1278,20 @@ mod dgis_migration_gate_hardening_negative_tests {
         // Without domain separation, these strings could collide
         assert_ne!(event_a.message, event_b.message, "messages should be distinct");
 
-        // Test phase string formatting in evaluation
-        let baseline = GraphHealthSnapshot {
-            cascade_risk: 0.1,
-            fragility_findings: 1,
-            articulation_points: 1,
-        };
-
         let phase_tests = vec![
             ("phase", "separator", "data"),
             ("phaseseparator", "", "data"),  // Different structure, same chars
             ("pha", "seseparator", "data"),  // Different split points
         ];
+        let encode_fields = |phase: &str, separator: &str, data: &str| {
+            let mut encoded = Vec::new();
+            for field in [phase, separator, data] {
+                encoded.extend_from_slice(&(field.len() as u64).to_le_bytes());
+                encoded.extend_from_slice(field.as_bytes());
+            }
+            encoded
+        };
+        let mut saw_raw_collision = false;
 
         for (phase_a, sep_a, data_a) in &phase_tests {
             for (phase_b, sep_b, data_b) in &phase_tests {
@@ -1232,12 +1300,20 @@ mod dgis_migration_gate_hardening_negative_tests {
                     let combined_b = format!("{}{}{}", phase_b, sep_b, data_b);
 
                     if combined_a == combined_b {
-                        // Document potential collision case
-                        panic!("Found collision case: {:?} vs {:?}", (phase_a, sep_a, data_a), (phase_b, sep_b, data_b));
+                        saw_raw_collision = true;
                     }
+                    assert_ne!(
+                        encode_fields(phase_a, sep_a, data_a),
+                        encode_fields(phase_b, sep_b, data_b),
+                        "length-prefixed fields should preserve tuple boundaries"
+                    );
                 }
             }
         }
+        assert!(
+            saw_raw_collision,
+            "test vectors should include at least one raw-concatenation collision"
+        );
     }
 
     // =========================================================================
@@ -1365,7 +1441,6 @@ mod dgis_migration_gate_hardening_negative_tests {
     #[test]
     fn test_threshold_comparison_boundary_fail_closed_attacks() {
         // Test > vs >= boundary conditions in evaluate_policy (lines 127, 146, 156)
-        // Current implementation uses > which may allow boundary bypass attacks
 
         let boundary_attack_vectors = vec![
             // Cascade risk delta boundary attacks
@@ -1402,22 +1477,11 @@ mod dgis_migration_gate_hardening_negative_tests {
         for (delta, attack_description) in boundary_attack_vectors {
             let reasons = evaluate_policy(delta, thresholds);
 
-            // For fail-closed security semantics, values exactly at threshold should be rejected
-            // Current implementation uses > which allows boundary values through
-            // This test documents the potential security gap
-
-            if delta.cascade_risk_delta == thresholds.max_cascade_risk_delta {
-                // This test will PASS with current > implementation but documents the issue
-                println!("SECURITY NOTE: cascade_risk_delta exactly at threshold allowed (uses >) - {}", attack_description);
-            }
-
-            if delta.new_fragility_findings == i64::from(thresholds.max_new_fragility_findings) {
-                println!("SECURITY NOTE: fragility_findings exactly at threshold allowed (uses >) - {}", attack_description);
-            }
-
-            if delta.new_articulation_points == i64::from(thresholds.max_new_articulation_points) {
-                println!("SECURITY NOTE: articulation_points exactly at threshold allowed (uses >) - {}", attack_description);
-            }
+            assert_eq!(
+                reasons.len(),
+                1,
+                "boundary value should trigger exactly one rejection ({attack_description})"
+            );
 
             // Test just over threshold (should always fail)
             let over_threshold = HealthDelta {
@@ -1453,8 +1517,12 @@ mod dgis_migration_gate_hardening_negative_tests {
                     path_id: format!("exhaust_candidate_{:05}", i),
                     projected: GraphHealthSnapshot {
                         cascade_risk: baseline.cascade_risk + (i as f64 * 0.00001),
-                        fragility_findings: baseline.fragility_findings + (i as u32 % 3),
-                        articulation_points: baseline.articulation_points + (i as u32 % 2),
+                        fragility_findings: baseline
+                            .fragility_findings
+                            .saturating_add(i as u32 % 3),
+                        articulation_points: baseline
+                            .articulation_points
+                            .saturating_add(i as u32 % 2),
                     },
                     notes: "A".repeat(100 + (i % 50)),
                 }

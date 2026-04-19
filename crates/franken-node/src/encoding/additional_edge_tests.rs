@@ -244,12 +244,12 @@ mod additional_encoding_edge_tests {
         for &version in &versions {
             let config = ScheduleConfig::new(version);
             let seed = derive_seed(&DomainTag::Scheduling, &hash, &config);
-            seeds.push(seed);
+            deterministic_seed::push_bounded(&mut seeds, seed, 10);
         }
 
         // All versions should produce different seeds
         for i in 0..seeds.len() {
-            for j in i + 1..seeds.len() {
+            for j in i.saturating_add(1)..seeds.len() {
                 assert!(
                     !constant_time::ct_eq_bytes(&seeds[i].bytes, &seeds[j].bytes),
                     "Seeds for versions {} and {} should be different",
@@ -284,12 +284,12 @@ mod additional_encoding_edge_tests {
 
         let mut seeds = Vec::new();
         for handle in handles {
-            seeds.push(handle.join().expect("Thread should complete successfully"));
+            deterministic_seed::push_bounded(&mut seeds, handle.join().expect("Thread should complete successfully"), 10);
         }
 
         // All seeds should be different (due to different thread IDs in config)
         for i in 0..seeds.len() {
-            for j in i + 1..seeds.len() {
+            for j in i.saturating_add(1)..seeds.len() {
                 assert!(
                     !constant_time::ct_eq_bytes(&seeds[i].bytes, &seeds[j].bytes),
                     "Concurrent seeds {i} and {j} should be different"

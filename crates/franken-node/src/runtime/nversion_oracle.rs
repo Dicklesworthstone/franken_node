@@ -28,9 +28,13 @@ use std::fmt;
 const MAX_EVENT_LOG_ENTRIES: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
-        items.drain(0..overflow);
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
@@ -2559,8 +2563,8 @@ mod tests {
         }
 
         // Calculate average times
-        let avg_valid = valid_times.iter().sum::<std::time::Duration>() / valid_times.len() as u32;
-        let avg_invalid = invalid_times.iter().sum::<std::time::Duration>() / invalid_times.len() as u32;
+        let avg_valid = valid_times.iter().sum::<std::time::Duration>() / u32::try_from(valid_times.len()).unwrap_or(u32::MAX);
+        let avg_invalid = invalid_times.iter().sum::<std::time::Duration>() / u32::try_from(invalid_times.len()).unwrap_or(u32::MAX);
 
         // Timing should not reveal linkage validation details
         if avg_valid.as_nanos() > 0 && avg_invalid.as_nanos() > 0 {

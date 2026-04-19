@@ -429,11 +429,15 @@ impl BarrierAuditReceipt {
         let canonical = serde_json::to_string(self).unwrap_or_else(|e| format!("__serde_err:{e}"));
         let mut hasher = Sha256::new();
         hasher.update(b"barrier_primitives_content_hash_v1:");
-        hasher.update((canonical.len() as u64).to_le_bytes());
+        hasher.update(len_to_u64(canonical.len()).to_le_bytes());
         hasher.update(canonical.as_bytes());
         let digest = hasher.finalize();
         hex::encode(digest)
     }
+}
+
+fn len_to_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
 }
 
 // ---------------------------------------------------------------------------

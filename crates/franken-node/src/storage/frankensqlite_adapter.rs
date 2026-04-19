@@ -47,9 +47,13 @@ pub mod event_codes {
 use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_EVENTS, MAX_SCHEMA_VERSIONS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
         let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
@@ -155,6 +159,38 @@ pub struct AdapterConfig {
     pub flush_interval_ms: u64,
 }
 
+impl AdapterConfig {
+    /// Validate configuration for security vulnerabilities.
+    pub fn validate(&self) -> Result<(), String> {
+        // Path traversal validation: reject dangerous path components
+        if self.db_path.contains("..") {
+            return Err("db_path contains path traversal sequence '..'".to_string());
+        }
+        if self.db_path.starts_with('/') && !self.db_path.starts_with("/tmp/") {
+            return Err("db_path contains absolute path outside allowed directories".to_string());
+        }
+        if self.db_path.contains('\\') {
+            return Err("db_path contains backslash (potential path traversal)".to_string());
+        }
+        if self.db_path.contains('\0') {
+            return Err("db_path contains null byte".to_string());
+        }
+        if self.db_path.is_empty() {
+            return Err("db_path cannot be empty".to_string());
+        }
+
+        // Additional validation
+        if self.pool_size == 0 {
+            return Err("pool_size must be greater than 0".to_string());
+        }
+        if self.pool_size > 1000 {
+            return Err("pool_size exceeds maximum allowed (1000)".to_string());
+        }
+
+        Ok(())
+    }
+}
+
 impl Default for AdapterConfig {
     fn default() -> Self {
         Self {
@@ -210,6 +246,7 @@ pub enum AdapterError {
     ReadFailure { key: String, reason: String },
     ReplayMismatch { entry_id: String, detail: String },
     SchemaMigrationFailed { version: u32, reason: String },
+    ConfigValidationFailed { reason: String },
     PoolExhausted,
 }
 
@@ -223,6 +260,9 @@ impl fmt::Display for AdapterError {
             }
             Self::SchemaMigrationFailed { version, reason } => {
                 write!(f, "migration failed: v{version}, {reason}")
+            }
+            Self::ConfigValidationFailed { reason } => {
+                write!(f, "config validation failed: {reason}")
             }
             Self::PoolExhausted => write!(f, "connection pool exhausted"),
         }
@@ -274,7 +314,22 @@ pub struct FrankensqliteAdapter {
 }
 
 impl FrankensqliteAdapter {
+    /// Create a new adapter with validated configuration.
+    pub fn new_validated(config: AdapterConfig) -> Result<Self, AdapterError> {
+        // Validate configuration for security issues
+        if let Err(reason) = config.validate() {
+            return Err(AdapterError::ConfigValidationFailed { reason });
+        }
+        Self::new_unchecked(config)
+    }
+
+    /// Create a new adapter without validation (for compatibility).
+    /// WARNING: Use new_validated for security-critical contexts.
     pub fn new(config: AdapterConfig) -> Self {
+        Self::new_unchecked(config).expect("default config should be valid")
+    }
+
+    fn new_unchecked(config: AdapterConfig) -> Result<Self, AdapterError> {
         let mut adapter = Self {
             config,
             store: BTreeMap::new(),
@@ -300,7 +355,7 @@ impl FrankensqliteAdapter {
                 adapter.config.pool_size
             ),
         );
-        adapter
+        Ok(adapter)
     }
 
     /// Write a key-value pair with persistence-class-appropriate durability.

@@ -1670,7 +1670,7 @@ mod tests {
         ];
 
         for (predicates_a, predicates_b) in collision_test_cases {
-            input.policy_predicates = predicates_a;
+            input.policy_predicates = predicates_a.clone();
             let hash_a = input.commitment_hash().expect("hash A should succeed");
 
             input.policy_predicates = predicates_b;
@@ -1686,7 +1686,7 @@ mod tests {
                 sorted_a.dedup();
 
                 // Reset to first case for comparison
-                input.policy_predicates = predicates_a;
+                input.policy_predicates = predicates_a.clone();
                 let mut sorted_original = input.policy_predicates.clone();
                 sorted_original.sort();
                 sorted_original.dedup();

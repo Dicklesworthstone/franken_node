@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Maximum entries in the canonical revocation log before oldest are evicted.
+/// Maximum entries in the canonical revocation log before new entries are rejected.
 const MAX_LOG_ENTRIES: usize = 4096;
 
 /// Maximum audit trail entries before oldest are evicted.
@@ -190,8 +190,12 @@ impl RevocationRegistry {
         // old entries — `push_bounded` on the old Vec silently dropped old
         // revocations, letting previously-revoked artifacts pass is_revoked().
         // Reject at capacity instead of evicting.
-        let zone_revoked = self.revoked.entry(head.zone_id.clone()).or_default();
-        if zone_revoked.contains(&head.revoked_artifact) {
+        let zone_revoked_len = self.revoked.get(&head.zone_id).map_or(0, BTreeSet::len);
+        if self
+            .revoked
+            .get(&head.zone_id)
+            .is_some_and(|zone_revoked| zone_revoked.contains(&head.revoked_artifact))
+        {
             return Err(RevocationError::InvalidInput {
                 detail: format!(
                     "zone {} already revoked artifact {}; duplicate revocation would advance head without new state",
@@ -199,7 +203,7 @@ impl RevocationRegistry {
                 ),
             });
         }
-        if zone_revoked.len() >= MAX_REVOKED_PER_ZONE {
+        if zone_revoked_len >= MAX_REVOKED_PER_ZONE {
             return Err(RevocationError::InvalidInput {
                 detail: format!(
                     "zone {} revoked set at capacity ({MAX_REVOKED_PER_ZONE}); cannot record revocation for {}",
@@ -207,11 +211,22 @@ impl RevocationRegistry {
                 ),
             });
         }
+        if self.log.len() >= MAX_LOG_ENTRIES {
+            return Err(RevocationError::InvalidInput {
+                detail: format!(
+                    "canonical revocation log at capacity ({MAX_LOG_ENTRIES}); cannot record revocation for {} in zone {}",
+                    head.revoked_artifact, head.zone_id
+                ),
+            });
+        }
 
         // Advance only after all fail-closed checks pass.  Capacity rejection
         // must not publish a head for a revocation that was not recorded.
         self.heads.insert(head.zone_id.clone(), head.sequence);
-        zone_revoked.insert(head.revoked_artifact.clone());
+        self.revoked
+            .entry(head.zone_id.clone())
+            .or_default()
+            .insert(head.revoked_artifact.clone());
 
         push_bounded(
             &mut self.audits,
@@ -249,6 +264,14 @@ impl RevocationRegistry {
         if log.is_empty() {
             return Err(RevocationError::RecoveryFailed {
                 reason: "empty log".into(),
+            });
+        }
+        if log.len() > MAX_LOG_ENTRIES {
+            return Err(RevocationError::RecoveryFailed {
+                reason: format!(
+                    "canonical revocation log length {} exceeds capacity ({MAX_LOG_ENTRIES})",
+                    log.len()
+                ),
             });
         }
 
@@ -1010,6 +1033,63 @@ mod tests {
             "recovery must fail closed instead of silently dropping revocations"
         );
     }
+
+    #[test]
+    fn global_log_capacity_rejection_is_atomic_across_zones() {
+        let mut reg = RevocationRegistry::new();
+        let zone_count = 2usize;
+
+        for idx in 0..MAX_LOG_ENTRIES {
+            let zone = format!("zone-{}", idx % zone_count);
+            let sequence = u64::try_from(idx / zone_count).unwrap().saturating_add(1);
+            reg.advance_head(head(&zone, sequence, &format!("art-{idx}")))
+                .unwrap();
+        }
+
+        let zone = "zone-over-capacity";
+        let head_before = reg.current_head(zone).err();
+        let log_len_before = reg.canonical_log().len();
+        let revocations_before = reg.total_revocations();
+        let zone_count_before = reg.zone_count();
+
+        let err = reg
+            .advance_head(head(zone, 1, "art-over-capacity"))
+            .unwrap_err();
+
+        assert_eq!(err.code(), "REV_INVALID_INPUT");
+        assert!(
+            err.to_string()
+                .contains("canonical revocation log at capacity")
+        );
+        assert_eq!(head_before, reg.current_head(zone).err());
+        assert_eq!(
+            reg.is_revoked(zone, "art-over-capacity")
+                .unwrap_err()
+                .code(),
+            "REV_ZONE_NOT_FOUND"
+        );
+        assert_eq!(reg.canonical_log().len(), log_len_before);
+        assert_eq!(reg.total_revocations(), revocations_before);
+        assert_eq!(reg.zone_count(), zone_count_before);
+    }
+
+    #[test]
+    fn recover_from_cross_zone_log_fails_instead_of_forgetting_old_revocations() {
+        let mut log = Vec::with_capacity(MAX_LOG_ENTRIES.saturating_add(1));
+        for idx in 0..=MAX_LOG_ENTRIES {
+            let sequence = u64::try_from(idx).unwrap().saturating_add(1);
+            log.push(head(
+                &format!("zone-{idx}"),
+                sequence,
+                &format!("art-{idx}"),
+            ));
+        }
+
+        let err = RevocationRegistry::recover_from_log(&log).unwrap_err();
+
+        assert_eq!(err.code(), "REV_RECOVERY_FAILED");
+        assert!(err.to_string().contains("exceeds capacity"));
+    }
 }
 
 #[cfg(test)]
@@ -1176,9 +1256,10 @@ mod revocation_registry_comprehensive_negative_tests {
         let recovered = recovered_reg.unwrap();
         assert_eq!(recovered.current_head("wraparound-zone").unwrap(), u64::MAX);
 
-        // Test massive zone count to check saturating arithmetic
+        // Test many zones within the canonical log capacity to check saturating arithmetic
         let mut massive_reg = RevocationRegistry::new();
-        for i in 0..10000 {
+        let total_zones = MAX_LOG_ENTRIES / 2;
+        for i in 0..total_zones {
             let zone_name = format!("zone-{}", i);
             massive_reg.init_zone(&zone_name).unwrap();
             massive_reg
@@ -1196,8 +1277,8 @@ mod revocation_registry_comprehensive_negative_tests {
         // Verify total_revocations uses saturating arithmetic
         let total = massive_reg.total_revocations();
         assert!(total <= usize::MAX);
-        assert_eq!(total, 10000);
-        assert_eq!(massive_reg.zone_count(), 10000);
+        assert_eq!(total, total_zones);
+        assert_eq!(massive_reg.zone_count(), total_zones);
     }
 
     /// Negative test: Memory exhaustion attacks with massive logs and revocation sets

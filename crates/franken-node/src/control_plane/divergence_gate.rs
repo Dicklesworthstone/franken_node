@@ -409,7 +409,7 @@ pub struct RecoveryResult {
 // ControlPlaneDivergenceGate
 // ---------------------------------------------------------------------------
 
-use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_EVENTS};
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 /// Maximum blocked mutations before oldest-first eviction.
 const MAX_BLOCKED_MUTATIONS: usize = 4096;
 /// Maximum quarantined partitions before oldest-first eviction.
@@ -525,10 +525,8 @@ impl ControlPlaneDivergenceGate {
 
         match result {
             DetectionResult::Converged => {
-                self.events
-                    .push(event_codes::DG_005_FRESHNESS_VERIFIED.to_string(), MAX_EVENT_CODES);
-                self.enforce_events_cap();
-                self.emit_audit(
+                push_bounded(&mut self.events, event_codes::DG_005_FRESHNESS_VERIFIED.to_string(), MAX_EVENT_CODES);
+                        self.emit_audit(
                     timestamp,
                     event_codes::DG_005_FRESHNESS_VERIFIED,
                     "propagation converged",
@@ -587,7 +585,6 @@ impl ControlPlaneDivergenceGate {
         });
 
         push_bounded(&mut self.events, event_codes::DG_001_DIVERGENCE_DETECTED.to_string(), MAX_EVENT_CODES);
-        self.enforce_events_cap();
         self.emit_audit(
             timestamp,
             event_codes::DG_001_DIVERGENCE_DETECTED,
@@ -620,10 +617,8 @@ impl ControlPlaneDivergenceGate {
                 detail: "gate is normal — mutation allowed".to_string(),
                 event_code: event_codes::DG_005_FRESHNESS_VERIFIED.to_string(),
             };
-            self.events
-                .push(event_codes::DG_005_FRESHNESS_VERIFIED.to_string(), MAX_EVENT_CODES);
-            self.enforce_events_cap();
-            return Ok(result);
+            push_bounded(&mut self.events, event_codes::DG_005_FRESHNESS_VERIFIED.to_string(), MAX_EVENT_CODES);
+                return Ok(result);
         }
 
         let result = MutationCheckResult {
@@ -643,7 +638,6 @@ impl ControlPlaneDivergenceGate {
             MAX_BLOCKED_MUTATIONS,
         );
         push_bounded(&mut self.events, event_codes::DG_002_MUTATION_BLOCKED.to_string(), MAX_EVENT_CODES);
-        self.enforce_events_cap();
         self.emit_audit(
             timestamp,
             event_codes::DG_002_MUTATION_BLOCKED,
@@ -678,10 +672,9 @@ impl ControlPlaneDivergenceGate {
             });
         }
         if let Some(ref mut ad) = self.active_divergence {
-            ad.response_mode = Some(ResponseMode::Halt.label().to_string(), MAX_EVENT_CODES);
+            ad.response_mode = Some(ResponseMode::Halt.label().to_string());
         }
         push_bounded(&mut self.events, event_codes::DG_003_RESPONSE_ACTIVATED.to_string(), MAX_EVENT_CODES);
-        self.enforce_events_cap();
         self.emit_audit(
             timestamp,
             event_codes::DG_003_RESPONSE_ACTIVATED,
@@ -729,12 +722,11 @@ impl ControlPlaneDivergenceGate {
         );
         self.state = GateState::Quarantined;
         if let Some(ref mut ad) = self.active_divergence {
-            ad.response_mode = Some(ResponseMode::Quarantine.label().to_string(), MAX_EVENT_CODES);
+            ad.response_mode = Some(ResponseMode::Quarantine.label().to_string());
         }
 
         push_bounded(&mut self.events, event_codes::DG_006_PARTITION_QUARANTINED.to_string(), MAX_EVENT_CODES);
         push_bounded(&mut self.events, event_codes::DG_003_RESPONSE_ACTIVATED.to_string(), MAX_EVENT_CODES);
-        self.enforce_events_cap();
         self.emit_audit(
             timestamp,
             event_codes::DG_006_PARTITION_QUARANTINED,
@@ -794,12 +786,11 @@ impl ControlPlaneDivergenceGate {
         push_bounded(&mut self.alerts, alert.clone(), MAX_ALERTS);
         self.state = GateState::Alerted;
         if let Some(ref mut ad) = self.active_divergence {
-            ad.response_mode = Some(ResponseMode::Alert.label().to_string(), MAX_EVENT_CODES);
+            ad.response_mode = Some(ResponseMode::Alert.label().to_string());
         }
 
         push_bounded(&mut self.events, event_codes::DG_007_OPERATOR_ALERTED.to_string(), MAX_EVENT_CODES);
         push_bounded(&mut self.events, event_codes::DG_003_RESPONSE_ACTIVATED.to_string(), MAX_EVENT_CODES);
-        self.enforce_events_cap();
         self.emit_audit(
             timestamp,
             event_codes::DG_007_OPERATOR_ALERTED,
@@ -881,7 +872,6 @@ impl ControlPlaneDivergenceGate {
         };
 
         push_bounded(&mut self.events, event_codes::DG_004_RECOVERY_COMPLETED.to_string(), MAX_EVENT_CODES);
-        self.enforce_events_cap();
         self.emit_audit(
             timestamp,
             event_codes::DG_004_RECOVERY_COMPLETED,
@@ -908,9 +898,11 @@ impl ControlPlaneDivergenceGate {
     ) -> Result<(), DivergenceGateError> {
         match MarkerProofVerifier::verify(stream, marker_id, claimed_epoch) {
             Ok(()) => {
-                self.events
-                    .push(event_codes::DG_008_MARKER_PROOF_VERIFIED.to_string(), MAX_EVENT_CODES);
-                self.enforce_events_cap();
+                push_bounded(
+                    &mut self.events,
+                    event_codes::DG_008_MARKER_PROOF_VERIFIED.to_string(),
+                    MAX_EVENT_CODES,
+                );
                 self.emit_audit(
                     timestamp,
                     event_codes::DG_008_MARKER_PROOF_VERIFIED,
@@ -930,12 +922,6 @@ impl ControlPlaneDivergenceGate {
     // Internal helpers
     // -----------------------------------------------------------------------
 
-    fn enforce_events_cap(&mut self) {
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
-    }
 
     fn emit_audit(
         &mut self,
@@ -968,9 +954,13 @@ impl Default for ControlPlaneDivergenceGate {
 }
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
-        items.drain(0..overflow);
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }

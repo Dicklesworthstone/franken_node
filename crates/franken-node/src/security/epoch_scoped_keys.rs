@@ -226,6 +226,15 @@ fn validate_domain(domain: &str) -> Result<(), AuthError> {
     if domain.trim().is_empty() || domain.trim() != domain {
         return Err(AuthError::DomainEmpty);
     }
+    if domain.chars().any(|ch| {
+        ch.is_control()
+            || matches!(
+                ch,
+                '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}'
+            )
+    }) {
+        return Err(AuthError::DomainEmpty);
+    }
     Ok(())
 }
 

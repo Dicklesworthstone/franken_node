@@ -278,7 +278,7 @@ fn digest_fields(domain: &[u8], fields: &[&[u8]]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(domain);
     for field in fields {
-        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(field.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(field);
     }
     hex::encode(hasher.finalize())
@@ -294,7 +294,7 @@ fn signature_digest(
     let mut hasher = Sha256::new();
     hasher.update(b"proof_executor_signature_v1:");
     for field in [receipt_id, proof_hash, signer_id] {
-        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(field.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(field.as_bytes());
     }
     hasher.update(expires_epoch_ms.to_le_bytes());

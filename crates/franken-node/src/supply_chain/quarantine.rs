@@ -2995,14 +2995,14 @@ mod tests {
             reg.trigger_recall(recall).unwrap();
 
             // Add some recall receipts
-            reg.add_recall_receipt(RecallReceipt {
+            reg.record_recall_receipt(order_id, RecallReceipt {
                 node_id: "node-1".to_string(),
                 recall_id: "recall-001".to_string(),
                 removed: true,
                 removal_method: "crypto_erase".to_string(),
                 removed_at: "2026-01-01T01:00:00Z".to_string(),
                 artifact_hash: "hash123".to_string(),
-            }, "2026-01-01T01:00:00Z").unwrap();
+            }).unwrap();
 
             // Test edge cases that could produce invalid f64 values
             let edge_cases = vec![

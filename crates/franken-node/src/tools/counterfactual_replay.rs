@@ -27,9 +27,15 @@ const MAX_SWEEP_RESULTS: usize = MAX_SWEEP_VALUES;
 const MAX_DIVERGENCE_POINTS: usize = 100_000;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if items.len() < cap {
-        items.push(item);
+    if cap == 0 {
+        items.clear();
+        return;
     }
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow);
+    }
+    items.push(item);
 }
 
 pub const COUNTERFACTUAL_REPLAY_STARTED: &str = "COUNTERFACTUAL_REPLAY_STARTED";

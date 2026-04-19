@@ -297,8 +297,11 @@ pub fn serialize_canonical(receipt: &ExecutionReceipt) -> Result<Vec<u8>, Execut
 
 pub fn receipt_hash_sha256(receipt: &ExecutionReceipt) -> Result<String, ExecutionReceiptError> {
     let bytes = serialize_canonical(receipt)?;
-    let digest = Sha256::digest([b"vef_exec_receipt_v1:" as &[u8], bytes.as_slice()].concat());
-    Ok(format!("sha256:{digest:x}"))
+    let mut hasher = Sha256::new();
+    hasher.update(b"vef_exec_receipt_v1:");
+    hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(bytes.as_slice());
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 /// Constant-time string comparison (inline to avoid cross-crate path issues in test harnesses).
@@ -604,14 +607,35 @@ mod tests {
     }
 
     #[test]
+    fn test_hash_length_prefixes_canonical_bytes() {
+        let receipt = make_receipt();
+        let bytes = serialize_canonical(&receipt).unwrap();
+        let mut expected_hasher = Sha256::new();
+        expected_hasher.update(b"vef_exec_receipt_v1:");
+        expected_hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+        expected_hasher.update(bytes.as_slice());
+
+        let mut unprefixed_hasher = Sha256::new();
+        unprefixed_hasher.update(b"vef_exec_receipt_v1:");
+        unprefixed_hasher.update(bytes.as_slice());
+
+        let actual = receipt_hash_sha256(&receipt).unwrap();
+        let expected = format!("sha256:{:x}", expected_hasher.finalize());
+        let unprefixed = format!("sha256:{:x}", unprefixed_hasher.finalize());
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, unprefixed);
+    }
+
+    #[test]
     fn test_hash_changes_when_sequence_changes() {
         let mut a = make_receipt();
         let mut b = make_receipt();
-        b.sequence_number += 1;
+        b.sequence_number = b.sequence_number.saturating_add(1);
         let hash_a = receipt_hash_sha256(&a).unwrap();
         let hash_b = receipt_hash_sha256(&b).unwrap();
         assert_ne!(hash_a, hash_b);
-        a.sequence_number += 1;
+        a.sequence_number = a.sequence_number.saturating_add(1);
         let hash_a2 = receipt_hash_sha256(&a).unwrap();
         assert_eq!(hash_a2, hash_b);
     }

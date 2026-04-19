@@ -703,7 +703,7 @@ mod remote_module_negative_tests {
 
             // Test corruption bit count boundaries
             FaultConfig { corrupt_bit_count: 0, ..valid_config() },
-            FaultConfig { corrupt_bit_count: u32::MAX, ..valid_config() },
+            FaultConfig { corrupt_bit_count: usize::MAX, ..valid_config() },
         ];
 
         for (i, config) in boundary_configs.iter().enumerate() {

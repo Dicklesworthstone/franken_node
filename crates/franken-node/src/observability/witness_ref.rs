@@ -465,7 +465,8 @@ impl WitnessValidator {
             high_impact_with_witnesses,
             total_witnesses,
             coverage_pct: if high_impact_entries > 0 {
-                (high_impact_with_witnesses as f64 / high_impact_entries as f64) * 100.0
+                let pct = (high_impact_with_witnesses as f64 / high_impact_entries as f64) * 100.0;
+                if pct.is_finite() { pct } else { 0.0 }
             } else {
                 100.0
             },

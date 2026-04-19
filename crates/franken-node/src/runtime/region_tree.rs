@@ -41,6 +41,9 @@ const MAX_CHILD_REGIONS: usize = 256;
 const MAX_REGION_TASKS: usize = 8192;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        return;
+    }
     if items.len() >= cap {
         let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
@@ -96,6 +99,8 @@ pub mod error_codes {
     pub const ERR_REGION_ALREADY_CLOSED: &str = "ERR_REGION_ALREADY_CLOSED";
     pub const ERR_REGION_PARENT_NOT_FOUND: &str = "ERR_REGION_PARENT_NOT_FOUND";
     pub const ERR_REGION_BUDGET_EXCEEDED: &str = "ERR_REGION_BUDGET_EXCEEDED";
+    pub const ERR_REGION_CAPACITY_EXCEEDED: &str = "ERR_REGION_CAPACITY_EXCEEDED";
+    pub const ERR_REGION_TASK_NOT_FOUND: &str = "ERR_REGION_TASK_NOT_FOUND";
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +222,15 @@ pub enum RegionTreeError {
         region_id: String,
         remaining_tasks: usize,
     },
+    CapacityExceeded {
+        region_id: String,
+        resource: &'static str,
+        capacity: usize,
+    },
+    TaskNotFound {
+        region_id: String,
+        task_id: String,
+    },
 }
 
 impl RegionTreeError {
@@ -227,6 +241,8 @@ impl RegionTreeError {
             Self::RegionAlreadyClosed { .. } => error_codes::ERR_REGION_ALREADY_CLOSED,
             Self::ParentNotFound { .. } => error_codes::ERR_REGION_PARENT_NOT_FOUND,
             Self::BudgetExceeded { .. } => error_codes::ERR_REGION_BUDGET_EXCEEDED,
+            Self::CapacityExceeded { .. } => error_codes::ERR_REGION_CAPACITY_EXCEEDED,
+            Self::TaskNotFound { .. } => error_codes::ERR_REGION_TASK_NOT_FOUND,
         }
     }
 }
@@ -253,6 +269,29 @@ impl fmt::Display for RegionTreeError {
                     self.code(),
                     region_id,
                     remaining_tasks
+                )
+            }
+            Self::CapacityExceeded {
+                region_id,
+                resource,
+                capacity,
+            } => {
+                write!(
+                    f,
+                    "{}: region {} exceeded {} capacity {}",
+                    self.code(),
+                    region_id,
+                    resource,
+                    capacity
+                )
+            }
+            Self::TaskNotFound { region_id, task_id } => {
+                write!(
+                    f,
+                    "{}: task {} not found in region {}",
+                    self.code(),
+                    task_id,
+                    region_id
                 )
             }
         }
@@ -401,6 +440,13 @@ impl RegionTree {
                     region_id: parent_id.as_str().to_string(),
                 });
             }
+            if parent.children.len() >= MAX_CHILD_REGIONS {
+                return Err(RegionTreeError::CapacityExceeded {
+                    region_id: parent_id.as_str().to_string(),
+                    resource: "children",
+                    capacity: MAX_CHILD_REGIONS,
+                });
+            }
         }
 
         let node = RegionNode {
@@ -419,7 +465,7 @@ impl RegionTree {
                 parent_id: parent_id.as_str().to_string(),
             }
         })?;
-        push_bounded(&mut parent.children, id.clone(), MAX_CHILD_REGIONS);
+        parent.children.push(id.clone());
         let child_count = parent.children.len();
 
         // Emit REG-001 for the new region
@@ -467,8 +513,15 @@ impl RegionTree {
                 region_id: region_id.as_str().to_string(),
             });
         }
+        if node.tasks.len() >= MAX_REGION_TASKS {
+            return Err(RegionTreeError::CapacityExceeded {
+                region_id: region_id.as_str().to_string(),
+                resource: "tasks",
+                capacity: MAX_REGION_TASKS,
+            });
+        }
 
-        push_bounded(&mut node.tasks, task_id.clone(), MAX_REGION_TASKS);
+        node.tasks.push(task_id.clone());
         let task_count = node.tasks.len();
 
         let event = RegionEvent {
@@ -497,7 +550,19 @@ impl RegionTree {
             }
         })?;
 
-        node.tasks.retain(|t| t != task_id);
+        if node.state != RegionState::Active {
+            return Err(RegionTreeError::RegionAlreadyClosed {
+                region_id: region_id.as_str().to_string(),
+            });
+        }
+        let Some(position) = node.tasks.iter().position(|t| t == task_id) else {
+            return Err(RegionTreeError::TaskNotFound {
+                region_id: region_id.as_str().to_string(),
+                task_id: task_id.as_str().to_string(),
+            });
+        };
+
+        node.tasks.remove(position);
         let task_count = node.tasks.len();
 
         let event = RegionEvent {
@@ -935,6 +1000,29 @@ mod tests {
     }
 
     #[test]
+    fn child_region_capacity_fails_without_orphaning_new_region() {
+        let mut tree = RegionTree::new(1000);
+        tree.open_region(&root_id(), 0).unwrap();
+        for idx in 0..MAX_CHILD_REGIONS {
+            let child = RegionId::new(&format!("child-{idx}"));
+            let timestamp = u64::try_from(idx).unwrap_or(u64::MAX).saturating_add(1);
+            tree.open_child_region(&child, &root_id(), timestamp)
+                .unwrap();
+        }
+        let events_before = tree.event_log().len();
+        let overflow = RegionId::new("child-overflow");
+
+        let err = tree
+            .open_child_region(&overflow, &root_id(), 999)
+            .unwrap_err();
+
+        assert_eq!(err.code(), error_codes::ERR_REGION_CAPACITY_EXCEEDED);
+        assert_eq!(tree.child_count(&root_id()), Some(MAX_CHILD_REGIONS));
+        assert_eq!(tree.region_state(&overflow), None);
+        assert_eq!(tree.event_log().len(), events_before);
+    }
+
+    #[test]
     fn closed_parent_child_open_does_not_attach_or_emit() {
         let mut tree = RegionTree::new(1000);
         tree.open_region(&root_id(), 0).unwrap();
@@ -1000,6 +1088,26 @@ mod tests {
         assert_eq!(err.code(), error_codes::ERR_REGION_NOT_FOUND);
         assert_eq!(tree.task_count(&rollout_id()), Some(1));
         assert_eq!(tree.region_state(&rollout_id()), Some(RegionState::Active));
+        assert_eq!(tree.event_log().len(), events_before);
+    }
+
+    #[test]
+    fn task_capacity_fails_without_dropping_existing_tasks() {
+        let mut tree = RegionTree::new(1000);
+        tree.open_region(&root_id(), 0).unwrap();
+        for idx in 0..MAX_REGION_TASKS {
+            let timestamp = u64::try_from(idx).unwrap_or(u64::MAX);
+            tree.register_task(&root_id(), TaskId::new(&format!("task-{idx}")), timestamp)
+                .unwrap();
+        }
+        let events_before = tree.event_log().len();
+
+        let err = tree
+            .register_task(&root_id(), TaskId::new("task-overflow"), 999)
+            .unwrap_err();
+
+        assert_eq!(err.code(), error_codes::ERR_REGION_CAPACITY_EXCEEDED);
+        assert_eq!(tree.task_count(&root_id()), Some(MAX_REGION_TASKS));
         assert_eq!(tree.event_log().len(), events_before);
     }
 
@@ -1328,6 +1436,15 @@ mod tests {
                 region_id: "x".into(),
                 remaining_tasks: 3,
             },
+            RegionTreeError::CapacityExceeded {
+                region_id: "x".into(),
+                resource: "tasks",
+                capacity: 1,
+            },
+            RegionTreeError::TaskNotFound {
+                region_id: "x".into(),
+                task_id: "t".into(),
+            },
         ];
         for e in &errors {
             let s = e.to_string();
@@ -1501,10 +1618,11 @@ mod tests {
         // Create deep hierarchy (100+ levels)
         for depth in 1..=150 {
             let child_id = RegionId::new(&format!("depth-{:03}", depth));
-            match tree.open_child_region(&child_id, &current_parent, depth as u64) {
-                Ok(()) => {
+            let timestamp = u64::try_from(depth).unwrap_or(u64::MAX);
+            match tree.open_child_region(&child_id, &current_parent, timestamp) {
+                Ok(_) => {
                     current_parent = child_id;
-                },
+                }
                 Err(_) => {
                     // Acceptable to reject at some depth to prevent stack overflow
                     break;
@@ -1513,11 +1631,12 @@ mod tests {
         }
 
         // Should handle deep hierarchy without crashing
-        let region_count = tree.list_regions().len();
+        let region_count = tree.region_count();
         assert!(region_count > 10); // Should have created at least some depth
 
         // Closing root should drain entire hierarchy deterministically
-        tree.close_region(&RegionId::new("root"), 999999).expect("close root");
+        tree.close(&RegionId::new("root"), 999999)
+            .expect("close root");
     }
 
     #[test]
@@ -1540,20 +1659,23 @@ mod tests {
         // All unicode region IDs should be handled safely
         for (i, region_id_str) in unicode_region_ids.iter().enumerate() {
             let region_id = RegionId::new(region_id_str);
-            let result = tree.open_region(&region_id, i as u64);
+            let timestamp = u64::try_from(i).unwrap_or(u64::MAX);
+            let result = tree.open_region(&region_id, timestamp);
 
             // Should either succeed or fail gracefully
             match result {
-                Ok(()) => {
-                    assert!(tree.list_regions().contains(&region_id));
+                Ok(_) => {
+                    assert!(tree.nodes.contains_key(region_id.as_str()));
 
                     // Test task registration with unicode region
                     let task_id = TaskId::new(&format!("unicode-task-{}", i));
-                    let _register_result = tree.register_task(&task_id, &region_id, (i + 1000) as u64);
+                    let task_timestamp = u64::try_from(i).unwrap_or(u64::MAX).saturating_add(1000);
+                    let _register_result = tree.register_task(&region_id, task_id, task_timestamp);
 
                     // Should be able to close unicode region
-                    let _close_result = tree.close_region(&region_id, (i + 2000) as u64);
-                },
+                    let close_timestamp = u64::try_from(i).unwrap_or(u64::MAX).saturating_add(2000);
+                    let _close_result = tree.close(&region_id, close_timestamp);
+                }
                 Err(_) => {
                     // Acceptable to reject malformed identifiers
                 }
@@ -1572,26 +1694,26 @@ mod tests {
         let max_timestamp = u64::MAX.saturating_sub(100);
         for i in 0..10 {
             let task_id = TaskId::new(&format!("extreme-timestamp-task-{}", i));
-            tree.register_task(&task_id, &root_id, max_timestamp.saturating_add(i))
+            tree.register_task(&root_id, task_id, max_timestamp.saturating_add(i))
                 .expect("register task with extreme timestamp");
         }
 
         // Close with budget near u64::MAX - should use saturating arithmetic
-        let close_result = tree.close_region(&root_id, u64::MAX);
+        let close_result = tree.close(&root_id, u64::MAX);
         match close_result {
-            Ok(()) => {
+            Ok(_) => {
                 // Successfully closed despite extreme timestamps
-            },
-            Err(RegionError::BudgetExceeded { .. }) => {
+            }
+            Err(RegionTreeError::BudgetExceeded { .. }) => {
                 // Acceptable to fail if budget calculation prevents overflow
-            },
+            }
             Err(other) => {
                 panic!("Unexpected error type: {:?}", other);
             }
         }
 
         // Events should handle extreme timestamps safely
-        let events = tree.events();
+        let events = tree.event_log();
         for event in events {
             assert!(event.timestamp_ms <= u64::MAX);
         }
@@ -1605,15 +1727,16 @@ mod tests {
         tree.open_region(&root_id, 0).expect("open root");
 
         // Attempt to register huge number of tasks
-        let massive_task_count = 100_000;
-        let mut successful_registrations = 0;
+        let massive_task_count: usize = 100_000;
+        let mut successful_registrations: usize = 0;
 
         for i in 0..massive_task_count {
             let task_id = TaskId::new(&format!("stress-task-{:08}", i));
-            match tree.register_task(&task_id, &root_id, i as u64) {
-                Ok(()) => {
+            let timestamp = u64::try_from(i).unwrap_or(u64::MAX);
+            match tree.register_task(&root_id, task_id, timestamp) {
+                Ok(_) => {
                     successful_registrations = successful_registrations.saturating_add(1);
-                },
+                }
                 Err(_) => {
                     // Acceptable to reject at some point to prevent memory exhaustion
                     break;
@@ -1625,12 +1748,11 @@ mod tests {
         assert!(successful_registrations <= massive_task_count);
 
         // Should remain functional despite memory pressure
-        let regions = tree.list_regions();
-        assert_eq!(regions.len(), 1);
-        assert_eq!(regions[0], root_id);
+        assert_eq!(tree.region_count(), 1);
+        assert_eq!(tree.region_state(&root_id), Some(RegionState::Active));
 
         // Closing should handle massive task count gracefully
-        let close_result = tree.close_region(&root_id, 999999);
+        let close_result = tree.close(&root_id, 999999);
         // May succeed or fail due to budget, but should not crash
         let _ = close_result;
     }
@@ -1642,31 +1764,41 @@ mod tests {
         let region_id = RegionId::new("state-test-region");
 
         // Try to close non-existent region
-        let err = tree.close_region(&region_id, 100).expect_err("should fail to close non-existent");
+        let err = tree
+            .close(&region_id, 100)
+            .expect_err("should fail to close non-existent");
         assert_eq!(err.code(), error_codes::ERR_REGION_NOT_FOUND);
 
         // Open region
         tree.open_region(&region_id, 200).expect("open region");
 
         // Try to open same region again - should fail
-        let err = tree.open_region(&region_id, 300).expect_err("should fail to re-open");
+        let _err = tree
+            .open_region(&region_id, 300)
+            .expect_err("should fail to re-open");
         // Error type varies by implementation
 
         // Close region
-        tree.close_region(&region_id, 400).expect("close region");
+        tree.close(&region_id, 400).expect("close region");
 
         // Try to close already-closed region
-        let err = tree.close_region(&region_id, 500).expect_err("should fail to re-close");
+        let err = tree
+            .close(&region_id, 500)
+            .expect_err("should fail to re-close");
         assert_eq!(err.code(), error_codes::ERR_REGION_ALREADY_CLOSED);
 
         // Try to register task to closed region
         let task_id = TaskId::new("orphan-task");
-        let err = tree.register_task(&task_id, &region_id, 600).expect_err("should fail to register to closed");
+        let err = tree
+            .register_task(&region_id, task_id, 600)
+            .expect_err("should fail to register to closed");
         assert_eq!(err.code(), error_codes::ERR_REGION_ALREADY_CLOSED);
 
         // Try to open child of closed region
         let child_id = RegionId::new("orphan-child");
-        let err = tree.open_child_region(&child_id, &region_id, 700).expect_err("should fail child of closed");
+        let err = tree
+            .open_child_region(&child_id, &region_id, 700)
+            .expect_err("should fail child of closed");
         assert_eq!(err.code(), error_codes::ERR_REGION_ALREADY_CLOSED);
     }
 
@@ -1678,19 +1810,24 @@ mod tests {
         // Generate events far exceeding MAX_EVENT_LOG_ENTRIES
         for cycle in 0..10 {
             let region_id = RegionId::new(&format!("rapid-cycle-{:04}", cycle));
-            tree.open_region(&region_id, cycle * 100).expect("open rapid region");
+            let base_timestamp = u64::try_from(cycle).unwrap_or(u64::MAX).saturating_mul(100);
+            tree.open_region(&region_id, base_timestamp)
+                .expect("open rapid region");
 
             // Rapid task registrations
             for task_num in 0..50 {
                 let task_id = TaskId::new(&format!("rapid-task-{}-{}", cycle, task_num));
-                let _ = tree.register_task(&task_id, &region_id, cycle * 100 + task_num);
+                let task_timestamp =
+                    base_timestamp.saturating_add(u64::try_from(task_num).unwrap_or(u64::MAX));
+                let _ = tree.register_task(&region_id, task_id, task_timestamp);
             }
 
-            tree.close_region(&region_id, cycle * 100 + 99).expect("close rapid region");
+            tree.close(&region_id, base_timestamp.saturating_add(99))
+                .expect("close rapid region");
         }
 
         // Event log should be bounded
-        let events = tree.events();
+        let events = tree.event_log();
         assert!(events.len() <= MAX_EVENT_LOG_ENTRIES.saturating_add(100));
 
         // All events should be well-formed despite high volume
@@ -1712,29 +1849,33 @@ mod tests {
         let region_c = RegionId::new("region-C");
 
         tree.open_region(&region_a, 100).expect("open A");
-        tree.open_child_region(&region_b, &region_a, 200).expect("open B child of A");
-        tree.open_child_region(&region_c, &region_b, 300).expect("open C child of B");
+        tree.open_child_region(&region_b, &region_a, 200)
+            .expect("open B child of A");
+        tree.open_child_region(&region_c, &region_b, 300)
+            .expect("open C child of B");
 
         // Try to create circular relationships
         // Attempt: make A child of C (would create A->B->C->A cycle)
-        let err = tree.open_child_region(&region_a, &region_c, 400)
+        let _err = tree
+            .open_child_region(&region_a, &region_c, 400)
             .expect_err("should prevent A as child of C");
         // Should prevent circular hierarchy
 
         // Attempt: make B child of C (would create B->C->B cycle)
-        let err2 = tree.open_child_region(&region_b, &region_c, 500)
+        let _err2 = tree
+            .open_child_region(&region_b, &region_c, 500)
             .expect_err("should prevent B as child of C");
         // Should prevent circular hierarchy
 
         // Original hierarchy should remain intact
-        let regions = tree.list_regions();
-        assert_eq!(regions.len(), 3);
-        assert!(regions.contains(&region_a));
-        assert!(regions.contains(&region_b));
-        assert!(regions.contains(&region_c));
+        assert_eq!(tree.region_count(), 3);
+        assert!(tree.nodes.contains_key(region_a.as_str()));
+        assert!(tree.nodes.contains_key(region_b.as_str()));
+        assert!(tree.nodes.contains_key(region_c.as_str()));
 
         // Should be able to close in proper order
-        tree.close_region(&region_a, 600).expect("close A (drains children)");
+        tree.close(&region_a, 600)
+            .expect("close A (drains children)");
     }
 
     #[test]
@@ -1745,33 +1886,42 @@ mod tests {
         tree.open_region(&region_id, 100).expect("open region");
 
         // Register multiple tasks
-        let task_ids: Vec<_> = (0..20).map(|i| TaskId::new(&format!("task-{:03}", i))).collect();
+        let task_ids: Vec<_> = (0..20)
+            .map(|i| TaskId::new(&format!("task-{:03}", i)))
+            .collect();
         for (i, task_id) in task_ids.iter().enumerate() {
-            tree.register_task(task_id, &region_id, 200 + i as u64).expect("register task");
+            let timestamp = 200_u64.saturating_add(u64::try_from(i).unwrap_or(u64::MAX));
+            tree.register_task(&region_id, task_id.clone(), timestamp)
+                .expect("register task");
         }
 
         // Try to deregister non-existent task
         let phantom_task = TaskId::new("phantom-task-999");
-        let err = tree.deregister_task(&phantom_task, &region_id, 1000)
+        let err = tree
+            .deregister_task(&region_id, &phantom_task, 1000)
             .expect_err("should fail to deregister non-existent");
-        // Should handle gracefully
+        assert_eq!(err.code(), error_codes::ERR_REGION_TASK_NOT_FOUND);
 
         // Deregister some tasks
         for i in (0..10).step_by(2) {
-            tree.deregister_task(&task_ids[i], &region_id, 1100 + i as u64)
+            let timestamp = 1100_u64.saturating_add(u64::try_from(i).unwrap_or(u64::MAX));
+            tree.deregister_task(&region_id, &task_ids[i], timestamp)
                 .expect("deregister even-numbered tasks");
         }
 
         // Try to deregister already-deregistered task
-        let err = tree.deregister_task(&task_ids[0], &region_id, 1200)
+        let err = tree
+            .deregister_task(&region_id, &task_ids[0], 1200)
             .expect_err("should fail to re-deregister");
-        // Should handle gracefully
+        assert_eq!(err.code(), error_codes::ERR_REGION_TASK_NOT_FOUND);
 
         // Close region with remaining tasks
-        tree.close_region(&region_id, 1300).expect("close with remaining tasks");
+        tree.close(&region_id, 1300)
+            .expect("close with remaining tasks");
 
         // Try to deregister from closed region
-        let err = tree.deregister_task(&task_ids[1], &region_id, 1400)
+        let err = tree
+            .deregister_task(&region_id, &task_ids[1], 1400)
             .expect_err("should fail to deregister from closed");
         assert_eq!(err.code(), error_codes::ERR_REGION_ALREADY_CLOSED);
     }

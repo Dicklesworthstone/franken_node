@@ -892,8 +892,8 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
         return;
     }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
-        items.drain(0..overflow);
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
@@ -1282,9 +1282,9 @@ mod tests {
         guard.register_profile(profile).unwrap();
 
         // 3 checks => 3 audit entries
-        let _ = guard.check_capability("sub", "cap:fs:read", "t1");
-        let _ = guard.check_capability("sub", "cap:fs:write", "t2");
-        let _ = guard.check_capability("sub", "cap:fs:read", "t3");
+        guard.check_capability("sub", "cap:fs:read", "t1").expect("fs:read should be granted");
+        let _denied_result = guard.check_capability("sub", "cap:fs:write", "t2"); // Expected denial
+        guard.check_capability("sub", "cap:fs:read", "t3").expect("fs:read should be granted");
         assert_eq!(guard.audit_trail().len(), 3);
     }
 
@@ -1594,7 +1594,7 @@ mod tests {
         let mut guard = CapabilityGuard::new();
         let profile = CapabilityProfile::new("registered_without_checks", "1.0.0", RiskLevel::Low);
         guard.register_profile(profile).unwrap();
-        let _ = guard.check_capability("unknown_sub", "cap:fs:read", "ts-missing");
+        let _missing_profile_result = guard.check_capability("unknown_sub", "cap:fs:read", "ts-missing");
 
         let gaps = guard.detect_audit_gaps();
 
@@ -1918,7 +1918,7 @@ mod tests {
         let operations_count = MAX_AUDIT_TRAIL_ENTRIES * 3; // 3x overflow
         for i in 0..operations_count {
             let timestamp = format!("ts-{:06}", i);
-            let _ = guard.check_capability("stress_sub", "cap:fs:read", &timestamp);
+            guard.check_capability("stress_sub", "cap:fs:read", &timestamp).expect("stress test should succeed");
         }
 
         // Should maintain exact capacity limit

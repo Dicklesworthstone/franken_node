@@ -3243,7 +3243,7 @@ mod tests {
         // Submit all proposals rapidly
         let mut decisions = Vec::new();
         for proposal in proposals {
-            decisions.push(gate.submit(proposal));
+            push_bounded(&mut decisions, gate.submit(proposal), 1000);
         }
 
         // Audit trail should maintain ordering and consistency
@@ -3650,7 +3650,7 @@ mod tests {
                 };
 
                 let _ = gate.submit(proposal);
-                total_proposals += 1;
+                total_proposals = total_proposals.saturating_add(1);
 
                 // Verify capacity limits are enforced
                 assert!(gate.audit_trail().len() <= MAX_AUDIT_TRAIL_ENTRIES,
@@ -3841,7 +3841,7 @@ mod tests {
                     thread::yield_now();
                 }
             });
-            handles.push(handle);
+            push_bounded(&mut handles, handle, 100);
         }
 
         // Wait for all threads to complete
@@ -3925,7 +3925,7 @@ mod tests {
                 let proposal_json = serde_json::to_string(&proposal).expect("proposal serialization");
                 hasher.update(proposal_json.as_bytes());
                 let hash_key = format!("{:02x}", hasher.finalize());
-                *collision_attempts.entry(hash_key).or_insert(0) += 1;
+                *collision_attempts.entry(hash_key).or_insert(0) = collision_attempts[&hash_key].saturating_add(1);
             }
 
             // Verify resistance to birthday attack scenarios
@@ -4664,7 +4664,7 @@ mod tests {
                 // Gradually increase each metric to attempt threshold bypass
                 current_throughput += 0.1;
                 current_latency += 0.05;
-                current_memory += 10;
+                current_memory = current_memory.saturating_add(10);
 
                 let creeping_proposal = OptimizationProposal {
                     proposal_id: format!("threshold_creep_{}", i),
@@ -4921,7 +4921,8 @@ mod tests {
                 assert!(!entry.proposal_id.is_empty() || entry.event_code.contains("ERROR"),
                        "Proposal ID should not be corrupted");
 
-                *event_code_counts.entry(entry.event_code.clone()).or_insert(0) += 1;
+                let count = event_code_counts.entry(entry.event_code.clone()).or_insert(0);
+                *count = count.saturating_add(1);
             }
 
             // Should maintain event code diversity despite stress

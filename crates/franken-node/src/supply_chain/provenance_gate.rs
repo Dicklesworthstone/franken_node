@@ -13,6 +13,9 @@ const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 /// Supports reasonable policy sizes while blocking adversarial patterns.
 const MAX_ATTESTATIONS: usize = 50;
 
+/// Maximum number of trusted builders accepted in one admission policy.
+const MAX_TRUSTED_BUILDERS: usize = 256;
+
 /// Push item to vector with bounded capacity to prevent memory exhaustion.
 /// When capacity is exceeded, removes oldest entries to maintain the limit.
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
@@ -96,9 +99,19 @@ pub struct ProvenancePolicy {
 
 impl ProvenancePolicy {
     pub fn validate(&self) -> Result<(), ProvenanceError> {
+        if self.required_attestations.len() > MAX_ATTESTATIONS {
+            return Err(ProvenanceError::PolicyInvalid {
+                reason: format!("required_attestations exceeds maximum of {MAX_ATTESTATIONS}"),
+            });
+        }
         if self.trusted_builders.is_empty() {
             return Err(ProvenanceError::PolicyInvalid {
                 reason: "trusted_builders must not be empty".to_string(),
+            });
+        }
+        if self.trusted_builders.len() > MAX_TRUSTED_BUILDERS {
+            return Err(ProvenanceError::PolicyInvalid {
+                reason: format!("trusted_builders exceeds maximum of {MAX_TRUSTED_BUILDERS}"),
             });
         }
         if self
@@ -180,6 +193,9 @@ pub enum GateFailure {
     InvalidArtifactId {
         reason: String,
     },
+    InvalidProvenance {
+        reason: String,
+    },
     PolicyInvalid {
         reason: String,
     },
@@ -200,6 +216,9 @@ impl fmt::Display for GateFailure {
             Self::InvalidArtifactId { reason } => {
                 write!(f, "PROV_ARTIFACT_INVALID: {reason}")
             }
+            Self::InvalidProvenance { reason } => {
+                write!(f, "PROV_PROVENANCE_INVALID: {reason}")
+            }
             Self::PolicyInvalid { reason } => {
                 write!(f, "PROV_POLICY_INVALID: {reason}")
             }
@@ -216,23 +235,15 @@ pub fn evaluate_gate(
     trace_id: &str,
     timestamp: &str,
 ) -> GateDecision {
-    let missing: Vec<AttestationType> = policy
-        .required_attestations
-        .iter()
-        .filter(|req| !provenance.attestations.contains(req))
-        .cloned()
-        .collect();
-
     let assurance_ok = provenance
         .build_assurance
         .meets_minimum(policy.min_build_assurance);
-    let builder_trusted = policy.trusted_builders.contains(&provenance.builder_id);
 
     if let Err(ProvenanceError::PolicyInvalid { reason }) = policy.validate() {
         return GateDecision {
             artifact_id: provenance.artifact_id.clone(),
             passed: false,
-            missing_attestations: missing,
+            missing_attestations: Vec::new(),
             assurance_ok,
             builder_trusted: false,
             failure_reason: Some(GateFailure::PolicyInvalid { reason }),
@@ -241,7 +252,35 @@ pub fn evaluate_gate(
         };
     }
 
-    if let Some(reason) = invalid_artifact_id_reason(&provenance.artifact_id) {
+    let builder_trusted = policy.trusted_builders.contains(&provenance.builder_id);
+    let artifact_id_failure = invalid_artifact_id_reason(&provenance.artifact_id);
+
+    if let Some(provenance_reason) = invalid_provenance_reason(provenance) {
+        let failure_reason = artifact_id_failure
+            .map(|reason| GateFailure::InvalidArtifactId { reason })
+            .unwrap_or(GateFailure::InvalidProvenance {
+                reason: provenance_reason,
+            });
+        return GateDecision {
+            artifact_id: provenance.artifact_id.clone(),
+            passed: false,
+            missing_attestations: Vec::new(),
+            assurance_ok,
+            builder_trusted,
+            failure_reason: Some(failure_reason),
+            trace_id: trace_id.to_string(),
+            timestamp: timestamp.to_string(),
+        };
+    }
+
+    let missing: Vec<AttestationType> = policy
+        .required_attestations
+        .iter()
+        .filter(|req| !provenance.attestations.contains(req))
+        .cloned()
+        .collect();
+
+    if let Some(reason) = artifact_id_failure {
         return GateDecision {
             artifact_id: provenance.artifact_id.clone(),
             passed: false,
@@ -298,6 +337,13 @@ fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
     }
     if trimmed != artifact_id {
         return Some("artifact_id contains leading or trailing whitespace".to_string());
+    }
+    None
+}
+
+fn invalid_provenance_reason(provenance: &ArtifactProvenance) -> Option<String> {
+    if provenance.attestations.len() > MAX_ATTESTATIONS {
+        return Some(format!("attestations exceeds maximum of {MAX_ATTESTATIONS}"));
     }
     None
 }
@@ -995,6 +1041,96 @@ mod tests {
     }
 
     #[test]
+    fn oversized_required_attestations_policy_is_invalid() {
+        let policy = ProvenancePolicy {
+            required_attestations: (0..=MAX_ATTESTATIONS)
+                .map(|idx| AttestationType::Custom(format!("att-{idx}")))
+                .collect(),
+            min_build_assurance: BuildAssurance::Basic,
+            trusted_builders: vec!["builder-alpha".to_string()],
+        };
+
+        let err = policy
+            .validate()
+            .expect_err("oversized required attestations must fail closed");
+
+        assert!(matches!(
+            err,
+            ProvenanceError::PolicyInvalid { reason }
+                if reason.contains("required_attestations exceeds maximum")
+        ));
+    }
+
+    #[test]
+    fn oversized_trusted_builders_policy_is_invalid() {
+        let policy = ProvenancePolicy {
+            required_attestations: vec![AttestationType::Slsa],
+            min_build_assurance: BuildAssurance::Basic,
+            trusted_builders: (0..=MAX_TRUSTED_BUILDERS)
+                .map(|idx| format!("builder-{idx}"))
+                .collect(),
+        };
+
+        let err = policy
+            .validate()
+            .expect_err("oversized trusted builder lists must fail closed");
+
+        assert!(matches!(
+            err,
+            ProvenanceError::PolicyInvalid { reason }
+                if reason.contains("trusted_builders exceeds maximum")
+        ));
+    }
+
+    #[test]
+    fn invalid_policy_does_not_collect_unbounded_missing_attestations() {
+        let policy = ProvenancePolicy {
+            required_attestations: (0..=MAX_ATTESTATIONS)
+                .map(|idx| AttestationType::Custom(format!("att-{idx}")))
+                .collect(),
+            min_build_assurance: BuildAssurance::Basic,
+            trusted_builders: vec!["builder-alpha".to_string()],
+        };
+        let mut provenance = good_provenance();
+        provenance.attestations.clear();
+
+        let decision = evaluate_gate(&policy, &provenance, "t-policy-cap", "ts");
+
+        assert!(!decision.passed);
+        assert!(decision.missing_attestations.is_empty());
+        assert!(matches!(
+            decision.failure_reason,
+            Some(GateFailure::PolicyInvalid { ref reason })
+                if reason.contains("required_attestations exceeds maximum")
+        ));
+    }
+
+    #[test]
+    fn oversized_provenance_attestations_fail_closed_before_missing_scan() {
+        let policy = ProvenancePolicy {
+            required_attestations: vec![AttestationType::Slsa],
+            min_build_assurance: BuildAssurance::Basic,
+            trusted_builders: vec!["builder-alpha".to_string()],
+        };
+        let mut provenance = good_provenance();
+        provenance.attestations = (0..=MAX_ATTESTATIONS)
+            .map(|idx| AttestationType::Custom(format!("claim-{idx}")))
+            .collect();
+
+        let decision = evaluate_gate(&policy, &provenance, "t-provenance-cap", "ts");
+
+        assert!(!decision.passed);
+        assert!(decision.missing_attestations.is_empty());
+        assert!(decision.assurance_ok);
+        assert!(decision.builder_trusted);
+        assert!(matches!(
+            decision.failure_reason,
+            Some(GateFailure::InvalidProvenance { ref reason })
+                if reason.contains("attestations exceeds maximum")
+        ));
+    }
+
+    #[test]
     fn empty_required_custom_attestation_policy_is_invalid() {
         let policy = ProvenancePolicy {
             required_attestations: vec![AttestationType::Custom(String::new())],
@@ -1097,10 +1233,15 @@ mod tests {
         };
         assert!(f4.to_string().contains("PROV_ARTIFACT_INVALID"));
 
-        let f5 = GateFailure::PolicyInvalid {
+        let f5 = GateFailure::InvalidProvenance {
             reason: "bad".into(),
         };
-        assert!(f5.to_string().contains("PROV_POLICY_INVALID"));
+        assert!(f5.to_string().contains("PROV_PROVENANCE_INVALID"));
+
+        let f6 = GateFailure::PolicyInvalid {
+            reason: "bad".into(),
+        };
+        assert!(f6.to_string().contains("PROV_POLICY_INVALID"));
     }
 
     #[test]

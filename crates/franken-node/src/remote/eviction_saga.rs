@@ -29,6 +29,7 @@ pub const DEFAULT_MAX_AUDIT_RECORDS: usize = 4_096;
 pub const DEFAULT_MAX_TRANSITIONS_PER_SAGA: usize = 512;
 use crate::capacity_defaults::aliases::MAX_SAGAS;
 const ERR_INVALID_ARTIFACT_ID: &str = "ERR_INVALID_ARTIFACT_ID";
+const ERR_INVALID_TRACE_ID: &str = "ERR_INVALID_TRACE_ID";
 const ERR_SAGA_ID_REUSED: &str = "ERR_SAGA_ID_REUSED";
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 
@@ -45,6 +46,29 @@ fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
     }
     if trimmed != artifact_id {
         return Some("artifact_id contains leading or trailing whitespace".to_string());
+    }
+    if artifact_id.starts_with('/') {
+        return Some("artifact_id must not be an absolute path".to_string());
+    }
+    if artifact_id.contains('\\') {
+        return Some("artifact_id must not contain backslashes".to_string());
+    }
+    if artifact_id.split('/').any(|segment| segment == "..") {
+        return Some("artifact_id must not contain parent directory segments".to_string());
+    }
+    None
+}
+
+fn invalid_trace_id_reason(trace_id: &str) -> Option<String> {
+    let trimmed = trace_id.trim();
+    if trimmed.is_empty() {
+        return Some("trace_id must not be empty".to_string());
+    }
+    if trace_id.chars().any(char::is_control) {
+        return Some("trace_id contains control characters".to_string());
+    }
+    if trimmed != trace_id {
+        return Some("trace_id contains leading or trailing whitespace".to_string());
     }
     None
 }
@@ -337,6 +361,9 @@ impl EvictionSagaManager {
     ) -> Result<String, String> {
         if let Some(reason) = invalid_artifact_id_reason(artifact_id) {
             return Err(format!("{ERR_INVALID_ARTIFACT_ID}: {reason}"));
+        }
+        if let Some(reason) = invalid_trace_id_reason(trace_id) {
+            return Err(format!("{ERR_INVALID_TRACE_ID}: {reason}"));
         }
         if !has_remote_cap {
             return Err("RemoteCap required for upload phase".to_string());
@@ -840,10 +867,12 @@ impl EvictionSagaManager {
     pub fn content_hash(&self) -> String {
         let content =
             serde_json::to_string(&self.sagas).unwrap_or_else(|e| format!("__serde_err:{e}"));
-        format!(
-            "{:x}",
-            Sha256::digest([b"eviction_saga_content_v1:" as &[u8], content.as_bytes()].concat())
-        )
+        let mut hasher = Sha256::new();
+        hasher.update(b"eviction_saga_content_v1:");
+        let content_len = u64::try_from(content.len()).unwrap_or(u64::MAX);
+        hasher.update(content_len.to_le_bytes());
+        hasher.update(content.as_bytes());
+        format!("{:x}", hasher.finalize())
     }
 
     /// Saga count.
@@ -980,6 +1009,23 @@ mod tests {
         let err = mgr.start_saga(" artifact-a ", true, "t1").unwrap_err();
         assert!(err.contains(ERR_INVALID_ARTIFACT_ID));
         assert!(err.contains("leading or trailing whitespace"));
+    }
+
+    #[test]
+    fn test_start_rejects_artifact_id_path_traversal_inputs() {
+        let cases = [
+            ("/artifact-a", "absolute path"),
+            ("artifact\\a", "backslashes"),
+            ("../artifact-a", "parent directory"),
+            ("tenant/../artifact-a", "parent directory"),
+        ];
+
+        for (artifact_id, expected) in cases {
+            let mut mgr = EvictionSagaManager::new();
+            let err = mgr.start_saga(artifact_id, true, "t1").unwrap_err();
+            assert!(err.contains(ERR_INVALID_ARTIFACT_ID), "{err}");
+            assert!(err.contains(expected), "{err}");
+        }
     }
 
     #[test]
@@ -1211,6 +1257,31 @@ mod tests {
         let mut m2 = EvictionSagaManager::new();
         m2.start_saga("a", true, "t1").expect("should succeed");
         assert_eq!(m1.content_hash(), m2.content_hash());
+    }
+
+    #[test]
+    fn test_content_hash_length_prefixes_serialized_saga_payload() {
+        use sha2::{Digest, Sha256};
+
+        let mut mgr = EvictionSagaManager::new();
+        mgr.start_saga("a", true, "t1").expect("should succeed");
+
+        let content = serde_json::to_string(&mgr.sagas).expect("sagas should serialize");
+        let mut expected_hasher = Sha256::new();
+        expected_hasher.update(b"eviction_saga_content_v1:");
+        let content_len = u64::try_from(content.len()).unwrap_or(u64::MAX);
+        expected_hasher.update(content_len.to_le_bytes());
+        expected_hasher.update(content.as_bytes());
+        let expected = format!("{:x}", expected_hasher.finalize());
+
+        let mut unprefixed_hasher = Sha256::new();
+        unprefixed_hasher.update(b"eviction_saga_content_v1:");
+        unprefixed_hasher.update(content.as_bytes());
+        let unprefixed = format!("{:x}", unprefixed_hasher.finalize());
+
+        let actual = mgr.content_hash();
+        assert_eq!(actual, expected);
+        assert_ne!(actual, unprefixed);
     }
 
     #[test]
@@ -1839,7 +1910,8 @@ mod eviction_saga_boundary_negative_tests {
     fn negative_start_saga_rejects_empty_artifact_id() {
         let mut mgr = EvictionSagaManager::new();
 
-        let err = mgr.start_saga("", true, "trace-empty-artifact")
+        let err = mgr
+            .start_saga("", true, "trace-empty-artifact")
             .expect_err("empty artifact ID should be rejected");
 
         assert!(err.contains(ERR_INVALID_ARTIFACT_ID));
@@ -1850,7 +1922,8 @@ mod eviction_saga_boundary_negative_tests {
     fn negative_start_saga_rejects_reserved_artifact_id() {
         let mut mgr = EvictionSagaManager::new();
 
-        let err = mgr.start_saga(RESERVED_ARTIFACT_ID, true, "trace-reserved")
+        let err = mgr
+            .start_saga(RESERVED_ARTIFACT_ID, true, "trace-reserved")
             .expect_err("reserved artifact ID should be rejected");
 
         assert!(err.contains(ERR_INVALID_ARTIFACT_ID));
@@ -1861,7 +1934,8 @@ mod eviction_saga_boundary_negative_tests {
     fn negative_start_saga_rejects_artifact_id_with_control_characters() {
         let mut mgr = EvictionSagaManager::new();
 
-        let err = mgr.start_saga("artifact\n\r\t", true, "trace-control-chars")
+        let err = mgr
+            .start_saga("artifact\n\r\t", true, "trace-control-chars")
             .expect_err("artifact ID with control characters should be rejected");
 
         assert!(err.contains(ERR_INVALID_ARTIFACT_ID));
@@ -1872,7 +1946,8 @@ mod eviction_saga_boundary_negative_tests {
     fn negative_start_saga_rejects_artifact_id_with_leading_trailing_whitespace() {
         let mut mgr = EvictionSagaManager::new();
 
-        let err = mgr.start_saga("  artifact-id  ", true, "trace-whitespace")
+        let err = mgr
+            .start_saga("  artifact-id  ", true, "trace-whitespace")
             .expect_err("artifact ID with whitespace should be rejected");
 
         assert!(err.contains(ERR_INVALID_ARTIFACT_ID));
@@ -1883,9 +1958,11 @@ mod eviction_saga_boundary_negative_tests {
     fn negative_start_saga_rejects_empty_trace_id() {
         let mut mgr = EvictionSagaManager::new();
 
-        let err = mgr.start_saga("artifact-valid", true, "")
+        let err = mgr
+            .start_saga("artifact-valid", true, "")
             .expect_err("empty trace ID should be rejected");
 
+        assert!(err.contains(ERR_INVALID_TRACE_ID));
         assert!(err.contains("trace_id"));
     }
 
@@ -1893,16 +1970,19 @@ mod eviction_saga_boundary_negative_tests {
     fn negative_start_saga_rejects_trace_id_with_nul_bytes() {
         let mut mgr = EvictionSagaManager::new();
 
-        let err = mgr.start_saga("artifact-valid", true, "trace\0injection")
+        let err = mgr
+            .start_saga("artifact-valid", true, "trace\0injection")
             .expect_err("trace ID with nul bytes should be rejected");
 
+        assert!(err.contains(ERR_INVALID_TRACE_ID));
         assert!(err.contains("trace_id"));
     }
 
     #[test]
     fn negative_start_saga_prevents_duplicate_saga_id_collision() {
         let mut mgr = EvictionSagaManager::new();
-        let first_id = mgr.start_saga("artifact-first", true, "trace-1")
+        let first_id = mgr
+            .start_saga("artifact-first", true, "trace-1")
             .expect("first saga should succeed");
 
         // Manually create collision by reusing ID
@@ -1922,9 +2002,9 @@ mod eviction_saga_boundary_negative_tests {
     #[test]
     fn negative_transition_saga_rejects_nonexistent_saga_id() {
         let mut mgr = EvictionSagaManager::new();
-        let nonexistent_id = SagaId("nonexistent-saga".to_string());
 
-        let err = mgr.transition_saga(&nonexistent_id, SagaEvent::UploadSucceeded, 1000, "trace-nonexistent")
+        let err = mgr
+            .begin_upload("nonexistent-saga", 1000, "trace-nonexistent")
             .expect_err("nonexistent saga ID should be rejected");
 
         assert!(err.contains("not found") || err.contains("nonexistent"));
@@ -1933,11 +2013,13 @@ mod eviction_saga_boundary_negative_tests {
     #[test]
     fn negative_transition_saga_rejects_invalid_state_transition() {
         let mut mgr = EvictionSagaManager::new();
-        let saga_id = mgr.start_saga("artifact-invalid-transition", true, "trace-start")
+        let saga_id = mgr
+            .start_saga("artifact-invalid-transition", true, "trace-start")
             .expect("saga start should succeed");
 
-        // Try invalid transition: Uploading -> Retired (skipping intermediate states)
-        let err = mgr.transition_saga(&saga_id, SagaEvent::RetireSucceeded, 1000, "trace-invalid")
+        // Try invalid transition: Created -> Complete (skipping intermediate states)
+        let err = mgr
+            .complete_retire(&saga_id, 1000, "trace-invalid")
             .expect_err("invalid state transition should be rejected");
 
         assert!(err.contains("invalid") || err.contains("transition"));
@@ -1946,7 +2028,8 @@ mod eviction_saga_boundary_negative_tests {
     #[test]
     fn negative_recover_saga_handles_corrupted_saga_state_gracefully() {
         let mut mgr = EvictionSagaManager::new();
-        let saga_id = mgr.start_saga("artifact-corrupted", true, "trace-start")
+        let saga_id = mgr
+            .start_saga("artifact-corrupted", true, "trace-start")
             .expect("saga start should succeed");
 
         // Manually corrupt saga state
@@ -1961,7 +2044,7 @@ mod eviction_saga_boundary_negative_tests {
         // Should handle corrupted state gracefully
         match action {
             Ok(CompensationAction::None) => (), // Graceful handling
-            Ok(_) => (), // Other compensation actions are acceptable
+            Ok(_) => (),                        // Other compensation actions are acceptable
             Err(err) => {
                 assert!(err.contains("corrupted") || err.contains("invalid"));
             }
@@ -1995,7 +2078,7 @@ mod eviction_saga_boundary_negative_tests {
 
     #[test]
     fn negative_serde_rejects_unknown_saga_event_variant() {
-        let result: Result<SagaEvent, _> = serde_json::from_str(r#""UnknownEvent""#);
+        let result: Result<SagaPhase, _> = serde_json::from_str(r#""UnknownEvent""#);
 
         assert!(result.is_err());
     }
@@ -2003,10 +2086,11 @@ mod eviction_saga_boundary_negative_tests {
     #[test]
     fn negative_saga_transition_with_extremely_old_timestamp_handles_gracefully() {
         let mut mgr = EvictionSagaManager::new();
-        let saga_id = mgr.start_saga("artifact-old-timestamp", true, "trace-start")
+        let saga_id = mgr
+            .start_saga("artifact-old-timestamp", true, "trace-start")
             .expect("saga start should succeed");
 
-        let result = mgr.transition_saga(&saga_id, SagaEvent::UploadSucceeded, 0, "trace-old-timestamp");
+        let result = mgr.begin_upload(&saga_id, 0, "trace-old-timestamp");
 
         // Should handle old timestamps gracefully
         match result {

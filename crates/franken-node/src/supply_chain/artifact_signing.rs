@@ -22,7 +22,7 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     }
     if items.len() >= cap {
         let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
@@ -117,7 +117,11 @@ pub struct KeyId(pub String);
 impl KeyId {
     /// Derive a key ID from a verifying (public) key: first 8 bytes of SHA-256, hex-encoded.
     pub fn from_verifying_key(vk: &VerifyingKey) -> Self {
-        let hash = Sha256::digest([b"artifact_signing_keyid_v1:" as &[u8], vk.as_bytes()].concat());
+        let mut hasher = Sha256::new();
+        hasher.update(b"artifact_signing_keyid_v1:");
+        hasher.update(len_to_u64(vk.as_bytes().len()).to_le_bytes());
+        hasher.update(vk.as_bytes());
+        let hash = hasher.finalize();
         Self(hex::encode(&hash[..8]))
     }
 }
@@ -327,8 +331,11 @@ impl KeyRing {
 
 /// Compute SHA-256 of arbitrary bytes, returned as hex string.
 pub fn sha256_hex(data: &[u8]) -> String {
-    let digest = Sha256::digest([b"artifact_signing_hash_v1:" as &[u8], data].concat());
-    hex::encode(digest)
+    let mut hasher = Sha256::new();
+    hasher.update(b"artifact_signing_hash_v1:");
+    hasher.update(len_to_u64(data.len()).to_le_bytes());
+    hasher.update(data);
+    hex::encode(hasher.finalize())
 }
 
 /// Sign arbitrary bytes with an Ed25519 signing key.

@@ -1197,6 +1197,7 @@ mod tests {
         let fired = clock.advance(50).unwrap();
         assert_eq!(fired.len(), 1);
         assert_eq!(fired[0].0, 50);
+        assert_eq!(fired[0].1.label, "t1");
     }
 
     // ── NEGATIVE-PATH INLINE TESTS ─────────────────────────────────────────
@@ -1889,8 +1890,6 @@ mod tests {
         let large_result = LabRuntime::run_scenario_dpor(&large_interleavings_config, &links, &quick_scenario).unwrap();
         assert!(large_result.passed);
         assert_eq!(large_result.interleavings_explored, 100_000);
-    }
-        assert_eq!(fired[0].1.label, "t1");
     }
 
     #[test]

@@ -206,8 +206,10 @@ impl HardwareProfile {
     pub fn fingerprint(&self) -> String {
         let mut hasher = sha2::Sha256::new();
         sha2::Digest::update(&mut hasher, b"benchmark_suite_fingerprint_v1:" as &[u8]);
+        sha2::Digest::update(&mut hasher, (self.cpu.len() as u64).to_le_bytes());
         sha2::Digest::update(&mut hasher, self.cpu.as_bytes());
         sha2::Digest::update(&mut hasher, self.memory_mb.to_le_bytes());
+        sha2::Digest::update(&mut hasher, (self.os.len() as u64).to_le_bytes());
         sha2::Digest::update(&mut hasher, self.os.as_bytes());
         format!("{:x}", sha2::Digest::finalize(hasher))
     }
@@ -301,6 +303,7 @@ impl BenchmarkReport {
             serde_json::to_string(&report_for_hash).unwrap_or_else(|e| format!("__serde_err:{e}"));
         let mut hasher = sha2::Sha256::new();
         sha2::Digest::update(&mut hasher, b"benchmark_suite_json_v1:" as &[u8]);
+        sha2::Digest::update(&mut hasher, (json.len() as u64).to_le_bytes());
         sha2::Digest::update(&mut hasher, json.as_bytes());
         format!("sha256:{:x}", sha2::Digest::finalize(hasher))
     }
@@ -947,6 +950,7 @@ pub fn from_json(json: &str) -> Result<BenchmarkReport, serde_json::Error> {
 fn deterministic_seed(name: &str) -> u64 {
     let mut hasher = sha2::Sha256::new();
     sha2::Digest::update(&mut hasher, b"benchmark_suite_seed_v1:" as &[u8]);
+    sha2::Digest::update(&mut hasher, (name.len() as u64).to_le_bytes());
     sha2::Digest::update(&mut hasher, name.as_bytes());
     let digest = sha2::Digest::finalize(hasher);
     let mut bytes = [0_u8; 8];

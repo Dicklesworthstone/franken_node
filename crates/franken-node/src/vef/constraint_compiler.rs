@@ -402,7 +402,7 @@ impl ConstraintCompiler {
             ),
         });
         if events.len() > MAX_EVENTS {
-            let overflow = events.len() - MAX_EVENTS;
+            let overflow = events.len().saturating_sub(MAX_EVENTS);
             events.drain(0..overflow);
         }
 
@@ -579,7 +579,7 @@ impl ConstraintCompiler {
                     ),
                 });
                 if events.len() > MAX_EVENTS {
-                    let overflow = events.len() - MAX_EVENTS;
+                    let overflow = events.len().saturating_sub(MAX_EVENTS);
                     events.drain(0..overflow);
                 }
             }
@@ -608,7 +608,7 @@ impl ConstraintCompiler {
             ),
         });
         if events.len() > MAX_EVENTS {
-            let overflow = events.len() - MAX_EVENTS;
+            let overflow = events.len().saturating_sub(MAX_EVENTS);
             events.drain(0..overflow);
         }
 

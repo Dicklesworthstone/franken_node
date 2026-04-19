@@ -82,7 +82,7 @@ impl IncidentTrace {
         hasher.update(b"mitigation_synthesis_hash_v1:");
         for d in &self.decisions {
             hasher.update(d.sequence_number.to_le_bytes());
-            hasher.update((d.action.len() as u64).to_le_bytes());
+            hasher.update((u32::try_from(d.action.len()).unwrap_or(u32::MAX) as u64).to_le_bytes());
             hasher.update(d.action.as_bytes());
             hasher.update(d.expected_loss.to_le_bytes());
         }
@@ -574,10 +574,10 @@ impl IncidentLab {
 fn sign_structured(secret: &str, domain: &[u8], fields: &[&[u8]]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(domain);
-    hasher.update((secret.len() as u64).to_le_bytes());
+    hasher.update((u32::try_from(secret.len()).unwrap_or(u32::MAX) as u64).to_le_bytes());
     hasher.update(secret.as_bytes());
     for field in fields {
-        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update((u32::try_from(field.len()).unwrap_or(u32::MAX) as u64).to_le_bytes());
         hasher.update(field);
     }
     hex::encode(hasher.finalize())

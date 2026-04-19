@@ -291,6 +291,9 @@ impl RedTeamEvaluations {
             }),
         );
 
+        if !engagement.confidence_score.is_finite() {
+            return Err("Confidence score must be finite (not NaN or infinite)".to_string());
+        }
         if !(0.0..=1.0).contains(&engagement.confidence_score) {
             return Err("Confidence score must be between 0.0 and 1.0".to_string());
         }
@@ -549,21 +552,26 @@ fn compute_catalog_content_hash(
     by_type: &BTreeMap<String, usize>,
     by_severity: &BTreeMap<String, usize>,
 ) -> String {
-    let hash_input = serde_json::json!({
-        "total_engagements": total_engagements,
-        "total_findings": total_findings,
-        "by_type": by_type,
-        "by_severity": by_severity,
-        "schema_version": schema_version,
-    })
-    .to_string();
-    hex::encode(Sha256::digest(
-        [
-            b"redteam_evaluations_hash_v1:" as &[u8],
-            hash_input.as_bytes(),
-        ]
-        .concat(),
-    ))
+    let mut hasher = Sha256::new();
+    hasher.update(b"redteam_evaluations_hash_v1:");
+
+    // Length-prefix each variable-length field to prevent collision attacks
+    hasher.update((total_engagements as u64).to_le_bytes());
+    hasher.update((total_findings as u64).to_le_bytes());
+
+    hasher.update((schema_version.len() as u64).to_le_bytes());
+    hasher.update(schema_version.as_bytes());
+
+    // Serialize maps deterministically with length prefixes
+    let by_type_json = serde_json::to_string(by_type).unwrap_or_default();
+    hasher.update((by_type_json.len() as u64).to_le_bytes());
+    hasher.update(by_type_json.as_bytes());
+
+    let by_severity_json = serde_json::to_string(by_severity).unwrap_or_default();
+    hasher.update((by_severity_json.len() as u64).to_le_bytes());
+    hasher.update(by_severity_json.as_bytes());
+
+    hex::encode(hasher.finalize())
 }
 
 // ---------------------------------------------------------------------------

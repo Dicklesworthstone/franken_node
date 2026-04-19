@@ -275,12 +275,14 @@ fn hash_f64(hasher: &mut Sha256, value: f64) {
 }
 
 fn hash_string(hasher: &mut Sha256, value: &str) {
-    hasher.update((value.len() as u64).to_le_bytes());
+    let len = u64::try_from(value.len()).unwrap_or(u64::MAX);
+    hasher.update(len.to_le_bytes());
     hasher.update(value.as_bytes());
 }
 
 fn hash_measurements(hasher: &mut Sha256, measurements: &[MetricMeasurement]) {
-    hasher.update((measurements.len() as u64).to_le_bytes());
+    let len = u64::try_from(measurements.len()).unwrap_or(u64::MAX);
+    hasher.update(len.to_le_bytes());
     for measurement in measurements {
         hash_string(hasher, &measurement.metric_id);
         hash_f64(hasher, measurement.score);
@@ -289,7 +291,8 @@ fn hash_measurements(hasher: &mut Sha256, measurements: &[MetricMeasurement]) {
         hash_f64(hasher, measurement.confidence_interval.confidence_level);
         hasher.update(measurement.sample_count.to_le_bytes());
         hash_string(hasher, &measurement.formula_version);
-        hasher.update((measurement.raw_data.len() as u64).to_le_bytes());
+        let raw_data_len = u64::try_from(measurement.raw_data.len()).unwrap_or(u64::MAX);
+        hasher.update(raw_data_len.to_le_bytes());
         for (key, value) in &measurement.raw_data {
             hash_string(hasher, key);
             hash_f64(hasher, *value);
@@ -298,7 +301,8 @@ fn hash_measurements(hasher: &mut Sha256, measurements: &[MetricMeasurement]) {
 }
 
 fn hash_gate_results(hasher: &mut Sha256, gate_results: &[MetricGateResult]) {
-    hasher.update((gate_results.len() as u64).to_le_bytes());
+    let len = u64::try_from(gate_results.len()).unwrap_or(u64::MAX);
+    hasher.update(len.to_le_bytes());
     for gate in gate_results {
         hash_string(hasher, &gate.metric_id);
         hash_f64(hasher, gate.score);
@@ -432,10 +436,15 @@ impl CoMetricEngine {
         }
 
         // Check coverage
-        let sec_covered =
-            security_measurements.len() as f64 / SecurityMetricCategory::all().len().max(1) as f64;
-        let trust_covered =
-            trust_measurements.len() as f64 / TrustMetricCategory::all().len().max(1) as f64;
+        let sec_count = security_measurements.len();
+        let sec_total = SecurityMetricCategory::all().len().max(1);
+        let sec_covered = sec_count as f64 / sec_total as f64;
+        let sec_covered = if !sec_covered.is_finite() { 0.0 } else { sec_covered };
+
+        let trust_count = trust_measurements.len();
+        let trust_total = TrustMetricCategory::all().len().max(1);
+        let trust_covered = trust_count as f64 / trust_total as f64;
+        let trust_covered = if !trust_covered.is_finite() { 0.0 } else { trust_covered };
 
         let all_gates_pass = gate_results.iter().all(|g| g.passed);
         let coverage_ok =
@@ -526,9 +535,13 @@ impl CoMetricEngine {
 }
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
-        items.drain(0..overflow);
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }

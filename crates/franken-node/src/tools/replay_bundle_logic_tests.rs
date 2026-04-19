@@ -5,7 +5,6 @@
 mod replay_bundle_logic_tests {
     use super::super::replay_bundle::*;
     use serde_json::{Value, json};
-    use std::collections::{BTreeMap, BTreeSet};
 
     // ── push_bounded function correctness tests ──
 
@@ -29,9 +28,7 @@ mod replay_bundle_logic_tests {
         let mut items = vec![1, 2, 3];
         push_bounded(&mut items, 4, 0);
 
-        // With zero capacity, should remove all and add new
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0], 4);
+        assert!(items.is_empty(), "zero capacity should retain no items");
     }
 
     #[test]
@@ -187,10 +184,20 @@ mod replay_bundle_logic_tests {
                 payload: json!({"change": "test"}),
                 provenance_ref: "refs/test.json".to_string(),
                 parent_event_id: None,
+                state_snapshot: None,
+                policy_version: None,
             }],
             evidence_refs: vec!["refs/test.json".to_string()],
-            metadata: json!({"test": "metadata"}),
+            metadata: IncidentEvidenceMetadata {
+                title: "Synthetic incident".to_string(),
+                affected_components: vec!["logic-test".to_string()],
+                tags: vec!["test".to_string()],
+            },
         }
+    }
+
+    fn validate(evidence: &IncidentEvidencePackage) -> Result<(), ReplayBundleError> {
+        validate_incident_evidence_package(evidence, None)
     }
 
     #[test]
@@ -198,7 +205,7 @@ mod replay_bundle_logic_tests {
         let mut evidence = minimal_evidence();
         evidence.incident_id = "".to_string();
 
-        let result = evidence.validate();
+        let result = validate(&evidence);
         assert!(result.is_err());
         assert!(
             matches!(result.unwrap_err(), ReplayBundleError::EvidenceFieldEmpty { field } if field == "incident_id")
@@ -210,7 +217,7 @@ mod replay_bundle_logic_tests {
         let mut evidence = minimal_evidence();
         evidence.events.clear();
 
-        let result = evidence.validate();
+        let result = validate(&evidence);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -228,9 +235,11 @@ mod replay_bundle_logic_tests {
             payload: json!({"duplicate": true}),
             provenance_ref: "refs/test2.json".to_string(),
             parent_event_id: None,
+            state_snapshot: None,
+            policy_version: None,
         });
 
-        let result = evidence.validate();
+        let result = validate(&evidence);
         assert!(result.is_err());
         assert!(
             matches!(result.unwrap_err(), ReplayBundleError::EvidenceDuplicateEventId { event_id } if event_id == "evt-001")
@@ -242,7 +251,7 @@ mod replay_bundle_logic_tests {
         let mut evidence = minimal_evidence();
         evidence.events[0].parent_event_id = Some("evt-001".to_string()); // Self-reference
 
-        let result = evidence.validate();
+        let result = validate(&evidence);
         assert!(result.is_err());
         assert!(
             matches!(result.unwrap_err(), ReplayBundleError::EvidenceSelfParentRef { event_id } if event_id == "evt-001")
@@ -254,7 +263,7 @@ mod replay_bundle_logic_tests {
         let mut evidence = minimal_evidence();
         evidence.events[0].parent_event_id = Some("nonexistent".to_string());
 
-        let result = evidence.validate();
+        let result = validate(&evidence);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -271,7 +280,7 @@ mod replay_bundle_logic_tests {
         let mut evidence = minimal_evidence();
         evidence.events[0].provenance_ref = "refs/unknown.json".to_string();
 
-        let result = evidence.validate();
+        let result = validate(&evidence);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -288,7 +297,7 @@ mod replay_bundle_logic_tests {
         let mut evidence = minimal_evidence();
         evidence.evidence_refs = vec!["/absolute/path.json".to_string()]; // Absolute path
 
-        let result = evidence.validate();
+        let result = validate(&evidence);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -307,9 +316,11 @@ mod replay_bundle_logic_tests {
             payload: json!({"earlier": true}),
             provenance_ref: "refs/test.json".to_string(),
             parent_event_id: None,
+            state_snapshot: None,
+            policy_version: None,
         });
 
-        let result = evidence.validate();
+        let result = validate(&evidence);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -373,7 +384,7 @@ mod replay_bundle_logic_tests {
         let mut evidence = minimal_evidence();
         evidence.schema_version = "wrong/schema/v1".to_string();
 
-        let result = evidence.validate();
+        let result = validate(&evidence);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -387,19 +398,19 @@ mod replay_bundle_logic_tests {
 
         // Invalid RFC3339 timestamp
         evidence.collected_at = "not-a-timestamp".to_string();
-        let result = evidence.validate();
+        let result = validate(&evidence);
         assert!(result.is_err());
 
         // Test with various timestamp formats
         evidence.collected_at = "2026-02-20T10:00:00Z".to_string(); // Without microseconds
         assert!(
-            evidence.validate().is_ok(),
+            validate(&evidence).is_ok(),
             "Should accept timestamp without microseconds"
         );
 
         evidence.collected_at = "2026-02-20T10:00:00.000Z".to_string(); // With milliseconds
         assert!(
-            evidence.validate().is_ok(),
+            validate(&evidence).is_ok(),
             "Should accept timestamp with milliseconds"
         );
     }
@@ -417,7 +428,7 @@ mod replay_bundle_logic_tests {
         });
 
         // Should handle large payloads without crashing
-        let result = evidence.validate();
+        let result = validate(&evidence);
         assert!(result.is_ok(), "Should handle large payloads");
     }
 
@@ -439,12 +450,14 @@ mod replay_bundle_logic_tests {
                 } else {
                     None
                 },
+                state_snapshot: None,
+                policy_version: None,
             });
         }
         evidence.evidence_refs = vec!["refs/test.json".to_string()];
 
         // Should handle many events efficiently
-        let result = evidence.validate();
+        let result = validate(&evidence);
         assert!(result.is_ok(), "Should handle many events");
     }
 }

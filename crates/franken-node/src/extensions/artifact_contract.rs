@@ -16,6 +16,7 @@ pub const SCHEMA_VERSION: &str = "capability-artifact-v1.0";
 
 /// Reserved placeholder for unknown artifact identifiers.
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
+const MAX_TOKEN_BYTES: usize = crate::capacity_defaults::base::SMALL;
 const MAX_CAPABILITIES_PER_CONTRACT: usize = crate::capacity_defaults::base::STANDARD;
 
 fn is_reserved_artifact_id(artifact_id: &str) -> bool {
@@ -38,6 +39,9 @@ fn invalid_token_detail(field_name: &str, value: &str) -> Option<String> {
     }
     if !value.is_ascii() {
         return Some(format!("{field_name} contains non-ASCII characters"));
+    }
+    if value.len() > MAX_TOKEN_BYTES {
+        return Some(format!("{field_name} exceeds {MAX_TOKEN_BYTES} bytes"));
     }
     if value.bytes().any(|byte| byte.is_ascii_control()) {
         return Some(format!("{field_name} contains control characters"));
@@ -1209,6 +1213,24 @@ mod tests {
             return;
         };
         assert!(detail.contains("artifact_id contains"));
+    }
+
+    #[test]
+    fn admission_rejects_overlong_artifact_id() {
+        let gate = test_gate();
+        let contract = test_contract();
+        let overlong_id = "a".repeat(MAX_TOKEN_BYTES.saturating_add(1));
+        let artifact = make_artifact(&overlong_id, "ext-alpha", contract);
+        let outcome = gate.evaluate(&artifact);
+        let AdmissionOutcome::Denied {
+            reason: AdmissionDenialReason::InvalidContract { detail },
+            ..
+        } = outcome
+        else {
+            assert!(false, "expected overlong artifact_id to be denied");
+            return;
+        };
+        assert!(detail.contains("artifact_id exceeds"));
     }
 
     #[test]

@@ -9,10 +9,13 @@ pub mod protocol_harness;
 /// call actually installs the subscriber).
 #[cfg(test)]
 pub fn init_test_tracing() {
-    let _ = tracing_subscriber::fmt()
+    if let Err(e) = tracing_subscriber::fmt()
         .with_test_writer()
         .with_max_level(tracing::Level::DEBUG)
-        .try_init();
+        .try_init()
+    {
+        eprintln!("conformance: failed to initialize tracing: {}", e);
+    }
 }
 
 #[cfg(test)]

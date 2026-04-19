@@ -394,7 +394,8 @@ pub fn build_test_tree(leaves: &[&str]) -> (String, Vec<InclusionProof>) {
     let size = n.next_power_of_two();
     let mut level: Vec<String> = leaf_hashes.clone();
     while level.len() < size {
-        push_bounded(&mut level, level.last().cloned().unwrap_or_default(), 1024);
+        let last = level.last().cloned().unwrap_or_default();
+        push_bounded(&mut level, last, 1024);
     }
 
     // Build tree bottom-up, collecting sibling info for proofs

@@ -13,6 +13,14 @@ mod tests {
         event_codes,
     };
 
+    fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+        if items.len() >= cap {
+            let overflow = items.len().saturating_sub(cap).saturating_add(1);
+            items.drain(0..overflow.min(items.len()));
+        }
+        items.push(item);
+    }
+
     fn safe_metrics() -> PredictedMetrics {
         PredictedMetrics {
             latency_ms: 200,
@@ -1178,7 +1186,7 @@ mod perf_module_extreme_adversarial_negative_tests {
 
                 let start = Instant::now();
                 let _decision = gate.submit(candidate);
-                short_timings.push(start.elapsed());
+                push_bounded(&mut short_timings, start.elapsed(), 10000);
             }
 
             // Measure timing for long variant
@@ -1200,7 +1208,7 @@ mod perf_module_extreme_adversarial_negative_tests {
 
                 let start = Instant::now();
                 let _decision = gate.submit(candidate);
-                long_timings.push(start.elapsed());
+                push_bounded(&mut long_timings, start.elapsed(), 10000);
             }
 
             // Statistical analysis of timing differences
@@ -1224,7 +1232,7 @@ mod perf_module_extreme_adversarial_negative_tests {
         // Create memory fragmentation
         let mut fragmenters: Vec<Vec<u8>> = Vec::new();
         for i in 0..10000 {
-            fragmenters.push(vec![i as u8; (i % 100) + 1]);
+            push_bounded(&mut fragmenters, vec![i as u8; (i % 100) + 1], 50000);
         }
 
         // Process large batch of proposals under memory pressure
@@ -1256,7 +1264,7 @@ mod perf_module_extreme_adversarial_negative_tests {
                    "Proposal {} took too long under memory pressure: {:?}", i, duration);
 
             match decision {
-                GovernorDecision::Approved => successful_submissions += 1,
+                GovernorDecision::Approved => successful_submissions = successful_submissions.saturating_add(1),
                 GovernorDecision::Rejected(_) => {
                     // Some rejections are expected due to envelope violations
                 }
@@ -1265,7 +1273,7 @@ mod perf_module_extreme_adversarial_negative_tests {
             // Add more fragmentation during processing
             if i % 10 == 0 {
                 for j in 0..100 {
-                    fragmenters.push(vec![(i + j) as u8; ((i + j) % 50) + 1]);
+                    push_bounded(&mut fragmenters, vec![(i + j) as u8; ((i + j) % 50) + 1], 50000);
                 }
             }
         }
@@ -1876,7 +1884,7 @@ mod perf_module_extreme_adversarial_negative_tests {
                 let _decision = gate.submit(candidate);
                 let duration = start.elapsed();
 
-                timing_samples.push(duration);
+                push_bounded(&mut timing_samples, duration, 10000);
 
                 // Early termination if times become excessive
                 if duration > std::time::Duration::from_millis(100) {
@@ -2093,7 +2101,7 @@ mod perf_module_extreme_adversarial_negative_tests {
 
                             if let Ok(mut g) = gate_clone.lock() {
                                 let _decision = g.submit(proposal);
-                                local_corruption_count += 1;
+                                local_corruption_count = local_corruption_count.saturating_add(1);
                             }
                         },
 
@@ -2108,7 +2116,7 @@ mod perf_module_extreme_adversarial_negative_tests {
 
                             if let Ok(mut g) = gate_clone.lock() {
                                 let _reverted = g.live_check(&extreme_metrics);
-                                local_corruption_count += 1;
+                                local_corruption_count = local_corruption_count.saturating_add(1);
                             }
                         },
 
@@ -2131,7 +2139,7 @@ mod perf_module_extreme_adversarial_negative_tests {
                                            "Thread {}: Entry {} proposal_id contains null byte", thread_id, i);
                                 }
 
-                                local_corruption_count += 1;
+                                local_corruption_count = local_corruption_count.saturating_add(1);
                             }
                         },
 
@@ -2146,7 +2154,7 @@ mod perf_module_extreme_adversarial_negative_tests {
 
                             if let Ok(mut g) = gate_clone.lock() {
                                 let _result = g.reject_engine_internal_adjustment(&polluted_namespace);
-                                local_corruption_count += 1;
+                                local_corruption_count = local_corruption_count.saturating_add(1);
                             }
                         }
                     }
@@ -2158,7 +2166,7 @@ mod perf_module_extreme_adversarial_negative_tests {
                 local_corruption_count
             });
 
-            handles.push(handle);
+            push_bounded(&mut handles, handle, 100);
         }
 
         // Wait for all corruption attempts to complete
@@ -2586,7 +2594,7 @@ mod perf_module_extreme_adversarial_negative_tests {
             let correct_decision = gate.submit(correct_proposal);
 
             if matches!(correct_decision, GovernorDecision::Approved) {
-                expected_value += 1;
+                expected_value = expected_value.saturating_add(1);
             }
 
             // Submit with deliberately wrong old_value

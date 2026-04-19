@@ -17,6 +17,7 @@ use super::{
 
 const MAX_ANOMALY_ALERTS: usize = 4096;
 const MAX_DATA_POINTS: usize = 4096;
+const MAX_VALUES_PER_METRIC: usize = 1024;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
@@ -544,10 +545,10 @@ impl TelemetryPipeline {
             if !point.value.is_finite() {
                 continue;
             }
-            metric_values
+            let values = metric_values
                 .entry(point.metric)
-                .or_default()
-                .push(point.value);
+                .or_default();
+            push_bounded(values, point.value, MAX_VALUES_PER_METRIC);
         }
 
         for (metric, values) in &metric_values {
@@ -555,7 +556,7 @@ impl TelemetryPipeline {
                 continue;
             }
 
-            let current_avg: f64 = values.iter().sum::<f64>() / values.len() as f64;
+            let current_avg: f64 = values.iter().sum::<f64>() / u32::try_from(values.len()).unwrap_or(u32::MAX) as f64;
 
             if let Some(&baseline_val) = baseline.get(metric) {
                 if !baseline_val.is_finite() || baseline_val.abs() < f64::EPSILON {
@@ -1389,7 +1390,7 @@ mod tests {
         let metric = MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate);
         // Ingest data points significantly below baseline.
         for i in 0..5 {
-            pipeline.ingest(make_point(&format!("p{i}"), metric, 0.3, &ts(i as u32 + 1)));
+            pipeline.ingest(make_point(&format!("p{i}"), metric, 0.3, &ts((i as u32).saturating_add(1))));
         }
 
         let mut baseline = BTreeMap::new();
@@ -1438,7 +1439,7 @@ mod tests {
                 &format!("q{i}"),
                 metric,
                 3600.0,
-                &ts(i as u32 + 1),
+                &ts((i as u32).saturating_add(1)),
             ));
         }
 
@@ -1462,7 +1463,7 @@ mod tests {
                 &format!("r{i}"),
                 metric,
                 20.0,
-                &ts(i as u32 + 1),
+                &ts((i as u32).saturating_add(1)),
             ));
         }
 
@@ -1489,7 +1490,7 @@ mod tests {
                 &format!("d{i}"),
                 metric,
                 7200.0,
-                &ts(i as u32 + 1),
+                &ts((i as u32).saturating_add(1)),
             ));
         }
 
@@ -1516,7 +1517,7 @@ mod tests {
                 &format!("v{i}"),
                 metric,
                 500.0,
-                &ts(i as u32 + 1),
+                &ts((i as u32).saturating_add(1)),
             ));
         }
 
@@ -1543,7 +1544,7 @@ mod tests {
                 &format!("p{i}"),
                 metric,
                 0.88,
-                &ts(i as u32 + 1),
+                &ts((i as u32).saturating_add(1)),
             ));
         }
 
@@ -1822,7 +1823,7 @@ mod tests {
                 &format!("p{i}"),
                 metric,
                 i as f64,
-                &ts(i as u32 + 1),
+                &ts((i as u32).saturating_add(1)),
             ));
         }
         assert_eq!(pipeline.stored_count(), 5);
@@ -2004,7 +2005,7 @@ mod tests {
                 &format!("p{i}"),
                 metric,
                 i as f64,
-                &ts(i as u32 + 1),
+                &ts((i as u32).saturating_add(1)),
             ));
         }
 
@@ -2208,7 +2209,7 @@ mod tests {
         for (i, &value) in suspicious_values.iter().enumerate() {
             let point = TelemetryDataPoint {
                 point_id: format!("suspicious-{i}"),
-                timestamp: ts(i as u32 + 1),
+                timestamp: ts((i as u32).saturating_add(1)),
                 metric: MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate),
                 value,
                 aggregation: AggregationLevel::Raw,
@@ -2264,7 +2265,7 @@ mod tests {
 
         // Add legitimate anomalous data
         for i in 0..10 {
-            pipeline.ingest(make_point(&format!("anomaly-{i}"), metric, 0.1, &ts(i + 1)));
+            pipeline.ingest(make_point(&format!("anomaly-{i}"), metric, 0.1, &ts((i as u32).saturating_add(1))));
         }
 
         let mut baseline = BTreeMap::new();
@@ -2328,7 +2329,7 @@ mod tests {
                 point_id: point_id.to_string(),
                 timestamp: timestamp.to_string(),
                 metric,
-                value: (i + 1) as f64 * 10.0,
+                value: ((i as u32).saturating_add(1)) as f64 * 10.0,
                 aggregation: AggregationLevel::Raw,
                 privacy_filtered: false,
                 labels,

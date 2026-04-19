@@ -23,6 +23,12 @@ mod tests {
         validate_signed_manifest,
     };
 
+    fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+        if items.len() < cap {
+            items.push(item);
+        }
+    }
+
     fn cap(name: &str) -> frankenengine_extension_host::Capability {
         serde_json::from_value(serde_json::json!(name)).expect("fixture capability should parse")
     }
@@ -519,15 +525,15 @@ mod tests {
 
         // Add progressively larger attestation entries
         for i in 0..10_000 {
-            let large_digest = "sha256:".to_string() + &"a".repeat(64 + (i % 1000)); // Growing size
-            manifest.provenance.attestation_chain.push(AttestationRef {
+            let large_digest = "sha256:".to_string() + &"a".repeat(64_usize.saturating_add(i % 1000)); // Growing size
+            push_bounded(&mut manifest.provenance.attestation_chain, AttestationRef {
                 id: format!("memory-exhaustion-att-{:05}", i),
                 attestation_type: format!("massive-type-{}", "x".repeat(i % 100)),
                 digest: large_digest,
-            });
+            }, 1000);
 
             // Prevent actual memory exhaustion in test environment
-            if manifest.provenance.attestation_chain.len() * 200 > 100_000 {
+            if manifest.provenance.attestation_chain.len().saturating_mul(200) > 100_000 {
                 break;
             }
         }
@@ -632,9 +638,9 @@ mod tests {
         for i in 0..1000 {
             let complex_cap_name = format!(
                 "cap_{}_{}_{}_{}_{}",
-                i % 13, (i * 7) % 17, (i * 11) % 19, (i * 13) % 23, (i * 17) % 29
+                i % 13, i.saturating_mul(7) % 17, i.saturating_mul(11) % 19, i.saturating_mul(13) % 23, i.saturating_mul(17) % 29
             );
-            manifest.capabilities.push(cap(&complex_cap_name));
+            push_bounded(&mut manifest.capabilities, cap(&complex_cap_name), 100);
         }
 
         let start = Instant::now();
@@ -698,7 +704,7 @@ mod tests {
                         },
                         _ => {
                             manifest.capabilities.clear();
-                            manifest.capabilities.push(cap(&format!("race-cap-{}", thread_id)));
+                            push_bounded(&mut manifest.capabilities, cap(&format!("race-cap-{}", thread_id)), 10);
                         }
                     }
 

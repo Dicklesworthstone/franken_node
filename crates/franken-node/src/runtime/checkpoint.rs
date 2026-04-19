@@ -16,9 +16,11 @@ use crate::security::constant_time::ct_eq;
 
 use crate::capacity_defaults::aliases::MAX_EVENTS;
 
+const MAX_CHECKPOINT_RECORDS_PER_STREAM: usize = 4096;
+
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -285,7 +287,7 @@ impl InMemoryCheckpointBackend {
         if let Some(stream) = self.records.get_mut(orchestration_id)
             && let Some(record) = stream.get(index).cloned()
         {
-            stream.push(record);
+            push_bounded(stream, record, MAX_CHECKPOINT_RECORDS_PER_STREAM);
         }
     }
 
@@ -310,7 +312,7 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
         {
             return Ok(false);
         }
-        stream.push(record);
+        push_bounded(stream, record, MAX_CHECKPOINT_RECORDS_PER_STREAM);
         Ok(true)
     }
 
@@ -390,7 +392,7 @@ impl<B: CheckpointBackend> CheckpointWriter<B> {
         let records = self.backend.load_all(orchestration_id)?;
         let (latest, mut events) = verify_chain(orchestration_id, trace_id, &records);
         if let Some(meta) = latest.as_ref() {
-            events.push(CheckpointEvent {
+            push_bounded(&mut events, CheckpointEvent {
                 event_code: FN_CK_002_CHECKPOINT_RESTORE.to_string(),
                 event_name: CHECKPOINT_RESTORE.to_string(),
                 orchestration_id: orchestration_id.to_string(),
@@ -402,9 +404,9 @@ impl<B: CheckpointBackend> CheckpointWriter<B> {
                 trace_id: trace_id.to_string(),
                 contract_status: "valid".to_string(),
                 wall_clock_time: now_unix_ms(),
-            });
+            }, MAX_EVENTS);
         } else {
-            events.push(CheckpointEvent {
+            push_bounded(&mut events, CheckpointEvent {
                 event_code: FN_CK_002_CHECKPOINT_RESTORE.to_string(),
                 event_name: CHECKPOINT_MISSING.to_string(),
                 orchestration_id: orchestration_id.to_string(),
@@ -416,7 +418,7 @@ impl<B: CheckpointBackend> CheckpointWriter<B> {
                 trace_id: trace_id.to_string(),
                 contract_status: "missing".to_string(),
                 wall_clock_time: now_unix_ms(),
-            });
+            }, MAX_EVENTS);
         }
 
         Ok(CheckpointReadResult { latest, events })
@@ -753,7 +755,7 @@ fn verify_chain(
         }
         chain_failed = true;
 
-        events.push(CheckpointEvent {
+        push_bounded(&mut events, CheckpointEvent {
             event_code: FN_CK_003_HASH_CHAIN_FAILURE.to_string(),
             event_name: CHECKPOINT_HASH_CHAIN_FAILURE.to_string(),
             orchestration_id: orchestration_id.to_string(),
@@ -765,7 +767,7 @@ fn verify_chain(
             trace_id: trace_id.to_string(),
             contract_status: format!("invalid:{reason}"),
             wall_clock_time: now_unix_ms(),
-        });
+        }, MAX_EVENTS);
     }
 
     (latest_valid, events)

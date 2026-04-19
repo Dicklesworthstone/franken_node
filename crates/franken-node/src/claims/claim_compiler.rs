@@ -64,6 +64,7 @@ pub mod invariants {
 }
 
 const DEFAULT_MAX_CONTRACTS_PER_PUBLISH: usize = 1024;
+const MAX_EVIDENCE_URIS_PER_CLAIM: usize = 128;
 
 // ---------------------------------------------------------------------------
 // Claim compilation
@@ -240,7 +241,7 @@ impl ClaimCompiler {
                     error_code: error_codes::ERR_CLAIM_UNVERIFIABLE.to_string(),
                 };
             };
-            evidence_uris.push(uri.to_string());
+            push_bounded(&mut evidence_uris, uri.to_string(), MAX_EVIDENCE_URIS_PER_CLAIM);
         }
 
         // Compile: produce executable evidence contract

@@ -343,7 +343,7 @@ impl CompatGateService {
             self.trace_counter = 1;
             self.trace_epoch = next_epoch;
         } else {
-            self.trace_counter += 1;
+            self.trace_counter = self.trace_counter.saturating_add(1);
         }
 
         Ok(if self.trace_epoch == 0 {
@@ -364,7 +364,7 @@ impl CompatGateService {
             self.receipt_counter = 1;
             self.receipt_epoch = next_epoch;
         } else {
-            self.receipt_counter += 1;
+            self.receipt_counter = self.receipt_counter.saturating_add(1);
         }
 
         Ok(if self.receipt_epoch == 0 {

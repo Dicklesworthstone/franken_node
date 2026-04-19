@@ -576,7 +576,9 @@ impl std::fmt::Display for SessionError {
 ///
 /// # INV-SCC-TERMINATED
 /// Once terminated, a session rejects all further messages.
-use crate::capacity_defaults::aliases::MAX_SESSION_EVENTS;
+use crate::capacity_defaults::aliases::{MAX_SESSION_EVENTS, MAX_WINDOWS_SEEN};
+
+const MAX_REPLAY_WINDOW_ENTRIES: usize = MAX_WINDOWS_SEEN;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
@@ -610,8 +612,8 @@ fn build_handshake_preimage(
 ) -> Vec<u8> {
     let mut buf = Vec::with_capacity(256);
     fn append_lp(buf: &mut Vec<u8>, field: &[u8]) {
-        let len = u32::try_from(field.len()).unwrap_or(u32::MAX);
-        buf.extend_from_slice(&(len as u64).to_le_bytes());
+        let len_u64 = u64::try_from(field.len()).unwrap_or(u64::MAX);
+        buf.extend_from_slice(&len_u64.to_le_bytes());
         buf.extend_from_slice(field);
     }
     append_lp(&mut buf, session_id.as_bytes());
@@ -655,8 +657,8 @@ fn build_message_preimage(
 ) -> Vec<u8> {
     let mut buf = Vec::with_capacity(256);
     fn append_lp(buf: &mut Vec<u8>, field: &[u8]) {
-        let len = u32::try_from(field.len()).unwrap_or(u32::MAX);
-        buf.extend_from_slice(&(len as u64).to_le_bytes());
+        let len_u64 = u64::try_from(field.len()).unwrap_or(u64::MAX);
+        buf.extend_from_slice(&len_u64.to_le_bytes());
         buf.extend_from_slice(field);
     }
     append_lp(&mut buf, session_id.as_bytes());
@@ -1089,7 +1091,10 @@ impl SessionManager {
         } else {
             // Windowed mode: accept sequences within [floor, ...) where
             // floor = max(0, high_watermark - replay_window). Reject replays.
-            let floor = expected_seq.saturating_sub(self.config.replay_window);
+            let effective_replay_window = self.config.replay_window.min(
+                u64::try_from(MAX_REPLAY_WINDOW_ENTRIES.saturating_sub(1)).unwrap_or(u64::MAX),
+            );
+            let floor = expected_seq.saturating_sub(effective_replay_window);
 
             if sequence < floor {
                 self.push_event(SessionEvent {
@@ -1129,6 +1134,11 @@ impl SessionManager {
 
             // Prune entries below the sliding floor
             window.retain(|&s| s >= floor);
+            while window.len() > MAX_REPLAY_WINDOW_ENTRIES {
+                if window.pop_first().is_none() {
+                    break;
+                }
+            }
         }
 
         // Advance session sequence counter
@@ -2736,6 +2746,49 @@ mod tests {
             mgr.process_message("s1", MessageDirection::Send, 2, "h2", &mac_old, 200, "t")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn test_windowed_replay_tracking_is_capped_when_config_window_is_large() {
+        let config = SessionConfig {
+            replay_window: (MAX_REPLAY_WINDOW_ENTRIES as u64).saturating_mul(2),
+            max_sessions: 10,
+            session_timeout_ms: 60_000,
+        };
+        let rs = test_root_secret();
+        let epoch = test_epoch();
+        let mut mgr = SessionManager::new(config, rs, epoch);
+        establish_test_session(&mut mgr, "s1");
+
+        let sequence = u64::try_from(MAX_REPLAY_WINDOW_ENTRIES.saturating_add(64))
+            .expect("test replay cap fits u64");
+        let replay_key = ("s1".to_string(), MessageDirection::Send);
+        let window = mgr.replay_windows.entry(replay_key.clone()).or_default();
+        for seq in 0..sequence {
+            window.insert(seq);
+        }
+        mgr.sessions.get_mut("s1").expect("session exists").send_seq = sequence;
+
+        let mac = sign_msg(&mgr, "s1", MessageDirection::Send, sequence, "h-cap");
+        assert!(
+            mgr.process_message(
+                "s1",
+                MessageDirection::Send,
+                sequence,
+                "h-cap",
+                &mac,
+                300,
+                "trace-cap"
+            )
+            .is_ok()
+        );
+
+        let window_size = mgr
+            .replay_windows
+            .get(&replay_key)
+            .map(BTreeSet::len)
+            .unwrap_or(0);
+        assert!(window_size <= MAX_REPLAY_WINDOW_ENTRIES);
     }
 
     // ── SessionManager: key role validation ─────────────────────────

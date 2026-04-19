@@ -114,14 +114,18 @@ impl BetaState {
 
     fn update(&mut self, success: bool) {
         if success {
-            self.alpha = self.alpha.saturating_add(1.0);
-            if !self.alpha.is_finite() {
+            if !self.alpha.is_finite() || self.alpha >= f64::MAX - 1.0 {
                 self.alpha = f64::MAX;
+            } else {
+                let result = self.alpha + 1.0;
+                self.alpha = if result.is_finite() { result } else { f64::MAX };
             }
         } else {
-            self.beta = self.beta.saturating_add(1.0);
-            if !self.beta.is_finite() {
+            if !self.beta.is_finite() || self.beta >= f64::MAX - 1.0 {
                 self.beta = f64::MAX;
+            } else {
+                let result = self.beta + 1.0;
+                self.beta = if result.is_finite() { result } else { f64::MAX };
             }
         }
         self.observation_count = self.observation_count.saturating_add(1);
@@ -129,16 +133,18 @@ impl BetaState {
 
     /// Mean of the beta distribution = alpha / (alpha + beta).
     fn mean(&self) -> f64 {
-        let n = self.alpha.saturating_add(self.beta);
         if !self.alpha.is_finite()
             || !self.beta.is_finite()
             || self.alpha < 0.0
             || self.beta < 0.0
             || self.alpha >= f64::MAX
             || self.beta >= f64::MAX
-            || !n.is_finite()
-            || n <= 0.0
         {
+            return 0.0;
+        }
+
+        let n = self.alpha + self.beta;
+        if !n.is_finite() || n <= 0.0 {
             return 0.0;
         }
         self.alpha / n
@@ -146,21 +152,44 @@ impl BetaState {
 
     /// 95% credible interval using the normal approximation for beta distribution.
     fn confidence_interval_95(&self) -> (f64, f64) {
-        let n = self.alpha.saturating_add(self.beta);
-        let mean = self.mean();
-        if self.alpha >= f64::MAX
+        if !self.alpha.is_finite()
+            || !self.beta.is_finite()
+            || self.alpha < 0.0
+            || self.beta < 0.0
+            || self.alpha >= f64::MAX
             || self.beta >= f64::MAX
-            || !n.is_finite()
-            || n <= 0.0
-            || !mean.is_finite()
         {
             return (0.0, 1.0);
         }
-        // Safe arithmetic for variance calculation
-        let numerator = self.alpha.saturating_mul(self.beta);
-        let n_squared = n.saturating_mul(n);
-        let n_plus_one = n.saturating_add(1.0);
-        let denominator = n_squared.saturating_mul(n_plus_one);
+
+        let n = self.alpha + self.beta;
+        if !n.is_finite() || n <= 0.0 || n >= f64::MAX {
+            return (0.0, 1.0);
+        }
+
+        let mean = self.alpha / n;
+        if !mean.is_finite() {
+            return (0.0, 1.0);
+        }
+
+        if self.beta > 0.0 && self.alpha > f64::MAX / self.beta {
+            return (0.0, 1.0);
+        }
+        let numerator = self.alpha * self.beta;
+
+        let sqrt_max = f64::MAX.sqrt();
+        if n > sqrt_max {
+            return (0.0, 1.0);
+        }
+        let n_squared = n * n;
+        let n_plus_one = n + 1.0;
+        if !n_squared.is_finite()
+            || !n_plus_one.is_finite()
+            || (n_squared > 0.0 && n_plus_one > f64::MAX / n_squared)
+        {
+            return (0.0, 1.0);
+        }
+        let denominator = n_squared * n_plus_one;
 
         if !numerator.is_finite() || !denominator.is_finite() || denominator == 0.0 {
             return (0.0, 1.0);
@@ -259,7 +288,8 @@ impl BayesianDiagnostics {
             .iter()
             .map(|c| {
                 let (posterior, prior, count, ci) = if let Some(state) = self.states.get(c) {
-                    let candidate_count_f64 = u32::try_from(candidates.len()).unwrap_or(u32::MAX) as f64;
+                    let candidate_count_f64 =
+                        u32::try_from(candidates.len()).unwrap_or(u32::MAX) as f64;
                     (
                         state.mean(),
                         1.0 / candidate_count_f64,
@@ -268,7 +298,8 @@ impl BayesianDiagnostics {
                     )
                 } else {
                     // No observations — uniform prior
-                    let candidate_count_f64 = u32::try_from(candidates.len()).unwrap_or(u32::MAX) as f64;
+                    let candidate_count_f64 =
+                        u32::try_from(candidates.len()).unwrap_or(u32::MAX) as f64;
                     let prior = 1.0 / candidate_count_f64;
                     (0.5, prior, 0, (0.0, 1.0))
                 };
@@ -933,14 +964,14 @@ mod tests {
     fn negative_candidate_ref_with_problematic_string_content() {
         // Test CandidateRef with various problematic string data
         let problematic_refs = vec![
-            CandidateRef::new(""), // Empty string
-            CandidateRef::new("\0null\x01control\x7f"), // Control characters
-            CandidateRef::new("candidate\nwith\nnewlines"), // Multiline
-            CandidateRef::new("🚀emoji💀candidate"), // Unicode emoji
-            CandidateRef::new("\u{FFFF}\u{10FFFF}"), // Max Unicode codepoints
-            CandidateRef::new("../../../etc/passwd"), // Path traversal
+            CandidateRef::new(""),                                    // Empty string
+            CandidateRef::new("\0null\x01control\x7f"),               // Control characters
+            CandidateRef::new("candidate\nwith\nnewlines"),           // Multiline
+            CandidateRef::new("🚀emoji💀candidate"),                  // Unicode emoji
+            CandidateRef::new("\u{FFFF}\u{10FFFF}"),                  // Max Unicode codepoints
+            CandidateRef::new("../../../etc/passwd"),                 // Path traversal
             CandidateRef::new("<script>alert('candidate')</script>"), // XSS
-            CandidateRef::new("x".repeat(10_000)), // Very long string
+            CandidateRef::new("x".repeat(10_000)),                    // Very long string
         ];
 
         for candidate_ref in problematic_refs {
@@ -996,8 +1027,16 @@ mod tests {
             let success_json = serde_json::to_string(&success_obs);
             let failure_json = serde_json::to_string(&failure_obs);
 
-            assert!(success_json.is_ok(), "Should serialize observation with epoch: {}", description);
-            assert!(failure_json.is_ok(), "Should serialize observation with epoch: {}", description);
+            assert!(
+                success_json.is_ok(),
+                "Should serialize observation with epoch: {}",
+                description
+            );
+            assert!(
+                failure_json.is_ok(),
+                "Should serialize observation with epoch: {}",
+                description
+            );
         }
     }
 
@@ -1021,39 +1060,102 @@ mod tests {
 
         // Mean should be safe with extreme values
         let mean = extreme_state.mean();
-        assert!(mean.is_finite() && mean >= 0.0 && mean <= 1.0, "Mean should be valid: {}", mean);
+        assert!(
+            mean.is_finite() && mean >= 0.0 && mean <= 1.0,
+            "Mean should be valid: {}",
+            mean
+        );
 
         // Confidence interval should be safe
         let (ci_lower, ci_upper) = extreme_state.confidence_interval_95();
-        assert!(ci_lower >= 0.0 && ci_lower <= 1.0, "CI lower bound invalid: {}", ci_lower);
-        assert!(ci_upper >= 0.0 && ci_upper <= 1.0, "CI upper bound invalid: {}", ci_upper);
-        assert!(ci_lower <= ci_upper, "CI bounds should be ordered: {} <= {}", ci_lower, ci_upper);
+        assert!(
+            ci_lower >= 0.0 && ci_lower <= 1.0,
+            "CI lower bound invalid: {}",
+            ci_lower
+        );
+        assert!(
+            ci_upper >= 0.0 && ci_upper <= 1.0,
+            "CI upper bound invalid: {}",
+            ci_upper
+        );
+        assert!(
+            ci_lower <= ci_upper,
+            "CI bounds should be ordered: {} <= {}",
+            ci_lower,
+            ci_upper
+        );
     }
 
     #[test]
     fn negative_beta_state_with_invalid_initial_conditions() {
         // Test BetaState with manually set invalid conditions
         let mut invalid_states = vec![
-            BetaState { alpha: 0.0, beta: 1.0, observation_count: 0 }, // Zero alpha
-            BetaState { alpha: 1.0, beta: 0.0, observation_count: 0 }, // Zero beta
-            BetaState { alpha: -1.0, beta: 1.0, observation_count: 0 }, // Negative alpha
-            BetaState { alpha: 1.0, beta: -1.0, observation_count: 0 }, // Negative beta
-            BetaState { alpha: f64::NAN, beta: 1.0, observation_count: 0 }, // NaN alpha
-            BetaState { alpha: 1.0, beta: f64::NAN, observation_count: 0 }, // NaN beta
-            BetaState { alpha: f64::INFINITY, beta: 1.0, observation_count: 0 }, // Infinite alpha
-            BetaState { alpha: 1.0, beta: f64::INFINITY, observation_count: 0 }, // Infinite beta
+            BetaState {
+                alpha: 0.0,
+                beta: 1.0,
+                observation_count: 0,
+            }, // Zero alpha
+            BetaState {
+                alpha: 1.0,
+                beta: 0.0,
+                observation_count: 0,
+            }, // Zero beta
+            BetaState {
+                alpha: -1.0,
+                beta: 1.0,
+                observation_count: 0,
+            }, // Negative alpha
+            BetaState {
+                alpha: 1.0,
+                beta: -1.0,
+                observation_count: 0,
+            }, // Negative beta
+            BetaState {
+                alpha: f64::NAN,
+                beta: 1.0,
+                observation_count: 0,
+            }, // NaN alpha
+            BetaState {
+                alpha: 1.0,
+                beta: f64::NAN,
+                observation_count: 0,
+            }, // NaN beta
+            BetaState {
+                alpha: f64::INFINITY,
+                beta: 1.0,
+                observation_count: 0,
+            }, // Infinite alpha
+            BetaState {
+                alpha: 1.0,
+                beta: f64::INFINITY,
+                observation_count: 0,
+            }, // Infinite beta
         ];
 
         for state in &mut invalid_states {
             // Mean calculation should return safe fallback (0.0) for invalid states
             let mean = state.mean();
-            assert!(mean.is_finite(), "Mean should be finite for invalid state: {}", mean);
-            assert!(mean >= 0.0 && mean <= 1.0, "Mean should be in [0,1] for invalid state: {}", mean);
+            assert!(
+                mean.is_finite(),
+                "Mean should be finite for invalid state: {}",
+                mean
+            );
+            assert!(
+                mean >= 0.0 && mean <= 1.0,
+                "Mean should be in [0,1] for invalid state: {}",
+                mean
+            );
 
             // Confidence interval should return safe bounds
             let (ci_lower, ci_upper) = state.confidence_interval_95();
-            assert!(ci_lower.is_finite() && ci_upper.is_finite(), "CI bounds should be finite");
-            assert!(ci_lower >= 0.0 && ci_upper <= 1.0, "CI bounds should be in [0,1]");
+            assert!(
+                ci_lower.is_finite() && ci_upper.is_finite(),
+                "CI bounds should be finite"
+            );
+            assert!(
+                ci_lower >= 0.0 && ci_upper <= 1.0,
+                "CI bounds should be in [0,1]"
+            );
 
             // Update should still work (normalize invalid state)
             state.update(true);
@@ -1104,7 +1206,7 @@ mod tests {
             RankedCandidate {
                 candidate_ref: c("test5"),
                 posterior_prob: 0.5,
-                prior_prob: f64::NAN, // NaN prior
+                prior_prob: f64::NAN,        // NaN prior
                 observation_count: u64::MAX, // Maximum observations
                 confidence_interval: (f64::NEG_INFINITY, f64::INFINITY), // Infinite CI
                 guardrail_filtered: true,
@@ -1155,15 +1257,19 @@ mod tests {
         // Test deserialization with invalid enum values
         let invalid_confidence_json = vec![
             "\"Unknown\"",
-            "\"HIGH\"", // Wrong case
+            "\"HIGH\"",     // Wrong case
             "\"VeryHigh\"", // Non-existent variant
-            "42", // Wrong type
+            "42",           // Wrong type
             "null",
         ];
 
         for invalid_json in invalid_confidence_json {
             let result: Result<DiagnosticConfidence, _> = serde_json::from_str(invalid_json);
-            assert!(result.is_err(), "Should reject invalid confidence JSON: {}", invalid_json);
+            assert!(
+                result.is_err(),
+                "Should reject invalid confidence JSON: {}",
+                invalid_json
+            );
         }
     }
 
@@ -1186,7 +1292,11 @@ mod tests {
         assert!(mean.is_finite() && mean >= 0.0 && mean <= 1.0);
 
         // With alternating pattern, mean should be close to 0.5
-        assert!((mean - 0.5).abs() < 0.1, "Mean should be close to 0.5 with alternating pattern: {}", mean);
+        assert!(
+            (mean - 0.5).abs() < 0.1,
+            "Mean should be close to 0.5 with alternating pattern: {}",
+            mean
+        );
 
         // Test with extreme bias (all successes)
         let mut success_state = BetaState::new();
@@ -1195,7 +1305,11 @@ mod tests {
         }
 
         let success_mean = success_state.mean();
-        assert!(success_mean > 0.9, "All-success mean should be high: {}", success_mean);
+        assert!(
+            success_mean > 0.9,
+            "All-success mean should be high: {}",
+            success_mean
+        );
 
         // Test with extreme bias (all failures)
         let mut failure_state = BetaState::new();
@@ -1204,43 +1318,81 @@ mod tests {
         }
 
         let failure_mean = failure_state.mean();
-        assert!(failure_mean < 0.1, "All-failure mean should be low: {}", failure_mean);
+        assert!(
+            failure_mean < 0.1,
+            "All-failure mean should be low: {}",
+            failure_mean
+        );
     }
 
     #[test]
     fn negative_confidence_interval_mathematical_edge_cases() {
         // Test confidence interval calculation with edge cases
         let edge_cases = vec![
-            (1.0, 1.0), // Uniform prior, no observations
-            (1.0, f64::MAX), // Infinite beta
-            (f64::MAX, 1.0), // Infinite alpha
+            (1.0, 1.0),           // Uniform prior, no observations
+            (1.0, f64::MAX),      // Infinite beta
+            (f64::MAX, 1.0),      // Infinite alpha
             (f64::MAX, f64::MAX), // Both infinite
-            (1e-100, 1.0), // Very small alpha
-            (1.0, 1e-100), // Very small beta
-            (1e100, 1e100), // Very large values
+            (1e-100, 1.0),        // Very small alpha
+            (1.0, 1e-100),        // Very small beta
+            (1e100, 1e100),       // Very large values
         ];
 
         for (alpha, beta) in edge_cases {
-            let state = BetaState { alpha, beta, observation_count: 1000 };
+            let state = BetaState {
+                alpha,
+                beta,
+                observation_count: 1000,
+            };
 
             let (ci_lower, ci_upper) = state.confidence_interval_95();
 
             // CI should always be valid bounds
-            assert!(ci_lower.is_finite(), "CI lower should be finite: {}", ci_lower);
-            assert!(ci_upper.is_finite(), "CI upper should be finite: {}", ci_upper);
-            assert!(ci_lower >= 0.0, "CI lower should be non-negative: {}", ci_lower);
-            assert!(ci_upper <= 1.0, "CI upper should not exceed 1.0: {}", ci_upper);
-            assert!(ci_lower <= ci_upper, "CI bounds should be ordered: {} <= {}", ci_lower, ci_upper);
+            assert!(
+                ci_lower.is_finite(),
+                "CI lower should be finite: {}",
+                ci_lower
+            );
+            assert!(
+                ci_upper.is_finite(),
+                "CI upper should be finite: {}",
+                ci_upper
+            );
+            assert!(
+                ci_lower >= 0.0,
+                "CI lower should be non-negative: {}",
+                ci_lower
+            );
+            assert!(
+                ci_upper <= 1.0,
+                "CI upper should not exceed 1.0: {}",
+                ci_upper
+            );
+            assert!(
+                ci_lower <= ci_upper,
+                "CI bounds should be ordered: {} <= {}",
+                ci_lower,
+                ci_upper
+            );
 
             // Mean should also be valid
             let mean = state.mean();
             if mean.is_finite() {
-                assert!(mean >= 0.0 && mean <= 1.0, "Mean should be in [0,1]: {}", mean);
+                assert!(
+                    mean >= 0.0 && mean <= 1.0,
+                    "Mean should be in [0,1]: {}",
+                    mean
+                );
                 // Mean should typically be within CI (allowing for edge cases)
                 if ci_lower <= ci_upper && ci_upper - ci_lower < 1.0 {
                     // Only check if CI is reasonable
-                    assert!(mean >= ci_lower - 0.1 && mean <= ci_upper + 0.1,
-                            "Mean {} should be near CI [{}, {}]", mean, ci_lower, ci_upper);
+                    assert!(
+                        mean >= ci_lower - 0.1 && mean <= ci_upper + 0.1,
+                        "Mean {} should be near CI [{}, {}]",
+                        mean,
+                        ci_lower,
+                        ci_upper
+                    );
                 }
             }
         }
@@ -1249,22 +1401,34 @@ mod tests {
     #[test]
     fn negative_constants_validation_and_event_code_consistency() {
         // Test that all event constants are well-formed
-        let event_constants = [
-            EVD_BAYES_001,
-            EVD_BAYES_002,
-            EVD_BAYES_003,
-            EVD_BAYES_004,
-        ];
+        let event_constants = [EVD_BAYES_001, EVD_BAYES_002, EVD_BAYES_003, EVD_BAYES_004];
 
         for constant in &event_constants {
             assert!(!constant.is_empty());
-            assert!(constant.starts_with("EVD-BAYES-"), "Event constant should start with EVD-BAYES-: {}", constant);
-            assert!(constant.is_ascii(), "Event constant should be ASCII: {}", constant);
+            assert!(
+                constant.starts_with("EVD-BAYES-"),
+                "Event constant should start with EVD-BAYES-: {}",
+                constant
+            );
+            assert!(
+                constant.is_ascii(),
+                "Event constant should be ASCII: {}",
+                constant
+            );
 
             // Should follow pattern EVD-BAYES-XXX where XXX is a 3-digit number
             let suffix = constant.strip_prefix("EVD-BAYES-").unwrap();
-            assert_eq!(suffix.len(), 3, "Event code suffix should be 3 digits: {}", suffix);
-            assert!(suffix.chars().all(|c| c.is_ascii_digit()), "Event code suffix should be numeric: {}", suffix);
+            assert_eq!(
+                suffix.len(),
+                3,
+                "Event code suffix should be 3 digits: {}",
+                suffix
+            );
+            assert!(
+                suffix.chars().all(|c| c.is_ascii_digit()),
+                "Event code suffix should be numeric: {}",
+                suffix
+            );
         }
 
         // Verify event codes are sequential
@@ -1276,10 +1440,10 @@ mod tests {
         // Test type alias exists and is well-formed
         let _raw_score: RawCandidateScore = (
             c("test"),
-            0.5,     // posterior_mean
-            0.5,     // prior
-            10,      // observation_count
-            (0.3, 0.7) // confidence interval
+            0.5,        // posterior_mean
+            0.5,        // prior
+            10,         // observation_count
+            (0.3, 0.7), // confidence interval
         );
 
         // Type alias should work as expected
@@ -1304,11 +1468,7 @@ mod tests {
 
             // Add observations to trigger internal state expansion
             for (i, candidate) in massive_candidates.iter().take(1000).enumerate() {
-                diagnostics.update(&Observation::new(
-                    candidate.clone(),
-                    i % 2 == 0,
-                    i as u64,
-                ));
+                diagnostics.update(&Observation::new(candidate.clone(), i % 2 == 0, i as u64));
             }
 
             // Ranking should handle massive candidate sets without crashing
@@ -1318,7 +1478,10 @@ mod tests {
                 len if len == massive_candidates.len() => {
                     // If successful, verify normalization invariant
                     let total: f64 = result.iter().map(|r| r.posterior_prob).sum();
-                    assert!((total - 1.0).abs() < 1e-6, "Probabilities should sum to 1.0");
+                    assert!(
+                        (total - 1.0).abs() < 1e-6,
+                        "Probabilities should sum to 1.0"
+                    );
                 }
                 _ => {
                     // Acceptable to handle subset if memory limits are hit
@@ -1333,14 +1496,14 @@ mod tests {
 
             // Unicode collision attack - visually similar candidates
             let collision_candidates = vec![
-                CandidateRef::new("café"), // NFC normalized
-                CandidateRef::new("cafe\u{301}"), // NFD normalized (combining accent)
-                CandidateRef::new("ca\u{FB00}e"), // With ligature
-                CandidateRef::new("caf\u{200B}e"), // With zero-width space
+                CandidateRef::new("café"),                 // NFC normalized
+                CandidateRef::new("cafe\u{301}"),          // NFD normalized (combining accent)
+                CandidateRef::new("ca\u{FB00}e"),          // With ligature
+                CandidateRef::new("caf\u{200B}e"),         // With zero-width space
                 CandidateRef::new("\u{202E}éfac\u{202D}"), // RTL override attack
-                CandidateRef::new("café\u{FEFF}"), // With BOM
-                CandidateRef::new("caf\u{00E9}"), // Different Unicode encoding
-                CandidateRef::new("CAFÉ".to_lowercase()), // Case folding
+                CandidateRef::new("café\u{FEFF}"),         // With BOM
+                CandidateRef::new("caf\u{00E9}"),          // Different Unicode encoding
+                CandidateRef::new("CAFÉ".to_lowercase()),  // Case folding
             ];
 
             // Add observations to all collision candidates
@@ -1349,7 +1512,10 @@ mod tests {
                     diagnostics.update(&Observation::new(
                         candidate.clone(),
                         (i + j) % 2 == 0,
-                        (i * 10 + j) as u64,
+                        u64::try_from(i)
+                            .unwrap_or(u64::MAX)
+                            .saturating_mul(10)
+                            .saturating_add(u64::try_from(j).unwrap_or(u64::MAX)),
                     ));
                 }
             }
@@ -1367,7 +1533,10 @@ mod tests {
 
             // Probabilities should sum to 1.0 despite Unicode complexity
             let total: f64 = ranked.iter().map(|r| r.posterior_prob).sum();
-            assert!((total - 1.0).abs() < 1e-6, "Unicode collision should not break normalization");
+            assert!(
+                (total - 1.0).abs() < 1e-6,
+                "Unicode collision should not break normalization"
+            );
         }
 
         #[test]
@@ -1403,19 +1572,34 @@ mod tests {
 
             // Verify numerical stability despite precision attacks
             for candidate in &ranked {
-                assert!(candidate.posterior_prob.is_finite(), "Posterior should be finite");
-                assert!(candidate.posterior_prob >= 0.0, "Posterior should be non-negative");
-                assert!(candidate.posterior_prob <= 1.0, "Posterior should not exceed 1.0");
+                assert!(
+                    candidate.posterior_prob.is_finite(),
+                    "Posterior should be finite"
+                );
+                assert!(
+                    candidate.posterior_prob >= 0.0,
+                    "Posterior should be non-negative"
+                );
+                assert!(
+                    candidate.posterior_prob <= 1.0,
+                    "Posterior should not exceed 1.0"
+                );
 
                 let (ci_lower, ci_upper) = candidate.confidence_interval;
-                assert!(ci_lower.is_finite() && ci_upper.is_finite(), "CI should be finite");
+                assert!(
+                    ci_lower.is_finite() && ci_upper.is_finite(),
+                    "CI should be finite"
+                );
                 assert!(ci_lower >= 0.0 && ci_upper <= 1.0, "CI should be in [0,1]");
                 assert!(ci_lower <= ci_upper, "CI bounds should be ordered");
             }
 
             // Total probability should remain normalized
             let total: f64 = ranked.iter().map(|r| r.posterior_prob).sum();
-            assert!((total - 1.0).abs() < 1e-10, "Precision attack should not break normalization");
+            assert!(
+                (total - 1.0).abs() < 1e-10,
+                "Precision attack should not break normalization"
+            );
         }
 
         #[test]
@@ -1434,21 +1618,19 @@ mod tests {
                 for (i, candidate) in concurrent_candidates.iter().enumerate() {
                     // Rapid updates to simulate race conditions
                     for micro_update in 0..10 {
-                        let epoch = (round * 30 + i * 10 + micro_update) as u64;
+                        let epoch = u64::try_from(round)
+                            .unwrap_or(u64::MAX)
+                            .saturating_mul(30)
+                            .saturating_add(u64::try_from(i).unwrap_or(u64::MAX).saturating_mul(10))
+                            .saturating_add(u64::try_from(micro_update).unwrap_or(u64::MAX));
                         let success = (epoch % 3 + epoch % 7) % 2 == 0;
 
-                        diagnostics.update(&Observation::new(
-                            candidate.clone(),
-                            success,
-                            epoch,
-                        ));
+                        diagnostics.update(&Observation::new(candidate.clone(), success, epoch));
 
                         // Interleave ranking operations during updates
                         if micro_update % 3 == 0 {
-                            let _intermediate_ranking = diagnostics.rank_candidates(
-                                &concurrent_candidates,
-                                &[],
-                            );
+                            let _intermediate_ranking =
+                                diagnostics.rank_candidates(&concurrent_candidates, &[]);
                         }
                     }
                 }
@@ -1462,7 +1644,10 @@ mod tests {
 
             // Verify consistency despite concurrent simulation
             let total: f64 = final_ranking.iter().map(|r| r.posterior_prob).sum();
-            assert!((total - 1.0).abs() < 1e-6, "Concurrent simulation should not corrupt state");
+            assert!(
+                (total - 1.0).abs() < 1e-6,
+                "Concurrent simulation should not corrupt state"
+            );
 
             // Verify observation counts are consistent
             let total_obs: u64 = final_ranking.iter().map(|r| r.observation_count).sum();
@@ -1489,7 +1674,7 @@ mod tests {
                 diagnostics.update(&Observation::new(
                     candidate.clone(),
                     i % 2 == 0,
-                    i as u64 + 1000,
+                    u64::try_from(i).unwrap_or(u64::MAX).saturating_add(1000),
                 ));
             }
 
@@ -1499,11 +1684,18 @@ mod tests {
             match json_result {
                 Ok(json) => {
                     // If serialization succeeds, verify no injection
-                    assert!(!json.contains("<script>"), "Should not contain script injection");
-                    assert!(!json.contains("HTTP/1.1"), "Should not contain HTTP injection");
+                    assert!(
+                        !json.contains("<script>"),
+                        "Should not contain script injection"
+                    );
+                    assert!(
+                        !json.contains("HTTP/1.1"),
+                        "Should not contain HTTP injection"
+                    );
 
                     // Verify can be safely deserialized
-                    let deserialization: Result<BayesianDiagnostics, _> = serde_json::from_str(&json);
+                    let deserialization: Result<BayesianDiagnostics, _> =
+                        serde_json::from_str(&json);
                     assert!(deserialization.is_ok(), "Should deserialize safely");
 
                     if let Ok(deserialized) = deserialization {
@@ -1580,7 +1772,10 @@ mod tests {
 
             // Verify correctness despite attack
             let total: f64 = ranked.iter().map(|r| r.posterior_prob).sum();
-            assert!((total - 1.0).abs() < 1e-6, "Complexity attack should not break correctness");
+            assert!(
+                (total - 1.0).abs() < 1e-6,
+                "Complexity attack should not break correctness"
+            );
         }
 
         #[test]
@@ -1592,7 +1787,7 @@ mod tests {
                 (0, "epoch_zero"),
                 (1, "epoch_one"),
                 (u32::MAX as u64, "u32_max"),
-                (u32::MAX as u64 + 1, "u32_overflow"),
+                (u64::from(u32::MAX).saturating_add(1), "u32_overflow"),
                 (i64::MAX as u64, "i64_max"),
                 (u64::MAX - 1, "near_u64_max"),
                 (u64::MAX, "u64_max"),
@@ -1606,18 +1801,16 @@ mod tests {
             // Add observations with boundary epochs
             for (epoch, description) in epoch_boundaries {
                 for (i, candidate) in candidates.iter().enumerate() {
-                    let obs = Observation::new(
-                        candidate.clone(),
-                        (epoch + i as u64) % 2 == 0,
-                        epoch,
-                    );
+                    let adjusted_epoch = epoch.saturating_add(u64::try_from(i).unwrap_or(u64::MAX));
+                    let obs = Observation::new(candidate.clone(), adjusted_epoch % 2 == 0, epoch);
 
                     diagnostics.update(&obs);
 
                     // Verify epoch is preserved correctly
                     assert_eq!(
                         diagnostics.epoch_id, epoch,
-                        "Epoch should be preserved for: {}", description
+                        "Epoch should be preserved for: {}",
+                        description
                     );
                 }
             }
@@ -1630,7 +1823,10 @@ mod tests {
 
             // Verify no overflow corruption
             let total: f64 = ranked.iter().map(|r| r.posterior_prob).sum();
-            assert!((total - 1.0).abs() < 1e-6, "Epoch boundary attack should not corrupt probabilities");
+            assert!(
+                (total - 1.0).abs() < 1e-6,
+                "Epoch boundary attack should not corrupt probabilities"
+            );
         }
 
         #[test]
@@ -1644,11 +1840,7 @@ mod tests {
 
             // Add observations to subset
             for candidate in large_candidate_set.iter().take(100) {
-                diagnostics.update(&Observation::new(
-                    candidate.clone(),
-                    true,
-                    1000,
-                ));
+                diagnostics.update(&Observation::new(candidate.clone(), true, 1000));
             }
 
             // Create massive guardrail blocked set designed to stress set operations
@@ -1671,7 +1863,8 @@ mod tests {
             assert!(ranked.iter().all(|r| !r.guardrail_filtered));
 
             // Test with overlapping blocked candidates
-            let overlapping_blocked: Vec<CandidateRef> = large_candidate_set.iter()
+            let overlapping_blocked: Vec<CandidateRef> = large_candidate_set
+                .iter()
                 .take(2500) // Half the candidates
                 .cloned()
                 .collect();
@@ -1688,7 +1881,10 @@ mod tests {
 
             // Verify correct filtering
             let filtered_count = ranked2.iter().filter(|r| r.guardrail_filtered).count();
-            assert_eq!(filtered_count, 2500, "Should filter exactly half the candidates");
+            assert_eq!(
+                filtered_count, 2500,
+                "Should filter exactly half the candidates"
+            );
         }
 
         #[test]
@@ -1696,27 +1892,45 @@ mod tests {
             // Test extreme beta distribution edge cases that could be exploited
             let edge_case_states = vec![
                 (f64::MIN_POSITIVE, f64::MIN_POSITIVE), // Minimal positive values
-                (f64::MAX / 1e10, f64::MAX / 1e10), // Very large but finite
-                (1e-300, 1e-300), // Near machine epsilon
-                (1e100, 1e-100), // Extreme ratio
-                (1e-100, 1e100), // Reverse extreme ratio
-                (1.0, 1e-308), // Near underflow
-                (1e308, 1.0), // Near overflow
+                (f64::MAX / 1e10, f64::MAX / 1e10),     // Very large but finite
+                (1e-300, 1e-300),                       // Near machine epsilon
+                (1e100, 1e-100),                        // Extreme ratio
+                (1e-100, 1e100),                        // Reverse extreme ratio
+                (1.0, 1e-308),                          // Near underflow
+                (1e308, 1.0),                           // Near overflow
             ];
 
             for (alpha, beta) in edge_case_states {
-                let state = BetaState { alpha, beta, observation_count: 1000 };
+                let state = BetaState {
+                    alpha,
+                    beta,
+                    observation_count: 1000,
+                };
 
                 // Mean should be stable
                 let mean = state.mean();
-                if mean != 0.0 { // Allow fail-closed to 0.0
-                    assert!(mean.is_finite(), "Mean should be finite for alpha={}, beta={}", alpha, beta);
-                    assert!(mean >= 0.0 && mean <= 1.0, "Mean should be in [0,1] for alpha={}, beta={}", alpha, beta);
+                if mean != 0.0 {
+                    // Allow fail-closed to 0.0
+                    assert!(
+                        mean.is_finite(),
+                        "Mean should be finite for alpha={}, beta={}",
+                        alpha,
+                        beta
+                    );
+                    assert!(
+                        mean >= 0.0 && mean <= 1.0,
+                        "Mean should be in [0,1] for alpha={}, beta={}",
+                        alpha,
+                        beta
+                    );
                 }
 
                 // Confidence interval should be bounded
                 let (ci_lower, ci_upper) = state.confidence_interval_95();
-                assert!(ci_lower.is_finite() && ci_upper.is_finite(), "CI should be finite");
+                assert!(
+                    ci_lower.is_finite() && ci_upper.is_finite(),
+                    "CI should be finite"
+                );
                 assert!(ci_lower >= 0.0 && ci_upper <= 1.0, "CI should be in [0,1]");
                 assert!(ci_lower <= ci_upper, "CI should be ordered");
 
@@ -1758,10 +1972,7 @@ mod tests {
             let replay1 = BayesianDiagnostics::replay_from(&base_observations);
             let replay2 = BayesianDiagnostics::replay_from(&base_observations);
 
-            let candidates = vec![
-                CandidateRef::new("base"),
-                CandidateRef::new("other"),
-            ];
+            let candidates = vec![CandidateRef::new("base"), CandidateRef::new("other")];
 
             let ranking1 = replay1.rank_candidates(&candidates, &[]);
             let ranking2 = replay2.rank_candidates(&candidates, &[]);

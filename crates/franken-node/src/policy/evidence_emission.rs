@@ -339,11 +339,11 @@ impl EvidenceConformanceChecker {
         };
 
         // Step 2: Validate evidence is well-formed
-        if entry.decision_id.is_empty() {
+        if entry.schema_version.trim().is_empty() {
             let outcome = PolicyActionOutcome::Rejected {
                 action,
                 error: ConformanceError::MalformedEvidence {
-                    reason: "decision_id is empty".into(),
+                    reason: "schema_version is empty or whitespace".into(),
                 },
             };
             self.rejected_count = self.rejected_count.saturating_add(1);
@@ -351,11 +351,23 @@ impl EvidenceConformanceChecker {
             return outcome;
         }
 
-        if entry.trace_id.is_empty() {
+        if entry.decision_id.trim().is_empty() {
             let outcome = PolicyActionOutcome::Rejected {
                 action,
                 error: ConformanceError::MalformedEvidence {
-                    reason: "trace_id is empty".into(),
+                    reason: "decision_id is empty or whitespace".into(),
+                },
+            };
+            self.rejected_count = self.rejected_count.saturating_add(1);
+            self.push_action(outcome.clone());
+            return outcome;
+        }
+
+        if entry.trace_id.trim().is_empty() {
+            let outcome = PolicyActionOutcome::Rejected {
+                action,
+                error: ConformanceError::MalformedEvidence {
+                    reason: "trace_id is empty or whitespace".into(),
                 },
             };
             self.rejected_count = self.rejected_count.saturating_add(1);
@@ -1205,13 +1217,13 @@ mod tests {
 
         // Unicode injection attack vectors in action IDs
         let malicious_action_ids = [
-            "ACT\u{202e}evil\u{200b}\u{0000}inject",      // Bidirectional override + zero width + null
-            "ACT\u{feff}\u{1f4a9}\u{2028}bypass",        // BOM + emoji + line separator
+            "ACT\u{202e}evil\u{200b}\u{0000}inject", // Bidirectional override + zero width + null
+            "ACT\u{feff}\u{1f4a9}\u{2028}bypass",    // BOM + emoji + line separator
             "ACT\u{0085}\u{2029}\u{00ad}payload\u{061c}", // Control chars + soft hyphen
-            "ACT\u{034f}\u{180e}\u{200c}id",             // Combining marks + invisible chars
-            "ACT-001\r\nHost: evil.com",                 // CRLF injection
-            "ACT-001\x00truncated",                      // Null termination attack
-            &"A".repeat(100_000),                        // Massive action ID (DoS)
+            "ACT\u{034f}\u{180e}\u{200c}id",         // Combining marks + invisible chars
+            "ACT-001\r\nHost: evil.com",             // CRLF injection
+            "ACT-001\x00truncated",                  // Null termination attack
+            &"A".repeat(100_000),                    // Massive action ID (DoS)
         ];
 
         for malicious_id in malicious_action_ids {
@@ -1232,20 +1244,32 @@ mod tests {
             );
 
             // Should handle Unicode injection safely
-            assert!(outcome.is_executed() || outcome.is_rejected(),
-                "Unicode action ID '{}' should be handled without panic", malicious_id);
+            assert!(
+                outcome.is_executed() || outcome.is_rejected(),
+                "Unicode action ID '{}' should be handled without panic",
+                malicious_id
+            );
 
             if outcome.is_executed() {
                 // Verify ledger entry is recorded safely
-                assert!(ledger.len() > 0, "Ledger should contain entry for Unicode action ID");
+                assert!(
+                    ledger.len() > 0,
+                    "Ledger should contain entry for Unicode action ID"
+                );
 
                 // Verify action ID is preserved as-is (no interpretation)
-                assert_eq!(action_id.as_str(), malicious_id,
-                    "Action ID should be preserved exactly as provided");
+                assert_eq!(
+                    action_id.as_str(),
+                    malicious_id,
+                    "Action ID should be preserved exactly as provided"
+                );
             }
 
             // Action log should contain outcome regardless of success/rejection
-            assert!(!checker.action_log().is_empty(), "Action log should record Unicode attempts");
+            assert!(
+                !checker.action_log().is_empty(),
+                "Action log should record Unicode attempts"
+            );
         }
     }
 
@@ -1273,7 +1297,6 @@ mod tests {
                 evidence.schema_version = String::new();
                 ("empty schema_version", evidence)
             },
-
             // Whitespace-only fields
             {
                 let mut evidence = make_evidence(PolicyAction::Commit, "ACT-MALFORMED-001");
@@ -1285,7 +1308,6 @@ mod tests {
                 evidence.trace_id = "\t\n\r ".to_string();
                 ("whitespace-only trace_id", evidence)
             },
-
             // Unicode control characters in fields
             {
                 let mut evidence = make_evidence(PolicyAction::Commit, "ACT-MALFORMED-001");
@@ -1297,7 +1319,6 @@ mod tests {
                 evidence.trace_id = "trace\u{001F}control".to_string();
                 ("control char in trace_id", evidence)
             },
-
             // Extremely long field values (potential DoS)
             {
                 let mut evidence = make_evidence(PolicyAction::Commit, "ACT-MALFORMED-001");
@@ -1319,23 +1340,39 @@ mod tests {
                 &mut ledger,
             );
 
-            // Empty decision_id and trace_id should be rejected as malformed
-            if evidence.decision_id.trim().is_empty() || evidence.trace_id.trim().is_empty() {
-                assert!(outcome.is_rejected(),
-                    "Test '{}' should reject malformed evidence", test_name);
+            // Blank required string fields should be rejected as malformed
+            if evidence.schema_version.trim().is_empty()
+                || evidence.decision_id.trim().is_empty()
+                || evidence.trace_id.trim().is_empty()
+            {
+                assert!(
+                    outcome.is_rejected(),
+                    "Test '{}' should reject malformed evidence",
+                    test_name
+                );
 
                 if let PolicyActionOutcome::Rejected { error, .. } = &outcome {
-                    assert_eq!(error.code(), "ERR_MALFORMED_EVIDENCE",
-                        "Test '{}' should produce malformed evidence error", test_name);
+                    assert_eq!(
+                        error.code(),
+                        "ERR_MALFORMED_EVIDENCE",
+                        "Test '{}' should produce malformed evidence error",
+                        test_name
+                    );
                 }
             } else {
                 // Other malformed inputs should be handled safely (may succeed or fail)
-                assert!(outcome.is_executed() || outcome.is_rejected(),
-                    "Test '{}' should handle malformed input safely", test_name);
+                assert!(
+                    outcome.is_executed() || outcome.is_rejected(),
+                    "Test '{}' should handle malformed input safely",
+                    test_name
+                );
             }
 
             // Verify no memory leaks or crashes with malformed data
-            assert!(checker.action_log().len() > 0, "Action log should record attempt");
+            assert!(
+                checker.action_log().len() > 0,
+                "Action log should record attempt"
+            );
         }
     }
 
@@ -1369,23 +1406,40 @@ mod tests {
                 );
 
                 // All mismatches should be rejected
-                assert!(outcome.is_rejected(),
+                assert!(
+                    outcome.is_rejected(),
                     "Mismatch {} action with {} evidence should be rejected",
-                    requesting_action.label(), evidence_action.label());
+                    requesting_action.label(),
+                    evidence_action.label()
+                );
 
                 if let PolicyActionOutcome::Rejected { error, .. } = &outcome {
-                    assert_eq!(error.code(), "ERR_DECISION_KIND_MISMATCH",
-                        "Should produce decision kind mismatch error");
+                    assert_eq!(
+                        error.code(),
+                        "ERR_DECISION_KIND_MISMATCH",
+                        "Should produce decision kind mismatch error"
+                    );
                 }
 
                 // Ledger should not be modified by rejected actions
-                assert_eq!(ledger.len(), 0, "Ledger should remain empty for all mismatches");
+                assert_eq!(
+                    ledger.len(),
+                    0,
+                    "Ledger should remain empty for all mismatches"
+                );
             }
         }
 
         // Verify all mismatches were rejected
-        assert!(checker.rejected_count() > 0, "Should have rejected multiple mismatches");
-        assert_eq!(checker.executed_count(), 0, "Should not have executed any mismatched actions");
+        assert!(
+            checker.rejected_count() > 0,
+            "Should have rejected multiple mismatches"
+        );
+        assert_eq!(
+            checker.executed_count(),
+            0,
+            "Should not have executed any mismatched actions"
+        );
     }
 
     #[test]
@@ -1397,27 +1451,21 @@ mod tests {
         let linkage_attacks = [
             // Basic substitution
             ("ACT-LEGIT-001", "ACT-MALICIOUS-001"),
-
             // Case sensitivity bypass attempts
             ("ACT-SECURE-001", "act-secure-001"),
             ("act-secure-001", "ACT-SECURE-001"),
-
             // Unicode normalization attacks
             ("ACT-café-001", "ACT-cafe\u{0301}-001"), // NFC vs NFD
-
             // Injection attempts via action IDs
             ("ACT-001", "ACT-001\"; DROP TABLE evidence; --"),
             ("ACT-001", "ACT-001<script>alert('xss')</script>"),
             ("ACT-001", "ACT-001\r\nBypass: true"),
-
             // Null byte truncation attacks
             ("ACT-REAL-001", "ACT-REAL-001\0fake"),
-
             // Whitespace confusion
             ("ACT-001", "ACT-001 "),
             ("ACT-001", " ACT-001"),
             ("ACT-001", "ACT-001\t"),
-
             // Length-based attacks
             ("ACT-SHORT", &"A".repeat(100_000)),
         ];
@@ -1435,13 +1483,19 @@ mod tests {
 
             // All linkage attacks should be rejected (exact match required)
             if expected_id != evidence_id {
-                assert!(outcome.is_rejected(),
+                assert!(
+                    outcome.is_rejected(),
                     "Linkage attack expected='{}', evidence='{}' should be rejected",
-                    expected_id, evidence_id);
+                    expected_id,
+                    evidence_id
+                );
 
                 if let PolicyActionOutcome::Rejected { error, .. } = &outcome {
-                    assert_eq!(error.code(), "ERR_ACTION_ID_MISMATCH",
-                        "Should produce action ID mismatch error");
+                    assert_eq!(
+                        error.code(),
+                        "ERR_ACTION_ID_MISMATCH",
+                        "Should produce action ID mismatch error"
+                    );
                 }
             } else {
                 // Exact matches should succeed
@@ -1450,11 +1504,15 @@ mod tests {
         }
 
         // Verify no malicious evidence was accepted
-        let expected_successes = linkage_attacks.iter()
+        let expected_successes = linkage_attacks
+            .iter()
             .filter(|(expected, evidence)| expected == evidence)
             .count();
-        assert_eq!(checker.executed_count() as usize, expected_successes,
-            "Only exact matches should have succeeded");
+        assert_eq!(
+            checker.executed_count() as usize,
+            expected_successes,
+            "Only exact matches should have succeeded"
+        );
     }
 
     #[test]
@@ -1466,48 +1524,50 @@ mod tests {
         let ledger = Arc::new(Mutex::new(make_ledger()));
 
         // Spawn multiple threads performing concurrent evidence verification
-        let handles: Vec<_> = (0..8).map(|thread_id| {
-            let checker_clone = Arc::clone(&checker);
-            let ledger_clone = Arc::clone(&ledger);
+        let handles: Vec<_> = (0..8)
+            .map(|thread_id| {
+                let checker_clone = Arc::clone(&checker);
+                let ledger_clone = Arc::clone(&ledger);
 
-            thread::spawn(move || {
-                let mut results = Vec::new();
+                thread::spawn(move || {
+                    let mut results = Vec::new();
 
-                for i in 0..25 {
-                    let action_id = ActionId::new(format!("CONCURRENT-{}-{}", thread_id, i));
-                    let action = PolicyAction::all()[i % PolicyAction::all().len()];
+                    for i in 0..25 {
+                        let action_id = ActionId::new(format!("CONCURRENT-{}-{}", thread_id, i));
+                        let action = PolicyAction::all()[i % PolicyAction::all().len()];
 
-                    // Mix of valid and invalid evidence
-                    let evidence = if i % 3 == 0 {
-                        None // Missing evidence
-                    } else if i % 3 == 1 {
-                        // Valid evidence
-                        Some(make_evidence(action, action_id.as_str()))
-                    } else {
-                        // Invalid evidence (wrong action ID)
-                        Some(make_evidence(action, "WRONG-ID"))
-                    };
+                        // Mix of valid and invalid evidence
+                        let evidence = if i % 3 == 0 {
+                            None // Missing evidence
+                        } else if i % 3 == 1 {
+                            // Valid evidence
+                            Some(make_evidence(action, action_id.as_str()))
+                        } else {
+                            // Invalid evidence (wrong action ID)
+                            Some(make_evidence(action, "WRONG-ID"))
+                        };
 
-                    if let (Ok(mut checker_lock), Ok(mut ledger_lock)) =
-                        (checker_clone.try_lock(), ledger_clone.try_lock()) {
+                        if let (Ok(mut checker_lock), Ok(mut ledger_lock)) =
+                            (checker_clone.try_lock(), ledger_clone.try_lock())
+                        {
+                            let outcome = checker_lock.verify_and_execute(
+                                action,
+                                &action_id,
+                                evidence.as_ref(),
+                                &mut ledger_lock,
+                            );
 
-                        let outcome = checker_lock.verify_and_execute(
-                            action,
-                            &action_id,
-                            evidence.as_ref(),
-                            &mut ledger_lock,
-                        );
+                            results.push((outcome.is_executed(), outcome.is_rejected()));
+                        }
 
-                        results.push((outcome.is_executed(), outcome.is_rejected()));
+                        // Brief yield to encourage race conditions
+                        thread::yield_now();
                     }
 
-                    // Brief yield to encourage race conditions
-                    thread::yield_now();
-                }
-
-                results
+                    results
+                })
             })
-        }).collect();
+            .collect();
 
         // Collect all results
         let mut all_results = Vec::new();
@@ -1521,19 +1581,31 @@ mod tests {
         let rejected_count = all_results.iter().filter(|(_, rej)| *rej).count();
 
         // All operations should have deterministic outcomes
-        assert_eq!(executed_count + rejected_count, all_results.len(),
-            "All operations should have definitive outcomes");
+        assert_eq!(
+            executed_count + rejected_count,
+            all_results.len(),
+            "All operations should have definitive outcomes"
+        );
 
         // Verify final state consistency
         let final_checker = checker.lock().unwrap();
         let final_ledger = ledger.lock().unwrap();
 
-        assert_eq!(final_checker.executed_count() as usize, executed_count,
-            "Executed count should match successful operations");
-        assert_eq!(final_checker.rejected_count() as usize, rejected_count,
-            "Rejected count should match failed operations");
-        assert_eq!(final_ledger.len(), executed_count,
-            "Ledger size should match executed operations");
+        assert_eq!(
+            final_checker.executed_count() as usize,
+            executed_count,
+            "Executed count should match successful operations"
+        );
+        assert_eq!(
+            final_checker.rejected_count() as usize,
+            rejected_count,
+            "Rejected count should match failed operations"
+        );
+        assert_eq!(
+            final_ledger.len(),
+            executed_count,
+            "Ledger size should match executed operations"
+        );
     }
 
     #[test]
@@ -1555,42 +1627,55 @@ mod tests {
                 None // Missing evidence
             };
 
-            let outcome = checker.verify_and_execute(
-                action,
-                &action_id,
-                evidence.as_ref(),
-                &mut ledger,
-            );
+            let outcome =
+                checker.verify_and_execute(action, &action_id, evidence.as_ref(), &mut ledger);
 
             // Verify operation completes without memory exhaustion
-            assert!(outcome.is_executed() || outcome.is_rejected(),
-                "Operation {} should complete without panic", i);
+            assert!(
+                outcome.is_executed() || outcome.is_rejected(),
+                "Operation {} should complete without panic",
+                i
+            );
         }
 
         // Action log should be bounded by capacity
-        assert!(checker.action_log().len() <= MAX_ACTION_LOG_ENTRIES,
-            "Action log should be bounded to capacity, got {}", checker.action_log().len());
+        assert!(
+            checker.action_log().len() <= MAX_ACTION_LOG_ENTRIES,
+            "Action log should be bounded to capacity, got {}",
+            checker.action_log().len()
+        );
 
         // Counters should accurately reflect all operations
         let expected_executed = excess_actions / 2;
         let expected_rejected = excess_actions - expected_executed;
 
-        assert_eq!(checker.executed_count() as usize, expected_executed,
-            "Executed count should reflect all successful operations");
-        assert_eq!(checker.rejected_count() as usize, expected_rejected,
-            "Rejected count should reflect all failed operations");
+        assert_eq!(
+            checker.executed_count() as usize,
+            expected_executed,
+            "Executed count should reflect all successful operations"
+        );
+        assert_eq!(
+            checker.rejected_count() as usize,
+            expected_rejected,
+            "Rejected count should reflect all failed operations"
+        );
 
         // Ledger should contain only executed entries
-        assert_eq!(ledger.len(), expected_executed,
-            "Ledger should contain only successfully executed entries");
+        assert_eq!(
+            ledger.len(),
+            expected_executed,
+            "Ledger should contain only successfully executed entries"
+        );
 
         // Action log should contain most recent entries (oldest evicted)
         if checker.action_log().len() == MAX_ACTION_LOG_ENTRIES {
             // Verify latest entries are preserved
             let last_entry_in_log = &checker.action_log()[MAX_ACTION_LOG_ENTRIES - 1];
             // Should be one of the recent outcomes
-            assert!(last_entry_in_log.is_executed() || last_entry_in_log.is_rejected(),
-                "Last action log entry should be valid");
+            assert!(
+                last_entry_in_log.is_executed() || last_entry_in_log.is_rejected(),
+                "Last action log entry should be valid"
+            );
         }
     }
 
@@ -1604,16 +1689,13 @@ mod tests {
             // JSON structure manipulation
             serde_json::json!({"key": "value\"},\"malicious\":true,\"original\":\""}),
             serde_json::json!({"key": "\": {\"bypass\": true}, \"real_key\": \""}),
-
             // Unicode escapes and control characters
             serde_json::json!({"unicode": "value\u{0000}bypass"}),
             serde_json::json!({"control": "value\u{001F}\u{007F}"}),
             serde_json::json!({"bidi": "value\u{202e}reversed"}),
-
             // CRLF injection attempts
             serde_json::json!({"crlf": "value\r\nX-Injection: malicious"}),
             serde_json::json!({"newline": "value\n{\"fake\": \"entry\"}"}),
-
             // Massive nested structures (DoS)
             {
                 let mut nested = serde_json::json!("deep");
@@ -1622,19 +1704,15 @@ mod tests {
                 }
                 nested
             },
-
             // Array flooding
             serde_json::json!({"flood": vec!["x"; 100_000]}),
-
             // String length attacks
             serde_json::json!({"massive": "x".repeat(100_000)}),
-
             // Number boundary attacks
             serde_json::json!({"max_int": i64::MAX}),
             serde_json::json!({"max_uint": u64::MAX}),
             serde_json::json!({"infinity": f64::INFINITY}),
             serde_json::json!({"neg_infinity": f64::NEG_INFINITY}),
-
             // Null and undefined values
             serde_json::json!(null),
             serde_json::json!({"null_field": null}),
@@ -1658,8 +1736,11 @@ mod tests {
             );
 
             // Should handle all payload attacks safely
-            assert!(outcome.is_executed() || outcome.is_rejected(),
-                "Payload attack {} should be handled without panic", i);
+            assert!(
+                outcome.is_executed() || outcome.is_rejected(),
+                "Payload attack {} should be handled without panic",
+                i
+            );
 
             if outcome.is_executed() {
                 // Verify payload is preserved as-is in ledger
@@ -1670,14 +1751,18 @@ mod tests {
                 assert!(serialized.is_ok(), "Evidence should serialize safely");
 
                 // Verify no interpretation of payload content
-                assert_eq!(evidence.payload, payload,
-                    "Payload should be preserved exactly as provided");
+                assert_eq!(
+                    evidence.payload, payload,
+                    "Payload should be preserved exactly as provided"
+                );
             }
         }
 
         // All operations should complete without system compromise
-        assert!(checker.executed_count() > 0 || checker.rejected_count() > 0,
-            "Should have processed all payload attacks");
+        assert!(
+            checker.executed_count() > 0 || checker.rejected_count() > 0,
+            "Should have processed all payload attacks"
+        );
     }
 
     #[test]
@@ -1687,13 +1772,20 @@ mod tests {
         // Test various ledger failure scenarios
         let failure_scenarios = [
             // Zero capacity ledger
-            ("zero_capacity", EvidenceLedger::new(LedgerCapacity::new(0, 100_000))),
-
+            (
+                "zero_capacity",
+                EvidenceLedger::new(LedgerCapacity::new(0, 100_000)),
+            ),
             // Minimal byte budget
-            ("tiny_bytes", EvidenceLedger::new(LedgerCapacity::new(100, 1))),
-
+            (
+                "tiny_bytes",
+                EvidenceLedger::new(LedgerCapacity::new(100, 1)),
+            ),
             // Moderate capacity for overflow testing
-            ("small_capacity", EvidenceLedger::new(LedgerCapacity::new(2, 1_000))),
+            (
+                "small_capacity",
+                EvidenceLedger::new(LedgerCapacity::new(2, 1_000)),
+            ),
         ];
 
         for (scenario_name, mut ledger) in failure_scenarios {
@@ -1701,7 +1793,8 @@ mod tests {
 
             // Attempt multiple evidence submissions
             for i in 0..10 {
-                let action_id = ActionId::new(format!("{}-ACT-{}", scenario_name.to_uppercase(), i));
+                let action_id =
+                    ActionId::new(format!("{}-ACT-{}", scenario_name.to_uppercase(), i));
                 let action = PolicyAction::all()[i % PolicyAction::all().len()];
                 let evidence = build_evidence_entry(
                     action,
@@ -1722,17 +1815,26 @@ mod tests {
                 match outcome {
                     PolicyActionOutcome::Executed { .. } => {
                         // Execution should increment executed count
-                        assert!(local_checker.executed_count() > 0,
-                            "Executed count should reflect successful operations in {}", scenario_name);
+                        assert!(
+                            local_checker.executed_count() > 0,
+                            "Executed count should reflect successful operations in {}",
+                            scenario_name
+                        );
 
                         // Ledger should contain the entry
-                        assert!(ledger.len() > 0,
-                            "Ledger should contain executed entry in {}", scenario_name);
+                        assert!(
+                            ledger.len() > 0,
+                            "Ledger should contain executed entry in {}",
+                            scenario_name
+                        );
                     }
                     PolicyActionOutcome::Rejected { error, .. } => {
                         // Rejection should increment rejected count
-                        assert!(local_checker.rejected_count() > 0,
-                            "Rejected count should reflect failed operations in {}", scenario_name);
+                        assert!(
+                            local_checker.rejected_count() > 0,
+                            "Rejected count should reflect failed operations in {}",
+                            scenario_name
+                        );
 
                         // For ledger failures, evidence should be valid but append failed
                         if let ConformanceError::LedgerAppendFailed { reason } = &error {
@@ -1745,13 +1847,19 @@ mod tests {
                 }
 
                 // Action log should always record the attempt
-                assert!(local_checker.action_log().len() > 0,
-                    "Action log should record all attempts in {}", scenario_name);
+                assert!(
+                    local_checker.action_log().len() > 0,
+                    "Action log should record all attempts in {}",
+                    scenario_name
+                );
 
                 // Counters should be consistent
                 let total_ops = local_checker.executed_count() + local_checker.rejected_count();
-                assert!((total_ops as usize) <= (i + 1),
-                    "Total operations should not exceed attempts in {}", scenario_name);
+                assert!(
+                    (total_ops as usize) <= (i + 1),
+                    "Total operations should not exceed attempts in {}",
+                    scenario_name
+                );
             }
 
             // Verify final state consistency
@@ -1759,11 +1867,18 @@ mod tests {
             let final_rejected = local_checker.rejected_count();
             let final_total = final_executed + final_rejected;
 
-            assert_eq!(final_total, 10,
-                "Should have processed exactly 10 operations in {}", scenario_name);
+            assert_eq!(
+                final_total, 10,
+                "Should have processed exactly 10 operations in {}",
+                scenario_name
+            );
 
-            assert_eq!(local_checker.action_log().len() as u64, final_total.min(MAX_ACTION_LOG_ENTRIES as u64),
-                "Action log should record all operations (up to capacity) in {}", scenario_name);
+            assert_eq!(
+                local_checker.action_log().len() as u64,
+                final_total.min(MAX_ACTION_LOG_ENTRIES as u64),
+                "Action log should record all operations (up to capacity) in {}",
+                scenario_name
+            );
         }
     }
 
@@ -1777,12 +1892,12 @@ mod tests {
 
         // Test malicious Unicode in action IDs
         let malicious_action_ids = vec![
-            "action\u{202e}evil\u{200b}",       // Right-to-Left Override + Zero Width Space
-            "action\u{0000}injection",          // Null byte injection
-            "action\u{feff}bom",                // Byte Order Mark
-            "action\u{2028}line\u{2029}para",   // Line/Paragraph separators
-            "action\u{200c}\u{200d}joiners",    // Zero-width joiners
-            "action\x00\x01\x02\x03\x1f",       // Control characters
+            "action\u{202e}evil\u{200b}", // Right-to-Left Override + Zero Width Space
+            "action\u{0000}injection",    // Null byte injection
+            "action\u{feff}bom",          // Byte Order Mark
+            "action\u{2028}line\u{2029}para", // Line/Paragraph separators
+            "action\u{200c}\u{200d}joiners", // Zero-width joiners
+            "action\x00\x01\x02\x03\x1f", // Control characters
         ];
 
         for (i, malicious_action_id) in malicious_action_ids.iter().enumerate() {
@@ -1805,30 +1920,29 @@ mod tests {
                 malicious_metadata,
             );
 
-            let outcome = checker.verify_and_execute(
-                action,
-                &action_id,
-                Some(&evidence),
-                &mut ledger,
-            );
+            let outcome =
+                checker.verify_and_execute(action, &action_id, Some(&evidence), &mut ledger);
 
             // Should handle Unicode gracefully without corruption
             match outcome {
                 PolicyActionOutcome::Executed { .. } => {
                     // Unicode was accepted, verify no corruption occurred
-                    assert!(ledger.len() > 0, "Ledger should contain evidence with Unicode");
+                    assert!(
+                        ledger.len() > 0,
+                        "Ledger should contain evidence with Unicode"
+                    );
 
                     // Verify action ID integrity
                     assert_eq!(action_id.as_str(), *malicious_action_id);
-                },
+                }
                 PolicyActionOutcome::Rejected { error, .. } => {
                     // Unicode rejection is also acceptable for security
                     match error {
-                        ConformanceError::MissingEvidence { .. } |
-                        ConformanceError::DecisionKindMismatch { .. } |
-                        ConformanceError::ActionIdMismatch { .. } => {
+                        ConformanceError::MissingEvidence { .. }
+                        | ConformanceError::DecisionKindMismatch { .. }
+                        | ConformanceError::ActionIdMismatch { .. } => {
                             // These errors indicate Unicode validation passed but other checks failed
-                        },
+                        }
                         _ => {
                             // Other rejection reasons are acceptable
                         }
@@ -1866,7 +1980,7 @@ mod tests {
         match unicode_trace_outcome {
             PolicyActionOutcome::Executed { .. } => {
                 // Complex Unicode accepted
-            },
+            }
             PolicyActionOutcome::Rejected { .. } => {
                 // Unicode rejection acceptable
             }
@@ -1911,13 +2025,13 @@ mod tests {
                 PolicyActionOutcome::Executed { .. } => {
                     // Large payload accepted - verify system remains responsive
                     assert!(checker.executed_count() > 0);
-                },
+                }
                 PolicyActionOutcome::Rejected { error, .. } => {
                     // Size-based rejection is acceptable
                     match error {
                         ConformanceError::LedgerAppendFailed { reason } => {
                             assert!(!reason.is_empty(), "Ledger failure should have reason");
-                        },
+                        }
                         _ => {
                             // Other rejection reasons acceptable
                         }
@@ -1955,13 +2069,13 @@ mod tests {
 
             // Should handle rapid submission or hit capacity limits gracefully
             match rapid_outcome {
-                PolicyActionOutcome::Executed { .. } => {},
+                PolicyActionOutcome::Executed { .. } => {}
                 PolicyActionOutcome::Rejected { error, .. } => {
                     match error {
                         ConformanceError::LedgerAppendFailed { .. } => {
                             // Hit capacity limits - expected behavior
                             break;
-                        },
+                        }
                         _ => {
                             // Other rejections acceptable
                         }
@@ -1983,8 +2097,8 @@ mod tests {
 
         // Test decision kind spoofing
         let spoofing_attempts = vec![
-            (PolicyAction::Commit, DecisionKind::Deny),      // Commit with Deny decision
-            (PolicyAction::Abort, DecisionKind::Admit),      // Abort with Admit decision
+            (PolicyAction::Commit, DecisionKind::Deny), // Commit with Deny decision
+            (PolicyAction::Abort, DecisionKind::Admit), // Abort with Admit decision
             (PolicyAction::Quarantine, DecisionKind::Release), // Quarantine with Release decision
             (PolicyAction::Release, DecisionKind::Quarantine), // Release with Quarantine decision
         ];
@@ -1993,19 +2107,18 @@ mod tests {
             let action_id = ActionId::new(format!("spoof-{}", i));
 
             // Create evidence with mismatched decision kind
-            let spoofed_evidence = EvidenceEntry {
-                schema_version: "test-schema".to_string(),
-                entry_id: format!("spoof-entry-{}", i),
-                decision_id: format!("spoof-decision-{}", i),
-                decision_kind: *spoofed_decision,
-                trace_id: format!("spoof-trace-{}", i),
-                timestamp: 1000 + i as u64,
-                json_payload: serde_json::json!({
+            let mut spoofed_evidence = build_evidence_entry(
+                *action,
+                &action_id,
+                &format!("spoof-trace-{}", i),
+                1000u64.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)),
+                serde_json::json!({
                     "action": action.label(),
                     "spoofed_decision": format!("{:?}", spoofed_decision),
                     "attempt": "decision_kind_spoofing"
                 }),
-            };
+            );
+            spoofed_evidence.decision_kind = *spoofed_decision;
 
             let spoof_outcome = checker.verify_and_execute(
                 *action,
@@ -2017,13 +2130,16 @@ mod tests {
             // Should reject spoofed evidence
             match spoof_outcome {
                 PolicyActionOutcome::Executed { .. } => {
-                    panic!("Spoofed evidence should not be accepted for {:?} with {:?}", action, spoofed_decision);
-                },
+                    panic!(
+                        "Spoofed evidence should not be accepted for {:?} with {:?}",
+                        action, spoofed_decision
+                    );
+                }
                 PolicyActionOutcome::Rejected { error, .. } => {
                     match error {
                         ConformanceError::DecisionKindMismatch { .. } => {
                             // Expected rejection for spoofing
-                        },
+                        }
                         _ => {
                             panic!("Unexpected rejection reason for spoofing: {:?}", error);
                         }
@@ -2056,36 +2172,38 @@ mod tests {
         match id_manipulation_outcome {
             PolicyActionOutcome::Executed { .. } => {
                 panic!("Action ID manipulation should be rejected");
-            },
+            }
             PolicyActionOutcome::Rejected { error, .. } => {
                 match error {
                     ConformanceError::ActionIdMismatch { .. } => {
                         // Expected rejection for ID manipulation
-                    },
+                    }
                     _ => {
-                        panic!("Unexpected rejection reason for ID manipulation: {:?}", error);
+                        panic!(
+                            "Unexpected rejection reason for ID manipulation: {:?}",
+                            error
+                        );
                     }
                 }
             }
         }
 
         // Test evidence timestamp manipulation
-        let timestamp_evidence = EvidenceEntry {
-            schema_version: "test-schema".to_string(),
-            entry_id: "timestamp-test".to_string(),
-            decision_id: "timestamp-decision".to_string(),
-            decision_kind: DecisionKind::Admit,
-            trace_id: "timestamp-trace".to_string(),
-            timestamp: u64::MAX, // Extreme timestamp
-            json_payload: serde_json::json!({
+        let timestamp_action_id = ActionId::new("timestamp-test");
+        let timestamp_evidence = build_evidence_entry(
+            PolicyAction::Commit,
+            &timestamp_action_id,
+            "timestamp-trace",
+            u64::MAX,
+            serde_json::json!({
                 "timestamp_attack": true,
                 "value": "max_u64"
             }),
-        };
+        );
 
         let timestamp_outcome = checker.verify_and_execute(
             PolicyAction::Commit,
-            &ActionId::new("timestamp-test"),
+            &timestamp_action_id,
             Some(&timestamp_evidence),
             &mut ledger,
         );
@@ -2094,7 +2212,7 @@ mod tests {
         match timestamp_outcome {
             PolicyActionOutcome::Executed { .. } => {
                 // Extreme timestamp accepted
-            },
+            }
             PolicyActionOutcome::Rejected { .. } => {
                 // Timestamp rejection acceptable
             }
@@ -2125,12 +2243,8 @@ mod tests {
             );
 
             let start = std::time::Instant::now();
-            let _result = checker.verify_and_execute(
-                action,
-                &action_id,
-                Some(&valid_evidence),
-                &mut ledger,
-            );
+            let _result =
+                checker.verify_and_execute(action, &action_id, Some(&valid_evidence), &mut ledger);
             valid_timings.push(start.elapsed());
 
             // Invalid evidence timing (wrong decision kind)
@@ -2142,15 +2256,14 @@ mod tests {
                 DecisionKind::Release => DecisionKind::Quarantine,
             };
 
-            let invalid_evidence = EvidenceEntry {
-                schema_version: "test-schema".to_string(),
-                entry_id: format!("invalid-entry-{}", i),
-                decision_id: format!("invalid-decision-{}", i),
-                decision_kind: wrong_decision,
-                trace_id: format!("invalid-trace-{}", i),
-                timestamp: 2000 + i as u64,
-                json_payload: serde_json::json!({"iteration": i, "type": "invalid"}),
-            };
+            let mut invalid_evidence = build_evidence_entry(
+                action,
+                &invalid_action_id,
+                &format!("invalid-trace-{}", i),
+                2000u64.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)),
+                serde_json::json!({"iteration": i, "type": "invalid"}),
+            );
+            invalid_evidence.decision_kind = wrong_decision;
 
             let start = std::time::Instant::now();
             let _result = checker.verify_and_execute(
@@ -2164,11 +2277,23 @@ mod tests {
 
         // Timing difference should be minimal (no timing-based information leakage)
         if valid_timings.len() > 1 && invalid_timings.len() > 1 {
-            let avg_valid: f64 = valid_timings.iter().map(|d| d.as_nanos() as f64).sum::<f64>() / valid_timings.len() as f64;
-            let avg_invalid: f64 = invalid_timings.iter().map(|d| d.as_nanos() as f64).sum::<f64>() / invalid_timings.len() as f64;
+            let avg_valid: f64 = valid_timings
+                .iter()
+                .map(|d| d.as_nanos() as f64)
+                .sum::<f64>()
+                / valid_timings.len() as f64;
+            let avg_invalid: f64 = invalid_timings
+                .iter()
+                .map(|d| d.as_nanos() as f64)
+                .sum::<f64>()
+                / invalid_timings.len() as f64;
 
             let timing_ratio = avg_valid.max(avg_invalid) / avg_valid.min(avg_invalid).max(1.0);
-            assert!(timing_ratio < 4.0, "Evidence verification timing variance too high: {}", timing_ratio);
+            assert!(
+                timing_ratio < 4.0,
+                "Evidence verification timing variance too high: {}",
+                timing_ratio
+            );
         }
     }
 
@@ -2179,7 +2304,9 @@ mod tests {
         use std::thread;
 
         let checker = Arc::new(Mutex::new(EvidenceConformanceChecker::new()));
-        let ledger = Arc::new(Mutex::new(EvidenceLedger::new(LedgerCapacity::new(200, 200_000))));
+        let ledger = Arc::new(Mutex::new(EvidenceLedger::new(LedgerCapacity::new(
+            200, 200_000,
+        ))));
 
         let mut handles = Vec::new();
 
@@ -2193,7 +2320,8 @@ mod tests {
 
                 for operation in 0..25 {
                     let action = PolicyAction::all()[operation % PolicyAction::all().len()];
-                    let action_id = ActionId::new(format!("concurrent-{}-{}", thread_id, operation));
+                    let action_id =
+                        ActionId::new(format!("concurrent-{}-{}", thread_id, operation));
 
                     let evidence = build_evidence_entry(
                         action,
@@ -2241,14 +2369,27 @@ mod tests {
         let total_operations = total_executed + total_rejected;
 
         // Should have processed all operations from all threads
-        assert_eq!(total_operations, 4 * 25, "Should have processed all concurrent operations");
+        assert_eq!(
+            total_operations,
+            4 * 25,
+            "Should have processed all concurrent operations"
+        );
 
         // Verify ledger consistency
-        assert!(final_ledger.len() as u64 <= total_executed, "Ledger entries should not exceed executed count");
-        assert!(final_ledger.len() <= 200, "Ledger should not exceed capacity");
+        assert!(
+            final_ledger.len() as u64 <= total_executed,
+            "Ledger entries should not exceed executed count"
+        );
+        assert!(
+            final_ledger.len() <= 200,
+            "Ledger should not exceed capacity"
+        );
 
         // Verify action log consistency
-        assert!(final_checker.action_log().len() as u64 <= total_operations.min(MAX_ACTION_LOG_ENTRIES as u64));
+        assert!(
+            final_checker.action_log().len() as u64
+                <= total_operations.min(MAX_ACTION_LOG_ENTRIES as u64)
+        );
     }
 
     /// Negative test: Arithmetic overflow in timestamps and counters
@@ -2259,9 +2400,9 @@ mod tests {
 
         // Test near-maximum timestamp values
         let overflow_timestamps = vec![
-            u64::MAX - 1000,  // Near maximum
-            u64::MAX,         // Maximum
-            0,                // Minimum
+            u64::MAX - 1000, // Near maximum
+            u64::MAX,        // Maximum
+            0,               // Minimum
         ];
 
         for (i, timestamp) in overflow_timestamps.iter().enumerate() {
@@ -2290,7 +2431,7 @@ mod tests {
                 PolicyActionOutcome::Executed { .. } => {
                     // Extreme timestamp accepted
                     assert!(checker.executed_count() > 0);
-                },
+                }
                 PolicyActionOutcome::Rejected { .. } => {
                     // Timestamp rejection is acceptable for edge cases
                 }
@@ -2327,8 +2468,14 @@ mod tests {
             let current_total = current_executed.saturating_add(current_rejected);
 
             // Verify counters don't overflow
-            assert!(current_executed >= initial_executed, "Executed counter should not overflow");
-            assert!(current_total >= initial_executed, "Total counter should be consistent");
+            assert!(
+                current_executed >= initial_executed,
+                "Executed counter should not overflow"
+            );
+            assert!(
+                current_total >= initial_executed,
+                "Total counter should be consistent"
+            );
 
             // Break if ledger hits capacity to prevent excessive test time
             if ledger.len() >= 100 {
@@ -2341,8 +2488,14 @@ mod tests {
         let final_rejected = checker.rejected_count();
         let final_total = final_executed.saturating_add(final_rejected);
 
-        assert!(final_total >= final_executed, "Final counter arithmetic should be consistent");
-        assert!(final_total >= final_rejected, "Final counter arithmetic should be consistent");
+        assert!(
+            final_total >= final_executed,
+            "Final counter arithmetic should be consistent"
+        );
+        assert!(
+            final_total >= final_rejected,
+            "Final counter arithmetic should be consistent"
+        );
     }
 
     /// Negative test: Policy decision bypass and evidence linkage manipulation
@@ -2384,13 +2537,16 @@ mod tests {
             // Should reject linkage bypass attempts
             match bypass_outcome {
                 PolicyActionOutcome::Executed { .. } => {
-                    panic!("Evidence linkage bypass should be rejected for '{}' vs '{}'", original_id, bypass_id);
-                },
+                    panic!(
+                        "Evidence linkage bypass should be rejected for '{}' vs '{}'",
+                        original_id, bypass_id
+                    );
+                }
                 PolicyActionOutcome::Rejected { error, .. } => {
                     match error {
                         ConformanceError::ActionIdMismatch { .. } => {
                             // Expected rejection for linkage bypass
-                        },
+                        }
                         _ => {
                             // Other rejection reasons are acceptable
                         }
@@ -2402,29 +2558,42 @@ mod tests {
         // Test policy decision bypass through edge cases
         let policy_bypass_attempts = vec![
             // Try to use Quarantine decision for Release action (reverse mapping)
-            (PolicyAction::Release, DecisionKind::Quarantine, "reverse_mapping"),
+            (
+                PolicyAction::Release,
+                DecisionKind::Quarantine,
+                "reverse_mapping",
+            ),
             // Try to use generic decisions for specific actions
-            (PolicyAction::Commit, DecisionKind::Release, "generic_decision"),
-            (PolicyAction::Abort, DecisionKind::Quarantine, "generic_decision_2"),
+            (
+                PolicyAction::Commit,
+                DecisionKind::Release,
+                "generic_decision",
+            ),
+            (
+                PolicyAction::Abort,
+                DecisionKind::Quarantine,
+                "generic_decision_2",
+            ),
         ];
 
-        for (i, (action, malicious_decision, bypass_type)) in policy_bypass_attempts.iter().enumerate() {
+        for (i, (action, malicious_decision, bypass_type)) in
+            policy_bypass_attempts.iter().enumerate()
+        {
             let bypass_action_id = ActionId::new(format!("policy-bypass-{}-{}", i, bypass_type));
 
-            let malicious_evidence = EvidenceEntry {
-                schema_version: "test-schema".to_string(),
-                entry_id: format!("bypass-entry-{}", i),
-                decision_id: format!("bypass-decision-{}", i),
-                decision_kind: *malicious_decision,
-                trace_id: format!("bypass-trace-{}", i),
-                timestamp: 2000 + i as u64,
-                json_payload: serde_json::json!({
+            let mut malicious_evidence = build_evidence_entry(
+                *action,
+                &bypass_action_id,
+                &format!("bypass-trace-{}", i),
+                2000u64.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)),
+                serde_json::json!({
                     "bypass_type": bypass_type,
                     "attempted_action": action.label(),
                     "malicious_decision": format!("{:?}", malicious_decision),
                     "policy_bypass_attempt": true
                 }),
-            };
+            );
+            malicious_evidence.decision_kind = *malicious_decision;
 
             let bypass_outcome = checker.verify_and_execute(
                 *action,
@@ -2436,13 +2605,16 @@ mod tests {
             // Should reject policy bypass attempts
             match bypass_outcome {
                 PolicyActionOutcome::Executed { .. } => {
-                    panic!("Policy bypass should be rejected for {:?} with {:?}", action, malicious_decision);
-                },
+                    panic!(
+                        "Policy bypass should be rejected for {:?} with {:?}",
+                        action, malicious_decision
+                    );
+                }
                 PolicyActionOutcome::Rejected { error, .. } => {
                     match error {
                         ConformanceError::DecisionKindMismatch { .. } => {
                             // Expected rejection for policy bypass
-                        },
+                        }
                         _ => {
                             // Other rejection reasons are acceptable
                         }

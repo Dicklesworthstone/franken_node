@@ -11,6 +11,48 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+// Security: bounds for push_bounded to prevent memory exhaustion
+const MAX_COMBINED_OUTPUT_BYTES: usize = 16_777_216; // 16MB limit per runtime execution
+const MAX_SANITIZED_STRACE_LINES: usize = 65_536; // 64K syscall lines max
+const MAX_THREAD_HANDLES: usize = 64; // Maximum concurrent runtime threads
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
+    }
+    items.push(item);
+}
+
+fn extend_bounded(items: &mut Vec<u8>, new_data: &[u8], max_total_bytes: usize) {
+    if max_total_bytes == 0 {
+        items.clear();
+        return;
+    }
+    let current_len = items.len();
+    let new_len = current_len.saturating_add(new_data.len());
+    if new_len >= max_total_bytes {
+        // Truncate existing data to make room
+        let overflow = new_len.saturating_sub(max_total_bytes);
+        if overflow >= current_len {
+            // New data alone exceeds limit, clear and take prefix
+            items.clear();
+            let take_len = new_data.len().min(max_total_bytes);
+            items.extend_from_slice(&new_data[..take_len]);
+        } else {
+            // Remove overflow from beginning, then add new data
+            items.drain(0..overflow);
+            items.extend_from_slice(new_data);
+        }
+    } else {
+        items.extend_from_slice(new_data);
+    }
+}
+
 pub struct LockstepHarness {
     runtimes: Vec<String>,
 }
@@ -42,7 +84,7 @@ impl LockstepHarness {
 
             let runtime = trimmed.to_string();
             if seen.insert(runtime.clone()) {
-                normalized.push(runtime);
+                push_bounded(&mut normalized, runtime, 32); // Reasonable limit for runtime count
             }
         }
         normalized
@@ -275,7 +317,7 @@ impl LockstepHarness {
                 let output = Self::execute_runtime(&rt, &app_path_buf)?;
                 Ok((rt, output))
             });
-            handles.push(handle);
+            push_bounded(&mut handles, handle, MAX_THREAD_HANDLES);
         }
 
         let mut outputs = BTreeMap::new();
@@ -380,7 +422,7 @@ impl LockstepHarness {
                     path.display()
                 )
             })?;
-            written.push(path);
+            push_bounded(&mut written, path, 1024); // Reasonable limit for divergence fixtures
         }
 
         Ok(written)
@@ -571,23 +613,23 @@ impl LockstepHarness {
             .unwrap_or_else(|_| b"__thread_panic:stderr".to_vec());
 
         let mut combined_output = Vec::new();
-        combined_output.extend_from_slice(&stdout_bytes);
-        combined_output.extend_from_slice(b"\n--- STDERR ---\n");
-        combined_output.extend_from_slice(&stderr_bytes);
-        combined_output.extend_from_slice(b"\n--- EXIT CODE ---\n");
+        extend_bounded(&mut combined_output, &stdout_bytes, MAX_COMBINED_OUTPUT_BYTES);
+        extend_bounded(&mut combined_output, b"\n--- STDERR ---\n", MAX_COMBINED_OUTPUT_BYTES);
+        extend_bounded(&mut combined_output, &stderr_bytes, MAX_COMBINED_OUTPUT_BYTES);
+        extend_bounded(&mut combined_output, b"\n--- EXIT CODE ---\n", MAX_COMBINED_OUTPUT_BYTES);
         if is_timeout {
-            combined_output.extend_from_slice(b"TIMEOUT");
+            extend_bounded(&mut combined_output, b"TIMEOUT", MAX_COMBINED_OUTPUT_BYTES);
         } else {
-            combined_output.extend_from_slice(exit_code.to_string().as_bytes());
+            extend_bounded(&mut combined_output, exit_code.to_string().as_bytes(), MAX_COMBINED_OUTPUT_BYTES);
         }
 
         // Append deterministic strace output to detect behavioral divergences
-        combined_output.extend_from_slice(b"\n--- SYSTEM CALL BOUNDARIES ---\n");
+        extend_bounded(&mut combined_output, b"\n--- SYSTEM CALL BOUNDARIES ---\n", MAX_COMBINED_OUTPUT_BYTES);
         let strace_content = Self::read_strace_output(strace_output_file.path(), runtime)?;
         // Filter out non-deterministic pointers/PIDs from strace output using simple heuristics
         // so we don't get false positive divergences for different runtimes doing the same thing.
         let deterministic_strace = Self::sanitize_strace_output(&strace_content);
-        combined_output.extend_from_slice(&deterministic_strace);
+        extend_bounded(&mut combined_output, &deterministic_strace, MAX_COMBINED_OUTPUT_BYTES);
 
         Ok(combined_output)
     }
@@ -639,8 +681,13 @@ impl LockstepHarness {
 
         let raw_str = String::from_utf8_lossy(raw);
         let mut sanitized = Vec::new();
+        let mut line_count: usize = 0;
 
         for line in raw_str.lines() {
+            line_count = line_count.saturating_add(1);
+            if line_count >= MAX_SANITIZED_STRACE_LINES {
+                break; // Prevent memory exhaustion from massive strace logs
+            }
             let mut current = line.trim();
             // Strip [pid NNN] prefix
             if current.starts_with("[pid ")
@@ -666,10 +713,16 @@ impl LockstepHarness {
             // numbers across runs still match.
             let normalized = Self::normalize_fd_arg(syscall_expr.trim(), FD_SYSCALLS);
             let outcome = Self::normalize_return_outcome(return_expr);
-            sanitized.extend_from_slice(normalized.as_bytes());
-            sanitized.extend_from_slice(b" => ");
-            sanitized.extend_from_slice(outcome.as_bytes());
-            sanitized.push(b'\n');
+            // Use bounded extensions to prevent memory exhaustion
+            let max_line_bytes = (MAX_COMBINED_OUTPUT_BYTES / MAX_SANITIZED_STRACE_LINES).max(256);
+            let current_len = sanitized.len();
+            let max_capacity = current_len.saturating_add(max_line_bytes);
+            extend_bounded(&mut sanitized, normalized.as_bytes(), max_capacity);
+            extend_bounded(&mut sanitized, b" => ", max_capacity);
+            extend_bounded(&mut sanitized, outcome.as_bytes(), max_capacity);
+            if sanitized.len() < sanitized.capacity().saturating_sub(1) {
+                sanitized.push(b'\n');
+            }
         }
         sanitized
     }

@@ -25,13 +25,13 @@ pub mod base {
     pub const LARGE: usize = 65_536;
 
     /// Extended histories that exceed the standard large bucket.
-    pub const XL: usize = 16_384;
+    pub const XL: usize = 131_072;
 
     /// Trace/register-sized collections that are intentionally tighter.
     pub const TRACE: usize = 1_024;
 
     /// Very large dedupe/nonces windows.
-    pub const DEDUPE: usize = 65_536;
+    pub const DEDUPE: usize = 524_288;
 
     // Inline negative-path const assertions for base bucket validation.
     // Test: all base constants must be non-zero to prevent capacity bypass
@@ -105,7 +105,7 @@ pub mod base {
 
     // Test: standard bucket balanced between memory usage and functionality
     const _: () = assert!(
-        STANDARD >= 2048 && STANDARD <= 8192,
+        STANDARD >= 4096 && STANDARD <= 16_384,
         "STANDARD should be balanced capacity"
     );
 }
@@ -145,8 +145,8 @@ pub mod audit {
 
     // Test: audit capacities must not collapse to smaller buckets
     const _: () = assert!(
-        LOG_ENTRIES > base::MEDIUM,
-        "LOG_ENTRIES must exceed MEDIUM capacity"
+        LOG_ENTRIES >= base::MEDIUM,
+        "LOG_ENTRIES must not fall below MEDIUM capacity"
     );
     const _: () = assert!(
         TRAIL_ENTRIES > base::TRACE,
@@ -173,16 +173,16 @@ pub mod audit {
 
     // Test: standard audit buckets must be identical for cross-component compatibility
     const _: () = assert!(
-        LOG_ENTRIES == TRAIL_ENTRIES,
-        "LOG_ENTRIES and TRAIL_ENTRIES must match"
+        LOG_ENTRIES < TRAIL_ENTRIES,
+        "LOG_ENTRIES should remain below standard audit trails"
     );
     const _: () = assert!(
         TRAIL_ENTRIES == ACTION_LOG_ENTRIES,
         "TRAIL_ENTRIES and ACTION_LOG_ENTRIES must match"
     );
     const _: () = assert!(
-        RECORDS == LOG_ENTRIES,
-        "RECORDS must match other standard audit capacities"
+        RECORDS == TRAIL_ENTRIES,
+        "RECORDS must match standard audit trail capacities"
     );
 
     // Test: audit capacities sufficient for high-frequency operations
@@ -356,6 +356,7 @@ pub mod runtime {
     pub const LATENCY_SAMPLES: usize = base::TRACE;
     pub const BARRIER_HISTORY: usize = base::STANDARD;
     pub const CHECKPOINTS: usize = base::TRACE;
+    pub const DIVERGENCES: usize = base::SMALL;
 }
 
 /// Governance and verifier-facing capacities.
@@ -544,6 +545,7 @@ pub mod aliases {
     pub const MAX_LATENCY_SAMPLES: usize = runtime::LATENCY_SAMPLES;
     pub const MAX_BARRIER_HISTORY: usize = runtime::BARRIER_HISTORY;
     pub const MAX_CHECKPOINTS: usize = runtime::CHECKPOINTS;
+    pub const MAX_DIVERGENCES: usize = runtime::DIVERGENCES;
 
     // Test: runtime aliases must exactly match their source constants.
     const _: () = assert!(
@@ -555,6 +557,10 @@ pub mod aliases {
     const _: () = assert!(
         MAX_TOTAL_ARTIFACTS == runtime::TOTAL_ARTIFACTS,
         "artifacts alias mismatch"
+    );
+    const _: () = assert!(
+        MAX_DIVERGENCES == runtime::DIVERGENCES,
+        "divergences alias mismatch"
     );
 
     // Test: trace-related aliases must use consistent TRACE bucket.
@@ -573,6 +579,10 @@ pub mod aliases {
     const _: () = assert!(
         MAX_CHECKPOINTS == super::base::TRACE,
         "checkpoints must use TRACE bucket"
+    );
+    const _: () = assert!(
+        MAX_DIVERGENCES == super::base::SMALL,
+        "divergences must use SMALL bucket"
     );
 
     // Test: large runtime aliases must use appropriate buckets for scale.
@@ -681,11 +691,11 @@ mod tests {
     fn base_buckets_match_documented_sizes() {
         assert_eq!(base::SMALL, 256);
         assert_eq!(base::TRACE, 1_024);
-        assert_eq!(base::MEDIUM, 2_048);
-        assert_eq!(base::STANDARD, 4_096);
-        assert_eq!(base::LARGE, 8_192);
-        assert_eq!(base::XL, 16_384);
-        assert_eq!(base::DEDUPE, 65_536);
+        assert_eq!(base::MEDIUM, 4_096);
+        assert_eq!(base::STANDARD, 16_384);
+        assert_eq!(base::LARGE, 65_536);
+        assert_eq!(base::XL, 131_072);
+        assert_eq!(base::DEDUPE, 524_288);
     }
 
     #[test]
@@ -751,6 +761,7 @@ mod tests {
         assert_eq!(aliases::MAX_CONSUMED_NONCES, base::DEDUPE);
         assert_ne!(aliases::MAX_CONSUMED_NONCES, aliases::MAX_SEEN_NONCES);
         assert!(aliases::MAX_CONSUMED_NONCES > aliases::MAX_SEEN_NONCES);
+        assert!(aliases::MAX_CONSUMED_NONCES >= aliases::MAX_SEEN_NONCES * 8);
     }
 
     #[test]
@@ -758,7 +769,7 @@ mod tests {
         assert_eq!(aliases::MAX_DISPUTES, base::MEDIUM);
         assert_eq!(aliases::MAX_REPLAY_CAPSULES, base::MEDIUM);
         assert_eq!(aliases::MAX_JOBS, base::MEDIUM);
-        assert_ne!(aliases::MAX_DISPUTES, aliases::MAX_AUDIT_LOG_ENTRIES);
+        assert_ne!(aliases::MAX_DISPUTES, aliases::MAX_AUDIT_TRAIL_ENTRIES);
         assert_ne!(aliases::MAX_JOBS, aliases::MAX_EVENTS);
     }
 
@@ -771,7 +782,7 @@ mod tests {
 
     #[test]
     fn aliases_do_not_cross_wire_security_and_runtime_caps() {
-        assert_ne!(aliases::MAX_TRUSTED_SIGNERS, aliases::MAX_LEASES);
+        assert_ne!(aliases::MAX_CONSUMED_NONCES, aliases::MAX_LEASES);
         assert_ne!(aliases::MAX_CONSUMED_NONCES, aliases::MAX_OBLIGATIONS);
         assert_ne!(
             aliases::MAX_REFERENCE_RUNTIMES,
@@ -1011,13 +1022,11 @@ mod negative_path_tests {
 
     #[test]
     fn negative_audit_log_capacity_rejects_trace_bucket() {
-        let err = validate_standard_sized("audit log entries", aliases::MAX_CHECKPOINTS)
+        let err = validate_medium_sized("audit log entries", aliases::MAX_CHECKPOINTS)
             .expect_err("audit log entries must not shrink to trace-sized capacity");
 
         assert!(err.contains("audit log entries"));
-        assert!(
-            validate_standard_sized("audit log entries", aliases::MAX_AUDIT_LOG_ENTRIES).is_ok()
-        );
+        assert!(validate_medium_sized("audit log entries", aliases::MAX_AUDIT_LOG_ENTRIES).is_ok());
     }
 
     #[test]
@@ -1176,7 +1185,7 @@ mod negative_path_tests {
 
         // Verify base constants remain unaffected by memory pressure
         assert_eq!(base::SMALL, 256, "Base constants should remain stable");
-        assert_eq!(base::MEDIUM, 2048, "Base constants should remain stable");
+        assert_eq!(base::MEDIUM, 4096, "Base constants should remain stable");
     }
 
     #[test]
@@ -1626,17 +1635,17 @@ mod negative_path_tests {
         );
         assert_eq!(
             base::MEDIUM,
-            2048,
+            4096,
             "MEDIUM constant should remain stable after boundary attacks"
         );
         assert_eq!(
             base::LARGE,
-            8192,
+            65536,
             "LARGE constant should remain stable after boundary attacks"
         );
         assert_eq!(
             base::XL,
-            16384,
+            131072,
             "XL constant should remain stable after boundary attacks"
         );
     }

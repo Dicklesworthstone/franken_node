@@ -1070,7 +1070,7 @@ mod encoding_root_negative_tests {
             assert_eq!(seed.domain(), &DomainTag::Encoding,
                 "Derived seed should maintain domain for pattern: {}", description);
 
-            derived_seeds.push((seed.bytes().to_vec(), description));
+            deterministic_seed::push_bounded(&mut derived_seeds, (seed.bytes().to_vec(), description), 20);
 
             // Verify no obvious information leakage
             let seed_bytes = seed.bytes();
@@ -1104,21 +1104,23 @@ mod encoding_root_negative_tests {
     fn encoding_root_memory_corruption_malformed_schedule_serialization_attack() {
         use super::deterministic_seed::ScheduleConfig;
 
+        let mut large_parameter_map = serde_json::Map::new();
+        large_parameter_map.insert("x".repeat(10000), serde_json::Value::String("value".to_string()));
+        let nested_parameter_value = "{".repeat(1000) + &"}".repeat(1000);
+
         // Memory corruption attack vectors in JSON serialization
         let corruption_payloads = [
             // Large parameter names to trigger buffer issues
             serde_json::json!({
                 "version": 1,
-                "parameters": {
-                    "x".repeat(10000): "value"
-                }
+                "parameters": large_parameter_map
             }),
 
             // Deep nesting to trigger stack overflow
             serde_json::json!({
                 "version": 1,
                 "parameters": {
-                    "nested": "{\".repeat(1000) + &"\"}".repeat(1000)
+                    "nested": nested_parameter_value
                 }
             }),
 
@@ -1142,7 +1144,8 @@ mod encoding_root_negative_tests {
             serde_json::json!({
                 "version": 1,
                 "parameters": {
-                    "binary": "\xff\xfe\xfd\xfc\xfb\xfa\xf9\xf8"
+                    "binary": String::from_utf8_lossy(b"\xff\xfe\xfd\xfc\xfb\xfa\xf9\xf8")
+                        .into_owned()
                 }
             }),
 
@@ -1524,10 +1527,20 @@ mod encoding_root_negative_tests {
     fn encoding_root_json_deserialization_bomb_parser_exhaustion_attack() {
         use super::deterministic_seed::ScheduleConfig;
 
+        let mut deep_object = r#""value""#.to_string();
+        for _ in 0..100 {
+            deep_object = format!(r#"{{"nested":{deep_object}}}"#);
+        }
+        let deep_object_payload = format!(r#"{{"version":1,"parameters":{deep_object}}}"#);
+        let array_bomb_payload = format!(
+            r#"{{"version":1,"parameters":{{"array":"[{}0]"}}}}"#,
+            "0,".repeat(10_000)
+        );
+
         // JSON bomb attack vectors targeting parser resource exhaustion
         let bomb_payloads = [
             // Deeply nested object structure
-            (r#"{"version":1,"parameters":{"#.to_string() + &"nested":.repeat(100) + &"}".repeat(100) + "\"value\"}}", "Deep object nesting"),
+            (deep_object_payload, "Deep object nesting"),
 
             // Repeated key attack
             (format!(r#"{{"version":1,"parameters":{{{}}}}}"#,
@@ -1538,7 +1551,7 @@ mod encoding_root_negative_tests {
             (format!(r#"{{"version":1,"parameters":{{"large":"{}"}}}}"#, "x".repeat(100_000)), "Massive string value"),
 
             // Array bombing (if arrays were accepted)
-            (r#"{"version":1,"parameters":{"array":"[".to_string() + &"0,".repeat(10_000) + "0]"}}", "Array structure"),
+            (array_bomb_payload, "Array structure"),
 
             // Unicode bombing
             (format!(r#"{{"version":1,"parameters":{{"unicode":"{}"}}}}"#, "🔥".repeat(10_000)), "Unicode bombing"),

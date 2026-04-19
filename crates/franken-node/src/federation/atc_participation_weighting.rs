@@ -235,7 +235,7 @@ impl WeightAuditRecord {
             serde_json::to_string(weights).unwrap_or_else(|e| format!("__serde_err:{e}"));
         let mut hasher = Sha256::new();
         hasher.update(b"atc_participation_hash_v1:");
-        hasher.update((canonical.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(canonical.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(canonical.as_bytes());
         hex::encode(hasher.finalize())
     }

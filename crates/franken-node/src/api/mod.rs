@@ -344,10 +344,10 @@ mod tests {
 
         // Strings with unusual byte patterns
         let unusual_patterns = vec![
-            "\xFF\xFE\xFD", // High bytes (would be invalid UTF-8 if raw)
+            "\u{00FF}\u{00FE}\u{00FD}", // High code points encoded as valid UTF-8
             "normal\u{FEFF}bom", // BOM in middle of string
             "emoji\u{1F4A9}\u{1F525}combo", // Multi-byte emoji sequence
-            "\u{D800}", // Lone high surrogate (invalid in UTF-8, but valid scalar)
+            "\u{FFFD}", // Replacement character for invalid byte decoding boundaries
         ];
 
         for pattern in unusual_patterns {

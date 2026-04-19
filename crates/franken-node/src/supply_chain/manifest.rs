@@ -1153,7 +1153,7 @@ mod tests {
         let mut manifest = valid_manifest();
 
         // Create massive base64-encoded signature (10MB)
-        let massive_data = vec![b'A'; 10 * 1024 * 1024];
+        let massive_data = vec![b'A'; 10_usize.saturating_mul(1024).saturating_mul(1024)];
         let massive_signature = base64::engine::general_purpose::STANDARD.encode(&massive_data);
         manifest.signature.signature = massive_signature;
 

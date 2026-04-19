@@ -932,6 +932,10 @@ impl Supervisor {
 // ---------------------------------------------------------------------------
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
         let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
@@ -940,6 +944,10 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 }
 
 fn push_bounded_deque<T>(items: &mut VecDeque<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     while items.len() >= cap {
         let _ = items.pop_front();
     }
@@ -1490,6 +1498,24 @@ mod tests {
         sup.add_child(spec).unwrap();
         let report = sup.shutdown();
         assert_eq!(report.force_terminated, 1);
+    }
+
+    #[test]
+    fn test_push_bounded_zero_capacity_drops_items() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_push_bounded_deque_zero_capacity_drops_items() {
+        let mut items = VecDeque::from([1, 2, 3]);
+
+        push_bounded_deque(&mut items, 4, 0);
+
+        assert!(items.is_empty());
     }
 
     #[test]

@@ -69,7 +69,7 @@ pub struct ProofLagSlo {
 impl ProofLagSlo {
     #[must_use]
     pub fn new(max_proof_lag_secs: u64, max_backlog_depth: u64, max_error_rate: f64) -> Self {
-        let safe_rate = if max_error_rate.is_finite() {
+        let safe_rate = if max_error_rate.is_finite() && max_error_rate >= 0.0 {
             max_error_rate
         } else {
             0.0 // fail-closed: any error rate breaches the SLO
@@ -87,7 +87,9 @@ impl ProofLagSlo {
         metrics.proof_lag_secs >= self.max_proof_lag_secs
             || metrics.backlog_depth >= self.max_backlog_depth
             || !metrics.error_rate.is_finite()
+            || metrics.error_rate < 0.0
             || !self.max_error_rate.is_finite()
+            || self.max_error_rate < 0.0
             || metrics.error_rate >= self.max_error_rate
     }
 
@@ -99,7 +101,9 @@ impl ProofLagSlo {
         } else if metrics.backlog_depth >= self.max_backlog_depth {
             Some("backlog_depth")
         } else if !metrics.error_rate.is_finite()
+            || metrics.error_rate < 0.0
             || !self.max_error_rate.is_finite()
+            || self.max_error_rate < 0.0
             || metrics.error_rate >= self.max_error_rate
         {
             Some("error_rate")
@@ -647,7 +651,12 @@ impl VefDegradedModeEngine {
                 metrics.backlog_depth as f64,
                 slo.max_backlog_depth as f64,
             )
-        } else if !metrics.error_rate.is_finite() || metrics.error_rate >= slo.max_error_rate {
+        } else if !metrics.error_rate.is_finite()
+            || metrics.error_rate < 0.0
+            || !slo.max_error_rate.is_finite()
+            || slo.max_error_rate < 0.0
+            || metrics.error_rate >= slo.max_error_rate
+        {
             ("error_rate", metrics.error_rate, slo.max_error_rate)
         } else {
             ("unknown", 0.0, 0.0)
@@ -1286,6 +1295,20 @@ mod tests {
         assert!((slo.max_error_rate - 0.0).abs() < f64::EPSILON);
     }
 
+    #[test]
+    fn proof_lag_slo_negative_error_rate_is_fail_closed() {
+        let slo = ProofLagSlo::new(300, 100, -0.10);
+        assert!((slo.max_error_rate - 0.0).abs() < f64::EPSILON);
+
+        let metrics = ProofLagMetrics {
+            proof_lag_secs: 0,
+            backlog_depth: 0,
+            error_rate: 0.0,
+            heartbeat_age_secs: 0,
+        };
+        assert!(slo.breached_by(&metrics));
+    }
+
     // ── NaN/Inf error_rate in metrics → fail-closed ────────────────────
 
     #[test]
@@ -1334,6 +1357,22 @@ mod tests {
     }
 
     #[test]
+    fn negative_error_rate_in_metrics_breaches_slo() {
+        let slo = ProofLagSlo::new(300, 100, 0.10);
+        let metrics = ProofLagMetrics {
+            proof_lag_secs: 0,
+            backlog_depth: 0,
+            error_rate: -0.01,
+            heartbeat_age_secs: 0,
+        };
+        assert!(
+            slo.breached_by(&metrics),
+            "negative finite error_rate must breach SLO (fail-closed)"
+        );
+        assert_eq!(slo.first_breached_metric(&metrics), Some("error_rate"));
+    }
+
+    #[test]
     fn nan_error_rate_escalates_engine_to_halt() {
         let mut engine = default_engine();
         let metrics = ProofLagMetrics {
@@ -1349,6 +1388,34 @@ mod tests {
             VefMode::Halt,
             "NaN error_rate must escalate to halt"
         );
+    }
+
+    #[test]
+    fn negative_error_rate_escalates_engine_to_halt() {
+        let mut engine = default_engine();
+        let metrics = ProofLagMetrics {
+            proof_lag_secs: 0,
+            backlog_depth: 0,
+            error_rate: -0.01,
+            heartbeat_age_secs: 0,
+        };
+        engine.observe_metrics(&metrics, 1000, "corr-negative-rate");
+
+        assert_eq!(
+            engine.mode(),
+            VefMode::Halt,
+            "negative finite error_rate must escalate to halt"
+        );
+        let breach = engine
+            .audit_log()
+            .iter()
+            .find_map(|event| match event {
+                VefDegradedModeEvent::SloBreach(breach) => Some(breach),
+                _ => None,
+            })
+            .expect("negative error_rate breach should be audited");
+        assert_eq!(breach.metric_name, "error_rate");
+        assert_eq!(breach.observed_value, -0.01);
     }
 
     #[test]
@@ -1407,6 +1474,26 @@ mod tests {
             slo.breached_by(&metrics),
             "Inf SLO threshold must fail-closed"
         );
+    }
+
+    #[test]
+    fn negative_slo_threshold_breaches_for_finite_metric() {
+        let slo = ProofLagSlo {
+            max_proof_lag_secs: 300,
+            max_backlog_depth: 100,
+            max_error_rate: -0.10,
+        };
+        let metrics = ProofLagMetrics {
+            proof_lag_secs: 0,
+            backlog_depth: 0,
+            error_rate: 0.0,
+            heartbeat_age_secs: 0,
+        };
+        assert!(
+            slo.breached_by(&metrics),
+            "negative SLO threshold must fail-closed"
+        );
+        assert_eq!(slo.first_breached_metric(&metrics), Some("error_rate"));
     }
 
     #[test]

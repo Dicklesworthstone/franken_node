@@ -11,6 +11,8 @@ use std::fmt;
 
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 
+const MAX_TELEMETRY_FIELD_BYTES: usize = 4 * 1024;
+
 // ── Domain-separated hash ───────────────────────────────────────────
 
 /// Compute a domain-separated hash over length-prefixed domain and data fields.
@@ -155,12 +157,12 @@ impl AdmissionTelemetry {
         push_bounded(
             &mut self.checks,
             AdmissionCheck {
-                connector_id: connector_id.to_string(),
-                domain: domain.to_string(),
+                connector_id: bounded_telemetry_field(connector_id),
+                domain: bounded_telemetry_field(domain),
                 admitted,
                 rejection_code,
-                trace_id: trace_id.to_string(),
-                timestamp: timestamp.to_string(),
+                trace_id: bounded_telemetry_field(trace_id),
+                timestamp: bounded_telemetry_field(timestamp),
             },
             MAX_AUDIT_LOG_ENTRIES,
         );
@@ -181,11 +183,28 @@ impl AdmissionTelemetry {
 }
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
         let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
+}
+
+fn bounded_telemetry_field(value: &str) -> String {
+    if value.len() <= MAX_TELEMETRY_FIELD_BYTES {
+        return value.to_string();
+    }
+
+    let mut end = MAX_TELEMETRY_FIELD_BYTES;
+    while !value.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    value[..end].to_string()
 }
 
 // ── Errors ──────────────────────────────────────────────────────────
@@ -881,12 +900,12 @@ mod interface_hash_retention_negative_tests {
     }
 
     #[test]
-    fn push_bounded_zero_capacity_replaces_existing_items_without_panic() {
+    fn push_bounded_zero_capacity_clears_existing_items_without_panic() {
         let mut items = vec!["old-a", "old-b"];
 
         push_bounded(&mut items, "new", 0);
 
-        assert_eq!(items, vec!["new"]);
+        assert!(items.is_empty());
     }
 
     #[test]
@@ -1293,9 +1312,31 @@ mod interface_hash_comprehensive_negative_tests {
         );
 
         assert!(admitted);
-        assert_eq!(telemetry.checks[0].connector_id, massive_connector_id);
-        assert_eq!(telemetry.checks[0].trace_id, massive_trace_id);
-        assert_eq!(telemetry.checks[0].timestamp, massive_timestamp);
+        assert_eq!(
+            telemetry.checks[0].connector_id.len(),
+            MAX_TELEMETRY_FIELD_BYTES
+        );
+        assert_eq!(
+            telemetry.checks[0].trace_id.len(),
+            MAX_TELEMETRY_FIELD_BYTES
+        );
+        assert_eq!(
+            telemetry.checks[0].timestamp.len(),
+            MAX_TELEMETRY_FIELD_BYTES
+        );
+        assert!(massive_connector_id.starts_with(&telemetry.checks[0].connector_id));
+        assert!(massive_trace_id.starts_with(&telemetry.checks[0].trace_id));
+        assert!(massive_timestamp.starts_with(&telemetry.checks[0].timestamp));
+    }
+
+    #[test]
+    fn negative_admission_telemetry_truncates_on_utf8_boundary() {
+        let oversized = format!("{}é", "a".repeat(MAX_TELEMETRY_FIELD_BYTES - 1));
+
+        let bounded = bounded_telemetry_field(&oversized);
+
+        assert_eq!(bounded.len(), MAX_TELEMETRY_FIELD_BYTES - 1);
+        assert!(oversized.starts_with(&bounded));
     }
 
     #[test]
@@ -1575,6 +1616,11 @@ mod interface_hash_advanced_negative_tests {
                 .rejection_distribution
                 .contains_key(&RejectionCode::MalformedHash)
         );
+        assert!(telemetry.checks.iter().all(|check| {
+            check.connector_id.len() <= MAX_TELEMETRY_FIELD_BYTES
+                && check.domain.len() <= MAX_TELEMETRY_FIELD_BYTES
+                && check.trace_id.len() <= MAX_TELEMETRY_FIELD_BYTES
+        }));
     }
 
     #[test]
@@ -1667,14 +1713,11 @@ mod interface_hash_advanced_negative_tests {
 
         push_bounded(&mut items, "new_item", 0);
 
-        // Should replace all existing items with just the new item
-        assert_eq!(items, vec!["new_item"]);
-        assert_eq!(items.len(), 1);
+        assert!(items.is_empty());
 
         // Test pushing another item with zero capacity
         push_bounded(&mut items, "second_new", 0);
-        assert_eq!(items, vec!["second_new"]);
-        assert_eq!(items.len(), 1);
+        assert!(items.is_empty());
     }
 
     #[test]

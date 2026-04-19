@@ -24,12 +24,12 @@ const MAX_VERIFIER_AUDIT_LOG_ENTRIES: usize = 512;
 
 fn hash_evidence_content(content: &serde_json::Value) -> Result<(String, u64), serde_json::Error> {
     let canonical = serde_json::to_vec(content)?;
-    let content_hash = format!(
-        "sha256:{}",
-        hex::encode(Sha256::digest(
-            [b"verifier_evidence_content_v1:" as &[u8], &canonical[..]].concat(),
-        ))
-    );
+    let canonical_len = u64::try_from(canonical.len()).unwrap_or(u64::MAX);
+    let mut hasher = Sha256::new();
+    hasher.update(b"verifier_evidence_content_v1:");
+    hasher.update(canonical_len.to_le_bytes());
+    hasher.update(&canonical);
+    let content_hash = format!("sha256:{}", hex::encode(hasher.finalize()));
     let size_bytes = u64::try_from(canonical.len()).unwrap_or(u64::MAX);
     Ok((content_hash, size_bytes))
 }
@@ -735,6 +735,38 @@ mod tests {
         assert_eq!(first.data.content_hash, second.data.content_hash);
         assert_eq!(first.data.size_bytes, second.data.size_bytes);
         assert_eq!(first.data.created_at, second.data.created_at);
+    }
+
+    #[test]
+    fn evidence_hash_length_prefixes_canonical_payload() {
+        let content = serde_json::json!({
+            "check_id": "chk-proof-0001",
+            "status": "pass",
+            "findings": ["a", "bc"]
+        });
+        let canonical = serde_json::to_vec(&content).expect("canonical evidence");
+        let canonical_len = u64::try_from(canonical.len()).unwrap_or(u64::MAX);
+
+        let mut expected = Sha256::new();
+        expected.update(b"verifier_evidence_content_v1:");
+        expected.update(canonical_len.to_le_bytes());
+        expected.update(&canonical);
+
+        let mut unprefixed = Sha256::new();
+        unprefixed.update(b"verifier_evidence_content_v1:");
+        unprefixed.update(&canonical);
+
+        let (content_hash, size_bytes) = hash_evidence_content(&content).expect("hash evidence");
+
+        assert_eq!(size_bytes, canonical_len);
+        assert_eq!(
+            content_hash,
+            format!("sha256:{}", hex::encode(expected.finalize()))
+        );
+        assert_ne!(
+            content_hash,
+            format!("sha256:{}", hex::encode(unprefixed.finalize()))
+        );
     }
 
     #[test]

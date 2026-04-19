@@ -1604,9 +1604,6 @@ mod tests {
             _ => panic!("Expected MessageSent event as most recent"),
         }
     }
-            .collect();
-        assert_eq!(partition_events.len(), 2);
-    }
 
     // -- Test 17: event log capacity evicts oldest entries first
     #[test]
@@ -3063,7 +3060,7 @@ mod additional_comprehensive_negative_tests {
             "a".repeat(10_000),               // Very long ID (10KB)
             "🚀💀🔥".to_string(),             // Emoji sequence
             "\x00\x01\x02\x03".to_string(),  // Control characters
-            "\n\r\t\v\f".to_string(),        // Whitespace control chars
+            "\n\r\t\u{000B}\u{000C}".to_string(),        // Whitespace control chars
             "link\u{FFFF}id".to_string(),    // Max BMP codepoint
         ];
 
@@ -5678,7 +5675,7 @@ mod additional_comprehensive_negative_tests {
                 "",  // Empty link ID
                 "../../etc/passwd",  // Path traversal
                 "${jndi:ldap://evil.com}",  // JNDI injection
-                "\x00\x01\xFF\x7F",  // Binary data
+                "\x00\x01\u{00FF}\x7F",  // Binary data
                 "link_with\nlines\rand\ttabs",  // Control characters
                 "very_long_link_id_".repeat(10000),  // Memory exhaustion
                 "unicode_link_🦀_🔒_⚡",  // Unicode injection
@@ -5874,7 +5871,7 @@ mod additional_comprehensive_negative_tests {
                 "Zero width chars: test\u{200B}invisible".as_bytes().to_vec(),
                 "Direction override: test\u{202E}reversed".as_bytes().to_vec(),
                 "Surrogate pairs: 𝕌𝕟𝕚𝕔𝕠𝕕𝕖".as_bytes().to_vec(),
-                "Null bytes: test\x00\x01embedded\xFF".as_bytes().to_vec(),
+                "Null bytes: test\x00\x01embedded\u{00FF}".as_bytes().to_vec(),
                 "CRLF injection: line1\r\nline2\r\n".as_bytes().to_vec(),
             ];
 
@@ -6523,7 +6520,7 @@ mod additional_comprehensive_negative_tests {
                 vec![0x00; 10000],  // Large null payload
                 vec![0xFF; 10000],  // Large 0xFF payload
                 "unicode_🦀_payload_with_emoji".as_bytes().to_vec(),
-                "\x00\x01\xFF\x7F malicious binary".as_bytes().to_vec(),
+                "\x00\x01\u{00FF}\x7F malicious binary".as_bytes().to_vec(),
                 "very_long_payload_".repeat(1000).as_bytes().to_vec(),
             ];
 

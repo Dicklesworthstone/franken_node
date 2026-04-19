@@ -12,6 +12,12 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+const MAX_POLICY_PROPOSAL_CHANGES: usize = 4096;
+const MAX_POLICY_FIELD_BYTES: usize = 512;
+const POLICY_PROPOSAL_SHAPE_INVARIANT_ID: &str = "INV-000-POLICY-PROPOSAL-SHAPE";
+const POLICY_PROPOSAL_SHAPE_INVARIANT_NAME: &str =
+    "Policy proposal shape is bounded and well-formed";
+
 // ── Invariant identity ──────────────────────────────────────────────
 
 /// Stable identifier for a correctness invariant.
@@ -184,7 +190,25 @@ impl CorrectnessEnvelope {
     /// Returns `Ok(())` if all changes are to tunable parameters.
     /// Returns `Err(EnvelopeViolation)` if any change targets an immutable field.
     pub fn is_within_envelope(&self, proposal: &PolicyProposal) -> Result<(), EnvelopeViolation> {
+        if proposal.changes.len() > MAX_POLICY_PROPOSAL_CHANGES {
+            return Err(proposal_shape_violation(
+                "changes",
+                format!(
+                    "proposal contains {} changes, exceeding maximum {}",
+                    proposal.changes.len(),
+                    MAX_POLICY_PROPOSAL_CHANGES
+                ),
+            ));
+        }
+
         for change in &proposal.changes {
+            if let Some(violation) = validate_policy_field(&change.field) {
+                eprintln!(
+                    "EVD-ENVELOPE-002: malformed policy field rejected: field={}, epoch={}",
+                    change.field, proposal.epoch_id
+                );
+                return Err(violation);
+            }
             if let Some(violation) = self.check_field(&change.field) {
                 eprintln!(
                     "EVD-ENVELOPE-002: envelope violation detected: invariant={}, field={}, epoch={}",
@@ -265,6 +289,56 @@ impl CorrectnessEnvelope {
             }).collect::<Vec<_>>(),
         })
     }
+}
+
+fn proposal_shape_violation(
+    proposal_field: impl Into<String>,
+    reason: String,
+) -> EnvelopeViolation {
+    EnvelopeViolation {
+        invariant_id: InvariantId::new(POLICY_PROPOSAL_SHAPE_INVARIANT_ID),
+        invariant_name: POLICY_PROPOSAL_SHAPE_INVARIANT_NAME.to_string(),
+        proposal_field: proposal_field.into(),
+        reason,
+    }
+}
+
+fn validate_policy_field(field: &str) -> Option<EnvelopeViolation> {
+    if field.trim().is_empty() {
+        return Some(proposal_shape_violation(
+            field,
+            "policy field cannot be empty".to_string(),
+        ));
+    }
+    if field.len() > MAX_POLICY_FIELD_BYTES {
+        return Some(proposal_shape_violation(
+            field,
+            format!(
+                "policy field is {} bytes, exceeding maximum {}",
+                field.len(),
+                MAX_POLICY_FIELD_BYTES
+            ),
+        ));
+    }
+    if field.contains('\0') {
+        return Some(proposal_shape_violation(
+            field,
+            "policy field cannot contain null bytes".to_string(),
+        ));
+    }
+    if field.starts_with('/') || field.contains('/') || field.contains('\\') {
+        return Some(proposal_shape_violation(
+            field,
+            "policy field cannot contain filesystem path separators".to_string(),
+        ));
+    }
+    if field.starts_with('.') || field.ends_with('.') || field.contains("..") {
+        return Some(proposal_shape_violation(
+            field,
+            "policy field cannot contain empty or parent path segments".to_string(),
+        ));
+    }
+    None
 }
 
 // ── Canonical invariant set ─────────────────────────────────────────
@@ -1112,14 +1186,14 @@ mod correctness_envelope_comprehensive_negative_tests {
     fn negative_invariant_id_with_unicode_injection_attacks() {
         // Test InvariantId with malicious Unicode patterns
         let malicious_ids = vec![
-            "INV\u{202E}spoofed\u{202D}-001",              // BiDi override
-            "INV\u{0000}null\r\n\t\x1b[31mred\x1b[0m",    // Null bytes + ANSI
-            "INV\u{FEFF}\u{200B}\u{200C}\u{200D}hidden",  // BOM + zero-width
-            "INV\u{10FFFF}\u{E000}\u{FDD0}extreme",       // Private use + non-chars
-            "INV\"quotes'apostrophe\\backslash",           // Quote injection
-            "INV<script>alert('xss')</script>",           // XSS pattern
-            "INV\u{FFFD}\u{FFFD}surrogate",               // Surrogate pairs
-            "../../../etc/passwd\x00malicious",           // Path traversal
+            "INV\u{202E}spoofed\u{202D}-001",            // BiDi override
+            "INV\u{0000}null\r\n\t\x1b[31mred\x1b[0m",   // Null bytes + ANSI
+            "INV\u{FEFF}\u{200B}\u{200C}\u{200D}hidden", // BOM + zero-width
+            "INV\u{10FFFF}\u{E000}\u{FDD0}extreme",      // Private use + non-chars
+            "INV\"quotes'apostrophe\\backslash",         // Quote injection
+            "INV<script>alert('xss')</script>",          // XSS pattern
+            "INV\u{FFFD}\u{FFFD}surrogate",              // Surrogate pairs
+            "../../../etc/passwd\x00malicious",          // Path traversal
         ];
 
         for malicious_id in malicious_ids {
@@ -1139,8 +1213,8 @@ mod correctness_envelope_comprehensive_negative_tests {
     #[test]
     fn negative_policy_proposal_with_massive_malicious_content() {
         // Create policy proposal with extreme and malicious content
-        let massive_changes = (0..10000).map(|i| {
-            PolicyChange {
+        let massive_changes = (0..10000)
+            .map(|i| PolicyChange {
                 field: format!("malicious.field.{}.{}", i, "x".repeat(1000)),
                 old_value: serde_json::json!({
                     "massive_key": "y".repeat(10000),
@@ -1159,8 +1233,8 @@ mod correctness_envelope_comprehensive_negative_tests {
                     "bidi_override": "\u{202A}ltr\u{202B}rtl\u{202C}pop",
                     "massive_array": (0..1000).map(|j| format!("item_{}", j)).collect::<Vec<_>>()
                 }),
-            }
-        }).collect();
+            })
+            .collect();
 
         let malicious_proposal = PolicyProposal {
             proposal_id: "proposal\u{FEFF}\u{200B}hidden".repeat(1000),
@@ -1181,8 +1255,13 @@ mod correctness_envelope_comprehensive_negative_tests {
         let env = CorrectnessEnvelope::canonical();
         let result = env.is_within_envelope(&malicious_proposal);
 
-        // Should handle massive proposals without panic
-        assert!(result.is_ok()); // Should pass since fields don't match immutable prefixes
+        // Should handle massive proposals without panic and fail closed.
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.invariant_id.as_str(),
+            POLICY_PROPOSAL_SHAPE_INVARIANT_ID
+        );
+        assert!(err.reason.contains("exceeding maximum"));
     }
 
     #[test]
@@ -1279,34 +1358,30 @@ mod correctness_envelope_comprehensive_negative_tests {
         // Test various field prefix bypass attempts
         let bypass_attempts = vec![
             // Case sensitivity attacks
-            "Hardening.direction",
-            "HARDENING.DIRECTION",
-            "hardening.Direction",
-
+            ("Hardening.direction", false),
+            ("HARDENING.DIRECTION", false),
+            ("hardening.Direction", false),
             // Unicode normalization attacks
-            "hardening.direction", // Normal
-            "hardening.direction\u{0301}", // With combining char
-            "hardening.direction\u{FEFF}", // With BOM
-            "hardening.direction\u{200B}", // With zero-width space
-
+            ("hardening.direction", true),          // Normal
+            ("hardening.direction\u{0301}", false), // With combining char
+            ("hardening.direction\u{FEFF}", false), // With BOM
+            ("hardening.direction\u{200B}", false), // With zero-width space
             // Prefix confusion attacks
-            "hardening.direction_bypass",
-            "hardening.directional",
-            "hardening.direction2",
-            "hardening.direction\x00null",
-
+            ("hardening.direction_bypass", false),
+            ("hardening.directional", false),
+            ("hardening.direction2", false),
+            ("hardening.direction\x00null", true),
             // Path traversal in field names
-            "../hardening.direction",
-            "./hardening.direction",
-            "config/../hardening.direction",
-
+            ("../hardening.direction", true),
+            ("./hardening.direction", true),
+            ("config/../hardening.direction", true),
             // Injection attacks in field names
-            "hardening.direction'; DROP TABLE config; --",
-            "hardening.direction<script>alert('field')</script>",
-            "hardening.direction\r\nHTTP/1.1 200 OK\r\n\r\n",
+            ("hardening.direction'; DROP TABLE config; --", false),
+            ("hardening.direction<script>alert('field')</script>", false),
+            ("hardening.direction\r\nHTTP/1.1 200 OK\r\n\r\n", false),
         ];
 
-        for malicious_field in bypass_attempts {
+        for (malicious_field, should_violate) in bypass_attempts {
             let proposal = PolicyProposal {
                 proposal_id: "bypass-test".to_string(),
                 controller_id: "attacker".to_string(),
@@ -1320,9 +1395,8 @@ mod correctness_envelope_comprehensive_negative_tests {
 
             let result = env.is_within_envelope(&proposal);
 
-            // Most should pass (bypass attempts), only exact matches should fail
-            if malicious_field == "hardening.direction" {
-                assert!(result.is_err());
+            if should_violate {
+                assert!(result.is_err(), "Failed to reject field: {malicious_field}");
             } else {
                 assert!(result.is_ok(), "Failed for field: {}", malicious_field);
             }
@@ -1332,25 +1406,32 @@ mod correctness_envelope_comprehensive_negative_tests {
     #[test]
     fn negative_correctness_envelope_with_malformed_immutable_fields() {
         // Test envelope with malformed immutable field mappings
-        let malformed_invariants = vec![
-            Invariant {
-                id: InvariantId::new("INV-VALID"),
-                name: "Valid Invariant".to_string(),
-                description: "A valid invariant for testing".to_string(),
-                owner_track: SectionId::new("10.14"),
-                enforcement: EnforcementMode::Runtime,
-            }
-        ];
+        let malformed_invariants = vec![Invariant {
+            id: InvariantId::new("INV-VALID"),
+            name: "Valid Invariant".to_string(),
+            description: "A valid invariant for testing".to_string(),
+            owner_track: SectionId::new("10.14"),
+            enforcement: EnforcementMode::Runtime,
+        }];
 
         let malformed_fields = vec![
             // Mapping to non-existent invariant
-            ("malicious.field\u{202E}spoofed".to_string(), InvariantId::new("INV-NONEXISTENT")),
+            (
+                "malicious.field\u{202E}spoofed".to_string(),
+                InvariantId::new("INV-NONEXISTENT"),
+            ),
             // Unicode attacks in field prefixes
-            ("field\x00null\u{FEFF}bom".to_string(), InvariantId::new("INV-VALID")),
+            (
+                "field\x00null\u{FEFF}bom".to_string(),
+                InvariantId::new("INV-VALID"),
+            ),
             // Extremely long field prefixes
             ("field.".repeat(10000), InvariantId::new("INV-VALID")),
             // XSS in field prefixes
-            ("field<script>alert('field')</script>".to_string(), InvariantId::new("INV-VALID")),
+            (
+                "field<script>alert('field')</script>".to_string(),
+                InvariantId::new("INV-VALID"),
+            ),
             // Empty field prefix
             ("".to_string(), InvariantId::new("INV-VALID")),
         ];
@@ -1361,13 +1442,14 @@ mod correctness_envelope_comprehensive_negative_tests {
         };
 
         // Test various proposals against malformed envelope
+        let long_field = "field.".repeat(10000);
         let test_proposals = vec![
-            "malicious.field\u{202E}spoofed",
-            "field\x00null\u{FEFF}bom",
-            &"field.".repeat(10000),
-            "field<script>alert('field')</script>",
-            "",
-            "malicious.field\u{202E}spoofed.subfield",
+            "malicious.field\u{202E}spoofed".to_string(),
+            "field\x00null\u{FEFF}bom".to_string(),
+            long_field,
+            "field<script>alert('field')</script>".to_string(),
+            String::new(),
+            "malicious.field\u{202E}spoofed.subfield".to_string(),
         ];
 
         for field in test_proposals {
@@ -1385,14 +1467,20 @@ mod correctness_envelope_comprehensive_negative_tests {
             let result = malformed_env.is_within_envelope(&proposal);
 
             // Should handle malformed mappings gracefully
-            if field.starts_with("malicious.field\u{202E}spoofed") ||
-               field.starts_with("field\x00null") ||
-               field.starts_with(&"field.".repeat(10000)) ||
-               field.starts_with("field<script>") {
+            if field.starts_with("malicious.field\u{202E}spoofed")
+                || field.starts_with("field\x00null")
+                || field.len() > MAX_POLICY_FIELD_BYTES
+                || field.starts_with("field<script>")
+                || field.is_empty()
+            {
                 // Should detect violations even with malformed invariant
                 assert!(result.is_err());
                 let err = result.unwrap_err();
-                assert!(err.invariant_name.contains("missing") || err.invariant_name == "Valid Invariant");
+                assert!(
+                    err.invariant_name.contains("missing")
+                        || err.invariant_name == "Valid Invariant"
+                        || err.invariant_id.as_str() == POLICY_PROPOSAL_SHAPE_INVARIANT_ID
+                );
             }
         }
     }
@@ -1401,10 +1489,10 @@ mod correctness_envelope_comprehensive_negative_tests {
     fn negative_enforcement_mode_serialization_tampering() {
         // Test EnforcementMode with invalid serialization attempts
         let invalid_enforcement_modes = [
-            "\"Compile\"", // Wrong case
-            "\"RUNTIME\"", // All caps
+            "\"Compile\"",   // Wrong case
+            "\"RUNTIME\"",   // All caps
             "\"execution\"", // Different word
-            "\"\"", // Empty string
+            "\"\"",          // Empty string
             "null",
             "42",
             "true",
@@ -1414,7 +1502,11 @@ mod correctness_envelope_comprehensive_negative_tests {
 
         for invalid_json in invalid_enforcement_modes {
             let result: Result<EnforcementMode, _> = serde_json::from_str(invalid_json);
-            assert!(result.is_err(), "Should reject invalid EnforcementMode: {}", invalid_json);
+            assert!(
+                result.is_err(),
+                "Should reject invalid EnforcementMode: {}",
+                invalid_json
+            );
         }
 
         // Test from_label with malicious inputs
@@ -1424,9 +1516,9 @@ mod correctness_envelope_comprehensive_negative_tests {
             "conformance\u{202E}spoofed",
             "compile<script>",
             "runtime'; DROP TABLE modes; --",
-            " compile", // Leading whitespace
-            "compile ", // Trailing whitespace
-            "Compile", // Wrong case
+            " compile",        // Leading whitespace
+            "compile ",        // Trailing whitespace
+            "Compile",         // Wrong case
             "\u{200B}runtime", // Zero-width prefix
         ];
 
@@ -1435,7 +1527,11 @@ mod correctness_envelope_comprehensive_negative_tests {
         }
 
         // Test valid round-trips still work
-        for mode in [EnforcementMode::Compile, EnforcementMode::Runtime, EnforcementMode::Conformance] {
+        for mode in [
+            EnforcementMode::Compile,
+            EnforcementMode::Runtime,
+            EnforcementMode::Conformance,
+        ] {
             let label = mode.label();
             let parsed = EnforcementMode::from_label(label).unwrap();
             assert_eq!(mode, parsed);
@@ -1474,9 +1570,18 @@ mod correctness_envelope_comprehensive_negative_tests {
         ];
 
         let malicious_fields = vec![
-            ("field\x00null".to_string(), InvariantId::new("INV\u{202E}spoofed\u{202D}")),
-            ("field<script>".to_string(), InvariantId::new("INV\u{10FFFF}\u{E000}")),
-            ("field\u{FFFD}\u{FFFD}".to_string(), InvariantId::new("INV\u{FFFD}\u{FFFD}")),
+            (
+                "field\x00null".to_string(),
+                InvariantId::new("INV\u{202E}spoofed\u{202D}"),
+            ),
+            (
+                "field<script>".to_string(),
+                InvariantId::new("INV\u{10FFFF}\u{E000}"),
+            ),
+            (
+                "field\u{FFFD}\u{FFFD}".to_string(),
+                InvariantId::new("INV\u{FFFD}\u{FFFD}"),
+            ),
         ];
 
         let malicious_env = CorrectnessEnvelope {
@@ -1533,7 +1638,11 @@ mod correctness_envelope_comprehensive_negative_tests {
             PolicyChange {
                 field: "extreme.array".to_string(),
                 old_value: serde_json::json!((0..50000).collect::<Vec<i32>>()),
-                new_value: serde_json::json!((0..50000).map(|i| format!("item_{}", "x".repeat(100))).collect::<Vec<_>>()),
+                new_value: serde_json::json!(
+                    (0..50000)
+                        .map(|i| format!("item_{}", "x".repeat(100)))
+                        .collect::<Vec<_>>()
+                ),
             },
             PolicyChange {
                 field: "extreme.unicode".to_string(),
@@ -1626,7 +1735,11 @@ mod correctness_envelope_comprehensive_negative_tests {
             massive_invariants.push(Invariant {
                 id: InvariantId::new(format!("INV-{:05}-{}", i, "x".repeat(100))),
                 name: format!("Invariant {} with massive content: {}", i, "y".repeat(1000)),
-                description: format!("Description {} with extreme length: {}", i, "z".repeat(10000)),
+                description: format!(
+                    "Description {} with extreme length: {}",
+                    i,
+                    "z".repeat(10000)
+                ),
                 owner_track: SectionId::new(format!("10.{}", i)),
                 enforcement: match i % 3 {
                     0 => EnforcementMode::Compile,
@@ -1681,7 +1794,7 @@ mod correctness_envelope_comprehensive_negative_tests {
 #[cfg(test)]
 mod correctness_envelope_additional_negative_path_tests {
     use super::*;
-    use std::collections::{HashMap, BTreeMap};
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::{Arc, Mutex};
     use std::thread;
 
@@ -1692,44 +1805,52 @@ mod correctness_envelope_additional_negative_path_tests {
         let results = Arc::new(Mutex::new(Vec::new()));
 
         // Spawn multiple threads performing different envelope operations
-        let handles: Vec<_> = (0..50).map(|i| {
-            let env_clone = env.clone();
-            let results_clone = results.clone();
+        let handles: Vec<_> = (0..50)
+            .map(|i| {
+                let env_clone = env.clone();
+                let results_clone = results.clone();
 
-            thread::spawn(move || {
-                let proposal = PolicyProposal {
-                    proposal_id: format!("concurrent-{}", i),
-                    controller_id: format!("thread-{}", i),
-                    epoch_id: (i as u64).saturating_mul(1000000), // Large epoch IDs
-                    changes: vec![
-                        PolicyChange {
-                            field: format!("concurrent.field.{}.{}", i, "x".repeat(i * 10)),
-                            old_value: serde_json::json!(i),
-                            new_value: serde_json::json!(i * 2),
-                        },
-                        PolicyChange {
-                            field: if i % 3 == 0 { "hardening.direction" } else { "tunable.param" }.to_string(),
-                            old_value: serde_json::json!(false),
-                            new_value: serde_json::json!(true),
-                        },
-                    ],
-                };
+                thread::spawn(move || {
+                    let proposal = PolicyProposal {
+                        proposal_id: format!("concurrent-{}", i),
+                        controller_id: format!("thread-{}", i),
+                        epoch_id: (i as u64).saturating_mul(1000000), // Large epoch IDs
+                        changes: vec![
+                            PolicyChange {
+                                field: format!("concurrent.field.{}.{}", i, "x".repeat(i * 10)),
+                                old_value: serde_json::json!(i),
+                                new_value: serde_json::json!(i.saturating_mul(2)),
+                            },
+                            PolicyChange {
+                                field: if i % 3 == 0 {
+                                    "hardening.direction"
+                                } else {
+                                    "tunable.param"
+                                }
+                                .to_string(),
+                                old_value: serde_json::json!(false),
+                                new_value: serde_json::json!(true),
+                            },
+                        ],
+                    };
 
-                // Test multiple operations concurrently
-                let check_result = env_clone.is_within_envelope(&proposal);
-                let lookup_result = env_clone.get(&InvariantId::new("INV-001-MONOTONIC-HARDENING"));
-                let len_result = env_clone.len();
-                let manifest_result = env_clone.to_manifest_json();
+                    // Test multiple operations concurrently
+                    let check_result = env_clone.is_within_envelope(&proposal);
+                    let lookup_result =
+                        env_clone.get(&InvariantId::new("INV-001-MONOTONIC-HARDENING"));
+                    let len_result = env_clone.len();
+                    let manifest_result = env_clone.to_manifest_json();
 
-                results_clone.lock().unwrap().push((
-                    i,
-                    check_result.is_ok(),
-                    lookup_result.is_some(),
-                    len_result,
-                    manifest_result["invariant_count"].as_u64().unwrap(),
-                ));
+                    results_clone.lock().unwrap().push((
+                        i,
+                        check_result.is_ok(),
+                        lookup_result.is_some(),
+                        len_result,
+                        manifest_result["invariant_count"].as_u64().unwrap(),
+                    ));
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all threads
         for handle in handles {
@@ -1742,18 +1863,22 @@ mod correctness_envelope_additional_negative_path_tests {
         // Verify consistency across all concurrent operations
         let expected_len = 12;
         let expected_count = 12;
-        let mut violation_count = 0;
+        let mut violation_count = 0usize;
 
         for (i, check_ok, lookup_ok, len, count) in results.iter() {
             // All lookups should succeed consistently
             assert!(*lookup_ok, "Lookup failed for thread {}", i);
             assert_eq!(*len, expected_len, "Inconsistent length for thread {}", i);
-            assert_eq!(*count, expected_count, "Inconsistent count for thread {}", i);
+            assert_eq!(
+                *count, expected_count,
+                "Inconsistent count for thread {}",
+                i
+            );
 
             // Only threads that modify hardening.direction should fail
             if i % 3 == 0 {
                 assert!(!check_ok, "Thread {} should have failed envelope check", i);
-                violation_count += 1;
+                violation_count = violation_count.saturating_add(1);
             } else {
                 assert!(*check_ok, "Thread {} should have passed envelope check", i);
             }
@@ -1777,22 +1902,20 @@ mod correctness_envelope_additional_negative_path_tests {
             });
         }
 
-        let memory_attack_changes = vec![
-            PolicyChange {
-                field: "memory.exhaustion.deeply.nested.field".to_string(),
-                old_value: deeply_nested.clone(),
-                new_value: serde_json::json!({
-                    "replacement": deeply_nested,
-                    "massive_array": (0..10000).map(|j| {
-                        serde_json::json!({
-                            "item": j,
-                            "content": "a".repeat(1000),
-                            "unicode": format!("\u{202E}spoofed_{}\u{202D}", j),
-                        })
-                    }).collect::<Vec<_>>()
-                }),
-            }
-        ];
+        let memory_attack_changes = vec![PolicyChange {
+            field: "memory.exhaustion.deeply.nested.field".to_string(),
+            old_value: deeply_nested.clone(),
+            new_value: serde_json::json!({
+                "replacement": deeply_nested,
+                "massive_array": (0..10000).map(|j| {
+                    serde_json::json!({
+                        "item": j,
+                        "content": "a".repeat(1000),
+                        "unicode": format!("\u{202E}spoofed_{}\u{202D}", j),
+                    })
+                }).collect::<Vec<_>>()
+            }),
+        }];
 
         let memory_attack_proposal = PolicyProposal {
             proposal_id: "memory-exhaustion-attack".repeat(100),
@@ -1825,10 +1948,10 @@ mod correctness_envelope_additional_negative_path_tests {
 
         // Generate similar field names that could cause hash collisions
         let collision_candidates = vec![
-            ("hardening.direction", true),  // Should violate
-            ("hardening.directions", false), // Should pass (different)
-            ("hardening.directio", false),   // Should pass (truncated)
-            ("hardening.direction\x00", false), // Should pass (null terminated)
+            ("hardening.direction", true),          // Should violate
+            ("hardening.directions", false),        // Should pass (different)
+            ("hardening.directio", false),          // Should pass (truncated)
+            ("hardening.direction\x00", true),      // Null-terminated bypass attempt
             ("hardening.direction\u{FEFF}", false), // Should pass (BOM)
             ("hardening.direction\u{200B}", false), // Should pass (zero-width)
         ];
@@ -1878,7 +2001,11 @@ mod correctness_envelope_additional_negative_path_tests {
             if id_str == "INV-001-MONOTONIC-HARDENING" {
                 assert!(lookup.is_some(), "Original ID should be found");
             } else {
-                assert!(lookup.is_none(), "Modified ID '{}' should not be found", id_str);
+                assert!(
+                    lookup.is_none(),
+                    "Modified ID '{}' should not be found",
+                    id_str
+                );
             }
         }
     }
@@ -1916,7 +2043,11 @@ mod correctness_envelope_additional_negative_path_tests {
             };
 
             let result = env.is_within_envelope(&proposal);
-            assert!(result.is_err(), "Epoch attack {} should be rejected", description);
+            assert!(
+                result.is_err(),
+                "Epoch attack {} should be rejected",
+                description
+            );
 
             let err = result.unwrap_err();
             assert_eq!(err.invariant_id.as_str(), "INV-006-EPOCH-MONOTONIC");
@@ -1963,16 +2094,14 @@ mod correctness_envelope_additional_negative_path_tests {
             proposal_id: "corruption-test".to_string(),
             controller_id: "corruption-detector".to_string(),
             epoch_id: 123456,
-            changes: vec![
-                PolicyChange {
-                    field: "test.field".to_string(),
-                    old_value: serde_json::json!({
-                        "nested": {"value": 42},
-                        "array": [1, 2, 3, 4, 5]
-                    }),
-                    new_value: serde_json::json!("replacement"),
-                },
-            ],
+            changes: vec![PolicyChange {
+                field: "test.field".to_string(),
+                old_value: serde_json::json!({
+                    "nested": {"value": 42},
+                    "array": [1, 2, 3, 4, 5]
+                }),
+                new_value: serde_json::json!("replacement"),
+            }],
         };
 
         // Test normal round-trip first
@@ -2014,9 +2143,18 @@ mod correctness_envelope_additional_negative_path_tests {
         let reparsed_manifest: serde_json::Value = serde_json::from_str(&manifest_json).unwrap();
 
         // Verify critical fields preserved
-        assert_eq!(manifest["schema_version"], reparsed_manifest["schema_version"]);
-        assert_eq!(manifest["invariant_count"], reparsed_manifest["invariant_count"]);
-        assert_eq!(manifest["immutable_field_count"], reparsed_manifest["immutable_field_count"]);
+        assert_eq!(
+            manifest["schema_version"],
+            reparsed_manifest["schema_version"]
+        );
+        assert_eq!(
+            manifest["invariant_count"],
+            reparsed_manifest["invariant_count"]
+        );
+        assert_eq!(
+            manifest["immutable_field_count"],
+            reparsed_manifest["immutable_field_count"]
+        );
     }
 
     #[test]
@@ -2029,31 +2167,30 @@ mod correctness_envelope_additional_negative_path_tests {
             ("hardening%2Edirection", false),
             ("hardening%2edirection", false),
             ("hardening.direction%00", false),
-
             // HTML entity encoding attempts
             ("hardening&period;direction", false),
             ("hardening&#46;direction", false),
             ("hardening&#x2E;direction", false),
-
             // Base64 encoding attempts
             ("aGFyZGVuaW5nLmRpcmVjdGlvbg==", false), // "hardening.direction" in base64
-
             // Hex encoding attempts
-            ("\\x68\\x61\\x72\\x64\\x65\\x6E\\x69\\x6E\\x67\\x2E\\x64\\x69\\x72\\x65\\x63\\x74\\x69\\x6F\\x6E", false),
-
+            (
+                "\\x68\\x61\\x72\\x64\\x65\\x6E\\x69\\x6E\\x67\\x2E\\x64\\x69\\x72\\x65\\x63\\x74\\x69\\x6F\\x6E",
+                false,
+            ),
             // Unicode escape attempts
-            ("\\u0068\\u0061\\u0072\\u0064\\u0065\\u006E\\u0069\\u006E\\u0067\\u002E\\u0064\\u0069\\u0072\\u0065\\u0063\\u0074\\u0069\\u006F\\u006E", false),
-
+            (
+                "\\u0068\\u0061\\u0072\\u0064\\u0065\\u006E\\u0069\\u006E\\u0067\\u002E\\u0064\\u0069\\u0072\\u0065\\u0063\\u0074\\u0069\\u006F\\u006E",
+                false,
+            ),
             // Case variations (should pass since we do exact matching)
             ("Hardening.Direction", false),
             ("HARDENING.DIRECTION", false),
             ("hardening.DIRECTION", false),
-
             // Homograph attacks using lookalike Unicode
             ("hardеning.direction", false), // Cyrillic 'е' instead of 'e'
             ("hardening.direсtion", false), // Cyrillic 'с' instead of 'c'
             ("hаrdening.direction", false), // Cyrillic 'а' instead of 'a'
-
             // Actual field (should violate)
             ("hardening.direction", true),
         ];
@@ -2072,11 +2209,19 @@ mod correctness_envelope_additional_negative_path_tests {
 
             let result = env.is_within_envelope(&proposal);
             if should_violate {
-                assert!(result.is_err(), "Encoded field '{}' should violate envelope", field);
+                assert!(
+                    result.is_err(),
+                    "Encoded field '{}' should violate envelope",
+                    field
+                );
                 let err = result.unwrap_err();
                 assert_eq!(err.invariant_id.as_str(), "INV-001-MONOTONIC-HARDENING");
             } else {
-                assert!(result.is_ok(), "Encoded field '{}' should not bypass validation", field);
+                assert!(
+                    result.is_ok(),
+                    "Encoded field '{}' should not bypass validation",
+                    field
+                );
             }
         }
 
@@ -2106,7 +2251,11 @@ mod correctness_envelope_additional_negative_path_tests {
                 assert!(result.is_err(), "Base field should violate");
             } else {
                 // Unicode variations should NOT match (no normalization)
-                assert!(result.is_ok(), "Unicode variation '{}' should not match", field.escape_unicode());
+                assert!(
+                    result.is_ok(),
+                    "Unicode variation '{}' should not match",
+                    field.escape_unicode()
+                );
             }
         }
     }
@@ -2140,7 +2289,6 @@ mod correctness_envelope_additional_negative_path_tests {
                     },
                 ],
             },
-
             // Mixed violations with tunable fields
             PolicyProposal {
                 proposal_id: "mixed-violations".to_string(),
@@ -2168,18 +2316,22 @@ mod correctness_envelope_additional_negative_path_tests {
 
         for proposal in cross_dependency_proposals {
             let result = env.is_within_envelope(&proposal);
-            assert!(result.is_err(), "Cross-dependency proposal should be rejected");
+            assert!(
+                result.is_err(),
+                "Cross-dependency proposal should be rejected"
+            );
 
             // Should fail on FIRST violation encountered, not later ones
             let err = result.unwrap_err();
 
             // Verify it's one of the expected invariant violations
             assert!(
-                err.invariant_id.as_str() == "INV-001-MONOTONIC-HARDENING" ||
-                err.invariant_id.as_str() == "INV-002-EVIDENCE-EMISSION" ||
-                err.invariant_id.as_str() == "INV-006-EPOCH-MONOTONIC" ||
-                err.invariant_id.as_str() == "INV-003-DETERMINISTIC-SEED",
-                "Unexpected invariant violation: {}", err.invariant_id
+                err.invariant_id.as_str() == "INV-001-MONOTONIC-HARDENING"
+                    || err.invariant_id.as_str() == "INV-002-EVIDENCE-EMISSION"
+                    || err.invariant_id.as_str() == "INV-006-EPOCH-MONOTONIC"
+                    || err.invariant_id.as_str() == "INV-003-DETERMINISTIC-SEED",
+                "Unexpected invariant violation: {}",
+                err.invariant_id
             );
         }
 
@@ -2189,7 +2341,7 @@ mod correctness_envelope_additional_negative_path_tests {
             dependent_changes.push(PolicyChange {
                 field: format!("chain.level_{}.param", i),
                 old_value: serde_json::json!(i),
-                new_value: serde_json::json!(i + 1),
+                new_value: serde_json::json!(i.saturating_add(1)),
             });
         }
 
@@ -2208,10 +2360,16 @@ mod correctness_envelope_additional_negative_path_tests {
         };
 
         let result = env.is_within_envelope(&chain_proposal);
-        assert!(result.is_err(), "Chain proposal with violation should be rejected");
+        assert!(
+            result.is_err(),
+            "Chain proposal with violation should be rejected"
+        );
 
         let err = result.unwrap_err();
-        assert_eq!(err.invariant_id.as_str(), "INV-004-INTEGRITY-PROOF-VERIFICATION");
+        assert_eq!(
+            err.invariant_id.as_str(),
+            "INV-004-INTEGRITY-PROOF-VERIFICATION"
+        );
         assert_eq!(err.proposal_field, "integrity.bypass_hash_check");
     }
 
@@ -2250,7 +2408,11 @@ mod correctness_envelope_additional_negative_path_tests {
             };
 
             let result = malformed_env.is_within_envelope(&proposal);
-            assert!(result.is_err(), "Malformed envelope should produce error for field '{}'", field);
+            assert!(
+                result.is_err(),
+                "Malformed envelope should produce error for field '{}'",
+                field
+            );
 
             let err = result.unwrap_err();
             assert_eq!(err.invariant_id.as_str(), expected_inv_id);
@@ -2260,24 +2422,33 @@ mod correctness_envelope_additional_negative_path_tests {
 
         // Test error recovery with partially valid envelope
         let partial_env = CorrectnessEnvelope {
-            invariants: vec![
-                Invariant {
-                    id: InvariantId::new("INV-VALID-ONLY"),
-                    name: "Valid Invariant".to_string(),
-                    description: "A single valid invariant".to_string(),
-                    owner_track: SectionId::new("10.14"),
-                    enforcement: EnforcementMode::Runtime,
-                }
-            ],
+            invariants: vec![Invariant {
+                id: InvariantId::new("INV-VALID-ONLY"),
+                name: "Valid Invariant".to_string(),
+                description: "A single valid invariant".to_string(),
+                owner_track: SectionId::new("10.14"),
+                enforcement: EnforcementMode::Runtime,
+            }],
             immutable_fields: vec![
-                ("valid.field".to_string(), InvariantId::new("INV-VALID-ONLY")),
+                (
+                    "valid.field".to_string(),
+                    InvariantId::new("INV-VALID-ONLY"),
+                ),
                 ("invalid.field".to_string(), InvariantId::new("INV-MISSING")),
             ],
         };
 
         let recovery_tests = vec![
-            ("valid.field", true, "Should reject valid field with valid invariant"),
-            ("invalid.field", true, "Should reject invalid field with missing invariant"),
+            (
+                "valid.field",
+                true,
+                "Should reject valid field with valid invariant",
+            ),
+            (
+                "invalid.field",
+                true,
+                "Should reject invalid field with missing invariant",
+            ),
             ("unrelated.field", false, "Should allow unrelated field"),
         ];
 
@@ -2316,9 +2487,15 @@ mod correctness_envelope_additional_negative_path_tests {
         let canonical_env = CorrectnessEnvelope::canonical();
 
         // Multiple checks should produce identical errors
-        let error1 = canonical_env.is_within_envelope(&multi_check_proposal).unwrap_err();
-        let error2 = canonical_env.is_within_envelope(&multi_check_proposal).unwrap_err();
-        let error3 = canonical_env.is_within_envelope(&multi_check_proposal).unwrap_err();
+        let error1 = canonical_env
+            .is_within_envelope(&multi_check_proposal)
+            .unwrap_err();
+        let error2 = canonical_env
+            .is_within_envelope(&multi_check_proposal)
+            .unwrap_err();
+        let error3 = canonical_env
+            .is_within_envelope(&multi_check_proposal)
+            .unwrap_err();
 
         assert_eq!(error1.invariant_id, error2.invariant_id);
         assert_eq!(error2.invariant_id, error3.invariant_id);

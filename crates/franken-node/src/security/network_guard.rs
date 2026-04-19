@@ -267,385 +267,6 @@ impl NetworkGuard {
         }
 
         Ok(action)
-
-        // Inline negative-path tests for process_egress method
-        #[cfg(test)]
-        #[allow(unreachable_code)]
-        {
-            // Test: Unicode injection in hostname (IDN homograph attacks)
-            let mut policy = EgressPolicy::new("unicode-test".into(), Action::Deny);
-            policy.add_rule(EgressRule {
-                host: "legitimate.com".into(),
-                port: Some(443),
-                action: Action::Allow,
-                protocol: Protocol::Http,
-            }).unwrap();
-            let mut guard = NetworkGuard::new(policy);
-            let provider = CapabilityProvider::new("guard-secret");
-            let (cap, _) = provider.issue(
-                "test-cap",
-                egress_scope(),
-                1_700_000_000,
-                3_600,
-                true,
-                false,
-                "trace-unicode",
-            ).unwrap();
-            let mut capability_gate = CapabilityGate::new(vec![provider], 1000);
-
-            // IDN homograph attack: xn--80ak6aa92e.com (аррӏе.com in Cyrillic)
-            let unicode_attack_host = "аррӏе.com"; // Cyrillic characters that look like "apple.com"
-            let result = guard.process_egress(
-                unicode_attack_host,
-                443,
-                Protocol::Http,
-                Some(&cap),
-                &mut capability_gate,
-                "trace-unicode-attack",
-                "2024-01-01T00:00:00Z",
-                1_700_000_001,
-            );
-            assert!(result.is_err(), "Unicode homograph attack should be denied");
-            assert!(!guard.audit_events().is_empty(), "Unicode attack should be audited");
-
-            // Test: Null byte injection in hostname (C-string truncation attack)
-            let null_byte_host = "evil.com\x00.legitimate.com";
-            let result = guard.process_egress(
-                null_byte_host,
-                443,
-                Protocol::Http,
-                Some(&cap),
-                &mut capability_gate,
-                "trace-null-injection",
-                "2024-01-01T00:00:01Z",
-                1_700_000_002,
-            );
-            assert!(result.is_err(), "Null byte injection should be denied");
-
-            // Test: Port boundary attacks (port 0 and port 65535)
-            let boundary_ports = [0u16, 65535u16, 1u16, 65534u16];
-            for &test_port in &boundary_ports {
-                let result = guard.process_egress(
-                    "test.com",
-                    test_port,
-                    Protocol::Tcp,
-                    Some(&cap),
-                    &mut capability_gate,
-                    &format!("trace-port-{}", test_port),
-                    "2024-01-01T00:00:02Z",
-                    1_700_000_003,
-                );
-                // Should not panic on boundary port values
-                assert!(result.is_err() || result.is_ok(), "Port {} should be handled without panic", test_port);
-            }
-
-            // Test: Memory exhaustion through massive hostname
-            let massive_hostname = "x".repeat(100_000) + ".evil.com"; // 100KB hostname
-            let result = guard.process_egress(
-                &massive_hostname,
-                443,
-                Protocol::Http,
-                Some(&cap),
-                &mut capability_gate,
-                "trace-massive-hostname",
-                "2024-01-01T00:00:03Z",
-                1_700_000_004,
-            );
-            assert!(result.is_err(), "Massive hostname should be denied");
-            // Should generate audit event without memory issues
-            assert!(guard.audit_events().iter().any(|e| e.trace_id == "trace-massive-hostname"), "Massive hostname should be audited");
-
-            // Test: Audit log capacity overflow (DoS via log flooding)
-            let initial_audit_count = guard.audit_events().len();
-            // Generate more audit events than capacity
-            for i in 0..MAX_AUDIT_LOG_ENTRIES + 10 {
-                let _ = guard.process_egress(
-                    &format!("flood-{}.com", i),
-                    80,
-                    Protocol::Http,
-                    Some(&cap),
-                    &mut capability_gate,
-                    &format!("trace-flood-{}", i),
-                    "2024-01-01T00:00:04Z",
-                    1_700_000_005 + i as u64,
-                );
-            }
-            // Should be bounded by MAX_AUDIT_LOG_ENTRIES via push_bounded
-            assert!(guard.audit_events().len() <= MAX_AUDIT_LOG_ENTRIES, "Audit log should be capacity-bounded");
-
-            // Test: Concurrent operation simulation with capability exhaustion
-            use std::sync::{Arc, Mutex};
-            use std::thread;
-            let shared_guard = Arc::new(Mutex::new(guard));
-            let shared_provider = Arc::new(provider);
-            let mut handles = vec![];
-
-            for i in 0..5 {
-                let guard_clone = Arc::clone(&shared_guard);
-                let provider_clone = Arc::clone(&shared_provider);
-                let handle = thread::spawn(move || {
-                    let (thread_cap, _) = provider_clone.issue(
-                        &format!("thread-cap-{}", i),
-                        egress_scope(),
-                        1_700_000_000,
-                        3_600,
-                        true,
-                        false,
-                        &format!("trace-thread-{}", i),
-                    ).unwrap();
-                    let mut thread_gate = CapabilityGate::new(vec![(*provider_clone).clone()], 1000);
-
-                    let mut guard = guard_clone.lock().unwrap();
-                    guard.process_egress(
-                        &format!("concurrent-{}.com", i),
-                        443,
-                        Protocol::Http,
-                        Some(&thread_cap),
-                        &mut thread_gate,
-                        &format!("trace-concurrent-{}", i),
-                        "2024-01-01T00:00:05Z",
-                        1_700_000_006 + i as u64,
-                    )
-                });
-                handles.push(handle);
-            }
-            for handle in handles {
-                let result = handle.join().unwrap();
-                assert!(result.is_err() || result.is_ok(), "Concurrent operations should complete without panic");
-            }
-
-            // Test: Protocol switching attack vectors
-            let protocol_switch_tests = [
-                ("https://evil.com", 443, Protocol::Http),
-                ("tcp://evil.com", 443, Protocol::Tcp),
-                ("ftp://evil.com", 21, Protocol::Http), // Protocol mismatch
-            ];
-            for (endpoint, port, protocol) in protocol_switch_tests {
-                let guard = shared_guard.lock().unwrap();
-                let provider = (*shared_provider).clone();
-                let (switch_cap, _) = provider.issue(
-                    "protocol-test",
-                    egress_scope(),
-                    1_700_000_000,
-                    3_600,
-                    true,
-                    false,
-                    "trace-protocol-switch",
-                ).unwrap();
-                let mut switch_gate = CapabilityGate::new(vec![provider], 1000);
-                drop(guard);
-
-                let mut guard = shared_guard.lock().unwrap();
-                let result = guard.process_egress(
-                    endpoint,
-                    port,
-                    protocol,
-                    Some(&switch_cap),
-                    &mut switch_gate,
-                    "trace-protocol-switch",
-                    "2024-01-01T00:00:06Z",
-                    1_700_000_007,
-                );
-                assert!(result.is_err(), "Protocol switching should be denied for endpoint {}", endpoint);
-            }
-
-            // Test: DNS subdomain traversal attacks
-            let subdomain_attacks = [
-                "evil.com.legitimate.com",
-                "legitimate.com.evil.com",
-                "sub.sub.sub.evil.com",
-                "evil..com", // Empty DNS label
-                ".evil.com", // Leading dot
-                "evil.com.", // Trailing dot should be normalized
-            ];
-            let guard = shared_guard.lock().unwrap();
-            let provider = (*shared_provider).clone();
-            drop(guard);
-
-            for &attack_host in &subdomain_attacks {
-                let (attack_cap, _) = provider.issue(
-                    "subdomain-test",
-                    egress_scope(),
-                    1_700_000_000,
-                    3_600,
-                    true,
-                    false,
-                    "trace-subdomain",
-                ).unwrap();
-                let mut attack_gate = CapabilityGate::new(vec![provider.clone()], 1000);
-
-                let mut guard = shared_guard.lock().unwrap();
-                let result = guard.process_egress(
-                    attack_host,
-                    80,
-                    Protocol::Http,
-                    Some(&attack_cap),
-                    &mut attack_gate,
-                    &format!("trace-subdomain-{}", attack_host.len()),
-                    "2024-01-01T00:00:07Z",
-                    1_700_000_008,
-                );
-                // Should handle malformed domains safely
-                assert!(result.is_err() || result.is_ok(), "Subdomain attack '{}' should be handled safely", attack_host);
-            }
-
-            // Test: Timestamp injection and format attacks
-            let timestamp_attacks = [
-                "2024-01-01T00:00:00Z\"; DROP TABLE audit; --",
-                "2024-01-01T00:00:00Z\r\n\r\nHTTP/1.1 200 OK",
-                "2024-01-01T00:00:00Z\x00\x01\x02",
-                "2024-01-01T00:00:00Z\u{FEFF}\u{200B}",
-                &"A".repeat(10_000), // Massive timestamp
-            ];
-            let guard = shared_guard.lock().unwrap();
-            let provider = (*shared_provider).clone();
-            drop(guard);
-
-            for &attack_timestamp in &timestamp_attacks {
-                let (time_cap, _) = provider.issue(
-                    "timestamp-test",
-                    egress_scope(),
-                    1_700_000_000,
-                    3_600,
-                    true,
-                    false,
-                    "trace-timestamp",
-                ).unwrap();
-                let mut time_gate = CapabilityGate::new(vec![provider.clone()], 1000);
-
-                let mut guard = shared_guard.lock().unwrap();
-                let result = guard.process_egress(
-                    "test.com",
-                    80,
-                    Protocol::Http,
-                    Some(&time_cap),
-                    &mut time_gate,
-                    "trace-timestamp-injection",
-                    attack_timestamp,
-                    1_700_000_009,
-                );
-                // Should preserve timestamp as-is without interpretation
-                assert!(result.is_err() || result.is_ok(), "Timestamp injection should be handled safely");
-                if let Some(audit_event) = guard.audit_events().last() {
-                    assert_eq!(audit_event.timestamp, attack_timestamp, "Malicious timestamp should be preserved as-is");
-                }
-            }
-
-            // Test: Trace ID injection and cross-site tracing attacks
-            let trace_id_attacks = [
-                "<script>alert('xss')</script>",
-                "trace\r\nX-Forwarded-For: evil.com",
-                "trace\x00truncated",
-                "legitimate_trace_id'; DROP TABLE traces; --",
-                &"T".repeat(50_000), // Massive trace ID
-            ];
-            let guard = shared_guard.lock().unwrap();
-            let provider = (*shared_provider).clone();
-            drop(guard);
-
-            for &attack_trace in &trace_id_attacks {
-                let (trace_cap, _) = provider.issue(
-                    "trace-test",
-                    egress_scope(),
-                    1_700_000_000,
-                    3_600,
-                    true,
-                    false,
-                    "trace-issue",
-                ).unwrap();
-                let mut trace_gate = CapabilityGate::new(vec![provider.clone()], 1000);
-
-                let mut guard = shared_guard.lock().unwrap();
-                let result = guard.process_egress(
-                    "test.com",
-                    443,
-                    Protocol::Http,
-                    Some(&trace_cap),
-                    &mut trace_gate,
-                    attack_trace,
-                    "2024-01-01T00:00:08Z",
-                    1_700_000_010,
-                );
-                // Should handle trace ID injection safely
-                assert!(result.is_err() || result.is_ok(), "Trace ID injection should be handled safely");
-                if let Some(audit_event) = guard.audit_events().last() {
-                    assert_eq!(audit_event.trace_id, attack_trace, "Malicious trace ID should be preserved as-is");
-                }
-            }
-
-            // Test: Capability tampering and replay attacks
-            let guard = shared_guard.lock().unwrap();
-            let provider = (*shared_provider).clone();
-            drop(guard);
-
-            let (original_cap, _) = provider.issue(
-                "original-cap",
-                egress_scope(),
-                1_700_000_000,
-                3_600,
-                true,
-                true, // Single-use capability
-                "trace-single-use",
-            ).unwrap();
-            let mut single_use_gate = CapabilityGate::new(vec![provider.clone()], 1000);
-
-            // First use should succeed (if allowed by policy)
-            let mut guard = shared_guard.lock().unwrap();
-            let first_result = guard.process_egress(
-                "test.com",
-                80,
-                Protocol::Http,
-                Some(&original_cap),
-                &mut single_use_gate,
-                "trace-first-use",
-                "2024-01-01T00:00:09Z",
-                1_700_000_011,
-            );
-            // Don't assert success/failure since policy might deny, but should not panic
-
-            // Second use should fail due to single-use exhaustion (capability replay attack)
-            let second_result = guard.process_egress(
-                "test.com",
-                80,
-                Protocol::Http,
-                Some(&original_cap),
-                &mut single_use_gate,
-                "trace-replay-attack",
-                "2024-01-01T00:00:10Z",
-                1_700_000_012,
-            );
-            assert!(second_result.is_err(), "Capability replay should be denied");
-            if let Err(GuardError::RemoteCapDenied { .. }) = second_result {
-                // Expected error for capability replay
-            } else {
-                panic!("Capability replay should produce RemoteCapDenied error");
-            }
-
-            // Test: Time-based attacks with expired capabilities
-            let (expired_cap, _) = provider.issue(
-                "expired-cap",
-                egress_scope(),
-                1_700_000_000, // Issued in past
-                1, // Very short TTL (1 second)
-                true,
-                false,
-                "trace-expired",
-            ).unwrap();
-            let mut expired_gate = CapabilityGate::new(vec![provider.clone()], 1000);
-
-            // Use capability way past expiration
-            let expired_result = guard.process_egress(
-                "test.com",
-                443,
-                Protocol::Http,
-                Some(&expired_cap),
-                &mut expired_gate,
-                "trace-time-attack",
-                "2024-01-01T00:00:11Z",
-                1_700_000_000 + 3600, // 1 hour later
-            );
-            assert!(expired_result.is_err(), "Expired capability should be denied");
-        }
     }
 
     /// Get all audit events.
@@ -1722,24 +1343,31 @@ mod network_guard_additional_negative_tests {
 
         // Unicode homograph attack vectors targeting DNS spoofing
         let spoofed_hostnames = [
-            "truѕted-api.com",           // Cyrillic 's' (U+0455) vs Latin 's'
-            "trusted-аpi.com",           // Cyrillic 'a' (U+0430) vs Latin 'a'
-            "trusted-api.соm",           // Cyrillic 'o' (U+043E) and 'm' (U+043C)
-            "truѕted-аpi.соm",           // Multiple Cyrillic characters
-            "trusted-api.ϲom",           // Greek 'o' (U+03BF)
-            "trusted-aρi.com",           // Greek 'ρ' (U+03C1) vs Latin 'p'
-            "truѕted-арi.com",           // Cyrillic 'р' (U+0440) vs Latin 'p'
-            "trusted-api.cοm",           // Greek 'ο' (U+03BF) vs Latin 'o'
+            "truѕted-api.com", // Cyrillic 's' (U+0455) vs Latin 's'
+            "trusted-аpi.com", // Cyrillic 'a' (U+0430) vs Latin 'a'
+            "trusted-api.соm", // Cyrillic 'o' (U+043E) and 'm' (U+043C)
+            "truѕted-аpi.соm", // Multiple Cyrillic characters
+            "trusted-api.ϲom", // Greek 'o' (U+03BF)
+            "trusted-aρi.com", // Greek 'ρ' (U+03C1) vs Latin 'p'
+            "truѕted-арi.com", // Cyrillic 'р' (U+0440) vs Latin 'p'
+            "trusted-api.cοm", // Greek 'ο' (U+03BF) vs Latin 'o'
         ];
 
         for spoofed_host in spoofed_hostnames {
             let (action, rule_idx) = policy.evaluate(spoofed_host, 443, Protocol::Http);
 
             // System must reject Unicode homograph attacks
-            assert_eq!(action, Action::Deny,
-                "Homograph attack with '{}' should be denied", spoofed_host);
-            assert_eq!(rule_idx, None,
-                "Homograph attack with '{}' should not match allow rule", spoofed_host);
+            assert_eq!(
+                action,
+                Action::Deny,
+                "Homograph attack with '{}' should be denied",
+                spoofed_host
+            );
+            assert_eq!(
+                rule_idx, None,
+                "Homograph attack with '{}' should not match allow rule",
+                spoofed_host
+            );
         }
     }
 
@@ -1776,10 +1404,19 @@ mod network_guard_additional_negative_tests {
             let (action, rule_idx) = policy.evaluate(host, port, protocol);
 
             // All protocol confusion attempts should be denied
-            assert_eq!(action, Action::Deny,
-                "Protocol smuggling {}://{}:{} should be denied", protocol, host, port);
-            assert_eq!(rule_idx, None,
-                "Protocol smuggling {}://{}:{} should not match allow rule", protocol, host, port);
+            assert_eq!(
+                action,
+                Action::Deny,
+                "Protocol smuggling {}://{}:{} should be denied",
+                protocol,
+                host,
+                port
+            );
+            assert_eq!(
+                rule_idx, None,
+                "Protocol smuggling {}://{}:{} should not match allow rule",
+                protocol, host, port
+            );
         }
     }
 
@@ -1792,7 +1429,8 @@ mod network_guard_additional_negative_tests {
         let mut policy = EgressPolicy::new("conn-memory-attack".to_string(), Action::Deny);
 
         // Fill policy to maximum capacity with complex rules
-        for i in 0..MAX_RULES.min(1000) { // Prevent actual DoS in test
+        for i in 0..MAX_RULES.min(1000) {
+            // Prevent actual DoS in test
             let complex_host = format!(
                 "{}.{}.{}.{}.attack-vector.com",
                 i % 100,
@@ -1805,8 +1443,16 @@ mod network_guard_additional_negative_tests {
                 .add_rule(EgressRule {
                     host: complex_host,
                     port: Some((i % 65535) as u16 + 1),
-                    action: if i % 2 == 0 { Action::Allow } else { Action::Deny },
-                    protocol: if i % 2 == 0 { Protocol::Http } else { Protocol::Tcp },
+                    action: if i % 2 == 0 {
+                        Action::Allow
+                    } else {
+                        Action::Deny
+                    },
+                    protocol: if i % 2 == 0 {
+                        Protocol::Http
+                    } else {
+                        Protocol::Tcp
+                    },
                 })
                 .expect("rule should fit within capacity");
 
@@ -1829,8 +1475,11 @@ mod network_guard_additional_negative_tests {
             let elapsed = start.elapsed();
 
             // Evaluation must complete in reasonable time despite large rule set
-            assert!(elapsed.as_millis() < 100,
-                "Rule evaluation took {}ms, should be <100ms", elapsed.as_millis());
+            assert!(
+                elapsed.as_millis() < 100,
+                "Rule evaluation took {}ms, should be <100ms",
+                elapsed.as_millis()
+            );
 
             // Results should be consistent
             assert!(action == Action::Allow || action == Action::Deny);
@@ -1855,18 +1504,18 @@ mod network_guard_additional_negative_tests {
 
         // Timing attack vectors: progressively longer matching prefixes
         let timing_probes = [
-            "a",                                      // Single char
-            "s",                                      // Correct first char
-            "se",                                     // Two chars
-            "sec",                                    // Three chars
-            "secr",                                   // Four chars
-            "secret",                                 // Correct prefix
-            "secret-",                                // More correct
-            "secret-internal",                        // Even more correct
-            "secret-internal-api",                    // Almost complete
-            "secret-internal-api.company",            // Very close
-            "secret-internal-api.company.com",        // Exact match
-            "secret-internal-api.company.com.evil",   // Longer than target
+            "a",                                    // Single char
+            "s",                                    // Correct first char
+            "se",                                   // Two chars
+            "sec",                                  // Three chars
+            "secr",                                 // Four chars
+            "secret",                               // Correct prefix
+            "secret-",                              // More correct
+            "secret-internal",                      // Even more correct
+            "secret-internal-api",                  // Almost complete
+            "secret-internal-api.company",          // Very close
+            "secret-internal-api.company.com",      // Exact match
+            "secret-internal-api.company.com.evil", // Longer than target
         ];
 
         // Measure timing for each probe (implementation should be constant-time)
@@ -1883,9 +1532,12 @@ mod network_guard_additional_negative_tests {
             // All timing measurements should be similar (constant-time property)
             // This test verifies there's no obvious timing leak, though full constant-time
             // analysis would require statistical testing beyond unit test scope
-            assert!(elapsed.as_micros() < 10_000,
+            assert!(
+                elapsed.as_micros() < 10_000,
                 "Hostname comparison for '{}' took {}μs, may indicate timing leak",
-                probe, elapsed.as_micros());
+                probe,
+                elapsed.as_micros()
+            );
         }
     }
 
@@ -1907,11 +1559,11 @@ mod network_guard_additional_negative_tests {
 
         // Unicode normalization attack vectors
         let normalization_attacks = [
-            "cafe\u{0301}.example.com",       // NFD: e + combining acute accent
-            "caf\u{00E9}.example.com",        // NFC: composed é (should match)
+            "cafe\u{0301}.example.com",         // NFD: e + combining acute accent
+            "caf\u{00E9}.example.com",          // NFC: composed é (should match)
             "cafe\u{0300}\u{0301}.example.com", // Multiple combining chars
-            "café.example.com",                // Same as policy (should match)
-            "caf\u{0065}\u{0301}.example.com", // Explicit e + accent
+            "café.example.com",                 // Same as policy (should match)
+            "caf\u{0065}\u{0301}.example.com",  // Explicit e + accent
         ];
 
         for attack_host in normalization_attacks {
@@ -1919,12 +1571,20 @@ mod network_guard_additional_negative_tests {
 
             // Only exact NFC match should be allowed, normalization variants denied
             if attack_host == "café.example.com" || attack_host == "caf\u{00E9}.example.com" {
-                assert_eq!(action, Action::Allow,
-                    "Exact Unicode match '{}' should be allowed", attack_host);
+                assert_eq!(
+                    action,
+                    Action::Allow,
+                    "Exact Unicode match '{}' should be allowed",
+                    attack_host
+                );
                 assert_eq!(rule_idx, Some(0));
             } else {
-                assert_eq!(action, Action::Deny,
-                    "Unicode normalization attack '{}' should be denied", attack_host);
+                assert_eq!(
+                    action,
+                    Action::Deny,
+                    "Unicode normalization attack '{}' should be denied",
+                    attack_host
+                );
                 assert_eq!(rule_idx, None);
             }
         }
@@ -1941,41 +1601,48 @@ mod network_guard_additional_negative_tests {
         let guard = Arc::new(Mutex::new(NetworkGuard::new(policy)));
 
         // Spawn multiple threads performing concurrent egress requests
-        let handles: Vec<_> = (0..10).map(|thread_id| {
-            let guard_clone = Arc::clone(&guard);
+        let handles: Vec<_> = (0..10)
+            .map(|thread_id| {
+                let guard_clone = Arc::clone(&guard);
 
-            thread::spawn(move || {
-                for i in 0..50 {
-                    let host = format!("host-{}-{}.example.com", thread_id, i);
-                    let port = 443 + (i % 1000) as u16;
-                    let trace_id = format!("trace-{}-{}", thread_id, i);
-                    let timestamp = format!("2026-04-17T{}:{}:{}Z",
-                        thread_id % 24, i % 60, (thread_id + i) % 60);
+                thread::spawn(move || {
+                    for i in 0..50 {
+                        let host = format!("host-{}-{}.example.com", thread_id, i);
+                        let port = 443 + (i % 1000) as u16;
+                        let trace_id = format!("trace-{}-{}", thread_id, i);
+                        let timestamp = format!(
+                            "2026-04-17T{}:{}:{}Z",
+                            thread_id % 24,
+                            i % 60,
+                            (thread_id + i) % 60
+                        );
 
-                    if let Ok(mut guard_lock) = guard_clone.try_lock() {
-                        // Simulate guard processing without remote caps for simplicity
-                        let (action, rule_idx) = guard_lock.policy.evaluate(&host, port, Protocol::Http);
+                        if let Ok(mut guard_lock) = guard_clone.try_lock() {
+                            // Simulate guard processing without remote caps for simplicity
+                            let (action, rule_idx) =
+                                guard_lock.policy.evaluate(&host, port, Protocol::Http);
 
-                        let event = AuditEvent {
-                            connector_id: guard_lock.policy.connector_id.clone(),
-                            timestamp,
-                            protocol: Protocol::Http,
-                            host,
-                            port,
-                            action,
-                            rule_matched: rule_idx,
-                            trace_id,
-                        };
+                            let event = AuditEvent {
+                                connector_id: guard_lock.policy.connector_id.clone(),
+                                timestamp,
+                                protocol: Protocol::Http,
+                                host,
+                                port,
+                                action,
+                                rule_matched: rule_idx,
+                                trace_id,
+                            };
 
-                        // Direct audit log manipulation to stress concurrent access
-                        push_bounded(&mut guard_lock.audit_log, event, MAX_AUDIT_LOG_ENTRIES);
+                            // Direct audit log manipulation to stress concurrent access
+                            push_bounded(&mut guard_lock.audit_log, event, MAX_AUDIT_LOG_ENTRIES);
+                        }
+
+                        // Brief yield to encourage race conditions
+                        thread::yield_now();
                     }
-
-                    // Brief yield to encourage race conditions
-                    thread::yield_now();
-                }
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all threads to complete
         for handle in handles {
@@ -2018,7 +1685,10 @@ mod network_guard_additional_negative_tests {
             // Trace ID injection
             ("api.example.com", r#"trace":{malicious":"payload"}"#),
             // Host field injection via malicious hostname
-            (r#"api.example.com","evil":{"injected":true},"host":"fake.com"#, "trace-1"),
+            (
+                r#"api.example.com","evil":{"injected":true},"host":"fake.com"#,
+                "trace-1",
+            ),
             // Unicode escapes in trace ID
             ("api.example.com", "trace\u{0000}\u{001F}\u{007F}"),
             // Newline injection for log splitting
@@ -2045,15 +1715,22 @@ mod network_guard_additional_negative_tests {
             let json_result = serde_json::to_string(&event);
 
             // Serialization should succeed despite injection attempts
-            assert!(json_result.is_ok(),
-                "JSON serialization failed for host='{}', trace_id='{}'", host, trace_id);
+            assert!(
+                json_result.is_ok(),
+                "JSON serialization failed for host='{}', trace_id='{}'",
+                host,
+                trace_id
+            );
 
             let json_str = json_result.unwrap();
 
             // Verify JSON structure integrity (no injection succeeded)
             let parsed_result = serde_json::from_str::<AuditEvent>(&json_str);
-            assert!(parsed_result.is_ok(),
-                "JSON round-trip failed, possible injection: {}", json_str);
+            assert!(
+                parsed_result.is_ok(),
+                "JSON round-trip failed, possible injection: {}",
+                json_str
+            );
 
             let parsed_event = parsed_result.unwrap();
             assert_eq!(parsed_event.host, host);
@@ -2090,14 +1767,24 @@ mod network_guard_additional_negative_tests {
             let (action, rule_idx) = policy.evaluate(malicious_host, 80, Protocol::Http);
 
             // All CRLF injection attempts should be denied
-            assert_eq!(action, Action::Deny,
-                "CRLF injection host '{}' should be denied", malicious_host);
-            assert_eq!(rule_idx, None,
-                "CRLF injection host '{}' should not match allow rule", malicious_host);
+            assert_eq!(
+                action,
+                Action::Deny,
+                "CRLF injection host '{}' should be denied",
+                malicious_host
+            );
+            assert_eq!(
+                rule_idx, None,
+                "CRLF injection host '{}' should not match allow rule",
+                malicious_host
+            );
 
             // Verify no match with the legitimate rule
-            assert!(!host_matches("api.example.com", malicious_host),
-                "CRLF injection host '{}' should not match clean pattern", malicious_host);
+            assert!(
+                !host_matches("api.example.com", malicious_host),
+                "CRLF injection host '{}' should not match clean pattern",
+                malicious_host
+            );
         }
     }
 
@@ -2117,15 +1804,15 @@ mod network_guard_additional_negative_tests {
 
         // Subdomain traversal attack vectors
         let traversal_attacks = [
-            "evil.com.safe.internal",           // Domain confusion
-            "safe.internal.evil.com",           // Suffix confusion
-            "api.safe.internal.evil.com",       // Double suffix
-            "safe-internal.evil.com",           // Dash confusion
-            "sub.safe.internalevil.com",        // Concatenation attack
-            "sub.safe.internal.evil.com",       // Chain traversal
-            "..safe.internal",                  // Path-like traversal
-            ".safe.internal",                   // Leading dot
-            "safe.internal.",                   // Trailing dot (should normalize)
+            "evil.com.safe.internal",                    // Domain confusion
+            "safe.internal.evil.com",                    // Suffix confusion
+            "api.safe.internal.evil.com",                // Double suffix
+            "safe-internal.evil.com",                    // Dash confusion
+            "sub.safe.internalevil.com",                 // Concatenation attack
+            "sub.safe.internal.evil.com",                // Chain traversal
+            "..safe.internal",                           // Path-like traversal
+            ".safe.internal",                            // Leading dot
+            "safe.internal.",                            // Trailing dot (should normalize)
             "x" + &"a".repeat(10000) + ".safe.internal", // Massive subdomain
         ];
 
@@ -2134,17 +1821,30 @@ mod network_guard_additional_negative_tests {
 
             if attack_host == "safe.internal." {
                 // Trailing dot should normalize and be denied (wildcard requires subdomain)
-                assert_eq!(action, Action::Deny,
-                    "Trailing dot host '{}' should be denied (no subdomain)", attack_host);
+                assert_eq!(
+                    action,
+                    Action::Deny,
+                    "Trailing dot host '{}' should be denied (no subdomain)",
+                    attack_host
+                );
             } else if attack_host.starts_with("x") && attack_host.len() > 1000 {
                 // Massive subdomain should be handled safely
-                assert!(action == Action::Allow || action == Action::Deny,
-                    "Massive subdomain should be handled without panic");
+                assert!(
+                    action == Action::Allow || action == Action::Deny,
+                    "Massive subdomain should be handled without panic"
+                );
             } else {
-                assert_eq!(action, Action::Deny,
-                    "Subdomain traversal '{}' should be denied", attack_host);
-                assert_eq!(rule_idx, None,
-                    "Subdomain traversal '{}' should not match wildcard rule", attack_host);
+                assert_eq!(
+                    action,
+                    Action::Deny,
+                    "Subdomain traversal '{}' should be denied",
+                    attack_host
+                );
+                assert_eq!(
+                    rule_idx, None,
+                    "Subdomain traversal '{}' should not match wildcard rule",
+                    attack_host
+                );
             }
         }
     }
@@ -2163,9 +1863,9 @@ mod network_guard_additional_negative_tests {
 
         // Common port scanning targets
         let scan_ports = [
-            21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 993, 995, 1433, 1521,
-            3306, 3389, 5432, 5900, 6379, 8080, 8443, 9200, 11211, 27017, 50070,
-            0, 1, 65534, 65535, // Boundary ports
+            21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 993, 995, 1433, 1521, 3306, 3389,
+            5432, 5900, 6379, 8080, 8443, 9200, 11211, 27017, 50070, 0, 1, 65534,
+            65535, // Boundary ports
         ];
 
         for port in scan_ports {
@@ -2175,16 +1875,27 @@ mod network_guard_additional_negative_tests {
                 assert_eq!(action, Action::Allow, "Port 443 should be allowed");
                 assert_eq!(rule_idx, Some(0));
             } else {
-                assert_eq!(action, Action::Deny,
-                    "Port scan on port {} should be denied", port);
-                assert_eq!(rule_idx, None,
-                    "Port scan on port {} should not match specific rule", port);
+                assert_eq!(
+                    action,
+                    Action::Deny,
+                    "Port scan on port {} should be denied",
+                    port
+                );
+                assert_eq!(
+                    rule_idx, None,
+                    "Port scan on port {} should not match specific rule",
+                    port
+                );
             }
         }
 
         // TCP protocol should be denied even for allowed HTTP port
         let (action, rule_idx) = policy.evaluate("api.service.com", 443, Protocol::Tcp);
-        assert_eq!(action, Action::Deny, "TCP on HTTP-allowed port should be denied");
+        assert_eq!(
+            action,
+            Action::Deny,
+            "TCP on HTTP-allowed port should be denied"
+        );
         assert_eq!(rule_idx, None);
     }
 
@@ -2218,7 +1929,11 @@ mod network_guard_additional_negative_tests {
         });
 
         assert!(overflow_result.is_err(), "Overflow rule should be rejected");
-        assert_eq!(policy.rules.len(), MAX_RULES, "Policy size should remain at capacity");
+        assert_eq!(
+            policy.rules.len(),
+            MAX_RULES,
+            "Policy size should remain at capacity"
+        );
 
         // Verify policy still functions correctly
         let (action, rule_idx) = policy.evaluate("host-0.example.com", 443, Protocol::Http);
@@ -2226,14 +1941,20 @@ mod network_guard_additional_negative_tests {
         assert_eq!(rule_idx, Some(0));
 
         // Verify overflow attempt didn't affect existing rules
-        let (overflow_action, overflow_idx) = policy.evaluate("overflow.example.com", 443, Protocol::Http);
-        assert_eq!(overflow_action, Action::Deny, "Overflow host should be denied");
+        let (overflow_action, overflow_idx) =
+            policy.evaluate("overflow.example.com", 443, Protocol::Http);
+        assert_eq!(
+            overflow_action,
+            Action::Deny,
+            "Overflow host should be denied"
+        );
         assert_eq!(overflow_idx, None);
     }
 
     #[test]
     fn audit_log_flood_protection_oldest_first_eviction() {
-        let mut guard = NetworkGuard::new(EgressPolicy::new("conn-flood".to_string(), Action::Allow));
+        let mut guard =
+            NetworkGuard::new(EgressPolicy::new("conn-flood".to_string(), Action::Allow));
 
         // Generate audit events beyond capacity
         let flood_size = MAX_AUDIT_LOG_ENTRIES + 100;
@@ -2256,20 +1977,32 @@ mod network_guard_additional_negative_tests {
         assert_eq!(guard.audit_log.len(), MAX_AUDIT_LOG_ENTRIES);
 
         // Oldest events should be evicted (first events 0 through 99 should be gone)
-        let remaining_events: Vec<&str> = guard.audit_log
+        let remaining_events: Vec<&str> = guard
+            .audit_log
             .iter()
             .map(|e| e.trace_id.as_str())
             .collect();
 
         // Should contain recent events
-        assert!(remaining_events.contains(&format!("trace-flood-{}", flood_size - 1).as_str()),
-            "Most recent event should be retained");
-        assert!(remaining_events.contains(&format!("trace-flood-{}", flood_size - MAX_AUDIT_LOG_ENTRIES).as_str()),
-            "Boundary event should be retained");
+        assert!(
+            remaining_events.contains(&format!("trace-flood-{}", flood_size - 1).as_str()),
+            "Most recent event should be retained"
+        );
+        assert!(
+            remaining_events
+                .contains(&format!("trace-flood-{}", flood_size - MAX_AUDIT_LOG_ENTRIES).as_str()),
+            "Boundary event should be retained"
+        );
 
         // Should not contain oldest events
-        assert!(!remaining_events.contains("trace-flood-0"), "Oldest event should be evicted");
-        assert!(!remaining_events.contains("trace-flood-50"), "Early event should be evicted");
+        assert!(
+            !remaining_events.contains("trace-flood-0"),
+            "Oldest event should be evicted"
+        );
+        assert!(
+            !remaining_events.contains("trace-flood-50"),
+            "Early event should be evicted"
+        );
     }
 
     #[test]
@@ -2286,29 +2019,39 @@ mod network_guard_additional_negative_tests {
 
         // Punycode and internationalized domain attacks
         let punycode_attacks = [
-            "xn--lgitimate-9wa.com",              // Punycode for "légitimate.com"
-            "xn--legtimate-9wa.com",              // Punycode variant
-            "xn--80ak6aa92e.com",                 // Punycode for "аррӏе.com" (Cyrillic apple)
-            "legitimate.xn--j1amh",               // Punycode TLD (.укр)
-            "xn--nxasmq6b.xn--j1amh",            // Full IDN (тест.укр)
-            "xn--fsq.com",                        // Punycode for "中.com"
-            "sub.xn--nxasmq6b.com",              // Subdomain with punycode
-            "xn--".repeat(100) + "a.com",          // Malformed punycode
-            "legitimate.com.xn--invalid",         // Invalid punycode TLD
+            "xn--lgitimate-9wa.com",      // Punycode for "légitimate.com"
+            "xn--legtimate-9wa.com",      // Punycode variant
+            "xn--80ak6aa92e.com",         // Punycode for "аррӏе.com" (Cyrillic apple)
+            "legitimate.xn--j1amh",       // Punycode TLD (.укр)
+            "xn--nxasmq6b.xn--j1amh",     // Full IDN (тест.укр)
+            "xn--fsq.com",                // Punycode for "中.com"
+            "sub.xn--nxasmq6b.com",       // Subdomain with punycode
+            "xn--".repeat(100) + "a.com", // Malformed punycode
+            "legitimate.com.xn--invalid", // Invalid punycode TLD
         ];
 
         for punycode_host in punycode_attacks {
             let (action, rule_idx) = policy.evaluate(&punycode_host, 443, Protocol::Http);
 
             // All punycode attacks should be denied (don't match ASCII rule)
-            assert_eq!(action, Action::Deny,
-                "Punycode attack '{}' should be denied", punycode_host);
-            assert_eq!(rule_idx, None,
-                "Punycode attack '{}' should not match ASCII rule", punycode_host);
+            assert_eq!(
+                action,
+                Action::Deny,
+                "Punycode attack '{}' should be denied",
+                punycode_host
+            );
+            assert_eq!(
+                rule_idx, None,
+                "Punycode attack '{}' should not match ASCII rule",
+                punycode_host
+            );
 
             // Verify direct matching also fails
-            assert!(!host_matches("legitimate.com", &punycode_host),
-                "Punycode '{}' should not match ASCII pattern", punycode_host);
+            assert!(
+                !host_matches("legitimate.com", &punycode_host),
+                "Punycode '{}' should not match ASCII pattern",
+                punycode_host
+            );
         }
     }
 
@@ -2330,32 +2073,38 @@ mod network_guard_additional_negative_tests {
         let tunnel_tests = [
             // Direct TCP to same endpoint should be blocked
             ("api.trusted.com", 80, Protocol::Tcp),
-
             // Common tunneling ports should be blocked
-            ("api.trusted.com", 8080, Protocol::Http),  // HTTP alternate
-            ("api.trusted.com", 443, Protocol::Http),   // HTTPS
-            ("api.trusted.com", 8443, Protocol::Http),  // HTTPS alternate
-            ("api.trusted.com", 3128, Protocol::Http),  // Proxy port
-            ("api.trusted.com", 1080, Protocol::Tcp),   // SOCKS proxy
-            ("api.trusted.com", 9050, Protocol::Tcp),   // Tor SOCKS
-
+            ("api.trusted.com", 8080, Protocol::Http), // HTTP alternate
+            ("api.trusted.com", 443, Protocol::Http),  // HTTPS
+            ("api.trusted.com", 8443, Protocol::Http), // HTTPS alternate
+            ("api.trusted.com", 3128, Protocol::Http), // Proxy port
+            ("api.trusted.com", 1080, Protocol::Tcp),  // SOCKS proxy
+            ("api.trusted.com", 9050, Protocol::Tcp),  // Tor SOCKS
             // DNS tunneling ports
-            ("api.trusted.com", 53, Protocol::Tcp),     // DNS TCP
-            ("api.trusted.com", 853, Protocol::Tcp),    // DNS over TLS
-
+            ("api.trusted.com", 53, Protocol::Tcp),  // DNS TCP
+            ("api.trusted.com", 853, Protocol::Tcp), // DNS over TLS
             // VPN/tunneling common ports
-            ("api.trusted.com", 1194, Protocol::Tcp),   // OpenVPN
-            ("api.trusted.com", 4500, Protocol::Tcp),   // IPSec
-            ("api.trusted.com", 500, Protocol::Tcp),    // IKE
+            ("api.trusted.com", 1194, Protocol::Tcp), // OpenVPN
+            ("api.trusted.com", 4500, Protocol::Tcp), // IPSec
+            ("api.trusted.com", 500, Protocol::Tcp),  // IKE
         ];
 
         for (host, port, protocol) in tunnel_tests {
             let (action, rule_idx) = policy.evaluate(host, port, protocol);
 
-            assert_eq!(action, Action::Deny,
-                "Tunnel attempt {}://{}:{} should be denied", protocol, host, port);
-            assert_eq!(rule_idx, None,
-                "Tunnel attempt {}://{}:{} should not match HTTP rule", protocol, host, port);
+            assert_eq!(
+                action,
+                Action::Deny,
+                "Tunnel attempt {}://{}:{} should be denied",
+                protocol,
+                host,
+                port
+            );
+            assert_eq!(
+                rule_idx, None,
+                "Tunnel attempt {}://{}:{} should not match HTTP rule",
+                protocol, host, port
+            );
         }
 
         // Verify original rule still works
@@ -2393,14 +2142,25 @@ mod network_guard_additional_negative_tests {
             let (action, rule_idx) = policy.evaluate(attack_host, 443, Protocol::Http);
 
             // All case variants should match deny rule (case-insensitive)
-            assert_eq!(action, Action::Deny,
-                "Case variant '{}' should be denied", attack_host);
-            assert_eq!(rule_idx, Some(0),
-                "Case variant '{}' should match deny rule", attack_host);
+            assert_eq!(
+                action,
+                Action::Deny,
+                "Case variant '{}' should be denied",
+                attack_host
+            );
+            assert_eq!(
+                rule_idx,
+                Some(0),
+                "Case variant '{}' should match deny rule",
+                attack_host
+            );
 
             // Verify direct host matching is case-insensitive
-            assert!(host_matches("evil.attacker.com", attack_host),
-                "Case variant '{}' should match lowercase pattern", attack_host);
+            assert!(
+                host_matches("evil.attacker.com", attack_host),
+                "Case variant '{}' should match lowercase pattern",
+                attack_host
+            );
         }
 
         // Verify similar but different hosts are not blocked
@@ -2413,8 +2173,17 @@ mod network_guard_additional_negative_tests {
 
         for non_match_host in non_matches {
             let (action, rule_idx) = policy.evaluate(non_match_host, 443, Protocol::Http);
-            assert_eq!(action, Action::Deny, "Non-match '{}' should hit default deny", non_match_host);
-            assert_eq!(rule_idx, None, "Non-match '{}' should not match deny rule", non_match_host);
+            assert_eq!(
+                action,
+                Action::Deny,
+                "Non-match '{}' should hit default deny",
+                non_match_host
+            );
+            assert_eq!(
+                rule_idx, None,
+                "Non-match '{}' should not match deny rule",
+                non_match_host
+            );
         }
     }
 
@@ -2452,7 +2221,10 @@ mod network_guard_additional_negative_tests {
         assert!(json_result.is_ok(), "Massive IDs should serialize to JSON");
 
         let json_str = json_result.unwrap();
-        assert!(json_str.len() > 150_000, "JSON should contain massive content");
+        assert!(
+            json_str.len() > 150_000,
+            "JSON should contain massive content"
+        );
 
         // JSON deserialization should work
         let parse_result = serde_json::from_str::<AuditEvent>(&json_str);

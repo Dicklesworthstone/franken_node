@@ -22,9 +22,15 @@ const MAX_TOTAL_FINDINGS: usize = 1_000;
 
 /// Push item to vector with capacity bounds checking to prevent memory exhaustion.
 fn push_bounded<T>(vec: &mut Vec<T>, item: T, max_cap: usize) {
-    if vec.len() < max_cap {
-        vec.push(item);
+    if max_cap == 0 {
+        vec.clear();
+        return;
     }
+    if vec.len() >= max_cap {
+        let overflow = vec.len().saturating_sub(max_cap).saturating_add(1);
+        vec.drain(0..overflow.min(vec.len()));
+    }
+    vec.push(item);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1589,7 +1595,7 @@ mod tests {
                 .recommendation
                 .as_deref()
                 .is_some_and(|text| text.contains("lockstep validation coverage"))
-        }, MAX_TOTAL_FINDINGS);
+        });
 
         assert!(report.is_pass());
         assert!(!has_lockstep_warning);

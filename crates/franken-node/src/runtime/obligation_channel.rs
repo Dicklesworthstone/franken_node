@@ -804,7 +804,7 @@ impl TwoPhaseFlow {
         // Check deadlines
         for id in &self.obligation_ids {
             if let Some(o) = self.ledger.get(id)
-                && now_ms > o.deadline
+                && now_ms >= o.deadline
             {
                 return PrepareResult::Failed {
                     flow_id: self.flow_id.clone(),

@@ -22,6 +22,14 @@ pub fn module_surface() -> &'static [&'static str] {
     ATC_MODULE_SURFACE
 }
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
+    }
+    items.push(item);
+}
+
 #[cfg(test)]
 mod module_surface_negative_tests {
     use super::*;
@@ -158,11 +166,14 @@ mod module_surface_negative_tests {
 
         for &module in modules {
             if module.contains("signal") {
-                *category_counts.entry("signal").or_insert(0) += 1;
+                let count = category_counts.entry("signal").or_insert(0);
+                *count = count.saturating_add(1);
             } else if module.contains("privacy") {
-                *category_counts.entry("privacy").or_insert(0) += 1;
+                let count = category_counts.entry("privacy").or_insert(0);
+                *count = count.saturating_add(1);
             } else {
-                *category_counts.entry("other").or_insert(0) += 1;
+                let count = category_counts.entry("other").or_insert(0);
+                *count = count.saturating_add(1);
             }
         }
 
@@ -170,6 +181,7 @@ mod module_surface_negative_tests {
         let total = modules.len();
         for (category, count) in &category_counts {
             let percentage = (*count as f64) / (total as f64) * 100.0;
+            assert!(percentage.is_finite(), "Non-finite percentage for category {}", category);
             assert!(percentage <= 75.0,
                    "Category {} dominates with {:.1}% of modules", category, percentage);
         }
@@ -259,12 +271,12 @@ mod module_surface_negative_tests {
                 (thread_id, surface[0], surface.as_ptr())
             });
 
-            handles.push(handle);
+            push_bounded(&mut handles, handle, 100);
         }
 
         let mut results = Vec::new();
         for handle in handles {
-            results.push(handle.join().unwrap());
+            push_bounded(&mut results, handle.join().unwrap(), 100);
         }
 
         // All threads should see identical results
@@ -499,7 +511,7 @@ mod update_len_prefixed_negative_tests {
             let mut hasher = Sha256::new();
             update_len_prefixed(&mut hasher, pattern);
             let hash = hasher.finalize();
-            hashes.push(hash);
+            push_bounded(&mut hashes, hash, 10000);
         }
 
         // All patterns should produce different hashes
@@ -586,7 +598,7 @@ mod update_count_negative_tests {
                 let mut hasher = Sha256::new();
                 update_count(&mut hasher, count);
                 let hash = hasher.finalize();
-                hashes.push((count, hash));
+                push_bounded(&mut hashes, (count, hash), 10000);
             }
         }
 
@@ -898,7 +910,7 @@ mod update_field_negative_tests {
             let mut hasher = Sha256::new();
             update_field(&mut hasher, domain, data);
             let hash = hasher.finalize();
-            hashes.push(hash);
+            push_bounded(&mut hashes, hash, 10000);
         }
 
         // All should be different
@@ -1228,6 +1240,7 @@ mod surface_fingerprint_hex_negative_tests {
             }
 
             let change_percentage = (differing_bits as f64) / 256.0 * 100.0;
+            assert!(change_percentage.is_finite(), "Non-finite change percentage");
             assert!(change_percentage > 25.0,
                    "Poor avalanche effect: only {:.1}% bits changed", change_percentage);
         }
@@ -2181,6 +2194,7 @@ mod atc_extreme_adversarial_negative_tests {
 
         if min_time.as_nanos() > 0 {
             let timing_ratio = max_time.as_nanos() as f64 / min_time.as_nanos() as f64;
+            assert!(timing_ratio.is_finite(), "Non-finite timing ratio");
             assert!(timing_ratio < 10.0,
                    "Suspicious timing variation: max={:?}, min={:?}, ratio={:.2}",
                    max_time, min_time, timing_ratio);
@@ -2474,7 +2488,7 @@ mod atc_extreme_adversarial_negative_tests {
                 shared.extend(local_results);
             });
 
-            handles.push(handle);
+            push_bounded(&mut handles, handle, 100);
         }
 
         // Wait for all threads to complete
@@ -2629,6 +2643,7 @@ mod atc_extreme_adversarial_negative_tests {
         // Timing shouldn't degrade dramatically (allow 10x slower)
         if initial_duration.as_nanos() > 0 {
             let slowdown_ratio = pressure_duration.as_nanos() as f64 / initial_duration.as_nanos() as f64;
+            assert!(slowdown_ratio.is_finite(), "Non-finite slowdown ratio");
             assert!(slowdown_ratio < 10.0,
                    "Performance degradation too severe: {}x slower", slowdown_ratio);
         }
@@ -2693,8 +2708,12 @@ mod atc_extreme_adversarial_negative_tests {
         fn calculate_stats(times: &[std::time::Duration]) -> (f64, f64) {
             let nanos: Vec<f64> = times.iter().map(|d| d.as_nanos() as f64).collect();
             let mean = nanos.iter().sum::<f64>() / nanos.len() as f64;
+            assert!(mean.is_finite(), "Non-finite mean in statistical analysis");
             let variance = nanos.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / nanos.len() as f64;
-            (mean, variance.sqrt())
+            assert!(variance.is_finite(), "Non-finite variance in statistical analysis");
+            let std_dev = variance.sqrt();
+            assert!(std_dev.is_finite(), "Non-finite standard deviation");
+            (mean, std_dev)
         }
 
         let (ref_mean, ref_std) = calculate_stats(&reference_times);
@@ -2763,6 +2782,7 @@ mod atc_extreme_adversarial_negative_tests {
             // Small input change should cause significant output change
             let hash_bits = base_bytes.len() * 8;
             let change_percentage = (differing_bits as f64) / (hash_bits as f64) * 100.0;
+            assert!(change_percentage.is_finite(), "Non-finite change percentage in avalanche test");
 
             // Good avalanche effect means ~50% of bits change
             assert!(change_percentage > 25.0,
@@ -2775,8 +2795,10 @@ mod atc_extreme_adversarial_negative_tests {
 
         // Average avalanche effect should be robust
         let avg_changed_bits = hamming_distances.iter().sum::<u32>() as f64 / hamming_distances.len() as f64;
+        assert!(avg_changed_bits.is_finite(), "Non-finite average changed bits");
         let hash_bits = 256f64; // SHA-256 has 256 bits
         let avg_change_percentage = avg_changed_bits / hash_bits * 100.0;
+        assert!(avg_change_percentage.is_finite(), "Non-finite average change percentage");
 
         assert!(avg_change_percentage > 40.0 && avg_change_percentage < 60.0,
                "Average avalanche effect outside expected range: {:.1}% (expected ~50%)",
@@ -3212,7 +3234,7 @@ mod atc_extreme_adversarial_negative_tests {
         let mut fingerprints = Vec::new();
         for _ in 0..1000 {
             let fingerprint = surface_fingerprint_hex(&surface_refs);
-            fingerprints.push(fingerprint);
+            push_bounded(&mut fingerprints, fingerprint, 10000);
         }
 
         // All fingerprints should be identical (deterministic)
@@ -4040,12 +4062,13 @@ mod atc_extreme_adversarial_negative_tests {
             assert!(fingerprint.chars().all(|c| c.is_ascii_hexdigit()),
                    "Entropy test {} invalid hex", entropy_idx);
 
-            all_fingerprints.push(fingerprint.clone());
+            push_bounded(&mut all_fingerprints, fingerprint.clone(), 50000);
 
             // Analyze character distribution for entropy
             let mut char_counts = std::collections::HashMap::new();
             for c in fingerprint.chars() {
-                *char_counts.entry(c).or_insert(0) += 1;
+                let count = char_counts.entry(c).or_insert(0);
+                *count = count.saturating_add(1);
             }
 
             let unique_chars = char_counts.len();
@@ -4066,13 +4089,15 @@ mod atc_extreme_adversarial_negative_tests {
             for byte in bytes {
                 for bit_pos in 0..8 {
                     let bit = (byte >> bit_pos) & 1;
-                    bit_counts[bit as usize] += 1;
+                    bit_counts[bit as usize] = bit_counts[bit as usize].saturating_add(1);
                 }
             }
 
             let total_bits = bytes.len() * 8;
             let bit_0_ratio = bit_counts[0] as f64 / total_bits as f64;
+            assert!(bit_0_ratio.is_finite(), "Non-finite bit 0 ratio");
             let bit_1_ratio = bit_counts[1] as f64 / total_bits as f64;
+            assert!(bit_1_ratio.is_finite(), "Non-finite bit 1 ratio");
 
             // Bit distribution should be roughly balanced
             assert!(bit_0_ratio >= 0.3 && bit_0_ratio <= 0.7,
@@ -4140,7 +4165,7 @@ mod atc_extreme_adversarial_negative_tests {
         for fingerprint in &statistical_fingerprints {
             for c in fingerprint.chars() {
                 let digit = c.to_digit(16).unwrap() as usize;
-                hex_char_histogram[digit] += 1;
+                hex_char_histogram[digit] = hex_char_histogram[digit].saturating_add(1);
             }
         }
 
@@ -4151,8 +4176,11 @@ mod atc_extreme_adversarial_negative_tests {
         let mut chi_squared = 0.0;
         for count in hex_char_histogram {
             let diff = count as f64 - expected_per_char as f64;
-            chi_squared += (diff * diff) / expected_per_char as f64;
+            let term = (diff * diff) / expected_per_char as f64;
+            assert!(term.is_finite(), "Non-finite chi-squared term");
+            chi_squared += term;
         }
+        assert!(chi_squared.is_finite(), "Non-finite chi-squared result");
 
         // Should not deviate too much from uniform distribution
         // Chi-squared with 15 degrees of freedom, 95% confidence is ~25
@@ -5115,7 +5143,7 @@ mod atc_extreme_adversarial_negative_tests {
                 results_clone.lock().unwrap().extend(thread_results);
             });
 
-            handles.push(handle);
+            push_bounded(&mut handles, handle, 100);
         }
 
         // Wait for all concurrent operations to complete
@@ -5242,7 +5270,8 @@ mod atc_extreme_adversarial_negative_tests {
             }
 
             // Track fingerprint distribution for collision analysis
-            *observed_fingerprints.entry(downgrade_fingerprint.clone()).or_insert(0) += 1;
+            let count = observed_fingerprints.entry(downgrade_fingerprint.clone()).or_insert(0);
+            *count = count.saturating_add(1);
 
             // Test determinism under downgrade attempts
             let downgrade_fingerprint_2 = surface_fingerprint_hex(&downgrade_refs);
@@ -5260,7 +5289,9 @@ mod atc_extreme_adversarial_negative_tests {
         println!("Cryptographic downgrade analysis:");
         println!("  Total unique fingerprints: {}", total_fingerprints);
         println!("  Collision count: {}", collision_count);
-        println!("  Collision rate: {:.4}%", (collision_count as f64 / total_fingerprints as f64) * 100.0);
+        let collision_rate = (collision_count as f64 / total_fingerprints as f64) * 100.0;
+        assert!(collision_rate.is_finite(), "Non-finite collision rate");
+        println!("  Collision rate: {:.4}%", collision_rate);
 
         // Verify low collision rate (should be cryptographically strong)
         assert!(collision_count < total_fingerprints / 10,
@@ -5796,7 +5827,8 @@ mod atc_extreme_adversarial_negative_tests {
             let mut char_counts = HashMap::new();
 
             for &c in &hex_chars {
-                *char_counts.entry(c).or_insert(0) += 1;
+                let count = char_counts.entry(c).or_insert(0);
+                *count = count.saturating_add(1);
             }
 
             // Should have reasonable entropy (not all same character)
@@ -5890,7 +5922,7 @@ mod atc_extreme_adversarial_negative_tests {
             }
 
             // Timing should be relatively consistent (no data-dependent timing)
-            let avg_time: u64 = access_times.iter().map(|d| d.as_nanos() as u64).sum::<u64>() / access_times.len() as u64;
+            let avg_time: u64 = access_times.iter().map(|d| d.as_nanos() as u64).sum::<u64>() / u64::try_from(access_times.len()).unwrap_or(u64::MAX);
             let mut outliers = 0;
 
             for (i, &time) in access_times.iter().enumerate() {

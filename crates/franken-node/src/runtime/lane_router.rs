@@ -2299,7 +2299,7 @@ mod tests {
             "op\0null",              // Null byte
             "op\x01\x02control",    // Control characters
             "op\r\ninjection",      // Line breaks
-            "op\x7F\x80\xFF",       // High bytes and DEL
+            &format!("op\x7F{}", String::from_utf8_lossy(&[0x80, 0xFF])), // High bytes and DEL
             "op\u{FFFE}invalid",    // Unicode non-character
             "op\u{FFFF}invalid",    // Unicode non-character
             "op\u{202E}rtl",        // RTL override (potential display corruption)

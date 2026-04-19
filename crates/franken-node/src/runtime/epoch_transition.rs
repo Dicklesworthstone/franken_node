@@ -631,7 +631,7 @@ fn manifest_hash_for_transition(
     hasher.update(b"epoch_transition_hash_v1:");
     // Length-prefixed encoding prevents delimiter-collision ambiguity.
     for field in [transition_id, initiator, reason] {
-        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(field.len()).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.update(field.as_bytes());
     }
     hasher.update(target_epoch.to_le_bytes());

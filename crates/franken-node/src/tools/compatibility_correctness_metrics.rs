@@ -332,6 +332,18 @@ impl CompatibilityCorrectnessMetrics {
             );
             return Err("mean_detect_ms must be a non-negative finite value".to_string());
         }
+        let max_mean_detect_ms = f64::MAX / (MAX_METRICS.saturating_add(1) as f64);
+        if metric.mean_detect_ms > max_mean_detect_ms {
+            self.log(
+                event_codes::CCM_ERR_INVALID_METRIC,
+                trace_id,
+                serde_json::json!({
+                    "metric_id": &metric.metric_id,
+                    "reason": "mean_detect_ms exceeds safe aggregation bound",
+                }),
+            );
+            return Err("mean_detect_ms exceeds safe aggregation bound".to_string());
+        }
 
         metric.timestamp = Utc::now().to_rfc3339();
         let metric_id = metric.metric_id.clone();
@@ -421,7 +433,12 @@ impl CompatibilityCorrectnessMetrics {
                 total_tests = total_tests.saturating_add(m.total_tests);
                 total_passed = total_passed.saturating_add(m.passed_tests);
                 total_regressions = total_regressions.saturating_add(m.regressions);
-                detect_sum += m.mean_detect_ms;
+                let next_detect_sum = detect_sum + m.mean_detect_ms;
+                detect_sum = if next_detect_sum.is_finite() {
+                    next_detect_sum
+                } else {
+                    f64::MAX
+                };
             }
 
             let rate = if total_tests > 0 {
@@ -709,6 +726,18 @@ mod tests {
     }
 
     #[test]
+    fn submit_extreme_mean_detect_above_aggregation_bound_fails() {
+        let mut engine = CompatibilityCorrectnessMetrics::default();
+        let mut m = sample_metric("m-huge", ApiFamily::Migration, RiskBand::Low, 100, 100);
+        m.mean_detect_ms = f64::MAX;
+
+        let err = engine.submit_metric(m, &trace()).unwrap_err();
+
+        assert!(err.contains("safe aggregation bound"));
+        assert!(engine.metrics().is_empty());
+    }
+
+    #[test]
     fn rejected_zero_tests_metric_is_not_stored() {
         let mut engine = CompatibilityCorrectnessMetrics::default();
         let m = sample_metric("m-zero", ApiFamily::Extension, RiskBand::High, 0, 0);
@@ -987,6 +1016,23 @@ mod tests {
         assert!((report.overall_correctness - 0.0).abs() < f64::EPSILON);
         assert!(report.segments.is_empty());
         assert!(report.flagged_segments.is_empty());
+    }
+
+    #[test]
+    fn report_large_detect_latency_mean_stays_finite() {
+        let mut engine = CompatibilityCorrectnessMetrics::default();
+        let safe_large = f64::MAX / (MAX_METRICS.saturating_add(1) as f64);
+        let mut first = sample_metric("m-large-1", ApiFamily::Core, RiskBand::Low, 100, 100);
+        first.mean_detect_ms = safe_large;
+        let mut second = sample_metric("m-large-2", ApiFamily::Core, RiskBand::Low, 100, 100);
+        second.mean_detect_ms = safe_large;
+
+        engine.submit_metric(first, &trace()).unwrap();
+        engine.submit_metric(second, &trace()).unwrap();
+
+        let report = engine.generate_report(&trace());
+
+        assert!(report.segments[0].mean_detect_ms.is_finite());
     }
 
     #[test]

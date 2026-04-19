@@ -285,22 +285,22 @@ impl ChallengeAuditEntry {
     pub fn hash(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(b"challenge_flow_hash_v1:");
-        hasher.update((self.challenge_id.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(self.challenge_id.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(self.challenge_id.as_bytes());
-        hasher.update((self.artifact_id.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(self.artifact_id.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(self.artifact_id.as_bytes());
-        hasher.update((self.from_state.label().len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(self.from_state.label().len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(self.from_state.label().as_bytes());
-        hasher.update((self.to_state.label().len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(self.to_state.label().len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(self.to_state.label().as_bytes());
-        hasher.update((self.event_code.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(self.event_code.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(self.event_code.as_bytes());
-        hasher.update((self.actor_id.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(self.actor_id.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(self.actor_id.as_bytes());
         hasher.update(self.timestamp_ms.to_le_bytes());
-        hasher.update((self.detail.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(self.detail.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(self.detail.as_bytes());
-        hasher.update((self.prev_hash.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(self.prev_hash.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(self.prev_hash.as_bytes());
         format!("{:x}", hasher.finalize())
     }

@@ -2515,9 +2515,9 @@ mod tests {
 
         let mut safe_hasher = Sha256::new();
         safe_hasher.update(b"control_plane_key_v1:");
-        safe_hasher.update((field1.len() as u64).to_le_bytes()); // Length prefix
+        safe_hasher.update((u64::try_from(field1.len()).unwrap_or(u64::MAX)).to_le_bytes()); // Length prefix
         safe_hasher.update(field1.as_bytes());
-        safe_hasher.update((field2.len() as u64).to_le_bytes()); // Length prefix
+        safe_hasher.update((u64::try_from(field2.len()).unwrap_or(u64::MAX)).to_le_bytes()); // Length prefix
         safe_hasher.update(field2.as_bytes());
         let safe_hash = safe_hasher.finalize();
 

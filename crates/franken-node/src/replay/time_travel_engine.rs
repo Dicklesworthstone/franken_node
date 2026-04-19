@@ -43,7 +43,7 @@ use crate::security::constant_time::ct_eq;
 pub const SCHEMA_VERSION: &str = "ttr-v1.0";
 
 use crate::capacity_defaults::aliases::{
-    MAX_AUDIT_LOG_ENTRIES, MAX_REGISTERED_TRACES, MAX_TRACE_STEPS,
+    MAX_AUDIT_LOG_ENTRIES, MAX_DIVERGENCES, MAX_REGISTERED_TRACES, MAX_TRACE_STEPS,
 };
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
@@ -520,21 +520,29 @@ impl TraceBuilder {
     pub fn new(trace_id: &str, workflow_name: &str, environment: EnvironmentSnapshot) -> Self {
         let now = environment.clock_seed_ns;
         let mut audit_log = Vec::new();
-        audit_log.push(AuditEntry::new(
-            event_codes::TTR_001,
-            trace_id,
-            &format!("Capture started for workflow '{workflow_name}'"),
-            now,
-        ));
-        audit_log.push(AuditEntry::new(
-            event_codes::TTR_008,
-            trace_id,
-            &format!(
-                "Environment snapshot sealed: platform={}",
-                environment.platform
+        push_bounded(
+            &mut audit_log,
+            AuditEntry::new(
+                event_codes::TTR_001,
+                trace_id,
+                &format!("Capture started for workflow '{workflow_name}'"),
+                now,
             ),
-            now,
-        ));
+            MAX_AUDIT_LOG_ENTRIES,
+        );
+        push_bounded(
+            &mut audit_log,
+            AuditEntry::new(
+                event_codes::TTR_008,
+                trace_id,
+                &format!(
+                    "Environment snapshot sealed: platform={}",
+                    environment.platform
+                ),
+                now,
+            ),
+            MAX_AUDIT_LOG_ENTRIES,
+        );
         Self {
             trace_id: trace_id.to_string(),
             workflow_name: workflow_name.to_string(),
@@ -916,13 +924,17 @@ impl ReplayEngine {
                     ),
                     MAX_AUDIT_LOG_ENTRIES,
                 );
-                divergences.push(Divergence {
-                    step_seq: step.seq,
-                    kind,
-                    expected_digest: original_output_digest,
-                    actual_digest: replayed_output_digest,
-                    explanation,
-                });
+                push_bounded(
+                    &mut divergences,
+                    Divergence {
+                        step_seq: step.seq,
+                        kind,
+                        expected_digest: original_output_digest,
+                        actual_digest: replayed_output_digest,
+                        explanation,
+                    },
+                    MAX_DIVERGENCES,
+                );
             }
 
             replay_duration_ns = std::cmp::max(replay_duration_ns, step.timestamp_ns);
@@ -1009,7 +1021,7 @@ pub fn build_demo_trace(trace_id: &str, workflow_name: &str, step_count: usize) 
         let effects = vec![SideEffect::new("log", format!("effect-{i}").into_bytes())];
         let seq = u64::try_from(i).unwrap_or(u64::MAX);
         let timestamp = seq.saturating_add(1).saturating_mul(1000);
-        steps.push(TraceStep::new(seq, input, output, effects, timestamp));
+        push_bounded(&mut steps, TraceStep::new(seq, input, output, effects, timestamp), MAX_TRACE_STEPS);
     }
 
     let trace_digest = WorkflowTrace::compute_digest(&steps);
@@ -2060,11 +2072,11 @@ mod tests {
                     let output = format!("unicode-output-{}", i).into_bytes();
                     let side_effects = vec![SideEffect::new("unicode-effect", format!("effect-{}", i).into_bytes())];
 
-                    let record_result = engine.record_step(trace_id, input, output, side_effects, 1000 + i as u64);
+                    let record_result = engine.record_step(trace_id, input, output, side_effects, 1000_u64.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)));
 
                     if record_result.is_ok() {
                         // Complete trace
-                        let complete_result = engine.complete_capture(trace_id, 2000 + i as u64);
+                        let complete_result = engine.complete_capture(trace_id, 2000_u64.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)));
 
                         match complete_result {
                             Ok((trace, audit)) => {
@@ -2226,7 +2238,7 @@ mod tests {
                 input,
                 output,
                 malicious_side_effects,
-                1000 + i as u64,
+                1000_u64.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)),
             );
 
             match record_result {
@@ -2298,7 +2310,7 @@ mod tests {
                 input,
                 output.clone(),
                 side_effects,
-                1000 + i as u64,
+                1000_u64.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)),
             );
 
             if record_result.is_err() {
@@ -2331,7 +2343,7 @@ mod tests {
 
                         // Verify divergence details handle size differences safely
                         for divergence in &result.divergences {
-                            assert!(divergence.step_seq < trace.steps.len() as u64);
+                            assert!(divergence.step_seq < u64::try_from(trace.steps.len()).unwrap_or(u64::MAX));
                             assert!(!divergence.expected_hash.is_empty());
                             assert!(!divergence.actual_hash.is_empty());
 
@@ -2521,7 +2533,10 @@ mod tests {
         // Should handle conflicting operations gracefully
         for result in conflicting_results {
             // May succeed or fail, but should not crash
-            let _ = result;
+            if result.is_err() {
+                // Expected failure case for conflicting operations
+                continue;
+            }
         }
 
         // Engine state should remain consistent
@@ -2627,7 +2642,7 @@ mod tests {
             let output = format!("output-{}", i).into_bytes();
             let effects = vec![SideEffect::new("test", format!("effect-{}", i).into_bytes())];
 
-            let _ = engine.record_step(&trace_id, input, output, effects, i);
+            let _result = engine.record_step(&trace_id, input, output, effects, i);
         }
 
         // Complete capture

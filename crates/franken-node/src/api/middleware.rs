@@ -2195,7 +2195,7 @@ mod api_middleware_advanced_security_edge_tests {
                 &mut limiter,
                 &keys,
                 |_identity, ctx| {
-                    handler_call_count += 1;
+                    handler_call_count = handler_call_count.saturating_add(1);
                     // Simulate handler that could fail
                     if ctx.trace_id.contains("evil") {
                         Err(ApiError::Internal {

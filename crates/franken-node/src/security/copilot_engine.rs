@@ -54,30 +54,52 @@ pub struct ExpectedLossVector {
 }
 
 impl ExpectedLossVector {
+    fn dimensions(&self) -> [f64; 5] {
+        [
+            self.availability_loss,
+            self.integrity_loss,
+            self.confidentiality_loss,
+            self.financial_loss,
+            self.reputation_loss,
+        ]
+    }
+
+    fn checked_total(&self) -> Option<f64> {
+        let mut sum = 0.0;
+        for value in self.dimensions() {
+            if !value.is_finite() || value < 0.0 {
+                return None;
+            }
+            let next = sum + value;
+            if !next.is_finite() {
+                return None;
+            }
+            sum = next;
+        }
+        Some(sum)
+    }
+
     /// Validate all values are non-negative.
     #[must_use]
     pub fn is_valid(&self) -> bool {
-        self.availability_loss.is_finite()
-            && self.integrity_loss.is_finite()
-            && self.confidentiality_loss.is_finite()
-            && self.financial_loss.is_finite()
-            && self.reputation_loss.is_finite()
-            && self.availability_loss >= 0.0
-            && self.integrity_loss >= 0.0
-            && self.confidentiality_loss >= 0.0
-            && self.financial_loss >= 0.0
-            && self.reputation_loss >= 0.0
+        self.checked_total().is_some()
     }
 
     /// Total expected loss across all dimensions.
     #[must_use]
     pub fn total(&self) -> f64 {
-        let sum = self.availability_loss
-            + self.integrity_loss
-            + self.confidentiality_loss
-            + self.financial_loss
-            + self.reputation_loss;
-        if sum.is_finite() { sum } else { 0.0 }
+        let mut sum = 0.0;
+        for value in self.dimensions() {
+            if !value.is_finite() {
+                return f64::NAN;
+            }
+            let next = sum + value;
+            if !next.is_finite() {
+                return f64::INFINITY;
+            }
+            sum = next;
+        }
+        sum
     }
 
     /// Dominant loss dimension name.
@@ -800,6 +822,16 @@ mod tests {
             reputation_loss: 0.0,
         };
         assert!(!non_finite.is_valid());
+
+        let overflowing_total = ExpectedLossVector {
+            availability_loss: f64::MAX,
+            integrity_loss: f64::MAX,
+            confidentiality_loss: 0.0,
+            financial_loss: 0.0,
+            reputation_loss: 0.0,
+        };
+        assert!(!overflowing_total.is_valid());
+        assert!(overflowing_total.total().is_infinite());
     }
 
     #[test]
@@ -1546,7 +1578,7 @@ mod tests {
                 availability_loss: f64::MIN_POSITIVE,
                 integrity_loss: f64::EPSILON,
                 confidentiality_loss: 1.0000000000000002,  // Just above 1.0 in f64
-                financial_loss: f64::MAX,
+                financial_loss: f64::MAX / 16.0,
                 reputation_loss: 1e-308,
             },
         ];
@@ -1570,6 +1602,7 @@ mod tests {
         };
 
         // Should handle potential overflow gracefully
+        assert!(!overflow_attack.is_valid());
         let total = overflow_attack.total();
         assert!(total.is_infinite() || total.is_finite(),
                "Overflow calculation should not produce NaN");

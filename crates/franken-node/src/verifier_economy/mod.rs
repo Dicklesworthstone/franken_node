@@ -46,7 +46,7 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 }
 
 fn push_length_prefixed(bytes: &mut Vec<u8>, value: &str) {
-    bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&(u64::try_from(value.len()).unwrap_or(u64::MAX)).to_le_bytes());
     bytes.extend_from_slice(value.as_bytes());
 }
 
@@ -86,7 +86,8 @@ fn compute_claim_metadata_hash(
     payload.extend_from_slice(b"verifier_economy_replay_claim_v1:");
     push_length_prefixed(&mut payload, &dimension.to_string());
     push_length_prefixed(&mut payload, statement);
-    payload.extend_from_slice(&score.to_bits().to_le_bytes());
+    let score_bits = if score.is_finite() { score.to_bits() } else { 0_f64.to_bits() };
+    payload.extend_from_slice(&score_bits.to_le_bytes());
     push_length_prefixed(&mut payload, suite_id);
     format!("sha256:{}", hex::encode(Sha256::digest(payload)))
 }
@@ -144,14 +145,15 @@ pub(crate) fn attestation_signature_payload(submission: &AttestationSubmission) 
     push_length_prefixed(&mut payload, &submission.verifier_id);
     push_length_prefixed(&mut payload, &submission.claim.dimension.to_string());
     push_length_prefixed(&mut payload, &submission.claim.statement);
-    payload.extend_from_slice(&submission.claim.score.to_bits().to_le_bytes());
+    let score_bits = if submission.claim.score.is_finite() { submission.claim.score.to_bits() } else { 0_f64.to_bits() };
+    payload.extend_from_slice(&score_bits.to_le_bytes());
     push_length_prefixed(&mut payload, &submission.evidence.suite_id);
     push_length_prefixed(&mut payload, &submission.evidence.execution_trace_hash);
-    payload.extend_from_slice(&(submission.evidence.measurements.len() as u64).to_le_bytes());
+    payload.extend_from_slice(&(u64::try_from(submission.evidence.measurements.len()).unwrap_or(u64::MAX)).to_le_bytes());
     for measurement in &submission.evidence.measurements {
         push_length_prefixed(&mut payload, measurement);
     }
-    payload.extend_from_slice(&(submission.evidence.environment.len() as u64).to_le_bytes());
+    payload.extend_from_slice(&(u64::try_from(submission.evidence.environment.len()).unwrap_or(u64::MAX)).to_le_bytes());
     for (key, value) in &submission.evidence.environment {
         push_length_prefixed(&mut payload, key);
         push_length_prefixed(&mut payload, value);
@@ -986,11 +988,23 @@ impl VerifierEconomyRegistry {
             "Attestation",
         )?;
 
+        // Bound evidence measurements to prevent DoS attacks
+        let mut bounded_measurements = Vec::new();
+        for measurement in submission.evidence.measurements {
+            push_bounded(&mut bounded_measurements, measurement, 20);
+        }
+        let bounded_evidence = AttestationEvidence {
+            suite_id: submission.evidence.suite_id,
+            measurements: bounded_measurements,
+            execution_trace_hash: submission.evidence.execution_trace_hash,
+            environment: submission.evidence.environment,
+        };
+
         let attestation = Attestation {
             attestation_id: attestation_id.clone(),
             verifier_id: submission.verifier_id,
             claim: submission.claim,
-            evidence: submission.evidence,
+            evidence: bounded_evidence,
             signature: submission.signature,
             timestamp: submission.timestamp,
             immutable: false, // Not yet published
@@ -1230,12 +1244,18 @@ impl VerifierEconomyRegistry {
             "Dispute",
         )?;
 
+        // Bound supporting evidence to prevent DoS attacks
+        let mut bounded_evidence = Vec::new();
+        for evidence in supporting_evidence {
+            push_bounded(&mut bounded_evidence, evidence, 10);
+        }
+
         let dispute = Dispute {
             dispute_id: dispute_id.clone(),
             attestation_id: attestation_id.to_string(),
             filed_by: filed_by.to_string(),
             justification: justification.to_string(),
-            supporting_evidence,
+            supporting_evidence: bounded_evidence,
             outcome: None,
             filed_at: format!("{}", self.now_epoch()),
             resolved_at: None,
@@ -1355,7 +1375,17 @@ impl VerifierEconomyRegistry {
         {
             self.replay_capsules.remove(&oldest_key);
         }
-        self.replay_capsules.insert(capsule_id.clone(), capsule);
+        // Bound trace chunk hashes to prevent DoS attacks
+        let mut bounded_trace_chunks = Vec::new();
+        for chunk_hash in capsule.trace_chunk_hashes {
+            push_bounded(&mut bounded_trace_chunks, chunk_hash, 100);
+        }
+        let bounded_capsule = ReplayCapsule {
+            trace_chunk_hashes: bounded_trace_chunks,
+            ..capsule
+        };
+
+        self.replay_capsules.insert(capsule_id.clone(), bounded_capsule);
         Ok(())
     }
 

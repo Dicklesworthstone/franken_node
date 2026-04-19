@@ -100,6 +100,23 @@ impl IdempotencyDerivationEvent {
             detail: "derivation succeeded".to_string(),
         }
     }
+
+    #[must_use]
+    pub fn derivation_error(
+        computation_name: &str,
+        epoch: u64,
+        trace_id: &str,
+        error_message: &str,
+    ) -> Self {
+        Self {
+            event_code: event_codes::IK_DERIVATION_ERROR.to_string(),
+            computation_name: computation_name.to_string(),
+            epoch,
+            key_fingerprint: String::new(), // No key for error events
+            trace_id: trace_id.to_string(),
+            detail: error_message.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,7 +263,7 @@ impl IdempotencyKeyDeriver {
 #[must_use]
 pub fn key_fingerprint(key: &IdempotencyKey) -> String {
     let digest = Sha256::digest([b"idempotency_fingerprint_v1:" as &[u8], key.as_bytes()].concat());
-    hex::encode(digest)[..16].to_string()
+    format!("fp:{}", &hex::encode(digest)[..16])
 }
 
 #[cfg(test)]
@@ -297,6 +314,17 @@ mod tests {
             )
             .expect("valid registration");
         registry
+    }
+
+    // Helper function for tests to derive keys with default deriver
+    fn derive_idempotency_key(
+        computation_name: &str,
+        epoch: u64,
+        request_bytes: &[u8],
+    ) -> IdempotencyKey {
+        IdempotencyKeyDeriver::default()
+            .derive_key(computation_name, epoch, request_bytes)
+            .expect("key derivation should succeed")
     }
 
     #[test]
@@ -1165,6 +1193,9 @@ mod tests {
         let epoch = 1234567890;
 
         // Test domain separation with computation names that might bypass separation
+        let binary_suffix_a = String::from_utf8_lossy(b"suffix\xFF").into_owned();
+        let binary_suffix_b = String::from_utf8_lossy(b"suffix\xFE").into_owned();
+
         let separation_tests = [
             // Basic separation
             ("domain1", "domain2"),
@@ -1198,7 +1229,7 @@ mod tests {
             // Binary patterns
             ("binary\x01\x02", "binary\x01\x03"),     // Binary difference
             ("\x00prefix", "\x01prefix"),              // Binary prefix
-            ("suffix\xFF", "suffix\xFE"),              // Binary suffix
+            (binary_suffix_a.as_str(), binary_suffix_b.as_str()), // Binary suffix
         ];
 
         for (name1, name2) in separation_tests {

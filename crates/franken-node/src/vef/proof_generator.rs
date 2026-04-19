@@ -2132,7 +2132,7 @@ mod tests {
 
                 for config in extreme_configs {
                     let backend = Arc::new(TestProofBackend::new());
-                    let mut generator = ProofGenerator::new(backend, config);
+                    let mut generator = ProofGenerator::new(backend, config.clone());
 
                     let entries = sample_chain_entries();
                     let window = sample_window();
@@ -2288,7 +2288,7 @@ mod tests {
                         // If submit succeeds, the implementation recovered from poisoning
                         // This is possible with proper mutex poison recovery
                     }
-                    Err(err) => {
+                    Err(ref err) => {
                         // Should fail gracefully with internal error about mutex poisoning
                         assert_eq!(err.code, error_codes::ERR_PGN_INTERNAL);
                         assert!(err.message.contains("poisoned"));
@@ -3001,8 +3001,8 @@ mod tests {
                     .collect();
 
                 let total_submitted: usize = results.iter().map(|(s, _, _)| s).sum();
-                let total_collisions: usize = results.iter().map(|(_, c, _)| c).sum();
-                let total_exhausted: usize = results.iter().map(|(_, _, e)| e).sum();
+                let _total_collisions: usize = results.iter().map(|(_, c, _)| c).sum();
+                let _total_exhausted: usize = results.iter().map(|(_, _, e)| e).sum();
 
                 // Verify system handled concurrent access gracefully
                 assert!(total_submitted > 0, "Should have submitted some requests");
@@ -3134,9 +3134,13 @@ mod tests {
             #[test]
             fn negative_proof_hash_computation_collision_resistance() {
                 // Test proof hash computation collision resistance
-                let backend = TestProofBackend::new();
+                let _backend = TestProofBackend::new();
 
                 // Create similar but distinct proof data patterns
+                // Create bindings for binary patterns to avoid temporary value drops
+                let binary_pattern_1 = String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD, 0xFC]);
+                let binary_pattern_2 = String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD, 0xFB]);
+
                 let collision_test_patterns = vec![
                     // Pattern 1: Similar strings with single character difference
                     ("proof_data_a", "proof_data_b"),
@@ -3148,10 +3152,7 @@ mod tests {
 
                     // Pattern 3: Binary-similar patterns
                     ("\x01\x02\x03\x04", "\x01\x02\x03\x05"),
-                    (
-                        &String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD, 0xFC]),
-                        &String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD, 0xFB])
-                    ),
+                    (&binary_pattern_1, &binary_pattern_2),
 
                     // Pattern 4: Length extension patterns
                     ("short", "short_extended"),

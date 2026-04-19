@@ -9,6 +9,9 @@ use std::fmt;
 
 use crate::capacity_defaults::aliases::MAX_EVENTS;
 
+const MAX_OPERATION_ID_LEN: usize = 256;
+const MAX_PERMIT_ID_LEN: usize = 64;
+
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
         items.clear();
@@ -19,6 +22,27 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
         items.drain(0..overflow);
     }
     items.push(item);
+}
+
+fn validate_identifier(field: &str, value: &str, max_len: usize) -> Result<(), BulkheadError> {
+    if value.trim().is_empty() {
+        return Err(BulkheadError::InvalidConfig {
+            detail: format!("{field} must not be empty"),
+        });
+    }
+    if value.len() > max_len {
+        return Err(BulkheadError::InvalidConfig {
+            detail: format!("{field} length {} exceeds max {max_len}", value.len()),
+        });
+    }
+    if value != value.trim() || value.chars().any(|ch| ch.is_control()) {
+        return Err(BulkheadError::InvalidConfig {
+            detail: format!(
+                "{field} must not contain control characters or surrounding whitespace"
+            ),
+        });
+    }
+    Ok(())
 }
 
 pub mod event_codes {
@@ -224,6 +248,8 @@ impl GlobalBulkhead {
         operation_id: &str,
         now_ms: u64,
     ) -> Result<BulkheadPermit, BulkheadError> {
+        validate_identifier("operation_id", operation_id, MAX_OPERATION_ID_LEN)?;
+
         if self.in_flight >= self.max_in_flight {
             self.rejection_count = self.rejection_count.saturating_add(1);
             self.emit_event(BulkheadEvent {
@@ -290,6 +316,9 @@ impl GlobalBulkhead {
         operation_id: &str,
         now_ms: u64,
     ) -> Result<(), BulkheadError> {
+        validate_identifier("permit_id", permit_id, MAX_PERMIT_ID_LEN)?;
+        validate_identifier("operation_id", operation_id, MAX_OPERATION_ID_LEN)?;
+
         let Some(expected_operation_id) = self.active_permits.get(permit_id).cloned() else {
             return Err(BulkheadError::UnknownPermit {
                 permit_id: permit_id.to_string(),
@@ -367,7 +396,7 @@ mod tests {
     #[test]
     fn overload_returns_stable_error_and_retry_hint() {
         let mut b = GlobalBulkhead::new(1, 40).expect("bulkhead");
-        let _ = b.try_acquire("op-1", 10).expect("acquire first");
+        let _held = b.try_acquire("op-1", 10).expect("acquire first");
         let err = b.try_acquire("op-2", 11).expect_err("expected overload");
         assert_eq!(err.code(), error_codes::BULKHEAD_OVERLOAD);
         assert!(matches!(
@@ -452,7 +481,7 @@ mod tests {
     #[test]
     fn reload_limits_changes_capacity_for_new_acquires() {
         let mut b = GlobalBulkhead::new(1, 10).expect("bulkhead");
-        let _ = b.try_acquire("op-1", 1).expect("acquire");
+        let _held = b.try_acquire("op-1", 1).expect("acquire");
         b.reload_limits(2, 50, 2).expect("reload");
         let p2 = b.try_acquire("op-2", 3).expect("acquire second");
         assert_eq!(b.in_flight(), 2);
@@ -599,7 +628,7 @@ mod tests {
     fn events_include_stable_codes() {
         let mut b = GlobalBulkhead::new(1, 10).expect("bulkhead");
         let p = b.try_acquire("op-1", 1).expect("acquire");
-        let _ = b.try_acquire("op-2", 2).expect_err("overload");
+        let _overload = b.try_acquire("op-2", 2).expect_err("overload");
         b.release(&p.permit_id, "op-1", 3).expect("release");
 
         let codes: Vec<_> = b.events().iter().map(|e| e.event_code.as_str()).collect();
@@ -623,6 +652,66 @@ mod tests {
         let p2 = b.try_acquire("op-2", 2).expect("p2");
         b.release(&p2.permit_id, "op-2", 3).expect("release p2");
         b.release(&p1.permit_id, "op-1", 4).expect("release p1");
+        assert_eq!(b.in_flight(), 0);
+    }
+
+    #[test]
+    fn invalid_operation_ids_fail_before_state_or_event_mutation() {
+        let invalid_ids = vec![
+            String::new(),
+            "   ".to_string(),
+            "\t\n".to_string(),
+            " op-leading-space".to_string(),
+            "op-trailing-space ".to_string(),
+            "op\0null".to_string(),
+            "op\r\ninjection".to_string(),
+            "op\x1B[31mansi".to_string(),
+            "x".repeat(MAX_OPERATION_ID_LEN + 1),
+        ];
+
+        for operation_id in invalid_ids {
+            let mut b = GlobalBulkhead::new(1, 10).expect("bulkhead");
+            let err = b
+                .try_acquire(&operation_id, 1)
+                .expect_err("invalid operation_id must fail closed");
+
+            assert_eq!(err.code(), error_codes::BULKHEAD_INVALID_CONFIG);
+            assert_eq!(b.in_flight(), 0);
+            assert!(b.events().is_empty());
+            assert!(b.active_permits.is_empty());
+        }
+    }
+
+    #[test]
+    fn invalid_release_identifiers_do_not_release_or_emit_events() {
+        let mut b = GlobalBulkhead::new(1, 10).expect("bulkhead");
+        let permit = b.try_acquire("op-held", 1).expect("acquire");
+        let event_count = b.events().len();
+        let overlong_operation_id = "x".repeat(MAX_OPERATION_ID_LEN + 1);
+        let overlong_permit_id = "p".repeat(MAX_PERMIT_ID_LEN + 1);
+
+        let invalid_cases = vec![
+            ("", "op-held"),
+            ("   ", "op-held"),
+            ("permit-00000001", ""),
+            ("permit-00000001", "op\0held"),
+            ("permit-00000001", "op-held\n"),
+            ("permit-00000001", overlong_operation_id.as_str()),
+            (overlong_permit_id.as_str(), "op-held"),
+        ];
+
+        for (permit_id, operation_id) in invalid_cases {
+            let err = b
+                .release(permit_id, operation_id, 2)
+                .expect_err("invalid release identifier must fail closed");
+
+            assert_eq!(err.code(), error_codes::BULKHEAD_INVALID_CONFIG);
+            assert_eq!(b.in_flight(), 1);
+            assert_eq!(b.events().len(), event_count);
+        }
+
+        b.release(&permit.permit_id, "op-held", 3)
+            .expect("valid release remains possible");
         assert_eq!(b.in_flight(), 0);
     }
 
@@ -730,7 +819,7 @@ mod tests {
     fn event_buffer_retains_latest_entries_when_over_capacity() {
         let mut events = Vec::new();
 
-        for index in 0..(MAX_EVENTS + 2) {
+        for index in 0..MAX_EVENTS.saturating_add(2) {
             push_bounded(
                 &mut events,
                 BulkheadEvent {
@@ -749,7 +838,7 @@ mod tests {
         assert_eq!(events.first().expect("first retained").operation_id, "op-2");
         assert_eq!(
             events.last().expect("last retained").operation_id,
-            format!("op-{}", MAX_EVENTS + 1)
+            format!("op-{}", MAX_EVENTS.saturating_add(1))
         );
     }
 
@@ -774,34 +863,52 @@ mod tests {
         fn unicode_injection_in_operation_identifiers_handled_safely() {
             let mut bulkhead = GlobalBulkhead::new(10, 100).expect("bulkhead creation");
 
-            // Unicode control characters, NULL bytes, path traversal attempts
-            let malicious_operation_ids = vec![
-                "op\u{0000}null_injection",
+            let accepted_operation_ids = vec![
                 "op\u{200B}zero_width_space",
                 "op\u{FEFF}bom_attack",
                 "op/../../../etc/passwd",
                 "op\u{202E}rtl_override\u{202D}direction",
-                "op\x1B[H\x1B[2J", // ANSI escape sequences
                 "op\u{1F4A9}emoji_flood",
-                "op\u{0001}\u{0002}\u{0003}control_chars",
             ];
 
-            for malicious_op_id in &malicious_operation_ids {
-                // Should handle gracefully without panics/crashes
+            for malicious_op_id in &accepted_operation_ids {
                 let permit_result = bulkhead.try_acquire(malicious_op_id, 1000);
-                assert!(permit_result.is_ok(), "Should acquire permit for: {}", malicious_op_id);
+                assert!(
+                    permit_result.is_ok(),
+                    "should acquire printable operation id: {}",
+                    malicious_op_id
+                );
 
                 let permit = permit_result.unwrap();
                 assert!(permit.permit_id.starts_with("permit-"));
 
                 // Release should work normally
                 let release_result = bulkhead.release(&permit.permit_id, malicious_op_id, 1001);
-                assert!(release_result.is_ok(), "Should release permit for: {}", malicious_op_id);
+                assert!(
+                    release_result.is_ok(),
+                    "Should release permit for: {}",
+                    malicious_op_id
+                );
+            }
+
+            let rejected_operation_ids = vec![
+                "op\u{0000}null_injection",
+                "op\x1B[H\x1B[2J",
+                "op\u{0001}\u{0002}\u{0003}control_chars",
+                "op\r\nheader-injection",
+            ];
+
+            for malicious_op_id in &rejected_operation_ids {
+                let err = bulkhead
+                    .try_acquire(malicious_op_id, 1000)
+                    .expect_err("control operation id must fail closed");
+                assert_eq!(err.code(), error_codes::BULKHEAD_INVALID_CONFIG);
             }
 
             // Verify isolation - no cross-contamination between operations
             assert_eq!(bulkhead.in_flight(), 0);
-            assert_eq!(bulkhead.events().len(), malicious_operation_ids.len() * 2); // acquire + release each
+            assert_eq!(bulkhead.events().len(), accepted_operation_ids.len() * 2);
+            // acquire + release each
         }
 
         #[test]
@@ -811,15 +918,15 @@ mod tests {
             // Test near u64::MAX boundaries for sequence numbers
             bulkhead.next_permit_seq = u64::MAX - 2;
 
-            let edge_times = vec![
-                u64::MAX - 10,
-                u64::MAX - 1,
-                u64::MAX,
-            ];
+            let edge_times = vec![u64::MAX - 10, u64::MAX - 1, u64::MAX];
 
             for &edge_time in &edge_times {
                 let permit_result = bulkhead.try_acquire("overflow_test", edge_time);
-                assert!(permit_result.is_ok(), "Should handle edge time: {}", edge_time);
+                assert!(
+                    permit_result.is_ok(),
+                    "Should handle edge time: {}",
+                    edge_time
+                );
 
                 let permit = permit_result.unwrap();
                 assert_eq!(permit.issued_at_ms, edge_time);
@@ -828,17 +935,30 @@ mod tests {
                 assert!(bulkhead.next_permit_seq <= u64::MAX);
 
                 // Release should work with edge times
-                let release_result = bulkhead.release(&permit.permit_id, "overflow_test", edge_time);
-                assert!(release_result.is_ok(), "Should release at edge time: {}", edge_time);
+                let release_result =
+                    bulkhead.release(&permit.permit_id, "overflow_test", edge_time);
+                assert!(
+                    release_result.is_ok(),
+                    "Should release at edge time: {}",
+                    edge_time
+                );
             }
 
             // Test rejection count overflow protection
+            let mut saturated = GlobalBulkhead::new(1, 10).expect("bulkhead creation");
+            let held = saturated.try_acquire("held", 1000).expect("held permit");
             for _ in 0..10 {
-                bulkhead.rejection_count = u64::MAX - 1;
-                let _ = bulkhead.try_acquire("rejection_overflow", 1000);
+                saturated.rejection_count = u64::MAX - 1;
+                let err = saturated
+                    .try_acquire("rejection_overflow", 1000)
+                    .expect_err("saturated bulkhead should reject");
+                assert_eq!(err.code(), error_codes::BULKHEAD_OVERLOAD);
                 // Should saturate at u64::MAX, not wrap around
-                assert!(bulkhead.rejection_count <= u64::MAX);
+                assert_eq!(saturated.rejection_count, u64::MAX);
             }
+            saturated
+                .release(&held.permit_id, "held", 1001)
+                .expect("held permit should remain releasable");
         }
 
         #[test]
@@ -846,20 +966,25 @@ mod tests {
             let mut bulkhead = GlobalBulkhead::new(1000, 100).expect("bulkhead creation");
 
             // Simulate memory pressure attack with massive permit requests
-            let massive_operation_count = 5000;
+            let massive_operation_count: u64 = 5000;
             let mut active_permits = Vec::new();
 
             for op_idx in 0..massive_operation_count {
                 let operation_id = format!("flood_op_{op_idx:05}");
+                let now_ms = 1000u64.saturating_add(op_idx);
 
                 if op_idx < 1000 {
                     // First 1000 should succeed (within capacity)
-                    let permit = bulkhead.try_acquire(&operation_id, 1000 + op_idx).expect("permit");
+                    let permit = bulkhead.try_acquire(&operation_id, now_ms).expect("permit");
                     active_permits.push((permit, operation_id));
                 } else {
                     // Rest should be rejected due to capacity
-                    let result = bulkhead.try_acquire(&operation_id, 1000 + op_idx);
-                    assert!(result.is_err(), "Should reject overload at index {}", op_idx);
+                    let result = bulkhead.try_acquire(&operation_id, now_ms);
+                    assert!(
+                        result.is_err(),
+                        "Should reject overload at index {}",
+                        op_idx
+                    );
 
                     match result.unwrap_err() {
                         BulkheadError::BulkheadOverload { .. } => {
@@ -880,7 +1005,9 @@ mod tests {
 
             // Cleanup - releases should work efficiently
             for (permit, operation_id) in active_permits {
-                bulkhead.release(&permit.permit_id, &operation_id, 2000).expect("cleanup release");
+                bulkhead
+                    .release(&permit.permit_id, &operation_id, 2000)
+                    .expect("cleanup release");
             }
             assert_eq!(bulkhead.in_flight(), 0);
         }
@@ -896,7 +1023,7 @@ mod tests {
             // Rapid burst of acquisitions as if from concurrent threads
             for i in 0..10 {
                 let operation_id = format!("race_op_{i}");
-                let base_time = 1000 + i;
+                let base_time = 1000u64.saturating_add(i);
 
                 let acquire_result = bulkhead.try_acquire(&operation_id, base_time);
 
@@ -914,7 +1041,8 @@ mod tests {
                 if i % 2 == 1 && !active_permits.is_empty() {
                     let idx = active_permits.len() - 1;
                     let (permit, op_id, _) = active_permits.remove(idx);
-                    let release_result = bulkhead.release(&permit.permit_id, &op_id, base_time + 50);
+                    let release_result =
+                        bulkhead.release(&permit.permit_id, &op_id, base_time.saturating_add(50));
                     assert!(release_result.is_ok(), "Concurrent release should succeed");
                 }
             }
@@ -948,14 +1076,19 @@ mod tests {
 
             // Test invalid configurations
             let invalid_configs = vec![
-                (0, 1),      // Zero capacity
-                (1, 0),      // Zero retry time
-                (0, 0),      // Both zero
+                (0, 1), // Zero capacity
+                (1, 0), // Zero retry time
+                (0, 0), // Both zero
             ];
 
             for (max_in_flight, retry_after_ms) in invalid_configs {
                 let result = GlobalBulkhead::new(max_in_flight, retry_after_ms);
-                assert!(result.is_err(), "Should reject config: ({}, {})", max_in_flight, retry_after_ms);
+                assert!(
+                    result.is_err(),
+                    "Should reject config: ({}, {})",
+                    max_in_flight,
+                    retry_after_ms
+                );
 
                 match result.unwrap_err() {
                     BulkheadError::InvalidConfig { .. } => {
@@ -971,17 +1104,22 @@ mod tests {
             let mut bulkhead = GlobalBulkhead::new(1, 50).expect("bulkhead creation");
 
             // Generate events beyond MAX_EVENTS capacity to test bounded storage
-            let flood_event_count = MAX_EVENTS * 2;
+            let flood_event_count = MAX_EVENTS.saturating_mul(2);
 
             for event_idx in 0..flood_event_count {
                 let operation_id = format!("flood_event_{event_idx}");
+                let event_idx_ms = u64::try_from(event_idx).unwrap_or(u64::MAX);
+                let now_ms = 1000u64.saturating_add(event_idx_ms);
 
-                if event_idx % 2 == 0 {
-                    // Acquire (will generate event)
-                    let _ = bulkhead.try_acquire(&operation_id, 1000 + event_idx);
+                if event_idx == 0 {
+                    bulkhead
+                        .try_acquire(&operation_id, now_ms)
+                        .expect("first acquire should emit event");
                 } else {
-                    // Attempt overload (will generate rejection event)
-                    let _ = bulkhead.try_acquire(&operation_id, 1000 + event_idx);
+                    let err = bulkhead
+                        .try_acquire(&operation_id, now_ms)
+                        .expect_err("saturated bulkhead should emit overload event");
+                    assert_eq!(err.code(), error_codes::BULKHEAD_OVERLOAD);
                 }
             }
 
@@ -989,8 +1127,13 @@ mod tests {
             assert!(bulkhead.events().len() <= MAX_EVENTS);
 
             // Should retain most recent events
-            let recent_events: Vec<_> = bulkhead.events().iter()
-                .filter(|e| e.operation_id.contains(&format!("_{}", flood_event_count - 10)))
+            let recent_events: Vec<_> = bulkhead
+                .events()
+                .iter()
+                .filter(|e| {
+                    e.operation_id
+                        .contains(&format!("_{}", flood_event_count - 10))
+                })
                 .collect();
             assert!(!recent_events.is_empty(), "Should retain recent events");
         }
@@ -1001,24 +1144,32 @@ mod tests {
 
             // Test consistent behavior across timing boundaries
             let base_time = 1000;
-            let permit1 = bulkhead.try_acquire("timing_op_1", base_time).expect("permit 1");
-            let permit2 = bulkhead.try_acquire("timing_op_2", base_time + 1).expect("permit 2");
+            let permit1 = bulkhead
+                .try_acquire("timing_op_1", base_time)
+                .expect("permit 1");
+            let permit2 = bulkhead
+                .try_acquire("timing_op_2", base_time.saturating_add(1))
+                .expect("permit 2");
 
             // Fill capacity
             assert_eq!(bulkhead.in_flight(), 2);
 
             // Test overload behavior consistency at different times
             for offset in [0u64, 1, 5, 10, 100, 1000, u64::MAX / 2] {
-                let test_time = base_time + 100 + offset;
+                let test_time = base_time.saturating_add(100).saturating_add(offset);
                 let overload_result = bulkhead.try_acquire("timing_overflow", test_time);
 
-                assert!(overload_result.is_err(), "Should consistently reject at time {}", test_time);
+                assert!(
+                    overload_result.is_err(),
+                    "Should consistently reject at time {}",
+                    test_time
+                );
 
                 match overload_result.unwrap_err() {
                     BulkheadError::BulkheadOverload {
                         max_in_flight,
                         current_in_flight,
-                        retry_after_ms
+                        retry_after_ms,
                     } => {
                         assert_eq!(max_in_flight, 2);
                         assert_eq!(current_in_flight, 2);
@@ -1029,8 +1180,16 @@ mod tests {
             }
 
             // Releases should work consistently regardless of timing
-            bulkhead.release(&permit1.permit_id, "timing_op_1", base_time + 10000).expect("release 1");
-            bulkhead.release(&permit2.permit_id, "timing_op_2", u64::MAX).expect("release 2");
+            bulkhead
+                .release(
+                    &permit1.permit_id,
+                    "timing_op_1",
+                    base_time.saturating_add(10000),
+                )
+                .expect("release 1");
+            bulkhead
+                .release(&permit2.permit_id, "timing_op_2", u64::MAX)
+                .expect("release 2");
             assert_eq!(bulkhead.in_flight(), 0);
         }
 
@@ -1041,7 +1200,9 @@ mod tests {
             // Acquire permits up to capacity
             let mut permits = Vec::new();
             for i in 0..5 {
-                let permit = bulkhead.try_acquire(&format!("boundary_op_{i}"), 1000 + i).expect("permit");
+                let permit = bulkhead
+                    .try_acquire(&format!("boundary_op_{i}"), 1000u64.saturating_add(i))
+                    .expect("permit");
                 permits.push((permit, format!("boundary_op_{i}")));
             }
 
@@ -1051,13 +1212,16 @@ mod tests {
 
             // New acquisitions should be blocked (current > new capacity)
             let blocked_result = bulkhead.try_acquire("blocked_op", 2001);
-            assert!(blocked_result.is_err(), "Should block when current > new capacity");
+            assert!(
+                blocked_result.is_err(),
+                "Should block when current > new capacity"
+            );
 
             match blocked_result.unwrap_err() {
                 BulkheadError::BulkheadOverload {
                     max_in_flight,
                     current_in_flight,
-                    retry_after_ms
+                    retry_after_ms,
                 } => {
                     assert_eq!(max_in_flight, 2);
                     assert_eq!(current_in_flight, 5);
@@ -1068,25 +1232,37 @@ mod tests {
 
             // Test extreme reload attempts
             let extreme_reloads = vec![
-                (0, 300),           // Zero capacity
-                (10, 0),            // Zero retry time
-                (usize::MAX, 1),    // Maximum capacity
-                (1, u64::MAX),      // Maximum retry time
+                (0, 300),        // Zero capacity
+                (10, 0),         // Zero retry time
+                (usize::MAX, 1), // Maximum capacity
+                (1, u64::MAX),   // Maximum retry time
             ];
 
             for (new_capacity, new_retry) in extreme_reloads {
                 let reload_result = bulkhead.reload_limits(new_capacity, new_retry, 3000);
 
                 if new_capacity == 0 || new_retry == 0 {
-                    assert!(reload_result.is_err(), "Should reject invalid reload: ({}, {})", new_capacity, new_retry);
+                    assert!(
+                        reload_result.is_err(),
+                        "Should reject invalid reload: ({}, {})",
+                        new_capacity,
+                        new_retry
+                    );
                 } else {
-                    assert!(reload_result.is_ok(), "Should accept valid reload: ({}, {})", new_capacity, new_retry);
+                    assert!(
+                        reload_result.is_ok(),
+                        "Should accept valid reload: ({}, {})",
+                        new_capacity,
+                        new_retry
+                    );
                 }
             }
 
             // Cleanup
             for (permit, op_id) in permits {
-                bulkhead.release(&permit.permit_id, &op_id, 4000).expect("cleanup");
+                bulkhead
+                    .release(&permit.permit_id, &op_id, 4000)
+                    .expect("cleanup");
             }
         }
     }

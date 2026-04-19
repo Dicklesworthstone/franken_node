@@ -401,38 +401,44 @@ impl TrustComplexityGate {
     }
 
     pub fn summary(&self) -> TrustAuditSummary {
-        let total = self.decisions.len() as u64;
-        let grants = self
-            .decisions
-            .iter()
-            .filter(|d| d.outcome == TrustOutcome::Grant)
-            .count() as u64;
-        let denials = self
-            .decisions
-            .iter()
-            .filter(|d| d.outcome == TrustOutcome::Deny)
-            .count() as u64;
-        let escalations = self
-            .decisions
-            .iter()
-            .filter(|d| d.outcome == TrustOutcome::Escalate)
-            .count() as u64;
-        let degraded = self
-            .decisions
-            .iter()
-            .filter(|d| d.outcome == TrustOutcome::Degraded)
-            .count() as u64;
+        let total = u64::try_from(self.decisions.len()).unwrap_or(u64::MAX);
+        let grants = u64::try_from(
+            self.decisions
+                .iter()
+                .filter(|d| d.outcome == TrustOutcome::Grant)
+                .count()
+        ).unwrap_or(u64::MAX);
+        let denials = u64::try_from(
+            self.decisions
+                .iter()
+                .filter(|d| d.outcome == TrustOutcome::Deny)
+                .count()
+        ).unwrap_or(u64::MAX);
+        let escalations = u64::try_from(
+            self.decisions
+                .iter()
+                .filter(|d| d.outcome == TrustOutcome::Escalate)
+                .count()
+        ).unwrap_or(u64::MAX);
+        let degraded = u64::try_from(
+            self.decisions
+                .iter()
+                .filter(|d| d.outcome == TrustOutcome::Degraded)
+                .count()
+        ).unwrap_or(u64::MAX);
 
-        let replay_verified = self
-            .replay_results
-            .iter()
-            .filter(|r| r.deterministic)
-            .count() as u64;
-        let replay_diverged = self
-            .replay_results
-            .iter()
-            .filter(|r| !r.deterministic)
-            .count() as u64;
+        let replay_verified = u64::try_from(
+            self.replay_results
+                .iter()
+                .filter(|r| r.deterministic)
+                .count()
+        ).unwrap_or(u64::MAX);
+        let replay_diverged = u64::try_from(
+            self.replay_results
+                .iter()
+                .filter(|r| !r.deterministic)
+                .count()
+        ).unwrap_or(u64::MAX);
         let budget_exceeded = self.budget_exceeded_count;
 
         let total_depth: u64 = self.decisions.iter().fold(0u64, |acc, d| {
@@ -451,11 +457,12 @@ impl TrustComplexityGate {
             100.0
         };
 
-        let degraded_activations = self
-            .events
-            .iter()
-            .filter(|e| e.code == RTC_003_DEGRADED_MODE)
-            .count() as u64;
+        let degraded_activations = u64::try_from(
+            self.events
+                .iter()
+                .filter(|e| e.code == RTC_003_DEGRADED_MODE)
+                .count()
+        ).unwrap_or(u64::MAX);
 
         TrustAuditSummary {
             total_decisions: total,
@@ -543,7 +550,7 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     }
     if items.len() >= cap {
         let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
@@ -2158,7 +2165,7 @@ mod tests {
 
         // Metrics should remain stable despite Unicode input
         let metrics = controller.complexity_metrics();
-        assert!(metrics.current_decisions <= malicious_decision_cases.len() as u32);
+        assert!(metrics.current_decisions <= u32::try_from(malicious_decision_cases.len()).unwrap_or(u32::MAX));
     }
 
     #[test]
@@ -2674,7 +2681,7 @@ mod tests {
 
         // Clock value corruption should not affect other functionality
         let metrics = controller.complexity_metrics();
-        assert!(metrics.current_decisions <= malicious_clock_values.len() as u32);
+        assert!(metrics.current_decisions <= u32::try_from(malicious_clock_values.len()).unwrap_or(u32::MAX));
 
         // Events should handle clock value edge cases safely
         let events = controller.events();

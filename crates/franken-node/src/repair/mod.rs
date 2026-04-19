@@ -699,13 +699,15 @@ mod tests {
         let (fragments, proof) = valid_proof();
         let fragment_digests = fragment_digests(&fragments);
 
+        let massive_unicode_secret = "🔐".repeat(1000);
+        let malformed_byte_secret = String::from_utf8_lossy(b"\x7F\x80\xFF").into_owned();
         let malformed_secrets = [
             "", // Empty secret
             "\x00", // Null byte secret
             "\u{FEFF}", // Unicode BOM secret
             "secret\r\ninjection", // CRLF injection
-            "🔐".repeat(1000), // Massive Unicode secret
-            "\x7F\x80\xFF", // Invalid UTF-8 sequences (as much as possible in valid string)
+            massive_unicode_secret.as_str(), // Massive Unicode secret
+            malformed_byte_secret.as_str(), // Invalid UTF-8 bytes decoded lossily
         ];
 
         for secret in &malformed_secrets {
@@ -1903,8 +1905,8 @@ mod tests {
         // Analyze timing measurements for consistency
         // Note: In a real test environment, this would need more sophisticated timing analysis
         // Here we just verify that verification doesn't take extremely different amounts of time
-        let max_timing = timing_measurements.iter().map(|(_, _, duration, _)| *duration).max().unwrap();
-        let min_timing = timing_measurements.iter().map(|(_, _, duration, _)| *duration).min().unwrap();
+        let max_timing = timing_measurements.iter().map(|(_, _, duration, _)| *duration).max().unwrap_or(Duration::from_nanos(0));
+        let min_timing = timing_measurements.iter().map(|(_, _, duration, _)| *duration).min().unwrap_or(Duration::from_nanos(1));
 
         // Timing should not vary by more than an order of magnitude for constant-time operations
         assert!(max_timing.as_nanos() < min_timing.as_nanos() * 100,
@@ -2388,6 +2390,8 @@ mod tests {
         // Test algorithm ID handling with injection attempts and collision patterns
         let mut decoder = decoder();
 
+        let long_algorithm_id = "x".repeat(100000);
+        let binary_algorithm_id = String::from_utf8_lossy(b"algo\xFF\xFE\xFD\xFC").into_owned();
         let algorithm_attack_patterns = vec![
             // Path traversal in algorithm IDs
             ("path_traversal", "../../../etc/passwd"),
@@ -2410,10 +2414,10 @@ mod tests {
             ("newline_injection", "algo\nINJECTED\nalgo"),
 
             // Very long algorithm IDs
-            ("long_algo", &"x".repeat(100000)),
+            ("long_algo", long_algorithm_id.as_str()),
 
             // Binary data disguised as algorithm ID
-            ("binary_data", "algo\xFF\xFE\xFD\xFC"),
+            ("binary_data", binary_algorithm_id.as_str()),
 
             // Collision-prone patterns
             ("collision_a", "hash_collision_candidate_a"),
@@ -2618,7 +2622,7 @@ mod tests {
 
             match result {
                 Ok(_) => {
-                    successful_operations += 1;
+                    successful_operations = successful_operations.saturating_add(1);
 
                     // Periodically check audit log integrity
                     if i % 20 == 0 {
@@ -2659,9 +2663,13 @@ mod tests {
                "Audit log should contain recent operations");
 
         // Test 2: Operations with extreme data that might corrupt audit entries
+        let long_object_id = "x".repeat(100000);
+        let long_trace_id = "y".repeat(100000);
+        let binary_object_id = String::from_utf8_lossy(b"obj\xFF\xFE").into_owned();
+        let binary_trace_id = String::from_utf8_lossy(b"trace\xFD\xFC").into_owned();
         let corruption_test_cases = vec![
             // Very long identifiers
-            ("long_ids", "x".repeat(100000), "y".repeat(100000)),
+            ("long_ids", long_object_id.as_str(), long_trace_id.as_str()),
 
             // Unicode with potential corruption
             ("unicode_corruption", "obj\u{202e}_test\u{202c}", "trace\u{200b}_test\u{200c}"),
@@ -2670,7 +2678,11 @@ mod tests {
             ("control_chars", "obj\x00\x01\x7F", "trace\x08\x0A\x0D"),
 
             // Binary-like data
-            ("binary_data", "obj\xFF\xFE", "trace\xFD\xFC"),
+            (
+                "binary_data",
+                binary_object_id.as_str(),
+                binary_trace_id.as_str(),
+            ),
         ];
 
         for (test_name, object_id, trace_id) in corruption_test_cases {
@@ -3284,7 +3296,7 @@ mod tests {
             baseline_times.push(start.elapsed());
         }
 
-        let baseline_mean = baseline_times.iter().sum::<Duration>() / baseline_times.len() as u32;
+        let baseline_mean = baseline_times.iter().sum::<Duration>() / u32::try_from(baseline_times.len()).unwrap_or(u32::MAX);
 
         // Test timing correlation attack vectors
         let timing_attack_fragments = [
@@ -3384,7 +3396,7 @@ mod tests {
             }
 
             // Analyze timing correlation
-            let attack_mean = attack_times.iter().sum::<Duration>() / attack_times.len() as u32;
+            let attack_mean = attack_times.iter().sum::<Duration>() / u32::try_from(attack_times.len()).unwrap_or(u32::MAX);
             let timing_ratio = if baseline_mean.as_nanos() > 0 {
                 attack_mean.as_nanos() as f64 / baseline_mean.as_nanos() as f64
             } else {
@@ -3440,6 +3452,9 @@ mod tests {
         let test_fragments = fragments();
 
         // Audit trail injection attack vectors
+        let excessive_trace = "A".repeat(10000);
+        let whitespace_trace = " ".repeat(1000);
+        let invalid_utf8_trace = String::from_utf8_lossy(b"injection_trace_\x80\x81\x82").into_owned();
         let injection_attacks = [
             // Control character injection
             ("injection_trace_\x00_null", "Null byte injection in trace ID"),
@@ -3461,12 +3476,12 @@ mod tests {
             ("injection_trace_\u{034F}COMBINING_CHAR", "Combining character attack"),
 
             // Length attacks
-            ("A".repeat(10000), "Excessive length injection"),
+            (excessive_trace.as_str(), "Excessive length injection"),
             ("", "Empty trace injection"),
-            (" ".repeat(1000), "Whitespace flooding injection"),
+            (whitespace_trace.as_str(), "Whitespace flooding injection"),
 
             // Encoding attacks
-            ("injection_trace_\x80\x81\x82", "Invalid UTF-8 injection"),
+            (invalid_utf8_trace.as_str(), "Invalid UTF-8 injection"),
             ("injection_trace_%00%0A%0D", "URL encoded injection"),
             ("injection_trace_\\x00\\n\\r", "Escaped character injection"),
         ];
@@ -3479,7 +3494,7 @@ mod tests {
                 &format!("audit_injection_object_{}", attack_idx),
                 &test_fragments,
                 &AlgorithmId::new("simple_concat"),
-                7000 + attack_idx as u64,
+                7000_u64.saturating_add(attack_idx as u64),
                 malicious_trace,
             );
 

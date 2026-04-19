@@ -1639,8 +1639,8 @@ mod authority_audit_comprehensive_negative_tests {
         for i in 0..MAX_EVENTS * 2 {
             let massive_ctx = CapabilityContext::new(
                 &[], // Missing capabilities to trigger violations
-                &format!("trace_massive_{}_{'x'.repeat(1000)}", i),
-                &format!("principal_massive_{}_{'y'.repeat(1000)}", i),
+                &format!("trace_massive_{}_{}", i, "x".repeat(1000)),
+                &format!("principal_massive_{}_{}", i, "y".repeat(1000)),
             );
 
             // Each check generates multiple events
@@ -1942,7 +1942,7 @@ mod authority_audit_comprehensive_negative_tests {
                 event_code: format!("FN-AA-{:03}", i),
                 module_path: format!("crate::security::module_{}", "x".repeat(1000)),
                 detail: format!("Detail {}: {}", i, "y".repeat(10000)),
-                trace_id: format!("trace_{}_{'z'.repeat(100)}", i),
+                trace_id: format!("trace_{}_{}", i, "z".repeat(100)),
             });
 
             massive_violations.push(AmbientAuthorityViolation {
@@ -1999,8 +1999,13 @@ mod authority_audit_comprehensive_negative_tests {
                 for op_id in 0..100 {
                     let malicious_ctx = CapabilityContext::new(
                         &[], // Missing capabilities
-                        &format!("trace_thread_{}_{}_{'x'.repeat(100)}", thread_id, op_id),
-                        &format!("principal_thread_{}_{}_{'y'.repeat(100)}", thread_id, op_id),
+                        &format!("trace_thread_{}_{}_{}", thread_id, op_id, "x".repeat(100)),
+                        &format!(
+                            "principal_thread_{}_{}_{}",
+                            thread_id,
+                            op_id,
+                            "y".repeat(100)
+                        ),
                     );
 
                     let mut guard = guard_clone.lock().unwrap();
@@ -2078,7 +2083,7 @@ mod authority_audit_comprehensive_negative_tests {
                 // Add 10,000 malformed capability grants
                 for i in 0..10000 {
                     granted.insert(
-                        format!("malformed_cap_{}_{'x'.repeat(100)}", i),
+                        format!("malformed_cap_{}_{}", i, "x".repeat(100)),
                         i % 2 == 0,
                     );
                 }

@@ -51,6 +51,17 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
 }
 
+fn has_control_chars(value: &str) -> bool {
+    value.chars().any(char::is_control)
+}
+
+fn sanitize_log_field(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_control() { '?' } else { ch })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Schema version
 // ---------------------------------------------------------------------------
@@ -218,7 +229,9 @@ pub struct SafetyEnvelope {
 impl SafetyEnvelope {
     /// Check whether a set of predicted metrics fits within this envelope.
     pub fn contains(&self, metrics: &PredictedMetrics) -> bool {
-        metrics.latency_ms <= self.max_latency_ms
+        self.is_valid()
+            && (0.0..=100.0).contains(&metrics.error_rate_pct)
+            && metrics.latency_ms <= self.max_latency_ms
             && metrics.throughput_rps >= self.min_throughput_rps
             && metrics.error_rate_pct <= self.max_error_rate_pct
             && metrics.memory_mb <= self.max_memory_mb
@@ -229,29 +242,57 @@ impl SafetyEnvelope {
     #[allow(clippy::neg_cmp_op_on_partial_ord)]
     pub fn violations(&self, metrics: &PredictedMetrics) -> Vec<String> {
         let mut vs = Vec::new();
+        if !self.is_valid() {
+            push_bounded(&mut vs, "invalid safety envelope".to_string(), 10);
+        }
         if metrics.latency_ms > self.max_latency_ms {
-            push_bounded(&mut vs, format!(
-                "latency {}ms > cap {}ms",
-                metrics.latency_ms, self.max_latency_ms
-            ), 10);
+            push_bounded(
+                &mut vs,
+                format!(
+                    "latency {}ms > cap {}ms",
+                    metrics.latency_ms, self.max_latency_ms
+                ),
+                10,
+            );
         }
         if metrics.throughput_rps < self.min_throughput_rps {
-            push_bounded(&mut vs, format!(
-                "throughput {}rps < floor {}rps",
-                metrics.throughput_rps, self.min_throughput_rps
-            ), 10);
+            push_bounded(
+                &mut vs,
+                format!(
+                    "throughput {}rps < floor {}rps",
+                    metrics.throughput_rps, self.min_throughput_rps
+                ),
+                10,
+            );
         }
-        if !(metrics.error_rate_pct <= self.max_error_rate_pct) {
-            push_bounded(&mut vs, format!(
-                "error rate {:.2}% > ceiling {:.2}%",
-                metrics.error_rate_pct, self.max_error_rate_pct
-            ), 10);
+        if !(0.0..=100.0).contains(&metrics.error_rate_pct)
+            || !(metrics.error_rate_pct <= self.max_error_rate_pct)
+        {
+            let metrics_rate = if (0.0..=100.0).contains(&metrics.error_rate_pct) {
+                format!("{:.2}", metrics.error_rate_pct)
+            } else {
+                "invalid".to_string()
+            };
+            let ceiling_rate = if (0.0..=100.0).contains(&self.max_error_rate_pct) {
+                format!("{:.2}", self.max_error_rate_pct)
+            } else {
+                "invalid".to_string()
+            };
+            push_bounded(
+                &mut vs,
+                format!("error rate {}% > ceiling {}%", metrics_rate, ceiling_rate),
+                10,
+            );
         }
         if metrics.memory_mb > self.max_memory_mb {
-            push_bounded(&mut vs, format!(
-                "memory {}MB > cap {}MB",
-                metrics.memory_mb, self.max_memory_mb
-            ), 10);
+            push_bounded(
+                &mut vs,
+                format!(
+                    "memory {}MB > cap {}MB",
+                    metrics.memory_mb, self.max_memory_mb
+                ),
+                10,
+            );
         }
         vs
     }
@@ -309,6 +350,9 @@ impl OptimizationProposal {
     pub fn is_valid(&self) -> bool {
         !self.proposal_id.is_empty()
             && !self.trace_id.is_empty()
+            && !has_control_chars(&self.proposal_id)
+            && !has_control_chars(&self.trace_id)
+            && self.predicted.error_rate_pct.is_finite()
             && (0.0..=100.0).contains(&self.predicted.error_rate_pct)
     }
 }
@@ -543,8 +587,24 @@ impl OptimizationGovernor {
         // 1. Validate proposal
         if !proposal.is_valid() {
             let reason = RejectionReason::InvalidProposal(
-                "proposal_id or trace_id is empty, or error_rate_pct < 0".to_string(),
+                "proposal_id or trace_id is empty, contains control characters, or error_rate_pct is outside 0..=100".to_string(),
             );
+            let decision = GovernorDecision::Rejected(reason);
+            self.record(
+                &proposal.proposal_id,
+                proposal.knob,
+                &decision,
+                event_codes::GOV_004,
+                &proposal.trace_id,
+            );
+            return decision;
+        }
+
+        if self.applied.contains_key(&proposal.proposal_id) {
+            let reason = RejectionReason::InvalidProposal(format!(
+                "proposal_id `{}` is already applied",
+                sanitize_log_field(&proposal.proposal_id)
+            ));
             let decision = GovernorDecision::Rejected(reason);
             self.record(
                 &proposal.proposal_id,
@@ -700,7 +760,11 @@ impl OptimizationGovernor {
                 event_codes::GOV_005,
                 &ap.trace_id,
             );
-            push_bounded(&mut reverted_ids, ap.proposal_id.clone(), MAX_DECISION_LOG_ENTRIES);
+            push_bounded(
+                &mut reverted_ids,
+                ap.proposal_id.clone(),
+                MAX_DECISION_LOG_ENTRIES,
+            );
         }
 
         for id in &reverted_ids {
@@ -827,12 +891,12 @@ impl OptimizationGovernor {
 
         let rec = DecisionRecord {
             seq: self.next_seq,
-            proposal_id: proposal_id.to_string(),
+            proposal_id: sanitize_log_field(proposal_id),
             knob,
             decision: decision.clone(),
             event_code: event_code.to_string(),
-            trace_id: trace_id.to_string(),
-            evidence,
+            trace_id: sanitize_log_field(trace_id),
+            evidence: evidence.map(|detail| sanitize_log_field(&detail)),
         };
         push_bounded(&mut self.decision_log, rec, MAX_DECISION_LOG_ENTRIES);
         self.next_seq = self.next_seq.saturating_add(1);
@@ -1032,6 +1096,38 @@ mod tests {
     }
 
     #[test]
+    fn test_envelope_invalid_infinite_error_rate_ceiling_fails_closed() {
+        let env = SafetyEnvelope {
+            max_error_rate_pct: f64::INFINITY,
+            ..default_envelope()
+        };
+
+        assert!(!env.is_valid());
+        assert!(!env.contains(&safe_metrics()));
+        assert!(
+            env.violations(&safe_metrics())
+                .iter()
+                .any(|violation| violation.contains("invalid safety envelope"))
+        );
+    }
+
+    #[test]
+    fn test_envelope_invalid_zero_floor_fails_closed() {
+        let env = SafetyEnvelope {
+            min_throughput_rps: 0,
+            ..default_envelope()
+        };
+
+        assert!(!env.is_valid());
+        assert!(!env.contains(&safe_metrics()));
+        assert!(
+            env.violations(&safe_metrics())
+                .iter()
+                .any(|violation| violation.contains("invalid safety envelope"))
+        );
+    }
+
+    #[test]
     fn test_envelope_rejects_nan_metric_error_rate() {
         let env = default_envelope();
         let metrics = PredictedMetrics {
@@ -1089,6 +1185,19 @@ mod tests {
     fn test_proposal_invalid_empty_trace_id() {
         let mut p = good_proposal("p1");
         p.trace_id.clear();
+
+        assert!(!p.is_valid());
+    }
+
+    #[test]
+    fn test_proposal_invalid_control_character_ids() {
+        let mut p = good_proposal("p1");
+        p.proposal_id = "p1\0spoof".to_string();
+
+        assert!(!p.is_valid());
+
+        let mut p = good_proposal("p2");
+        p.trace_id = "trace\nspoof".to_string();
 
         assert!(!p.is_valid());
     }
@@ -1311,6 +1420,64 @@ mod tests {
         }
         assert_eq!(gov.applied_count(), 0);
         assert_eq!(gov.knob_value(&RuntimeKnob::ConcurrencyLimit), Some(64));
+    }
+
+    #[test]
+    fn test_submit_rejects_duplicate_applied_proposal_id_and_preserves_revert_baseline() {
+        let mut gov = OptimizationGovernor::with_defaults();
+        assert_eq!(
+            gov.submit(good_proposal("p_duplicate")),
+            GovernorDecision::Approved
+        );
+        assert_eq!(gov.knob_value(&RuntimeKnob::ConcurrencyLimit), Some(128));
+
+        let mut duplicate = good_proposal("p_duplicate");
+        duplicate.old_value = 128;
+        duplicate.new_value = 256;
+
+        let decision = gov.submit(duplicate);
+
+        match &decision {
+            GovernorDecision::Rejected(RejectionReason::InvalidProposal(msg)) => {
+                assert!(msg.contains("already applied"));
+            }
+            other => unreachable!("expected duplicate InvalidProposal rejection, got {other:?}"),
+        }
+        assert_eq!(gov.applied_count(), 1);
+        assert_eq!(gov.knob_value(&RuntimeKnob::ConcurrencyLimit), Some(128));
+
+        let reverted = gov.live_check(&PredictedMetrics {
+            latency_ms: 999,
+            ..safe_metrics()
+        });
+
+        assert_eq!(reverted, vec!["p_duplicate"]);
+        assert_eq!(gov.applied_count(), 0);
+        assert_eq!(gov.knob_value(&RuntimeKnob::ConcurrencyLimit), Some(64));
+    }
+
+    #[test]
+    fn test_submit_control_character_ids_are_logged_sanitized() {
+        let mut gov = OptimizationGovernor::with_defaults();
+        let mut p = good_proposal("p_control");
+        p.proposal_id = "p_control\0spoof".to_string();
+        p.trace_id = "trace\rsplit".to_string();
+
+        let decision = gov.submit(p);
+
+        assert!(matches!(
+            decision,
+            GovernorDecision::Rejected(RejectionReason::InvalidProposal(_))
+        ));
+        let record = &gov.decision_log()[0];
+        assert!(!record.proposal_id.contains('\0'));
+        assert!(!record.trace_id.contains('\r'));
+        assert!(
+            record
+                .evidence
+                .as_ref()
+                .is_none_or(|evidence| !evidence.contains('\0') && !evidence.contains('\r'))
+        );
     }
 
     // --- Live check and auto-revert tests ---
@@ -1541,9 +1708,9 @@ mod tests {
         let mut gov = OptimizationGovernor::with_defaults();
         let unicode_bomb = format!(
             "{}{}{}{}{}",
-            "\u{202E}", // RIGHT-TO-LEFT OVERRIDE
+            "\u{202E}",              // RIGHT-TO-LEFT OVERRIDE
             "\u{200B}".repeat(5000), // ZERO WIDTH SPACE x5000
-            "\u{FEFF}".repeat(500), // BOM x500
+            "\u{FEFF}".repeat(500),  // BOM x500
             "malicious\u{0000}payload\u{0001}injection",
             "\u{202D}" // LEFT-TO-RIGHT OVERRIDE
         );
@@ -1560,7 +1727,10 @@ mod tests {
 
         let decision = gov.submit(proposal);
         // Should handle Unicode gracefully without panics or corrupted state
-        assert!(matches!(decision, GovernorDecision::Rejected(_) | GovernorDecision::Approved));
+        assert!(matches!(
+            decision,
+            GovernorDecision::Rejected(_) | GovernorDecision::Approved
+        ));
 
         // Verify decision log doesn't contain corrupted entries
         if !gov.decision_log().is_empty() {
@@ -1587,7 +1757,10 @@ mod tests {
 
         let decision = gov.submit(proposal);
         // Should handle massive allocations without OOM crashes
-        assert!(matches!(decision, GovernorDecision::Rejected(_) | GovernorDecision::Approved));
+        assert!(matches!(
+            decision,
+            GovernorDecision::Rejected(_) | GovernorDecision::Approved
+        ));
 
         // Verify governor state remains consistent
         assert!(gov.decision_count() > 0);
@@ -1612,7 +1785,10 @@ mod tests {
             };
 
             let decision = gov.submit(proposal);
-            assert!(matches!(decision, GovernorDecision::Rejected(_) | GovernorDecision::Approved));
+            assert!(matches!(
+                decision,
+                GovernorDecision::Rejected(_) | GovernorDecision::Approved
+            ));
         }
 
         // Verify sequence numbers don't wrap around or panic
@@ -1629,14 +1805,14 @@ mod tests {
 
         let contradictory_metrics = vec![
             PredictedMetrics {
-                latency_ms: 0,           // Impossible: zero latency
+                latency_ms: 0,            // Impossible: zero latency
                 throughput_rps: u64::MAX, // Maximum possible throughput
                 error_rate_pct: f64::INFINITY,
                 memory_mb: 0,
             },
             PredictedMetrics {
-                latency_ms: u64::MAX,    // Maximum possible latency
-                throughput_rps: 0,       // No throughput
+                latency_ms: u64::MAX, // Maximum possible latency
+                throughput_rps: 0,    // No throughput
                 error_rate_pct: f64::NEG_INFINITY,
                 memory_mb: u64::MAX,
             },
@@ -1692,7 +1868,10 @@ mod tests {
 
             // Verify sequence numbers are monotonic
             for window in gov.decision_log().windows(2) {
-                assert!(window[1].seq > window[0].seq, "sequence numbers must be strictly increasing");
+                assert!(
+                    window[1].seq > window[0].seq,
+                    "sequence numbers must be strictly increasing"
+                );
             }
         }
 
@@ -1727,8 +1906,14 @@ mod tests {
         // Verify evidence doesn't contain dangerous control characters
         let decision_entry = &gov.decision_log()[0];
         if let Some(evidence) = &decision_entry.evidence {
-            assert!(!evidence.contains('\x00'), "evidence must not contain null bytes");
-            assert!(!evidence.contains('\x01'), "evidence must not contain control characters");
+            assert!(
+                !evidence.contains('\x00'),
+                "evidence must not contain null bytes"
+            );
+            assert!(
+                !evidence.contains('\x01'),
+                "evidence must not contain control characters"
+            );
         }
 
         // Verify trace_id is preserved but safe
@@ -1750,13 +1935,17 @@ mod tests {
             let result = serde_json::from_str::<OptimizationGovernor>(malformed_json);
 
             // Should fail gracefully without panics or crashes
-            assert!(result.is_err(), "malformed JSON {i} should fail to deserialize");
+            assert!(
+                result.is_err(),
+                "malformed JSON {i} should fail to deserialize"
+            );
         }
 
         // Test successful deserialization still works
         let gov = OptimizationGovernor::with_defaults();
         let json = serde_json::to_string(&gov).expect("serialize should work");
-        let _gov2: OptimizationGovernor = serde_json::from_str(&json).expect("deserialize should work");
+        let _gov2: OptimizationGovernor =
+            serde_json::from_str(&json).expect("deserialize should work");
     }
 
     #[test]
@@ -1780,7 +1969,7 @@ mod tests {
 
         // Update envelope to make all applied proposals unsafe
         let restrictive_envelope = SafetyEnvelope {
-            max_latency_ms: 1,    // Extremely restrictive
+            max_latency_ms: 1, // Extremely restrictive
             min_throughput_rps: u64::MAX - 1,
             max_error_rate_pct: 0.001,
             max_memory_mb: 1,
@@ -1836,7 +2025,10 @@ mod tests {
             let duration = start.elapsed();
 
             // Verify shadow evaluation completes within reasonable time
-            assert!(duration.as_millis() < 1000, "shadow evaluation should not timeout");
+            assert!(
+                duration.as_millis() < 1000,
+                "shadow evaluation should not timeout"
+            );
             assert!(result.within_envelope);
             assert!(result.is_beneficial);
         }
@@ -1869,7 +2061,8 @@ mod tests {
         assert!(lines.len() <= MAX_DECISION_LOG_ENTRIES);
 
         // Verify each line is valid JSON
-        for (i, line) in lines.iter().take(5).enumerate() { // Sample first 5 lines
+        for (i, line) in lines.iter().take(5).enumerate() {
+            // Sample first 5 lines
             let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
             assert!(parsed.is_ok(), "line {i} should be valid JSON: {line}");
         }

@@ -560,13 +560,22 @@ mod comprehensive_boundary_negative_tests {
         // Create multiple large allocations to simulate memory pressure
         let mut large_vecs = Vec::new();
         const MAX_PRESSURE_VECS: usize = 10;
-        for i in 0..10 {
-            // Use bounded push pattern even in tests to demonstrate proper practice
-            if large_vecs.len() >= MAX_PRESSURE_VECS {
-                let overflow = large_vecs.len().saturating_sub(MAX_PRESSURE_VECS).saturating_add(1);
-                large_vecs.drain(0..overflow);
+
+        fn push_bounded_test<T>(items: &mut Vec<T>, item: T, cap: usize) {
+            if cap == 0 {
+                items.clear();
+                return;
             }
-            large_vecs.push(vec![i as u8; 10_000]);
+            if items.len() >= cap {
+                let overflow = items.len().saturating_sub(cap).saturating_add(1);
+                items.drain(0..overflow);
+            }
+            items.push(item);
+        }
+
+        for i in 0..10 {
+            // Use bounded push pattern consistently
+            push_bounded_test(&mut large_vecs, vec![i as u8; 10_000], MAX_PRESSURE_VECS);
         }
 
         // Test comparison under potential memory pressure
@@ -664,7 +673,7 @@ mod comprehensive_boundary_negative_tests {
         assert!(!ct_eq_bytes(&large_a, &large_b));
 
         // Test length difference near boundaries
-        let mut almost_max = vec![0x77; max_reasonable_len - 1];
+        let mut almost_max = vec![0x77; max_reasonable_len.saturating_sub(1)];
         assert!(!ct_eq_bytes(&large_a, &almost_max)); // Different lengths
     }
 
@@ -879,7 +888,7 @@ mod comprehensive_boundary_negative_tests {
                 let mut boundary_test = vec![0xAB; *test_size];
 
                 // Modify different positions to test timing consistency
-                let positions = [0, test_size / 2, test_size - 1];
+                let positions = [0, test_size / 2, test_size.saturating_sub(1)];
                 for &pos in &positions {
                     if pos < boundary_test.len() {
                         boundary_test[pos] = 0xAC;
@@ -1076,17 +1085,25 @@ mod comprehensive_boundary_negative_tests {
 
         // Bounded storage with safe length handling
         for i in 0..20 {
-            let data_size = (i * 100).min(10000); // Bounded size growth
+            let data_size = i.saturating_mul(100).min(10000); // Bounded size growth
             let safe_size = u32::try_from(data_size).unwrap_or(u32::MAX) as usize;
 
             let test_data = vec![i as u8; safe_size];
 
-            // Use bounded push pattern
-            if test_data_store.len() >= MAX_STORE_SIZE {
-                let overflow = test_data_store.len().saturating_sub(MAX_STORE_SIZE).saturating_add(1);
-                test_data_store.drain(0..overflow);
+            // Use bounded push pattern helper for consistency
+            fn push_bounded_comprehensive<T>(items: &mut Vec<T>, item: T, cap: usize) {
+                if cap == 0 {
+                    items.clear();
+                    return;
+                }
+                if items.len() >= cap {
+                    let overflow = items.len().saturating_sub(cap).saturating_add(1);
+                    items.drain(0..overflow);
+                }
+                items.push(item);
             }
-            test_data_store.push(test_data);
+
+            push_bounded_comprehensive(&mut test_data_store, test_data, MAX_STORE_SIZE);
         }
 
         assert!(test_data_store.len() <= MAX_STORE_SIZE,

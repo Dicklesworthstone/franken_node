@@ -149,7 +149,9 @@ impl TransitionAbortEvent {
 
     /// Export as JSON string.
     pub fn to_json(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_default()
+        serde_json::to_string_pretty(self).unwrap_or_else(|e| {
+            format!("{{\"error\":\"serialization_failed\",\"details\":\"{}\"}}", e)
+        })
     }
 }
 
@@ -197,14 +199,14 @@ impl ForceTransitionPolicy {
         // Length-prefix each participant individually to prevent delimiter collisions.
         sha2::Digest::update(
             &mut hasher,
-            (self.skippable_participants.len() as u64).to_le_bytes(),
+            u64::try_from(self.skippable_participants.len()).unwrap_or(u64::MAX).to_le_bytes(),
         );
         for participant in &self.skippable_participants {
-            sha2::Digest::update(&mut hasher, (participant.len() as u64).to_le_bytes());
+            sha2::Digest::update(&mut hasher, u64::try_from(participant.len()).unwrap_or(u64::MAX).to_le_bytes());
             sha2::Digest::update(&mut hasher, participant.as_bytes());
         }
         for field in [self.operator_id.as_str(), self.audit_reason.as_str()] {
-            sha2::Digest::update(&mut hasher, (field.len() as u64).to_le_bytes());
+            sha2::Digest::update(&mut hasher, u64::try_from(field.len()).unwrap_or(u64::MAX).to_le_bytes());
             sha2::Digest::update(&mut hasher, field.as_bytes());
         }
         sha2::Digest::update(&mut hasher, (self.max_skippable as u64).to_le_bytes());
@@ -515,7 +517,9 @@ impl TransitionAbortManager {
     pub fn export_audit_log_jsonl(&self) -> String {
         self.audit_log
             .iter()
-            .map(|r| serde_json::to_string(r).unwrap_or_default())
+            .map(|r| serde_json::to_string(r).unwrap_or_else(|e| {
+                format!("{{\"error\":\"serialization_failed\",\"details\":\"{}\"}}", e)
+            }))
             .collect::<Vec<_>>()
             .join("\n")
     }

@@ -87,22 +87,22 @@ impl CapturedEvidence {
     pub fn compute_input_hash(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(b"evidence_replay_input_v1:");
-        hasher.update((self.decision_id.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(self.decision_id.len()).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.update(self.decision_id.as_bytes());
         let dt = self.decision_type_str();
-        hasher.update((dt.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(dt.len()).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.update(dt.as_bytes());
         hasher.update(self.epoch_id.to_le_bytes());
-        hasher.update((self.input_entries.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(self.input_entries.len()).unwrap_or(u64::MAX)).to_le_bytes());
         for entry in &self.input_entries {
             hasher.update((entry.len() as u64).to_le_bytes());
             hasher.update(entry.as_bytes());
         }
-        hasher.update((self.input_context.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(self.input_context.len()).unwrap_or(u64::MAX)).to_le_bytes());
         for (k, v) in &self.input_context {
-            hasher.update((k.len() as u64).to_le_bytes());
+            hasher.update((u64::try_from(k.len()).unwrap_or(u64::MAX)).to_le_bytes());
             hasher.update(k.as_bytes());
-            hasher.update((v.len() as u64).to_le_bytes());
+            hasher.update((u64::try_from(v.len()).unwrap_or(u64::MAX)).to_le_bytes());
             hasher.update(v.as_bytes());
         }
         format!("{:x}", hasher.finalize())

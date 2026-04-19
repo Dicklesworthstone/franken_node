@@ -174,7 +174,7 @@ impl VerificationPolicy {
 }
 
 /// Stable reason codes for verification results and failures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum VerificationErrorCode {
     AttestationMissingField,
@@ -309,7 +309,7 @@ pub fn verify_attestation_chain(
 
     let level = derive_level(attestation, &issues);
     if level < policy.min_level {
-        push_bounded(issues, ChainIssue {
+        push_bounded(&mut issues, ChainIssue {
             code: VerificationErrorCode::LevelInsufficient,
             link_role: None,
             message: format!("required {:?}, got {:?}", policy.min_level, level),
@@ -1995,14 +1995,14 @@ mod tests {
 
         // Create deeply nested JSON structure
         let mut deep_nested = Value::Object(Map::new());
-        let mut current = &mut deep_nested;
+        let current = &mut deep_nested;
 
         for i in 0..1000 {
             let mut new_map = Map::new();
             new_map.insert(format!("level_{}", i), Value::Null);
             let new_obj = Value::Object(new_map);
 
-            if let Value::Object(ref mut map) = current {
+            if let Value::Object(map) = current {
                 map.insert(format!("nested_{}", i), new_obj);
                 if let Some(Value::Object(_)) = map.get_mut(&format!("nested_{}", i)) {
                     // Continue nesting - this tests stack depth in canonicalization

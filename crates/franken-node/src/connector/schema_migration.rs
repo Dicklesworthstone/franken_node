@@ -397,12 +397,17 @@ impl ConnectorState {
             });
         }
         let canonical_state = canonicalize_state_map(&canonical_state)?;
+        let mut bounded_journal =
+            Vec::with_capacity(migration_journal.len().min(MAX_JOURNAL_RECORDS));
+        for record in migration_journal {
+            push_bounded(&mut bounded_journal, record, MAX_JOURNAL_RECORDS);
+        }
         let mut state = Self {
             connector_id,
             schema_version,
             canonical_state,
             state_hash: String::new(),
-            migration_journal,
+            migration_journal: bounded_journal,
         };
         state.refresh_state_hash()?;
         Ok(state)
@@ -1097,13 +1102,24 @@ fn compute_state_hash(
     hasher.update(b"schema_migration_state_v1:");
     hasher.update(len_to_u64(connector_id.len()).to_le_bytes());
     hasher.update(connector_id.as_bytes());
-    hasher.update(schema_version.to_string().as_bytes());
+    let schema_version = schema_version.to_string();
+    hasher.update(len_to_u64(schema_version.len()).to_le_bytes());
+    hasher.update(schema_version.as_bytes());
     hasher.update(len_to_u64(serialized.len()).to_le_bytes());
     hasher.update(serialized);
     Ok(hex::encode(hasher.finalize()))
 }
 
 fn normalize_plan(plan: &MigrationPlan) -> Result<Vec<ExecutableMigrationStep>, MigrationError> {
+    if plan.steps.len() > MAX_STEP_RESULTS {
+        return Err(MigrationError::PlanNormalizationFailed {
+            reason: format!(
+                "migration plan has {} steps but maximum is {MAX_STEP_RESULTS}",
+                plan.steps.len()
+            ),
+        });
+    }
+
     let mut executable = Vec::with_capacity(plan.steps.len());
     for hint in &plan.steps {
         if hint.description.trim().is_empty() {
@@ -1315,7 +1331,7 @@ fn already_applied_step_result(
 
 fn step_matches_record(record: &SchemaMigrationRecord, step: &ExecutableMigrationStep) -> bool {
     step.idempotent
-        && record.migration_id == step.step_id
+        && ct_eq_bytes(record.migration_id.as_bytes(), step.step_id.as_bytes())
         && record.version_from == step.from_version.to_string()
         && record.version_to == step.to_version.to_string()
 }
@@ -2674,6 +2690,45 @@ mod tests {
     }
 
     #[test]
+    fn connector_state_bounds_imported_migration_journal() {
+        let journal = (0..MAX_JOURNAL_RECORDS.saturating_add(1))
+            .map(|index| SchemaMigrationRecord {
+                migration_id: format!("migration-{index}"),
+                version_from: "1.0.0".to_string(),
+                version_to: "1.0.1".to_string(),
+                applied_at: "2026-01-01T00:00:00Z".to_string(),
+                checksum: format!("checksum-{index}"),
+                reversible: true,
+            })
+            .collect::<Vec<_>>();
+
+        let state = ConnectorState::with_journal(
+            "conn-1",
+            v(1, 0, 0),
+            BTreeMap::from([("name".to_string(), json!("Ada"))]),
+            journal,
+        )
+        .expect("state with oversized journal should build with bounded history");
+
+        assert_eq!(state.migration_journal.len(), MAX_JOURNAL_RECORDS);
+        assert_eq!(
+            state
+                .migration_journal
+                .first()
+                .map(|record| record.migration_id.as_str()),
+            Some("migration-1")
+        );
+        let expected_last = format!("migration-{MAX_JOURNAL_RECORDS}");
+        assert_eq!(
+            state
+                .migration_journal
+                .last()
+                .map(|record| record.migration_id.as_str()),
+            Some(expected_last.as_str())
+        );
+    }
+
+    #[test]
     fn normalize_plan_rejects_empty_non_identity_range() {
         let plan = MigrationPlan {
             connector_id: "conn-1".into(),
@@ -2688,6 +2743,36 @@ mod tests {
             err,
             MigrationError::PlanNormalizationFailed { reason }
                 if reason.contains("requires at least one step")
+        ));
+    }
+
+    #[test]
+    fn normalize_plan_rejects_oversized_step_list() {
+        let hint = MigrationHint {
+            from_version: v(1, 0, 0),
+            to_version: v(1, 0, 1),
+            hint_type: HintType::AddField,
+            description: "oversized plan step".into(),
+            idempotent: true,
+            rollback_safe: true,
+            mutation: MutationSpec::AddField {
+                field: "email".into(),
+                value: json!("unknown@example.invalid"),
+            },
+        };
+        let plan = MigrationPlan {
+            connector_id: "conn-1".into(),
+            from_version: v(1, 0, 0),
+            to_version: v(1, 0, 1),
+            steps: vec![hint; MAX_STEP_RESULTS.saturating_add(1)],
+        };
+
+        let err = normalize_plan(&plan).unwrap_err();
+
+        assert!(matches!(
+            err,
+            MigrationError::PlanNormalizationFailed { reason }
+                if reason.contains("maximum")
         ));
     }
 
@@ -2818,9 +2903,7 @@ mod tests {
 
     #[test]
     fn negative_serde_schema_version_rejects_string_major() {
-        let err = serde_json::from_str::<SchemaVersion>(
-            r#"{"major":"1","minor":0,"patch":0}"#,
-        );
+        let err = serde_json::from_str::<SchemaVersion>(r#"{"major":"1","minor":0,"patch":0}"#);
 
         assert!(err.is_err());
     }
@@ -2841,9 +2924,8 @@ mod tests {
 
     #[test]
     fn negative_serde_mutation_spec_rejects_unknown_kind_tag() {
-        let err = serde_json::from_str::<MutationSpec>(
-            r#"{"kind":"delete_table","field":"email"}"#,
-        );
+        let err =
+            serde_json::from_str::<MutationSpec>(r#"{"kind":"delete_table","field":"email"}"#);
 
         assert!(err.is_err());
     }
@@ -2864,11 +2946,11 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(
-            err,
-            MigrationError::NonDeterministicState { .. }
-        ));
-        assert!(err.to_string().contains("MIGRATION_STATE_NON_DETERMINISTIC"));
+        assert!(matches!(err, MigrationError::NonDeterministicState { .. }));
+        assert!(
+            err.to_string()
+                .contains("MIGRATION_STATE_NON_DETERMINISTIC")
+        );
     }
 
     #[test]
@@ -2897,7 +2979,10 @@ mod tests {
             err,
             MigrationError::PlanNormalizationFailed { .. }
         ));
-        assert!(err.to_string().contains("mutation field names cannot be empty"));
+        assert!(
+            err.to_string()
+                .contains("mutation field names cannot be empty")
+        );
     }
 
     #[test]
@@ -2926,6 +3011,9 @@ mod tests {
             err,
             MigrationError::PlanNormalizationFailed { .. }
         ));
-        assert!(err.to_string().contains("must change the destination field"));
+        assert!(
+            err.to_string()
+                .contains("must change the destination field")
+        );
     }
 }

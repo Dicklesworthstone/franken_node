@@ -153,6 +153,12 @@ impl StateVector {
     pub fn compute_state_hash(payload: &str) -> String {
         let mut hasher = sha2::Sha256::new();
         sha2::Digest::update(&mut hasher, b"fork_detection_state_v1:");
+        sha2::Digest::update(
+            &mut hasher,
+            u64::try_from(payload.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         sha2::Digest::update(&mut hasher, payload.as_bytes());
         format!("{:x}", sha2::Digest::finalize(hasher))
     }
@@ -704,7 +710,7 @@ mod tests {
             marker_id: format!("marker-{epoch}"),
             state_hash: StateVector::compute_state_hash(hash_seed),
             parent_state_hash: StateVector::compute_state_hash(parent_seed),
-            timestamp: 1000 + epoch,
+            timestamp: 1000_u64.saturating_add(epoch),
             node_id: node.to_string(),
         }
     }
@@ -720,7 +726,7 @@ mod tests {
                 marker_id: format!("marker-{i}"),
                 state_hash: hash.clone(),
                 parent_state_hash: prev_hash.clone(),
-                timestamp: 1000 + i,
+                timestamp: 1000_u64.saturating_add(i),
                 node_id: node.to_string(),
             });
             prev_hash = hash;
@@ -783,6 +789,23 @@ mod tests {
         let h1 = StateVector::compute_state_hash("payload-a");
         let h2 = StateVector::compute_state_hash("payload-b");
         assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn state_vector_compute_hash_length_prefixes_payload() {
+        let payload = "length-prefixed-payload";
+        let mut hasher = sha2::Sha256::new();
+        sha2::Digest::update(&mut hasher, b"fork_detection_state_v1:");
+        sha2::Digest::update(
+            &mut hasher,
+            u64::try_from(payload.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        sha2::Digest::update(&mut hasher, payload.as_bytes());
+        let expected = format!("{:x}", sha2::Digest::finalize(hasher));
+
+        assert_eq!(StateVector::compute_state_hash(payload), expected);
     }
 
     #[test]
@@ -1273,7 +1296,7 @@ mod tests {
         let mut detector = RollbackDetector::new();
         let chain = make_chain(3, "node");
         for sv in &chain {
-            let _ = detector.feed(sv.clone());
+            detector.feed(sv.clone()).unwrap();
         }
         // Two bad vectors in sequence
         for i in 3..5 {
@@ -1282,10 +1305,17 @@ mod tests {
                 marker_id: format!("marker-{i}"),
                 state_hash: StateVector::compute_state_hash(&format!("bad-{i}")),
                 parent_state_hash: StateVector::compute_state_hash(&format!("wrong-{i}")),
-                timestamp: 1000 + i,
+                timestamp: 1000_u64.saturating_add(i),
                 node_id: "node".to_string(),
             };
-            let _ = detector.feed(bad);
+            let err = detector
+                .feed(bad)
+                .expect_err("bad vector should not be accepted");
+            assert!(matches!(
+                err,
+                ForkDetectionError::RfdRollbackDetected { .. }
+                    | ForkDetectionError::RfdGapDetected { .. }
+            ));
         }
         // Should catch at least the first bad one
         assert!(detector.proof_count() >= 1);
@@ -1398,7 +1428,7 @@ mod tests {
                 .append(
                     MarkerEventType::PolicyChange,
                     &format!("payload-{i}"),
-                    1000 + i,
+                    1000_u64.saturating_add(i),
                     &format!("trace-{i}"),
                 )
                 .unwrap();
@@ -1588,7 +1618,7 @@ mod tests {
                 marker_id: format!("marker-{i}"),
                 state_hash: hash.clone(),
                 parent_state_hash: prev_hash.clone(),
-                timestamp: 1000 + i,
+                timestamp: 1000_u64.saturating_add(i),
                 node_id: "local".to_string(),
             };
             local_chain.push(sv);
@@ -1611,7 +1641,7 @@ mod tests {
                 marker_id: format!("marker-{i}"),
                 state_hash: hash.clone(),
                 parent_state_hash: remote_prev_hash.clone(),
-                timestamp: 1000 + i,
+                timestamp: 1000_u64.saturating_add(i),
                 node_id: "remote".to_string(),
             });
             remote_prev_hash = hash;
@@ -1770,7 +1800,10 @@ mod tests {
         detector
             .feed(make_sv(10, "state-10", "state-9", "node"))
             .unwrap();
-        let _ = detector.feed(make_sv(15, "state-15", "state-14", "node"));
+        let gap_err = detector
+            .feed(make_sv(15, "state-15", "state-14", "node"))
+            .expect_err("gap must be reported");
+        assert_eq!(gap_err.code(), "RFD_GAP_DETECTED");
 
         let err = detector
             .feed(make_sv(14, "state-14-replay", "state-13", "node"))
@@ -1961,7 +1994,9 @@ mod tests {
 
         // Feed another state at max epoch - should be classified as rollback, not gap
         let replay = make_sv(u64::MAX, "max-replay", "max-replay-parent", "node");
-        let err = detector.feed(replay).expect_err("same max epoch should be rollback");
+        let err = detector
+            .feed(replay)
+            .expect_err("same max epoch should be rollback");
         assert_eq!(err.code(), "RFD_ROLLBACK_DETECTED");
 
         // The arithmetic in gap check should not overflow even at u64::MAX

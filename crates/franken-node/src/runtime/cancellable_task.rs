@@ -132,9 +132,10 @@ impl TaskPhase {
     pub fn can_transition_to(&self, target: &TaskPhase) -> bool {
         self.legal_targets().contains(target)
     }
+}
 
-    #[cfg(test)]
-    mod phase_transition_negative_tests {
+#[cfg(test)]
+mod phase_transition_negative_tests {
         use super::*;
 
         #[test]
@@ -226,8 +227,9 @@ impl TaskPhase {
             // Even self-transition is not allowed according to legal_targets()
             assert!(!TaskPhase::Finalized.can_transition_to(&TaskPhase::Finalized));
         }
-    }
+}
 
+impl TaskPhase {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Running => "running",
@@ -305,9 +307,10 @@ impl ObligationClosureProof {
             all_closed,
         }
     }
+}
 
-    #[cfg(test)]
-    mod obligation_closure_negative_tests {
+#[cfg(test)]
+mod obligation_closure_negative_tests {
         use super::*;
 
         #[test]
@@ -416,7 +419,6 @@ impl ObligationClosureProof {
             ]);
             assert!(proof.all_closed);
         }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -592,9 +594,10 @@ impl DrainConfig {
             force_finalize_on_timeout,
         }
     }
+}
 
-    #[cfg(test)]
-    mod drain_config_negative_tests {
+#[cfg(test)]
+mod drain_config_negative_tests {
         use super::*;
 
         #[test]
@@ -638,7 +641,6 @@ impl DrainConfig {
                 assert_eq!(config.timeout_ms, MIN_DRAIN_TIMEOUT_MS, "timeout {} should be clamped to minimum", timeout);
             }
         }
-    }
 }
 
 impl Default for DrainConfig {
@@ -700,9 +702,10 @@ impl CancellationRuntime {
     fn emit_audit(&mut self, event: CancellableTaskAuditEvent) {
         push_bounded(&mut self.audit_log, event, MAX_AUDIT_LOG_ENTRIES);
     }
+}
 
-    #[cfg(test)]
-    mod emit_audit_negative_tests {
+#[cfg(test)]
+mod emit_audit_negative_tests {
         use super::*;
 
         #[test]
@@ -801,8 +804,9 @@ impl CancellationRuntime {
                     "timestamp {} should be > timestamp {}", timestamps[i], timestamps[i-1]);
             }
         }
-    }
+}
 
+impl CancellationRuntime {
     /// Register a new cancellable task.
     /// Emits FN-CX-001.
     pub fn register_task(
@@ -907,9 +911,10 @@ impl CancellationRuntime {
         );
         Ok(())
     }
+}
 
-    #[cfg(test)]
-    mod register_child_negative_tests {
+#[cfg(test)]
+mod register_child_negative_tests {
         use super::*;
 
         #[test]
@@ -1005,9 +1010,9 @@ impl CancellationRuntime {
             let task = rt.get_task("task-1").expect("task should exist");
             assert!(task.child_task_ids.is_empty());
         }
-    }
-    }
+}
 
+impl CancellationRuntime {
     /// Signal cancel on a task.
     /// Emits FN-CX-002.  Also emits FN-CX-009 for each child.
     /// INV-CXT-THREE-PHASE, INV-CXT-NESTED-PROPAGATION
@@ -1480,9 +1485,10 @@ impl CancellationRuntime {
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
 
-    #[cfg(test)]
-    mod export_audit_log_negative_tests {
+#[cfg(test)]
+mod export_audit_log_negative_tests {
         use super::*;
 
         #[test]
@@ -1612,7 +1618,7 @@ impl CancellationRuntime {
             let parsed: serde_json::Value = serde_json::from_str(&jsonl).unwrap();
             assert_eq!(parsed["detail"], very_long_detail);
         }
-    }
+}
 
 impl Default for CancellationRuntime {
     fn default() -> Self {
@@ -1622,8 +1628,12 @@ impl Default for CancellationRuntime {
 
 // ===========================================================================
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);

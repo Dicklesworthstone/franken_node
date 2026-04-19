@@ -573,11 +573,11 @@ impl RailRouter {
     pub fn rail_summary(&self) -> BTreeMap<String, usize> {
         let mut summary = BTreeMap::new();
         for rail in &IsolationRail::ALL {
-            summary.insert(rail.as_str().to_string(), 0);
+            summary.insert(rail.as_str().to_string(), 0usize);
         }
         for c in self.classifications.values() {
-            let count = summary.entry(c.rail.as_str().to_string()).or_insert(0);
-            *count = count.saturating_add(1);
+            let count = summary.entry(c.rail.as_str().to_string()).or_insert(0usize);
+            *count = (*count).saturating_add(1usize);
         }
         summary
     }

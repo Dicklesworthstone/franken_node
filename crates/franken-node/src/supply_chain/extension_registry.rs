@@ -927,6 +927,9 @@ impl SignedExtensionRegistry {
         let state = serde_json::json!({
             "extensions": &self.extensions,
             "revocations": &self.revocations,
+            "require_provenance": self.config.require_provenance,
+            "require_signature": self.config.require_signature,
+            "allow_self_revocation": self.config.allow_self_revocation,
             "registry_version": &self.config.registry_version,
         })
         .to_string();
@@ -1946,6 +1949,19 @@ mod tests {
         );
         let hash2 = reg.content_hash();
         assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn content_hash_changes_on_config_policy_mutation() {
+        let (_, vk) = test_keypair();
+        let strict = test_registry(&vk);
+        let strict_hash = strict.content_hash();
+
+        let mut relaxed_config = RegistryConfig::default();
+        relaxed_config.require_signature = false;
+        let relaxed = SignedExtensionRegistry::new(relaxed_config, test_kernel(&vk));
+
+        assert_ne!(strict_hash, relaxed.content_hash());
     }
 
     // === Config ===

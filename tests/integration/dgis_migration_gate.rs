@@ -123,7 +123,7 @@ fn health_report_is_machine_readable_with_gate_verdict() {
         GraphHealthSnapshot {
             cascade_risk: 0.24,
             fragility_findings: 4,
-            articulation_points: 3,
+            articulation_points: 2,
         },
         MigrationGateThresholds::default(),
         &[],

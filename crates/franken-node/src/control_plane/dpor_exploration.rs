@@ -497,9 +497,13 @@ const MAX_SAFETY_PROPERTIES: usize = 4096;
 const MAX_MATERIALIZED_SCHEDULES: usize = 100;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
-        items.drain(0..overflow);
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
@@ -507,7 +511,7 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 fn schedule_pruning_key(schedule: &[Operation]) -> Vec<u8> {
     let mut key = b"dpor_schedule_key_v1:".to_vec();
     for op in schedule {
-        key.extend_from_slice(&(op.id.len() as u64).to_le_bytes());
+        key.extend_from_slice(&u64::try_from(op.id.len()).unwrap_or(u64::MAX).to_le_bytes());
         key.extend_from_slice(op.id.as_bytes());
     }
     key

@@ -755,6 +755,8 @@ fn sync_directory(dir: &Path) -> Result<(), RootPointerError> {
 fn hash_hex(payload: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"root_pointer_hash_v1:");
+    let payload_len = u64::try_from(payload.len()).unwrap_or(u64::MAX);
+    hasher.update(payload_len.to_le_bytes());
     hasher.update(payload);
     hex::encode(hasher.finalize())
 }
@@ -762,6 +764,8 @@ fn hash_hex(payload: &[u8]) -> String {
 fn sign_payload(payload: &str, signing_key: &[u8]) -> Result<String, hmac::digest::InvalidLength> {
     let mut mac = Hmac::<Sha256>::new_from_slice(signing_key)?;
     mac.update(b"root_pointer_sign_v1:");
+    let payload_len = u64::try_from(payload.len()).unwrap_or(u64::MAX);
+    mac.update(&payload_len.to_le_bytes());
     mac.update(payload.as_bytes());
     Ok(hex::encode(mac.finalize().into_bytes()))
 }
@@ -837,6 +841,31 @@ mod tests {
             .unwrap_or(chars.len().saturating_sub(1));
         chars[idx] = if chars[idx] == '0' { '1' } else { '0' };
         chars.into_iter().collect()
+    }
+
+    #[test]
+    fn root_pointer_hash_and_mac_length_prefix_payloads() {
+        let payload = b"root-pointer";
+        let mut expected_hash = Sha256::new();
+        expected_hash.update(b"root_pointer_hash_v1:");
+        let payload_len = u64::try_from(payload.len()).unwrap_or(u64::MAX);
+        expected_hash.update(payload_len.to_le_bytes());
+        expected_hash.update(payload);
+
+        assert_eq!(hash_hex(payload), hex::encode(expected_hash.finalize()));
+
+        let signing_key = key();
+        let mac_payload = "root-pointer-mac";
+        let mut expected_mac = Hmac::<Sha256>::new_from_slice(&signing_key).expect("hmac key");
+        expected_mac.update(b"root_pointer_sign_v1:");
+        let mac_payload_len = u64::try_from(mac_payload.len()).unwrap_or(u64::MAX);
+        expected_mac.update(&mac_payload_len.to_le_bytes());
+        expected_mac.update(mac_payload.as_bytes());
+
+        assert_eq!(
+            sign_payload(mac_payload, &signing_key).expect("sign"),
+            hex::encode(expected_mac.finalize().into_bytes())
+        );
     }
 
     #[test]

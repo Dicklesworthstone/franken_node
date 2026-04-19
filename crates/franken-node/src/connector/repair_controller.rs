@@ -3,7 +3,24 @@
 //! Respects per-cycle work caps. Guarantees no tenant starvation via fairness minimum.
 //! Every cycle produces an auditable record.
 
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
+
 use std::collections::{BTreeMap, BTreeSet};
+
+const MAX_PENDING_REPAIR_ITEMS_PER_CYCLE: usize = MAX_AUDIT_LOG_ENTRIES;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
+    let overflow = items.len().saturating_sub(cap.saturating_sub(1));
+    if overflow > 0 {
+        items.drain(0..overflow.min(items.len()));
+    }
+    items.push(item);
+}
 
 /// Configuration for the repair controller.
 #[derive(Debug, Clone)]
@@ -127,6 +144,13 @@ pub fn run_cycle(
     if pending.is_empty() {
         return Err(RepairError::NoPending);
     }
+    if pending.len() > MAX_PENDING_REPAIR_ITEMS_PER_CYCLE {
+        return Err(RepairError::InvalidConfig {
+            reason: format!(
+                "pending repair items must not exceed {MAX_PENDING_REPAIR_ITEMS_PER_CYCLE}"
+            ),
+        });
+    }
 
     let trimmed_cycle_id = cycle_id.trim();
     if trimmed_cycle_id.is_empty() || trimmed_cycle_id != cycle_id {
@@ -168,10 +192,8 @@ pub fn run_cycle(
                 reason: format!("duplicate item_id: {item_id}"),
             });
         }
-        by_tenant
-            .entry(item.tenant_id.clone())
-            .or_default()
-            .push(item);
+        let tenant_items = by_tenant.entry(item.tenant_id.clone()).or_default();
+        push_bounded(tenant_items, item, MAX_PENDING_REPAIR_ITEMS_PER_CYCLE);
     }
 
     // Sort each tenant's items by priority descending, then item_id for determinism
@@ -213,7 +235,11 @@ pub fn run_cycle(
                 .min(fairness_remaining)
                 .min(config.max_units_per_cycle.saturating_sub(total_used));
             if can_use > 0 {
-                tenant_alloc.items_allocated.push(item.item_id.clone());
+                push_bounded(
+                    &mut tenant_alloc.items_allocated,
+                    item.item_id.clone(),
+                    MAX_PENDING_REPAIR_ITEMS_PER_CYCLE,
+                );
                 tenant_alloc.units_used = tenant_alloc.units_used.saturating_add(can_use);
                 total_used = total_used.saturating_add(can_use);
                 fairness_remaining = fairness_remaining.saturating_sub(can_use);
@@ -238,7 +264,11 @@ pub fn run_cycle(
                 })?;
             for item in items {
                 if !alloc.items_allocated.contains(&item.item_id) {
-                    remaining_items.push(item);
+                    push_bounded(
+                        &mut remaining_items,
+                        item,
+                        MAX_PENDING_REPAIR_ITEMS_PER_CYCLE,
+                    );
                 }
             }
         }
@@ -258,7 +288,11 @@ pub fn run_cycle(
                         .ok_or(RepairError::InvalidConfig {
                             reason: format!("missing allocation for tenant {}", item.tenant_id),
                         })?;
-                alloc.items_allocated.push(item.item_id.clone());
+                push_bounded(
+                    &mut alloc.items_allocated,
+                    item.item_id.clone(),
+                    MAX_PENDING_REPAIR_ITEMS_PER_CYCLE,
+                );
                 alloc.units_used = alloc.units_used.saturating_add(can_use);
                 total_used = total_used.saturating_add(can_use);
             }
@@ -404,6 +438,33 @@ mod tests {
         };
         let err = run_cycle(&[item("r1", "t1", 5, 10)], &cfg, "c1", "tr", "ts").unwrap_err();
         assert_eq!(err.code(), "BRC_INVALID_CONFIG");
+    }
+
+    #[test]
+    fn rejects_overlarge_pending_set_before_allocation() {
+        let items: Vec<RepairItem> = (0..=MAX_PENDING_REPAIR_ITEMS_PER_CYCLE)
+            .map(|i| item(&format!("r{i}"), "tenant", 1, 1))
+            .collect();
+
+        let err = run_cycle(&items, &config(), "c1", "tr", "ts").unwrap_err();
+
+        assert_eq!(
+            err,
+            RepairError::InvalidConfig {
+                reason: format!(
+                    "pending repair items must not exceed {MAX_PENDING_REPAIR_ITEMS_PER_CYCLE}"
+                )
+            }
+        );
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_drops_existing_and_new_items() {
+        let mut items = vec!["old-a", "old-b"];
+
+        push_bounded(&mut items, "new", 0);
+
+        assert!(items.is_empty());
     }
 
     #[test]
@@ -815,7 +876,10 @@ mod tests {
             max_tenants_per_cycle: 1,
             ..config()
         };
-        let items = vec![item("dup", "a-tenant", 10, 5), item("dup", "z-tenant", 1, 5)];
+        let items = vec![
+            item("dup", "a-tenant", 10, 5),
+            item("dup", "z-tenant", 1, 5),
+        ];
 
         let err = run_cycle(&items, &cfg, "c1", "tr", "ts").unwrap_err();
 
@@ -851,7 +915,10 @@ mod tests {
             max_tenants_per_cycle: 1,
             ..config()
         };
-        let items = vec![item("ok", "a-tenant", 10, 5), item("late", " z-tenant", 1, 5)];
+        let items = vec![
+            item("ok", "a-tenant", 10, 5),
+            item("late", " z-tenant", 1, 5),
+        ];
 
         let err = run_cycle(&items, &cfg, "c1", "tr", "ts").unwrap_err();
 
@@ -870,9 +937,8 @@ mod tests {
             item("billable-low", "tenant", 1, 5),
         ];
 
-        let (allocs, audit) =
-            run_cycle(&items, &config(), "c-zero-high", "tr-zero-high", "ts")
-                .expect("cycle succeeds");
+        let (allocs, audit) = run_cycle(&items, &config(), "c-zero-high", "tr-zero-high", "ts")
+            .expect("cycle succeeds");
 
         assert_eq!(allocs.len(), 1);
         assert_eq!(allocs[0].items_allocated, vec!["billable-low".to_string()]);
@@ -885,9 +951,8 @@ mod tests {
     fn negative_zero_sized_tenant_does_not_inflate_served_count() {
         let items = vec![item("zero", "a-zero", 10, 0), item("work", "b-work", 10, 5)];
 
-        let (allocs, audit) =
-            run_cycle(&items, &config(), "c-zero-tenant", "tr-zero-tenant", "ts")
-                .expect("cycle succeeds");
+        let (allocs, audit) = run_cycle(&items, &config(), "c-zero-tenant", "tr-zero-tenant", "ts")
+            .expect("cycle succeeds");
 
         assert_eq!(allocs.len(), 2);
         assert!(allocs[0].items_allocated.is_empty());
@@ -906,9 +971,8 @@ mod tests {
         };
         let items = vec![item("huge", "tenant", 10, u64::MAX)];
 
-        let (allocs, audit) =
-            run_cycle(&items, &cfg, "c-extreme-fair", "tr-extreme-fair", "ts")
-                .expect("cycle succeeds");
+        let (allocs, audit) = run_cycle(&items, &cfg, "c-extreme-fair", "tr-extreme-fair", "ts")
+            .expect("cycle succeeds");
 
         assert_eq!(allocs.len(), 1);
         assert_eq!(allocs[0].units_used, 3);

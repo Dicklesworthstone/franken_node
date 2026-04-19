@@ -34,16 +34,19 @@ impl CidrRange {
 
     /// Check whether `ip` falls within this CIDR range.
     pub fn contains(&self, ip: [u8; 4]) -> bool {
+        if self.prefix_len > 32 {
+            return true;
+        }
         if self.prefix_len == 0 {
             // 0.0.0.0/0 matches everything — but we use /8 for "this" network
             return true;
         }
         let net = u32::from_be_bytes(self.network);
         let addr = u32::from_be_bytes(ip);
-        let mask = if self.prefix_len >= 32 {
+        let mask = if self.prefix_len == 32 {
             u32::MAX
         } else {
-            u32::MAX << (32 - self.prefix_len)
+            u32::MAX << (32_u8.saturating_sub(self.prefix_len))
         };
         (addr & mask) == (net & mask)
     }
@@ -219,6 +222,15 @@ fn has_null_byte(host: &str) -> bool {
     host.contains('\0')
 }
 
+fn has_path_like_or_empty_label_host_syntax(host: &str) -> bool {
+    let trimmed = host.trim();
+    if trimmed.is_empty() || trimmed.contains('/') || trimmed.contains('\\') {
+        return true;
+    }
+    let canonical = trimmed.strip_suffix('.').unwrap_or(trimmed);
+    canonical.is_empty() || canonical.split('.').any(str::is_empty)
+}
+
 /// Reserved hostname aliases that resolve to loopback without touching the public DNS.
 fn blocked_hostname_label(host: &str) -> Option<&'static str> {
     let trimmed = host.trim();
@@ -256,6 +268,9 @@ impl SsrfPolicyTemplate {
     pub fn is_private_ip(ip: &str) -> bool {
         let ip = ip.trim();
         if has_null_byte(ip) {
+            return true;
+        }
+        if has_path_like_or_empty_label_host_syntax(ip) {
             return true;
         }
         if has_multiple_trailing_dots(ip) {
@@ -311,6 +326,20 @@ impl SsrfPolicyTemplate {
     ) -> Result<Action, SsrfError> {
         let host = host.trim();
         if has_null_byte(host) {
+            self.emit_audit(
+                host,
+                port,
+                Action::Deny,
+                Some("invalid_ip_format"),
+                false,
+                trace_id,
+                timestamp,
+            );
+            return Err(SsrfError::SsrfInvalidIp {
+                host: host.to_string(),
+            });
+        }
+        if has_path_like_or_empty_label_host_syntax(host) {
             self.emit_audit(
                 host,
                 port,
@@ -553,6 +582,11 @@ impl SsrfPolicyTemplate {
                 reason: "allowlist host contains null byte".to_string(),
             });
         }
+        if has_path_like_or_empty_label_host_syntax(host) {
+            return Err(SsrfError::SsrfTemplateInvalid {
+                reason: "allowlist host contains invalid host syntax".to_string(),
+            });
+        }
 
         let receipt_id = format!("rcpt-{}-{}", self.connector_id, self.allowlist.len());
         let receipt = PolicyReceipt {
@@ -564,18 +598,16 @@ impl SsrfPolicyTemplate {
             trace_id: trace_id.to_string(),
         };
 
-        if self.allowlist.len() >= MAX_ALLOWLIST_ENTRIES {
-            return Err(SsrfError::SsrfTemplateInvalid {
-                reason: format!("allowlist capacity exceeded ({})", MAX_ALLOWLIST_ENTRIES),
-            });
-        }
-
-        self.allowlist.push(AllowlistEntry {
-            host: host.to_string(),
-            port,
-            reason: reason.to_string(),
-            receipt: receipt.clone(),
-        });
+        push_bounded(
+            &mut self.allowlist,
+            AllowlistEntry {
+                host: host.to_string(),
+                port,
+                reason: reason.to_string(),
+                receipt: receipt.clone(),
+            },
+            MAX_ALLOWLIST_ENTRIES,
+        );
 
         Ok(receipt)
     }
@@ -630,10 +662,25 @@ impl SsrfPolicyTemplate {
                 reason: "template has no blocked CIDRs".to_string(),
             });
         }
+        for cidr in &self.blocked_cidrs {
+            if cidr.prefix_len > 32 {
+                return Err(SsrfError::SsrfTemplateInvalid {
+                    reason: format!(
+                        "blocked CIDR {} has invalid prefix length {}",
+                        cidr.label, cidr.prefix_len
+                    ),
+                });
+            }
+        }
         for entry in &self.allowlist {
             if has_null_byte(&entry.host) {
                 return Err(SsrfError::SsrfTemplateInvalid {
                     reason: format!("allowlist entry for {} contains null byte", entry.host),
+                });
+            }
+            if has_path_like_or_empty_label_host_syntax(&entry.host) {
+                return Err(SsrfError::SsrfTemplateInvalid {
+                    reason: format!("allowlist entry for {} has invalid host syntax", entry.host),
                 });
             }
             if entry.reason.trim().is_empty() || entry.receipt.trace_id.trim().is_empty() {
@@ -707,8 +754,12 @@ impl fmt::Display for SsrfError {
 impl std::error::Error for SsrfError {}
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -774,6 +825,13 @@ mod tests {
     fn cidr_display() {
         let cidr = CidrRange::new([10, 0, 0, 0], 8, "test");
         assert_eq!(cidr.to_string(), "10.0.0.0/8");
+    }
+
+    #[test]
+    fn cidr_contains_invalid_prefix_fails_closed() {
+        let cidr = CidrRange::new([192, 168, 1, 0], 33, "invalid");
+
+        assert!(cidr.contains([8, 8, 8, 8]));
     }
 
     // === parse_ipv4 ===
@@ -855,6 +913,17 @@ mod tests {
         assert!(SsrfPolicyTemplate::is_private_ip("localhost.."));
         assert!(SsrfPolicyTemplate::is_private_ip("api.example.com.."));
         assert!(SsrfPolicyTemplate::is_private_ip("127.0.0.1.."));
+    }
+
+    #[test]
+    fn private_ip_treats_path_like_and_empty_label_hosts_as_denied() {
+        assert!(SsrfPolicyTemplate::is_private_ip(
+            "api.example.com/../169.254.169.254"
+        ));
+        assert!(SsrfPolicyTemplate::is_private_ip(
+            r"api.example.com\169.254.169.254"
+        ));
+        assert!(SsrfPolicyTemplate::is_private_ip("api..example.com"));
     }
 
     #[test]
@@ -1057,6 +1126,26 @@ mod tests {
     }
 
     #[test]
+    fn check_ssrf_rejects_path_like_and_empty_label_hosts_as_invalid_format() {
+        for host in [
+            "api.example.com/../169.254.169.254",
+            r"api.example.com\169.254.169.254",
+            "/api.example.com",
+            "api..example.com",
+        ] {
+            let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
+            let result = t.check_ssrf(host, 443, Protocol::Http, "path-host", "ts");
+
+            assert!(matches!(result, Err(SsrfError::SsrfInvalidIp { .. })));
+            assert_eq!(t.audit_log[0].action, Action::Deny);
+            assert_eq!(
+                t.audit_log[0].cidr_matched.as_deref(),
+                Some("invalid_ip_format")
+            );
+        }
+    }
+
+    #[test]
     fn check_ssrf_rejects_public_ipv6_literals_as_unsupported() {
         let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
         let result = t.check_ssrf("2001:4860:4860::8888", 443, Protocol::Http, "td7", "ts");
@@ -1142,6 +1231,21 @@ mod tests {
     }
 
     #[test]
+    fn allowlist_rejects_path_like_and_empty_label_hosts() {
+        for host in [
+            "api.example.com/../169.254.169.254",
+            r"api.example.com\169.254.169.254",
+            "api..example.com",
+        ] {
+            let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
+            let result = t.add_allowlist(host, None, "public api", "trace-path", "ts");
+
+            assert!(matches!(result, Err(SsrfError::SsrfTemplateInvalid { .. })));
+            assert!(t.allowlist.is_empty());
+        }
+    }
+
+    #[test]
     fn allowlist_receipt_has_fields() {
         let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
         let receipt = t
@@ -1194,21 +1298,36 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_invalid_cidr_prefix_length() {
+        let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
+        t.blocked_cidrs[0].prefix_len = 33;
+
+        assert!(matches!(
+            t.validate(),
+            Err(SsrfError::SsrfTemplateInvalid { .. })
+        ));
+    }
+
+    #[test]
     fn validate_rejects_allowlist_entry_without_reason() {
         let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
-        t.allowlist.push(AllowlistEntry {
-            host: "10.0.0.5".into(),
-            port: Some(8080),
-            reason: String::new(),
-            receipt: PolicyReceipt {
-                receipt_id: "rcpt-missing-reason".into(),
-                connector_id: "conn-1".into(),
+        push_bounded(
+            &mut t.allowlist,
+            AllowlistEntry {
                 host: "10.0.0.5".into(),
-                issued_at: "2026-01-01".into(),
-                reason: "present on receipt only".into(),
-                trace_id: "trace-present".into(),
+                port: Some(8080),
+                reason: String::new(),
+                receipt: PolicyReceipt {
+                    receipt_id: "rcpt-missing-reason".into(),
+                    connector_id: "conn-1".into(),
+                    host: "10.0.0.5".into(),
+                    issued_at: "2026-01-01".into(),
+                    reason: "present on receipt only".into(),
+                    trace_id: "trace-present".into(),
+                },
             },
-        });
+            MAX_ALLOWLIST_ENTRIES,
+        );
 
         assert!(matches!(
             t.validate(),
@@ -1219,23 +1338,54 @@ mod tests {
     #[test]
     fn validate_rejects_allowlist_entry_without_receipt_trace_id() {
         let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
-        t.allowlist.push(AllowlistEntry {
-            host: "10.0.0.5".into(),
-            port: Some(8080),
-            reason: "internal API".into(),
-            receipt: PolicyReceipt {
-                receipt_id: "rcpt-missing-trace".into(),
-                connector_id: "conn-1".into(),
+        push_bounded(
+            &mut t.allowlist,
+            AllowlistEntry {
                 host: "10.0.0.5".into(),
-                issued_at: "2026-01-01".into(),
+                port: Some(8080),
                 reason: "internal API".into(),
-                trace_id: String::new(),
+                receipt: PolicyReceipt {
+                    receipt_id: "rcpt-missing-trace".into(),
+                    connector_id: "conn-1".into(),
+                    host: "10.0.0.5".into(),
+                    issued_at: "2026-01-01".into(),
+                    reason: "internal API".into(),
+                    trace_id: String::new(),
+                },
             },
-        });
+            MAX_ALLOWLIST_ENTRIES,
+        );
 
         assert!(matches!(
             t.validate(),
             Err(SsrfError::SsrfReceiptMissing { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_allowlist_entry_with_path_like_host() {
+        let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
+        push_bounded(
+            &mut t.allowlist,
+            AllowlistEntry {
+                host: "api.example.com/../169.254.169.254".into(),
+                port: None,
+                reason: "public api".into(),
+                receipt: PolicyReceipt {
+                    receipt_id: "rcpt-path-host".into(),
+                    connector_id: "conn-1".into(),
+                    host: "api.example.com/../169.254.169.254".into(),
+                    issued_at: "2026-01-01".into(),
+                    reason: "public api".into(),
+                    trace_id: "trace-path-host".into(),
+                },
+            },
+            MAX_ALLOWLIST_ENTRIES,
+        );
+
+        assert!(matches!(
+            t.validate(),
+            Err(SsrfError::SsrfTemplateInvalid { .. })
         ));
     }
 
@@ -1293,19 +1443,23 @@ mod tests {
         // DNS hostnames are case-insensitive (RFC 4343).
         // Uppercase host must still match a lowercase allowlist entry.
         let mut policy = SsrfPolicyTemplate::default_template("test-conn".into());
-        policy.allowlist.push(AllowlistEntry {
-            host: "api.example.com".into(),
-            port: Some(443),
-            reason: "test".into(),
-            receipt: PolicyReceipt {
-                receipt_id: "r1".into(),
-                connector_id: "test-conn".into(),
+        push_bounded(
+            &mut policy.allowlist,
+            AllowlistEntry {
                 host: "api.example.com".into(),
-                issued_at: "2026-01-01T00:00:00Z".into(),
+                port: Some(443),
                 reason: "test".into(),
-                trace_id: "t1".into(),
+                receipt: PolicyReceipt {
+                    receipt_id: "r1".into(),
+                    connector_id: "test-conn".into(),
+                    host: "api.example.com".into(),
+                    issued_at: "2026-01-01T00:00:00Z".into(),
+                    reason: "test".into(),
+                    trace_id: "t1".into(),
+                },
             },
-        });
+            MAX_ALLOWLIST_ENTRIES,
+        );
 
         // Exact case → match
         let found = policy.find_allowlist("api.example.com", 443);
@@ -1332,19 +1486,23 @@ mod tests {
     #[test]
     fn test_find_allowlist_normalizes_trailing_dot_and_whitespace() {
         let mut policy = SsrfPolicyTemplate::default_template("test-conn".into());
-        policy.allowlist.push(AllowlistEntry {
-            host: "api.example.com".into(),
-            port: Some(443),
-            reason: "test".into(),
-            receipt: PolicyReceipt {
-                receipt_id: "r2".into(),
-                connector_id: "test-conn".into(),
+        push_bounded(
+            &mut policy.allowlist,
+            AllowlistEntry {
                 host: "api.example.com".into(),
-                issued_at: "2026-01-01T00:00:00Z".into(),
+                port: Some(443),
                 reason: "test".into(),
-                trace_id: "t2".into(),
+                receipt: PolicyReceipt {
+                    receipt_id: "r2".into(),
+                    connector_id: "test-conn".into(),
+                    host: "api.example.com".into(),
+                    issued_at: "2026-01-01T00:00:00Z".into(),
+                    reason: "test".into(),
+                    trace_id: "t2".into(),
+                },
             },
-        });
+            MAX_ALLOWLIST_ENTRIES,
+        );
 
         let found = policy.find_allowlist(" API.EXAMPLE.COM. ", 443);
         assert!(
@@ -1360,10 +1518,23 @@ mod tests {
             p.add_allowlist(&format!("host-{i}"), None, "r", "t", "time")
                 .unwrap();
         }
-        let err = p
+        // Now uses bounded eviction instead of error
+        let receipt = p
             .add_allowlist("overflow", None, "r", "t", "time")
-            .unwrap_err();
-        assert!(matches!(err, SsrfError::SsrfTemplateInvalid { .. }));
+            .unwrap();
+        assert_eq!(p.allowlist.len(), MAX_ALLOWLIST_ENTRIES);
+        assert_eq!(receipt.host, "overflow");
+        // Verify oldest entry was evicted
+        assert!(!p.allowlist.iter().any(|e| e.host == "host-0"));
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_drops_existing_and_new_entries() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
     }
 
     #[test]
@@ -1408,7 +1579,7 @@ mod tests {
         assert!(policy.audit_log.len() <= crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES);
 
         // Test that oldest entries are evicted (FIFO)
-        let last_entry = &policy.audit_log[policy.audit_log.len() - 1];
+        let last_entry = &policy.audit_log[policy.audit_log.len().saturating_sub(1)];
         assert!(last_entry.trace_id.contains("999")); // Should contain recent entry
 
         // Verify memory usage is bounded despite massive payloads
@@ -1464,7 +1635,7 @@ mod tests {
         let extreme_cidr = CidrRange::new([192, 168, 1, 0], 255, "overflow-test");
         let contains_result = extreme_cidr.contains([192, 168, 1, 1]);
         // Should not crash on overflow in mask calculation
-        assert!(!contains_result); // Invalid prefix should fail safely
+        assert!(contains_result); // Invalid blocked prefix should fail closed
 
         // Test allowlist capacity near MAX_ALLOWLIST_ENTRIES
         for i in 0..(MAX_ALLOWLIST_ENTRIES - 1) {
@@ -1583,7 +1754,7 @@ mod tests {
                         let mut p = policy_clone.lock().unwrap();
                         let _ = p.add_allowlist(
                             &format!("host-{thread_id}"),
-                            Some(8080 + thread_id as u16),
+                            Some(8080_u16.saturating_add(thread_id as u16)),
                             "concurrent test",
                             &format!("trace-{thread_id}"),
                             "ts"

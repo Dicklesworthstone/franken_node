@@ -21,6 +21,25 @@
 
 use std::path::{Path, PathBuf};
 
+/// Maximum number of violations to collect to prevent memory exhaustion attacks.
+const MAX_VIOLATIONS: usize = 10_000;
+
+/// Maximum number of source files to collect to prevent memory exhaustion attacks.
+const MAX_SOURCE_FILES: usize = 50_000;
+
+/// Add item to Vec with bounded capacity. When capacity is exceeded, removes oldest entries.
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 /// Patterns that indicate ambient executor / runtime bootstrap.
 const BANNED_PATTERNS: &[&str] = &[
     "#[tokio::main]",
@@ -231,7 +250,7 @@ fn check_line_for_violations(
                 *exceptions_honored = exceptions_honored.saturating_add(1);
                 return;
             }
-            violations.push(DriftViolation {
+            push_bounded(&mut *violations, DriftViolation {
                 file: file.to_path_buf(),
                 line_number,
                 line_content: line.to_string(),
@@ -240,7 +259,7 @@ fn check_line_for_violations(
                          This crate must not reintroduce ambient executor scaffolding. \
                          If a real async boundary is needed, add a TOKIO_DRIFT_EXCEPTION \
                          marker referencing an architectural decision bead.",
-            });
+            }, MAX_VIOLATIONS);
             return; // One violation per line is enough
         }
     }
@@ -252,7 +271,7 @@ fn check_line_for_violations(
                 *exceptions_honored = exceptions_honored.saturating_add(1);
                 return;
             }
-            violations.push(DriftViolation {
+            push_bounded(&mut *violations, DriftViolation {
                 file: file.to_path_buf(),
                 line_number,
                 line_content: line.to_string(),
@@ -261,7 +280,7 @@ fn check_line_for_violations(
                          This crate removed its Tokio dependency in bd-1now.2. \
                          If async runtime support is genuinely needed, add a \
                          TOKIO_DRIFT_EXCEPTION marker referencing a decision bead.",
-            });
+            }, MAX_VIOLATIONS);
             return;
         }
     }
@@ -297,7 +316,7 @@ fn check_api_transport_boundary_line_for_violations(
                 *exceptions_honored = exceptions_honored.saturating_add(1);
                 return;
             }
-            violations.push(DriftViolation {
+            push_bounded(&mut *violations, DriftViolation {
                 file: file.to_path_buf(),
                 line_number,
                 line_content: line.to_string(),
@@ -307,7 +326,7 @@ fn check_api_transport_boundary_line_for_violations(
                          request-region work (bd-1now.6). Add a TOKIO_DRIFT_EXCEPTION \
                          marker referencing the decision bead if the boundary is \
                          intentional and fully reviewed.",
-            });
+            }, MAX_VIOLATIONS);
             return;
         }
     }
@@ -341,7 +360,7 @@ fn check_cargo_toml(
                     in_tokio_dev_dependency_table = false;
                     continue;
                 }
-                violations.push(DriftViolation {
+                push_bounded(&mut *violations, DriftViolation {
                     file: cargo_toml_path.to_path_buf(),
                     line_number: idx.saturating_add(1),
                     line_content: line.to_string(),
@@ -350,7 +369,7 @@ fn check_cargo_toml(
                              This crate intentionally removed Tokio (bd-1now.2). \
                              Add a TOKIO_DRIFT_EXCEPTION marker if reintroduction is \
                              architecturally justified.",
-                });
+                }, MAX_VIOLATIONS);
             }
             in_dependencies = true;
             in_dev_dependencies = false;
@@ -366,7 +385,7 @@ fn check_cargo_toml(
                 in_tokio_dev_dependency_table = false;
                 continue;
             }
-            violations.push(DriftViolation {
+            push_bounded(&mut *violations, DriftViolation {
                 file: cargo_toml_path.to_path_buf(),
                 line_number: idx.saturating_add(1),
                 line_content: line.to_string(),
@@ -375,7 +394,7 @@ fn check_cargo_toml(
                          This crate intentionally removed Tokio (bd-1now.2). \
                          Add a TOKIO_DRIFT_EXCEPTION marker if reintroduction is \
                          architecturally justified.",
-            });
+            }, MAX_VIOLATIONS);
             in_dependencies = true;
             in_dev_dependencies = false;
             in_tokio_dev_dependency_table = false;
@@ -414,7 +433,7 @@ fn check_cargo_toml(
                 *exceptions_honored = exceptions_honored.saturating_add(1);
                 continue;
             }
-            violations.push(DriftViolation {
+            push_bounded(&mut *violations, DriftViolation {
                 file: cargo_toml_path.to_path_buf(),
                 line_number: idx.saturating_add(1),
                 line_content: line.to_string(),
@@ -423,7 +442,7 @@ fn check_cargo_toml(
                          This crate intentionally removed Tokio (bd-1now.2). \
                          Add a TOKIO_DRIFT_EXCEPTION marker if reintroduction is \
                          architecturally justified.",
-            });
+            }, MAX_VIOLATIONS);
         }
 
         // Dev-dependencies with tokio are allowed (for test infrastructure)
@@ -438,7 +457,7 @@ fn check_cargo_toml(
                 *exceptions_honored = exceptions_honored.saturating_add(1);
                 continue;
             }
-            violations.push(DriftViolation {
+            push_bounded(&mut *violations, DriftViolation {
                 file: cargo_toml_path.to_path_buf(),
                 line_number: idx.saturating_add(1),
                 line_content: line.to_string(),
@@ -446,7 +465,7 @@ fn check_cargo_toml(
                 reason: "Tokio runtime features in dev-dependencies may mask \
                          ambient executor reintroduction. Use explicit feature \
                          gates or add a TOKIO_DRIFT_EXCEPTION marker.",
-            });
+            }, MAX_VIOLATIONS);
         }
     }
 }
@@ -475,7 +494,7 @@ fn collect_source_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
         if file_type.is_dir() {
             collect_source_files_recursive(&path, files);
         } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
-            files.push(path);
+            push_bounded(files, path, MAX_SOURCE_FILES);
         }
     }
 }
@@ -1779,7 +1798,7 @@ mod tokio_drift_checker_boundary_negative_tests {
         }
 
         // The current implementation has no bounds on violations vector growth
-        // A hardened version might use push_bounded(&mut violations, violation, MAX_VIOLATIONS)
+        // A hardened version might use push_bounded(&mut *violations, violation, MAX_VIOLATIONS)
         // or implement early termination when violation count exceeds a threshold
     }
 
@@ -1880,7 +1899,7 @@ mod tokio_drift_checker_boundary_negative_tests {
             r#"let pattern = "tokio::runtime::Runtime"; // Should not trigger"#,
             r#"let escaped = "He said \"tokio::runtime::Runtime\" works"; // Should not trigger"#,
             r#"let double_escaped = "Path\\\"tokio::runtime::Runtime\\\""; // Should not trigger"#,
-            r#"let complex = r#"Raw string with tokio::runtime::Runtime"#; // Should not trigger"#,
+            r##"let complex = r#"Raw string with tokio::runtime::Runtime"#; // Should not trigger"##,
             r#"actual_runtime_code(); tokio::runtime::Runtime::new(); // Should trigger"#,
             r#"// Comment with "quoted tokio::runtime::Runtime" - should trigger"#,
         ];

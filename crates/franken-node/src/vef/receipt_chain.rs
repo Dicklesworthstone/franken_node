@@ -50,7 +50,7 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     }
 
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -390,17 +390,19 @@ impl ReceiptChain {
                     checkpoint.checkpoint_id
                 )));
             }
-            let expected_entry_count = checkpoint.end_index - checkpoint.start_index + 1;
+            let expected_entry_count = checkpoint
+                .end_index
+                .saturating_sub(checkpoint.start_index)
+                .saturating_add(1);
             if checkpoint.entry_count != expected_entry_count {
                 return Err(ChainError::checkpoint(format!(
                     "checkpoint {} entry_count mismatch",
                     checkpoint.checkpoint_id
                 )));
             }
-            let chain_head = entries[usize::try_from(checkpoint.end_index)
-                .unwrap_or(usize::MAX.min(entries.len().saturating_sub(1)))]
-            .chain_hash
-            .as_str();
+            let chain_head_index = usize::try_from(checkpoint.end_index)
+                .map_err(|_| ChainError::checkpoint("checkpoint end index overflows usize"))?;
+            let chain_head = entries[chain_head_index].chain_hash.as_str();
             if !ct_eq_inline(&checkpoint.chain_head_hash, chain_head) {
                 return Err(ChainError::checkpoint(format!(
                     "checkpoint {} chain head mismatch",
@@ -487,14 +489,14 @@ impl ReceiptChain {
         now_millis: u64,
         trace_id: String,
     ) -> Result<ReceiptCheckpoint, ChainError> {
-        let start_index = self.last_checkpoint_entry as u64;
-        let end_index = self
+        let start_index = u64::try_from(self.last_checkpoint_entry).unwrap_or(u64::MAX);
+        let end_entry_index = self
             .entries
             .len()
             .checked_sub(1)
-            .ok_or_else(|| ChainError::checkpoint("cannot checkpoint empty entry set"))?
-            as u64;
-        let chain_head_hash = self.entries[end_index as usize].chain_hash.clone();
+            .ok_or_else(|| ChainError::checkpoint("cannot checkpoint empty entry set"))?;
+        let end_index = u64::try_from(end_entry_index).unwrap_or(u64::MAX);
+        let chain_head_hash = self.entries[end_entry_index].chain_hash.clone();
         let commitment_hash =
             compute_checkpoint_commitment(start_index, end_index, &chain_head_hash, &self.entries)?;
 
@@ -583,8 +585,11 @@ fn compute_chain_hash(
     };
     let bytes = serde_json::to_vec(&material)
         .map_err(|err| ChainError::internal(format!("failed to serialize link material: {err}")))?;
-    let digest = Sha256::digest([b"receipt_chain_hash_v1:" as &[u8], &bytes[..]].concat());
-    Ok(format!("sha256:{digest:x}"))
+    let mut hasher = Sha256::new();
+    hasher.update(b"receipt_chain_hash_v1:");
+    hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(&bytes);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 fn compute_checkpoint_commitment(
@@ -593,8 +598,12 @@ fn compute_checkpoint_commitment(
     chain_head_hash: &str,
     entries: &[ReceiptChainEntry],
 ) -> Result<String, ChainError> {
+    let start = usize::try_from(start_index)
+        .map_err(|_| ChainError::checkpoint("checkpoint start index overflows usize"))?;
+    let end = usize::try_from(end_index)
+        .map_err(|_| ChainError::checkpoint("checkpoint end index overflows usize"))?;
     let range = entries
-        .get(start_index as usize..=end_index as usize)
+        .get(start..=end)
         .ok_or_else(|| ChainError::checkpoint("checkpoint range out of bounds"))?;
     let entry_hashes = range
         .iter()
@@ -615,7 +624,7 @@ fn compute_checkpoint_commitment(
         schema_version: RECEIPT_CHAIN_SCHEMA_VERSION,
         start_index,
         end_index,
-        entry_count: range.len() as u64,
+        entry_count: u64::try_from(range.len()).unwrap_or(u64::MAX),
         chain_head_hash,
         entry_chain_hashes: entry_hashes,
     };
@@ -623,8 +632,11 @@ fn compute_checkpoint_commitment(
     let bytes = serde_json::to_vec(&material).map_err(|err| {
         ChainError::internal(format!("failed to serialize checkpoint material: {err}"))
     })?;
-    let digest = Sha256::digest([b"receipt_chain_hash_v1:" as &[u8], &bytes[..]].concat());
-    Ok(format!("sha256:{digest:x}"))
+    let mut hasher = Sha256::new();
+    hasher.update(b"receipt_chain_hash_v1:");
+    hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(&bytes);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 #[cfg(test)]
@@ -1407,5 +1419,102 @@ mod tests {
         let mutated = "sha256:abcdef0123456788";
 
         assert!(!constant_time_eq(original, mutated));
+    }
+
+    #[test]
+    fn chain_hash_length_prefixes_link_material() {
+        #[derive(Serialize)]
+        struct LinkMaterial<'a> {
+            schema_version: &'a str,
+            index: u64,
+            prev_chain_hash: &'a str,
+            receipt_hash: &'a str,
+        }
+
+        let material = LinkMaterial {
+            schema_version: RECEIPT_CHAIN_SCHEMA_VERSION,
+            index: 7,
+            prev_chain_hash: GENESIS_PREV_HASH,
+            receipt_hash: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+        };
+        let bytes = serde_json::to_vec(&material).unwrap();
+        let mut expected_hasher = Sha256::new();
+        expected_hasher.update(b"receipt_chain_hash_v1:");
+        expected_hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+        expected_hasher.update(&bytes);
+
+        let mut unprefixed_hasher = Sha256::new();
+        unprefixed_hasher.update(b"receipt_chain_hash_v1:");
+        unprefixed_hasher.update(&bytes);
+
+        let actual = compute_chain_hash(
+            material.index,
+            material.prev_chain_hash,
+            material.receipt_hash,
+        )
+        .unwrap();
+        let expected = format!("sha256:{:x}", expected_hasher.finalize());
+        let unprefixed = format!("sha256:{:x}", unprefixed_hasher.finalize());
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, unprefixed);
+    }
+
+    #[test]
+    fn checkpoint_commitment_length_prefixes_canonical_material() {
+        #[derive(Serialize)]
+        struct CheckpointMaterial<'a> {
+            schema_version: &'a str,
+            start_index: u64,
+            end_index: u64,
+            entry_count: u64,
+            chain_head_hash: &'a str,
+            entry_chain_hashes: Vec<&'a str>,
+        }
+
+        let mut chain = ReceiptChain::new(ReceiptChainConfig {
+            checkpoint_every_entries: 0,
+            checkpoint_every_millis: 0,
+        });
+        for seq in 0..2_u64 {
+            chain
+                .append(
+                    make_receipt(ExecutionActionType::PolicyTransition, seq),
+                    1_700_002_000_000_u64.saturating_add(seq),
+                    "trace-length-prefix-checkpoint",
+                )
+                .unwrap();
+        }
+
+        let chain_head_hash = chain.entries()[1].chain_hash.as_str();
+        let entry_chain_hashes = chain
+            .entries()
+            .iter()
+            .map(|entry| entry.chain_hash.as_str())
+            .collect::<Vec<_>>();
+        let material = CheckpointMaterial {
+            schema_version: RECEIPT_CHAIN_SCHEMA_VERSION,
+            start_index: 0,
+            end_index: 1,
+            entry_count: 2,
+            chain_head_hash,
+            entry_chain_hashes,
+        };
+        let bytes = serde_json::to_vec(&material).unwrap();
+        let mut expected_hasher = Sha256::new();
+        expected_hasher.update(b"receipt_chain_hash_v1:");
+        expected_hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+        expected_hasher.update(&bytes);
+
+        let mut unprefixed_hasher = Sha256::new();
+        unprefixed_hasher.update(b"receipt_chain_hash_v1:");
+        unprefixed_hasher.update(&bytes);
+
+        let actual = compute_checkpoint_commitment(0, 1, chain_head_hash, chain.entries()).unwrap();
+        let expected = format!("sha256:{:x}", expected_hasher.finalize());
+        let unprefixed = format!("sha256:{:x}", unprefixed_hasher.finalize());
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, unprefixed);
     }
 }

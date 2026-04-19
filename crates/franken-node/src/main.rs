@@ -9789,13 +9789,13 @@ fn handle_remotecap_issue(args: &RemoteCapIssueArgs) -> Result<()> {
         println!(
             "  operations: {}",
             cap.scope()
-                .operations
+                .operations()
                 .iter()
                 .map(|op| op.as_str())
                 .collect::<Vec<_>>()
                 .join(",")
         );
-        println!("  endpoints: {}", cap.scope().endpoint_prefixes.join(","));
+        println!("  endpoints: {}", cap.scope().endpoint_prefixes().join(","));
         println!("  event_code: {}", audit_event.event_code);
     }
 

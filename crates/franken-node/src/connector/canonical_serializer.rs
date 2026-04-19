@@ -569,7 +569,8 @@ fn canonical_decode(bytes: &[u8]) -> Result<Vec<u8>, String> {
     if bytes.len() < 4 {
         return Err("payload too short: need at least 4 bytes for length prefix".to_string());
     }
-    let len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+    let len_u32 = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let len = usize::try_from(len_u32).map_err(|_| "length exceeds platform usize maximum".to_string())?;
     if bytes.len().saturating_sub(4) != len {
         return Err(format!(
             "length mismatch: prefix says {} bytes, got {}",
@@ -3429,7 +3430,7 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
 
         for (thread_id, iteration, byte_len, hash) in final_roundtrip_results.iter() {
             if hash == "ERROR" {
-                error_count += 1;
+                error_count = error_count.saturating_add(1);
             } else {
                 assert!(byte_len > &0, "Valid results should have non-zero length");
                 assert_eq!(hash.len(), 8, "Hash should be valid hex");

@@ -16,8 +16,12 @@ use sha2::{Digest, Sha256};
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -784,8 +788,8 @@ fn canonical_payload(
     // Length-prefixed encoding prevents hash collision attacks via delimiter injection
     format!(
         "v1|{}:{}|{}:{}|issued={}|expires={}|ops={}|endpoints={}|single_use={}",
-        token_id.len(), token_id,
-        issuer_identity.len(), issuer_identity,
+        u64::try_from(token_id.len()).unwrap_or(u64::MAX), token_id,
+        u64::try_from(issuer_identity.len()).unwrap_or(u64::MAX), issuer_identity,
         issued_at_epoch_secs,
         expires_at_epoch_secs,
         operations,
@@ -803,7 +807,8 @@ fn scope_fingerprint(scope: &RemoteScope) -> String {
 fn encode_scope_entries<'a>(entries: impl IntoIterator<Item = &'a str>) -> String {
     let mut encoded = String::new();
     for entry in entries {
-        encoded.push_str(&entry.len().to_string());
+        let entry_len = u64::try_from(entry.len()).unwrap_or(u64::MAX);
+        encoded.push_str(&entry_len.to_string());
         encoded.push(':');
         encoded.push_str(entry);
         encoded.push('|');
@@ -2018,22 +2023,30 @@ mod remote_cap_comprehensive_negative_tests {
         // Create scope with extremely large number of operations and endpoints
         let mut operations = Vec::new();
         let mut endpoints = Vec::new();
+        const MAX_TEST_OPERATIONS: usize = 100; // Bound the test operations
+        const MAX_TEST_ENDPOINTS: usize = 1000; // Bound the test endpoints
 
         // Add all possible operations multiple times
         for _ in 0..1000 {
-            operations.push(RemoteOperation::NetworkEgress);
-            operations.push(RemoteOperation::FederationSync);
-            operations.push(RemoteOperation::RevocationFetch);
-            operations.push(RemoteOperation::RemoteAttestationVerify);
-            operations.push(RemoteOperation::TelemetryExport);
-            operations.push(RemoteOperation::RemoteComputation);
-            operations.push(RemoteOperation::ArtifactUpload);
+            if operations.len() >= MAX_TEST_OPERATIONS {
+                break;
+            }
+            push_bounded(&mut operations, RemoteOperation::NetworkEgress, MAX_TEST_OPERATIONS);
+            push_bounded(&mut operations, RemoteOperation::FederationSync, MAX_TEST_OPERATIONS);
+            push_bounded(&mut operations, RemoteOperation::RevocationFetch, MAX_TEST_OPERATIONS);
+            push_bounded(&mut operations, RemoteOperation::RemoteAttestationVerify, MAX_TEST_OPERATIONS);
+            push_bounded(&mut operations, RemoteOperation::TelemetryExport, MAX_TEST_OPERATIONS);
+            push_bounded(&mut operations, RemoteOperation::RemoteComputation, MAX_TEST_OPERATIONS);
+            push_bounded(&mut operations, RemoteOperation::ArtifactUpload, MAX_TEST_OPERATIONS);
         }
 
         // Add massive number of endpoint prefixes
         for i in 0..10000 {
-            endpoints.push(format!("https://endpoint-{}.example.com", i));
-            endpoints.push(format!("https://service-{}.internal", i));
+            if endpoints.len() >= MAX_TEST_ENDPOINTS {
+                break;
+            }
+            push_bounded(&mut endpoints, format!("https://endpoint-{}.example.com", i), MAX_TEST_ENDPOINTS);
+            push_bounded(&mut endpoints, format!("https://service-{}.internal", i), MAX_TEST_ENDPOINTS);
         }
 
         let massive_scope = RemoteScope::new(operations, endpoints);
@@ -2084,6 +2097,7 @@ mod remote_cap_comprehensive_negative_tests {
 
         // Create multiple single-use tokens
         let mut tokens = Vec::new();
+        const MAX_TEST_TOKENS: usize = 10;
         for i in 0..10 {
             let (token, _) = provider.issue(
                 "operator",
@@ -2094,13 +2108,14 @@ mod remote_cap_comprehensive_negative_tests {
                 true, // single-use
                 &format!("trace-concurrent-{}", i),
             ).expect("token creation");
-            tokens.push(token);
+            push_bounded(&mut tokens, token, MAX_TEST_TOKENS);
         }
 
         let mut gate = CapabilityGate::new("secret-key");
 
         // Simulate concurrent access attempts on the same gate
         let mut results = Vec::new();
+        const MAX_TEST_RESULTS: usize = 10;
         for (i, token) in tokens.iter().enumerate() {
             // Each token should only succeed once
             let result1 = gate.authorize_network(
@@ -2110,7 +2125,7 @@ mod remote_cap_comprehensive_negative_tests {
                 1_700_000_100,
                 &format!("trace-concurrent-first-{}", i),
             );
-            results.push(result1);
+            push_bounded(&mut results, result1, MAX_TEST_RESULTS);
 
             // Second use should fail with replay error
             let result2 = gate.authorize_network(

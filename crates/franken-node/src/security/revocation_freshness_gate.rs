@@ -16,6 +16,13 @@ use std::fmt;
 
 use crate::capacity_defaults::aliases::MAX_CONSUMED_NONCES;
 
+const MAX_FRESHNESS_PROOF_CREDENTIALS: usize = 1024;
+const MAX_FRESHNESS_PROOF_FIELD_BYTES: usize = 4096;
+
+fn len_to_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -114,15 +121,15 @@ impl FreshnessProof {
         hasher.update(b"rfg_freshness_proof_v1:");
         hasher.update(self.timestamp.to_le_bytes());
         // Length-prefix each credential individually
-        hasher.update((self.credentials_checked.len() as u64).to_le_bytes());
+        hasher.update(len_to_u64(self.credentials_checked.len()).to_le_bytes());
         for cred in &self.credentials_checked {
-            hasher.update((cred.len() as u64).to_le_bytes());
+            hasher.update(len_to_u64(cred.len()).to_le_bytes());
             hasher.update(cred.as_bytes());
         }
-        hasher.update((self.nonce.len() as u64).to_le_bytes());
+        hasher.update(len_to_u64(self.nonce.len()).to_le_bytes());
         hasher.update(self.nonce.as_bytes());
         let tier_str = self.tier.to_string();
-        hasher.update((tier_str.len() as u64).to_le_bytes());
+        hasher.update(len_to_u64(tier_str.len()).to_le_bytes());
         hasher.update(tier_str.as_bytes());
         hasher.update(self.epoch.to_le_bytes());
         hasher.finalize().to_vec()
@@ -193,6 +200,52 @@ impl fmt::Display for FreshnessError {
             }
         }
     }
+}
+
+fn validate_action_id(action_id: &str) -> Result<(), FreshnessError> {
+    if action_id.trim().is_empty() {
+        return Err(FreshnessError::ProofTampered {
+            detail: "action_id must not be empty".into(),
+        });
+    }
+    if action_id.len() > MAX_FRESHNESS_PROOF_FIELD_BYTES {
+        return Err(FreshnessError::ProofTampered {
+            detail: format!("action_id must not exceed {MAX_FRESHNESS_PROOF_FIELD_BYTES} bytes"),
+        });
+    }
+    if action_id != action_id.trim() || action_id.chars().any(char::is_whitespace) {
+        return Err(FreshnessError::ProofTampered {
+            detail: "action_id must not contain whitespace".into(),
+        });
+    }
+    if !action_id
+        .bytes()
+        .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
+    {
+        return Err(FreshnessError::ProofTampered {
+            detail: "action_id must use canonical lowercase action syntax".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_trace_id(trace_id: &str) -> Result<(), FreshnessError> {
+    if trace_id.trim().is_empty() {
+        return Err(FreshnessError::ProofTampered {
+            detail: "trace_id must not be empty".into(),
+        });
+    }
+    if trace_id.len() > MAX_FRESHNESS_PROOF_FIELD_BYTES {
+        return Err(FreshnessError::ProofTampered {
+            detail: format!("trace_id must not exceed {MAX_FRESHNESS_PROOF_FIELD_BYTES} bytes"),
+        });
+    }
+    if trace_id != trace_id.trim() || !trace_id.bytes().all(|b| matches!(b, b'!'..=b'~')) {
+        return Err(FreshnessError::ProofTampered {
+            detail: "trace_id must use printable ASCII without whitespace".into(),
+        });
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -281,14 +334,35 @@ impl RevocationFreshnessGate {
                 detail: "nonce must not be empty".into(),
             });
         }
+        if proof.nonce.len() > MAX_FRESHNESS_PROOF_FIELD_BYTES {
+            return Err(FreshnessError::ProofTampered {
+                detail: format!(
+                    "nonce must not exceed {MAX_FRESHNESS_PROOF_FIELD_BYTES} bytes"
+                ),
+            });
+        }
         if proof.signature.trim().is_empty() {
             return Err(FreshnessError::ProofTampered {
                 detail: "signature must not be empty".into(),
             });
         }
+        if proof.signature.len() > MAX_FRESHNESS_PROOF_FIELD_BYTES {
+            return Err(FreshnessError::ProofTampered {
+                detail: format!(
+                    "signature must not exceed {MAX_FRESHNESS_PROOF_FIELD_BYTES} bytes"
+                ),
+            });
+        }
         if proof.credentials_checked.is_empty() {
             return Err(FreshnessError::ProofTampered {
                 detail: "credentials_checked must not be empty".into(),
+            });
+        }
+        if proof.credentials_checked.len() > MAX_FRESHNESS_PROOF_CREDENTIALS {
+            return Err(FreshnessError::ProofTampered {
+                detail: format!(
+                    "credentials_checked must not exceed {MAX_FRESHNESS_PROOF_CREDENTIALS} entries"
+                ),
             });
         }
         if proof
@@ -298,6 +372,17 @@ impl RevocationFreshnessGate {
         {
             return Err(FreshnessError::ProofTampered {
                 detail: "credentials_checked contains an empty credential id".into(),
+            });
+        }
+        if proof
+            .credentials_checked
+            .iter()
+            .any(|credential| credential.len() > MAX_FRESHNESS_PROOF_FIELD_BYTES)
+        {
+            return Err(FreshnessError::ProofTampered {
+                detail: format!(
+                    "credentials_checked contains a credential id over {MAX_FRESHNESS_PROOF_FIELD_BYTES} bytes"
+                ),
             });
         }
 
@@ -321,6 +406,7 @@ impl RevocationFreshnessGate {
     fn consume_nonce(&mut self, nonce: &str) {
         // Consume nonce with bounded eviction to prevent unbounded memory growth.
         if self.consumed_nonces.insert(nonce.to_string()) {
+            // Use the standard push_bounded pattern for consistency with codebase hardening
             while self.consumed_nonces_queue.len() >= MAX_CONSUMED_NONCES {
                 if let Some(oldest) = self.consumed_nonces_queue.pop_front() {
                     self.consumed_nonces.remove(&oldest);
@@ -348,16 +434,8 @@ impl RevocationFreshnessGate {
         if !authenticated {
             return Err(FreshnessError::Unauthenticated);
         }
-        if action_id.trim().is_empty() {
-            return Err(FreshnessError::ProofTampered {
-                detail: "action_id must not be empty".into(),
-            });
-        }
-        if trace_id.trim().is_empty() {
-            return Err(FreshnessError::ProofTampered {
-                detail: "trace_id must not be empty".into(),
-            });
-        }
+        validate_action_id(action_id)?;
+        validate_trace_id(trace_id)?;
 
         let tier = self.classify_action(action_id);
         if proof.tier != tier {
@@ -1539,7 +1617,7 @@ mod tests {
         for pattern in &collision_patterns {
             let p = proof(SafetyTier::Advisory, 100, pattern);
             if g.check(&p, 100, true, false, "telemetry_config", "tr-collision").is_ok() {
-                successful_nonces += 1;
+                successful_nonces = successful_nonces.saturating_add(1);
             }
         }
 
@@ -1581,7 +1659,9 @@ mod tests {
         let err = g.check(&wrong_prefix, 100, true, false, "key_rotate_extended", "tr-wrong").unwrap_err();
         assert_eq!(err.code(), "ERR_RFG_TAMPERED");
 
-        // Test tier bypass through action name manipulation
+        // Test tier bypass through action name manipulation. These must be
+        // rejected before classification so malformed critical action names
+        // cannot fall through to the Advisory default.
         let bypass_attempts = [
             "KEY_ROTATE",           // Case variation
             "key_rotate ",          // Trailing space
@@ -1589,21 +1669,17 @@ mod tests {
             "key\0rotate",          // Null byte injection
             "key_rotate\n",         // Newline injection
             "key_rotate\t",         // Tab injection
+            "\u{202E}key_rotate",   // BiDi override
         ];
 
         for malicious_action in &bypass_attempts {
             let bypass_proof = proof(SafetyTier::Advisory, 100, &format!("bypass-{}", malicious_action.len()));
 
-            // These should either classify correctly as Critical (fail due to tier mismatch)
-            // or classify as Advisory (succeed) - but not bypass Critical protections
-            match g.check(&bypass_proof, 100, true, false, malicious_action, "tr-bypass") {
-                Ok(decision) => {
-                    assert_eq!(decision.tier, SafetyTier::Advisory); // Must be classified as Advisory to succeed
-                }
-                Err(e) => {
-                    assert_eq!(e.code(), "ERR_RFG_TAMPERED"); // Tier mismatch
-                }
-            }
+            let err = g
+                .check(&bypass_proof, 100, true, false, malicious_action, "tr-bypass")
+                .unwrap_err();
+            assert_eq!(err.code(), "ERR_RFG_TAMPERED");
+            assert!(!g.is_nonce_consumed(&bypass_proof.nonce));
         }
 
         // Test staleness calculation manipulation at tier boundaries
@@ -1806,14 +1882,14 @@ mod tests {
             let mut hasher = Sha256::new();
             hasher.update(b"rfg_freshness_proof_v1:");
             hasher.update(manual_tier_proof.timestamp.to_le_bytes());
-            hasher.update((manual_tier_proof.credentials_checked.len() as u64).to_le_bytes());
+            hasher.update(len_to_u64(manual_tier_proof.credentials_checked.len()).to_le_bytes());
             for cred in &manual_tier_proof.credentials_checked {
-                hasher.update((cred.len() as u64).to_le_bytes());
+                hasher.update(len_to_u64(cred.len()).to_le_bytes());
                 hasher.update(cred.as_bytes());
             }
-            hasher.update((manual_tier_proof.nonce.len() as u64).to_le_bytes());
+            hasher.update(len_to_u64(manual_tier_proof.nonce.len()).to_le_bytes());
             hasher.update(manual_tier_proof.nonce.as_bytes());
-            hasher.update((tier_str.len() as u64).to_le_bytes()); // Different tier string
+            hasher.update(len_to_u64(tier_str.len()).to_le_bytes()); // Different tier string
             hasher.update(tier_str.as_bytes());
             hasher.update(manual_tier_proof.epoch.to_le_bytes());
             let manipulated_payload = hasher.finalize().to_vec();
@@ -1887,17 +1963,9 @@ mod tests {
             let id_proof = proof(SafetyTier::Advisory, 100, &format!("id-attack-{}-{}", trace_id.len(), action_id.len()));
             let result = g.check(&id_proof, 100, true, false, action_id, trace_id);
 
-            // Should succeed unless the action/trace IDs are empty after trimming
-            match result {
-                Ok(_) => {
-                    assert!(!trace_id.trim().is_empty());
-                    assert!(!action_id.trim().is_empty());
-                }
-                Err(e) => {
-                    assert_eq!(e.code(), "ERR_RFG_TAMPERED");
-                    assert!(trace_id.trim().is_empty() || action_id.trim().is_empty());
-                }
-            }
+            let err = result.expect_err("malformed action_id/trace_id must fail closed");
+            assert_eq!(err.code(), "ERR_RFG_TAMPERED");
+            assert!(!g.is_nonce_consumed(&id_proof.nonce));
         }
 
         // Signature format injection attacks
@@ -2030,19 +2098,16 @@ mod tests {
             };
             memory_proof.signature = test_sig(&memory_proof);
 
-            // Should handle massive inputs gracefully without crashing
+            // Should reject excessive proof material before signature verification or nonce storage.
             let result = g.check(&memory_proof, 100, true, false, "telemetry_config", "tr-memory");
-
-            match attack_type {
-                "many_credentials" => {
-                    // Should succeed but might be slow
-                    assert!(result.is_ok(), "Many credentials should be handled gracefully");
-                }
-                _ => {
-                    // Should succeed for massive but otherwise valid inputs
-                    assert!(result.is_ok(), "Massive {} should be handled gracefully", attack_type);
-                }
-            }
+            assert!(result.is_err(), "Massive {attack_type} should be rejected");
+            let err = result.unwrap_err();
+            assert_eq!(err.code(), "ERR_RFG_TAMPERED");
+            assert!(
+                format!("{err}").contains("must not exceed")
+                    || format!("{err}").contains("over")
+            );
+            assert!(!g.is_nonce_consumed(&memory_proof.nonce));
         }
 
         // Test nonce capacity exhaustion patterns

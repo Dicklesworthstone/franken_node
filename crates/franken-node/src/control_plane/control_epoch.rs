@@ -702,7 +702,7 @@ mod tests {
         let mut store = EpochStore::new();
         for i in 1..=100_u64 {
             let t = store
-                .epoch_advance(&mhash(i as u32), 1000 + i, &tid(i as u32))
+                .epoch_advance(&mhash(i as u32), 1000_u64.saturating_add(i), &tid(i as u32))
                 .unwrap();
             assert_eq!(t.old_epoch, ControlEpoch::new(i - 1));
             assert_eq!(t.new_epoch, ControlEpoch::new(i));
@@ -716,7 +716,7 @@ mod tests {
         let mut store = EpochStore::new();
         for i in 1..=1000_u64 {
             store
-                .epoch_advance(&mhash(i as u32), 1000 + i, &tid(i as u32))
+                .epoch_advance(&mhash(i as u32), 1000_u64.saturating_add(i), &tid(i as u32))
                 .unwrap();
         }
         assert_eq!(store.epoch_read().value(), 1000);
@@ -724,8 +724,11 @@ mod tests {
         // Verify all transitions are strictly monotonic
         let transitions = store.transitions();
         for (i, t) in transitions.iter().enumerate() {
-            assert_eq!(t.old_epoch.value(), i as u64);
-            assert_eq!(t.new_epoch.value(), (i + 1) as u64);
+            assert_eq!(t.old_epoch.value(), u64::try_from(i).unwrap_or(u64::MAX));
+            assert_eq!(
+                t.new_epoch.value(),
+                u64::try_from(i.saturating_add(1)).unwrap_or(u64::MAX)
+            );
         }
     }
 
@@ -1503,8 +1506,8 @@ mod tests {
             "u64 should handle large usize values safely"
         );
 
-        // Production code should use: u64::try_from(field.len()).unwrap_or(u64::MAX) ✓
-        // NOT: field.len() as u64 ✗ (potential truncation on some platforms)
+        // Production code should use: u32::try_from(field.len()).unwrap_or(u32::MAX) as u64 ✓
+        // NOT: field.len() as u64 ✗ (potential truncation) or u64::try_from().unwrap_or(u64::MAX) ✗ (DoS risk)
     }
 
     #[test]

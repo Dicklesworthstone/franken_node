@@ -2203,7 +2203,7 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         let barrier_id = b.active_barrier().unwrap().barrier_id.clone();
 
         // Attempt to exhaust memory with massive drain ACKs
-        let mut successful_acks = 0;
+        let mut successful_acks: u32 = 0;
         for i in 0..1000 {
             let participant_id = format!("{}-{}", huge_participant_base, i);
             let huge_trace_id = "t".repeat(5000); // Very large trace ID
@@ -2240,9 +2240,9 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
 
             // Create and abort barriers rapidly
             let propose_result = cycle_barrier.propose(
-                cycle,
-                cycle.saturating_add(1),
-                10000_u64.saturating_add(cycle),
+                cycle as u64,
+                (cycle as u64).saturating_add(1),
+                10000_u64.saturating_add(cycle as u64),
                 &format!("cycle-trace-{}-{}", "y".repeat(200), cycle)
             );
 
@@ -2544,6 +2544,7 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         let min_timing = timing_results.iter().min().unwrap();
         let timing_ratio = max_timing.as_nanos() as f64 / min_timing.as_nanos() as f64;
 
+        assert!(timing_ratio.is_finite(), "Timing ratio must be finite for meaningful comparison");
         assert!(
             timing_ratio < 5.0,
             "Participant validation timing variance too high: {}",
@@ -2580,6 +2581,7 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         let min_barrier_timing = barrier_timing_results.iter().min().unwrap();
         let barrier_timing_ratio = max_barrier_timing.as_nanos() as f64 / min_barrier_timing.as_nanos() as f64;
 
+        assert!(barrier_timing_ratio.is_finite(), "Barrier timing ratio must be finite for meaningful comparison");
         assert!(
             barrier_timing_ratio < 4.0,
             "Barrier ID validation timing variance too high: {}",
@@ -2606,6 +2608,7 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         let min_timeout_timing = timeout_timing_results.iter().min().unwrap();
         let timeout_timing_ratio = max_timeout_timing.as_nanos() as f64 / min_timeout_timing.as_nanos() as f64;
 
+        assert!(timeout_timing_ratio.is_finite(), "Timeout timing ratio must be finite for meaningful comparison");
         assert!(
             timeout_timing_ratio < 3.0,
             "Timeout check timing variance too high: {}",
@@ -2645,7 +2648,7 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
 
         // Create many barriers to flood audit history
         for i in 0..MAX_BARRIER_HISTORY.saturating_add(500) {
-            let propose_result = b.propose(i, i.saturating_add(1), (i as u64).saturating_mul(1000), &format!("audit-flood-{}", i));
+            let propose_result = b.propose(i as u64, (i as u64).saturating_add(1), (i as u64).saturating_mul(1000), &format!("audit-flood-{}", i));
 
             if let Ok(_) = propose_result {
                 // Complete barrier immediately
@@ -2659,7 +2662,10 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
                 };
 
                 if b.record_drain_ack(ack).is_ok() {
-                    let _ = b.try_commit((i as u64).saturating_mul(1000).saturating_add(100), &format!("commit-{}", i));
+                    // Note: In stress test, commit may fail due to overflow - that's expected behavior
+                    if b.try_commit((i as u64).saturating_mul(1000).saturating_add(100), &format!("commit-{}", i)).is_err() {
+                        // If commit fails (e.g., overflow), that's part of stress testing - continue
+                    }
                 }
             } else {
                 // If barrier creation fails (e.g., overflow), abort the test

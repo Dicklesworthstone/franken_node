@@ -1749,7 +1749,7 @@ mod tests {
             "trace\0null",           // Null byte
             "trace\x01\x02control", // Control characters
             "trace\r\ninjection",   // Line breaks
-            "trace\x7F\x80\xFF",    // High bytes and DEL
+            &format!("trace\x7F{}", String::from_utf8_lossy(&[0x80, 0xFF])), // High bytes and DEL
             "trace\u{FFFE}\u{FFFF}", // Unicode non-characters
         ];
 

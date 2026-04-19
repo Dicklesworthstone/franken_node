@@ -32,6 +32,18 @@ fn push_bounded_box(
     items.push(item);
 }
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 use super::hardening_state_machine::HardeningLevel;
 
 /// Stable event codes for structured logging.
@@ -197,7 +209,17 @@ impl ReliabilityTelemetry {
         if self.sample_count == 0 {
             0.0
         } else {
-            self.nonconforming_count as f64 / self.sample_count as f64
+            let nonconforming_f64 = if self.nonconforming_count <= (1u64 << 53) {
+                self.nonconforming_count as f64
+            } else {
+                (1u64 << 53) as f64 // Cap to prevent precision loss
+            };
+            let sample_f64 = if self.sample_count <= (1u64 << 53) {
+                self.sample_count as f64
+            } else {
+                (1u64 << 53) as f64 // Cap to prevent precision loss
+            };
+            nonconforming_f64 / sample_f64
         }
     }
 }
@@ -208,7 +230,17 @@ impl SystemState {
         if self.memory_budget_bytes == 0 {
             return 1.0; // No budget = fully consumed
         }
-        self.memory_used_bytes as f64 / self.memory_budget_bytes as f64
+        let used_f64 = if self.memory_used_bytes <= (1u64 << 53) {
+            self.memory_used_bytes as f64
+        } else {
+            (1u64 << 53) as f64 // Cap to prevent precision loss
+        };
+        let budget_f64 = if self.memory_budget_bytes <= (1u64 << 53) {
+            self.memory_budget_bytes as f64
+        } else {
+            (1u64 << 53) as f64 // Cap to prevent precision loss
+        };
+        used_f64 / budget_f64
     }
 }
 
@@ -286,8 +318,8 @@ impl GuardrailMonitor for MemoryBudgetGuardrail {
             GuardrailVerdict::Block {
                 reason: format!(
                     "memory utilization {:.1}% exceeds block threshold {:.1}%",
-                    util * 100.0,
-                    self.block_threshold * 100.0,
+                    if (util * 100.0).is_finite() { util * 100.0 } else { 0.0 },
+                    if (self.block_threshold * 100.0).is_finite() { self.block_threshold * 100.0 } else { 0.0 },
                 ),
                 budget_id: self.budget_id.clone(),
             }
@@ -295,8 +327,8 @@ impl GuardrailMonitor for MemoryBudgetGuardrail {
             GuardrailVerdict::Warn {
                 reason: format!(
                     "memory utilization {:.1}% exceeds warn threshold {:.1}%",
-                    util * 100.0,
-                    self.warn_threshold * 100.0,
+                    if (util * 100.0).is_finite() { util * 100.0 } else { 0.0 },
+                    if (self.warn_threshold * 100.0).is_finite() { self.warn_threshold * 100.0 } else { 0.0 },
                 ),
             }
         } else {
@@ -388,7 +420,11 @@ impl MemoryTailRiskGuardrail {
     /// One-sided empirical-Bernstein upper bound for bounded `[0, 1]` telemetry.
     fn upper_confidence_bound(&self, telemetry: &MemoryTailRiskTelemetry) -> f64 {
         let t = telemetry.sanitized();
-        let n = t.sample_count as f64;
+        let n = if t.sample_count <= (1u64 << 53) {
+            t.sample_count as f64
+        } else {
+            (1u64 << 53) as f64 // Cap to prevent precision loss
+        };
         if t.sample_count == 0 {
             return 0.0;
         }
@@ -419,8 +455,8 @@ impl GuardrailMonitor for MemoryTailRiskGuardrail {
             GuardrailVerdict::Block {
                 reason: format!(
                     "tail-risk memory envelope {:.1}% exceeds block threshold {:.1}% (n={}, alpha={:.4})",
-                    tail_util * 100.0,
-                    self.block_threshold * 100.0,
+                    if (tail_util * 100.0).is_finite() { tail_util * 100.0 } else { 0.0 },
+                    if (self.block_threshold * 100.0).is_finite() { self.block_threshold * 100.0 } else { 0.0 },
                     telemetry.sample_count,
                     self.alpha,
                 ),
@@ -430,8 +466,8 @@ impl GuardrailMonitor for MemoryTailRiskGuardrail {
             GuardrailVerdict::Warn {
                 reason: format!(
                     "tail-risk memory envelope {:.1}% exceeds warn threshold {:.1}% (n={}, alpha={:.4})",
-                    tail_util * 100.0,
-                    self.warn_threshold * 100.0,
+                    if (tail_util * 100.0).is_finite() { tail_util * 100.0 } else { 0.0 },
+                    if (self.warn_threshold * 100.0).is_finite() { self.warn_threshold * 100.0 } else { 0.0 },
                     telemetry.sample_count,
                     self.alpha,
                 ),
@@ -529,7 +565,11 @@ impl ConformalRiskGuardrail {
         if t.sample_count == 0 {
             return 0.0;
         }
-        let n = t.sample_count as f64;
+        let n = if t.sample_count <= (1u64 << 53) {
+            t.sample_count as f64
+        } else {
+            (1u64 << 53) as f64 // Cap to prevent precision loss
+        };
         let p_hat = t.empirical_error_rate();
         let var = p_hat * (1.0 - p_hat);
         let log_term = self.anytime_log_term(n);
@@ -849,7 +889,7 @@ impl GuardrailMonitorSet {
                 dominant_verdict = verdict.clone();
             }
             if let GuardrailVerdict::Block { budget_id, .. } = &verdict {
-                blocking_budget_ids.push(budget_id.clone());
+                push_bounded(&mut blocking_budget_ids, budget_id.clone(), MAX_MONITORS);
             }
             findings.push(GuardrailFinding {
                 monitor_name: monitor.name().to_string(),
@@ -1658,7 +1698,7 @@ mod tests {
         let mut state = healthy_state();
 
         for dur in [99, 96, 92, 89, 50] {
-            state.durability_level = dur as f64 / 100.0;
+            state.durability_level = f64::from(dur) / 100.0;
             let verdict = guard.check(&state);
             if dur < 90 {
                 assert!(verdict.is_blocked());
@@ -2122,13 +2162,23 @@ mod tests {
                 let test_states = [
                     {
                         let mut s = healthy_state();
-                        s.memory_used_bytes = (s.memory_budget_bytes as f64 * memory_guard.block_threshold) as u64;
+                        let computed = s.memory_budget_bytes as f64 * memory_guard.block_threshold;
+                        s.memory_used_bytes = if computed.is_finite() && computed >= 0.0 && computed <= u64::MAX as f64 {
+                            computed as u64
+                        } else {
+                            s.memory_budget_bytes // Safe fallback
+                        };
                         s.durability_level = durability_guard.min_durability;
                         s
                     },
                     {
                         let mut s = healthy_state();
-                        s.memory_used_bytes = (s.memory_budget_bytes as f64 * memory_guard.warn_threshold) as u64;
+                        let computed = s.memory_budget_bytes as f64 * memory_guard.warn_threshold;
+                        s.memory_used_bytes = if computed.is_finite() && computed >= 0.0 && computed <= u64::MAX as f64 {
+                            computed as u64
+                        } else {
+                            s.memory_budget_bytes // Safe fallback
+                        };
                         s.durability_level = durability_guard.min_durability + durability_guard.warn_margin;
                         s
                     },

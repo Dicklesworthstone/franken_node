@@ -11,9 +11,12 @@ use sha2::{Digest, Sha256};
 
 /// Hardening: Push with bounded capacity to prevent memory exhaustion attacks
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        return;
+    }
     if items.len() >= cap {
         let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
@@ -1401,25 +1404,40 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
 
         // Test 2: Evidence reference and trace ID injection
         let ref_trace_attacks = vec![
-            ("evidence\x00null", "trace\r\ninjection"),
-            ("evidence\u{202E}spoofed", "trace\u{FEFF}invisible"),
-            ("<script>evidence</script>", "'; DROP trace; --"),
+            ("evidence\x00null".to_string(), "trace\r\ninjection".to_string()),
+            (
+                "evidence\u{202E}spoofed".to_string(),
+                "trace\u{FEFF}invisible".to_string(),
+            ),
+            (
+                "<script>evidence</script>".to_string(),
+                "'; DROP trace; --".to_string(),
+            ),
             ("evidence".repeat(100000), "trace".repeat(100000)),
-            ("evi\u{D800}dence", "tra\u{DFFF}ce"), // Surrogate pairs
+            (
+                format!(
+                    "evi{}dence",
+                    String::from_utf8_lossy(&[0xED, 0xA0, 0x80])
+                ),
+                format!(
+                    "tra{}ce",
+                    String::from_utf8_lossy(&[0xED, 0xBF, 0xBF])
+                ),
+            ),
         ];
 
-        for (evidence_ref, trace_id) in ref_trace_attacks {
+        for (evidence_ref, trace_id) in &ref_trace_attacks {
             let observation = AdversaryObservation::new(
                 "injection_test_principal",
                 0.3,
                 50,
-                evidence_ref.clone(),
-                trace_id.clone(),
+                evidence_ref.as_str(),
+                trace_id.as_str(),
             ).unwrap();
 
             let result = graph.ingest(&observation);
             if let Ok(posterior) = result {
-                assert_eq!(posterior.last_trace_id, trace_id,
+                assert_eq!(posterior.last_trace_id, *trace_id,
                     "Trace ID should be preserved: '{}'", trace_id.escape_debug());
                 assert!(!posterior.evidence_hash.is_empty(),
                     "Evidence hash should be generated despite malicious input");
@@ -2201,39 +2219,105 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         // Test 1: Advanced hash collision and preimage attacks
         let cryptographic_attack_vectors = vec![
             // Length extension attack attempts
-            ("evidence", "trace", "evidence\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x08", "trace"),
+            (
+                "evidence".to_string(),
+                "trace".to_string(),
+                format!(
+                    "evidence{}",
+                    String::from_utf8_lossy(&[
+                        0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                        0x00, 0x00, 0x00, 0x00, 0x00, 0x08,
+                    ])
+                ),
+                "trace".to_string(),
+            ),
             // Hash function state manipulation
-            ("a".repeat(55), "trace1", "a".repeat(56), "trace1"), // MD5 block boundary
-            ("b".repeat(63), "trace2", "b".repeat(64), "trace2"), // SHA-256 block boundary
+            (
+                "a".repeat(55),
+                "trace1".to_string(),
+                "a".repeat(56),
+                "trace1".to_string(),
+            ), // MD5 block boundary
+            (
+                "b".repeat(63),
+                "trace2".to_string(),
+                "b".repeat(64),
+                "trace2".to_string(),
+            ), // SHA-256 block boundary
 
             // Unicode normalization attacks on evidence content
-            ("café", "trace", "cafe\u{0301}", "trace"), // NFC vs NFD
-            ("²", "trace", "\u{00B2}", "trace"), // Different Unicode representations
-            ("🚀", "trace", "\u{1F680}", "trace"), // Emoji vs codepoint
+            (
+                "café".to_string(),
+                "trace".to_string(),
+                "cafe\u{0301}".to_string(),
+                "trace".to_string(),
+            ), // NFC vs NFD
+            (
+                "²".to_string(),
+                "trace".to_string(),
+                "\u{00B2}".to_string(),
+                "trace".to_string(),
+            ), // Different Unicode representations
+            (
+                "🚀".to_string(),
+                "trace".to_string(),
+                "\u{1F680}".to_string(),
+                "trace".to_string(),
+            ), // Emoji vs codepoint
 
             // Null byte and control character injection in evidence
-            ("evidence\x00hidden", "trace", "evidence", "trace\x00hidden"),
-            ("evi\rdence", "tr\nace", "evi\ndence", "tr\race"),
+            (
+                "evidence\x00hidden".to_string(),
+                "trace".to_string(),
+                "evidence".to_string(),
+                "trace\x00hidden".to_string(),
+            ),
+            (
+                "evi\rdence".to_string(),
+                "tr\nace".to_string(),
+                "evi\ndence".to_string(),
+                "tr\race".to_string(),
+            ),
 
             // JSON/XML structure injection in evidence content
-            ("{\"malicious\":\"evidence\"}", "trace", "evidence", "{\"malicious\":\"trace\"}"),
-            ("<evidence>attack</evidence>", "trace", "evidence", "<trace>attack</trace>"),
+            (
+                "{\"malicious\":\"evidence\"}".to_string(),
+                "trace".to_string(),
+                "evidence".to_string(),
+                "{\"malicious\":\"trace\"}".to_string(),
+            ),
+            (
+                "<evidence>attack</evidence>".to_string(),
+                "trace".to_string(),
+                "evidence".to_string(),
+                "<trace>attack</trace>".to_string(),
+            ),
 
             // Binary data and encoding edge cases
-            ("\xFF\xFE\xFD\xFC", "trace", "evidence", "\xFF\xFE\xFD\xFC"),
-            ("evidence", "\xC0\x80", "evidence", "\xE0\x80\x80"), // Overlong UTF-8
+            (
+                String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD, 0xFC]).into_owned(),
+                "trace".to_string(),
+                "evidence".to_string(),
+                String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD, 0xFC]).into_owned(),
+            ),
+            (
+                "evidence".to_string(),
+                String::from_utf8_lossy(&[0xC0, 0x80]).into_owned(),
+                "evidence".to_string(),
+                String::from_utf8_lossy(&[0xE0, 0x80, 0x80]).into_owned(),
+            ), // Overlong UTF-8
         ];
 
         let mut seen_hashes = std::collections::HashSet::new();
 
-        for (evidence1, trace1, evidence2, trace2) in cryptographic_attack_vectors {
+        for (evidence1, trace1, evidence2, trace2) in &cryptographic_attack_vectors {
             // Test first evidence/trace combination
             let obs1 = AdversaryObservation::new(
                 "hash_attack_test",
                 0.3,
                 100,
-                evidence1,
-                trace1,
+                evidence1.as_str(),
+                trace1.as_str(),
             ).unwrap();
 
             // Test second evidence/trace combination
@@ -2241,8 +2325,8 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 "hash_attack_test",
                 0.7,
                 100,
-                evidence2,
-                trace2,
+                evidence2.as_str(),
+                trace2.as_str(),
             ).unwrap();
 
             let result1 = graph.ingest(&obs1).unwrap();

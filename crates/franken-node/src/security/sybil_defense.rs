@@ -30,7 +30,7 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     }
     if items.len() >= cap {
         let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
@@ -276,7 +276,8 @@ impl TrustAggregator {
         sorted.sort_by(|a, b| a.total_cmp(b));
 
         let n = sorted.len();
-        let trim_count = (n as f64 * self.trim_ratio).floor() as usize;
+        let n_f64 = u32::try_from(n).unwrap_or(u32::MAX) as f64;
+        let trim_count = (n_f64 * self.trim_ratio).floor() as usize;
 
         let trimmed = if 2 * trim_count >= n {
             // If we'd trim everything, just use all values.
@@ -295,7 +296,8 @@ impl TrustAggregator {
                 "non-finite sum in trimmed mean",
             ));
         }
-        let mean = sum / trimmed.len() as f64;
+        let trimmed_len_f64 = u32::try_from(trimmed.len()).unwrap_or(u32::MAX) as f64;
+        let mean = sum / trimmed_len_f64;
 
         Ok(AggregationResult {
             value: mean,
@@ -402,8 +404,9 @@ impl StakeWeighter {
             return self.base_weight;
         }
 
-        let progress =
-            (node.verified_history_len as f64 / self.established_threshold as f64).min(1.0);
+        let history_len_f64 = u64::try_from(node.verified_history_len).unwrap_or(u64::MAX) as f64;
+        let threshold_f64 = u64::try_from(self.established_threshold).unwrap_or(u64::MAX) as f64;
+        let progress = (history_len_f64 / threshold_f64).min(1.0);
 
         // Logarithmic growth: monotonically increasing, slow start, fast middle
         let log_progress = (1.0 + progress * (std::f64::consts::E - 1.0)).ln();
@@ -617,7 +620,9 @@ impl SybilDetector {
                         })
                         .count();
 
-                    if new_count as f64 / matches.len() as f64 >= 0.8 {
+                    let new_count_f64 = u32::try_from(new_count).unwrap_or(u32::MAX) as f64;
+                    let matches_len_f64 = u32::try_from(matches.len()).unwrap_or(u32::MAX) as f64;
+                    if new_count_f64 / matches_len_f64 >= 0.8 {
                         coordinated_group.extend(matches);
                     }
                 }
@@ -2438,7 +2443,8 @@ mod sybil_defense_negative_path_tests {
                 trim_ratio, deviation, expected_honest_mean, result.value);
 
             // Verify trim count calculation
-            let expected_trim_count = (combined_values.len() as f64 * trim_ratio).floor() as usize * 2;
+            let len_f64 = u32::try_from(combined_values.len()).unwrap_or(u32::MAX) as f64;
+            let expected_trim_count = (len_f64 * trim_ratio).floor() as usize * 2;
             let actual_trim_count = result.trimmed_count;
 
             // Allow for edge cases where trimming would eliminate all values
