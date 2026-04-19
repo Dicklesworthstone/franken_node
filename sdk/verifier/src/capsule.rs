@@ -2415,6 +2415,13 @@ mod tests {
                    "High coefficient of variation for '{}': {:.3}", test_name, coefficient_of_variation);
 
             // 99th percentile should not be dramatically higher than median (indicating outliers)
+            assert!(
+                p95 <= p99,
+                "p95 should not exceed p99 for '{}': p95={:.0}ns, p99={:.0}ns",
+                test_name,
+                p95,
+                p99
+            );
             let outlier_ratio = p99 / median;
             assert!(outlier_ratio < 10.0,
                    "Excessive outliers for '{}': p99/median ratio={:.3}", test_name, outlier_ratio);

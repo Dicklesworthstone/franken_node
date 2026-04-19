@@ -333,15 +333,15 @@ mod tests {
     fn negative_sdk_event_with_control_characters_and_large_details_handles_safely() {
         // Test SdkEvent with various problematic detail strings
         let problematic_details = vec![
-            "",                                    // Empty detail
-            "\0null\x01control\x7fchars",         // Control characters
-            "detail\nwith\nnewlines",             // Multiline content
-            "🚀🔥💀",                  // Unicode emoji
-            "\u{FFFF}\u{10FFFF}",     // Max Unicode codepoints
-            "x".repeat(10_000),                   // Very long detail
-            "{\"malicious\": \"json\"}",          // Potential JSON injection
-            "<script>alert('xss')</script>",      // Potential XSS
-            "../../etc/passwd",                   // Path traversal pattern
+            String::new(),                          // Empty detail
+            "\0null\x01control\x7fchars".into(),    // Control characters
+            "detail\nwith\nnewlines".into(),        // Multiline content
+            "🚀🔥💀".into(),                        // Unicode emoji
+            "\u{FFFF}\u{10FFFF}".into(),            // Max Unicode codepoints
+            "x".repeat(10_000),                     // Very long detail
+            "{\"malicious\": \"json\"}".into(),     // Potential JSON injection
+            "<script>alert('xss')</script>".into(), // Potential XSS
+            "../../etc/passwd".into(),              // Path traversal pattern
         ];
 
         for detail in problematic_details {
@@ -543,7 +543,7 @@ mod tests {
         assert_eq!(events.len(), 1000);
 
         // Verify all events are independently stored
-        for (idx, event) in events.iter().enumerate() {
+        for (_idx, event) in events.iter().enumerate() {
             assert!(event.detail.contains("concurrent_test"));
             let cloned = event.clone();
             assert_eq!(cloned.detail, event.detail);
@@ -592,7 +592,7 @@ mod tests {
         ];
 
         for (idx, detail) in unicode_edge_cases.into_iter().enumerate() {
-            let event = SdkEvent::new(CAPSULE_SIGNED, detail.clone());
+            let event = SdkEvent::new(CAPSULE_SIGNED, detail);
 
             assert_eq!(event.event_code, CAPSULE_SIGNED);
             assert_eq!(event.detail, detail);
@@ -712,7 +712,7 @@ mod tests {
         }
 
         // Verify all events are still accessible and correct
-        for (idx, event) in large_events.iter().enumerate() {
+        for (_idx, event) in large_events.iter().enumerate() {
             assert!(event.detail.starts_with("memory_pressure_test_"));
             assert_eq!(event.event_code, CAPSULE_VERDICT_REPRODUCED);
 
@@ -791,7 +791,7 @@ mod tests {
             format!("{}{}attack{}{}", "\u{202E}", "\u{200B}", "\u{200C}", "\u{202D}"),
         ];
 
-        for (i, malicious_detail) in bidi_attack_patterns.iter().enumerate() {
+        for (_i, malicious_detail) in bidi_attack_patterns.iter().enumerate() {
             let event = SdkEvent::new(CAPSULE_CREATED, malicious_detail.clone());
 
             // Should store BiDi characters without interpretation or corruption
@@ -989,25 +989,31 @@ mod tests {
         // Extreme: Timing attacks based on version string processing complexity
         let complexity_test_cases = vec![
             // Simple baseline
-            ("vsdk-v1.0", "baseline"),
+            ("vsdk-v1.0".to_string(), "baseline"),
 
             // Repeated patterns that might stress string comparison
-            (&("vsdk-v1.0".to_owned() + &"x".repeat(1000)), "long_suffix"),
-            (&("v".repeat(1000) + "sdk-v1.0"), "long_prefix"),
-            (&("vs".repeat(500) + "dk-v1.0"), "repeated_prefix"),
+            ("vsdk-v1.0".to_owned() + &"x".repeat(1000), "long_suffix"),
+            ("v".repeat(1000) + "sdk-v1.0", "long_prefix"),
+            ("vs".repeat(500) + "dk-v1.0", "repeated_prefix"),
 
             // Patterns that might stress specific algorithms
-            (&("vsdk-".to_string() + &"a".repeat(1000)), "no_version"),
-            (&("vsdk-v".to_string() + &"1".repeat(500)), "repeated_digits"),
-            (&("vsdk-v1.".to_string() + &"0".repeat(500)), "repeated_zeros"),
+            ("vsdk-".to_string() + &"a".repeat(1000), "no_version"),
+            ("vsdk-v".to_string() + &"1".repeat(500), "repeated_digits"),
+            ("vsdk-v1.".to_string() + &"0".repeat(500), "repeated_zeros"),
 
             // Unicode complexity
-            ("vsdk-v1🚀.0🔥", "unicode_emoji"),
-            (&("vsdk-v1".to_string() + &"\u{0300}".repeat(100) + ".0"), "combining_chars"),
+            ("vsdk-v1🚀.0🔥".to_string(), "unicode_emoji"),
+            (
+                "vsdk-v1".to_string() + &"\u{0300}".repeat(100) + ".0",
+                "combining_chars",
+            ),
 
             // Nested structure patterns
-            (&("vsdk-v".to_string() + &"(())".repeat(250)), "nested_parens"),
-            (&("{".repeat(500) + "vsdk-v1.0" + &"}".repeat(500)), "nested_braces"),
+            ("vsdk-v".to_string() + &"(())".repeat(250), "nested_parens"),
+            (
+                "{".repeat(500) + "vsdk-v1.0" + &"}".repeat(500),
+                "nested_braces",
+            ),
         ];
 
         let mut timing_samples = std::collections::HashMap::new();
@@ -1088,8 +1094,8 @@ mod tests {
             "detail\"}/*injection*/,\"evil\":true",
         ];
 
-        for (i, injection_attempt) in json_injection_patterns.iter().enumerate() {
-            let event = SdkEvent::new(CAPSULE_REPLAY_START, injection_attempt.clone());
+        for (_i, injection_attempt) in json_injection_patterns.iter().enumerate() {
+            let event = SdkEvent::new(CAPSULE_REPLAY_START, *injection_attempt);
 
             // Event should store injection attempt literally without interpretation
             assert_eq!(event.event_code, CAPSULE_REPLAY_START);
@@ -1140,6 +1146,7 @@ mod tests {
         // Test versions with different "closeness" to the correct version
         let comparison_test_cases = vec![
             // Differ at different positions
+            (baseline_version, "baseline"),
             ("xsdk-v1.0", "first_char_diff"),      // Differs at position 0
             ("vsdk-v2.0", "version_diff"),         // Differs at position 7
             ("vsdk-v1.1", "minor_diff"),           // Differs at position 9
@@ -1192,7 +1199,7 @@ mod tests {
                avg_time, max_time, min_time, timing_variance_ratio);
 
         // No individual test case should be dramatically different
-        for (test_name, (median, min, max)) in &timing_results {
+        for (test_name, (median, _min, _max)) in &timing_results {
             let individual_ratio = median / avg_time;
             assert!(individual_ratio < 3.0 && individual_ratio > 0.3,
                    "Test case {} has suspicious timing: median={:.0}ns, avg={:.0}ns, ratio={:.2}",
@@ -1223,6 +1230,8 @@ mod tests {
         );
 
         for (test_name, original_constant, malicious_value) in privilege_escalation_attempts {
+            assert_ne!(original_constant, malicious_value);
+
             // Verify constants remain immutable and correct
             match test_name {
                 "bypass_posture" => {
