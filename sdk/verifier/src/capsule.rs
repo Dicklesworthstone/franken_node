@@ -972,13 +972,17 @@ mod tests {
                 // If it passes, the field isn't empty after trim, which is fine
                 assert!(!capsule.manifest.capsule_id.trim().is_empty());
             }
+            Err(_) => {
+                // Other errors are not expected for this test case but should not panic
+            }
         }
 
         let mut capsule2 = build_reference_capsule();
         capsule2.manifest.claim_type = "\u{00A0}\u{2000}\u{2001}".to_string(); // Non-breaking spaces
         match validate_manifest(&capsule2.manifest) {
             Err(CapsuleError::ManifestIncomplete(_)) => {}, // Expected if considered empty
-            Ok(_) => {} // Fine if non-breaking spaces aren't considered empty
+            Ok(_) => {}, // Fine if non-breaking spaces aren't considered empty
+            Err(_) => {} // Other errors are not expected for this test case
         }
     }
 
@@ -1163,7 +1167,7 @@ mod tests {
 
     #[test]
     fn negative_compute_signing_payload_with_boundary_manifest_sizes() {
-        let mut capsule = build_reference_capsule();
+        let capsule = build_reference_capsule();
 
         // Test with minimal manifest fields (empty strings where allowed)
         let mut minimal_capsule = capsule.clone();
@@ -1243,7 +1247,7 @@ mod tests {
         assert!(!ct_eq_bytes(&large1, &large3)); // Same content, different length
 
         // Test with arrays differing only in last byte
-        let mut almost_same1 = vec![42u8; 1000];
+        let almost_same1 = vec![42u8; 1000];
         let mut almost_same2 = vec![42u8; 1000];
         almost_same2[999] = 43;  // Change last byte
 
@@ -1621,7 +1625,7 @@ mod tests {
 
         let hash_canonical = deterministic_hash(canonical_form);
         let hash_decomposed = deterministic_hash(decomposed_form);
-        let hash_lookalike = deterministic_hash(malicious_lookalike);
+        let _hash_lookalike = deterministic_hash(malicious_lookalike);
 
         // Different Unicode representations should produce different hashes
         // (no normalization should be applied)
@@ -1696,7 +1700,7 @@ mod tests {
                     // If accepted, ensure it doesn't compromise security
                     // (the test just ensures no panic/crash occurs)
                 }
-                Err(other_err) => {
+                Err(_other_err) => {
                     // Other errors are also acceptable as long as no crash
                 }
             }
@@ -2064,12 +2068,14 @@ mod tests {
         }
 
         // Test resistance to second preimage attacks via crafted payloads
+        let collision_prefix = format!("{}collision", base_payload);
+        let collision_suffix = format!("collision{}", base_payload);
         let second_preimage_attempts = vec![
             // Try to create payload that when combined with different inputs produces same hash
             "crafted_payload_attempt_1",
             "crafted_payload_attempt_2",
-            &format!("{}collision", base_payload),
-            &format!("collision{}", base_payload),
+            &collision_prefix,
+            &collision_suffix,
         ];
 
         for preimage_attempt in second_preimage_attempts {
