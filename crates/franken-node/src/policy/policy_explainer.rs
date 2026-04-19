@@ -59,6 +59,69 @@ const DIAGNOSTIC_VOCABULARY: &[&str] = &[
     "data-driven estimate",
 ];
 
+const MAX_EXPLAINED_BLOCKED_ALTERNATIVES: usize = 256;
+const MAX_GUARDRAILS_CHECKED: usize = 1024;
+const MAX_GUARDRAILS_PER_BLOCKED_EXPLANATION: usize = 50;
+const MAX_REASONS_PER_BLOCKED_EXPLANATION: usize = 50;
+
+fn normalize_wording_text(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}' => {}
+            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => {}
+            '\u{FB00}' => normalized.push_str("ff"),
+            '\u{FB01}' => normalized.push_str("fi"),
+            '\u{FB02}' => normalized.push_str("fl"),
+            '\u{FB03}' => normalized.push_str("ffi"),
+            '\u{FB04}' => normalized.push_str("ffl"),
+            '\u{FB05}' => normalized.push_str("st"),
+            '\u{FB06}' => normalized.push_str("st"),
+            '\u{FF01}'..='\u{FF5E}' => {
+                let ascii = char::from_u32(ch as u32 - 0xFEE0).unwrap_or(ch);
+                for lower in ascii.to_lowercase() {
+                    normalized.push(lower);
+                }
+            }
+            _ => {
+                for lower in ch.to_lowercase() {
+                    normalized.push(lower);
+                }
+            }
+        }
+    }
+    normalized
+}
+
+fn valid_probability(value: f64) -> Option<f64> {
+    if value.is_finite() && (0.0..=1.0).contains(&value) {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn valid_confidence_interval((lo, hi): (f64, f64)) -> Option<(f64, f64)> {
+    if lo.is_finite() && hi.is_finite() && (0.0..=1.0).contains(&lo) && lo <= hi && hi <= 1.0 {
+        Some((lo, hi))
+    } else {
+        None
+    }
+}
+
+fn sanitize_for_json(explanation: &PolicyExplanation) -> PolicyExplanation {
+    let mut sanitized = explanation.clone();
+    sanitized.diagnostic_confidence.posterior_prob = sanitized
+        .diagnostic_confidence
+        .posterior_prob
+        .and_then(valid_probability);
+    sanitized.diagnostic_confidence.confidence_interval = sanitized
+        .diagnostic_confidence
+        .confidence_interval
+        .and_then(valid_confidence_interval);
+    sanitized
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -139,12 +202,12 @@ pub struct WordingValidation {
 /// [EVD-EXPLAIN-002] on pass, [EVD-EXPLAIN-003] on failure.
 pub fn validate_wording(explanation: &PolicyExplanation) -> WordingValidation {
     let mut violations = Vec::new();
-    let diag_text = explanation.diagnostic_confidence.summary.to_lowercase();
-    let guar_text = explanation.guarantee_confidence.summary.to_lowercase();
+    let diag_text = normalize_wording_text(&explanation.diagnostic_confidence.summary);
+    let guar_text = normalize_wording_text(&explanation.guarantee_confidence.summary);
 
     // Diagnostic section must not use guarantee vocabulary.
     for term in GUARANTEE_VOCABULARY {
-        if diag_text.contains(&term.to_lowercase()) {
+        if diag_text.contains(&normalize_wording_text(term)) {
             violations.push(format!(
                 "diagnostic section contains guarantee term: '{term}'"
             ));
@@ -153,7 +216,7 @@ pub fn validate_wording(explanation: &PolicyExplanation) -> WordingValidation {
 
     // Guarantee section must not use diagnostic vocabulary.
     for term in DIAGNOSTIC_VOCABULARY {
-        if guar_text.contains(&term.to_lowercase()) {
+        if guar_text.contains(&normalize_wording_text(term)) {
             violations.push(format!(
                 "guarantee section contains diagnostic term: '{term}'"
             ));
@@ -221,7 +284,13 @@ impl PolicyExplainer {
 
         if let Some(ref chosen) = outcome.chosen {
             let candidates: Vec<CandidateRef> = std::iter::once(chosen.clone())
-                .chain(outcome.blocked.iter().map(|b| b.candidate.clone()))
+                .chain(
+                    outcome
+                        .blocked
+                        .iter()
+                        .take(MAX_EXPLAINED_BLOCKED_ALTERNATIVES)
+                        .map(|b| b.candidate.clone()),
+                )
                 .collect();
             let ranked = diagnostics.rank_candidates(&candidates, &[]);
             let chosen_ranked = ranked.iter().find(|r| &r.candidate_ref == chosen);
@@ -269,13 +338,24 @@ impl PolicyExplainer {
         let has_chosen = outcome.chosen.is_some();
         let has_blocked = !outcome.blocked.is_empty();
 
-        let guardrails_checked: Vec<String> = outcome
+        let mut guardrails = std::collections::BTreeSet::new();
+        'blocked: for blocked in outcome
             .blocked
             .iter()
-            .flat_map(|b| b.blocked_by.iter().map(|g| g.as_str().to_string()))
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
+            .take(MAX_EXPLAINED_BLOCKED_ALTERNATIVES)
+        {
+            for guardrail in blocked
+                .blocked_by
+                .iter()
+                .take(MAX_GUARDRAILS_PER_BLOCKED_EXPLANATION)
+            {
+                guardrails.insert(guardrail.as_str().to_string());
+                if guardrails.len() >= MAX_GUARDRAILS_CHECKED {
+                    break 'blocked;
+                }
+            }
+        }
+        let guardrails_checked: Vec<String> = guardrails.into_iter().collect();
 
         let invariants = if has_chosen {
             vec![
@@ -340,23 +420,36 @@ impl PolicyExplainer {
         outcome
             .blocked
             .iter()
+            .take(MAX_EXPLAINED_BLOCKED_ALTERNATIVES)
             .map(|b| {
                 let guardrail_names: Vec<String> = b
                     .blocked_by
                     .iter()
+                    .take(MAX_GUARDRAILS_PER_BLOCKED_EXPLANATION)
                     .map(|g| g.as_str().to_string())
+                    .collect();
+                let reasons: Vec<&str> = b
+                    .reasons
+                    .iter()
+                    .take(MAX_REASONS_PER_BLOCKED_EXPLANATION)
+                    .map(String::as_str)
                     .collect();
                 let explanation = format!(
                     "Candidate '{}' (rank {}) was blocked by guardrail(s): {}. Reasons: {}",
                     b.candidate.0,
                     b.bayesian_rank,
                     guardrail_names.join(", "),
-                    b.reasons.join("; "),
+                    reasons.join("; "),
                 );
                 BlockedExplanation {
                     candidate: b.candidate.clone(),
                     bayesian_rank: b.bayesian_rank,
-                    blocked_by: b.blocked_by.clone(),
+                    blocked_by: b
+                        .blocked_by
+                        .iter()
+                        .take(MAX_GUARDRAILS_PER_BLOCKED_EXPLANATION)
+                        .cloned()
+                        .collect(),
                     explanation,
                 }
             })
@@ -369,7 +462,7 @@ impl PolicyExplainer {
     #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn to_json(explanation: &PolicyExplanation) -> Result<String, serde_json::Error> {
         let _event = EVD_EXPLAIN_004;
-        serde_json::to_string_pretty(explanation)
+        serde_json::to_string_pretty(&sanitize_for_json(explanation))
     }
 }
 
@@ -1010,12 +1103,26 @@ mod tests {
 
         // Check blocked alternatives preserve Unicode injection
         assert_eq!(explanation.blocked_alternatives.len(), 2);
-        assert!(explanation.blocked_alternatives[0].candidate.0.contains('\u{200B}'));
-        assert!(explanation.blocked_alternatives[0].explanation.contains('\u{202E}'));
-        assert!(explanation.blocked_alternatives[0].explanation.contains('\0'));
+        assert!(
+            explanation.blocked_alternatives[0]
+                .candidate
+                .0
+                .contains('\u{200B}')
+        );
+        assert!(
+            explanation.blocked_alternatives[0]
+                .explanation
+                .contains('\u{202E}')
+        );
+        assert!(
+            explanation.blocked_alternatives[0]
+                .explanation
+                .contains('\0')
+        );
 
         // Check guardrail names preserve injection
-        let guardrail_names: Vec<String> = explanation.blocked_alternatives
+        let guardrail_names: Vec<String> = explanation
+            .blocked_alternatives
             .iter()
             .flat_map(|b| b.blocked_by.iter())
             .map(|g| g.as_str().to_string())
@@ -1032,50 +1139,86 @@ mod tests {
     #[test]
     fn negative_wording_validation_bypass_and_vocabulary_confusion_attacks() {
         // Test case-insensitive validation bypass attempts
-        let mut bypass_explanation = PolicyExplainer::explain(&top_accepted_outcome(), &diagnostics_with_observations());
+        let mut bypass_explanation =
+            PolicyExplainer::explain(&top_accepted_outcome(), &diagnostics_with_observations());
 
         // Attempt to bypass validation with case variations
-        bypass_explanation.diagnostic_confidence.summary = "This is VERIFIED BY GUARDRAIL with alternating case.".to_string();
-        bypass_explanation.guarantee_confidence.summary = "This guarantee uses DATA INDICATES for confusion.".to_string();
+        bypass_explanation.diagnostic_confidence.summary =
+            "This is VERIFIED BY GUARDRAIL with alternating case.".to_string();
+        bypass_explanation.guarantee_confidence.summary =
+            "This guarantee uses DATA INDICATES for confusion.".to_string();
 
         let validation = validate_wording(&bypass_explanation);
         assert!(!validation.valid);
         assert_eq!(validation.violations.len(), 2);
 
         // Test Unicode homoglyph attacks in vocabulary
-        let mut homoglyph_explanation = PolicyExplainer::explain(&top_accepted_outcome(), &diagnostics_with_observations());
-        homoglyph_explanation.diagnostic_confidence.summary = "This is veriﬁed by guardrail with unicode fi ligature.".to_string(); // \u{FB01}
+        let mut homoglyph_explanation =
+            PolicyExplainer::explain(&top_accepted_outcome(), &diagnostics_with_observations());
+        homoglyph_explanation.diagnostic_confidence.summary =
+            "This is veriﬁed by guardrail with unicode fi ligature.".to_string(); // \u{FB01}
 
         let homoglyph_validation = validate_wording(&homoglyph_explanation);
-        // Current validation should miss homoglyph, but this tests the edge case
-        assert!(homoglyph_validation.valid); // Demonstrates potential vulnerability
+        assert!(!homoglyph_validation.valid);
+        assert!(
+            homoglyph_validation
+                .violations
+                .iter()
+                .any(|violation| violation.contains("verified by guardrail"))
+        );
+
+        let mut zero_width_explanation =
+            PolicyExplainer::explain(&top_accepted_outcome(), &diagnostics_with_observations());
+        zero_width_explanation.guarantee_confidence.summary =
+            "This guarantee relies on data\u{200B} indicates wording.".to_string();
+
+        let zero_width_validation = validate_wording(&zero_width_explanation);
+        assert!(!zero_width_validation.valid);
+        assert!(
+            zero_width_validation
+                .violations
+                .iter()
+                .any(|violation| violation.contains("data indicates"))
+        );
 
         // Test partial term matching edge cases
-        let mut partial_explanation = PolicyExplainer::explain(&top_accepted_outcome(), &diagnostics_with_observations());
-        partial_explanation.diagnostic_confidence.summary = "verified by guardrail suffix".to_string();
-        partial_explanation.guarantee_confidence.summary = "prefix data indicates approach".to_string();
+        let mut partial_explanation =
+            PolicyExplainer::explain(&top_accepted_outcome(), &diagnostics_with_observations());
+        partial_explanation.diagnostic_confidence.summary =
+            "verified by guardrail suffix".to_string();
+        partial_explanation.guarantee_confidence.summary =
+            "prefix data indicates approach".to_string();
 
         let partial_validation = validate_wording(&partial_explanation);
         assert!(!partial_validation.valid);
         assert_eq!(partial_validation.violations.len(), 2);
 
         // Test vocabulary injection via embedded terms
-        let mut embedded_explanation = PolicyExplainer::explain(&top_accepted_outcome(), &diagnostics_with_observations());
-        embedded_explanation.diagnostic_confidence.summary = "not_verified by guardrail_but_close".to_string();
-        embedded_explanation.guarantee_confidence.summary = "no_data indicates_anything".to_string();
+        let mut embedded_explanation =
+            PolicyExplainer::explain(&top_accepted_outcome(), &diagnostics_with_observations());
+        embedded_explanation.diagnostic_confidence.summary =
+            "not_verified by guardrail_but_close".to_string();
+        embedded_explanation.guarantee_confidence.summary =
+            "no_data indicates_anything".to_string();
 
         let embedded_validation = validate_wording(&embedded_explanation);
         // Should still catch because contains() finds substrings
         assert!(!embedded_validation.valid);
 
         // Test maximum violations (all terms at once)
-        let mut max_violation_explanation = PolicyExplainer::explain(&top_accepted_outcome(), &diagnostics_with_observations());
-        max_violation_explanation.diagnostic_confidence.summary = GUARANTEE_VOCABULARY.join(" ") + " mixed with diagnostic terms";
-        max_violation_explanation.guarantee_confidence.summary = DIAGNOSTIC_VOCABULARY.join(" ") + " mixed with guarantee terms";
+        let mut max_violation_explanation =
+            PolicyExplainer::explain(&top_accepted_outcome(), &diagnostics_with_observations());
+        max_violation_explanation.diagnostic_confidence.summary =
+            GUARANTEE_VOCABULARY.join(" ") + " mixed with diagnostic terms";
+        max_violation_explanation.guarantee_confidence.summary =
+            DIAGNOSTIC_VOCABULARY.join(" ") + " mixed with guarantee terms";
 
         let max_validation = validate_wording(&max_violation_explanation);
         assert!(!max_validation.valid);
-        assert!(max_validation.violations.len() >= GUARANTEE_VOCABULARY.len() + DIAGNOSTIC_VOCABULARY.len());
+        assert!(
+            max_validation.violations.len()
+                >= GUARANTEE_VOCABULARY.len() + DIAGNOSTIC_VOCABULARY.len()
+        );
     }
 
     #[test]
@@ -1096,14 +1239,26 @@ mod tests {
         // Test confidence interval edge cases
         let mut manual_explanation = explanation.clone();
         manual_explanation.diagnostic_confidence.posterior_prob = Some(f64::NAN);
-        manual_explanation.diagnostic_confidence.confidence_interval = Some((f64::NEG_INFINITY, f64::INFINITY));
+        manual_explanation.diagnostic_confidence.confidence_interval =
+            Some((f64::NEG_INFINITY, f64::INFINITY));
 
         // JSON serialization should handle extreme values
         let json_result = PolicyExplainer::to_json(&manual_explanation);
         assert!(json_result.is_ok());
+        let json_value: serde_json::Value = serde_json::from_str(&json_result.unwrap()).unwrap();
+        assert!(json_value["diagnostic_confidence"]["posterior_prob"].is_null());
+        assert!(json_value["diagnostic_confidence"]["confidence_interval"].is_null());
 
         // Test confidence level manipulation
-        let confidence_levels = vec!["low", "medium", "high", "invalid", "", "\0", "extremely_high"];
+        let confidence_levels = vec![
+            "low",
+            "medium",
+            "high",
+            "invalid",
+            "",
+            "\0",
+            "extremely_high",
+        ];
         for level in confidence_levels {
             let mut conf_explanation = explanation.clone();
             conf_explanation.diagnostic_confidence.confidence_level = level.to_string();
@@ -1131,17 +1286,28 @@ mod tests {
 
         let bounds_json = PolicyExplainer::to_json(&bounds_explanation);
         assert!(bounds_json.is_ok());
+        let bounds_value: serde_json::Value = serde_json::from_str(&bounds_json.unwrap()).unwrap();
+        assert!(bounds_value["diagnostic_confidence"]["posterior_prob"].is_null());
+        assert!(bounds_value["diagnostic_confidence"]["confidence_interval"].is_null());
 
         // Test very small and very large floating point values
         let extreme_values = vec![
-            f64::MIN, f64::MAX, f64::EPSILON, -f64::EPSILON,
-            1e-100, 1e100, -1e-100, -1e100
+            f64::MIN,
+            f64::MAX,
+            f64::EPSILON,
+            -f64::EPSILON,
+            1e-100,
+            1e100,
+            -1e-100,
+            -1e100,
         ];
 
         for value in extreme_values {
             let mut extreme_explanation = explanation.clone();
             extreme_explanation.diagnostic_confidence.posterior_prob = Some(value);
-            extreme_explanation.diagnostic_confidence.confidence_interval = Some((value, value + 0.01));
+            extreme_explanation
+                .diagnostic_confidence
+                .confidence_interval = Some((value, value + 0.01));
 
             let extreme_json = PolicyExplainer::to_json(&extreme_explanation);
             assert!(extreme_json.is_ok());
@@ -1150,7 +1316,8 @@ mod tests {
 
     #[test]
     fn negative_json_serialization_injection_and_corruption_attacks() {
-        let base_explanation = PolicyExplainer::explain(&fallback_outcome(), &diagnostics_with_observations());
+        let base_explanation =
+            PolicyExplainer::explain(&fallback_outcome(), &diagnostics_with_observations());
 
         // Test JSON injection in string fields
         let json_injection_fields = vec![
@@ -1168,26 +1335,35 @@ mod tests {
                 "summary" => {
                     inject_explanation.diagnostic_confidence.summary = injection_str.to_string();
                     inject_explanation.guarantee_confidence.summary = injection_str.to_string();
-                },
+                }
                 "explanation" => {
                     if let Some(blocked) = inject_explanation.blocked_alternatives.get_mut(0) {
                         blocked.explanation = injection_str.to_string();
                     }
-                },
+                }
                 "control_chars" => {
-                    inject_explanation.diagnostic_confidence.confidence_level = injection_str.to_string();
-                },
+                    inject_explanation.diagnostic_confidence.confidence_level =
+                        injection_str.to_string();
+                }
                 _ => {}
             }
 
             // JSON serialization should escape properly
             let json_result = PolicyExplainer::to_json(&inject_explanation);
-            assert!(json_result.is_ok(), "JSON serialization failed for field: {}", field_type);
+            assert!(
+                json_result.is_ok(),
+                "JSON serialization failed for field: {}",
+                field_type
+            );
 
             if let Ok(json_str) = json_result {
                 // Verify JSON is parseable
                 let parse_result: Result<PolicyExplanation, _> = serde_json::from_str(&json_str);
-                assert!(parse_result.is_ok(), "JSON parsing failed for field: {}", field_type);
+                assert!(
+                    parse_result.is_ok(),
+                    "JSON parsing failed for field: {}",
+                    field_type
+                );
 
                 // Verify no unescaped injection in final JSON
                 assert!(!json_str.contains(r#""malicious""#));
@@ -1216,13 +1392,19 @@ mod tests {
                     if let Some(blocked) = huge_explanation.blocked_alternatives.get_mut(0) {
                         blocked.explanation = huge_str;
                     }
-                },
-                "huge_confidence_level" => huge_explanation.diagnostic_confidence.confidence_level = huge_str,
+                }
+                "huge_confidence_level" => {
+                    huge_explanation.diagnostic_confidence.confidence_level = huge_str
+                }
                 _ => {}
             }
 
             let huge_json = PolicyExplainer::to_json(&huge_explanation);
-            assert!(huge_json.is_ok(), "Failed to serialize huge string in field: {}", field_name);
+            assert!(
+                huge_json.is_ok(),
+                "Failed to serialize huge string in field: {}",
+                field_name
+            );
         }
 
         // Test empty string edge cases
@@ -1259,34 +1441,48 @@ mod tests {
         let massive_outcome = DecisionOutcome {
             chosen: Some(c("survivor")),
             blocked: massive_blocked,
-            reason: DecisionReason::TopCandidateBlockedFallbackUsed { fallback_rank: 9999 },
+            reason: DecisionReason::TopCandidateBlockedFallbackUsed {
+                fallback_rank: 9999,
+            },
             epoch_id: 12345,
         };
 
         let massive_diagnostics = diagnostics_with_observations();
         let explanation = PolicyExplainer::explain(&massive_outcome, &massive_diagnostics);
 
-        // Should handle large number of blocked alternatives
-        assert_eq!(explanation.blocked_alternatives.len(), 10_000);
+        // Should cap large blocked alternative sets at the operator-facing boundary.
+        assert_eq!(
+            explanation.blocked_alternatives.len(),
+            MAX_EXPLAINED_BLOCKED_ALTERNATIVES
+        );
 
         // Each blocked explanation should be properly formed
         for (i, blocked) in explanation.blocked_alternatives.iter().enumerate() {
             assert_eq!(blocked.bayesian_rank, i);
             assert_eq!(blocked.blocked_by.len(), 3);
             assert!(!blocked.explanation.is_empty());
-            assert!(blocked.explanation.contains(&format!("massive_candidate_{}", i)));
+            assert!(
+                blocked
+                    .explanation
+                    .contains(&format!("massive_candidate_{}", i))
+            );
         }
 
         // Test serialization with massive data
         let json_result = PolicyExplainer::to_json(&explanation);
-        assert!(json_result.is_ok(), "Failed to serialize massive blocked alternatives");
+        assert!(
+            json_result.is_ok(),
+            "Failed to serialize massive blocked alternatives"
+        );
 
         // Test guarantee section with massive guardrails list
-        assert!(explanation.guarantee_confidence.guardrails_checked.len() <= 30_000); // Should be manageable
+        assert!(
+            explanation.guarantee_confidence.guardrails_checked.len() <= MAX_GUARDRAILS_CHECKED
+        );
 
         // Test that memory growth is predictable
         let json_size = json_result.unwrap().len();
-        assert!(json_size > 1_000_000, "JSON should be large but manageable");
+        assert!(json_size < 2_000_000, "JSON should stay bounded");
 
         // Test deserialization of massive JSON
         let parse_start = std::time::Instant::now();
@@ -1295,7 +1491,11 @@ mod tests {
         let parse_duration = parse_start.elapsed();
 
         assert!(parsed.is_ok(), "Failed to parse massive JSON");
-        assert!(parse_duration.as_secs() < 10, "Parsing took too long: {:?}", parse_duration);
+        assert!(
+            parse_duration.as_secs() < 10,
+            "Parsing took too long: {:?}",
+            parse_duration
+        );
     }
 
     #[test]
@@ -1330,25 +1530,24 @@ mod tests {
             epoch_id: 999,
         };
 
-        let dup_explanation = PolicyExplainer::explain(&dup_outcome, &diagnostics_with_observations());
+        let dup_explanation =
+            PolicyExplainer::explain(&dup_outcome, &diagnostics_with_observations());
 
         // Verify guardrails_checked deduplicates (BTreeSet behavior)
         let guardrails = &dup_explanation.guarantee_confidence.guardrails_checked;
         assert!(guardrails.len() <= 2); // Should deduplicate "memory_budget"
 
         // Test empty guardrail IDs
-        let empty_guardrail_blocked = vec![
-            BlockedCandidate {
-                candidate: c("empty_guardrail_test"),
-                blocked_by: vec![
-                    GuardrailId::new(""),
-                    GuardrailId::new("valid_guardrail"),
-                    GuardrailId::new("\0"),
-                ],
-                bayesian_rank: 0,
-                reasons: vec!["testing empty guardrail IDs".to_string()],
-            },
-        ];
+        let empty_guardrail_blocked = vec![BlockedCandidate {
+            candidate: c("empty_guardrail_test"),
+            blocked_by: vec![
+                GuardrailId::new(""),
+                GuardrailId::new("valid_guardrail"),
+                GuardrailId::new("\0"),
+            ],
+            bayesian_rank: 0,
+            reasons: vec!["testing empty guardrail IDs".to_string()],
+        }];
 
         let empty_guardrail_outcome = DecisionOutcome {
             chosen: None,
@@ -1357,26 +1556,30 @@ mod tests {
             epoch_id: 888,
         };
 
-        let empty_explanation = PolicyExplainer::explain(&empty_guardrail_outcome, &empty_diagnostics());
+        let empty_explanation =
+            PolicyExplainer::explain(&empty_guardrail_outcome, &empty_diagnostics());
 
         // Should handle empty guardrail IDs gracefully
-        assert!(!empty_explanation.guarantee_confidence.guardrails_checked.is_empty());
+        assert!(
+            !empty_explanation
+                .guarantee_confidence
+                .guardrails_checked
+                .is_empty()
+        );
 
         // Test invariant verification consistency
         let invariants = &empty_explanation.guarantee_confidence.invariants_verified;
         assert!(invariants.contains(&"INV-DECIDE-NO-PANIC".to_string())); // Should be present for all-blocked case
 
         // Test massive guardrail ID attacks
-        let massive_guardrail_blocked = vec![
-            BlockedCandidate {
-                candidate: c("massive_guardrails"),
-                blocked_by: (0..1000)
-                    .map(|i| GuardrailId::new(&format!("guardrail_mass_{}", i)))
-                    .collect(),
-                bayesian_rank: 0,
-                reasons: vec!["massive guardrail attack".to_string()],
-            },
-        ];
+        let massive_guardrail_blocked = vec![BlockedCandidate {
+            candidate: c("massive_guardrails"),
+            blocked_by: (0..1000)
+                .map(|i| GuardrailId::new(&format!("guardrail_mass_{}", i)))
+                .collect(),
+            bayesian_rank: 0,
+            reasons: vec!["massive guardrail attack".to_string()],
+        }];
 
         let massive_guardrail_outcome = DecisionOutcome {
             chosen: None,
@@ -1385,10 +1588,17 @@ mod tests {
             epoch_id: 777,
         };
 
-        let massive_guardrail_explanation = PolicyExplainer::explain(&massive_guardrail_outcome, &diagnostics_with_observations());
+        let massive_guardrail_explanation =
+            PolicyExplainer::explain(&massive_guardrail_outcome, &diagnostics_with_observations());
 
-        // Should handle massive guardrail lists
-        assert_eq!(massive_guardrail_explanation.guarantee_confidence.guardrails_checked.len(), 1000);
+        // Should cap massive guardrail lists.
+        assert_eq!(
+            massive_guardrail_explanation
+                .guarantee_confidence
+                .guardrails_checked
+                .len(),
+            MAX_GUARDRAILS_PER_BLOCKED_EXPLANATION
+        );
 
         // JSON serialization should still work
         let massive_json = PolicyExplainer::to_json(&massive_guardrail_explanation);
@@ -1409,14 +1619,19 @@ mod tests {
             epoch_outcome.epoch_id = epoch_value;
             epoch_outcome.chosen = Some(c(test_name));
 
-            let explanation = PolicyExplainer::explain(&epoch_outcome, &diagnostics_with_observations());
+            let explanation =
+                PolicyExplainer::explain(&epoch_outcome, &diagnostics_with_observations());
 
             // Verify epoch is preserved correctly
             assert_eq!(explanation.epoch_id, epoch_value);
 
             // Serialization should handle all epoch values
             let json_result = PolicyExplainer::to_json(&explanation);
-            assert!(json_result.is_ok(), "Failed to serialize epoch: {}", epoch_value);
+            assert!(
+                json_result.is_ok(),
+                "Failed to serialize epoch: {}",
+                epoch_value
+            );
 
             if let Ok(json_str) = json_result {
                 let parsed: Result<PolicyExplanation, _> = serde_json::from_str(&json_str);
@@ -1433,22 +1648,24 @@ mod tests {
         arithmetic_outcome.epoch_id = u64::MAX;
 
         // Add large epoch ID to blocked candidates to test arithmetic
-        let arithmetic_blocked = vec![
-            BlockedCandidate {
-                candidate: c("arithmetic_test"),
-                blocked_by: vec![GuardrailId::new("test_guardrail")],
-                bayesian_rank: usize::MAX, // Also test rank overflow
-                reasons: vec!["arithmetic boundary test".to_string()],
-            },
-        ];
+        let arithmetic_blocked = vec![BlockedCandidate {
+            candidate: c("arithmetic_test"),
+            blocked_by: vec![GuardrailId::new("test_guardrail")],
+            bayesian_rank: usize::MAX, // Also test rank overflow
+            reasons: vec!["arithmetic boundary test".to_string()],
+        }];
 
         arithmetic_outcome.blocked = arithmetic_blocked;
 
-        let arithmetic_explanation = PolicyExplainer::explain(&arithmetic_outcome, &diagnostics_with_observations());
+        let arithmetic_explanation =
+            PolicyExplainer::explain(&arithmetic_outcome, &diagnostics_with_observations());
 
         // Verify all fields handle extreme values
         assert_eq!(arithmetic_explanation.epoch_id, u64::MAX);
-        assert_eq!(arithmetic_explanation.blocked_alternatives[0].bayesian_rank, usize::MAX);
+        assert_eq!(
+            arithmetic_explanation.blocked_alternatives[0].bayesian_rank,
+            usize::MAX
+        );
 
         // Test serialization with extreme values
         let extreme_json = PolicyExplainer::to_json(&arithmetic_explanation);
@@ -1521,7 +1738,11 @@ mod tests {
             assert!(!explanation.guarantee_confidence.summary.is_empty());
 
             // Wording validation should pass for generated explanations
-            assert!(validation.valid, "Wording validation failed: {:?}", validation.violations);
+            assert!(
+                validation.valid,
+                "Wording validation failed: {:?}",
+                validation.violations
+            );
 
             // JSON serialization should succeed
             assert!(json_result.is_ok(), "JSON serialization failed");

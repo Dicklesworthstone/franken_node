@@ -289,10 +289,16 @@ impl ControllerBoundaryChecker {
         for record in &self.rejected_mutations {
             *per_invariant
                 .entry(record.violated_invariant.as_str().to_string())
-                .or_insert(0) += 1;
+                .or_insert(0) = per_invariant
+                .get(record.violated_invariant.as_str())
+                .unwrap_or(&0)
+                .saturating_add(1);
             *per_class
                 .entry(record.error_class.label().to_string())
-                .or_insert(0) += 1;
+                .or_insert(0) = per_class
+                .get(record.error_class.label())
+                .unwrap_or(&0)
+                .saturating_add(1);
         }
 
         serde_json::json!({
@@ -314,7 +320,7 @@ impl ControllerBoundaryChecker {
     pub fn restore_audit_trail(&mut self, data: &[u8]) -> Result<(), serde_json::Error> {
         let records: Vec<RejectedMutationRecord> = serde_json::from_slice(data)?;
         self.rejected_mutations = records;
-        self.checks_rejected = self.rejected_mutations.len() as u64;
+        self.checks_rejected = u64::try_from(self.rejected_mutations.len()).unwrap_or(u64::MAX);
         Ok(())
     }
 }

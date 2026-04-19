@@ -178,12 +178,14 @@ pub struct AdmissionConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AdmissionConfigError {
+    InvalidTrustedSigner { detail: String },
     TrustedSignerCapacityExceeded { capacity: usize },
 }
 
 impl AdmissionConfigError {
     pub fn code(&self) -> &'static str {
         match self {
+            Self::InvalidTrustedSigner { .. } => error_codes::ERR_ARTIFACT_INVALID_CONTRACT,
             Self::TrustedSignerCapacityExceeded { .. } => {
                 error_codes::ERR_ARTIFACT_TRUSTED_SIGNER_CAPACITY
             }
@@ -194,6 +196,9 @@ impl AdmissionConfigError {
 impl std::fmt::Display for AdmissionConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidTrustedSigner { detail } => {
+                write!(f, "invalid trusted signer: {detail}")
+            }
             Self::TrustedSignerCapacityExceeded { capacity } => {
                 write!(
                     f,
@@ -219,8 +224,8 @@ impl AdmissionConfig {
         signer_id: impl Into<String>,
     ) -> Result<(), AdmissionConfigError> {
         let signer_id = signer_id.into();
-        if invalid_token_detail("signer_id", &signer_id).is_some() {
-            return Ok(());
+        if let Some(detail) = invalid_token_detail("signer_id", &signer_id) {
+            return Err(AdmissionConfigError::InvalidTrustedSigner { detail });
         }
         if self.trusted_signers.contains(&signer_id) {
             return Ok(());
@@ -822,18 +827,46 @@ mod tests {
     }
 
     #[test]
-    fn trusted_signer_registration_ignores_blank_signer() {
+    fn trusted_signer_registration_rejects_blank_signer() {
         let mut cfg = AdmissionConfig::new(SCHEMA_VERSION);
-        cfg.with_signer("   ")
-            .expect("blank signer registration should be ignored");
+        let err = cfg
+            .with_signer("   ")
+            .expect_err("blank signer registration must fail closed");
+        assert!(matches!(
+            &err,
+            AdmissionConfigError::InvalidTrustedSigner { detail }
+                if detail.contains("empty signer_id")
+        ));
+        assert_eq!(err.code(), error_codes::ERR_ARTIFACT_INVALID_CONTRACT);
         assert!(cfg.trusted_signers.is_empty());
     }
 
     #[test]
-    fn trusted_signer_registration_ignores_whitespace_wrapped_signer() {
+    fn trusted_signer_registration_rejects_whitespace_wrapped_signer() {
         let mut cfg = AdmissionConfig::new(SCHEMA_VERSION);
-        cfg.with_signer(" signer-A ")
-            .expect("whitespace signer registration should be ignored");
+        let err = cfg
+            .with_signer(" signer-A ")
+            .expect_err("whitespace signer registration must fail closed");
+        assert!(matches!(
+            &err,
+            AdmissionConfigError::InvalidTrustedSigner { detail }
+                if detail.contains("leading or trailing whitespace")
+        ));
+        assert!(cfg.trusted_signers.is_empty());
+    }
+
+    #[test]
+    fn trusted_signer_registration_rejects_path_like_signers() {
+        let mut cfg = AdmissionConfig::new(SCHEMA_VERSION);
+        for signer in ["../signer-A", "/signer-A", "signer\\A", "signer\0A"] {
+            let err = cfg
+                .with_signer(signer)
+                .expect_err("path-like signer registration must fail closed");
+            assert!(matches!(
+                &err,
+                AdmissionConfigError::InvalidTrustedSigner { .. }
+            ));
+        }
         assert!(cfg.trusted_signers.is_empty());
     }
 

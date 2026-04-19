@@ -53,7 +53,7 @@ impl ObjectClass {
             Self::TrustReceipt => "trust_receipt",
             Self::ReplayBundle => "replay_bundle",
             Self::TelemetryArtifact => "telemetry_artifact",
-            Self::Custom(_) => "custom",
+            Self::Custom(class_id) => class_id.as_str(),
         }
     }
 
@@ -64,6 +64,27 @@ impl ObjectClass {
             Self::ReplayBundle,
             Self::TelemetryArtifact,
         ]
+    }
+
+    fn event_class_id(&self) -> String {
+        match self {
+            Self::Custom(class_id) if invalid_custom_class_id_detail(class_id).is_some() => {
+                "custom".to_string()
+            }
+            _ => self.label().to_string(),
+        }
+    }
+
+    fn validate_for_override(&self) -> Result<(), TuningError> {
+        if let Self::Custom(class_id) = self {
+            if let Some(detail) = invalid_custom_class_id_detail(class_id) {
+                return Err(TuningError::new(
+                    ERR_UNKNOWN_CLASS,
+                    format!("Unknown object class {class_id:?}: {detail}"),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -191,6 +212,32 @@ impl TuningError {
     }
 }
 
+fn invalid_custom_class_id_detail(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Some("empty custom class id".to_string());
+    }
+    if trimmed != value {
+        return Some("custom class id contains leading or trailing whitespace".to_string());
+    }
+    if !value.is_ascii() {
+        return Some("custom class id contains non-ASCII characters".to_string());
+    }
+    if value.bytes().any(|byte| byte.is_ascii_control()) {
+        return Some("custom class id contains control characters".to_string());
+    }
+    if value.starts_with('/') {
+        return Some("custom class id starts with '/'".to_string());
+    }
+    if value.contains('\\') {
+        return Some("custom class id contains backslash".to_string());
+    }
+    if value.split('/').any(|segment| segment == "..") {
+        return Some("custom class id contains path traversal segment".to_string());
+    }
+    None
+}
+
 impl fmt::Display for TuningError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[{}] {}", self.code, self.message)
@@ -300,13 +347,27 @@ impl ObjectClassTuningEngine {
         class: ObjectClass,
         tuning: ClassTuning,
     ) -> Result<(), TuningError> {
+        let event_class_id = class.event_class_id();
+        if let Err(e) = class.validate_for_override() {
+            push_bounded(
+                &mut self.events,
+                TuningEvent {
+                    code: OC_POLICY_OVERRIDE_REJECTED.to_string(),
+                    class_id: event_class_id,
+                    detail: format!("Override rejected: {}", e),
+                },
+                MAX_EVENTS,
+            );
+            return Err(e);
+        }
+
         // Validate
         if let Err(e) = tuning.validate() {
             push_bounded(
                 &mut self.events,
                 TuningEvent {
                     code: OC_POLICY_OVERRIDE_REJECTED.to_string(),
-                    class_id: class.label().to_string(),
+                    class_id: event_class_id,
                     detail: format!("Override rejected: {}", e),
                 },
                 MAX_EVENTS,
@@ -343,7 +404,7 @@ impl ObjectClassTuningEngine {
             &mut self.events,
             TuningEvent {
                 code: OC_POLICY_OVERRIDE_APPLIED.to_string(),
-                class_id: class.label().to_string(),
+                class_id: event_class_id,
                 detail: format!("before=[{}], after=[{}]", before_desc, after_desc),
             },
             MAX_EVENTS,
@@ -636,6 +697,27 @@ mod tests {
     }
 
     #[test]
+    fn test_custom_override_event_uses_specific_class_id() {
+        let mut engine = ObjectClassTuningEngine::new();
+        let class = ObjectClass::Custom("custom_bundle".into());
+        let tuning = ClassTuning {
+            symbol_size_bytes: 777,
+            encoding_overhead_ratio: 0.10,
+            fetch_priority: FetchPriority::Background,
+            prefetch_policy: PrefetchPolicy::Lazy,
+        };
+
+        engine.apply_override(class, tuning).unwrap();
+
+        let event = engine
+            .events()
+            .iter()
+            .find(|event| event.code == OC_POLICY_OVERRIDE_APPLIED)
+            .expect("custom override should emit an applied event");
+        assert_eq!(event.class_id, "custom_bundle");
+    }
+
+    #[test]
     fn test_engine_reject_invalid_override() {
         let mut engine = ObjectClassTuningEngine::new();
         let tuning = ClassTuning {
@@ -727,6 +809,34 @@ mod tests {
 
         assert_eq!(reject_events, 3);
         assert!(engine.active_overrides().is_empty());
+    }
+
+    #[test]
+    fn test_invalid_custom_class_ids_fail_closed() {
+        let mut engine = ObjectClassTuningEngine::new();
+        let tuning = ClassTuning {
+            symbol_size_bytes: 1024,
+            encoding_overhead_ratio: 0.25,
+            fetch_priority: FetchPriority::Background,
+            prefetch_policy: PrefetchPolicy::None,
+        };
+
+        for class_id in [
+            "",
+            " custom ",
+            "../escape",
+            "/absolute",
+            "bad\\path",
+            "bad\0id",
+        ] {
+            let class = ObjectClass::Custom(class_id.into());
+            let err = engine
+                .apply_override(class.clone(), tuning.clone())
+                .unwrap_err();
+            assert_eq!(err.code, ERR_UNKNOWN_CLASS);
+            assert!(!engine.has_override(&class));
+            assert!(engine.resolve(&class).is_none());
+        }
     }
 
     // -- Override management --
@@ -878,7 +988,7 @@ mod tests {
         assert_eq!(ObjectClass::TrustReceipt.label(), "trust_receipt");
         assert_eq!(ObjectClass::ReplayBundle.label(), "replay_bundle");
         assert_eq!(ObjectClass::TelemetryArtifact.label(), "telemetry_artifact");
-        assert_eq!(ObjectClass::Custom("x".into()).label(), "custom");
+        assert_eq!(ObjectClass::Custom("x".into()).label(), "x");
     }
 
     #[test]

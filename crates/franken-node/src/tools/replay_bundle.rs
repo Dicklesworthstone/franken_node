@@ -1792,11 +1792,15 @@ mod tests {
 
         for malicious_id in malicious_incident_ids {
             // Verify incident ID validation catches injection attempts
-            let builder = ReplayBundleBuilder::new(malicious_id);
+            let test_events = vec![RawEvent::new(
+                "2026-02-20T10:00:00.000100Z",
+                EventType::ExternalSignal,
+                serde_json::json!({"test": "injection"}),
+            )];
 
             // The ID should be stored as-is, but Bundle operations should validate
             // Let's test that the incident_id field doesn't break serialization
-            let result = builder.build();
+            let result = generate_replay_bundle(malicious_id, &test_events);
 
             match result {
                 Ok(bundle) => {
@@ -1848,10 +1852,9 @@ mod tests {
         assert!(json.len() > 6_000_000, "serialized form should preserve large payload");
 
         // Test that bundles properly handle oversized events
-        let mut builder = ReplayBundleBuilder::new("massive-test");
-        builder.add_raw_event(massive_event);
+        let massive_events = vec![massive_event];
 
-        match builder.build() {
+        match generate_replay_bundle("massive-test", &massive_events) {
             Ok(bundle) => {
                 // If it succeeds, verify it's within bounds or chunked appropriately
                 let serialized = serde_json::to_string(&bundle).unwrap();
@@ -1871,8 +1874,6 @@ mod tests {
 
     #[test]
     fn test_negative_bundle_manifest_with_json_injection_attacks() {
-        let mut builder = ReplayBundleBuilder::new("injection-test");
-
         // Add event with potential JSON injection in state snapshot
         let injection_payload = serde_json::json!({
             "normal_field": "value",
@@ -1881,15 +1882,15 @@ mod tests {
 
         let event = RawEvent::new(
             "2026-02-20T10:00:00.000100Z",
-            EventType::InternalEvent,
+            EventType::StateChange,
             injection_payload,
         ).with_state_snapshot(serde_json::json!({
             "normal_state": "ok",
             "injection_attempt": "state\"},\"injected_admin\":true,\"bypass"
         }));
 
-        builder.add_raw_event(event);
-        let bundle = builder.build().expect("bundle should build");
+        let injection_events = vec![event];
+        let bundle = generate_replay_bundle("injection-test", &injection_events).expect("bundle should build");
 
         // Verify JSON structure integrity in manifest
         let json = serde_json::to_string(&bundle).expect("serialization should succeed");
@@ -1926,63 +1927,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_negative_timeline_metadata_with_extreme_sequence_numbers() {
-        // Test with sequence numbers near overflow boundaries
-        let extreme_sequences = [
-            0,
-            1,
-            u64::MAX - 1,
-            u64::MAX,
-        ];
-
-        for seq in extreme_sequences {
-            let metadata = TimelineMetadata {
-                sequence_number: seq,
-                timestamp: Utc::now(),
-                bundle_chunk_index: 0,
-                total_chunks: 1,
-            };
-
-            // Verify serialization handles extreme values
-            let json = serde_json::to_string(&metadata).expect("serialization should handle extreme values");
-            let parsed: TimelineMetadata = serde_json::from_str(&json).expect("deserialization should work");
-
-            assert_eq!(parsed.sequence_number, seq, "sequence number should be preserved");
-
-            // Test that sequence number arithmetic uses saturating operations
-            let next_seq = seq.saturating_add(1);
-            if seq == u64::MAX {
-                assert_eq!(next_seq, u64::MAX, "sequence increment should saturate");
-            } else {
-                assert_eq!(next_seq, seq + 1, "normal increment should work");
-            }
-        }
-
-        // Test chunk index boundaries
-        let extreme_chunks = [
-            (0, 1),
-            (999, 1000),
-            (u32::MAX as usize, (u32::MAX as usize) + 1),
-        ];
-
-        for (chunk_idx, total) in extreme_chunks {
-            if chunk_idx < MAX_CHUNKS_PER_BUNDLE && total <= MAX_CHUNKS_PER_BUNDLE {
-                let metadata = TimelineMetadata {
-                    sequence_number: 1,
-                    timestamp: Utc::now(),
-                    bundle_chunk_index: chunk_idx,
-                    total_chunks: total,
-                };
-
-                // Should handle within bounds
-                let json = serde_json::to_string(&metadata).expect("chunk serialization should work");
-                let parsed: TimelineMetadata = serde_json::from_str(&json).expect("chunk deserialization should work");
-                assert_eq!(parsed.bundle_chunk_index, chunk_idx);
-                assert_eq!(parsed.total_chunks, total);
-            }
-        }
-    }
 
     #[test]
     fn test_negative_temp_file_guard_with_malicious_paths() {
@@ -2039,10 +1983,9 @@ mod tests {
             repetitive_payload,
         );
 
-        let mut builder = ReplayBundleBuilder::new("compression-test");
-        builder.add_raw_event(compressible_event);
+        let compression_events = vec![compressible_event];
 
-        let bundle = builder.build().expect("bundle should build");
+        let bundle = generate_replay_bundle("compression-test", &compression_events).expect("bundle should build");
 
         // Verify that compression is bounded and doesn't create extremely small bundles
         // that expand to huge sizes (zip bomb protection)
@@ -2068,14 +2011,13 @@ mod tests {
 
         let entropic_event = RawEvent::new(
             "2026-02-20T10:00:00.000200Z",
-            EventType::InternalEvent,
+            EventType::StateChange,
             random_payload,
         );
 
-        let mut builder2 = ReplayBundleBuilder::new("entropy-test");
-        builder2.add_raw_event(entropic_event);
+        let entropy_events = vec![entropic_event];
 
-        let bundle2 = builder2.build().expect("entropic bundle should build");
+        let bundle2 = generate_replay_bundle("entropy-test", &entropy_events).expect("entropic bundle should build");
         let json2 = serde_json::to_string(&bundle2).expect("entropic serialization should work");
 
         // High-entropy data should not compress as well
@@ -2092,9 +2034,9 @@ mod tests {
         // Test EventType serialization robustness
         let event_types = [
             EventType::ExternalSignal,
-            EventType::InternalEvent,
-            EventType::StateTransition,
-            EventType::ErrorCondition,
+            EventType::StateChange,
+            EventType::PolicyEval,
+            EventType::OperatorAction,
         ];
 
         for event_type in event_types {
@@ -2144,17 +2086,15 @@ mod tests {
 
         let mut bundle_ids = Vec::new();
         for i in 0..100 {
-            let mut builder = ReplayBundleBuilder::new(incident_id);
-
             // Add slightly different events to test deterministic ID generation
             let event = RawEvent::new(
                 &format!("2026-02-20T10:00:0{:02}.000100Z", i % 60),
-                EventType::InternalEvent,
+                EventType::StateChange,
                 serde_json::json!({"iteration": i}),
             );
 
-            builder.add_raw_event(event);
-            let bundle = builder.build().expect("bundle should build");
+            let collision_events = vec![event];
+            let bundle = generate_replay_bundle(incident_id, &collision_events).expect("bundle should build");
             bundle_ids.push(bundle.bundle_id);
         }
 
@@ -2204,14 +2144,13 @@ mod tests {
 
             let event = RawEvent::new(
                 "2026-02-20T10:00:00.000100Z",
-                EventType::ErrorCondition,
+                EventType::ExternalSignal,
                 payload_with_float,
             );
 
-            let mut builder = ReplayBundleBuilder::new("float-test");
-            builder.add_raw_event(event);
+            let float_events = vec![event];
 
-            match builder.build() {
+            match generate_replay_bundle("float-test", &float_events) {
                 Ok(_bundle) => {
                     // If bundle creation succeeds, the non-deterministic float validation
                     // either didn't trigger (floats were in safe locations) or was bypassed
@@ -2236,15 +2175,14 @@ mod tests {
 
         let string_event = RawEvent::new(
             "2026-02-20T10:00:00.000100Z",
-            EventType::InternalEvent,
+            EventType::StateChange,
             string_with_float_content,
         );
 
-        let mut builder = ReplayBundleBuilder::new("string-float-test");
-        builder.add_raw_event(string_event);
+        let string_events = vec![string_event];
 
         // String content containing float representations should be OK
-        let result = builder.build();
+        let result = generate_replay_bundle("string-float-test", &string_events);
         assert!(result.is_ok(), "floats in string content should be allowed");
     }
 
@@ -2269,7 +2207,7 @@ mod tests {
             // Test direct timestamp construction
             let result = RawEvent::new(
                 malicious_timestamp,
-                EventType::ErrorCondition,
+                EventType::ExternalSignal,
                 serde_json::json!({"test": "timestamp_validation"}),
             );
 
@@ -2279,10 +2217,9 @@ mod tests {
             // 3. Sanitize/normalize the timestamp
 
             // Test that timestamps are properly validated somewhere in the pipeline
-            let mut builder = ReplayBundleBuilder::new("timestamp-test");
-            builder.add_raw_event(result);
+            let timestamp_events = vec![result];
 
-            match builder.build() {
+            match generate_replay_bundle("timestamp-test", &timestamp_events) {
                 Ok(bundle) => {
                     // If successful, verify the timestamp in the bundle is valid
                     let json = serde_json::to_string(&bundle).expect("serialization should work");

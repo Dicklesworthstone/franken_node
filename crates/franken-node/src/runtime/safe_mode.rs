@@ -3245,8 +3245,8 @@ mod tests {
             vec!["--degraded", &"x".repeat(1024 * 1024)],
 
             // Binary data injection
-            vec!["\x00\x01\x02\x03\x04"],
-            vec!["--safe-mode", "\xFF\xFE\xFD"],
+            vec![&String::from_utf8_lossy(&[0x00, 0x01, 0x02, 0x03, 0x04])],
+            vec!["--safe-mode", &String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD])],
         ];
 
         for (i, malicious_flags) in malicious_flag_sets.iter().enumerate() {

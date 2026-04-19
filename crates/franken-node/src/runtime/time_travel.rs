@@ -192,15 +192,15 @@ impl ControlDecision {
     pub fn digest(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(b"time_travel_decision_v1:");
-        hasher.update((self.decision_id.len() as u64).to_le_bytes());
+        hasher.update((u32::try_from(self.decision_id.len()).unwrap_or(u32::MAX) as u64).to_le_bytes());
         hasher.update(self.decision_id.as_bytes());
-        hasher.update((self.payload.len() as u64).to_le_bytes());
+        hasher.update((u32::try_from(self.payload.len()).unwrap_or(u32::MAX) as u64).to_le_bytes());
         hasher.update(&self.payload);
-        hasher.update((self.metadata.len() as u64).to_le_bytes());
+        hasher.update((u32::try_from(self.metadata.len()).unwrap_or(u32::MAX) as u64).to_le_bytes());
         for (k, v) in &self.metadata {
-            hasher.update((k.len() as u64).to_le_bytes());
+            hasher.update((u32::try_from(k.len()).unwrap_or(u32::MAX) as u64).to_le_bytes());
             hasher.update(k.as_bytes());
-            hasher.update((v.len() as u64).to_le_bytes());
+            hasher.update((u32::try_from(v.len()).unwrap_or(u32::MAX) as u64).to_le_bytes());
             hasher.update(v.as_bytes());
         }
         hex::encode(hasher.finalize())
@@ -259,14 +259,14 @@ impl WorkflowSnapshot {
     pub fn compute_integrity_digest(frames: &[CaptureFrame]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(b"time_travel_integrity_v1:");
-        hasher.update((frames.len() as u64).to_le_bytes());
+        hasher.update((u32::try_from(frames.len()).unwrap_or(u32::MAX) as u64).to_le_bytes());
         for f in frames {
             hasher.update(f.frame_index.to_le_bytes());
             hasher.update(f.clock_tick.to_le_bytes());
-            hasher.update((f.input_hash.len() as u64).to_le_bytes());
+            hasher.update((u32::try_from(f.input_hash.len()).unwrap_or(u32::MAX) as u64).to_le_bytes());
             hasher.update(f.input_hash.as_bytes());
             let digest = f.decision.digest();
-            hasher.update((digest.len() as u64).to_le_bytes());
+            hasher.update((u32::try_from(digest.len()).unwrap_or(u32::MAX) as u64).to_le_bytes());
             hasher.update(digest.as_bytes());
         }
         hex::encode(hasher.finalize())
@@ -306,7 +306,7 @@ impl WorkflowSnapshot {
                 detail: "integrity digest mismatch".to_string(),
             });
         }
-        if snap.frame_count != snap.frames.len() as u64 {
+        if snap.frame_count != u32::try_from(snap.frames.len()).unwrap_or(u32::MAX) as u64 {
             return Err(TimeTravelError::SnapshotCorrupt {
                 detail: format!(
                     "frame_count mismatch: declared {}, actual {}",
@@ -516,7 +516,7 @@ impl CaptureSession {
             schema_version: SCHEMA_VERSION.to_string(),
             snapshot_id: self.snapshot_id,
             seed: self.seed,
-            frame_count: self.frames.len() as u64,
+            frame_count: u32::try_from(self.frames.len()).unwrap_or(u32::MAX) as u64,
             frames: self.frames,
             integrity_digest,
             metadata: BTreeMap::new(),
@@ -567,7 +567,7 @@ impl ReplaySession {
                 code: error_codes::ERR_TTR_EMPTY_TRACE.to_string(),
             });
         }
-        if snapshot.frame_count != snapshot.frames.len() as u64 {
+        if snapshot.frame_count != u32::try_from(snapshot.frames.len()).unwrap_or(u32::MAX) as u64 {
             return Err(TimeTravelError::SnapshotCorrupt {
                 detail: format!(
                     "frame_count mismatch: declared {}, actual {}",
@@ -603,7 +603,7 @@ impl ReplaySession {
 
     /// Return the current frame (at the cursor).
     pub fn current_frame(&self) -> Option<&CaptureFrame> {
-        self.snapshot.frames.get(self.cursor as usize)
+        self.snapshot.frames.get(usize::try_from(self.cursor).unwrap_or(usize::MAX))
     }
 
     /// Step the replay forward by one frame.
@@ -619,7 +619,7 @@ impl ReplaySession {
         }
         self.cursor = next;
         self.emit_event(event_codes::TTR_004.to_string());
-        Ok(&self.snapshot.frames[self.cursor as usize])
+        Ok(&self.snapshot.frames[usize::try_from(self.cursor).unwrap_or(usize::MAX)])
     }
 
     /// Step the replay backward by one frame.
@@ -634,7 +634,7 @@ impl ReplaySession {
         }
         self.cursor = self.cursor.saturating_sub(1);
         self.emit_event(event_codes::TTR_005.to_string());
-        Ok(&self.snapshot.frames[self.cursor as usize])
+        Ok(&self.snapshot.frames[usize::try_from(self.cursor).unwrap_or(usize::MAX)])
     }
 
     /// Jump to a specific frame index.
@@ -651,7 +651,7 @@ impl ReplaySession {
             self.emit_event(event_codes::TTR_005.to_string());
         }
         self.cursor = frame_index;
-        Ok(&self.snapshot.frames[self.cursor as usize])
+        Ok(&self.snapshot.frames[usize::try_from(self.cursor).unwrap_or(usize::MAX)])
     }
 
     /// Verify that a replayed decision matches the captured decision at the
@@ -660,7 +660,7 @@ impl ReplaySession {
     /// INV-TTR-DIVERGENCE-DETECTED: returns a [`DivergenceExplanation`] on mismatch.
     /// INV-TTR-DETERMINISTIC: identical seed + input => matching digest.
     pub fn verify_decision(&mut self, replayed: &ControlDecision) -> Result<(), TimeTravelError> {
-        let frame = &self.snapshot.frames[self.cursor as usize];
+        let frame = &self.snapshot.frames[usize::try_from(self.cursor).unwrap_or(usize::MAX)];
         let expected_digest = frame.decision.digest();
         let actual_digest = replayed.digest();
         if !crate::security::constant_time::ct_eq(&expected_digest, &actual_digest) {
@@ -796,7 +796,7 @@ pub fn deterministic_decision(seed: u64, tick: u64, input: &[u8]) -> ControlDeci
     hasher.update(b"time_travel_det_decision_v1:");
     hasher.update(seed.to_le_bytes());
     hasher.update(tick.to_le_bytes());
-    hasher.update((input.len() as u64).to_le_bytes());
+    hasher.update((u32::try_from(input.len()).unwrap_or(u32::MAX) as u64).to_le_bytes());
     hasher.update(input);
     let digest = hex::encode(hasher.finalize());
     let decision_id = format!("dec-{}-{}", tick, &digest[..8]);
@@ -834,9 +834,10 @@ mod tests {
     fn simple_capture(seed: u64, inputs: &[&[u8]]) -> WorkflowSnapshot {
         let mut session = CaptureSession::start("snap-test", seed);
         for (i, input) in inputs.iter().enumerate() {
-            let decision = deterministic_decision(seed, i as u64 + 1, input);
+            let tick = u32::try_from(i).unwrap_or(u32::MAX) as u64 + 1;
+            let decision = deterministic_decision(seed, tick, input);
             session
-                .capture_frame(i as u64 + 1, input, decision)
+                .capture_frame(tick, input, decision)
                 .unwrap();
         }
         session.finalize()
@@ -1414,7 +1415,7 @@ mod tests {
         // Replay against captured snapshot must verify all frames
         let mut session = ReplaySession::start(snap1.clone(), seed).expect("start should succeed");
         for input in &inputs {
-            let tick = session.cursor() as u64 + 1;
+            let tick = session.cursor().saturating_add(1);
             let replayed = deterministic_decision(seed, tick, input);
             session
                 .verify_decision(&replayed)

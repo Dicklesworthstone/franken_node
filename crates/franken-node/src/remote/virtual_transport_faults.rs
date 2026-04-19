@@ -15,7 +15,11 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
         return;
     }
     if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        let overflow = items
+            .len()
+            .saturating_sub(cap)
+            .saturating_add(1)
+            .min(items.len());
         items.drain(0..overflow);
     }
     items.push(item);

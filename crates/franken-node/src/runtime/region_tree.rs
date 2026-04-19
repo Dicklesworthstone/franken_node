@@ -34,9 +34,15 @@ use std::fmt;
 /// Maximum number of events before oldest-first eviction.
 const MAX_EVENT_LOG_ENTRIES: usize = 4096;
 
+/// Maximum number of child regions per region.
+const MAX_CHILD_REGIONS: usize = 256;
+
+/// Maximum number of tasks per region.
+const MAX_REGION_TASKS: usize = 8192;
+
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -413,7 +419,7 @@ impl RegionTree {
                 parent_id: parent_id.as_str().to_string(),
             }
         })?;
-        parent.children.push(id.clone());
+        push_bounded(&mut parent.children, id.clone(), MAX_CHILD_REGIONS);
         let child_count = parent.children.len();
 
         // Emit REG-001 for the new region
@@ -462,7 +468,7 @@ impl RegionTree {
             });
         }
 
-        node.tasks.push(task_id.clone());
+        push_bounded(&mut node.tasks, task_id.clone(), MAX_REGION_TASKS);
         let task_count = node.tasks.len();
 
         let event = RegionEvent {

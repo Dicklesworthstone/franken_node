@@ -491,24 +491,14 @@ mod tests {
     }
 
     #[test]
-    fn admission_denies_negative_max_calls_per_epoch() {
-        let mut caps = capabilities();
-        // Force negative value by casting from signed
-        caps[0].max_calls_per_epoch = (-1i32) as u32;
-        let contract = make_contract(
-            "contract-negative-calls",
-            "ext-alpha",
-            caps,
-            "signer-A",
-            SCHEMA_VERSION,
-            1,
-        );
-        let artifact = make_artifact("artifact-negative-calls", "ext-alpha", contract);
+    fn serde_rejects_negative_max_calls_per_epoch() {
+        let json = r#"{
+            "capability_id": "fs.read",
+            "scope": "filesystem:read",
+            "max_calls_per_epoch": -1
+        }"#;
 
-        assert_invalid_capability_detail(
-            trusted_gate().evaluate(&artifact),
-            "max_calls_per_epoch",
-        );
+        assert!(serde_json::from_str::<CapabilityEntry>(json).is_err());
     }
 
     #[test]

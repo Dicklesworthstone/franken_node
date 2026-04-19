@@ -93,6 +93,13 @@ impl BulkheadPermit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct OutstandingPermit {
+    request_id: String,
+    issued_at_ms: u64,
+    cap_snapshot: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct QueuedRequest {
     request_id: String,
     enqueued_at_ms: u64,
@@ -145,6 +152,9 @@ pub enum BulkheadError {
     UnknownPermit {
         permit_id: u64,
     },
+    InvalidPermit {
+        permit_id: u64,
+    },
     PermitIdExhausted {
         request_id: String,
     },
@@ -172,6 +182,7 @@ impl BulkheadError {
             Self::UnknownRequest { .. } => "RB_ERR_UNKNOWN_REQUEST",
             Self::DuplicateRequest { .. } => "RB_ERR_DUPLICATE_REQUEST",
             Self::UnknownPermit { .. } => "RB_ERR_UNKNOWN_PERMIT",
+            Self::InvalidPermit { .. } => "RB_ERR_INVALID_PERMIT",
             Self::PermitIdExhausted { .. } => "RB_ERR_PERMIT_ID_EXHAUSTED",
             Self::InvalidRequestId { .. } => "RB_ERR_INVALID_REQUEST_ID",
             Self::Draining { .. } => "RB_ERR_DRAINING",
@@ -211,6 +222,9 @@ impl fmt::Display for BulkheadError {
             Self::UnknownPermit { permit_id } => {
                 write!(f, "{}: unknown permit_id={permit_id}", self.code())
             }
+            Self::InvalidPermit { permit_id } => {
+                write!(f, "{}: invalid permit_id={permit_id}", self.code())
+            }
             Self::PermitIdExhausted { request_id } => {
                 write!(
                     f,
@@ -245,7 +259,7 @@ pub struct RemoteBulkhead {
     in_flight: usize,
     policy: BackpressurePolicy,
     queue: VecDeque<QueuedRequest>,
-    outstanding_permits: BTreeMap<u64, String>,
+    outstanding_permits: BTreeMap<u64, OutstandingPermit>,
     active_request_ids: BTreeSet<String>,
     next_permit_id: u64,
     permit_ids_exhausted: bool,
@@ -409,8 +423,14 @@ impl RemoteBulkhead {
         } else {
             self.next_permit_id = self.next_permit_id.saturating_add(1);
         }
-        self.outstanding_permits
-            .insert(permit.permit_id, request_id.to_string());
+        self.outstanding_permits.insert(
+            permit.permit_id,
+            OutstandingPermit {
+                request_id: request_id.to_string(),
+                issued_at_ms: permit.issued_at_ms,
+                cap_snapshot: permit.cap_snapshot,
+            },
+        );
         self.active_request_ids.insert(request_id.to_string());
         self.in_flight = self.in_flight.saturating_add(1);
         permit
@@ -703,11 +723,20 @@ impl RemoteBulkhead {
 
     /// Release a previously issued permit.
     pub fn release(&mut self, permit: BulkheadPermit, now_ms: u64) -> Result<(), BulkheadError> {
-        let Some(request_id) = self.outstanding_permits.remove(&permit.permit_id) else {
+        let Some(record) = self.outstanding_permits.remove(&permit.permit_id) else {
             return Err(BulkheadError::UnknownPermit {
                 permit_id: permit.permit_id,
             });
         };
+        if record.issued_at_ms != permit.issued_at_ms || record.cap_snapshot != permit.cap_snapshot
+        {
+            self.outstanding_permits.insert(permit.permit_id, record);
+            return Err(BulkheadError::InvalidPermit {
+                permit_id: permit.permit_id,
+            });
+        }
+
+        let request_id = record.request_id;
         self.active_request_ids.remove(&request_id);
 
         self.in_flight = self.in_flight.saturating_sub(1);
@@ -1144,6 +1173,35 @@ mod tests {
             )
             .expect_err("unknown permit");
         assert!(matches!(err, BulkheadError::UnknownPermit { .. }));
+    }
+
+    #[test]
+    fn deserialized_permit_with_tampered_metadata_fails_closed() {
+        let mut b = bulkhead_reject(1);
+        let permit = b.acquire(true, "victim", 10).expect("permit");
+        let forged_json = format!(
+            r#"{{"permit_id":{},"issued_at_ms":{},"cap_snapshot":{}}}"#,
+            permit.permit_id(),
+            permit.issued_at_ms().saturating_add(1),
+            permit.cap_snapshot()
+        );
+        let forged: BulkheadPermit =
+            serde_json::from_str(&forged_json).expect("forged permit should deserialize");
+
+        let err = b
+            .release(forged, 11)
+            .expect_err("tampered permit must fail closed");
+
+        assert!(matches!(
+            err,
+            BulkheadError::InvalidPermit { permit_id } if permit_id == permit.permit_id()
+        ));
+        assert_eq!(b.current_in_flight(), 1);
+        assert!(b.active_request_ids.contains("victim"));
+        assert!(b.outstanding_permits.contains_key(&permit.permit_id()));
+        b.release(permit, 12)
+            .expect("original permit should still release");
+        assert_eq!(b.current_in_flight(), 0);
     }
 
     #[test]
@@ -1597,7 +1655,10 @@ mod tests {
             .acquire(true, "overflow", 3)
             .expect_err("full queue must reject overflow");
 
-        assert!(matches!(err, BulkheadError::QueueSaturated { max_depth: 1 }));
+        assert!(matches!(
+            err,
+            BulkheadError::QueueSaturated { max_depth: 1 }
+        ));
         assert_eq!(b.queue_depth(), 1);
         assert!(!b.request_id_in_use("overflow"));
         b.release(active, 4).expect("release active permit");
@@ -1698,7 +1759,10 @@ mod tests {
             )
             .expect_err("unknown permit must fail closed");
 
-        assert!(matches!(err, BulkheadError::UnknownPermit { permit_id: 999 }));
+        assert!(matches!(
+            err,
+            BulkheadError::UnknownPermit { permit_id: 999 }
+        ));
         assert_eq!(b.current_in_flight(), 1);
         assert_eq!(b.queue_depth(), 1);
         assert_eq!(b.events().len(), events_before);
