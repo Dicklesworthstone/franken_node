@@ -2107,7 +2107,7 @@ mod tests {
             ("decision", "endpoint", &"z".repeat(100_000)),
 
             // Binary data injection
-            ("decision\xFF\xFE\xFD", "endpoint", "token"),
+            (&format!("decision{}", String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD])), "endpoint", "token"),
             ("decision", "endpoint\x00\x01\x02", "token"),
         ];
 

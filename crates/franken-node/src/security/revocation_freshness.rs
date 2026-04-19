@@ -233,6 +233,7 @@ fn validate_override_receipt(
     let invalid = check.action_id.trim().is_empty()
         || receipt.action_id.trim().is_empty()
         || receipt.action_id != check.action_id
+        || check.trace_id.trim().is_empty()
         || receipt.trace_id != check.trace_id
         || receipt.actor.trim().is_empty()
         || receipt.reason.trim().is_empty()
@@ -796,6 +797,28 @@ mod override_receipt_negative_tests {
 
         assert!(decision.allowed);
         assert!(decision.override_receipt.is_some());
+    }
+
+    #[test]
+    fn stale_override_rejects_empty_check_trace_id() {
+        let mut check = stale_check(SafetyTier::Risky);
+        check.trace_id = String::new();
+        let override_receipt = receipt();
+
+        let err = evaluate_freshness(&policy(), &check, Some(&override_receipt)).unwrap_err();
+
+        expect_override_required(err, SafetyTier::Risky, 7200);
+    }
+
+    #[test]
+    fn stale_override_rejects_whitespace_check_trace_id() {
+        let mut check = stale_check(SafetyTier::Dangerous);
+        check.trace_id = "   ".to_string();
+        let override_receipt = receipt();
+
+        let err = evaluate_freshness(&policy(), &check, Some(&override_receipt)).unwrap_err();
+
+        expect_override_required(err, SafetyTier::Dangerous, 7200);
     }
 }
 

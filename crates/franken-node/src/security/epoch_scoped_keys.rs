@@ -234,7 +234,7 @@ pub fn derive_epoch_key(root_secret: &RootSecret, epoch: ControlEpoch, domain: &
     let hkdf = Hkdf::<Sha256>::new(Some(KDF_SALT), root_secret.as_bytes());
     let epoch_bytes = epoch.value().to_le_bytes();
     let domain_bytes = domain.as_bytes();
-    let domain_len = (domain_bytes.len() as u64).to_le_bytes();
+    let domain_len = (u64::try_from(domain_bytes.len()).unwrap_or(u64::MAX)).to_le_bytes();
     let mut info = Vec::with_capacity(64);
     info.extend_from_slice(b"franken-node:epoch-kdf-info:v1:");
     info.extend_from_slice(&epoch_bytes);
@@ -265,7 +265,7 @@ pub fn sign_epoch_artifact(
         }
     })?;
     mac.update(b"epoch_scoped_sign_v1:");
-    mac.update(&(artifact.len() as u64).to_le_bytes());
+    mac.update(&(u64::try_from(artifact.len()).unwrap_or(u64::MAX)).to_le_bytes());
     mac.update(artifact);
     let bytes = mac.finalize().into_bytes();
     let mut out = [0u8; SIGNATURE_LEN];
@@ -290,7 +290,7 @@ pub fn verify_epoch_signature(
         }
     })?;
     mac.update(b"epoch_scoped_sign_v1:");
-    mac.update(&(artifact.len() as u64).to_le_bytes());
+    mac.update(&(u64::try_from(artifact.len()).unwrap_or(u64::MAX)).to_le_bytes());
     mac.update(artifact);
     mac.verify_slice(&signature.bytes)
         .map_err(|_| AuthError::SignatureRejected {

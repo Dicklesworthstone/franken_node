@@ -2364,7 +2364,7 @@ mod tests {
             ("/bin/echo", vec!["test\x1B[Hescape"]),
 
             // Binary data injection
-            ("/bin/echo", vec!["\xFF\xFE\xFD\xFC"]),
+            ("/bin/echo", vec![&String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD, 0xFC])]),
 
             // Extremely long arguments
             ("/bin/echo", vec![&"x".repeat(1000000)]),

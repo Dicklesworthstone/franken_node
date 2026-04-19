@@ -610,7 +610,8 @@ fn build_handshake_preimage(
 ) -> Vec<u8> {
     let mut buf = Vec::with_capacity(256);
     fn append_lp(buf: &mut Vec<u8>, field: &[u8]) {
-        buf.extend_from_slice(&(field.len() as u64).to_le_bytes());
+        let len = u32::try_from(field.len()).unwrap_or(u32::MAX);
+        buf.extend_from_slice(&(len as u64).to_le_bytes());
         buf.extend_from_slice(field);
     }
     append_lp(&mut buf, session_id.as_bytes());
@@ -654,7 +655,8 @@ fn build_message_preimage(
 ) -> Vec<u8> {
     let mut buf = Vec::with_capacity(256);
     fn append_lp(buf: &mut Vec<u8>, field: &[u8]) {
-        buf.extend_from_slice(&(field.len() as u64).to_le_bytes());
+        let len = u32::try_from(field.len()).unwrap_or(u32::MAX);
+        buf.extend_from_slice(&(len as u64).to_le_bytes());
         buf.extend_from_slice(field);
     }
     append_lp(&mut buf, session_id.as_bytes());

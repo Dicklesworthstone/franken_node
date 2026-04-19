@@ -654,7 +654,7 @@ fn criterion_satisfied(criterion: &RecoveryCriterion, status: &RecoveryStatus) -
         }
         RecoveryCriterion::ErrorRateBelow { threshold, .. } => status
             .observed_error_rate
-            .is_some_and(|rate| rate <= *threshold),
+            .is_some_and(|rate| rate < *threshold),
         RecoveryCriterion::OperatorAcknowledged(operator_id) => {
             status.acknowledged_operators.contains(operator_id)
         }

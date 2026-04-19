@@ -37,7 +37,7 @@ impl ThresholdConfig {
                 ),
             });
         }
-        if self.signer_keys.len() != self.total_signers as usize {
+        if u32::try_from(self.signer_keys.len()).unwrap_or(u32::MAX) != self.total_signers {
             return Err(ThresholdError::ConfigInvalid {
                 reason: format!(
                     "signer_keys count {} != total_signers {}",
@@ -160,7 +160,7 @@ fn digest_prefix_u64(digest: &[u8]) -> u64 {
 fn build_signing_message(content_hash: &str) -> Vec<u8> {
     let mut msg = Vec::new();
     msg.extend_from_slice(b"threshold_sig_verify_v1:");
-    msg.extend_from_slice(&(content_hash.len() as u64).to_le_bytes());
+    msg.extend_from_slice(&(u32::try_from(content_hash.len()).unwrap_or(u32::MAX) as u64).to_le_bytes());
     msg.extend_from_slice(content_hash.as_bytes());
     msg
 }

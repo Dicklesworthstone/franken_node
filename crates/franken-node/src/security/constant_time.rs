@@ -559,7 +559,13 @@ mod comprehensive_boundary_negative_tests {
 
         // Create multiple large allocations to simulate memory pressure
         let mut large_vecs = Vec::new();
+        const MAX_PRESSURE_VECS: usize = 10;
         for i in 0..10 {
+            // Use bounded push pattern even in tests to demonstrate proper practice
+            if large_vecs.len() >= MAX_PRESSURE_VECS {
+                let overflow = large_vecs.len().saturating_sub(MAX_PRESSURE_VECS).saturating_add(1);
+                large_vecs.drain(0..overflow);
+            }
             large_vecs.push(vec![i as u8; 10_000]);
         }
 

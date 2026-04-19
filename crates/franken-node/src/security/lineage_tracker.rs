@@ -228,10 +228,10 @@ impl TaintBoundary {
 
     /// Validate that the boundary rule is well-formed.
     pub fn validate(&self) -> Result<(), LineageError> {
-        if self.from_zone.is_empty() || self.to_zone.is_empty() {
+        if self.boundary_id.is_empty() || self.from_zone.is_empty() || self.to_zone.is_empty() {
             return Err(LineageError::BoundaryInvalid {
                 detail: format!(
-                    "{}: from_zone and to_zone must be non-empty",
+                    "{}: boundary_id, from_zone, and to_zone must be non-empty",
                     ERR_IFL_BOUNDARY_INVALID
                 ),
             });
@@ -698,6 +698,14 @@ impl ExfiltrationSentinel {
     /// Register a taint boundary.
     pub fn add_boundary(&mut self, boundary: TaintBoundary) -> Result<(), LineageError> {
         boundary.validate()?;
+        if self.boundaries.contains_key(&boundary.boundary_id) {
+            return Err(LineageError::BoundaryInvalid {
+                detail: format!(
+                    "{}: boundary '{}' already registered",
+                    ERR_IFL_BOUNDARY_INVALID, boundary.boundary_id
+                ),
+            });
+        }
         self.boundaries
             .insert(boundary.boundary_id.clone(), boundary);
         Ok(())
@@ -1735,6 +1743,63 @@ mod tests {
             .expect_err("empty destination zone must fail closed");
 
         assert!(err.to_string().contains(ERR_IFL_BOUNDARY_INVALID));
+    }
+
+    #[test]
+    fn test_boundary_validation_empty_boundary_id() {
+        let boundary = TaintBoundary {
+            boundary_id: String::new(),
+            from_zone: "internal".to_string(),
+            to_zone: "external".to_string(),
+            denied_labels: BTreeSet::new(),
+            deny_all: false,
+        };
+
+        let err = boundary
+            .validate()
+            .expect_err("empty boundary id must fail closed");
+
+        assert!(err.to_string().contains(ERR_IFL_BOUNDARY_INVALID));
+    }
+
+    #[test]
+    fn test_duplicate_boundary_id_cannot_weaken_existing_policy() {
+        let config = default_config();
+        let mut graph = LineageGraph::new(config.clone());
+        let mut sentinel = ExfiltrationSentinel::new(config);
+
+        sentinel
+            .add_boundary(make_boundary("b1", "internal", "external", &["PII"]))
+            .unwrap();
+
+        let err = sentinel
+            .add_boundary(make_boundary("b1", "internal", "external", &[]))
+            .expect_err("duplicate boundary id must not overwrite policy");
+        assert!(err.to_string().contains(ERR_IFL_BOUNDARY_INVALID));
+
+        let mut taint = TaintSet::new();
+        taint.insert("PII");
+        let edge = FlowEdge {
+            edge_id: "duplicate-boundary-policy".to_string(),
+            source: "internal-db".to_string(),
+            sink: "external-api".to_string(),
+            operation: "export".to_string(),
+            taint_set: taint,
+            timestamp_ms: 1,
+            quarantined: false,
+        };
+        graph.append_edge(edge.clone()).unwrap();
+
+        let verdict = sentinel.evaluate_edge(&edge, &mut graph).unwrap();
+
+        assert_eq!(verdict, FlowVerdict::Quarantine);
+        assert_eq!(sentinel.alert_count(), 1);
+        assert!(
+            graph
+                .get_edge("duplicate-boundary-policy")
+                .unwrap()
+                .quarantined
+        );
     }
 
     #[test]

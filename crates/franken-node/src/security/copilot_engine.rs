@@ -72,11 +72,12 @@ impl ExpectedLossVector {
     /// Total expected loss across all dimensions.
     #[must_use]
     pub fn total(&self) -> f64 {
-        self.availability_loss
+        let sum = self.availability_loss
             + self.integrity_loss
             + self.confidentiality_loss
             + self.financial_loss
-            + self.reputation_loss
+            + self.reputation_loss;
+        if sum.is_finite() { sum } else { 0.0 }
     }
 
     /// Dominant loss dimension name.
@@ -322,7 +323,8 @@ pub struct CopilotAuditEntry {
 pub fn compute_voi(action: &ActionCandidate, _state: &SystemState) -> f64 {
     let loss_if_wait = action.expected_loss_if_wait.total();
     let loss_if_act = action.expected_loss_if_act.total();
-    loss_if_wait - loss_if_act
+    let voi = loss_if_wait - loss_if_act;
+    if voi.is_finite() { voi } else { 0.0 }
 }
 
 // ── Action recommendation engine ─────────────────────────────────────────────
@@ -405,12 +407,19 @@ impl ActionRecommendationEngine {
 
                 let adjusted_uncertainty = if degraded_confidence {
                     // Widen uncertainty band by 50% under degraded mode.
-                    let adjusted = ConfidenceInterval {
-                        lower_bound: candidate.uncertainty_band.lower_bound * 0.75,
-                        upper_bound: candidate.uncertainty_band.upper_bound * 1.5,
-                        confidence_level: candidate.uncertainty_band.confidence_level * 0.8,
-                    };
-                    adjusted.is_valid().then_some(adjusted)
+                    let lower = candidate.uncertainty_band.lower_bound * 0.75;
+                    let upper = candidate.uncertainty_band.upper_bound * 1.5;
+                    let confidence = candidate.uncertainty_band.confidence_level * 0.8;
+                    if lower.is_finite() && upper.is_finite() && confidence.is_finite() {
+                        let adjusted = ConfidenceInterval {
+                            lower_bound: lower,
+                            upper_bound: upper,
+                            confidence_level: confidence,
+                        };
+                        adjusted.is_valid().then_some(adjusted)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 };

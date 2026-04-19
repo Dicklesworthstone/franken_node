@@ -1119,9 +1119,8 @@ mod interface_hash_boundary_negative_tests {
 
     #[test]
     fn serde_rejects_negative_data_len_field() {
-        let result: Result<InterfaceHash, _> = serde_json::from_str(
-            r#"{"domain":"iface.v1","hash_hex":"aaaa","data_len":-1}"#,
-        );
+        let result: Result<InterfaceHash, _> =
+            serde_json::from_str(r#"{"domain":"iface.v1","hash_hex":"aaaa","data_len":-1}"#);
 
         assert!(result.is_err());
     }
@@ -1181,8 +1180,8 @@ mod interface_hash_comprehensive_negative_tests {
     #[test]
     fn negative_compute_hash_unicode_domain_collision_resistance() {
         // Test that Unicode normalization doesn't create hash collisions
-        let nfc_domain = "café.v1";  // NFC normalized
-        let nfd_domain = "cafe\u{0301}.v1";  // NFD normalized
+        let nfc_domain = "café.v1"; // NFC normalized
+        let nfd_domain = "cafe\u{0301}.v1"; // NFD normalized
 
         let hash_nfc = compute_hash(nfc_domain, b"data");
         let hash_nfd = compute_hash(nfd_domain, b"data");
@@ -1215,8 +1214,14 @@ mod interface_hash_comprehensive_negative_tests {
         assert_ne!(hash_a.hash_hex, hash_b.hash_hex);
 
         // Cross-verification should fail
-        assert_eq!(verify_hash(&hash_a, domain_b, b"data"), Err(RejectionCode::DomainMismatch));
-        assert_eq!(verify_hash(&hash_b, domain_a, b"data"), Err(RejectionCode::DomainMismatch));
+        assert_eq!(
+            verify_hash(&hash_a, domain_b, b"data"),
+            Err(RejectionCode::DomainMismatch)
+        );
+        assert_eq!(
+            verify_hash(&hash_b, domain_a, b"data"),
+            Err(RejectionCode::DomainMismatch)
+        );
     }
 
     #[test]
@@ -1229,17 +1234,43 @@ mod interface_hash_comprehensive_negative_tests {
         let late_diff_hash = compute_hash("test.vX", b"reference_data");
 
         // All should fail in constant time
-        assert_eq!(verify_hash(&early_diff_hash, "test.v1", b"reference_data"), Err(RejectionCode::DomainMismatch));
-        assert_eq!(verify_hash(&late_diff_hash, "test.v1", b"reference_data"), Err(RejectionCode::DomainMismatch));
+        assert_eq!(
+            verify_hash(&early_diff_hash, "test.v1", b"reference_data"),
+            Err(RejectionCode::DomainMismatch)
+        );
+        assert_eq!(
+            verify_hash(&late_diff_hash, "test.v1", b"reference_data"),
+            Err(RejectionCode::DomainMismatch)
+        );
 
         // Test with hash material differences
         let mut early_hash_diff = reference_hash.clone();
-        early_hash_diff.hash_hex.replace_range(0..1, "X");
+        let early_replacement = if reference_hash.hash_hex.as_bytes()[0] == b'0' {
+            "1"
+        } else {
+            "0"
+        };
+        early_hash_diff
+            .hash_hex
+            .replace_range(0..1, early_replacement);
         let mut late_hash_diff = reference_hash.clone();
-        late_hash_diff.hash_hex.replace_range(63..64, "X");
+        let late_replacement = if reference_hash.hash_hex.as_bytes()[63] == b'0' {
+            "1"
+        } else {
+            "0"
+        };
+        late_hash_diff
+            .hash_hex
+            .replace_range(63..64, late_replacement);
 
-        assert_eq!(verify_hash(&early_hash_diff, "test.v1", b"reference_data"), Err(RejectionCode::HashMismatch));
-        assert_eq!(verify_hash(&late_hash_diff, "test.v1", b"reference_data"), Err(RejectionCode::HashMismatch));
+        assert_eq!(
+            verify_hash(&early_hash_diff, "test.v1", b"reference_data"),
+            Err(RejectionCode::HashMismatch)
+        );
+        assert_eq!(
+            verify_hash(&late_hash_diff, "test.v1", b"reference_data"),
+            Err(RejectionCode::HashMismatch)
+        );
     }
 
     #[test]
@@ -1279,13 +1310,15 @@ mod interface_hash_comprehensive_negative_tests {
         let expected_hash = compute_hash("test.v1", b"data");
 
         // Test admission near overflow
-        let admitted_success = telemetry.admit("conn-1", &expected_hash, "test.v1", b"data", "t1", "ts");
+        let admitted_success =
+            telemetry.admit("conn-1", &expected_hash, "test.v1", b"data", "t1", "ts");
         assert!(admitted_success);
         assert_eq!(telemetry.total_checks, u64::MAX);
         assert_eq!(telemetry.total_admitted, u64::MAX);
 
         // Test rejection at maximum
-        let admitted_failure = telemetry.admit("conn-2", &expected_hash, "test.v1", b"wrong", "t2", "ts");
+        let admitted_failure =
+            telemetry.admit("conn-2", &expected_hash, "test.v1", b"wrong", "t2", "ts");
         assert!(!admitted_failure);
         assert_eq!(telemetry.total_checks, u64::MAX); // Should saturate
         assert_eq!(telemetry.total_rejected, u64::MAX); // Should saturate
@@ -1311,11 +1344,11 @@ mod interface_hash_comprehensive_negative_tests {
     fn negative_verify_hash_with_malicious_hex_patterns() {
         // Test with hex patterns that might bypass validation
         let malicious_patterns = [
-            "0x" + &"a".repeat(62), // Hex prefix
-            "a".repeat(32) + "G" + &"a".repeat(31), // Invalid hex char in middle
+            "0x" + &"a".repeat(62),                    // Hex prefix
+            "a".repeat(32) + "G" + &"a".repeat(31),    // Invalid hex char in middle
             "a".repeat(32) + "\x00" + &"a".repeat(31), // Null byte in middle
-            "a".repeat(32) + "\n" + &"a".repeat(31), // Newline in middle
-            "a".repeat(63) + "G", // Invalid char at end
+            "a".repeat(32) + "\n" + &"a".repeat(31),   // Newline in middle
+            "a".repeat(63) + "G",                      // Invalid char at end
         ];
 
         for pattern in malicious_patterns {
@@ -1326,7 +1359,12 @@ mod interface_hash_comprehensive_negative_tests {
             };
 
             let result = verify_hash(&malformed_hash, "test.v1", b"data");
-            assert_eq!(result, Err(RejectionCode::MalformedHash), "Failed for pattern: {}", pattern);
+            assert_eq!(
+                result,
+                Err(RejectionCode::MalformedHash),
+                "Failed for pattern: {}",
+                pattern
+            );
         }
     }
 
@@ -1382,9 +1420,15 @@ mod interface_hash_comprehensive_negative_tests {
         let mut telemetry = AdmissionTelemetry::new();
 
         // Create specific distribution
-        telemetry.rejection_distribution.insert(RejectionCode::HashMismatch, 100);
-        telemetry.rejection_distribution.insert(RejectionCode::DomainMismatch, 200);
-        telemetry.rejection_distribution.insert(RejectionCode::MalformedHash, 50);
+        telemetry
+            .rejection_distribution
+            .insert(RejectionCode::HashMismatch, 100);
+        telemetry
+            .rejection_distribution
+            .insert(RejectionCode::DomainMismatch, 200);
+        telemetry
+            .rejection_distribution
+            .insert(RejectionCode::MalformedHash, 50);
 
         let counts = telemetry.rejection_counts();
 
@@ -1502,8 +1546,9 @@ mod interface_hash_advanced_negative_tests {
 
         // Pre-fill with maximum size strings to stress memory
         for i in 0..1000 {
+            let expected_domain = format!("domain{}{}.v1", i, "x".repeat(10000));
             let massive_strings_hash = InterfaceHash {
-                domain: format!("domain{}.v1", "x".repeat(10000)),
+                domain: expected_domain.clone(),
                 hash_hex: "z".repeat(64), // Invalid but consistent length
                 data_len: i,
             };
@@ -1514,7 +1559,7 @@ mod interface_hash_advanced_negative_tests {
             let admitted = telemetry.admit(
                 &connector_id,
                 &massive_strings_hash,
-                &format!("test{}.v1", i),
+                &expected_domain,
                 b"data",
                 &trace_id,
                 "2026-04-17T00:00:00Z",
@@ -1525,7 +1570,11 @@ mod interface_hash_advanced_negative_tests {
 
         // Verify telemetry still functions correctly under stress
         assert_eq!(telemetry.total_rejected, 1000);
-        assert!(telemetry.rejection_distribution.contains_key(&RejectionCode::MalformedHash));
+        assert!(
+            telemetry
+                .rejection_distribution
+                .contains_key(&RejectionCode::MalformedHash)
+        );
     }
 
     #[test]
@@ -1533,13 +1582,17 @@ mod interface_hash_advanced_negative_tests {
         // Test deserialization with malformed JSON escape sequences
         let malformed_json_attempts = [
             r#"{"domain":"test\uXXXX.v1","hash_hex":"aaaa","data_len":4}"#, // Invalid Unicode escape
-            r#"{"domain":"test.v1","hash_hex":"aaaa\","data_len":4}"#, // Unterminated escape
+            r#"{"domain":"test.v1","hash_hex":"aaaa\","data_len":4}"#,      // Unterminated escape
             r#"{"domain":"test.v1","hash_hex":"\uD800aaaa","data_len":4}"#, // Unpaired surrogate
         ];
 
         for malformed_json in malformed_json_attempts {
             let result: Result<InterfaceHash, _> = serde_json::from_str(malformed_json);
-            assert!(result.is_err(), "Should reject malformed JSON: {}", malformed_json);
+            assert!(
+                result.is_err(),
+                "Should reject malformed JSON: {}",
+                malformed_json
+            );
         }
     }
 
@@ -1559,11 +1612,20 @@ mod interface_hash_advanced_negative_tests {
             let hash_b = compute_hash("legitimate.v1", b"data");
 
             // Should produce different hashes
-            assert_ne!(hash_a.hash_hex, hash_b.hash_hex, "Domain: {}", malicious_domain);
+            assert_ne!(
+                hash_a.hash_hex, hash_b.hash_hex,
+                "Domain: {}",
+                malicious_domain
+            );
 
             // Cross-verification should fail
             let result = verify_hash(&hash_a, "legitimate.v1", b"data");
-            assert_eq!(result, Err(RejectionCode::DomainMismatch), "Domain: {}", malicious_domain);
+            assert_eq!(
+                result,
+                Err(RejectionCode::DomainMismatch),
+                "Domain: {}",
+                malicious_domain
+            );
         }
     }
 
@@ -1578,7 +1640,7 @@ mod interface_hash_advanced_negative_tests {
             "c" + &"с".repeat(63), // Cyrillic 'с' instead of Latin 'c'
             "d" + &"ԁ".repeat(63), // Cyrillic 'd' lookalike
             "e" + &"е".repeat(63), // Cyrillic 'е' instead of Latin 'e'
-            "f" + &"f".repeat(63), // Mixed with potential Unicode variants
+            "f" + &"𝒇".repeat(63), // Mathematical italic f instead of ASCII f
         ];
 
         for homograph_hex in homograph_patterns {
@@ -1589,7 +1651,12 @@ mod interface_hash_advanced_negative_tests {
             };
 
             let result = verify_hash(&homograph_hash, "test.v1", b"data");
-            assert_eq!(result, Err(RejectionCode::MalformedHash), "Failed for homograph: {}", homograph_hex);
+            assert_eq!(
+                result,
+                Err(RejectionCode::MalformedHash),
+                "Failed for homograph: {}",
+                homograph_hex
+            );
         }
     }
 
@@ -1619,7 +1686,9 @@ mod interface_hash_advanced_negative_tests {
         telemetry.total_admitted = u64::MAX - 1;
 
         // Set a rejection counter to max
-        telemetry.rejection_distribution.insert(RejectionCode::HashMismatch, u64::MAX);
+        telemetry
+            .rejection_distribution
+            .insert(RejectionCode::MalformedHash, u64::MAX);
 
         let valid_hash = compute_hash("test.v1", b"data");
         let malformed_hash = InterfaceHash {
@@ -1644,7 +1713,10 @@ mod interface_hash_advanced_negative_tests {
         let failure = telemetry.admit("conn-3", &malformed_hash, "test.v1", b"data", "t3", "ts");
         assert!(!failure);
         assert_eq!(telemetry.total_checks, u64::MAX); // Should remain saturated
-        assert_eq!(telemetry.rejection_distribution[&RejectionCode::MalformedHash], u64::MAX); // Should remain saturated
+        assert_eq!(
+            telemetry.rejection_distribution[&RejectionCode::MalformedHash],
+            u64::MAX
+        ); // Should remain saturated
     }
 
     #[test]
@@ -1653,7 +1725,11 @@ mod interface_hash_advanced_negative_tests {
         let adversarial_data_patterns = [
             vec![0xFF; 1000000], // All-ones pattern, large size
             vec![0x00; 1000000], // All-zeros pattern, large size
-            (0..256).cycle().take(1000000).map(|x| x as u8).collect::<Vec<_>>(), // Repeating pattern
+            (0..256)
+                .cycle()
+                .take(1000000)
+                .map(|x| x as u8)
+                .collect::<Vec<_>>(), // Repeating pattern
             vec![0xAA, 0x55].repeat(500000), // Alternating bit pattern
             b"interface_hash_v1:".repeat(100000).into_bytes(), // Separator repeated
         ];

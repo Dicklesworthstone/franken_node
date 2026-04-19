@@ -61,6 +61,14 @@ impl SafetyTier {
             Self::Advisory => 10,
         }
     }
+
+    fn strictness(self) -> u8 {
+        match self {
+            Self::Critical => 3,
+            Self::Standard => 2,
+            Self::Advisory => 1,
+        }
+    }
 }
 
 impl fmt::Display for SafetyTier {
@@ -253,12 +261,14 @@ impl RevocationFreshnessGate {
     ///
     /// Returns Advisory if the action is not in the tier table.
     pub fn classify_action(&self, action_id: &str) -> SafetyTier {
-        for (pattern, tier) in &self.tier_table {
-            if action_id == pattern || action_id.starts_with(pattern.as_str()) {
-                return *tier;
-            }
-        }
-        SafetyTier::Advisory
+        self.tier_table
+            .iter()
+            .filter(|(pattern, _)| {
+                action_id == pattern || action_id.starts_with(pattern.as_str())
+            })
+            .map(|(_, tier)| *tier)
+            .max_by_key(|tier| tier.strictness())
+            .unwrap_or(SafetyTier::Advisory)
     }
 
     /// Verify a FreshnessProof's signature and replay preconditions.
@@ -549,6 +559,31 @@ mod tests {
     fn classify_unknown_defaults_to_advisory() {
         let g = gate();
         assert_eq!(g.classify_action("unknown_action"), SafetyTier::Advisory);
+    }
+
+    #[test]
+    fn overlapping_lower_tier_prefix_cannot_shadow_critical_action() {
+        let mut g = RevocationFreshnessGate::new(
+            Box::new(test_sig),
+            vec![
+                ("key".to_string(), SafetyTier::Advisory),
+                ("key_rotate".to_string(), SafetyTier::Critical),
+            ],
+        );
+        assert_eq!(g.classify_action("key_rotate"), SafetyTier::Critical);
+        assert_eq!(
+            g.classify_action("key_rotate_extended"),
+            SafetyTier::Critical
+        );
+
+        let p = proof(SafetyTier::Advisory, 100, "shadowed-critical");
+        let err = g
+            .check(&p, 100, true, false, "key_rotate", "tr-shadowed")
+            .unwrap_err();
+
+        assert_eq!(err.code(), "ERR_RFG_TAMPERED");
+        assert!(format!("{err}").contains("does not match action tier Critical"));
+        assert!(!g.is_nonce_consumed("shadowed-critical"));
     }
 
     // --- FreshnessProof tests ---

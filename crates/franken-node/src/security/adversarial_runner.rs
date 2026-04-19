@@ -17,6 +17,23 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::capacity_defaults::aliases::{MAX_EVENTS, MAX_RESULTS};
+
+const MAX_RUNNER_EVENTS: usize = MAX_EVENTS;
+const MAX_BREACHED_CAMPAIGN_IDS: usize = MAX_RESULTS;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -393,19 +410,23 @@ impl AdversarialRunner {
     pub fn validate_corpus(&self) -> (bool, Vec<RunnerEvent>) {
         let mut events = Vec::new();
         let valid = self.corpus.validate_corpus_invariant();
-        events.push(RunnerEvent {
-            code: if valid {
-                event_codes::ADV_RUN_005_CORPUS_UPDATED.to_string()
-            } else {
-                event_codes::ADV_RUN_ERR_001_INFRA.to_string()
+        push_bounded(
+            &mut events,
+            RunnerEvent {
+                code: if valid {
+                    event_codes::ADV_RUN_005_CORPUS_UPDATED.to_string()
+                } else {
+                    event_codes::ADV_RUN_ERR_001_INFRA.to_string()
+                },
+                campaign_id: String::new(),
+                detail: format!(
+                    "corpus has {} categories (need >= 5): {}",
+                    self.corpus.category_count(),
+                    if valid { "VALID" } else { "INVALID" }
+                ),
             },
-            campaign_id: String::new(),
-            detail: format!(
-                "corpus has {} categories (need >= 5): {}",
-                self.corpus.category_count(),
-                if valid { "VALID" } else { "INVALID" }
-            ),
-        });
+            MAX_RUNNER_EVENTS,
+        );
         (valid, events)
     }
 
@@ -420,15 +441,19 @@ impl AdversarialRunner {
             .collect::<std::collections::HashSet<_>>()
             .len();
         let valid = count >= 3;
-        events.push(RunnerEvent {
-            code: event_codes::ADV_RUN_004_MUTATION.to_string(),
-            campaign_id: String::new(),
-            detail: format!(
-                "{} mutation strategies enabled (need >= 3): {}",
-                count,
-                if valid { "VALID" } else { "INSUFFICIENT" }
-            ),
-        });
+        push_bounded(
+            &mut events,
+            RunnerEvent {
+                code: event_codes::ADV_RUN_004_MUTATION.to_string(),
+                campaign_id: String::new(),
+                detail: format!(
+                    "{} mutation strategies enabled (need >= 3): {}",
+                    count,
+                    if valid { "VALID" } else { "INSUFFICIENT" }
+                ),
+            },
+            MAX_RUNNER_EVENTS,
+        );
         (valid, events)
     }
 
@@ -437,44 +462,66 @@ impl AdversarialRunner {
         let mut events = Vec::new();
         let mut breaches = Vec::new();
         let mut held = 0_usize;
+        let mut breach_count = 0_usize;
         let mut inconclusive = 0_usize;
         let mut containment_failures = 0_usize;
 
         for result in results {
-            events.push(RunnerEvent {
-                code: event_codes::ADV_RUN_001_STARTED.to_string(),
-                campaign_id: result.campaign_id.clone(),
-                detail: format!("execution_id={}", result.execution_id),
-            });
+            push_bounded(
+                &mut events,
+                RunnerEvent {
+                    code: event_codes::ADV_RUN_001_STARTED.to_string(),
+                    campaign_id: result.campaign_id.clone(),
+                    detail: format!("execution_id={}", result.execution_id),
+                },
+                MAX_RUNNER_EVENTS,
+            );
 
             if !result.sandbox_verified && self.config.sandbox_required {
                 containment_failures = containment_failures.saturating_add(1);
-                events.push(RunnerEvent {
-                    code: event_codes::ADV_RUN_ERR_002_CONTAINMENT.to_string(),
-                    campaign_id: result.campaign_id.clone(),
-                    detail: "sandbox containment not verified".to_string(),
-                });
+                push_bounded(
+                    &mut events,
+                    RunnerEvent {
+                        code: event_codes::ADV_RUN_ERR_002_CONTAINMENT.to_string(),
+                        campaign_id: result.campaign_id.clone(),
+                        detail: "sandbox containment not verified".to_string(),
+                    },
+                    MAX_RUNNER_EVENTS,
+                );
             }
 
             match result.verdict {
                 ExecutionVerdict::DefenseHeld => {
                     held = held.saturating_add(1);
-                    events.push(RunnerEvent {
-                        code: event_codes::ADV_RUN_002_DEFENSE_HELD.to_string(),
-                        campaign_id: result.campaign_id.clone(),
-                        detail: format!("duration={}ms", result.duration_ms),
-                    });
+                    push_bounded(
+                        &mut events,
+                        RunnerEvent {
+                            code: event_codes::ADV_RUN_002_DEFENSE_HELD.to_string(),
+                            campaign_id: result.campaign_id.clone(),
+                            detail: format!("duration={}ms", result.duration_ms),
+                        },
+                        MAX_RUNNER_EVENTS,
+                    );
                 }
                 ExecutionVerdict::DefenseBreached => {
-                    breaches.push(result.campaign_id.clone());
-                    events.push(RunnerEvent {
-                        code: event_codes::ADV_RUN_003_BREACH.to_string(),
-                        campaign_id: result.campaign_id.clone(),
-                        detail: format!(
-                            "severity={} duration={}ms",
-                            result.severity_if_breached, result.duration_ms
-                        ),
-                    });
+                    breach_count = breach_count.saturating_add(1);
+                    push_bounded(
+                        &mut breaches,
+                        result.campaign_id.clone(),
+                        MAX_BREACHED_CAMPAIGN_IDS,
+                    );
+                    push_bounded(
+                        &mut events,
+                        RunnerEvent {
+                            code: event_codes::ADV_RUN_003_BREACH.to_string(),
+                            campaign_id: result.campaign_id.clone(),
+                            detail: format!(
+                                "severity={} duration={}ms",
+                                result.severity_if_breached, result.duration_ms
+                            ),
+                        },
+                        MAX_RUNNER_EVENTS,
+                    );
                 }
                 ExecutionVerdict::Inconclusive => {
                     inconclusive = inconclusive.saturating_add(1);
@@ -483,16 +530,19 @@ impl AdversarialRunner {
 
             // Result integration event
             for target in &result.integration_targets {
-                events.push(RunnerEvent {
-                    code: event_codes::ADV_RUN_006_INTEGRATED.to_string(),
-                    campaign_id: result.campaign_id.clone(),
-                    detail: format!("target={target}"),
-                });
+                push_bounded(
+                    &mut events,
+                    RunnerEvent {
+                        code: event_codes::ADV_RUN_006_INTEGRATED.to_string(),
+                        campaign_id: result.campaign_id.clone(),
+                        detail: format!("target={target}"),
+                    },
+                    MAX_RUNNER_EVENTS,
+                );
             }
         }
 
         let total = results.len();
-        let breach_count = breaches.len();
         // Fail-closed: pass only when no breaches AND either no campaigns ran
         // (vacuous pass) or at least one defense held. All-inconclusive
         // campaigns must not pass the gate. Sandbox containment failures also
@@ -1424,7 +1474,7 @@ mod tests {
         for i in 0..10000 {
             massive_payload.insert(
                 format!("attack_vector_{}", i),
-                serde_json::Value::String(format!("payload_data_{}", "x".repeat(1000)))
+                serde_json::Value::String(format!("payload_data_{}", "x".repeat(1000))),
             );
         }
 
@@ -1471,14 +1521,14 @@ mod tests {
     fn negative_unicode_attack_vectors_handled_without_corruption() {
         // Test attack vectors with problematic Unicode characters
         let unicode_attacks = vec![
-            "攻击向量-🔥-测试",                    // Mixed CJK with emoji
-            "هجوم-اختبار-٧٨٩",                   // Arabic with numbers
-            "attack\u{200B}vector\u{FEFF}",      // Zero-width space and BOM
-            "attack‌vector‍hidden",               // Zero-width joiners
-            "𝒂𝒕𝒕𝒂𝒄𝒌_𝒗𝒆𝒄𝒕𝒐𝒓",           // Mathematical script unicode
-            "attack\u{0301}vect\u{0302}or",      // Combining diacriticals
-            "attack\u{202E}rtl\u{202D}vector",   // RTL/LTR override
-            "attack\u{1F600}vector",             // Emoji codepoint
+            "攻击向量-🔥-测试",                // Mixed CJK with emoji
+            "هجوم-اختبار-٧٨٩",                 // Arabic with numbers
+            "attack\u{200B}vector\u{FEFF}",    // Zero-width space and BOM
+            "attack‌vector‍hidden",              // Zero-width joiners
+            "𝒂𝒕𝒕𝒂𝒄𝒌_𝒗𝒆𝒄𝒕𝒐𝒓",                   // Mathematical script unicode
+            "attack\u{0301}vect\u{0302}or",    // Combining diacriticals
+            "attack\u{202E}rtl\u{202D}vector", // RTL/LTR override
+            "attack\u{1F600}vector",           // Emoji codepoint
         ];
 
         for (i, attack_vector) in unicode_attacks.iter().enumerate() {
@@ -1531,13 +1581,13 @@ mod tests {
     #[test]
     fn negative_null_bytes_and_control_characters_in_campaign_data() {
         let problematic_inputs = vec![
-            "campaign\0null",              // Null byte
-            "campaign\x01\x02control",    // Control characters
-            "campaign\r\nlinebreak",      // Line breaks
-            "campaign\t\x0Btab",          // Tab and vertical tab
-            "campaign\x7F\u{80}\u{FF}",       // DEL and high bytes
-            "",                           // Empty string
-            "\0\0\0",                     // Only null bytes
+            "campaign\0null",           // Null byte
+            "campaign\x01\x02control",  // Control characters
+            "campaign\r\nlinebreak",    // Line breaks
+            "campaign\t\x0Btab",        // Tab and vertical tab
+            "campaign\x7F\u{80}\u{FF}", // DEL and high bytes
+            "",                         // Empty string
+            "\0\0\0",                   // Only null bytes
         ];
 
         for (i, input) in problematic_inputs.iter().enumerate() {
@@ -1557,7 +1607,10 @@ mod tests {
                 },
                 payload: {
                     let mut payload = BTreeMap::new();
-                    payload.insert("control_test".to_string(), serde_json::Value::String(input.clone()));
+                    payload.insert(
+                        "control_test".to_string(),
+                        serde_json::Value::String(input.clone()),
+                    );
                     payload
                 },
                 mutations_applied: Vec::new(),
@@ -1590,13 +1643,7 @@ mod tests {
 
     #[test]
     fn negative_extreme_timestamp_values_use_saturating_arithmetic() {
-        let extreme_timestamps = vec![
-            u64::MAX,
-            u64::MAX - 1,
-            u64::MAX / 2,
-            0,
-            1,
-        ];
+        let extreme_timestamps = vec![u64::MAX, u64::MAX - 1, u64::MAX / 2, 0, 1];
 
         for (i, timestamp) in extreme_timestamps.iter().enumerate() {
             let result = CampaignResult {
@@ -1616,7 +1663,8 @@ mod tests {
                 integration_targets: Vec::new(),
             };
 
-            let runner = AdversarialRunner::new(RunnerConfig::default_config(), build_default_corpus());
+            let runner =
+                AdversarialRunner::new(RunnerConfig::default_config(), build_default_corpus());
             let gate = runner.evaluate_results(&[result]);
 
             // Should handle extreme timestamps without overflow
@@ -1684,8 +1732,8 @@ mod tests {
         let collision_candidates = vec![
             "CAMP-001",
             "CAMP-002",
-            "CAMP-001", // Duplicate
-            "camp-001", // Case variation
+            "CAMP-001",  // Duplicate
+            "camp-001",  // Case variation
             "CAMP-001 ", // Trailing space
             " CAMP-001", // Leading space
             "CAMP\0001", // Null byte variation
@@ -1735,7 +1783,11 @@ mod tests {
         // Test with massive integration target lists
         let mut massive_targets = Vec::new();
         for i in 0..1000 {
-            massive_targets.push(format!("target_system_{}_with_very_long_name_{}", i, "x".repeat(100)));
+            massive_targets.push(format!(
+                "target_system_{}_with_very_long_name_{}",
+                i,
+                "x".repeat(100)
+            ));
         }
 
         let config = RunnerConfig {
@@ -1765,7 +1817,9 @@ mod tests {
         assert!(gate.overall_pass);
 
         // Should produce integration events for each target
-        let integration_events = gate.events.iter()
+        let integration_events = gate
+            .events
+            .iter()
             .filter(|e| e.code == event_codes::ADV_RUN_006_INTEGRATED)
             .count();
         assert!(integration_events <= 1000); // Should not exceed input count
@@ -1774,14 +1828,14 @@ mod tests {
     #[test]
     fn negative_defense_decision_component_boundary_testing() {
         let boundary_components = vec![
-            "",                              // Empty component
-            "x".repeat(10000),              // Massive component name
-            "component\0null",              // Null byte
-            "comp\r\nonent",               // Line break
-            "🔥component🔥",               // Unicode emoji
-            "component.with.dots",          // Dot notation
-            "component/with/slashes",       // Path-like
-            "component:with:colons",        // Colon separated
+            "",                       // Empty component
+            "x".repeat(10000),        // Massive component name
+            "component\0null",        // Null byte
+            "comp\r\nonent",          // Line break
+            "🔥component🔥",          // Unicode emoji
+            "component.with.dots",    // Dot notation
+            "component/with/slashes", // Path-like
+            "component:with:colons",  // Colon separated
         ];
 
         for (i, component) in boundary_components.iter().enumerate() {
@@ -1804,7 +1858,8 @@ mod tests {
                 integration_targets: Vec::new(),
             };
 
-            let runner = AdversarialRunner::new(RunnerConfig::default_config(), build_default_corpus());
+            let runner =
+                AdversarialRunner::new(RunnerConfig::default_config(), build_default_corpus());
             let gate = runner.evaluate_results(&[result]);
 
             // Should handle boundary component names without corruption
@@ -1882,7 +1937,7 @@ mod tests {
             Ok(json) => {
                 assert!(json.contains("CAMP-MASSIVE-DETAIL"));
                 // Should complete without memory corruption
-            },
+            }
             Err(_) => {
                 // Graceful failure acceptable for extreme sizes
             }
@@ -1907,7 +1962,7 @@ mod tests {
     // Negative-path hardening tests targeting specific vulnerability patterns
     #[test]
     fn negative_vec_push_events_memory_exhaustion_dos_attack() {
-        // Test unbounded events.push() calls - should use push_bounded for DoS protection
+        // Test bounded event emission under adversarial result volume.
         let config = RunnerConfig::default_config();
         let corpus = build_default_corpus();
         let runner = AdversarialRunner::new(config, corpus);
@@ -1933,28 +1988,23 @@ mod tests {
             });
         }
 
-        // This should use push_bounded, not raw push(), to prevent memory exhaustion
-        // Raw push() would allow unbounded event growth → DoS vulnerability
         let gate = runner.evaluate_results(&massive_results);
 
-        // Verify the attack completes but warn about unbounded growth
         assert_eq!(gate.total_campaigns, 10000);
-        assert!(gate.events.len() > 20000); // Should generate many events but be bounded
-
-        // The vulnerability: no capacity limit enforced on events vector
-        // Production code should use: push_bounded(&mut events, event, MAX_EVENTS_CAP)
+        assert_eq!(gate.events.len(), MAX_RUNNER_EVENTS);
+        assert!(gate.events.iter().all(|event| !event.code.is_empty()));
     }
 
     #[test]
     fn negative_vec_push_breaches_unbounded_capacity_overflow() {
-        // Test unbounded breaches.push() calls - DoS via breach list exhaustion
+        // Test bounded breach ID retention without undercounting actual breaches.
         let config = RunnerConfig::default_config();
         let corpus = build_default_corpus();
         let runner = AdversarialRunner::new(config, corpus);
 
-        // Create massive breach scenario to overflow breaches vector
+        let breach_result_count = MAX_BREACHED_CAMPAIGN_IDS.saturating_add(100);
         let mut breach_results = Vec::new();
-        for i in 0..5000 {
+        for i in 0..breach_result_count {
             breach_results.push(CampaignResult {
                 campaign_id: format!("CAMP-BREACH-FLOOD-{:05}", i),
                 execution_id: format!("exec-breach-{}", i),
@@ -1968,27 +2018,25 @@ mod tests {
             });
         }
 
-        // This should use push_bounded on breaches vector to prevent memory exhaustion
         let gate = runner.evaluate_results(&breach_results);
 
-        assert!(!gate.overall_pass); // Should fail due to breaches
-        assert_eq!(gate.defense_breached, 5000);
-        assert_eq!(gate.breached_campaign_ids.len(), 5000);
-
-        // Vulnerability: breaches.push() has no capacity limit
-        // Should be: push_bounded(&mut breaches, campaign_id, MAX_BREACHES_CAP)
-
-        // Verify memory pressure from unbounded breach list
-        let total_breach_bytes: usize = gate.breached_campaign_ids
-            .iter()
-            .map(|id| id.len())
-            .sum();
-        assert!(total_breach_bytes > 100000); // Demonstrates memory exhaustion risk
+        assert!(!gate.overall_pass);
+        assert_eq!(gate.defense_breached, breach_result_count);
+        assert_eq!(gate.breached_campaign_ids.len(), MAX_BREACHED_CAMPAIGN_IDS);
+        assert_eq!(
+            gate.breached_campaign_ids.first().map(String::as_str),
+            Some("CAMP-BREACH-FLOOD-00100")
+        );
+        let expected_last = format!("CAMP-BREACH-FLOOD-{:05}", breach_result_count - 1);
+        assert_eq!(
+            gate.breached_campaign_ids.last().map(String::as_str),
+            Some(expected_last.as_str())
+        );
     }
 
     #[test]
     fn negative_validate_mutations_events_push_capacity_bypass() {
-        // Test validate_mutations() events.push() without bounds checking
+        // Test validate_mutations() keeps validation event emission bounded.
         let mut config = RunnerConfig::default_config();
 
         // Create scenario that forces many validation events
@@ -1999,24 +2047,19 @@ mod tests {
 
         let runner = AdversarialRunner::new(config, build_default_corpus());
 
-        // This should use push_bounded on events vector in validate_mutations()
         let (valid, events) = runner.validate_mutations();
 
         assert!(!valid);
-        assert_eq!(events.len(), 1); // Currently unbounded, should be capped
+        assert!(events.len() <= MAX_RUNNER_EVENTS);
+        assert_eq!(events.len(), 1);
 
-        // The vulnerability exists in validate_mutations() method:
-        // events.push(RunnerEvent { ... }) without capacity limit
-        // Should use: push_bounded(&mut events, event, MAX_VALIDATION_EVENTS)
-
-        // Verify event detail contains expected failure message
         assert!(events[0].detail.contains("INSUFFICIENT"));
         assert!(events[0].detail.contains("2 mutation strategies enabled"));
     }
 
     #[test]
     fn negative_validate_corpus_events_push_memory_bound_bypass() {
-        // Test validate_corpus() events.push() without capacity enforcement
+        // Test validate_corpus() keeps validation event emission bounded.
         let config = RunnerConfig::default_config();
 
         // Create corpus that triggers validation events
@@ -2029,14 +2072,11 @@ mod tests {
 
         let runner = AdversarialRunner::new(config, invalid_corpus);
 
-        // This should use push_bounded in validate_corpus()
         let (valid, events) = runner.validate_corpus();
 
         assert!(!valid);
-        assert_eq!(events.len(), 1); // Currently unbounded
-
-        // Vulnerability: events.push() in validate_corpus() lacks capacity limit
-        // Should be: push_bounded(&mut events, event, MAX_CORPUS_VALIDATION_EVENTS)
+        assert!(events.len() <= MAX_RUNNER_EVENTS);
+        assert_eq!(events.len(), 1);
 
         assert_eq!(events[0].code, event_codes::ADV_RUN_ERR_001_INFRA);
         assert!(events[0].detail.contains("INVALID"));
@@ -2045,13 +2085,13 @@ mod tests {
 
     #[test]
     fn negative_integration_events_loop_push_exhaustion_attack() {
-        // Test integration events loop with unbounded events.push() calls
+        // Test integration events loop cannot grow the output event list without bound.
         let config = RunnerConfig::default_config();
         let corpus = build_default_corpus();
         let runner = AdversarialRunner::new(config, corpus);
 
-        // Create result with massive integration targets to trigger loop exhaustion
-        let massive_targets: Vec<String> = (0..1000)
+        let target_count = MAX_RUNNER_EVENTS.saturating_add(100);
+        let massive_targets: Vec<String> = (0..target_count)
             .map(|i| format!("integration_target_{:04}", i))
             .collect();
 
@@ -2067,32 +2107,26 @@ mod tests {
             integration_targets: massive_targets,
         };
 
-        // The for loop in evaluate_results() does unbounded events.push() per target
         let gate = runner.evaluate_results(&[result]);
 
         assert!(gate.overall_pass);
+        assert_eq!(gate.events.len(), MAX_RUNNER_EVENTS);
 
-        // Count integration events generated by the unbounded loop
-        let integration_event_count = gate.events
+        let integration_event_count = gate
+            .events
             .iter()
             .filter(|e| e.code == event_codes::ADV_RUN_006_INTEGRATED)
             .count();
 
-        assert_eq!(integration_event_count, 1000);
+        assert!(integration_event_count <= MAX_RUNNER_EVENTS);
 
-        // Vulnerability: for target in &result.integration_targets loop
-        // uses unbounded events.push() - should use push_bounded with capacity limit
-        // Attacker could DoS by providing massive integration_targets list
-
-        // Verify each integration event was created
-        for i in 0..100 { // Check first 100
-            let target_name = format!("integration_target_{:04}", i);
-            let found = gate.events.iter().any(|e|
-                e.code == event_codes::ADV_RUN_006_INTEGRATED &&
-                e.detail.contains(&target_name)
-            );
-            assert!(found, "Missing integration event for target {}", target_name);
-        }
+        let retained_tail = format!("integration_target_{:04}", target_count - 1);
+        assert!(
+            gate.events
+                .iter()
+                .any(|event| event.code == event_codes::ADV_RUN_006_INTEGRATED
+                    && event.detail.contains(&retained_tail))
+        );
     }
 
     #[test]
@@ -2103,19 +2137,17 @@ mod tests {
         let runner = AdversarialRunner::new(config, corpus);
 
         // Test saturating arithmetic at overflow boundaries
-        let max_results = vec![
-            CampaignResult {
-                campaign_id: "CAMP-SAT-HELD".to_string(),
-                execution_id: "exec-sat-held".to_string(),
-                timestamp: "2026-02-21T00:00:00Z".to_string(),
-                verdict: ExecutionVerdict::DefenseHeld,
-                defense_decisions: Vec::new(),
-                sandbox_verified: false, // Trigger containment failure
-                duration_ms: 100,
-                severity_if_breached: CampaignSeverity::High,
-                integration_targets: Vec::new(),
-            },
-        ];
+        let max_results = vec![CampaignResult {
+            campaign_id: "CAMP-SAT-HELD".to_string(),
+            execution_id: "exec-sat-held".to_string(),
+            timestamp: "2026-02-21T00:00:00Z".to_string(),
+            verdict: ExecutionVerdict::DefenseHeld,
+            defense_decisions: Vec::new(),
+            sandbox_verified: false, // Trigger containment failure
+            duration_ms: 100,
+            severity_if_breached: CampaignSeverity::High,
+            integration_targets: Vec::new(),
+        }];
 
         let gate = runner.evaluate_results(&max_results);
 

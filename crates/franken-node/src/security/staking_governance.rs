@@ -648,7 +648,9 @@ impl TrustGovernanceState {
 
         // INV-STAKE-NO-DOUBLE-SLASH: check for duplicate evidence
         let used = self.used_evidence_hashes.entry(stake_id.0).or_default();
-        if used.contains(&evidence.evidence_hash) {
+        if used.iter().any(|used_hash| {
+            crate::security::constant_time::ct_eq(used_hash, &evidence.evidence_hash)
+        }) {
             return Err(StakingError::new(
                 ERR_STAKE_ALREADY_SLASHED,
                 format!(
@@ -963,8 +965,12 @@ impl TrustGovernanceState {
         let minimum = self.policy.minimum_for_tier(risk_tier);
 
         // Find the publisher's active stake for this risk tier
+        let now = self.current_time;
         let active_stake = self.stakes.values().find(|s| {
-            s.publisher == publisher && s.state == StakeState::Active && s.risk_tier == risk_tier
+            s.publisher == publisher
+                && s.state == StakeState::Active
+                && s.risk_tier == risk_tier
+                && (s.expires_at == 0 || now < s.expires_at)
         });
 
         let (passed, reason) = match active_stake {
@@ -1578,6 +1584,22 @@ mod tests {
         assert!(gate.reason.contains("no active stake"));
     }
 
+    #[test]
+    fn test_capability_gate_rejects_unswept_expired_stake_at_boundary() {
+        let mut gov = TrustGovernanceState::new();
+        gov.set_time(1000);
+        let id = gov
+            .deposit_stake("alice", 500, RiskTier::High, 2000)
+            .unwrap();
+
+        gov.set_time(2000);
+        let gate = gov.check_capability_gate("alice", "publish", RiskTier::High);
+
+        assert!(!gate.passed, "gate must fail closed at exact expiry");
+        assert!(gate.reason.contains("no active stake"));
+        assert_eq!(gov.get_stake(id).unwrap().state, StakeState::Active);
+    }
+
     // -- audit trail tests --------------------------------------------------
 
     #[test]
@@ -1949,7 +1971,7 @@ mod tests {
 
             // Should handle deadline calculations safely
             let now = 1_000_000u64;
-            let is_expired = now > event.appeal_deadline;
+            let is_expired = now >= event.appeal_deadline;
             assert!(is_expired || !is_expired); // Basic boolean check
         }
     }
@@ -2074,7 +2096,7 @@ mod tests {
 
         for (current_time, deadline) in edge_timestamps {
             // Deadline comparison should not overflow
-            let is_expired = current_time > deadline;
+            let is_expired = current_time >= deadline;
             let time_left = if deadline > current_time {
                 deadline.saturating_sub(current_time)
             } else {
@@ -2082,11 +2104,11 @@ mod tests {
             };
 
             // Basic sanity checks
-            if current_time <= deadline {
-                assert!(!is_expired, "Should not be expired when current <= deadline");
+            if current_time < deadline {
+                assert!(!is_expired, "Should not be expired when current < deadline");
                 assert_eq!(time_left, deadline - current_time);
             } else {
-                assert!(is_expired, "Should be expired when current > deadline");
+                assert!(is_expired, "Should be expired when current >= deadline");
                 assert_eq!(time_left, 0);
             }
 
