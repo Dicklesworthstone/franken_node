@@ -2721,6 +2721,7 @@ mod tests {
                         }
                     }
                 }
+            }
 
             #[test]
             fn negative_unicode_injection_in_trace_ids_and_metadata_keys() {

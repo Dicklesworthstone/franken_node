@@ -191,6 +191,14 @@ impl RevocationRegistry {
         // revocations, letting previously-revoked artifacts pass is_revoked().
         // Reject at capacity instead of evicting.
         let zone_revoked = self.revoked.entry(head.zone_id.clone()).or_default();
+        if zone_revoked.contains(&head.revoked_artifact) {
+            return Err(RevocationError::InvalidInput {
+                detail: format!(
+                    "zone {} already revoked artifact {}; duplicate revocation would advance head without new state",
+                    head.zone_id, head.revoked_artifact
+                ),
+            });
+        }
         if zone_revoked.len() >= MAX_REVOKED_PER_ZONE {
             return Err(RevocationError::InvalidInput {
                 detail: format!(
@@ -270,6 +278,14 @@ impl RevocationRegistry {
             }
             registry.heads.insert(entry.zone_id.clone(), entry.sequence);
             let zone_revoked = registry.revoked.entry(entry.zone_id.clone()).or_default();
+            if zone_revoked.contains(&entry.revoked_artifact) {
+                return Err(RevocationError::RecoveryFailed {
+                    reason: format!(
+                        "duplicate revocation for artifact {} in zone {}",
+                        entry.revoked_artifact, entry.zone_id
+                    ),
+                });
+            }
             if zone_revoked.len() >= MAX_REVOKED_PER_ZONE {
                 return Err(RevocationError::RecoveryFailed {
                     reason: format!(
@@ -879,6 +895,36 @@ mod tests {
     }
 
     #[test]
+    fn negative_duplicate_artifact_revocation_does_not_advance_head() {
+        let mut reg = RevocationRegistry::new();
+        reg.advance_head(head("zone-a", 1, "art-a1")).unwrap();
+        let head_before = reg.current_head("zone-a").unwrap();
+        let log_len_before = reg.canonical_log().len();
+        let audit_len_before = reg.audits.len();
+        let revocations_before = reg.total_revocations();
+
+        let err = reg.advance_head(head("zone-a", 2, "art-a1")).unwrap_err();
+
+        assert_eq!(err.code(), "REV_INVALID_INPUT");
+        assert!(err.to_string().contains("already revoked artifact"));
+        assert_eq!(reg.current_head("zone-a").unwrap(), head_before);
+        assert_eq!(reg.canonical_log().len(), log_len_before);
+        assert_eq!(reg.audits.len(), audit_len_before);
+        assert_eq!(reg.total_revocations(), revocations_before);
+        assert!(reg.is_revoked("zone-a", "art-a1").unwrap());
+    }
+
+    #[test]
+    fn negative_recovery_rejects_duplicate_artifact_for_same_zone() {
+        let log = vec![head("zone-a", 1, "art-a1"), head("zone-a", 2, "art-a1")];
+
+        let err = RevocationRegistry::recover_from_log(&log).unwrap_err();
+
+        assert_eq!(err.code(), "REV_RECOVERY_FAILED");
+        assert!(err.to_string().contains("duplicate revocation"));
+    }
+
+    #[test]
     fn negative_recovery_rejects_stale_sequence_after_cross_zone_entries() {
         let log = vec![
             head("zone-a", 3, "art-a3"),
@@ -978,11 +1024,11 @@ mod revocation_registry_comprehensive_negative_tests {
 
         // Test malicious Unicode in zone IDs
         let malicious_zones = vec![
-            "zone\u{202e}evil\u{200b}", // Right-to-left override + zero-width space
-            "zone\u{0000}injection", // Null byte injection
-            "zone\u{feff}bom", // Byte order mark
-            "zone\u{2028}newline", // Line separator
-            "zone\u{2029}paragraph", // Paragraph separator
+            "zone\u{202e}evil\u{200b}",    // Right-to-left override + zero-width space
+            "zone\u{0000}injection",       // Null byte injection
+            "zone\u{feff}bom",             // Byte order mark
+            "zone\u{2028}newline",         // Line separator
+            "zone\u{2029}paragraph",       // Paragraph separator
             "zone\u{200c}\u{200d}joiners", // Zero-width joiners
         ];
 
@@ -1008,14 +1054,17 @@ mod revocation_registry_comprehensive_negative_tests {
                     match advance_result {
                         Ok(_) => {
                             // Verify Unicode artifact is properly tracked
-                            assert!(reg.is_revoked(malicious_zone, &unicode_artifact).unwrap_or(false));
-                        },
+                            assert!(
+                                reg.is_revoked(malicious_zone, &unicode_artifact)
+                                    .unwrap_or(false)
+                            );
+                        }
                         Err(e) => {
                             // Unicode validation rejection is acceptable
                             assert!(matches!(e, RevocationError::InvalidInput { .. }));
                         }
                     }
-                },
+                }
                 Err(e) => {
                     // Unicode rejection is also acceptable
                     assert_eq!(e.code(), "REV_INVALID_INPUT");
@@ -1030,7 +1079,7 @@ mod revocation_registry_comprehensive_negative_tests {
         let malicious_artifacts = vec![
             "artifact\x00injection", // Null byte
             &format!("artifact{}", String::from_utf8_lossy(&[0x7f, 0x80, 0x9f])), // Control characters
-            "artifact\u{202e}reverse", // Text direction manipulation
+            "artifact\u{202e}reverse",   // Text direction manipulation
             "artifact\u{034f}combining", // Combining grapheme joiner
             "artifact\u{180e}mongolian", // Mongolian vowel separator
         ];
@@ -1048,8 +1097,12 @@ mod revocation_registry_comprehensive_negative_tests {
             match result {
                 Ok(_) => {
                     // Verify control characters don't corrupt revocation checks
-                    assert!(clean_reg.is_revoked("test-zone", &malicious_artifact).unwrap());
-                },
+                    assert!(
+                        clean_reg
+                            .is_revoked("test-zone", &malicious_artifact)
+                            .unwrap()
+                    );
+                }
                 Err(e) => {
                     // Control character rejection is acceptable
                     assert_eq!(e.code(), "REV_INVALID_INPUT");
@@ -1074,7 +1127,10 @@ mod revocation_registry_comprehensive_negative_tests {
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             trace_id: "near-max-trace".to_string(),
         });
-        assert!(result.is_ok(), "Should handle near-maximum sequence numbers");
+        assert!(
+            result.is_ok(),
+            "Should handle near-maximum sequence numbers"
+        );
 
         // Test maximum sequence number
         let max_sequence = u64::MAX;
@@ -1112,7 +1168,10 @@ mod revocation_registry_comprehensive_negative_tests {
         ];
 
         let recovered_reg = RevocationRegistry::recover_from_log(&wraparound_log);
-        assert!(recovered_reg.is_ok(), "Should recover logs with maximum sequence numbers");
+        assert!(
+            recovered_reg.is_ok(),
+            "Should recover logs with maximum sequence numbers"
+        );
 
         let recovered = recovered_reg.unwrap();
         assert_eq!(recovered.current_head("wraparound-zone").unwrap(), u64::MAX);
@@ -1122,14 +1181,16 @@ mod revocation_registry_comprehensive_negative_tests {
         for i in 0..10000 {
             let zone_name = format!("zone-{}", i);
             massive_reg.init_zone(&zone_name).unwrap();
-            massive_reg.advance_head(RevocationHead {
-                zone_id: zone_name,
-                sequence: 1,
-                revoked_artifact: format!("artifact-{}", i),
-                reason: "Massive test".to_string(),
-                timestamp: "2026-01-01T00:00:00Z".to_string(),
-                trace_id: format!("massive-trace-{}", i),
-            }).unwrap();
+            massive_reg
+                .advance_head(RevocationHead {
+                    zone_id: zone_name,
+                    sequence: 1,
+                    revoked_artifact: format!("artifact-{}", i),
+                    reason: "Massive test".to_string(),
+                    timestamp: "2026-01-01T00:00:00Z".to_string(),
+                    trace_id: format!("massive-trace-{}", i),
+                })
+                .unwrap();
         }
 
         // Verify total_revocations uses saturating arithmetic
@@ -1152,7 +1213,10 @@ mod revocation_registry_comprehensive_negative_tests {
         let huge_trace_id = "tr".repeat(5000);
 
         let result = reg.init_zone(&huge_zone_id);
-        assert!(result.is_ok(), "Should handle large zone IDs without memory exhaustion");
+        assert!(
+            result.is_ok(),
+            "Should handle large zone IDs without memory exhaustion"
+        );
 
         let result = reg.advance_head(RevocationHead {
             zone_id: huge_zone_id.clone(),
@@ -1186,7 +1250,7 @@ mod revocation_registry_comprehensive_negative_tests {
 
                 // Some may fail due to capacity limits, which is expected
                 match result {
-                    Ok(_) => {},
+                    Ok(_) => {}
                     Err(e) => {
                         assert!(matches!(e, RevocationError::InvalidInput { .. }));
                         break; // Stop when capacity reached
@@ -1238,20 +1302,32 @@ mod revocation_registry_comprehensive_negative_tests {
         // Verify monotonic invariants are maintained
         for zone in &zones {
             let head = reg.current_head(zone).unwrap();
-            assert!(head >= 1 && head <= 100, "Head should be in valid range for zone {}", zone);
+            assert!(
+                head >= 1 && head <= 100,
+                "Head should be in valid range for zone {}",
+                zone
+            );
 
             // Verify all artifacts up to current head are revoked
             for seq in 1..=head {
                 let artifact = format!("artifact-{}-{}", zone, seq);
-                assert!(reg.is_revoked(zone, &artifact).unwrap(),
-                       "Artifact {} should be revoked in zone {}", artifact, zone);
+                assert!(
+                    reg.is_revoked(zone, &artifact).unwrap(),
+                    "Artifact {} should be revoked in zone {}",
+                    artifact,
+                    zone
+                );
             }
 
             // Verify artifacts beyond current head are not revoked
             for seq in (head + 1)..=100 {
                 let artifact = format!("artifact-{}-{}", zone, seq);
-                assert!(!reg.is_revoked(zone, &artifact).unwrap(),
-                       "Artifact {} should not be revoked in zone {}", artifact, zone);
+                assert!(
+                    !reg.is_revoked(zone, &artifact).unwrap(),
+                    "Artifact {} should not be revoked in zone {}",
+                    artifact,
+                    zone
+                );
             }
         }
 
@@ -1263,7 +1339,8 @@ mod revocation_registry_comprehensive_negative_tests {
         assert!(reg.audits.len() >= successful_operations.min(MAX_AUDIT_ENTRIES));
 
         // Verify no state corruption by checking total revocations
-        let expected_revocations = zones.iter()
+        let expected_revocations = zones
+            .iter()
             .map(|zone| reg.current_head(zone).unwrap() as usize)
             .sum::<usize>();
         assert_eq!(reg.total_revocations(), expected_revocations);
@@ -1283,7 +1360,6 @@ mod revocation_registry_comprehensive_negative_tests {
                 timestamp: "2026-01-01T00:00:00Z".to_string(),
                 trace_id: "empty-attack".to_string(),
             }],
-
             // Massive sequence gap (potential wraparound attack)
             vec![
                 RevocationHead {
@@ -1303,7 +1379,6 @@ mod revocation_registry_comprehensive_negative_tests {
                     trace_id: "gap-max".to_string(),
                 },
             ],
-
             // Unicode corruption in log entries
             vec![RevocationHead {
                 zone_id: "zone\u{202e}corrupted\u{0000}".to_string(),
@@ -1313,7 +1388,6 @@ mod revocation_registry_comprehensive_negative_tests {
                 timestamp: "2026\u{feff}-01-01T00:00:00Z".to_string(),
                 trace_id: "unicode\u{200c}trace".to_string(),
             }],
-
             // Duplicate artifacts with different sequences
             vec![
                 RevocationHead {
@@ -1342,17 +1416,24 @@ mod revocation_registry_comprehensive_negative_tests {
                 Ok(recovered_reg) => {
                     // If recovery succeeded, verify state integrity
                     for entry in corrupted_log {
-                        if !entry.zone_id.trim().is_empty() && !entry.revoked_artifact.trim().is_empty() {
+                        if !entry.zone_id.trim().is_empty()
+                            && !entry.revoked_artifact.trim().is_empty()
+                        {
                             // Should be able to query without corruption
                             let _ = recovered_reg.current_head(&entry.zone_id);
-                            let _ = recovered_reg.is_revoked(&entry.zone_id, &entry.revoked_artifact);
+                            let _ =
+                                recovered_reg.is_revoked(&entry.zone_id, &entry.revoked_artifact);
                         }
                     }
-                },
+                }
                 Err(e) => {
                     // Recovery failure is acceptable for corrupted data
-                    assert_eq!(e.code(), "REV_RECOVERY_FAILED",
-                             "Corrupted log {} should fail with REV_RECOVERY_FAILED", i);
+                    assert_eq!(
+                        e.code(),
+                        "REV_RECOVERY_FAILED",
+                        "Corrupted log {} should fail with REV_RECOVERY_FAILED",
+                        i
+                    );
                 }
             }
         }
@@ -1377,7 +1458,7 @@ mod revocation_registry_comprehensive_negative_tests {
                 assert!(massive_reg.zone_count() <= 10);
                 assert!(massive_reg.canonical_log().len() <= MAX_LOG_ENTRIES);
                 assert!(massive_reg.total_revocations() <= MAX_REVOKED_PER_ZONE * 10);
-            },
+            }
             Err(e) => {
                 // Capacity failure is expected and acceptable
                 assert_eq!(e.code(), "REV_RECOVERY_FAILED");
@@ -1399,12 +1480,13 @@ mod revocation_registry_comprehensive_negative_tests {
         for (i, artifact) in revoked_artifacts.iter().enumerate() {
             reg.advance_head(RevocationHead {
                 zone_id: "timing-zone".to_string(),
-                sequence: (i as u64) + 1,
+                sequence: u64::try_from(i).unwrap_or(u64::MAX).saturating_add(1),
                 revoked_artifact: artifact.to_string(),
                 reason: "Timing test".to_string(),
                 timestamp: "2026-01-01T00:00:00Z".to_string(),
                 trace_id: format!("timing-{}", i),
-            }).unwrap();
+            })
+            .unwrap();
         }
 
         // Test timing differences for various queries
@@ -1421,10 +1503,18 @@ mod revocation_registry_comprehensive_negative_tests {
         // Timing differences should be minimal (no timing-based information leakage)
         let max_timing = timing_results.iter().max().unwrap();
         let min_timing = timing_results.iter().min().unwrap();
-        let timing_ratio = max_timing.as_nanos() as f64 / min_timing.as_nanos() as f64;
+        let timing_ratio = max_timing.as_nanos() as f64 / min_timing.as_nanos().max(1) as f64;
+        assert!(
+            timing_ratio.is_finite(),
+            "Revocation check timing ratio must be finite"
+        );
 
         // Allow reasonable variance but prevent timing attacks
-        assert!(timing_ratio < 5.0, "Revocation check timing variance too high: {}", timing_ratio);
+        assert!(
+            timing_ratio < 5.0,
+            "Revocation check timing variance too high: {}",
+            timing_ratio
+        );
 
         // Test timing consistency for zone lookups
         let test_zones = vec!["timing-zone", "nonexistent-zone-1", "nonexistent-zone-2"];
@@ -1440,9 +1530,18 @@ mod revocation_registry_comprehensive_negative_tests {
         // Zone lookup timing should also be consistent
         let max_zone_timing = zone_timing_results.iter().max().unwrap();
         let min_zone_timing = zone_timing_results.iter().min().unwrap();
-        let zone_timing_ratio = max_zone_timing.as_nanos() as f64 / min_zone_timing.as_nanos() as f64;
+        let zone_timing_ratio =
+            max_zone_timing.as_nanos() as f64 / min_zone_timing.as_nanos().max(1) as f64;
+        assert!(
+            zone_timing_ratio.is_finite(),
+            "Zone lookup timing ratio must be finite"
+        );
 
-        assert!(zone_timing_ratio < 4.0, "Zone lookup timing variance too high: {}", zone_timing_ratio);
+        assert!(
+            zone_timing_ratio < 4.0,
+            "Zone lookup timing variance too high: {}",
+            zone_timing_ratio
+        );
 
         // Test timing attacks on similar artifact names
         let similar_artifacts = vec![
@@ -1461,7 +1560,8 @@ mod revocation_registry_comprehensive_negative_tests {
             reason: "Similar name test".to_string(),
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             trace_id: "similar-test".to_string(),
-        }).unwrap();
+        })
+        .unwrap();
 
         let mut similar_timing_results = Vec::new();
         for artifact in &similar_artifacts {
@@ -1474,9 +1574,17 @@ mod revocation_registry_comprehensive_negative_tests {
         // Similar names should not have timing differences that reveal content
         let max_similar = similar_timing_results.iter().max().unwrap();
         let min_similar = similar_timing_results.iter().min().unwrap();
-        let similar_ratio = max_similar.as_nanos() as f64 / min_similar.as_nanos() as f64;
+        let similar_ratio = max_similar.as_nanos() as f64 / min_similar.as_nanos().max(1) as f64;
+        assert!(
+            similar_ratio.is_finite(),
+            "Similar artifact timing ratio must be finite"
+        );
 
-        assert!(similar_ratio < 3.0, "Similar artifact timing variance too high: {}", similar_ratio);
+        assert!(
+            similar_ratio < 3.0,
+            "Similar artifact timing variance too high: {}",
+            similar_ratio
+        );
     }
 
     /// Negative test: Edge cases in push_bounded and capacity management
@@ -1579,7 +1687,8 @@ mod revocation_registry_comprehensive_negative_tests {
             reason: "Initial state".to_string(),
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             trace_id: "initial-1".to_string(),
-        }).unwrap();
+        })
+        .unwrap();
 
         reg.advance_head(RevocationHead {
             zone_id: "consistent-zone-b".to_string(),
@@ -1588,7 +1697,8 @@ mod revocation_registry_comprehensive_negative_tests {
             reason: "Initial state".to_string(),
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             trace_id: "initial-2".to_string(),
-        }).unwrap();
+        })
+        .unwrap();
 
         // Capture initial state
         let initial_zone_a_head = reg.current_head("consistent-zone-a").unwrap();
@@ -1646,16 +1756,34 @@ mod revocation_registry_comprehensive_negative_tests {
         }
 
         // Verify state remains consistent after errors
-        assert_eq!(reg.current_head("consistent-zone-a").unwrap(), initial_zone_a_head,
-                  "Zone A head should be unchanged after errors");
-        assert_eq!(reg.current_head("consistent-zone-b").unwrap(), initial_zone_b_head,
-                  "Zone B head should be unchanged after errors");
+        assert_eq!(
+            reg.current_head("consistent-zone-a").unwrap(),
+            initial_zone_a_head,
+            "Zone A head should be unchanged after errors"
+        );
+        assert_eq!(
+            reg.current_head("consistent-zone-b").unwrap(),
+            initial_zone_b_head,
+            "Zone B head should be unchanged after errors"
+        );
 
         // Verify revocation status is preserved
-        assert!(reg.is_revoked("consistent-zone-a", "valid-artifact-1").unwrap());
-        assert!(reg.is_revoked("consistent-zone-b", "valid-artifact-2").unwrap());
-        assert!(!reg.is_revoked("consistent-zone-a", "error-artifact").unwrap_or(true));
-        assert!(!reg.is_revoked("consistent-zone-a", "stale-artifact").unwrap_or(true));
+        assert!(
+            reg.is_revoked("consistent-zone-a", "valid-artifact-1")
+                .unwrap()
+        );
+        assert!(
+            reg.is_revoked("consistent-zone-b", "valid-artifact-2")
+                .unwrap()
+        );
+        assert!(
+            !reg.is_revoked("consistent-zone-a", "error-artifact")
+                .unwrap_or(true)
+        );
+        assert!(
+            !reg.is_revoked("consistent-zone-a", "stale-artifact")
+                .unwrap_or(true)
+        );
 
         // Some operations may have succeeded (e.g., auto-zone creation with valid data)
         // but overall state should remain coherent
@@ -1691,7 +1819,13 @@ mod revocation_registry_comprehensive_negative_tests {
             trace_id: "post-error".to_string(),
         });
 
-        assert!(final_test.is_ok(), "Registry should remain functional after error conditions");
-        assert!(reg.is_revoked("consistent-zone-a", "post-error-artifact").unwrap());
+        assert!(
+            final_test.is_ok(),
+            "Registry should remain functional after error conditions"
+        );
+        assert!(
+            reg.is_revoked("consistent-zone-a", "post-error-artifact")
+                .unwrap()
+        );
     }
 }

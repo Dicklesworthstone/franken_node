@@ -365,6 +365,22 @@ impl std::error::Error for TransparencyError {}
 
 // ── Test helpers ────────────────────────────────────────────────────
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+    if items.len() >= cap {
+        let overflow = items
+            .len()
+            .saturating_sub(cap)
+            .saturating_add(1)
+            .min(items.len());
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 /// Build a small Merkle tree from leaves and return (root, proofs).
 pub fn build_test_tree(leaves: &[&str]) -> (String, Vec<InclusionProof>) {
     let n = leaves.len();
@@ -378,7 +394,7 @@ pub fn build_test_tree(leaves: &[&str]) -> (String, Vec<InclusionProof>) {
     let size = n.next_power_of_two();
     let mut level: Vec<String> = leaf_hashes.clone();
     while level.len() < size {
-        level.push(level.last().cloned().unwrap_or_default());
+        push_bounded(&mut level, level.last().cloned().unwrap_or_default(), 1024);
     }
 
     // Build tree bottom-up, collecting sibling info for proofs
@@ -391,7 +407,7 @@ pub fn build_test_tree(leaves: &[&str]) -> (String, Vec<InclusionProof>) {
             } else {
                 chunk[0].clone()
             };
-            next.push(h);
+            push_bounded(&mut next, h, 512);
         }
         level = next;
         levels.push(level.clone());
@@ -407,7 +423,7 @@ pub fn build_test_tree(leaves: &[&str]) -> (String, Vec<InclusionProof>) {
         for lvl in &levels[..levels.len() - 1] {
             let sibling_idx = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
             if sibling_idx < lvl.len() {
-                audit_path.push(lvl[sibling_idx].clone());
+                push_bounded(&mut audit_path, lvl[sibling_idx].clone(), 256);
             }
             idx /= 2;
         }

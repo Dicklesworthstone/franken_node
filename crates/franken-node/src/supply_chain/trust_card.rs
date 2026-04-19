@@ -70,15 +70,15 @@ fn compute_trust_card_derivation_hash(refs: &[VerifiedEvidenceRef], derived_at: 
     let mut hasher = Sha256::new();
     hasher.update(b"trust_card_derivation_v1:");
     hasher.update(derived_at.to_le_bytes());
-    hasher.update((refs.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(refs.len()).unwrap_or(u64::MAX).to_le_bytes());
     for r in refs {
-        hasher.update((r.evidence_id.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(r.evidence_id.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(r.evidence_id.as_bytes());
         let type_tag = serde_json::to_string(&r.evidence_type).unwrap_or_default();
-        hasher.update((type_tag.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(type_tag.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(type_tag.as_bytes());
         hasher.update(r.verified_at_epoch.to_le_bytes());
-        hasher.update((r.verification_receipt_hash.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(r.verification_receipt_hash.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(r.verification_receipt_hash.as_bytes());
     }
     format!("sha256:{}", hex::encode(hasher.finalize()))
@@ -698,7 +698,7 @@ impl TrustCardRegistry {
         );
 
         if let Some(cached) = self.cache_by_extension.get(extension_id)
-            && now_secs.saturating_sub(cached.cached_at_secs) <= self.cache_ttl_secs
+            && now_secs.saturating_sub(cached.cached_at_secs) < self.cache_ttl_secs
         {
             let card = cached.card.clone();
             if verify_card_signature(&card, &self.registry_key).is_ok() {
@@ -1276,7 +1276,11 @@ pub fn verify_card_signature(card: &TrustCard, registry_key: &[u8]) -> Result<()
 pub fn compute_card_hash(card: &TrustCard) -> Result<String, TrustCardError> {
     let canonical = canonical_card_without_hash_and_signature(card)?;
     let encoded = serde_json::to_vec(&canonical)?;
-    let digest = Sha256::digest([b"trust_card_hash_v1:" as &[u8], &encoded].concat());
+    let mut hasher = Sha256::new();
+    hasher.update(b"trust_card_hash_v1:");
+    hasher.update(u64::try_from(encoded.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(&encoded);
+    let digest = hasher.finalize();
     Ok(hex::encode(digest))
 }
 

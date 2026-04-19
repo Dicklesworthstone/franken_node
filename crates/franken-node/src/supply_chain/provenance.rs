@@ -12,6 +12,24 @@ use std::collections::BTreeMap;
 
 use crate::capacity_defaults::aliases::MAX_EVENTS;
 
+/// Maximum number of issues that can be reported during attestation verification.
+/// Prevents memory exhaustion from adversarial attestations with many problems.
+const MAX_CHAIN_ISSUES: usize = 1024;
+
+/// Push item to bounded vector with capacity limit to prevent memory exhaustion.
+/// When capacity is exceeded, removes oldest entries to maintain the limit.
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -291,14 +309,14 @@ pub fn verify_attestation_chain(
 
     let level = derive_level(attestation, &issues);
     if level < policy.min_level {
-        issues.push(ChainIssue {
+        push_bounded(issues, ChainIssue {
             code: VerificationErrorCode::LevelInsufficient,
             link_role: None,
             message: format!("required {:?}, got {:?}", policy.min_level, level),
             remediation: "Raise provenance guarantees (chain depth/signing/reproducibility) to satisfy policy minimum."
                 .to_string(),
             allow_in_cached_mode: false,
-        });
+        }, MAX_CHAIN_ISSUES);
     }
 
     issues.sort_by(|a, b| {
@@ -420,7 +438,7 @@ fn validate_required_fields(attestation: &ProvenanceAttestation, issues: &mut Ve
 
     for (field_name, field_value) in required {
         if field_value.trim().is_empty() {
-            issues.push(ChainIssue {
+            push_bounded(issues, ChainIssue {
                 code: VerificationErrorCode::AttestationMissingField,
                 link_role: None,
                 message: format!("missing required field: {field_name}"),
@@ -428,7 +446,7 @@ fn validate_required_fields(attestation: &ProvenanceAttestation, issues: &mut Ve
                     "Populate all required attestation fields and re-issue the provenance bundle."
                         .to_string(),
                 allow_in_cached_mode: false,
-            });
+            }, MAX_CHAIN_ISSUES);
         }
     }
 }
@@ -439,7 +457,7 @@ fn validate_chain_depth(
     issues: &mut Vec<ChainIssue>,
 ) {
     if attestation.links.len() < policy.required_chain_depth {
-        issues.push(ChainIssue {
+        push_bounded(issues, ChainIssue {
             code: VerificationErrorCode::ChainIncomplete,
             link_role: None,
             message: format!(
@@ -451,7 +469,7 @@ fn validate_chain_depth(
                 "Provide full publisher -> build_system -> source_vcs attestation coverage for required depth."
                     .to_string(),
             allow_in_cached_mode: false,
-        });
+        }, MAX_CHAIN_ISSUES);
     }
 }
 
@@ -469,7 +487,7 @@ fn validate_link_order(
     for (index, expected_role) in expected.iter().copied().enumerate().take(checks) {
         let actual = attestation.links[index].role;
         if actual != expected_role {
-            issues.push(ChainIssue {
+            push_bounded(issues, ChainIssue {
                 code: VerificationErrorCode::ChainLinkOrderInvalid,
                 link_role: Some(actual),
                 message: format!(
@@ -480,7 +498,7 @@ fn validate_link_order(
                     "Reorder links to canonical transitive order: publisher, build_system, source_vcs."
                         .to_string(),
                 allow_in_cached_mode: false,
-            });
+            }, MAX_CHAIN_ISSUES);
         }
     }
 }
@@ -502,7 +520,7 @@ fn validate_attestation_freshness(
                 .max_attestation_age_secs
                 .saturating_add(policy.cached_trust_window_secs);
 
-    issues.push(ChainIssue {
+    push_bounded(issues, ChainIssue {
         code: VerificationErrorCode::ChainStale,
         link_role: None,
         message: format!("attestation age {age}s exceeded policy window"),
@@ -512,7 +530,7 @@ fn validate_attestation_freshness(
             "Rebuild and re-attest artifact with fresh provenance timestamps.".to_string()
         },
         allow_in_cached_mode: within_cached_window,
-    });
+    }, MAX_CHAIN_ISSUES);
 }
 
 fn validate_links(
@@ -523,7 +541,7 @@ fn validate_links(
 ) {
     for link in &attestation.links {
         if link.revoked {
-            issues.push(ChainIssue {
+            push_bounded(issues, ChainIssue {
                 code: VerificationErrorCode::ChainLinkRevoked,
                 link_role: Some(link.role),
                 message: format!("link revoked for signer {}", link.signer_id),
@@ -531,11 +549,11 @@ fn validate_links(
                     "Rotate compromised signing key and issue a new signed attestation link."
                         .to_string(),
                 allow_in_cached_mode: false,
-            });
+            }, MAX_CHAIN_ISSUES);
         }
 
         if !policy.allow_self_signed && link.signer_id == "self" {
-            issues.push(ChainIssue {
+            push_bounded(issues, ChainIssue {
                 code: VerificationErrorCode::InvalidSignature,
                 link_role: Some(link.role),
                 message: "self-signed links are disallowed by current policy".to_string(),
@@ -543,14 +561,14 @@ fn validate_links(
                     "Use externally trusted signing identities or relax policy only for development profiles."
                         .to_string(),
                 allow_in_cached_mode: false,
-            });
+            }, MAX_CHAIN_ISSUES);
         }
 
         if !crate::security::constant_time::ct_eq(
             &link.signed_payload_hash,
             &attestation.output_hash,
         ) {
-            issues.push(ChainIssue {
+            push_bounded(issues, ChainIssue {
                 code: VerificationErrorCode::InvalidSignature,
                 link_role: Some(link.role),
                 message: "signed payload hash does not match attestation output hash".to_string(),
@@ -558,7 +576,7 @@ fn validate_links(
                     "Re-sign link with canonical payload hash bound to the attested output."
                         .to_string(),
                 allow_in_cached_mode: false,
-            });
+            }, MAX_CHAIN_ISSUES);
         }
 
         match expected_link_signature(attestation, link) {
@@ -566,7 +584,7 @@ fn validate_links(
                 if link.signature.trim().is_empty()
                     || !crate::security::constant_time::ct_eq(&link.signature, &expected)
                 {
-                    issues.push(ChainIssue {
+                    push_bounded(issues, ChainIssue {
                         code: VerificationErrorCode::InvalidSignature,
                         link_role: Some(link.role),
                         message: "link signature failed deterministic canonical verification".to_string(),
@@ -574,17 +592,17 @@ fn validate_links(
                             "Regenerate link signature from canonical signable payload and re-submit."
                                 .to_string(),
                         allow_in_cached_mode: false,
-                    });
+                    }, MAX_CHAIN_ISSUES);
                 }
             }
             Err(error) => {
-                issues.push(ChainIssue {
+                push_bounded(issues, ChainIssue {
                     code: error.code,
                     link_role: Some(link.role),
                     message: error.message,
                     remediation: error.remediation,
                     allow_in_cached_mode: false,
-                });
+                }, MAX_CHAIN_ISSUES);
             }
         }
 
@@ -602,7 +620,7 @@ fn validate_links(
                         .expires_at_epoch
                         .saturating_add(policy.cached_trust_window_secs);
 
-            issues.push(ChainIssue {
+            push_bounded(issues, ChainIssue {
                 code: VerificationErrorCode::ChainStale,
                 link_role: Some(link.role),
                 message: format!("link age {age}s exceeded policy window"),
@@ -614,7 +632,7 @@ fn validate_links(
                         .to_string()
                 },
                 allow_in_cached_mode: within_cached_window,
-            });
+            }, MAX_CHAIN_ISSUES);
         }
     }
 }
@@ -746,11 +764,7 @@ fn classify_events(
 }
 
 fn push_unique_event(events: &mut Vec<ProvenanceEventCode>, event: ProvenanceEventCode) {
-    if !events.contains(&event) {
-        if events.len() >= MAX_EVENTS {
-            let overflow = events.len().saturating_sub(MAX_EVENTS).saturating_add(1);
-            events.drain(0..overflow.min(events.len()));
-        }
+    if !events.contains(&event) && events.len() < MAX_EVENTS {
         events.push(event);
     }
 }

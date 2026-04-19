@@ -9,6 +9,24 @@ use std::fmt;
 
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 
+/// Maximum number of attestations to prevent memory exhaustion.
+/// Supports reasonable policy sizes while blocking adversarial patterns.
+const MAX_ATTESTATIONS: usize = 50;
+
+/// Push item to vector with bounded capacity to prevent memory exhaustion.
+/// When capacity is exceeded, removes oldest entries to maintain the limit.
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 // ── Types ───────────────────────────────────────────────────────────
 
 /// Supported attestation types.
@@ -679,9 +697,11 @@ mod tests {
         let policy = test_policy();
         let original = good_provenance();
         let mut enriched = original.clone();
-        enriched
-            .attestations
-            .push(AttestationType::Custom("sbom".into()));
+        push_bounded(
+            &mut enriched.attestations,
+            AttestationType::Custom("sbom".into()),
+            MAX_ATTESTATIONS,
+        );
 
         let baseline = evaluate_gate(&policy, &original, "mr-extra-a", "ts");
         let transformed = evaluate_gate(&policy, &enriched, "mr-extra-b", "ts");
@@ -697,7 +717,11 @@ mod tests {
         missing_sigstore.attestations = vec![AttestationType::Slsa];
 
         let mut repaired = missing_sigstore.clone();
-        repaired.attestations.push(AttestationType::Sigstore);
+        push_bounded(
+            &mut repaired.attestations,
+            AttestationType::Sigstore,
+            MAX_ATTESTATIONS,
+        );
 
         let before = evaluate_gate(&policy, &missing_sigstore, "mr-repair-a", "ts");
         let after = evaluate_gate(&policy, &repaired, "mr-repair-b", "ts");
@@ -829,9 +853,11 @@ mod tests {
     fn mr_adding_required_attestation_can_only_narrow_policy() {
         let policy = test_policy();
         let mut narrowed_policy = policy.clone();
-        narrowed_policy
-            .required_attestations
-            .push(AttestationType::InToto);
+        push_bounded(
+            &mut narrowed_policy.required_attestations,
+            AttestationType::InToto,
+            MAX_ATTESTATIONS,
+        );
         let provenance = good_provenance();
 
         let baseline = evaluate_gate(&policy, &provenance, "mr-narrow-a", "ts");
@@ -857,9 +883,11 @@ mod tests {
 
         let mut transformed_provenance = original.clone();
         transformed_provenance.attestations.reverse();
-        transformed_provenance
-            .attestations
-            .push(AttestationType::Custom("vex".into()));
+        push_bounded(
+            &mut transformed_provenance.attestations,
+            AttestationType::Custom("vex".into()),
+            MAX_ATTESTATIONS,
+        );
         transformed_provenance.build_assurance = BuildAssurance::Hardened;
 
         let baseline = evaluate_gate(&policy, &original, "mr-compound-a", "ts");
