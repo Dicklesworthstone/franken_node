@@ -1492,9 +1492,21 @@ mod tests {
         let sig2 = sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
 
         replay_artifact.signatures.extend([
-            PartialSignature { signer_id: "admin".to_string(), key_id: sig1.key_id, signature_hex: sig1.signature_hex },
-            PartialSignature { signer_id: "root".to_string(), key_id: sig2.key_id, signature_hex: sig2.signature_hex },
-            PartialSignature { signer_id: "superuser".to_string(), key_id: sig1.key_id.clone(), signature_hex: sig1.signature_hex },
+            PartialSignature {
+                signer_id: "admin".to_string(),
+                key_id: sig1.key_id,
+                signature_hex: sig1.signature_hex,
+            },
+            PartialSignature {
+                signer_id: "root".to_string(),
+                key_id: sig2.key_id,
+                signature_hex: sig2.signature_hex,
+            },
+            PartialSignature {
+                signer_id: "superuser".to_string(),
+                key_id: sig1.key_id.clone(),
+                signature_hex: sig1.signature_hex,
+            },
         ]);
 
         let result = verify_threshold(&config, &replay_artifact, "t-replay-bypass", "ts");
@@ -1508,7 +1520,10 @@ mod tests {
 
         let result = verify_threshold(&overflow_config, &replay_artifact, "t-overflow", "ts");
         assert!(!result.verified);
-        assert!(matches!(result.failure_reason, Some(FailureReason::ConfigInvalid { .. })));
+        assert!(matches!(
+            result.failure_reason,
+            Some(FailureReason::ConfigInvalid { .. })
+        ));
     }
 
     #[test]
@@ -1630,7 +1645,10 @@ mod tests {
 
         let result = verify_threshold(&config, &artifact, "t-normalization", "ts");
         assert!(!result.verified);
-        assert!(matches!(result.failure_reason, Some(FailureReason::InvalidSignature { .. })));
+        assert!(matches!(
+            result.failure_reason,
+            Some(FailureReason::InvalidSignature { .. })
+        ));
     }
 
     #[test]
@@ -1738,13 +1756,19 @@ mod tests {
         artifact.artifact_id = format!(" {} ", RESERVED_ARTIFACT_ID); // Padded reserved ID
         let result = verify_threshold(&config, &artifact, "t-reserved-bypass", "ts");
         assert!(!result.verified);
-        assert!(matches!(result.failure_reason, Some(FailureReason::InvalidArtifactId { .. })));
+        assert!(matches!(
+            result.failure_reason,
+            Some(FailureReason::InvalidArtifactId { .. })
+        ));
 
         // Test whitespace normalization bypass
         artifact.artifact_id = "normal-id\t".to_string(); // Trailing tab
         let result = verify_threshold(&config, &artifact, "t-tab-bypass", "ts");
         assert!(!result.verified);
-        assert!(matches!(result.failure_reason, Some(FailureReason::InvalidArtifactId { .. })));
+        assert!(matches!(
+            result.failure_reason,
+            Some(FailureReason::InvalidArtifactId { .. })
+        ));
     }
 
     #[test]
@@ -1766,14 +1790,23 @@ mod tests {
         let result = verify_threshold(&config, &artifact, injection_trace, "ts");
 
         let serialized = serde_json::to_string(&result).unwrap();
-        assert!(!serialized.contains(r#""injected":"#), "JSON injection should be escaped");
-        assert!(serialized.contains("field"), "Content should be preserved but escaped");
+        assert!(
+            !serialized.contains(r#""injected":"#),
+            "JSON injection should be escaped"
+        );
+        assert!(
+            serialized.contains("field"),
+            "Content should be preserved but escaped"
+        );
 
         // Test extremely long field values
         let huge_trace = "x".repeat(1_000_000);
         let result = verify_threshold(&config, &artifact, &huge_trace, "ts");
         let serialized = serde_json::to_string(&result);
-        assert!(serialized.is_ok(), "Large trace IDs should serialize safely");
+        assert!(
+            serialized.is_ok(),
+            "Large trace IDs should serialize safely"
+        );
 
         // Test Unicode in all result fields
         let unicode_artifact = PublicationArtifact {
@@ -1795,7 +1828,10 @@ mod tests {
         };
 
         let failure_json = serde_json::to_string(&failure_with_injection).unwrap();
-        assert!(!failure_json.contains(r#""evil":"#), "Injection should be escaped");
+        assert!(
+            !failure_json.contains(r#""evil":"#),
+            "Injection should be escaped"
+        );
     }
 
     #[test]
@@ -1910,7 +1946,11 @@ mod tests {
         // All verifications should produce identical results (deterministic)
         for (i, verified, valid_count) in results.iter() {
             assert!(*verified, "Thread {} verification should succeed", i);
-            assert_eq!(*valid_count, 3, "Thread {} should count 3 valid signatures", i);
+            assert_eq!(
+                *valid_count, 3,
+                "Thread {} should count 3 valid signatures",
+                i
+            );
         }
 
         // Test concurrent modification of artifacts (should be isolated)
@@ -1937,7 +1977,8 @@ mod tests {
                     signature_hex: format!("{:064x}", i),
                 });
 
-                let result = verify_threshold(&*config_clone, &local_artifact, &format!("t-{}", i), "ts");
+                let result =
+                    verify_threshold(&*config_clone, &local_artifact, &format!("t-{}", i), "ts");
 
                 // Count failed verifications (expected due to invalid signatures)
                 if !result.verified {
@@ -1955,7 +1996,10 @@ mod tests {
 
         // All should fail verification due to invalid signatures
         let final_count = *shared_counter.lock().unwrap();
-        assert_eq!(final_count, 20, "All concurrent invalid signatures should be rejected");
+        assert_eq!(
+            final_count, 20,
+            "All concurrent invalid signatures should be rejected"
+        );
     }
 
     // -- Negative-Path Tests --
@@ -1968,19 +2012,19 @@ mod tests {
             ThresholdConfig {
                 threshold: 0,
                 total_signers: 5,
-                signer_keys: vec![]
+                signer_keys: vec![],
             },
             // Threshold exceeds total signers (invalid)
             ThresholdConfig {
                 threshold: 10,
                 total_signers: 5,
-                signer_keys: vec![]
+                signer_keys: vec![],
             },
             // Maximum valid threshold
             ThresholdConfig {
                 threshold: u32::MAX,
                 total_signers: u32::MAX,
-                signer_keys: vec![]
+                signer_keys: vec![],
             },
             // Single signer, threshold 1 (edge case)
             ThresholdConfig {
@@ -1988,9 +2032,9 @@ mod tests {
                 total_signers: 1,
                 signer_keys: vec![SignerKey {
                     key_id: "solo-signer".to_string(),
-                    public_key_hex: "deadbeef".repeat(8)
-                }]
-            }
+                    public_key_hex: "deadbeef".repeat(8),
+                }],
+            },
         ];
 
         for (i, config) in extreme_configs.iter().enumerate() {
@@ -2003,14 +2047,17 @@ mod tests {
                     if let Err(err) = validation_result {
                         assert!(matches!(err, ThresholdError::ConfigInvalid { .. }));
                     }
-                },
+                }
                 2 => {
                     // Maximum config should fail due to empty signer_keys
                     assert!(validation_result.is_err());
-                },
+                }
                 3 => {
                     // Single signer should be valid
-                    assert!(validation_result.is_ok(), "Single signer config should be valid");
+                    assert!(
+                        validation_result.is_ok(),
+                        "Single signer config should be valid"
+                    );
                 }
                 _ => {}
             }
@@ -2032,16 +2079,12 @@ mod tests {
             "signer\u{202E}rtl-override\u{202D}attack",
             "signer\x1B[H\x1B[2Jansi-escape",
             "хакер-кириллица",
-            "攻击者-中文"
+            "攻击者-中文",
         ];
 
         for (i, malicious_id) in malicious_identifiers.iter().enumerate() {
             // Test malicious signer key IDs
-            base_config.signer_keys[0].key_id = malicious_id.clone();
-
-            // Should handle Unicode identifiers without corruption
-            let validation_result = base_config.validate();
-            // May accept or reject, but should not crash
+            base_config.signer_keys[0].key_id = malicious_id.to_string();
 
             // Test malicious artifact with Unicode content
             let malicious_artifact = PublicationArtifact {
@@ -2049,10 +2092,10 @@ mod tests {
                 connector_id: format!("connector-{}", malicious_id),
                 content_hash: format!("hash-{}", malicious_id),
                 signatures: vec![PartialSignature {
-                    signer_id: malicious_id.clone(),
-                    key_id: malicious_id.clone(),
-                    signature_hex: "deadbeef".repeat(16)
-                }]
+                    signer_id: malicious_id.to_string(),
+                    key_id: malicious_id.to_string(),
+                    signature_hex: "deadbeef".repeat(16),
+                }],
             };
 
             let result = verify_threshold(
@@ -2074,17 +2117,17 @@ mod tests {
         let (_signing_keys, config) = test_config(2, 3);
 
         let malformed_signature_hex_cases = vec![
-            "", // Empty signature
-            "not-hex-at-all!", // Non-hex characters
-            "deadbeef", // Too short
-            "g".repeat(128), // Invalid hex characters
-            "0".repeat(127), // Odd length
-            "00".repeat(1000), // Extremely long
-            "\0".repeat(64), // Null bytes
-            "🚀".repeat(32), // Unicode in hex field
-            "../etc/passwd", // Path traversal attempt
-            "<script>alert('xss')</script>", // XSS injection
-            "0x".repeat(64), // Malformed hex prefix
+            "".to_string(),                              // Empty signature
+            "not-hex-at-all!".to_string(),               // Non-hex characters
+            "deadbeef".to_string(),                      // Too short
+            "g".repeat(128),                             // Invalid hex characters
+            "0".repeat(127),                             // Odd length
+            "00".repeat(1000),                           // Extremely long
+            "\0".repeat(64),                             // Null bytes
+            "🚀".repeat(32),                             // Unicode in hex field
+            "../etc/passwd".to_string(),                 // Path traversal attempt
+            "<script>alert('xss')</script>".to_string(), // XSS injection
+            "0x".repeat(64),                             // Malformed hex prefix
         ];
 
         for (i, malformed_hex) in malformed_signature_hex_cases.iter().enumerate() {
@@ -2096,7 +2139,7 @@ mod tests {
                     signer_id: "signer-0".to_string(),
                     key_id: "signer-0".to_string(),
                     signature_hex: malformed_hex.clone(),
-                }]
+                }],
             };
 
             let result = verify_threshold(
@@ -2107,7 +2150,11 @@ mod tests {
             );
 
             // All should fail verification with appropriate error messages
-            assert!(!result.verified, "Malformed signature should fail: {}", malformed_hex);
+            assert!(
+                !result.verified,
+                "Malformed signature should fail: {}",
+                malformed_hex
+            );
             assert_eq!(result.valid_signatures, 0);
             assert!(result.failure_reason.is_some());
 
@@ -2116,7 +2163,11 @@ mod tests {
                 let reason = reason.to_string().to_lowercase();
                 reason.contains("invalid") || reason.contains("malformed") || reason.contains("hex")
             });
-            assert!(has_format_error, "Should report format error for: {}", malformed_hex);
+            assert!(
+                has_format_error,
+                "Should report format error for: {}",
+                malformed_hex
+            );
         }
     }
 
@@ -2137,8 +2188,8 @@ mod tests {
                 SignerKey {
                     key_id: "extreme-signer-2".to_string(),
                     public_key_hex: hex::encode(signing_keys[1].verifying_key().to_bytes()),
-                }
-            ]
+                },
+            ],
         };
 
         // Config validation should handle extreme values
@@ -2157,10 +2208,15 @@ mod tests {
             artifact_id: "overflow-test".to_string(),
             connector_id: "stress-connector".to_string(),
             content_hash: "stress-hash".to_string(),
-            signatures: vec![]
+            signatures: vec![],
         };
 
-        let result = verify_threshold(&corrected_config, &stress_artifact, "t-overflow-boundary", "ts");
+        let result = verify_threshold(
+            &corrected_config,
+            &stress_artifact,
+            "t-overflow-boundary",
+            "ts",
+        );
 
         // Should handle extreme values without arithmetic overflow
         assert!(!result.verified); // No signatures provided
@@ -2176,8 +2232,12 @@ mod tests {
         let content_hash = hex::encode(sha2::Sha256::digest(message));
 
         // Create valid signature
-        let valid_sig_hex = sign(&signing_keys[0], &config.signer_keys[0].key_id, &content_hash)
-            .signature_hex;
+        let valid_sig_hex = sign(
+            &signing_keys[0],
+            &config.signer_keys[0].key_id,
+            &content_hash,
+        )
+        .signature_hex;
 
         // Test various duplicate signature attack patterns
         let duplicate_attack_artifacts = vec![
@@ -2197,7 +2257,7 @@ mod tests {
                         key_id: "signer-0".to_string(),
                         signature_hex: valid_sig_hex.clone(),
                     },
-                ]
+                ],
             },
             // Same key ID with different signer ID (identity confusion)
             PublicationArtifact {
@@ -2215,7 +2275,7 @@ mod tests {
                         key_id: "signer-0".to_string(),
                         signature_hex: valid_sig_hex.clone(),
                     },
-                ]
+                ],
             },
         ];
 
@@ -2223,14 +2283,18 @@ mod tests {
             let result = verify_threshold(&config, &attack_artifact, "t-duplicate-injection", "ts");
 
             // Should only count each unique valid signature once
-            assert!(result.valid_signatures <= 1,
+            assert!(
+                result.valid_signatures <= 1,
                 "Duplicate signatures should only count once for artifact: {}",
-                attack_artifact.artifact_id);
+                attack_artifact.artifact_id
+            );
 
             // Should not meet threshold with duplicates
-            assert!(!result.verified,
+            assert!(
+                !result.verified,
                 "Duplicate signature attack should not meet threshold: {}",
-                attack_artifact.artifact_id);
+                attack_artifact.artifact_id
+            );
         }
     }
 
@@ -2264,7 +2328,10 @@ mod tests {
         let duration = start_time.elapsed();
 
         // Should complete in reasonable time despite large input
-        assert!(duration.as_secs() < 30, "Verification should complete within 30 seconds");
+        assert!(
+            duration.as_secs() < 30,
+            "Verification should complete within 30 seconds"
+        );
 
         // Should not verify due to invalid signatures
         assert!(!result.verified);
@@ -2305,7 +2372,7 @@ mod tests {
                     signer_id: "signer-0".to_string(),
                     key_id: "signer-0".to_string(),
                     signature_hex: modified_hex,
-                }]
+                }],
             };
 
             // Measure verification timing
@@ -2316,7 +2383,10 @@ mod tests {
             timing_measurements.push(duration.as_nanos());
 
             // All should fail verification
-            assert!(!result.verified, "Modified signature should fail verification");
+            assert!(
+                !result.verified,
+                "Modified signature should fail verification"
+            );
         }
 
         // Timing variance should be bounded (basic timing attack resistance check)
@@ -2327,25 +2397,27 @@ mod tests {
         assert!(variance_ratio.is_finite(), "timing ratio must be finite");
 
         // Allow reasonable variance but flag excessive timing differences
-        assert!(variance_ratio < 10.0,
+        assert!(
+            variance_ratio < 10.0,
             "Timing variance too high ({}x), possible timing vulnerability",
-            variance_ratio);
+            variance_ratio
+        );
     }
 
     #[test]
     fn negative_malformed_public_key_format_injection_attempts() {
         // Test handling of malformed public key formats in signer configuration
         let malformed_public_key_cases = vec![
-            "", // Empty public key
-            "not-a-hex-key", // Non-hex
-            "00".repeat(16), // Too short (32 bytes expected)
-            "ff".repeat(64), // Too long
-            "GG".repeat(32), // Invalid hex characters
-            "\0".repeat(64), // Null bytes
-            "../../etc/passwd", // Path traversal
-            "<script>alert('key')</script>", // XSS injection
-            "🔑".repeat(32), // Unicode emoji
-            "DEADBEEF".repeat(8), // Valid hex but wrong case/content
+            "".to_string(),                              // Empty public key
+            "not-a-hex-key".to_string(),                 // Non-hex
+            "00".repeat(16),                             // Too short (32 bytes expected)
+            "ff".repeat(64),                             // Too long
+            "GG".repeat(32),                             // Invalid hex characters
+            "\0".repeat(64),                             // Null bytes
+            "../../etc/passwd".to_string(),              // Path traversal
+            "<script>alert('key')</script>".to_string(), // XSS injection
+            "🔑".repeat(32),                             // Unicode emoji
+            "DEADBEEF".repeat(8),                        // Valid hex but wrong case/content
         ];
 
         for (i, malformed_key) in malformed_public_key_cases.iter().enumerate() {
@@ -2355,7 +2427,7 @@ mod tests {
                 signer_keys: vec![SignerKey {
                     key_id: format!("malformed-key-{}", i),
                     public_key_hex: malformed_key.clone(),
-                }]
+                }],
             };
 
             let test_artifact = PublicationArtifact {
@@ -2366,7 +2438,7 @@ mod tests {
                     signer_id: format!("malformed-key-{}", i),
                     key_id: format!("malformed-key-{}", i),
                     signature_hex: "00".repeat(64), // Valid format but won't verify
-                }]
+                }],
             };
 
             let result = verify_threshold(
@@ -2377,14 +2449,20 @@ mod tests {
             );
 
             // Should handle malformed keys without crashing
-            assert!(!result.verified, "Malformed public key should lead to verification failure");
+            assert!(
+                !result.verified,
+                "Malformed public key should lead to verification failure"
+            );
 
             // Should provide meaningful error messages
-            let has_key_error = result.failure_reasons.iter()
-                .any(|reason| reason.to_lowercase().contains("key") ||
-                             reason.to_lowercase().contains("invalid") ||
-                             reason.to_lowercase().contains("malformed"));
-            assert!(has_key_error, "Should report key or signature validation failure");
+            let has_key_error = result.failure_reason.as_ref().is_some_and(|reason| {
+                let reason = reason.to_string().to_lowercase();
+                reason.contains("key") || reason.contains("invalid") || reason.contains("malformed")
+            });
+            assert!(
+                has_key_error,
+                "Should report key or signature validation failure"
+            );
         }
     }
 }

@@ -1490,7 +1490,7 @@ mod tests {
         );
 
         // Demonstrate unsafe vs safe casting with simulated overflow
-        let large_size: usize = (u32::MAX as usize) + 1;
+        let large_size: usize = (u32::MAX as usize).saturating_add(1);
 
         // Unsafe casting (what NOT to do in production)
         let unsafe_cast = large_size as u64;
@@ -1645,10 +1645,8 @@ mod tests {
         // Test length-prefixed domain separation (more robust)
         let mut length_prefixed_hasher = sha2::Sha256::new();
         let domain = control_epoch_domain;
-        sha2::Digest::update(
-            &mut length_prefixed_hasher,
-            (domain.len() as u64).to_le_bytes(),
-        );
+        let domain_len = u64::try_from(domain.len()).unwrap_or(u64::MAX);
+        sha2::Digest::update(&mut length_prefixed_hasher, domain_len.to_le_bytes());
         sha2::Digest::update(&mut length_prefixed_hasher, domain.as_bytes());
         sha2::Digest::update(&mut length_prefixed_hasher, old_epoch.value().to_le_bytes());
         let length_prefixed_hash = sha2::Digest::finalize(length_prefixed_hasher);
@@ -1684,7 +1682,7 @@ mod tests {
         for i in 0..(MAX_TRANSITIONS * 2) {
             let result = store.epoch_advance(
                 &format!("manifest-{:08x}", i),
-                1000 + i as u64,
+                1000_u64.saturating_add(i as u64),
                 &format!("trace-{:04}", i),
             );
             assert!(
@@ -1751,7 +1749,7 @@ mod tests {
     fn negative_constant_time_comparison_validation() {
         // Test that string comparisons use the shared constant-time helper.
 
-        // Test ct_eq_inline correctness
+        // Test ct_eq correctness
         assert!(
             ct_eq("identical", "identical"),
             "Identical strings should match"
@@ -1781,7 +1779,7 @@ mod tests {
 
             assert_eq!(
                 result, expected,
-                "ct_eq_inline should match == operator result for: {}",
+                "ct_eq should match == operator result for: {}",
                 description
             );
 
@@ -1828,7 +1826,7 @@ mod tests {
         assert_ne!(mac1, mac3, "Different inputs should produce different MAC");
 
         // MAC comparison should use constant-time when used in security contexts
-        // The EpochTransition::verify() method should use ct_eq_inline for MAC comparison
+        // The EpochTransition::verify() method should use ct_eq for MAC comparison
         let transition = EpochTransition {
             old_epoch: ControlEpoch::new(1),
             new_epoch: ControlEpoch::new(2),
@@ -1840,7 +1838,7 @@ mod tests {
 
         assert!(transition.verify(), "Valid transition should verify");
 
-        // Production code should use: ct_eq_inline(mac1, mac2) ✓
+        // Production code should use: ct_eq(mac1, mac2) ✓
         // NOT: mac1 == mac2 ✗ (timing attack vulnerable for cryptographic values)
     }
 
@@ -1932,7 +1930,7 @@ mod tests {
             store
                 .epoch_advance(
                     &format!("comprehensive-hash-{:08x}", i),
-                    2000 + i as u64,
+                    2000_u64.saturating_add(i as u64),
                     &format!("comprehensive-trace-{:04}", i),
                 )
                 .expect("comprehensive epoch advance should succeed");
