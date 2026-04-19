@@ -930,9 +930,11 @@ impl SignedExtensionRegistry {
             "registry_version": &self.config.registry_version,
         })
         .to_string();
-        hex::encode(Sha256::digest(
-            [b"extension_registry_hash_v1:" as &[u8], state.as_bytes()].concat(),
-        ))
+        let mut hasher = Sha256::new();
+        hasher.update(b"extension_registry_content_hash_v1:");
+        hasher.update(len_to_u64(state.len()).to_le_bytes());
+        hasher.update(state.as_bytes());
+        hex::encode(hasher.finalize())
     }
 
     /// Export audit log as JSONL.
