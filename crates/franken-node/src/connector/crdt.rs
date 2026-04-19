@@ -109,9 +109,15 @@ impl LwwMap {
     }
 
     pub fn merge(&self, other: &LwwMap) -> Result<LwwMap, CrdtError> {
-        if self.crdt_type != other.crdt_type {
+        if self.crdt_type != CrdtType::LwwMap {
             return Err(CrdtError::TypeMismatch {
-                expected: self.crdt_type,
+                expected: CrdtType::LwwMap,
+                actual: self.crdt_type,
+            });
+        }
+        if other.crdt_type != CrdtType::LwwMap {
+            return Err(CrdtError::TypeMismatch {
+                expected: CrdtType::LwwMap,
                 actual: other.crdt_type,
             });
         }
@@ -234,9 +240,15 @@ impl OrSet {
     }
 
     pub fn merge(&self, other: &OrSet) -> Result<OrSet, CrdtError> {
-        if self.crdt_type != other.crdt_type {
+        if self.crdt_type != CrdtType::OrSet {
             return Err(CrdtError::TypeMismatch {
-                expected: self.crdt_type,
+                expected: CrdtType::OrSet,
+                actual: self.crdt_type,
+            });
+        }
+        if other.crdt_type != CrdtType::OrSet {
+            return Err(CrdtError::TypeMismatch {
+                expected: CrdtType::OrSet,
                 actual: other.crdt_type,
             });
         }
@@ -308,9 +320,15 @@ impl GCounter {
     }
 
     pub fn merge(&self, other: &GCounter) -> Result<GCounter, CrdtError> {
-        if self.crdt_type != other.crdt_type {
+        if self.crdt_type != CrdtType::GCounter {
             return Err(CrdtError::TypeMismatch {
-                expected: self.crdt_type,
+                expected: CrdtType::GCounter,
+                actual: self.crdt_type,
+            });
+        }
+        if other.crdt_type != CrdtType::GCounter {
+            return Err(CrdtError::TypeMismatch {
+                expected: CrdtType::GCounter,
                 actual: other.crdt_type,
             });
         }
@@ -364,9 +382,15 @@ impl PnCounter {
     }
 
     pub fn merge(&self, other: &PnCounter) -> Result<PnCounter, CrdtError> {
-        if self.crdt_type != other.crdt_type {
+        if self.crdt_type != CrdtType::PnCounter {
             return Err(CrdtError::TypeMismatch {
-                expected: self.crdt_type,
+                expected: CrdtType::PnCounter,
+                actual: self.crdt_type,
+            });
+        }
+        if other.crdt_type != CrdtType::PnCounter {
+            return Err(CrdtError::TypeMismatch {
+                expected: CrdtType::PnCounter,
                 actual: other.crdt_type,
             });
         }
@@ -450,6 +474,24 @@ mod tests {
     fn lww_map_merge_rejects_type_mismatch() {
         let a = LwwMap::new();
         let mut b = LwwMap::new();
+        b.crdt_type = CrdtType::OrSet;
+
+        let err = a.merge(&b).unwrap_err();
+
+        assert_eq!(
+            err,
+            CrdtError::TypeMismatch {
+                expected: CrdtType::LwwMap,
+                actual: CrdtType::OrSet
+            }
+        );
+    }
+
+    #[test]
+    fn lww_map_merge_rejects_matching_corrupt_type_tags() {
+        let mut a = LwwMap::new();
+        let mut b = LwwMap::new();
+        a.crdt_type = CrdtType::OrSet;
         b.crdt_type = CrdtType::OrSet;
 
         let err = a.merge(&b).unwrap_err();
@@ -622,6 +664,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn or_set_merge_rejects_matching_corrupt_type_tags() {
+        let mut a = OrSet::new();
+        let mut b = OrSet::new();
+        a.crdt_type = CrdtType::GCounter;
+        b.crdt_type = CrdtType::GCounter;
+
+        let err = a.merge(&b).unwrap_err();
+
+        assert_eq!(
+            err,
+            CrdtError::TypeMismatch {
+                expected: CrdtType::OrSet,
+                actual: CrdtType::GCounter
+            }
+        );
+    }
+
     // === GCounter tests ===
 
     #[test]
@@ -672,6 +732,24 @@ mod tests {
     fn gcounter_merge_rejects_type_mismatch() {
         let a = GCounter::new();
         let mut b = GCounter::new();
+        b.crdt_type = CrdtType::LwwMap;
+
+        let err = a.merge(&b).unwrap_err();
+
+        assert_eq!(
+            err,
+            CrdtError::TypeMismatch {
+                expected: CrdtType::GCounter,
+                actual: CrdtType::LwwMap
+            }
+        );
+    }
+
+    #[test]
+    fn gcounter_merge_rejects_matching_corrupt_type_tags() {
+        let mut a = GCounter::new();
+        let mut b = GCounter::new();
+        a.crdt_type = CrdtType::LwwMap;
         b.crdt_type = CrdtType::LwwMap;
 
         let err = a.merge(&b).unwrap_err();
@@ -756,9 +834,45 @@ mod tests {
     }
 
     #[test]
+    fn pncounter_merge_rejects_matching_corrupt_outer_type_tags() {
+        let mut a = PnCounter::new();
+        let mut b = PnCounter::new();
+        a.crdt_type = CrdtType::GCounter;
+        b.crdt_type = CrdtType::GCounter;
+
+        let err = a.merge(&b).unwrap_err();
+
+        assert_eq!(
+            err,
+            CrdtError::TypeMismatch {
+                expected: CrdtType::PnCounter,
+                actual: CrdtType::GCounter
+            }
+        );
+    }
+
+    #[test]
     fn pncounter_merge_rejects_nested_counter_type_mismatch() {
         let a = PnCounter::new();
         let mut b = PnCounter::new();
+        b.positive.crdt_type = CrdtType::OrSet;
+
+        let err = a.merge(&b).unwrap_err();
+
+        assert_eq!(
+            err,
+            CrdtError::TypeMismatch {
+                expected: CrdtType::GCounter,
+                actual: CrdtType::OrSet
+            }
+        );
+    }
+
+    #[test]
+    fn pncounter_merge_rejects_matching_corrupt_nested_counter_type_tags() {
+        let mut a = PnCounter::new();
+        let mut b = PnCounter::new();
+        a.positive.crdt_type = CrdtType::OrSet;
         b.positive.crdt_type = CrdtType::OrSet;
 
         let err = a.merge(&b).unwrap_err();
