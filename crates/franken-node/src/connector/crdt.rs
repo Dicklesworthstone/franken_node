@@ -157,20 +157,55 @@ impl OrSet {
         Self::default()
     }
 
+    fn max_observed_counter_for_replica(&self, replica_id: &str) -> u64 {
+        self.adds
+            .values()
+            .chain(self.removes.values())
+            .flat_map(|tags| tags.iter())
+            .filter(|tag| tag.replica_id == replica_id)
+            .map(|tag| tag.counter)
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn sync_next_dot_floors(&mut self) {
+        let mut observed_by_replica = BTreeMap::new();
+        for tag in self
+            .adds
+            .values()
+            .chain(self.removes.values())
+            .flat_map(|tags| tags.iter())
+        {
+            let observed = observed_by_replica
+                .entry(tag.replica_id.clone())
+                .or_insert(0_u64);
+            *observed = (*observed).max(tag.counter);
+        }
+
+        for (replica_id, observed) in observed_by_replica {
+            let stored = self.next_dot_by_replica.entry(replica_id).or_insert(0);
+            *stored = (*stored).max(observed);
+        }
+    }
+
     pub fn add(&mut self, replica_id: &str, element: String) {
         if replica_id.is_empty() {
             return;
         }
+        let observed_counter = self.max_observed_counter_for_replica(replica_id);
+        let replica_id = replica_id.to_string();
         let counter = self
             .next_dot_by_replica
-            .entry(replica_id.to_string())
+            .entry(replica_id.clone())
             .or_insert(0);
-        if *counter == u64::MAX {
+        let next_dot_floor = (*counter).max(observed_counter);
+        if next_dot_floor == u64::MAX {
+            *counter = u64::MAX;
             return;
         }
-        *counter += 1;
+        *counter = next_dot_floor.saturating_add(1);
         self.adds.entry(element).or_default().insert(OrTag {
-            replica_id: replica_id.to_string(),
+            replica_id,
             counter: *counter,
         });
     }
@@ -205,7 +240,7 @@ impl OrSet {
                 actual: other.crdt_type,
             });
         }
-        Ok(OrSet {
+        let mut result = OrSet {
             crdt_type: CrdtType::OrSet,
             adds: self.adds.iter().chain(other.adds.iter()).fold(
                 BTreeMap::new(),
@@ -234,7 +269,9 @@ impl OrSet {
                     *entry = (*entry).max(*counter);
                     acc
                 }),
-        })
+        };
+        result.sync_next_dot_floors();
+        Ok(result)
     }
 }
 
@@ -515,6 +552,57 @@ mod tests {
 
         assert!(s.adds.is_empty());
         assert_eq!(s.next_dot_by_replica["r1"], u64::MAX);
+    }
+
+    #[test]
+    fn or_set_add_after_stale_next_dot_uses_observed_tag_floor() {
+        let mut s = OrSet::new();
+        let removed_tag = OrTag {
+            replica_id: "r1".to_string(),
+            counter: 5,
+        };
+        s.adds
+            .entry("x".to_string())
+            .or_default()
+            .insert(removed_tag.clone());
+        s.removes
+            .entry("x".to_string())
+            .or_default()
+            .insert(removed_tag);
+        s.next_dot_by_replica.insert("r1".to_string(), 4);
+
+        s.add("r1", "x".into());
+
+        assert_eq!(s.next_dot_by_replica["r1"], 6);
+        assert!(s.adds["x"].contains(&OrTag {
+            replica_id: "r1".to_string(),
+            counter: 6,
+        }));
+        assert!(s.elements().contains(&&"x".to_string()));
+    }
+
+    #[test]
+    fn or_set_merge_lifts_next_dot_to_observed_tag_floor() {
+        let mut remote = OrSet::new();
+        remote
+            .adds
+            .entry("x".to_string())
+            .or_default()
+            .insert(OrTag {
+                replica_id: "r1".to_string(),
+                counter: 9,
+            });
+        remote.next_dot_by_replica.insert("r1".to_string(), 2);
+
+        let mut merged = OrSet::new().merge(&remote).unwrap();
+
+        assert_eq!(merged.next_dot_by_replica["r1"], 9);
+        merged.add("r1", "y".into());
+        assert_eq!(merged.next_dot_by_replica["r1"], 10);
+        assert!(merged.adds["y"].contains(&OrTag {
+            replica_id: "r1".to_string(),
+            counter: 10,
+        }));
     }
 
     #[test]
