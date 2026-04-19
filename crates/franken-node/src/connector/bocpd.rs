@@ -3902,7 +3902,7 @@ mod tests {
         let mut correlator = MultiStreamCorrelator::new(60);
         let mut invalid_retained = valid_shift("invalid-retained");
         invalid_retained.confidence = f64::NAN;
-        correlator.recent_shifts.push(invalid_retained);
+        push_bounded(&mut correlator.recent_shifts, invalid_retained, MAX_RECENT_SHIFTS);
 
         let correlated = correlator.record_shift(valid_shift("fresh-stream"));
 
@@ -4262,9 +4262,8 @@ mod tests {
                 strength: 1.0,
             };
 
-            // This should use push_bounded instead of direct Vec::push
-            // Current implementation might allow unbounded growth
-            correlator.recent_shifts.push(shift);
+            // Use push_bounded to prevent unbounded growth
+            push_bounded(&mut correlator.recent_shifts, shift, MAX_RECENT_SHIFTS);
 
             // Check if memory usage is becoming problematic
             if i % 1000 == 0 {

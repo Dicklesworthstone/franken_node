@@ -17,6 +17,16 @@ use crate::security::constant_time::ct_eq;
 /// Maximum leaf hashes before oldest-first eviction.
 const MAX_LEAF_HASHES: usize = 4096;
 
+/// Safe conversion from usize to u64 with overflow protection.
+fn len_to_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+/// Safe conversion from u64 to usize with overflow protection.
+fn u64_to_usize(val: u64) -> usize {
+    usize::try_from(val).unwrap_or(usize::MAX)
+}
+
 /// Canonical hash string type used by proof APIs.
 pub type Hash = String;
 
@@ -174,7 +184,7 @@ impl MmrCheckpoint {
 
     #[must_use]
     pub fn tree_size(&self) -> u64 {
-        self.leaf_hashes.len() as u64
+        len_to_u64(self.leaf_hashes.len())
     }
 
     #[must_use]
@@ -219,7 +229,7 @@ impl MmrCheckpoint {
         let root_hash =
             merkle_root_from_leaf_hashes(&self.leaf_hashes).ok_or(ProofError::EmptyCheckpoint)?;
         let root = MmrRoot {
-            tree_size: stream.len() as u64,
+            tree_size: len_to_u64(stream.len()),
             root_hash,
         };
         self.latest_root = Some(root.clone());
@@ -248,7 +258,7 @@ pub fn mmr_inclusion_proof(
         return Err(ProofError::MmrDisabled);
     }
 
-    let stream_size = stream.len() as u64;
+    let stream_size = len_to_u64(stream.len());
     if stream_size == 0 {
         return Err(ProofError::EmptyCheckpoint);
     }
@@ -275,13 +285,13 @@ pub fn mmr_inclusion_proof(
         });
     }
 
-    let leaf_index = (seq - window_start) as usize;
+    let leaf_index = u64_to_usize(seq.saturating_sub(window_start));
     let leaf_hash = leaf_hashes
         .get(leaf_index)
         .cloned()
         .ok_or(ProofError::SequenceOutOfRange {
             sequence: seq,
-            tree_size: leaf_hashes.len() as u64,
+            tree_size: len_to_u64(leaf_hashes.len()),
         })?;
     let audit_path =
         merkle_audit_path(&leaf_hashes, leaf_index).ok_or(ProofError::InvalidProof {
@@ -289,7 +299,7 @@ pub fn mmr_inclusion_proof(
         })?;
 
     Ok(InclusionProof {
-        leaf_index: leaf_index as u64,
+        leaf_index: len_to_u64(leaf_index),
         tree_size: stream_size,
         leaf_hash,
         audit_path,
@@ -331,7 +341,7 @@ pub fn verify_inclusion(
     }
 
     let mut current = proof.leaf_hash.clone();
-    let mut index = proof.leaf_index as usize;
+    let mut index = u64_to_usize(proof.leaf_index);
     for sibling in &proof.audit_path {
         current = if index.is_multiple_of(2) {
             hash_pair(&current, sibling)
@@ -370,11 +380,11 @@ pub fn mmr_prefix_proof(
         });
     }
 
-    let prefix_size = root_a.tree_size as usize;
+    let prefix_size = u64_to_usize(root_a.tree_size);
     if prefix_size > checkpoint_b.leaf_hashes.len() {
         return Err(ProofError::PrefixSizeInvalid {
             prefix_size: root_a.tree_size,
-            super_tree_size: checkpoint_b.leaf_hashes.len() as u64,
+            super_tree_size: len_to_u64(checkpoint_b.leaf_hashes.len()),
         });
     }
     let prefix_root_from_super =
@@ -453,7 +463,7 @@ fn retained_window_start(stream: &MarkerStream) -> Result<u64, ProofError> {
 
 fn retained_leaf_hashes(stream: &MarkerStream) -> Result<Vec<Hash>, ProofError> {
     let window_start = retained_window_start(stream)?;
-    let window_end = window_start.saturating_add(stream.len() as u64);
+    let window_end = window_start.saturating_add(len_to_u64(stream.len()));
     Ok(stream
         .range(window_start, window_end)
         .iter()
@@ -530,9 +540,13 @@ fn sha256_hex(input: &[u8]) -> Hash {
 }
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
-        items.drain(0..overflow);
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
@@ -1075,7 +1089,7 @@ mod tests {
             "marker\x01\x02control",    // Control characters
             "marker\r\nlinebreak",      // Line breaks
             "marker\t\x0Btab",          // Tab and vertical tab
-            "marker\x7F\x80\xFF",       // DEL and high bytes
+            "marker\x7F\u{80}\u{FF}",   // DEL and high bytes
             "marker\u{FFFE}nonchar",    // Unicode non-character
             "marker\u{FFFF}invalid",    // Another non-character
             "",                         // Empty string
@@ -1101,7 +1115,7 @@ mod tests {
 
         // Test in actual proof verification
         let mut checkpoint = MmrCheckpoint::enabled();
-        let result = checkpoint.append_marker_hash("test\0null\xFF");
+        let result = checkpoint.append_marker_hash("test\0null\u{FF}");
 
         // Should either succeed or fail cleanly, not corrupt state
         match result {
@@ -1349,7 +1363,7 @@ mod tests {
             "",
             " ",
             "\n\r\t",
-            "input-with-high-bytes-\x80\xFF",
+            "input-with-high-bytes-\u{80}\u{FF}",
         ];
 
         for input in test_inputs {

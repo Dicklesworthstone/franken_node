@@ -128,7 +128,8 @@ impl EpochTransition {
         sha2::Digest::update(&mut hasher, timestamp.to_le_bytes());
         // Length-prefixed encoding prevents delimiter-collision ambiguity.
         for field in [manifest_hash, trace_id] {
-            sha2::Digest::update(&mut hasher, (field.len() as u64).to_le_bytes());
+            let field_len = u64::try_from(field.len()).unwrap_or(u64::MAX);
+            sha2::Digest::update(&mut hasher, field_len.to_le_bytes());
             sha2::Digest::update(&mut hasher, field.as_bytes());
         }
         format!("mac:{:x}", sha2::Digest::finalize(hasher))

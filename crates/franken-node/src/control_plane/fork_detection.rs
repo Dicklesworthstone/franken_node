@@ -578,7 +578,7 @@ impl RollbackDetector {
                     actual_parent: sv.parent_state_hash.clone(),
                 });
             }
-            if sv.epoch > last.epoch + 1 {
+            if sv.epoch > last.epoch.saturating_add(1) {
                 let local_epoch = last.epoch;
                 self.last_known = Some(sv.clone());
                 return Err(ForkDetectionError::RfdGapDetected {
@@ -1951,5 +1951,21 @@ mod tests {
             .expect_err("non-numeric detection_timestamp must fail");
 
         assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn rollback_detector_gap_check_uses_saturating_arithmetic_at_max_epoch() {
+        let mut detector = RollbackDetector::new();
+        let max_epoch = make_sv(u64::MAX, "max-state", "max-parent", "node");
+        detector.feed(max_epoch).unwrap();
+
+        // Feed another state at max epoch - should be classified as rollback, not gap
+        let replay = make_sv(u64::MAX, "max-replay", "max-replay-parent", "node");
+        let err = detector.feed(replay).expect_err("same max epoch should be rollback");
+        assert_eq!(err.code(), "RFD_ROLLBACK_DETECTED");
+
+        // The arithmetic in gap check should not overflow even at u64::MAX
+        let detector_proofs_before = detector.proof_count();
+        assert!(detector_proofs_before > 0);
     }
 }

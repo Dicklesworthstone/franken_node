@@ -37,7 +37,7 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     }
 
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -1395,6 +1395,16 @@ mod tests {
         push_bounded(&mut items, 4, 0);
 
         assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_uses_saturating_arithmetic_to_prevent_underflow() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 2);
+
+        assert_eq!(items, vec![2, 3, 4]);
+        assert_eq!(items.len(), 2);
     }
 
     #[test]

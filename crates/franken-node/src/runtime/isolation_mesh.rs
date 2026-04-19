@@ -26,7 +26,7 @@ const MAX_ELEVATION_HISTORY: usize = 256;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -1644,5 +1644,24 @@ mod tests {
             mesh.events().last().unwrap().event_code,
             event_codes::MESH_007
         );
+    }
+
+    #[test]
+    fn push_bounded_uses_saturating_arithmetic_to_prevent_underflow() {
+        let mut items = vec![1, 2, 3];
+
+        // Normal case: items.len() >= cap works correctly
+        push_bounded(&mut items, 4, 2);
+        assert_eq!(items, vec![3, 4]);
+
+        // Edge case: empty vec with non-zero cap should not underflow
+        let mut empty = Vec::<i32>::new();
+        push_bounded(&mut empty, 42, 5);
+        assert_eq!(empty, vec![42]);
+
+        // Edge case: single item with cap 1 should replace
+        let mut single = vec![100];
+        push_bounded(&mut single, 200, 1);
+        assert_eq!(single, vec![200]);
     }
 }
