@@ -539,7 +539,7 @@ impl VirtualTransportLayer {
         }
 
         let msg_id = self.next_message_id;
-        self.next_message_id = if msg_id == u64::MAX { 0 } else { msg_id + 1 };
+        self.next_message_id = msg_id.checked_add(1).unwrap_or(0);
         self.total_messages = self.total_messages.saturating_add(1);
 
         // Read config values before mutable borrow.

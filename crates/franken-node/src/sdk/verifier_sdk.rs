@@ -3792,7 +3792,7 @@ mod verifier_sdk_boundary_negative_tests {
                 let attempt_data = format!("preimage_attempt_{}", preimage_attempt).as_bytes().to_vec();
                 let computed = compute_artifact_hash(&attempt_data);
 
-                if computed == target_hash {
+                if crate::security::constant_time::ct_eq(&computed, target_hash) {
                     found_preimage = true;
                     break;
                 }
