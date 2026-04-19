@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::capacity_defaults::aliases::MAX_FIELDS;
 use crate::control_plane::control_epoch::{
     ControlEpoch, EpochArtifactEvent, EpochRejection, EpochRejectionReason, ValidityWindowPolicy,
     check_artifact_epoch,
@@ -21,6 +22,7 @@ pub mod epoch_event_codes {
 }
 
 const RESERVED_POLICY_ID: &str = "<unknown>";
+pub const MAX_HEALTH_CHECKS: usize = MAX_FIELDS;
 
 fn invalid_policy_id_reason(policy_id: &str) -> Option<String> {
     let trimmed = policy_id.trim();
@@ -32,6 +34,12 @@ fn invalid_policy_id_reason(policy_id: &str) -> Option<String> {
     }
     if trimmed != policy_id {
         return Some("policy_id contains leading or trailing whitespace".to_string());
+    }
+    if policy_id.contains('\0') {
+        return Some("policy_id must not contain null bytes".to_string());
+    }
+    if policy_id.chars().any(char::is_control) {
+        return Some("policy_id must not contain control characters".to_string());
     }
     None
 }
@@ -57,11 +65,30 @@ impl HealthGateResult {
     ///
     /// The gate passes if and only if all required checks pass.
     pub fn evaluate(checks: Vec<HealthCheck>) -> Self {
-        let required_checks: Vec<_> = checks.iter().filter(|c| c.required).collect();
+        let too_many_checks = checks.len() > MAX_HEALTH_CHECKS;
+        let required_check_seen = checks.iter().any(|c| c.required);
+        let all_required_checks_passed = checks.iter().filter(|c| c.required).all(|c| c.passed);
+
+        let mut bounded_checks: Vec<HealthCheck> =
+            checks.into_iter().take(MAX_HEALTH_CHECKS).collect();
+        if too_many_checks {
+            if bounded_checks.len() >= MAX_HEALTH_CHECKS {
+                bounded_checks.truncate(MAX_HEALTH_CHECKS.saturating_sub(1));
+            }
+            bounded_checks.push(HealthCheck {
+                name: "health_check_capacity_exceeded".to_string(),
+                required: true,
+                passed: false,
+                message: Some(format!(
+                    "health check count exceeds maximum {MAX_HEALTH_CHECKS}"
+                )),
+            });
+        }
+
         // Fail-closed: if no required checks exist, gate must not pass.
-        let gate_passed = !required_checks.is_empty() && required_checks.iter().all(|c| c.passed);
+        let gate_passed = !too_many_checks && required_check_seen && all_required_checks_passed;
         Self {
-            checks,
+            checks: bounded_checks,
             gate_passed,
         }
     }
@@ -72,6 +99,7 @@ impl HealthGateResult {
             .iter()
             .filter(|c| c.required && !c.passed)
             .map(|c| c.name.as_str())
+            .take(MAX_HEALTH_CHECKS)
             .collect()
     }
 }
@@ -256,7 +284,14 @@ pub fn evaluate_epoch_scoped_policy(
     )
     .map_err(EpochHealthGateError::from_rejection)?;
 
-    let gate_result = HealthGateResult::evaluate(policy.checks.clone());
+    let gate_result = HealthGateResult::evaluate(
+        policy
+            .checks
+            .iter()
+            .take(MAX_HEALTH_CHECKS.saturating_add(1))
+            .cloned()
+            .collect(),
+    );
     let current_epoch = validity_policy.current_epoch();
 
     Ok(EpochScopedHealthResult {
@@ -473,6 +508,38 @@ mod tests {
     }
 
     #[test]
+    fn epoch_scoped_policy_rejects_null_byte_policy_id() {
+        let policy = EpochScopedHealthPolicy::new(
+            "health-policy\0bad".to_string(),
+            ControlEpoch::new(7),
+            standard_checks(true, true, true, true),
+            "trace-hg-null-policy".to_string(),
+        );
+        let validity = ValidityWindowPolicy::new(ControlEpoch::new(7), 2);
+
+        let err = evaluate_epoch_scoped_policy(&policy, &validity).unwrap_err();
+
+        assert!(matches!(err, EpochHealthGateError::InvalidPolicyId { .. }));
+        assert!(err.to_string().contains("null bytes"));
+    }
+
+    #[test]
+    fn epoch_scoped_policy_rejects_embedded_control_policy_id() {
+        let policy = EpochScopedHealthPolicy::new(
+            "health-policy\nbad".to_string(),
+            ControlEpoch::new(7),
+            standard_checks(true, true, true, true),
+            "trace-hg-control-policy".to_string(),
+        );
+        let validity = ValidityWindowPolicy::new(ControlEpoch::new(7), 2);
+
+        let err = evaluate_epoch_scoped_policy(&policy, &validity).unwrap_err();
+
+        assert!(matches!(err, EpochHealthGateError::InvalidPolicyId { .. }));
+        assert!(err.to_string().contains("control characters"));
+    }
+
+    #[test]
     fn epoch_health_gate_error_display_uses_reason_label() {
         let err = EpochHealthGateError::from_rejection(EpochRejection {
             artifact_id: "health-policy-future".to_string(),
@@ -522,6 +589,48 @@ mod tests {
             !result.gate_passed,
             "all-optional checks must fail gate (no required checks)"
         );
+    }
+
+    #[test]
+    fn excessive_health_checks_fail_closed_and_are_bounded() {
+        let checks: Vec<HealthCheck> = (0..MAX_HEALTH_CHECKS.saturating_add(8))
+            .map(|index| HealthCheck {
+                name: format!("check-{index}"),
+                required: true,
+                passed: true,
+                message: None,
+            })
+            .collect();
+
+        let result = HealthGateResult::evaluate(checks);
+
+        assert!(!result.gate_passed);
+        assert_eq!(result.checks.len(), MAX_HEALTH_CHECKS);
+        assert!(
+            result
+                .failing_required()
+                .contains(&"health_check_capacity_exceeded")
+        );
+    }
+
+    #[test]
+    fn failing_required_is_bounded_for_deserialized_results() {
+        let checks: Vec<HealthCheck> = (0..MAX_HEALTH_CHECKS.saturating_add(7))
+            .map(|index| HealthCheck {
+                name: format!("failed-{index}"),
+                required: true,
+                passed: false,
+                message: None,
+            })
+            .collect();
+        let result = HealthGateResult {
+            checks,
+            gate_passed: false,
+        };
+
+        assert_eq!(result.failing_required().len(), MAX_HEALTH_CHECKS);
+        let err = HealthGateError::from_result(&result).expect("failed gate should emit error");
+        assert_eq!(err.failing_checks.len(), MAX_HEALTH_CHECKS);
     }
 
     #[test]

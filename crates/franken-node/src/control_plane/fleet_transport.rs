@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use crate::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -20,6 +21,8 @@ pub const FLEET_ACTION_LOG_FILE: &str = "actions.jsonl";
 pub const FLEET_NODE_DIR: &str = "nodes";
 pub const FLEET_LOCK_DIR: &str = "locks";
 const MAX_NODE_ID_LEN: usize = 128;
+const MAX_ZONE_ID_LEN: usize = 128;
+const MAX_ACTION_ID_LEN: usize = 128;
 const MAX_ACTION_RECORD_BYTES: usize = 2_048;
 const ACTION_LOG_COMPACTION_THRESHOLD_BYTES: u64 = 10 * 1024 * 1024;
 const ACTION_LOG_RETENTION_DAYS: i64 = 30;
@@ -312,7 +315,7 @@ impl FileFleetTransport {
         let mut stale_nodes: Vec<NodeStatus> = self
             .list_node_statuses()?
             .into_iter()
-            .filter(|status| now.signed_duration_since(status.last_seen) > staleness_threshold)
+            .filter(|status| now.signed_duration_since(status.last_seen) >= staleness_threshold)
             .collect();
         stale_nodes.sort_by(|left, right| left.node_id.cmp(&right.node_id));
         Ok(stale_nodes)
@@ -646,6 +649,11 @@ impl FleetTransport for FileFleetTransport {
             })?;
             validate_zone_id(&status.zone_id)?;
             validate_node_id(&status.node_id)?;
+            if nodes.len() >= MAX_NODES_CAP {
+                return Err(FleetTransportError::serialization(format!(
+                    "fleet node status count exceeds {MAX_NODES_CAP} entries"
+                )));
+            }
             nodes.push(status);
         }
 
@@ -654,45 +662,51 @@ impl FleetTransport for FileFleetTransport {
 }
 
 pub fn validate_zone_id(zone_id: &str) -> Result<&str, FleetTransportError> {
-    let trimmed = zone_id.trim();
-    if trimmed.is_empty() {
-        return Err(FleetTransportError::serialization(
-            "zone_id must not be empty",
-        ));
-    }
-    if trimmed != zone_id {
-        return Err(FleetTransportError::serialization(
-            "zone_id must not include leading or trailing whitespace",
-        ));
-    }
-    Ok(trimmed)
+    validate_transport_identifier(zone_id, "zone_id", MAX_ZONE_ID_LEN)
 }
 
 pub fn validate_node_id(node_id: &str) -> Result<&str, FleetTransportError> {
-    if node_id.is_empty() || node_id.len() > MAX_NODE_ID_LEN {
+    validate_transport_identifier(node_id, "node_id", MAX_NODE_ID_LEN)
+}
+
+fn validate_action_id(action_id: &str) -> Result<&str, FleetTransportError> {
+    validate_transport_identifier(action_id, "action_id", MAX_ACTION_ID_LEN)
+}
+
+fn validate_transport_identifier<'a>(
+    value: &'a str,
+    field_name: &str,
+    max_len: usize,
+) -> Result<&'a str, FleetTransportError> {
+    if value.is_empty() || value.len() > max_len {
         return Err(FleetTransportError::serialization(format!(
-            "node_id must be 1..={MAX_NODE_ID_LEN} characters"
+            "{field_name} must be 1..={max_len} characters"
         )));
     }
-
-    if node_id
+    if value.trim() != value {
+        return Err(FleetTransportError::serialization(format!(
+            "{field_name} must not include leading or trailing whitespace"
+        )));
+    }
+    if value == "." || value == ".." || value.contains("..") {
+        return Err(FleetTransportError::serialization(format!(
+            "{field_name} must not include traversal segments"
+        )));
+    }
+    if value
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
     {
-        return Ok(node_id);
+        return Ok(value);
     }
 
-    Err(FleetTransportError::serialization(
-        "node_id must match [a-zA-Z0-9._-]{1,128}",
-    ))
+    Err(FleetTransportError::serialization(format!(
+        "{field_name} must match [a-zA-Z0-9._-]{{1,{max_len}}}"
+    )))
 }
 
 fn validate_action_record(action: &FleetActionRecord) -> Result<(), FleetTransportError> {
-    if action.action_id.trim().is_empty() {
-        return Err(FleetTransportError::serialization(
-            "fleet action action_id must not be empty",
-        ));
-    }
+    validate_action_id(&action.action_id)?;
 
     match &action.action {
         FleetAction::Quarantine {
@@ -831,6 +845,12 @@ where
                 path.display()
             ))
         })?;
+        if records.len() >= MAX_ACTION_LOG_ENTRIES {
+            return Err(FleetTransportError::serialization(format!(
+                "JSONL record count in {} exceeds {MAX_ACTION_LOG_ENTRIES} entries",
+                path.display()
+            )));
+        }
         records.push(record);
     }
     Ok(records)

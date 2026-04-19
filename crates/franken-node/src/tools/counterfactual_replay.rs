@@ -20,6 +20,18 @@ use super::replay_bundle::{
 const MAX_SWEEP_VALUES: usize = 20;
 const DEFAULT_ENGINE_VERSION: &str = "counterfactual-v1";
 
+// Security: bounds for push_bounded to prevent memory exhaustion
+const MAX_POLICY_OVERRIDE_DIFFS: usize = 32;
+const MAX_REPLAY_OUTCOMES: usize = 1_000_000;
+const MAX_SWEEP_RESULTS: usize = MAX_SWEEP_VALUES;
+const MAX_DIVERGENCE_POINTS: usize = 100_000;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() < cap {
+        items.push(item);
+    }
+}
+
 pub const COUNTERFACTUAL_REPLAY_STARTED: &str = "COUNTERFACTUAL_REPLAY_STARTED";
 pub const COUNTERFACTUAL_REPLAY_COMPLETED: &str = "COUNTERFACTUAL_REPLAY_COMPLETED";
 pub const COUNTERFACTUAL_BUNDLE_INVALID: &str = "COUNTERFACTUAL_BUNDLE_INVALID";
@@ -156,32 +168,32 @@ impl PolicyConfig {
     pub fn diff_from(&self, baseline: &PolicyConfig) -> Vec<PolicyOverrideDiffEntry> {
         let mut out = Vec::new();
         if self.policy_name != baseline.policy_name {
-            out.push(PolicyOverrideDiffEntry {
+            push_bounded(&mut out, PolicyOverrideDiffEntry {
                 field: "policy_name".to_string(),
                 original: baseline.policy_name.clone(),
                 counterfactual: self.policy_name.clone(),
-            });
+            }, MAX_POLICY_OVERRIDE_DIFFS);
         }
         if self.quarantine_threshold != baseline.quarantine_threshold {
-            out.push(PolicyOverrideDiffEntry {
+            push_bounded(&mut out, PolicyOverrideDiffEntry {
                 field: "quarantine_threshold".to_string(),
                 original: baseline.quarantine_threshold.to_string(),
                 counterfactual: self.quarantine_threshold.to_string(),
-            });
+            }, MAX_POLICY_OVERRIDE_DIFFS);
         }
         if self.observe_threshold != baseline.observe_threshold {
-            out.push(PolicyOverrideDiffEntry {
+            push_bounded(&mut out, PolicyOverrideDiffEntry {
                 field: "observe_threshold".to_string(),
                 original: baseline.observe_threshold.to_string(),
                 counterfactual: self.observe_threshold.to_string(),
-            });
+            }, MAX_POLICY_OVERRIDE_DIFFS);
         }
         if self.degraded_mode_bias != baseline.degraded_mode_bias {
-            out.push(PolicyOverrideDiffEntry {
+            push_bounded(&mut out, PolicyOverrideDiffEntry {
                 field: "degraded_mode_bias".to_string(),
                 original: baseline.degraded_mode_bias.to_string(),
                 counterfactual: self.degraded_mode_bias.to_string(),
-            });
+            }, MAX_POLICY_OVERRIDE_DIFFS);
         }
         out
     }
@@ -471,8 +483,8 @@ where
                 });
             }
 
-            original_outcomes.push(self.executor.evaluate_event(event, baseline_policy));
-            counterfactual_outcomes.push(self.executor.evaluate_event(event, alternate_policy));
+            push_bounded(&mut original_outcomes, self.executor.evaluate_event(event, baseline_policy), MAX_REPLAY_OUTCOMES);
+            push_bounded(&mut counterfactual_outcomes, self.executor.evaluate_event(event, alternate_policy), MAX_REPLAY_OUTCOMES);
         }
 
         Ok(self.build_result(
@@ -512,7 +524,7 @@ where
                     let mut policy = template_policy.with_numeric_parameter(&parameter, value)?;
                     policy.policy_name =
                         format!("{}:{}={value}", template_policy.policy_name, parameter);
-                    results.push(self.replay_with_baseline(bundle, baseline_policy, &policy)?);
+                    push_bounded(&mut results, self.replay_with_baseline(bundle, baseline_policy, &policy)?, MAX_SWEEP_RESULTS);
                 }
 
                 Ok(CounterfactualSimulationOutput::Sweep { parameter, results })
@@ -546,14 +558,14 @@ where
                 let delta = i64::try_from(counterfactual.expected_loss)
                     .unwrap_or(i64::MAX)
                     .saturating_sub(i64::try_from(original.expected_loss).unwrap_or(i64::MAX));
-                divergence_points.push(DivergenceRecord {
+                push_bounded(&mut divergence_points, DivergenceRecord {
                     sequence_number: original.sequence_number,
                     original_decision: original.decision.clone(),
                     counterfactual_decision: counterfactual.decision.clone(),
                     original_rationale: original.rationale.clone(),
                     counterfactual_rationale: counterfactual.rationale.clone(),
                     impact_estimate: classify_impact(delta),
-                });
+                }, MAX_DIVERGENCE_POINTS);
             }
         }
 

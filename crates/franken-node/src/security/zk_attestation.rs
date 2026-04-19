@@ -34,6 +34,18 @@ pub const DEFAULT_VALIDITY_MS: u64 = 600_000; // 10 minutes
 /// Maximum proofs in a single batch verification.
 pub const MAX_BATCH_SIZE: usize = 256;
 
+/// Security: bounds for push_bounded to prevent memory exhaustion
+const MAX_TIMING_SAMPLES: usize = 10_000;
+const MAX_AUDIT_TRAIL_ENTRIES: usize = 100_000;
+const MAX_ATTESTATIONS_LIST: usize = 10_000;
+const MAX_THREAD_HANDLES: usize = 1_000;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() < cap {
+        items.push(item);
+    }
+}
+
 // ── Invariant constants ─────────────────────────────────────────────────────
 
 /// INV-ZKA-SELECTIVE: proofs reveal only predicate results, not private metadata.
@@ -898,7 +910,7 @@ impl AttestationLedger {
         for (id, att) in &mut self.attestations {
             if att.status == AttestationStatus::Active && now_ms >= att.expires_at_ms {
                 att.status = AttestationStatus::Expired;
-                expired.push(id.clone());
+                push_bounded(&mut expired, id.clone(), MAX_AUDIT_TRAIL_ENTRIES);
             }
         }
         expired
@@ -2021,7 +2033,7 @@ mod tests {
                     sensitive_data: format!("test-data-{}", i),
                     compliance_threshold: 100.0,
                 },
-                1_000_000 + i as u64,
+                1_000_000 + u64::try_from(i).unwrap_or(u64::MAX),
                 format!("trace-unicode-{}", i),
             );
 
@@ -2107,7 +2119,7 @@ mod tests {
                     sensitive_data: format!("data-{}", i),
                     compliance_threshold: 100.0,
                 },
-                1_000_000 + i as u64,
+                1_000_000 + u64::try_from(i).unwrap_or(u64::MAX),
                 format!("trace-collision-{}", i),
             );
 
@@ -2213,12 +2225,12 @@ mod tests {
                     sensitive_data: format!("data-{}", i),
                     compliance_threshold: 100.0,
                 },
-                1_000_000 + i as u64,
+                1_000_000 + u64::try_from(i).unwrap_or(u64::MAX),
                 format!("trace-batch-{}", i),
             );
 
             if let Ok(attestation) = proof_result {
-                attestations.push(attestation);
+                push_bounded(&mut attestations, attestation, MAX_ATTESTATIONS_LIST);
             }
 
             if attestations.len() > MAX_BATCH_SIZE {
@@ -2307,8 +2319,8 @@ mod tests {
                 },
                 outcome: PredicateOutcome::Pass,
                 status: AttestationStatus::Active,
-                generated_at_ms: 1_000_000 + i as u64,
-                expires_at_ms: 1_000_000 + i as u64 + DEFAULT_VALIDITY_MS,
+                generated_at_ms: 1_000_000 + u64::try_from(i).unwrap_or(u64::MAX),
+                expires_at_ms: 1_000_000 + u64::try_from(i).unwrap_or(u64::MAX) + DEFAULT_VALIDITY_MS,
                 trace_id: format!("trace-schema-{}", i),
             };
 
@@ -2354,7 +2366,7 @@ mod tests {
                             sensitive_data: format!("data-{}-{}", thread_id, i),
                             compliance_threshold: 100.0,
                         },
-                        1_000_000 + (thread_id * 1000 + i) as u64,
+                        1_000_000 + u64::try_from(thread_id * 1000 + i).unwrap_or(u64::MAX),
                         format!("trace-{}-{}", thread_id, i),
                     );
 
@@ -2362,7 +2374,7 @@ mod tests {
                 }
             });
 
-            handles.push(handle);
+            push_bounded(&mut handles, handle, MAX_THREAD_HANDLES);
         }
 
         for handle in handles {
@@ -2418,13 +2430,13 @@ mod tests {
         for _ in 0..100 {
             // Time legitimate verification
             let start = Instant::now();
-            let _ = ledger.verify_proof(&legit_result.as_ref().unwrap(), &policy, 1_000_001, "trace-timing".to_string());
-            legit_times.push(start.elapsed());
+            let _legit_verification_result = ledger.verify_proof(&legit_result.as_ref().unwrap(), &policy, 1_000_001, "trace-timing".to_string());
+            push_bounded(&mut legit_times, start.elapsed(), MAX_TIMING_SAMPLES);
 
             // Time forged verification
             let start = Instant::now();
-            let _ = ledger.verify_proof(&forged, &policy, 1_000_001, "trace-timing-forged".to_string());
-            forged_times.push(start.elapsed());
+            let _forged_verification_result = ledger.verify_proof(&forged, &policy, 1_000_001, "trace-timing-forged".to_string());
+            push_bounded(&mut forged_times, start.elapsed(), MAX_TIMING_SAMPLES);
         }
 
         // Calculate average times
@@ -2437,6 +2449,11 @@ mod tests {
             let max_time = std::cmp::max(avg_legit, avg_forged);
             let min_time = std::cmp::min(avg_legit, avg_forged);
             let timing_ratio = max_time.as_nanos() as f64 / min_time.as_nanos() as f64;
+
+            // Security: guard against non-finite division results
+            if !timing_ratio.is_finite() {
+                panic!("Invalid timing ratio computation: max={:?}, min={:?}", max_time, min_time);
+            }
 
             // Allow up to 3x difference due to normal variance
             assert!(timing_ratio < 3.0,
@@ -2459,7 +2476,7 @@ mod tests {
                     sensitive_data: format!("data-{}", i),
                     compliance_threshold: 100.0,
                 },
-                1_000_000 + i as u64,
+                1_000_000 + u64::try_from(i).unwrap_or(u64::MAX),
                 format!("trace-overflow-{}", i),
             );
 

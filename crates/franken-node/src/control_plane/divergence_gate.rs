@@ -44,6 +44,14 @@ pub mod event_codes {
 }
 
 // ---------------------------------------------------------------------------
+// Security: bounds for push_bounded to prevent memory exhaustion
+// ---------------------------------------------------------------------------
+
+const MAX_EVENT_CODES: usize = 10_000;
+const MAX_TIMING_SAMPLES: usize = 10_000;
+const MAX_ATTACK_STEPS: usize = 1_000;
+
+// ---------------------------------------------------------------------------
 // Invariant identifiers
 // ---------------------------------------------------------------------------
 
@@ -518,7 +526,7 @@ impl ControlPlaneDivergenceGate {
         match result {
             DetectionResult::Converged => {
                 self.events
-                    .push(event_codes::DG_005_FRESHNESS_VERIFIED.to_string());
+                    .push(event_codes::DG_005_FRESHNESS_VERIFIED.to_string(), MAX_EVENT_CODES);
                 self.enforce_events_cap();
                 self.emit_audit(
                     timestamp,
@@ -578,8 +586,7 @@ impl ControlPlaneDivergenceGate {
             response_mode: None,
         });
 
-        self.events
-            .push(event_codes::DG_001_DIVERGENCE_DETECTED.to_string());
+        push_bounded(&mut self.events, event_codes::DG_001_DIVERGENCE_DETECTED.to_string(), MAX_EVENT_CODES);
         self.enforce_events_cap();
         self.emit_audit(
             timestamp,
@@ -614,7 +621,7 @@ impl ControlPlaneDivergenceGate {
                 event_code: event_codes::DG_005_FRESHNESS_VERIFIED.to_string(),
             };
             self.events
-                .push(event_codes::DG_005_FRESHNESS_VERIFIED.to_string());
+                .push(event_codes::DG_005_FRESHNESS_VERIFIED.to_string(), MAX_EVENT_CODES);
             self.enforce_events_cap();
             return Ok(result);
         }
@@ -635,8 +642,7 @@ impl ControlPlaneDivergenceGate {
             result.clone(),
             MAX_BLOCKED_MUTATIONS,
         );
-        self.events
-            .push(event_codes::DG_002_MUTATION_BLOCKED.to_string());
+        push_bounded(&mut self.events, event_codes::DG_002_MUTATION_BLOCKED.to_string(), MAX_EVENT_CODES);
         self.enforce_events_cap();
         self.emit_audit(
             timestamp,
@@ -672,10 +678,9 @@ impl ControlPlaneDivergenceGate {
             });
         }
         if let Some(ref mut ad) = self.active_divergence {
-            ad.response_mode = Some(ResponseMode::Halt.label().to_string());
+            ad.response_mode = Some(ResponseMode::Halt.label().to_string(), MAX_EVENT_CODES);
         }
-        self.events
-            .push(event_codes::DG_003_RESPONSE_ACTIVATED.to_string());
+        push_bounded(&mut self.events, event_codes::DG_003_RESPONSE_ACTIVATED.to_string(), MAX_EVENT_CODES);
         self.enforce_events_cap();
         self.emit_audit(
             timestamp,
@@ -724,13 +729,11 @@ impl ControlPlaneDivergenceGate {
         );
         self.state = GateState::Quarantined;
         if let Some(ref mut ad) = self.active_divergence {
-            ad.response_mode = Some(ResponseMode::Quarantine.label().to_string());
+            ad.response_mode = Some(ResponseMode::Quarantine.label().to_string(), MAX_EVENT_CODES);
         }
 
-        self.events
-            .push(event_codes::DG_006_PARTITION_QUARANTINED.to_string());
-        self.events
-            .push(event_codes::DG_003_RESPONSE_ACTIVATED.to_string());
+        push_bounded(&mut self.events, event_codes::DG_006_PARTITION_QUARANTINED.to_string(), MAX_EVENT_CODES);
+        push_bounded(&mut self.events, event_codes::DG_003_RESPONSE_ACTIVATED.to_string(), MAX_EVENT_CODES);
         self.enforce_events_cap();
         self.emit_audit(
             timestamp,
@@ -791,13 +794,11 @@ impl ControlPlaneDivergenceGate {
         push_bounded(&mut self.alerts, alert.clone(), MAX_ALERTS);
         self.state = GateState::Alerted;
         if let Some(ref mut ad) = self.active_divergence {
-            ad.response_mode = Some(ResponseMode::Alert.label().to_string());
+            ad.response_mode = Some(ResponseMode::Alert.label().to_string(), MAX_EVENT_CODES);
         }
 
-        self.events
-            .push(event_codes::DG_007_OPERATOR_ALERTED.to_string());
-        self.events
-            .push(event_codes::DG_003_RESPONSE_ACTIVATED.to_string());
+        push_bounded(&mut self.events, event_codes::DG_007_OPERATOR_ALERTED.to_string(), MAX_EVENT_CODES);
+        push_bounded(&mut self.events, event_codes::DG_003_RESPONSE_ACTIVATED.to_string(), MAX_EVENT_CODES);
         self.enforce_events_cap();
         self.emit_audit(
             timestamp,
@@ -879,8 +880,7 @@ impl ControlPlaneDivergenceGate {
             ),
         };
 
-        self.events
-            .push(event_codes::DG_004_RECOVERY_COMPLETED.to_string());
+        push_bounded(&mut self.events, event_codes::DG_004_RECOVERY_COMPLETED.to_string(), MAX_EVENT_CODES);
         self.enforce_events_cap();
         self.emit_audit(
             timestamp,
@@ -909,7 +909,7 @@ impl ControlPlaneDivergenceGate {
         match MarkerProofVerifier::verify(stream, marker_id, claimed_epoch) {
             Ok(()) => {
                 self.events
-                    .push(event_codes::DG_008_MARKER_PROOF_VERIFIED.to_string());
+                    .push(event_codes::DG_008_MARKER_PROOF_VERIFIED.to_string(), MAX_EVENT_CODES);
                 self.enforce_events_cap();
                 self.emit_audit(
                     timestamp,
@@ -1805,7 +1805,7 @@ mod tests {
                         let result = test_gate.respond_quarantine(
                             format!("attack-partition-{}", step_idx),
                             "attack-node",
-                            3000 + step_idx as u64,
+                            3000 + u64::try_from(step_idx).unwrap_or(u64::MAX),
                             &format!("attack-{}-{}", attack_name, step_idx)
                         );
                         if step_idx == 0 {
@@ -1814,7 +1814,7 @@ mod tests {
                         }
                     }
                     "halt" => {
-                        let result = test_gate.respond_halt(3000 + step_idx as u64, &format!("attack-{}-{}", attack_name, step_idx));
+                        let result = test_gate.respond_halt(3000 + u64::try_from(step_idx).unwrap_or(u64::MAX), &format!("attack-{}-{}", attack_name, step_idx));
                         // HALT from Quarantined should fail
                         if expected_final_state == GateState::Quarantined {
                             assert!(result.is_err(), "HALT from Quarantined should fail in attack {}", attack_name);

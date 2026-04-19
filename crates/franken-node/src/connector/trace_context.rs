@@ -4,6 +4,8 @@
 //! and optional `parent_span_id`.  Missing context is a conformance failure.
 //! Traces can be stitched across services via shared `trace_id`.
 
+use crate::capacity_defaults::aliases::MAX_REGISTERED_TRACES;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -205,6 +207,12 @@ impl TraceStore {
             }
         }
 
+        if !self.traces.contains_key(&ctx.trace_id) && self.traces.len() >= MAX_REGISTERED_TRACES {
+            return Err(TraceError::ConformanceFailed(format!(
+                "registered trace capacity exceeded ({MAX_REGISTERED_TRACES})"
+            )));
+        }
+
         let spans = self.traces.entry(ctx.trace_id.clone()).or_default();
         push_bounded(spans, ctx.clone(), MAX_SPANS_PER_TRACE);
         Ok(())
@@ -212,14 +220,37 @@ impl TraceStore {
 
     /// Retrieve all spans for a trace_id (INV-TRC-STITCHABLE).
     pub fn stitch(&self, trace_id: &str) -> Vec<&TraceContext> {
-        self.traces
+        let mut spans: Vec<&TraceContext> = self
+            .traces
             .get(trace_id)
             .map(|spans| spans.iter().collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        spans.sort_by(|left, right| {
+            left.timestamp
+                .cmp(&right.timestamp)
+                .then_with(|| left.span_id.cmp(&right.span_id))
+        });
+        spans
     }
 
     /// Check conformance: every artifact in the list must have valid trace context.
     pub fn check_conformance(artifacts: &[TracedArtifact]) -> ConformanceReport {
+        if artifacts.len() > MAX_SPANS_PER_TRACE {
+            return ConformanceReport {
+                trace_id: String::new(),
+                total_artifacts: artifacts.len(),
+                violations: vec![TraceViolation {
+                    artifact_id: RESERVED_ARTIFACT_ID.to_string(),
+                    reason: TraceError::ConformanceFailed(format!(
+                        "artifact count {} exceeds maximum {MAX_SPANS_PER_TRACE}",
+                        artifacts.len()
+                    ))
+                    .to_string(),
+                }],
+                verdict: "FAIL".to_string(),
+            };
+        }
+
         let mut violations = Vec::new();
         let mut trace_id = None;
         let mut valid_contexts = Vec::new();
@@ -386,6 +417,65 @@ mod tests {
     }
 
     #[test]
+    fn stitch_orders_spans_by_timestamp_not_record_order() {
+        let mut store = TraceStore::new();
+        for (span_id, timestamp) in [
+            (sid(1), "2026-01-01T00:00:03Z"),
+            (sid(2), "2026-01-01T00:00:01Z"),
+            (sid(3), "2026-01-01T00:00:02Z"),
+        ] {
+            store
+                .record(&TraceContext {
+                    trace_id: tid(),
+                    span_id,
+                    parent_span_id: None,
+                    timestamp: timestamp.to_string(),
+                })
+                .unwrap();
+        }
+
+        let spans = store.stitch(&tid());
+
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| span.span_id.clone())
+                .collect::<Vec<_>>(),
+            vec![sid(2), sid(3), sid(1)]
+        );
+    }
+
+    #[test]
+    fn record_rejects_new_trace_when_registry_capacity_reached() {
+        let mut store = TraceStore::new();
+        for n in 1..=MAX_REGISTERED_TRACES {
+            store
+                .record(&TraceContext {
+                    trace_id: format!("{n:032x}"),
+                    span_id: sid(1),
+                    parent_span_id: None,
+                    timestamp: "2026-01-01T00:00:00Z".to_string(),
+                })
+                .unwrap();
+        }
+        let overflow = TraceContext {
+            trace_id: format!("{:032x}", MAX_REGISTERED_TRACES.saturating_add(1)),
+            span_id: sid(1),
+            parent_span_id: None,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        let err = store.record(&overflow).unwrap_err();
+
+        assert_eq!(err.code(), "TRC_CONFORMANCE_FAILED");
+        assert!(
+            err.to_string()
+                .contains("registered trace capacity exceeded")
+        );
+        assert!(store.stitch(&overflow.trace_id).is_empty());
+    }
+
+    #[test]
     fn store_rejects_orphan_parent() {
         let mut store = TraceStore::new();
         let c = TraceContext {
@@ -426,6 +516,33 @@ mod tests {
         assert_eq!(report.verdict, "FAIL");
         assert_eq!(report.violations.len(), 1);
         assert_eq!(report.violations[0].artifact_id, "a1");
+    }
+
+    #[test]
+    fn conformance_rejects_artifact_stream_over_trace_capacity() {
+        let arts = (0..=MAX_SPANS_PER_TRACE)
+            .map(|n| TracedArtifact {
+                artifact_id: format!("artifact-{n}"),
+                artifact_type: "invoke".into(),
+                trace_context: Some(TraceContext {
+                    trace_id: tid(),
+                    span_id: format!("{:016x}", n.saturating_add(1)),
+                    parent_span_id: None,
+                    timestamp: "2026-01-01T00:00:00Z".to_string(),
+                }),
+            })
+            .collect::<Vec<_>>();
+
+        let report = TraceStore::check_conformance(&arts);
+
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(report.trace_id, "");
+        assert_eq!(
+            report.total_artifacts,
+            MAX_SPANS_PER_TRACE.saturating_add(1)
+        );
+        assert_eq!(report.violations.len(), 1);
+        assert!(report.violations[0].reason.contains("artifact count"));
     }
 
     #[test]
@@ -1173,7 +1290,11 @@ mod tests {
         assert_eq!(report.verdict, "FAIL");
         assert_eq!(report.trace_id, tid());
         assert_eq!(report.violations.len(), 1);
-        assert!(report.violations[0].reason.contains("TRC_CONFORMANCE_FAILED"));
+        assert!(
+            report.violations[0]
+                .reason
+                .contains("TRC_CONFORMANCE_FAILED")
+        );
     }
 
     #[test]

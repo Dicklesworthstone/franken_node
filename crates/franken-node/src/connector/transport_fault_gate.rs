@@ -8,7 +8,7 @@
 //!
 //! Schema version: tfg-v1.0
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ use crate::security::constant_time::ct_eq;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
+use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_RESULTS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
@@ -44,6 +44,13 @@ pub const DEFAULT_SEEDS: [u64; 5] = [42, 137, 256, 1001, 9999];
 
 /// Minimum number of messages per campaign run.
 pub const DEFAULT_MESSAGES_PER_RUN: usize = 200;
+
+/// Maximum number of configured seeds accepted by one gate.
+pub const MAX_SEEDS_PER_GATE: usize = MAX_RESULTS;
+/// Maximum messages accepted for one campaign run.
+pub const MAX_MESSAGES_PER_RUN: usize = MAX_RESULTS;
+/// Maximum protocol x fault mode x seed results accepted for one gate run.
+pub const MAX_GATE_TEST_RESULTS: usize = MAX_RESULTS;
 
 // ── Event codes ──────────────────────────────────────────────────────────────
 
@@ -147,7 +154,7 @@ impl fmt::Display for ControlProtocol {
 
 /// Fault modes exercised by the gate.
 /// Extends the upstream `FaultClass` with a Partition mode.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum FaultMode {
     /// Silent message discard.
     Drop,
@@ -287,6 +294,52 @@ impl TransportFaultGateConfig {
         if self.messages_per_run == 0 {
             return Err(TransportFaultGateError::InvalidConfig(
                 "messages_per_run must be > 0".into(),
+            ));
+        }
+        if self.seeds.len() > MAX_SEEDS_PER_GATE {
+            return Err(TransportFaultGateError::InvalidConfig(format!(
+                "seeds must contain at most {MAX_SEEDS_PER_GATE} entries"
+            )));
+        }
+        if self.messages_per_run > MAX_MESSAGES_PER_RUN {
+            return Err(TransportFaultGateError::InvalidConfig(format!(
+                "messages_per_run must be <= {MAX_MESSAGES_PER_RUN}"
+            )));
+        }
+        let total_combinations = self
+            .protocols
+            .len()
+            .saturating_mul(self.fault_modes.len())
+            .saturating_mul(self.seeds.len());
+        if total_combinations > MAX_GATE_TEST_RESULTS {
+            return Err(TransportFaultGateError::InvalidConfig(format!(
+                "test matrix must contain at most {MAX_GATE_TEST_RESULTS} combinations"
+            )));
+        }
+        let mut unique_seeds = BTreeSet::new();
+        if self.seeds.iter().any(|seed| !unique_seeds.insert(*seed)) {
+            return Err(TransportFaultGateError::InvalidConfig(
+                "seeds must be unique".into(),
+            ));
+        }
+        let mut unique_protocols = BTreeSet::new();
+        if self
+            .protocols
+            .iter()
+            .any(|protocol| !unique_protocols.insert(*protocol))
+        {
+            return Err(TransportFaultGateError::InvalidConfig(
+                "protocols must be unique".into(),
+            ));
+        }
+        let mut unique_fault_modes = BTreeSet::new();
+        if self
+            .fault_modes
+            .iter()
+            .any(|fault_mode| !unique_fault_modes.insert(fault_mode.clone()))
+        {
+            return Err(TransportFaultGateError::InvalidConfig(
+                "fault_modes must be unique".into(),
             ));
         }
         for mode in &self.fault_modes {
@@ -612,7 +665,7 @@ impl TransportFaultGate {
         let fault_modes = self.config.fault_modes.clone();
         let seeds = self.config.seeds.clone();
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(self.total_combinations());
 
         for &protocol in &protocols {
             for fault_mode in &fault_modes {
@@ -637,6 +690,10 @@ impl TransportFaultGate {
             h.update(b"transport_fault_gate_hash_v1:");
             h.update((SCHEMA_VERSION.len() as u64).to_le_bytes());
             h.update(SCHEMA_VERSION.as_bytes());
+            h.update((BEAD_ID.len() as u64).to_le_bytes());
+            h.update(BEAD_ID.as_bytes());
+            h.update((SECTION.len() as u64).to_le_bytes());
+            h.update(SECTION.as_bytes());
             h.update([u8::from(passed)]);
             h.update((total_tests as u64).to_le_bytes());
             h.update((passed_tests as u64).to_le_bytes());
@@ -905,6 +962,82 @@ mod tests {
         assert!(config.validate().is_err());
     }
 
+    #[test]
+    fn test_excessive_messages_rejected() {
+        let config = TransportFaultGateConfig {
+            messages_per_run: MAX_MESSAGES_PER_RUN.saturating_add(1),
+            ..Default::default()
+        };
+
+        let err = config.validate().unwrap_err();
+
+        assert!(matches!(err, TransportFaultGateError::InvalidConfig(_)));
+        assert!(err.to_string().contains("messages_per_run must be <="));
+    }
+
+    #[test]
+    fn test_excessive_test_matrix_rejected() {
+        let config = TransportFaultGateConfig {
+            seeds: (0..u64::try_from(MAX_GATE_TEST_RESULTS / 2 + 1).unwrap_or(u64::MAX)).collect(),
+            protocols: vec![
+                ControlProtocol::HealthCheck,
+                ControlProtocol::EpochTransition,
+            ],
+            fault_modes: vec![FaultMode::None],
+            messages_per_run: 1,
+        };
+
+        let err = config.validate().unwrap_err();
+
+        assert!(matches!(err, TransportFaultGateError::InvalidConfig(_)));
+        assert!(err.to_string().contains("test matrix must contain at most"));
+    }
+
+    #[test]
+    fn test_duplicate_matrix_entries_rejected() {
+        let duplicated_seed = TransportFaultGateConfig {
+            seeds: vec![42, 42],
+            protocols: vec![ControlProtocol::HealthCheck],
+            fault_modes: vec![FaultMode::None],
+            messages_per_run: 1,
+        };
+        assert!(
+            duplicated_seed
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("seeds must be unique")
+        );
+
+        let duplicated_protocol = TransportFaultGateConfig {
+            seeds: vec![42],
+            protocols: vec![ControlProtocol::HealthCheck, ControlProtocol::HealthCheck],
+            fault_modes: vec![FaultMode::None],
+            messages_per_run: 1,
+        };
+        assert!(
+            duplicated_protocol
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("protocols must be unique")
+        );
+
+        let duplicated_fault_mode = TransportFaultGateConfig {
+            seeds: vec![42],
+            protocols: vec![ControlProtocol::HealthCheck],
+            fault_modes: vec![FaultMode::None, FaultMode::None],
+            messages_per_run: 1,
+        };
+        assert!(
+            duplicated_fault_mode
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("fault_modes must be unique")
+        );
+    }
+
     // -- Test 10: gate creation with default config
     #[test]
     fn test_gate_creation_default() {
@@ -1162,6 +1295,51 @@ mod tests {
         assert!(parsed["passed"].as_bool().expect("boolean field expected"));
     }
 
+    #[test]
+    fn gate_verdict_content_hash_binds_identity_fields() {
+        let config = TransportFaultGateConfig {
+            seeds: vec![42],
+            messages_per_run: 10,
+            protocols: vec![ControlProtocol::HealthCheck],
+            fault_modes: vec![FaultMode::None],
+        };
+        let mut gate = TransportFaultGate::with_config(config).expect("should succeed");
+        let verdict = gate.run_full_gate().expect("should succeed");
+        let results_json = serde_json::to_string(&verdict.results).expect("serialize results");
+
+        let mut h = Sha256::new();
+        h.update(b"transport_fault_gate_hash_v1:");
+        h.update((SCHEMA_VERSION.len() as u64).to_le_bytes());
+        h.update(SCHEMA_VERSION.as_bytes());
+        h.update((BEAD_ID.len() as u64).to_le_bytes());
+        h.update(BEAD_ID.as_bytes());
+        h.update((SECTION.len() as u64).to_le_bytes());
+        h.update(SECTION.as_bytes());
+        h.update([u8::from(verdict.passed)]);
+        h.update((verdict.total_tests as u64).to_le_bytes());
+        h.update((verdict.passed_tests as u64).to_le_bytes());
+        h.update((verdict.failed_tests as u64).to_le_bytes());
+        h.update((results_json.len() as u64).to_le_bytes());
+        h.update(results_json.as_bytes());
+        h.update((verdict.protocols_tested.len() as u64).to_le_bytes());
+        for protocol in &verdict.protocols_tested {
+            h.update((protocol.len() as u64).to_le_bytes());
+            h.update(protocol.as_bytes());
+        }
+        h.update((verdict.fault_modes_tested.len() as u64).to_le_bytes());
+        for fault_mode in &verdict.fault_modes_tested {
+            h.update((fault_mode.len() as u64).to_le_bytes());
+            h.update(fault_mode.as_bytes());
+        }
+        h.update((verdict.seeds_used.len() as u64).to_le_bytes());
+        for seed in &verdict.seeds_used {
+            h.update(seed.to_le_bytes());
+        }
+        let expected = format!("{:x}", h.finalize());
+
+        assert!(ct_eq(&verdict.content_hash, &expected));
+    }
+
     fn campaign_with_faults(
         total_faults: usize,
         drops: usize,
@@ -1402,7 +1580,7 @@ mod transport_fault_gate_extreme_adversarial_negative_tests {
 
     #[test]
     fn extreme_adversarial_massive_seed_collection_memory_exhaustion() {
-        // Test memory exhaustion with massive seed collections
+        // Test fail-closed rejection of massive seed collections
         let massive_seeds: Vec<u64> = (0..1_000_000).collect(); // 1M seeds
 
         let config = TransportFaultGateConfig {
@@ -1412,19 +1590,10 @@ mod transport_fault_gate_extreme_adversarial_negative_tests {
             fault_modes: vec![FaultMode::None], // Single mode
         };
 
-        // Should handle massive seed collection without crashing
-        let gate_result = TransportFaultGate::with_config(config);
+        let err = TransportFaultGate::with_config(config).unwrap_err();
 
-        match gate_result {
-            Ok(_) => {
-                // If it succeeds, it should handle the memory allocation gracefully
-                // (In practice, this would consume significant memory)
-            }
-            Err(e) => {
-                // Should fail gracefully with meaningful error, not panic
-                assert!(matches!(e, TransportFaultGateError::InvalidConfig(_)));
-            }
-        }
+        assert!(matches!(err, TransportFaultGateError::InvalidConfig(_)));
+        assert!(err.to_string().contains("seeds must contain at most"));
     }
 
     #[test]
@@ -1644,26 +1813,10 @@ mod transport_fault_gate_extreme_adversarial_negative_tests {
                 fault_modes: vec![FaultMode::None], // No faults for speed
             };
 
-            let gate_result = TransportFaultGate::with_config(config);
+            let err = TransportFaultGate::with_config(config).unwrap_err();
 
-            match gate_result {
-                Ok(mut gate) => {
-                    // If config validation passes, test should complete without crash
-                    let test_result = gate.test_protocol(
-                        ControlProtocol::HealthCheck,
-                        &FaultMode::None,
-                        42,
-                    );
-
-                    // Should complete or fail gracefully
-                    assert!(test_result.outcome.is_acceptable() ||
-                        matches!(test_result.outcome, ProtocolOutcome::IncorrectResult { .. }));
-                }
-                Err(e) => {
-                    // Should reject extreme values gracefully
-                    assert!(matches!(e, TransportFaultGateError::InvalidConfig(_)));
-                }
-            }
+            assert!(matches!(err, TransportFaultGateError::InvalidConfig(_)));
+            assert!(err.to_string().contains("messages_per_run must be <="));
         }
     }
 

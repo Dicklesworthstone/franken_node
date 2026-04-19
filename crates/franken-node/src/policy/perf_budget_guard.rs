@@ -250,6 +250,9 @@ use crate::capacity_defaults::aliases::MAX_EVENTS;
 /// Maximum timing samples retained per hot path before oldest-first eviction.
 const MAX_TIMING_SAMPLES: usize = 8192;
 
+/// Maximum path results retained per gate evaluation to prevent memory exhaustion.
+const MAX_PATH_RESULTS: usize = 512;
+
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
         items.clear();
@@ -379,21 +382,25 @@ impl PerformanceBudgetGuard {
                 );
             }
 
-            path_results.push(PathResult {
-                hot_path: m.hot_path.clone(),
-                measurement: m.clone(),
-                overhead_p95_pct: overhead_p95,
-                overhead_p99_pct: overhead_p99,
-                cold_start_ms: cold_start,
-                within_budget,
-                violations,
-                flamegraph_path,
-            });
+            push_bounded(
+                &mut path_results,
+                PathResult {
+                    hot_path: m.hot_path.clone(),
+                    measurement: m.clone(),
+                    overhead_p95_pct: overhead_p95,
+                    overhead_p99_pct: overhead_p99,
+                    cold_start_ms: cold_start,
+                    within_budget,
+                    violations,
+                    flamegraph_path,
+                },
+                MAX_PATH_RESULTS,
+            );
         }
 
         let total = path_results.len();
         let passing = path_results.iter().filter(|r| r.within_budget).count();
-        let failing = total - passing;
+        let failing = total.saturating_sub(passing);
 
         Ok(GateResult {
             overall_pass: failing == 0,

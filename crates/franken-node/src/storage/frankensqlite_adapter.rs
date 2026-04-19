@@ -395,7 +395,7 @@ impl FrankensqliteAdapter {
                     format!("key={key}, mismatch detected"),
                 );
             }
-            results.push((key.clone(), matches));
+            push_bounded(&mut results, (key.clone(), matches), MAX_AUDIT_LOG_ENTRIES);
         }
         results
     }
@@ -1537,7 +1537,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
             ("key\x00\x01\x02", b"value\x03\x04\x05"),
             ("key\r\ninjection", b"value\r\nHTTP/1.1 200 OK"),
             ("key\t\t\t", b"value\x1B[31mred\x1B[0m"), // ANSI escape sequences
-            ("key\x7F\x80\x81", b"value\xFF\xFE\xFD"), // High control chars
+            (&format!("key{}", String::from_utf8_lossy(&[0x7F, 0x80, 0x81])), b"value\xFF\xFE\xFD"), // High control chars
         ];
 
         for (key, value) in control_char_tests {
@@ -1626,8 +1626,8 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         let ordering_attack_keys = vec![
             "\x00\x00\x00",     // Null prefix
             "\x00\x00\x01",     // Minimal increment
-            "\xFF\xFF\xFF",     // Maximum bytes
-            "\x80\x00\x00",     // Sign bit boundary
+            &String::from_utf8_lossy(&[0xFF, 0xFF, 0xFF]),     // Maximum bytes
+            &String::from_utf8_lossy(&[0x80, 0x00, 0x00]),     // Sign bit boundary
             "a\x00z",           // Null in middle
             "z\x00a",           // Reverse null pattern
         ];
