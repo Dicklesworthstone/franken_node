@@ -16,6 +16,7 @@ pub const SCHEMA_VERSION: &str = "capability-artifact-v1.0";
 
 /// Reserved placeholder for unknown artifact identifiers.
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
+const MAX_CAPABILITIES_PER_CONTRACT: usize = crate::capacity_defaults::base::STANDARD;
 
 fn is_reserved_artifact_id(artifact_id: &str) -> bool {
     artifact_id.trim() == RESERVED_ARTIFACT_ID
@@ -23,6 +24,34 @@ fn is_reserved_artifact_id(artifact_id: &str) -> bool {
 
 fn len_to_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+fn invalid_token_detail(field_name: &str, value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Some(format!("empty {field_name}"));
+    }
+    if trimmed != value {
+        return Some(format!(
+            "{field_name} contains leading or trailing whitespace"
+        ));
+    }
+    if !value.is_ascii() {
+        return Some(format!("{field_name} contains non-ASCII characters"));
+    }
+    if value.bytes().any(|byte| byte.is_ascii_control()) {
+        return Some(format!("{field_name} contains control characters"));
+    }
+    if value.starts_with('/') {
+        return Some(format!("{field_name} starts with '/'"));
+    }
+    if value.contains('\\') {
+        return Some(format!("{field_name} contains backslash"));
+    }
+    if value.split('/').any(|segment| segment == "..") {
+        return Some(format!("{field_name} contains path traversal segment"));
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -190,8 +219,7 @@ impl AdmissionConfig {
         signer_id: impl Into<String>,
     ) -> Result<(), AdmissionConfigError> {
         let signer_id = signer_id.into();
-        let trimmed = signer_id.trim();
-        if trimmed.is_empty() || trimmed != signer_id.as_str() {
+        if invalid_token_detail("signer_id", &signer_id).is_some() {
             return Ok(());
         }
         if self.trusted_signers.contains(&signer_id) {
@@ -237,19 +265,10 @@ impl AdmissionGate {
             }
         };
 
-        if contract.schema_version.trim().is_empty() {
+        if let Some(detail) = invalid_token_detail("schema_version", &contract.schema_version) {
             return AdmissionOutcome::Denied {
                 reason: AdmissionDenialReason::InvalidContract {
-                    detail: "empty schema_version".to_string(),
-                },
-                event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
-            };
-        }
-
-        if contract.schema_version != contract.schema_version.trim() {
-            return AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract {
-                    detail: "schema_version contains leading or trailing whitespace".to_string(),
+                    detail,
                 },
                 event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
             };
@@ -266,56 +285,42 @@ impl AdmissionGate {
             };
         }
 
-        if contract.contract_id.trim().is_empty() {
+        if let Some(detail) = invalid_token_detail("contract_id", &contract.contract_id) {
             return AdmissionOutcome::Denied {
                 reason: AdmissionDenialReason::InvalidContract {
-                    detail: "empty contract_id".to_string(),
+                    detail,
                 },
                 event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
             };
         }
 
-        if contract.contract_id != contract.contract_id.trim() {
+        if is_reserved_artifact_id(&contract.extension_id) {
             return AdmissionOutcome::Denied {
                 reason: AdmissionDenialReason::InvalidContract {
-                    detail: "contract_id contains leading or trailing whitespace".to_string(),
+                    detail: format!(
+                        "contract extension_id is reserved: {:?}",
+                        contract.extension_id
+                    ),
                 },
                 event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
             };
         }
 
-        if contract.extension_id.trim().is_empty() {
+        if let Some(detail) =
+            invalid_token_detail("contract extension_id", &contract.extension_id)
+        {
             return AdmissionOutcome::Denied {
                 reason: AdmissionDenialReason::InvalidContract {
-                    detail: "empty contract extension_id".to_string(),
+                    detail,
                 },
                 event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
             };
         }
 
-        if contract.extension_id != contract.extension_id.trim() {
+        if let Some(detail) = invalid_token_detail("signer_id", &contract.signer_id) {
             return AdmissionOutcome::Denied {
                 reason: AdmissionDenialReason::InvalidContract {
-                    detail: "contract extension_id contains leading or trailing whitespace"
-                        .to_string(),
-                },
-                event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
-            };
-        }
-
-        if contract.signer_id.trim().is_empty() {
-            return AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract {
-                    detail: "empty signer_id".to_string(),
-                },
-                event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
-            };
-        }
-
-        if contract.signer_id != contract.signer_id.trim() {
-            return AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract {
-                    detail: "signer_id contains leading or trailing whitespace".to_string(),
+                    detail,
                 },
                 event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
             };
@@ -330,15 +335,6 @@ impl AdmissionGate {
             };
         }
 
-        if artifact.artifact_id.trim().is_empty() {
-            return AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract {
-                    detail: "empty artifact_id".to_string(),
-                },
-                event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
-            };
-        }
-
         if is_reserved_artifact_id(&artifact.artifact_id) {
             return AdmissionOutcome::Denied {
                 reason: AdmissionDenialReason::InvalidContract {
@@ -348,19 +344,10 @@ impl AdmissionGate {
             };
         }
 
-        if artifact.artifact_id != artifact.artifact_id.trim() {
+        if let Some(detail) = invalid_token_detail("artifact_id", &artifact.artifact_id) {
             return AdmissionOutcome::Denied {
                 reason: AdmissionDenialReason::InvalidContract {
-                    detail: "artifact_id contains leading or trailing whitespace".to_string(),
-                },
-                event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
-            };
-        }
-
-        if artifact.extension_id.trim().is_empty() {
-            return AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract {
-                    detail: "empty artifact extension_id".to_string(),
+                    detail,
                 },
                 event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
             };
@@ -378,11 +365,12 @@ impl AdmissionGate {
             };
         }
 
-        if artifact.extension_id != artifact.extension_id.trim() {
+        if let Some(detail) =
+            invalid_token_detail("artifact extension_id", &artifact.extension_id)
+        {
             return AdmissionOutcome::Denied {
                 reason: AdmissionDenialReason::InvalidContract {
-                    detail: "artifact extension_id contains leading or trailing whitespace"
-                        .to_string(),
+                    detail,
                 },
                 event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
             };
@@ -427,6 +415,17 @@ impl AdmissionGate {
             };
         }
 
+        if contract.capabilities.len() > MAX_CAPABILITIES_PER_CONTRACT {
+            return AdmissionOutcome::Denied {
+                reason: AdmissionDenialReason::InvalidContract {
+                    detail: format!(
+                        "capability list exceeds maximum of {MAX_CAPABILITIES_PER_CONTRACT}"
+                    ),
+                },
+                event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
+            };
+        }
+
         if !is_hex_sha256(&artifact.payload_hash) {
             return AdmissionOutcome::Denied {
                 reason: AdmissionDenialReason::InvalidContract {
@@ -439,24 +438,18 @@ impl AdmissionGate {
         // Validate each capability entry
         let mut seen_ids = BTreeSet::new();
         for cap in &contract.capabilities {
-            if cap.capability_id.trim().is_empty() || cap.scope.trim().is_empty() {
+            if let Some(detail) = invalid_token_detail("capability_id", &cap.capability_id) {
                 return AdmissionOutcome::Denied {
                     reason: AdmissionDenialReason::InvalidCapability {
-                        detail: format!(
-                            "empty capability_id or scope in capability '{}'",
-                            cap.capability_id
-                        ),
+                        detail,
                     },
                     event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
                 };
             }
-            if cap.capability_id != cap.capability_id.trim() || cap.scope != cap.scope.trim() {
+            if let Some(detail) = invalid_token_detail("capability scope", &cap.scope) {
                 return AdmissionOutcome::Denied {
                     reason: AdmissionDenialReason::InvalidCapability {
-                        detail: format!(
-                            "capability '{}' has leading or trailing whitespace",
-                            cap.capability_id
-                        ),
+                        detail,
                     },
                     event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
                 };
@@ -1862,7 +1855,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn unicode_injection_in_artifact_identifiers() {
+        fn identifier_injection_in_artifact_identifiers() {
             let gate = test_gate();
             let malicious_identifiers = [
                 "artifact\u{202E}deilav", // RLO override
@@ -1871,6 +1864,9 @@ mod tests {
                 "name\u{2028}break",      // Line separator
                 "\u{1F4A9}payload",       // Non-ASCII emoji
                 "test\u{0000}null",       // Null byte injection
+                "../artifact",            // Path traversal segment
+                "/artifact",              // Absolute path marker
+                "artifact\\id",           // Windows path separator
             ];
 
             for malicious_id in malicious_identifiers {
@@ -1886,7 +1882,7 @@ mod tests {
                 let outcome = gate.evaluate(&artifact);
                 assert!(
                     matches!(outcome, AdmissionOutcome::Denied { .. }),
-                    "Unicode injection in identifier '{malicious_id:?}' should be rejected"
+                    "Identifier injection in '{malicious_id:?}' should be rejected"
                 );
             }
         }
@@ -1952,12 +1948,8 @@ mod tests {
             );
             let artifact = make_artifact("memory-artifact", "ext-alpha", contract);
 
-            // Should handle large capability lists without crashing
             let outcome = gate.evaluate(&artifact);
-            assert!(matches!(
-                outcome,
-                AdmissionOutcome::Accepted { .. } | AdmissionOutcome::Denied { .. }
-            ));
+            assert!(matches!(outcome, AdmissionOutcome::Denied { .. }));
 
             // Test enforcement engine with massive admitted set
             if let AdmissionOutcome::Accepted { .. } = outcome {
@@ -2089,10 +2081,12 @@ mod tests {
 
             // These should all be rejected due to invalid characters
             let outcome = gate.evaluate(&artifact);
-            // The make_contract function will create a valid signature, but the validation should catch the malformed content
             assert!(matches!(
                 outcome,
-                AdmissionOutcome::Accepted { .. } | AdmissionOutcome::Denied { .. }
+                AdmissionOutcome::Denied {
+                    reason: AdmissionDenialReason::InvalidCapability { .. },
+                    ..
+                }
             ));
         }
 
