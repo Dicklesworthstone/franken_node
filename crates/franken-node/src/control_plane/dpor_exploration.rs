@@ -156,7 +156,7 @@ impl ProtocolModel {
 
     /// Estimate total possible schedules (upper bound: n!).
     pub fn estimated_schedules(&self) -> u64 {
-        let n = self.operations.len() as u64;
+        let n = u64::try_from(self.operations.len()).unwrap_or(u64::MAX);
         if n <= 1 {
             return 1;
         }
@@ -272,7 +272,7 @@ impl ProtocolModel {
                 if op.depends_on.contains(id)
                     && let Some(count) = in_degree.get_mut(op.id.as_str())
                 {
-                    *count -= 1;
+                    *count = count.saturating_sub(1);
                     if *count == 0 {
                         queue.push_back(op.id.as_str());
                     }
@@ -504,6 +504,15 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
 }
 
+fn schedule_pruning_key(schedule: &[Operation]) -> Vec<u8> {
+    let mut key = b"dpor_schedule_key_v1:".to_vec();
+    for op in schedule {
+        key.extend_from_slice(&(op.id.len() as u64).to_le_bytes());
+        key.extend_from_slice(op.id.as_bytes());
+    }
+    key
+}
+
 /// The DPOR schedule exploration framework.
 pub struct DporExplorer {
     models: BTreeMap<String, ProtocolModel>,
@@ -574,20 +583,14 @@ impl DporExplorer {
         let mut explored: u64 = 0;
         let mut pruned: u64 = 0;
         let mut violations = Vec::new();
-        let mut seen_hashes = BTreeSet::new();
+        let mut seen_schedules = BTreeSet::new();
 
         for schedule in &schedules {
-            // Compute schedule hash for DPOR pruning
-            let hash = schedule
-                .iter()
-                .map(|op| op.id.as_str())
-                .collect::<Vec<_>>()
-                .join(",");
-            if seen_hashes.contains(&hash) {
+            let schedule_key = schedule_pruning_key(schedule);
+            if !seen_schedules.insert(schedule_key) {
                 pruned = pruned.saturating_add(1);
                 continue;
             }
-            seen_hashes.insert(hash);
             explored = explored.saturating_add(1);
 
             // Check safety properties
@@ -599,7 +602,13 @@ impl DporExplorer {
         }
 
         let coverage_pct = if estimated > 0 {
-            (explored as f64 / estimated as f64 * 100.0).min(100.0)
+            let explored_f64 = explored as f64;
+            let estimated_f64 = estimated as f64;
+            if explored_f64.is_finite() && estimated_f64.is_finite() {
+                (explored_f64 / estimated_f64 * 100.0).min(100.0)
+            } else {
+                0.0
+            }
         } else {
             100.0
         };
@@ -1148,6 +1157,32 @@ mod tests {
         let schedules = e.generate_linearizations(&model);
 
         assert_eq!(schedules.len(), MAX_MATERIALIZED_SCHEDULES);
+    }
+
+    #[test]
+    fn schedule_pruning_key_length_prefixes_operation_ids() {
+        let left = vec![
+            Operation::new("a,b", "actor", "combined left"),
+            Operation::new("c", "actor", "right"),
+        ];
+        let right = vec![
+            Operation::new("a", "actor", "left"),
+            Operation::new("b,c", "actor", "combined right"),
+        ];
+
+        let legacy_left = left
+            .iter()
+            .map(|op| op.id.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let legacy_right = right
+            .iter()
+            .map(|op| op.id.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        assert_eq!(legacy_left, legacy_right);
+        assert_ne!(schedule_pruning_key(&left), schedule_pruning_key(&right));
     }
 
     // ---- Audit log ----

@@ -775,7 +775,7 @@ impl EpochTransitionBarrier {
         barrier.transcript.phase = BarrierPhase::Committed;
 
         // Record audit
-        self.history.push(BarrierAuditRecord {
+        push_bounded(&mut self.history, BarrierAuditRecord {
             barrier_id: barrier.barrier_id.clone(),
             current_epoch: barrier.current_epoch,
             target_epoch: barrier.target_epoch,
@@ -785,11 +785,7 @@ impl EpochTransitionBarrier {
             elapsed_ms: timestamp_ms.saturating_sub(barrier.propose_timestamp_ms),
             abort_reason: None,
             schema_version: SCHEMA_VERSION.to_string(),
-        });
-        if self.history.len() > MAX_BARRIER_HISTORY {
-            let overflow = self.history.len() - MAX_BARRIER_HISTORY;
-            self.history.drain(0..overflow);
-        }
+        }, MAX_BARRIER_HISTORY);
 
         Ok(BarrierCommitOutcome::Committed { target_epoch })
     }
@@ -858,7 +854,7 @@ impl EpochTransitionBarrier {
         let current_epoch = barrier.current_epoch;
 
         // Record audit
-        self.history.push(BarrierAuditRecord {
+        push_bounded(&mut self.history, BarrierAuditRecord {
             barrier_id: barrier.barrier_id.clone(),
             current_epoch: barrier.current_epoch,
             target_epoch: barrier.target_epoch,
@@ -868,11 +864,7 @@ impl EpochTransitionBarrier {
             elapsed_ms: timestamp_ms.saturating_sub(barrier.propose_timestamp_ms),
             abort_reason: Some(reason_str),
             schema_version: SCHEMA_VERSION.to_string(),
-        });
-        if self.history.len() > MAX_BARRIER_HISTORY {
-            let overflow = self.history.len() - MAX_BARRIER_HISTORY;
-            self.history.drain(0..overflow);
-        }
+        }, MAX_BARRIER_HISTORY);
 
         // INV-BARRIER-ABORT-SAFE: return current epoch (not advanced)
         Ok(current_epoch)
@@ -2225,7 +2217,7 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
             };
 
             match b.record_drain_ack(massive_ack) {
-                Ok(_) => successful_acks += 1,
+                Ok(_) => successful_acks = successful_acks.saturating_add(1),
                 Err(_) => break, // Stop on first error
             }
         }
@@ -2249,8 +2241,8 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
             // Create and abort barriers rapidly
             let propose_result = cycle_barrier.propose(
                 cycle,
-                cycle + 1,
-                10000 + cycle,
+                cycle.saturating_add(1),
+                10000_u64.saturating_add(cycle),
                 &format!("cycle-trace-{}-{}", "y".repeat(200), cycle)
             );
 
@@ -2451,7 +2443,7 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         }
 
         // Test transcript capacity limits with flooding attack
-        for flood_idx in 0..MAX_TRANSCRIPT_ENTRIES + 1000 {
+        for flood_idx in 0..MAX_TRANSCRIPT_ENTRIES.saturating_add(1000) {
             let flood_detail = format!("flood-attack-{}-{}", flood_idx, "padding".repeat(100));
             b.active_barrier
                 .as_mut()
@@ -2652,8 +2644,8 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         b.register_participant("audit-svc");
 
         // Create many barriers to flood audit history
-        for i in 0..MAX_BARRIER_HISTORY + 500 {
-            let propose_result = b.propose(i, i + 1, (i as u64) * 1000, &format!("audit-flood-{}", i));
+        for i in 0..MAX_BARRIER_HISTORY.saturating_add(500) {
+            let propose_result = b.propose(i, i.saturating_add(1), (i as u64).saturating_mul(1000), &format!("audit-flood-{}", i));
 
             if let Ok(_) = propose_result {
                 // Complete barrier immediately
@@ -2667,7 +2659,7 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
                 };
 
                 if b.record_drain_ack(ack).is_ok() {
-                    let _ = b.try_commit((i as u64) * 1000 + 100, &format!("commit-{}", i));
+                    let _ = b.try_commit((i as u64).saturating_mul(1000).saturating_add(100), &format!("commit-{}", i));
                 }
             } else {
                 // If barrier creation fails (e.g., overflow), abort the test

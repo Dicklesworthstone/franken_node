@@ -735,8 +735,9 @@ impl ControlLanePolicy {
             return;
         }
         if entries.len() >= max_entries {
-            let overflow = entries.len() - max_entries + 1;
-            entries.drain(0..overflow);
+            let overflow = entries.len().saturating_sub(max_entries).saturating_add(1);
+            let safe_overflow = overflow.min(entries.len());
+            entries.drain(0..safe_overflow);
         }
         entries.push(value);
     }

@@ -28,6 +28,20 @@ const ACTION_LOG_COMPACTION_THRESHOLD_BYTES: u64 = 10 * 1024 * 1024;
 const ACTION_LOG_RETENTION_DAYS: i64 = 30;
 const LOCK_RETRY_BACKOFF_MILLIS: [u64; 3] = [100, 200, 400];
 
+/// Bounded push helper that maintains capacity by removing oldest entries when limit is exceeded.
+/// When capacity is exceeded, removes oldest entries to maintain the limit.
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FleetTargetKind {
@@ -693,6 +707,11 @@ fn validate_transport_identifier<'a>(
             "{field_name} must not include traversal segments"
         )));
     }
+    if value.contains('\0') {
+        return Err(FleetTransportError::serialization(format!(
+            "{field_name} must not contain null bytes"
+        )));
+    }
     if value
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
@@ -903,7 +922,7 @@ mod tests {
             action: &FleetActionRecord,
         ) -> Result<(), FleetTransportError> {
             self.ensure_initialized()?;
-            self.actions.push(action.clone());
+            push_bounded(&mut self.actions, action.clone(), MAX_ACTION_LOG_ENTRIES);
             Ok(())
         }
 
@@ -931,7 +950,7 @@ mod tests {
             {
                 *existing = status;
             } else {
-                self.nodes.push(status);
+                push_bounded(&mut self.nodes, status, MAX_NODES_CAP);
             }
             Ok(())
         }

@@ -55,7 +55,15 @@ impl Drop for TempFileGuard {
         if let Some(path) = self.0.take()
             && path.is_file()
         {
-            let _ = fs::rename(&path, Self::abandoned_path(&path));
+            let abandoned_path = Self::abandoned_path(&path);
+            if let Err(source) = fs::rename(&path, &abandoned_path) {
+                tracing::warn!(
+                    path = %path.display(),
+                    abandoned_path = %abandoned_path.display(),
+                    error = %source,
+                    "failed to orphan abandoned root pointer temp file"
+                );
+            }
         }
     }
 }
@@ -1551,17 +1559,12 @@ mod tests {
         let k = key();
         let root = root(100, 1000, "unicode-trace-test");
 
-        // Test BiDi override injection in trace_id
         let malicious_trace = "normal\u{202e}evil\u{202c}trace";
-        let result = publish_root(dir.path(), &root, &k, malicious_trace);
+        let outcome =
+            publish_root(dir.path(), &root, &k, malicious_trace).expect("publish unicode trace");
 
-        // Should handle Unicode without corruption
-        assert!(result.is_ok());
-
-        // Verify trace ID is preserved in metadata
-        let meta_path = root_metadata_path(dir.path());
-        let content = fs::read_to_string(&meta_path).expect("read metadata");
-        assert!(content.contains(&malicious_trace));
+        assert_eq!(outcome.event.trace_id, malicious_trace);
+        assert!(verify_publish_event(&outcome.event, &k).expect("verify"));
     }
 
     #[test]
@@ -1570,20 +1573,20 @@ mod tests {
         let k = key();
         let mut root = root(101, 1010, "massive-hash");
 
-        // Create massive root hash (10MB)
-        root.root_hash = vec![0xCC; 10 * 1024 * 1024];
+        root.marker_stream_head_hash = "c".repeat(10 * 1024 * 1024);
 
         let result = publish_root(dir.path(), &root, &k, "massive-hash-test");
         assert!(result.is_ok());
 
-        // Test bootstrap with massive hash
         let cfg = RootAuthConfig::strict(k, ControlEpoch(101));
         let bootstrap_result = bootstrap_root(dir.path(), &cfg);
 
-        // Should handle large hashes without memory issues
         assert!(bootstrap_result.is_ok());
         let bootstrapped = bootstrap_result.unwrap();
-        assert_eq!(bootstrapped.root_hash.len(), 10 * 1024 * 1024);
+        assert_eq!(
+            bootstrapped.root.marker_stream_head_hash.len(),
+            10 * 1024 * 1024
+        );
     }
 
     #[test]
@@ -1591,16 +1594,13 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let k = key();
 
-        // Test near-overflow epoch values
         let root_max = root(u64::MAX, u64::MAX.saturating_sub(1), "epoch-overflow");
         let result = publish_root(dir.path(), &root_max, &k, "overflow-test");
         assert!(result.is_ok());
 
-        // Verify epoch serialization doesn't corrupt
-        let meta_path = root_metadata_path(dir.path());
-        let content = fs::read_to_string(&meta_path).expect("read metadata");
-        let meta: RootPointerMetadata = serde_json::from_str(&content).expect("parse");
-        assert_eq!(meta.epoch, u64::MAX);
+        let loaded = read_root(dir.path()).expect("read root");
+        assert_eq!(loaded.epoch, ControlEpoch(u64::MAX));
+        assert_eq!(loaded.marker_stream_head_seq, u64::MAX.saturating_sub(1));
     }
 
     #[test]
@@ -1609,19 +1609,20 @@ mod tests {
         let k = key();
         let mut root = root(102, 1020, "zw-unicode");
 
-        // Insert zero-width characters in publisher
-        root.publisher = "legit\u{200b}\u{feff}\u{200c}publisher".to_string();
+        root.publisher_id = "legit\u{200b}\u{feff}\u{200c}publisher".to_string();
 
         let result = publish_root(dir.path(), &root, &k, "zero-width-test");
         assert!(result.is_ok());
 
-        // Test bootstrap preserves zero-width chars
         let cfg = RootAuthConfig::strict(k, ControlEpoch(102));
         let bootstrap_result = bootstrap_root(dir.path(), &cfg);
         assert!(bootstrap_result.is_ok());
 
         let bootstrapped = bootstrap_result.unwrap();
-        assert_eq!(bootstrapped.publisher, "legit\u{200b}\u{feff}\u{200c}publisher");
+        assert_eq!(
+            bootstrapped.root.publisher_id,
+            "legit\u{200b}\u{feff}\u{200c}publisher"
+        );
     }
 
     #[test]
@@ -1630,19 +1631,16 @@ mod tests {
         let k = key();
         let root = root(103, 1030, "json-corruption");
 
-        // Publish normally first
         publish_root(dir.path(), &root, &k, "corruption-test").expect("initial publish");
 
-        // Manually corrupt the metadata JSON
-        let meta_path = root_metadata_path(dir.path());
-        let corrupt_json = r#"{"epoch": 103, "publisher": "unclosed_string, "timestamp": malformed}"#;
-        fs::write(&meta_path, corrupt_json).expect("write corrupt json");
+        let auth_path = root_auth_path(dir.path());
+        let corrupt_json =
+            r#"{"epoch": 103, "publisher": "unclosed_string, "timestamp": malformed}"#;
+        fs::write(&auth_path, corrupt_json).expect("write corrupt auth json");
 
-        // Bootstrap should handle corruption gracefully
         let cfg = RootAuthConfig::strict(k, ControlEpoch(103));
         let result = bootstrap_root(dir.path(), &cfg);
 
-        // Should fail with appropriate error, not panic
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.code(), "ROOT_BOOTSTRAP_AUTH_FAILED");
@@ -1660,31 +1658,27 @@ mod tests {
         let key_arc = Arc::new(k);
         let barrier = Arc::new(Barrier::new(3));
 
-        let handles: Vec<_> = (0..3).map(|i| {
-            let path = Arc::clone(&dir_path);
-            let key = Arc::clone(&key_arc);
-            let barrier = Arc::clone(&barrier);
+        let handles: Vec<_> = (0..3)
+            .map(|i| {
+                let path = Arc::clone(&dir_path);
+                let key = Arc::clone(&key_arc);
+                let barrier = Arc::clone(&barrier);
 
-            thread::spawn(move || {
-                let root = root(104 + i, 1040 + i * 10, &format!("concurrent-{}", i));
-                barrier.wait();
-                publish_root(&path, &root, &key, &format!("thread-{}", i))
+                thread::spawn(move || {
+                    let root = root(104 + i, 1040 + i * 10, &format!("concurrent-{}", i));
+                    barrier.wait();
+                    publish_root(&path, &root, &key, &format!("thread-{}", i))
+                })
             })
-        }).collect();
+            .collect();
 
-        // Collect results
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         let successes = results.iter().filter(|r| r.is_ok()).count();
 
-        // At least one should succeed due to atomic operations
         assert!(successes >= 1);
 
-        // Final state should be consistent
-        let meta_path = root_metadata_path(&dir.path());
-        assert!(meta_path.exists());
-        let content = fs::read_to_string(&meta_path).expect("read final metadata");
-        let meta: RootPointerMetadata = serde_json::from_str(&content).expect("parse final");
-        assert!(meta.epoch >= 104 && meta.epoch <= 106);
+        let final_root = read_root(dir.path()).expect("read final root");
+        assert!(final_root.epoch >= ControlEpoch(104) && final_root.epoch <= ControlEpoch(106));
     }
 
     #[test]
@@ -1702,19 +1696,13 @@ mod tests {
         // Publish in secure directory
         publish_root(&secure_dir, &root, &k, "traversal-test").expect("publish");
 
-        // Test bootstrap with path traversal attempt
         let malicious_path = PathBuf::from("../../../etc/passwd");
         let traversal_dir = base_dir.path().join(&malicious_path);
 
-        // Should fail safely when trying to bootstrap from traversed path
         let cfg = RootAuthConfig::strict(k, ControlEpoch(105));
         let result = bootstrap_root(&traversal_dir, &cfg);
 
-        // Should either fail or not escape containment
-        if let Ok(_) = result {
-            // If it succeeds, verify we're still in expected location
-            assert!(traversal_dir.starts_with(base_dir.path()));
-        }
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1722,22 +1710,17 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let k = key();
 
-        // Test root with all minimal values
         let mut minimal_root = root(0, 0, "");
-        minimal_root.root_hash.clear();
-        minimal_root.publisher.clear();
+        minimal_root.marker_stream_head_hash.clear();
+        minimal_root.publisher_id.clear();
 
         let result = publish_root(dir.path(), &minimal_root, &k, "");
 
-        // Should handle empty values gracefully
         assert!(result.is_ok());
 
-        // Verify empty values are preserved
-        let meta_path = root_metadata_path(dir.path());
-        let content = fs::read_to_string(&meta_path).expect("read metadata");
-        let meta: RootPointerMetadata = serde_json::from_str(&content).expect("parse");
-        assert_eq!(meta.epoch, 0);
-        assert_eq!(meta.publisher, "");
-        assert!(meta.root_hash.is_empty() || !meta.root_hash.is_empty()); // Either case is valid
+        let loaded = read_root(dir.path()).expect("read root");
+        assert_eq!(loaded.epoch, ControlEpoch(0));
+        assert_eq!(loaded.publisher_id, "");
+        assert_eq!(loaded.marker_stream_head_hash, "");
     }
 }
