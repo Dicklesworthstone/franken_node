@@ -115,6 +115,19 @@ fn revision_validation_error(revision: &StandardRevision) -> Option<&'static str
 // Semantic version
 // ---------------------------------------------------------------------------
 
+fn parse_semver_component(component: &str) -> Option<u32> {
+    if component.is_empty() {
+        return None;
+    }
+    if component.len() > 1 && component.starts_with('0') {
+        return None;
+    }
+    if !component.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    component.parse().ok()
+}
+
 /// Semantic version for benchmark standards.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SemVer {
@@ -137,14 +150,17 @@ impl SemVer {
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        let parts: Vec<&str> = s.split('.').collect();
-        if parts.len() != 3 {
+        let mut parts = s.split('.');
+        let major = parse_semver_component(parts.next()?)?;
+        let minor = parse_semver_component(parts.next()?)?;
+        let patch = parse_semver_component(parts.next()?)?;
+        if parts.next().is_some() {
             return None;
         }
         Some(Self {
-            major: parts[0].parse().ok()?,
-            minor: parts[1].parse().ok()?,
-            patch: parts[2].parse().ok()?,
+            major,
+            minor,
+            patch,
         })
     }
 
@@ -340,6 +356,9 @@ impl BenchmarkVersioning {
             );
         }
 
+        if revision.version > self.current_version {
+            self.current_version = revision.version.clone();
+        }
         self.revisions.insert(revision.version.clone(), revision);
     }
 
@@ -637,7 +656,7 @@ impl BenchmarkVersioning {
             description: "Back up existing benchmark results and configuration".to_string(),
             automated: true,
         });
-        step_num += 1;
+        step_num = step_num.saturating_add(1);
 
         for change in breaking_changes {
             steps.push(MigrationStep {
@@ -646,7 +665,7 @@ impl BenchmarkVersioning {
                 description: format!("Address breaking change: {change}"),
                 automated: false,
             });
-            step_num += 1;
+            step_num = step_num.saturating_add(1);
         }
 
         steps.push(MigrationStep {
@@ -658,7 +677,7 @@ impl BenchmarkVersioning {
             ),
             automated: true,
         });
-        step_num += 1;
+        step_num = step_num.saturating_add(1);
 
         steps.push(MigrationStep {
             step_number: step_num,
@@ -1004,6 +1023,22 @@ mod tests {
     }
 
     #[test]
+    fn register_newer_revision_updates_current_version() {
+        let mut engine = BenchmarkVersioning::new();
+        engine.register_revision(custom_revision(SemVer::new(3, 0, 0)), &make_trace());
+
+        assert_eq!(*engine.current_version(), SemVer::new(3, 0, 0));
+    }
+
+    #[test]
+    fn register_older_revision_does_not_downgrade_current_version() {
+        let mut engine = BenchmarkVersioning::new();
+        engine.register_revision(custom_revision(SemVer::new(1, 0, 1)), &make_trace());
+
+        assert_eq!(*engine.current_version(), SemVer::new(2, 0, 0));
+    }
+
+    #[test]
     fn register_revision_rejects_whitespace_title_without_insert() {
         let mut revision = custom_revision(SemVer::new(3, 1, 0));
         revision.title = " \n\t ".to_string();
@@ -1090,6 +1125,21 @@ mod tests {
         assert!(SemVer::parse("1.two.3").is_none());
         assert!(SemVer::parse("1.0.-1").is_none());
         assert!(SemVer::parse("4294967296.0.0").is_none());
+    }
+
+    #[test]
+    fn semver_parse_rejects_leading_zero_components() {
+        assert!(SemVer::parse("01.2.3").is_none());
+        assert!(SemVer::parse("1.02.3").is_none());
+        assert!(SemVer::parse("1.2.03").is_none());
+    }
+
+    #[test]
+    fn semver_parse_rejects_signs_and_whitespace() {
+        assert!(SemVer::parse("+1.2.3").is_none());
+        assert!(SemVer::parse("1.+2.3").is_none());
+        assert!(SemVer::parse("1.2.+3").is_none());
+        assert!(SemVer::parse("1.2.3 ").is_none());
     }
 
     #[test]
