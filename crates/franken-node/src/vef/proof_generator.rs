@@ -447,11 +447,12 @@ impl ProofGenerator {
             )));
         }
 
+        if self.next_request_seq == u64::MAX {
+            return Err(ProofGeneratorError::internal("request sequence overflow"));
+        }
+
         let request_id = format!("req-{:08}", self.next_request_seq);
-        self.next_request_seq = self
-            .next_request_seq
-            .checked_add(1)
-            .ok_or_else(|| ProofGeneratorError::internal("request sequence overflow"))?;
+        self.next_request_seq = self.next_request_seq.saturating_add(1);
 
         let status = ProofRequestStatus {
             request_id: request_id.clone(),
@@ -1661,6 +1662,37 @@ mod tests {
                     }
                 }
             }
+        }
+
+        #[test]
+        fn saturated_request_sequence_fails_without_reusing_request_id() {
+            let mut generator = test_generator();
+            generator.next_request_seq = u64::MAX - 1;
+
+            let first_request_id = generator
+                .submit_request(
+                    &sample_window(),
+                    &sample_chain_entries(),
+                    1_702_000_000_000,
+                    "trace-before-overflow",
+                )
+                .expect("request before sequence saturation should be accepted");
+
+            assert_eq!(first_request_id, format!("req-{:08}", u64::MAX - 1));
+
+            let err = generator
+                .submit_request(
+                    &sample_window(),
+                    &sample_chain_entries(),
+                    1_702_000_000_001,
+                    "trace-overflow",
+                )
+                .expect_err("saturated sequence must fail instead of reusing a request id");
+
+            assert_eq!(err.code, error_codes::ERR_PGN_INTERNAL);
+            assert!(err.message.contains("overflow"));
+            assert_eq!(generator.requests.len(), 1);
+            assert!(!generator.requests.contains_key(&format!("req-{:08}", u64::MAX)));
         }
 
         #[test]
