@@ -142,7 +142,11 @@ pub struct Percentiles {
 
 impl Percentiles {
     pub fn is_ordered(&self) -> bool {
-        self.p50_ms <= self.p95_ms && self.p95_ms <= self.p99_ms
+        self.p50_ms.is_finite()
+            && self.p95_ms.is_finite()
+            && self.p99_ms.is_finite()
+            && self.p50_ms <= self.p95_ms
+            && self.p95_ms <= self.p99_ms
     }
 }
 
@@ -170,7 +174,8 @@ impl ContainmentEvent {
 
     /// Whether convergence time exceeds the SLO threshold.
     pub fn exceeds_slo(&self) -> bool {
-        self.initiation_to_convergence_ms >= self.category.slo_ms()
+        !self.initiation_to_convergence_ms.is_finite()
+            || self.initiation_to_convergence_ms >= self.category.slo_ms()
     }
 }
 
@@ -383,7 +388,7 @@ impl ContainmentRevocationMetrics {
                 events.iter().map(|e| e.convergence_ratio()).sum::<f64>() / events.len() as f64;
 
             let breaches = events.iter().filter(|e| e.exceeds_slo()).count();
-            total_breaches += breaches;
+            total_breaches = total_breaches.saturating_add(breaches);
 
             let slo_met = breaches == 0;
             if !slo_met {
@@ -489,13 +494,15 @@ fn compute_report_content_hash(
         "metric_version": metric_version,
     })
     .to_string();
-    hex::encode(Sha256::digest(
-        [
-            b"containment_revocation_hash_v1:" as &[u8],
-            hash_input.as_bytes(),
-        ]
-        .concat(),
-    ))
+    let mut hasher = Sha256::new();
+    hasher.update(b"containment_revocation_hash_v1:");
+    hasher.update(
+        u64::try_from(hash_input.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    hasher.update(hash_input.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 fn compute_percentiles(sorted: &[f64]) -> Percentiles {
@@ -598,6 +605,23 @@ mod tests {
         assert!(!p.is_ordered());
     }
 
+    #[test]
+    fn percentiles_non_finite_are_not_ordered() {
+        let infinite = Percentiles {
+            p50_ms: f64::INFINITY,
+            p95_ms: f64::INFINITY,
+            p99_ms: f64::INFINITY,
+        };
+        let nan = Percentiles {
+            p50_ms: 10.0,
+            p95_ms: f64::NAN,
+            p99_ms: 99.0,
+        };
+
+        assert!(!infinite.is_ordered());
+        assert!(!nan.is_ordered());
+    }
+
     // === Event recording ===
 
     #[test]
@@ -638,6 +662,14 @@ mod tests {
     fn exceeds_slo_true() {
         let mut ev = sample_event("e1", EventCategory::EmergencyContainment);
         ev.initiation_to_convergence_ms = 2000.0; // > 1000ms
+        assert!(ev.exceeds_slo());
+    }
+
+    #[test]
+    fn non_finite_convergence_exceeds_slo_fail_closed() {
+        let mut ev = sample_event("nan-slo", EventCategory::EmergencyContainment);
+        ev.initiation_to_convergence_ms = f64::NAN;
+
         assert!(ev.exceeds_slo());
     }
 
@@ -689,6 +721,36 @@ mod tests {
         let mut engine = ContainmentRevocationMetrics::default();
         let report = engine.generate_report(&trace());
         assert_eq!(report.content_hash.len(), 64);
+    }
+
+    #[test]
+    fn report_hash_length_prefixes_serialized_payload() {
+        let hash_input = serde_json::json!({
+            "total_events": 0usize,
+            "categories": Vec::<CategoryMetrics>::new(),
+            "overall_slo_breach_rate": 0.0,
+            "flagged_categories": Vec::<EventCategory>::new(),
+            "metric_version": METRIC_VERSION,
+        })
+        .to_string();
+
+        let actual = compute_report_content_hash(0, &[], 0.0, &[], METRIC_VERSION);
+
+        let mut expected = Sha256::new();
+        expected.update(b"containment_revocation_hash_v1:");
+        expected.update(
+            u64::try_from(hash_input.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        expected.update(hash_input.as_bytes());
+
+        let mut legacy_unframed = Sha256::new();
+        legacy_unframed.update(b"containment_revocation_hash_v1:");
+        legacy_unframed.update(hash_input.as_bytes());
+
+        assert_eq!(actual, hex::encode(expected.finalize()));
+        assert_ne!(actual, hex::encode(legacy_unframed.finalize()));
     }
 
     #[test]
