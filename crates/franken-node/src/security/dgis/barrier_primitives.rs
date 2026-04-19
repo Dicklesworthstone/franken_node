@@ -427,13 +427,11 @@ impl BarrierAuditReceipt {
     /// Compute a deterministic hash of this receipt for chain-linking.
     pub fn content_hash(&self) -> String {
         let canonical = serde_json::to_string(self).unwrap_or_else(|e| format!("__serde_err:{e}"));
-        let digest = Sha256::digest(
-            [
-                b"barrier_primitives_hash_v1:" as &[u8],
-                canonical.as_bytes(),
-            ]
-            .concat(),
-        );
+        let mut hasher = Sha256::new();
+        hasher.update(b"barrier_primitives_content_hash_v1:");
+        hasher.update((canonical.len() as u64).to_le_bytes());
+        hasher.update(canonical.as_bytes());
+        let digest = hasher.finalize();
         hex::encode(digest)
     }
 }
@@ -467,7 +465,11 @@ impl RolloutState {
         if self.total_count == 0 {
             return 0.0;
         }
-        self.error_count as f64 / self.total_count as f64
+        let rate = self.error_count as f64 / self.total_count as f64;
+        if !rate.is_finite() {
+            return 0.0; // fail-closed on NaN/Inf
+        }
+        rate
     }
 
     pub fn record_success(&mut self) {

@@ -13,24 +13,66 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
-
-/// Constant-time string comparison (inline to avoid cross-crate path issues in test harnesses).
-fn ct_eq_inline(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut acc = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        acc |= x ^ y;
-    }
-    acc == 0
-}
 use std::fmt;
+
+use crate::security::constant_time::ct_eq;
 
 /// Maximum transition history entries before oldest-first eviction.
 const MAX_TRANSITIONS: usize = 4096;
+const MAX_EPOCH_TEXT_BYTES: usize = 4096;
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
+
+fn invalid_required_text_reason(field_name: &str, value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Some(format!("{field_name} must not be empty"));
+    }
+    if trimmed != value {
+        return Some(format!(
+            "{field_name} must not contain leading or trailing whitespace"
+        ));
+    }
+    if value.contains('\0') {
+        return Some(format!("{field_name} must not contain null bytes"));
+    }
+    if value.len() > MAX_EPOCH_TEXT_BYTES {
+        return Some(format!(
+            "{field_name} must not exceed {MAX_EPOCH_TEXT_BYTES} bytes"
+        ));
+    }
+    None
+}
+
+fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
+    let trimmed = artifact_id.trim();
+    if trimmed.is_empty() {
+        return Some("artifact_id must not be empty".to_string());
+    }
+    if trimmed == RESERVED_ARTIFACT_ID {
+        return Some(format!("artifact_id is reserved: {artifact_id:?}"));
+    }
+    if trimmed != artifact_id {
+        return Some("artifact_id must not contain leading or trailing whitespace".to_string());
+    }
+    if artifact_id.contains('\0') {
+        return Some("artifact_id must not contain null bytes".to_string());
+    }
+    if artifact_id.starts_with('/') {
+        return Some("artifact_id must not start with '/'".to_string());
+    }
+    if artifact_id.contains('\\') {
+        return Some("artifact_id must not contain backslashes".to_string());
+    }
+    if artifact_id.split('/').any(|segment| segment == "..") {
+        return Some("artifact_id must not contain parent-directory segments".to_string());
+    }
+    if artifact_id.len() > MAX_EPOCH_TEXT_BYTES {
+        return Some(format!(
+            "artifact_id must not exceed {MAX_EPOCH_TEXT_BYTES} bytes"
+        ));
+    }
+    None
+}
 
 /// Stable event codes for structured logging.
 pub mod event_codes {
@@ -144,7 +186,7 @@ impl EpochTransition {
             &self.manifest_hash,
             &self.trace_id,
         );
-        ct_eq_inline(&self.event_mac, &expected)
+        ct_eq(&self.event_mac, &expected)
     }
 }
 
@@ -337,8 +379,7 @@ pub fn check_artifact_epoch(
     trace_id: &str,
 ) -> Result<(), EpochRejection> {
     let current = policy.current_epoch();
-    let trimmed = artifact_id.trim();
-    if trimmed.is_empty() || trimmed == RESERVED_ARTIFACT_ID || trimmed != artifact_id {
+    if invalid_artifact_id_reason(artifact_id).is_some() {
         return Err(EpochRejection {
             artifact_id: artifact_id.to_string(),
             artifact_epoch,
@@ -427,9 +468,9 @@ impl EpochStore {
         timestamp: u64,
         trace_id: &str,
     ) -> Result<EpochTransition, EpochError> {
-        if manifest_hash.trim().is_empty() {
+        if let Some(reason) = invalid_required_text_reason("manifest_hash", manifest_hash) {
             return Err(EpochError::InvalidManifestHash {
-                reason: "manifest_hash must not be empty".into(),
+                reason,
             });
         }
 
@@ -479,9 +520,9 @@ impl EpochStore {
             });
         }
 
-        if manifest_hash.trim().is_empty() {
+        if let Some(reason) = invalid_required_text_reason("manifest_hash", manifest_hash) {
             return Err(EpochError::InvalidManifestHash {
-                reason: "manifest_hash must not be empty".into(),
+                reason,
             });
         }
 

@@ -13,6 +13,8 @@ use std::fmt;
 // ── Types ───────────────────────────────────────────────────────────
 
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
+const ED25519_PUBLIC_KEY_HEX_LEN: usize = 64;
+const ED25519_SIGNATURE_HEX_LEN: usize = 128;
 
 /// Threshold configuration: k-of-n quorum.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,7 +56,8 @@ impl ThresholdConfig {
                     reason: format!("duplicate signer key_id {}", signer.key_id),
                 });
             }
-            if !seen_public_keys.insert(signer.public_key_hex.as_str()) {
+            let canonical_public_key_hex = signer.public_key_hex.to_ascii_lowercase();
+            if !seen_public_keys.insert(canonical_public_key_hex) {
                 return Err(ThresholdError::ConfigInvalid {
                     reason: format!("duplicate signer public_key_hex {}", signer.public_key_hex),
                 });
@@ -160,7 +163,8 @@ fn digest_prefix_u64(digest: &[u8]) -> u64 {
 fn build_signing_message(content_hash: &str) -> Vec<u8> {
     let mut msg = Vec::new();
     msg.extend_from_slice(b"threshold_sig_verify_v1:");
-    msg.extend_from_slice(&(u32::try_from(content_hash.len()).unwrap_or(u32::MAX) as u64).to_le_bytes());
+    let content_hash_len = u64::try_from(content_hash.len()).unwrap_or(u64::MAX);
+    msg.extend_from_slice(&content_hash_len.to_le_bytes());
     msg.extend_from_slice(content_hash.as_bytes());
     msg
 }
@@ -195,6 +199,10 @@ fn invalid_connector_id_reason(connector_id: &str) -> Option<String> {
 
 /// Verify a partial signature using Ed25519.
 fn verify_signature(key: &SignerKey, content_hash: &str, sig: &PartialSignature) -> bool {
+    if key.public_key_hex.len() != ED25519_PUBLIC_KEY_HEX_LEN {
+        return false;
+    }
+
     // Decode the public key from hex (32 bytes for Ed25519)
     let pk_bytes = match hex::decode(&key.public_key_hex) {
         Ok(b) => b,
@@ -208,6 +216,10 @@ fn verify_signature(key: &SignerKey, content_hash: &str, sig: &PartialSignature)
         Ok(vk) => vk,
         Err(_) => return false,
     };
+
+    if sig.signature_hex.len() != ED25519_SIGNATURE_HEX_LEN {
+        return false;
+    }
 
     // Decode the signature from hex (64 bytes for Ed25519)
     let sig_bytes = match hex::decode(&sig.signature_hex) {
