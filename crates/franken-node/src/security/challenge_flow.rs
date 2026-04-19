@@ -763,9 +763,15 @@ impl ChallengeFlowController {
         };
 
         if self.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES + 1;
-            self.chain_anchor_hash = Some(self.audit_log[overflow - 1].hash());
-            self.audit_log.drain(0..overflow);
+            let overflow = self
+                .audit_log
+                .len()
+                .saturating_sub(MAX_AUDIT_LOG_ENTRIES)
+                .saturating_add(1);
+            if let Some(anchor_entry) = self.audit_log.get(overflow.saturating_sub(1)) {
+                self.chain_anchor_hash = Some(anchor_entry.hash());
+            }
+            self.audit_log.drain(0..overflow.min(self.audit_log.len()));
         }
         self.audit_log.push(entry);
     }
