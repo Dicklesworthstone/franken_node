@@ -13,6 +13,28 @@ use std::fmt;
 /// Schema version for the isolation mesh protocol.
 pub const SCHEMA_VERSION: &str = "iso-mesh-v1.0";
 
+// ─── Capacity constants ─────────────────────────────────────────────────────
+
+/// Maximum elevation events to retain in memory (prevents unbounded growth).
+const MAX_ELEVATION_LOG_ENTRIES: usize = 1000;
+
+/// Maximum audit events to retain in memory (prevents unbounded growth).
+const MAX_AUDIT_LOG_ENTRIES: usize = 2000;
+
+/// Push item to vector with bounded capacity to prevent memory exhaustion.
+/// When capacity is exceeded, removes oldest entries to maintain the limit.
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 // ─── Invariant constants ────────────────────────────────────────────────────
 
 /// Every workload must be classified before execution; unclassified workloads
@@ -369,6 +391,19 @@ impl RailRouter {
             });
         }
 
+        // Validate risk score is finite (reject NaN/infinity)
+        if !risk_score.is_finite() {
+            self.emit_audit(
+                ISO_006,
+                workload_id,
+                &format!("non-finite risk score: {risk_score}"),
+            );
+            return Err(RailRouterError::InvalidRiskScore {
+                workload_id: workload_id.to_string(),
+                score: risk_score,
+            });
+        }
+
         // Validate risk score range
         if !(0.0..=1.0).contains(&risk_score) {
             self.emit_audit(
@@ -493,7 +528,7 @@ impl RailRouter {
             timestamp: now,
         };
 
-        self.elevation_log.push(event.clone());
+        push_bounded(&mut self.elevation_log, event.clone(), MAX_ELEVATION_LOG_ENTRIES);
 
         // ISO-004: Hot-elevation completed
         self.emit_audit(
@@ -611,12 +646,12 @@ impl RailRouter {
 
     fn emit_audit(&mut self, event_code: &str, workload_id: &str, detail: &str) {
         let now = self.timestamp();
-        self.audit_log.push(AuditEntry {
+        push_bounded(&mut self.audit_log, AuditEntry {
             event_code: event_code.to_string(),
             workload_id: workload_id.to_string(),
             detail: detail.to_string(),
             timestamp: now,
-        });
+        }, MAX_AUDIT_LOG_ENTRIES);
     }
 }
 
