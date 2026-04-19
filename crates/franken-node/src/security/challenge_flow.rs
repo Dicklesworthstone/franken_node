@@ -638,10 +638,11 @@ impl ChallengeFlowController {
             .challenges
             .values()
             .filter(|ch| !ch.state.is_terminal() && ch.is_timed_out(current_time_ms))
+            .take(MAX_TIMEOUT_BATCH_SIZE)
             .map(|ch| (ch.challenge_id.clone(), ch.artifact_id.clone(), ch.state))
             .collect();
 
-        let mut denied_ids = Vec::new();
+        let mut denied_ids = Vec::with_capacity(timed_out.len());
         for (cid, aid, old_state) in timed_out {
             if let Some(ch) = self.challenges.get_mut(&cid) {
                 ch.state = ChallengeState::Denied;
@@ -663,7 +664,7 @@ impl ChallengeFlowController {
                     "Challenge timed out, denied by policy",
                 );
 
-                push_bounded(&mut denied_ids, cid, MAX_TIMEOUT_BATCH_SIZE);
+                denied_ids.push(cid);
             }
         }
 
@@ -1530,6 +1531,42 @@ mod tests {
         assert_eq!(ctrl.metrics().challenges_timed_out_total, 1);
         assert_eq!(ctrl.metrics().challenges_denied_total, 1);
         assert_eq!(ctrl.metrics().challenges_resolved_total, 1);
+    }
+
+    #[test]
+    fn timeout_enforcement_processes_one_reported_batch_at_a_time() {
+        let mut ctrl = make_controller();
+        let total = MAX_TIMEOUT_BATCH_SIZE + 1;
+        let total_u64 = u64::try_from(total).expect("timeout batch test size fits in u64");
+        let batch_u64 =
+            u64::try_from(MAX_TIMEOUT_BATCH_SIZE).expect("timeout batch cap fits in u64");
+
+        for idx in 0..total {
+            ctrl.issue_challenge(
+                ArtifactId::new(format!("art-{idx}")),
+                SuspicionReason::UnexpectedProvenance,
+                vec![RequiredProofType::ProvenanceAttestation],
+                "operator-1",
+                1000,
+            )
+            .unwrap();
+        }
+
+        let first = ctrl.enforce_timeouts(31_000);
+
+        assert_eq!(first.len(), MAX_TIMEOUT_BATCH_SIZE);
+        assert_eq!(ctrl.active_challenges().len(), 1);
+        assert_eq!(ctrl.metrics().challenges_timed_out_total, batch_u64);
+        assert_eq!(ctrl.metrics().challenges_denied_total, batch_u64);
+        assert_eq!(ctrl.metrics().challenges_resolved_total, batch_u64);
+
+        let second = ctrl.enforce_timeouts(31_001);
+
+        assert_eq!(second.len(), 1);
+        assert!(ctrl.active_challenges().is_empty());
+        assert_eq!(ctrl.metrics().challenges_timed_out_total, total_u64);
+        assert_eq!(ctrl.metrics().challenges_denied_total, total_u64);
+        assert_eq!(ctrl.metrics().challenges_resolved_total, total_u64);
     }
 
     #[test]
