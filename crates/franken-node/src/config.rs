@@ -674,7 +674,7 @@ impl Config {
             }
             if let Some(value) = &section.node_id {
                 self.fleet.node_id = Some(value.clone());
-                push_bounded(&mut decisions, MergeDecision::new(stage.clone(), "fleet.node_id", value));
+                push_bounded(&mut decisions, MergeDecision::new(stage.clone(), "fleet.node_id", value), MAX_MERGE_DECISIONS);
             }
             if let Some(value) = section.poll_interval_seconds {
                 self.fleet.poll_interval_seconds = Some(value);
@@ -748,7 +748,7 @@ impl Config {
                 stage.clone(),
                 "security.max_degraded_duration_secs",
                 value,
-            ));
+            ), MAX_MERGE_DECISIONS);
         }
         if let Some(section) = &overrides.security
             && let Some(value) = &section.decision_receipt_signing_key_path

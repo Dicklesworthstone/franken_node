@@ -16,13 +16,13 @@ pub mod base {
     pub const SMALL: usize = 256;
 
     /// Medium windows for disputes, replay capsules, and similar registries.
-    pub const MEDIUM: usize = 2_048;
+    pub const MEDIUM: usize = 4_096;
 
     /// Common default for event logs, receipts, and audit trails.
-    pub const STANDARD: usize = 4_096;
+    pub const STANDARD: usize = 16_384;
 
     /// Larger collections for traces, obligations, and artifact inventories.
-    pub const LARGE: usize = 8_192;
+    pub const LARGE: usize = 65_536;
 
     /// Extended histories that exceed the standard large bucket.
     pub const XL: usize = 16_384;
@@ -114,7 +114,7 @@ pub mod base {
 pub mod audit {
     use super::base;
 
-    pub const LOG_ENTRIES: usize = base::STANDARD;
+    pub const LOG_ENTRIES: usize = base::MEDIUM;
     pub const TRAIL_ENTRIES: usize = base::STANDARD;
     pub const ACTION_LOG_ENTRIES: usize = base::STANDARD;
     pub const RECORDS: usize = base::STANDARD;
@@ -123,8 +123,8 @@ pub mod audit {
     // Inline negative-path const assertions for audit capacity validation.
     // Test: all audit constants derive from valid base buckets only
     const _: () = assert!(
-        LOG_ENTRIES == base::STANDARD,
-        "LOG_ENTRIES must use STANDARD bucket"
+        LOG_ENTRIES == base::MEDIUM,
+        "LOG_ENTRIES must use MEDIUM bucket"
     );
     const _: () = assert!(
         TRAIL_ENTRIES == base::STANDARD,
@@ -347,7 +347,7 @@ pub mod runtime {
     pub const FORCE_EVENTS: usize = base::STANDARD;
     pub const SESSION_EVENTS: usize = base::STANDARD;
     pub const OBLIGATIONS: usize = base::LARGE;
-    pub const LEASES: usize = base::LARGE;
+    pub const LEASES: usize = base::STANDARD;
     pub const SAGAS: usize = base::STANDARD;
     pub const TOTAL_ARTIFACTS: usize = base::LARGE;
     pub const REGISTERED_TRACES: usize = base::TRACE;
@@ -422,8 +422,8 @@ pub mod aliases {
 
     // Test: all audit aliases use expected underlying bucket sizes.
     const _: () = assert!(
-        MAX_AUDIT_LOG_ENTRIES == super::base::STANDARD,
-        "audit log alias must use STANDARD"
+        MAX_AUDIT_LOG_ENTRIES == super::base::MEDIUM,
+        "audit log alias must use MEDIUM"
     );
     const _: () = assert!(
         MAX_RECEIPT_CHAIN == super::base::LARGE,
@@ -581,8 +581,8 @@ pub mod aliases {
         "obligations must use LARGE bucket"
     );
     const _: () = assert!(
-        MAX_LEASES == super::base::LARGE,
-        "leases must use LARGE bucket"
+        MAX_LEASES == super::base::STANDARD,
+        "leases must use STANDARD bucket"
     );
     const _: () = assert!(
         MAX_TOTAL_ARTIFACTS == super::base::LARGE,
