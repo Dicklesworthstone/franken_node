@@ -5240,7 +5240,7 @@ fn build_backup_path(path: &Path, timestamp_suffix: &str) -> PathBuf {
         if !candidate.exists() {
             return candidate;
         }
-        index += 1;
+        index = index.saturating_add(1);
     }
 }
 
@@ -10628,7 +10628,7 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
             .read(&dependency.extension_id, now_secs, "trace-cli-trust-scan")
             .map_err(|err| anyhow::anyhow!(err.to_string()))?
         {
-            skipped_existing += 1;
+            skipped_existing = skipped_existing.saturating_add(1);
             items.push(build_trust_scan_item(
                 dependency,
                 &existing,
@@ -10679,7 +10679,7 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
             .registry
             .create(input, now_secs, "trace-cli-trust-scan")
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-        created_cards += 1;
+        created_cards = created_cards.saturating_add(1);
         items.push(build_trust_scan_item(
             dependency,
             &card,
@@ -12944,7 +12944,7 @@ fn handle_registry_gc(args: &cli::RegistryGcArgs) -> Result<()> {
         active += artifacts.len().min(args.keep);
         for artifact in artifacts.iter().skip(args.keep) {
             archive_local_registry_artifact(&project_root, artifact)?;
-            archived += 1;
+            archived = archived.saturating_add(1);
         }
     }
 

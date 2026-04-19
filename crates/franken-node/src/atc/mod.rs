@@ -5107,7 +5107,7 @@ mod atc_extreme_adversarial_negative_tests {
 
         for &(thread_id, iteration, ref fingerprint, format_valid) in final_results.iter() {
             if !format_valid {
-                format_violations += 1;
+                format_violations = format_violations.saturating_add(1);
                 println!("Format violation: Thread {} Iteration {} - Fingerprint: {}",
                     thread_id, iteration, fingerprint);
             }
@@ -5126,7 +5126,7 @@ mod atc_extreme_adversarial_negative_tests {
                 let test_fingerprint = surface_fingerprint_hex(&test_refs);
 
                 if test_fingerprint != *fingerprint {
-                    determinism_violations += 1;
+                    determinism_violations = determinism_violations.saturating_add(1);
                 }
             }
         }
@@ -5875,7 +5875,7 @@ mod atc_extreme_adversarial_negative_tests {
             for (i, &time) in access_times.iter().enumerate() {
                 let time_nanos = time.as_nanos() as u64;
                 if time_nanos > avg_time * 10 { // More than 10x average
-                    outliers += 1;
+                    outliers = outliers.saturating_add(1);
                 }
                 assert!(outliers < 100, // Less than 1% outliers
                        "Too many timing outliers detected, potential timing attack vulnerability");

@@ -5431,11 +5431,11 @@ mod proof_carrying_decode_comprehensive_attack_resistance_tests {
                 format!("encoding_test_{}", fragment_idx),
             );
 
-            processed_fragments += 1;
+            processed_fragments = processed_fragments.saturating_add(1);
 
             match result {
                 Ok(outcome) => {
-                    successful_repairs += 1;
+                    successful_repairs = successful_repairs.saturating_add(1);
 
                     // Verify output hash consistency
                     assert_eq!(outcome.output_hash, fragment_hash,
@@ -5453,12 +5453,12 @@ mod proof_carrying_decode_comprehensive_attack_resistance_tests {
                     });
 
                     if has_corruption_event {
-                        detected_corruptions += 1;
+                        detected_corruptions = detected_corruptions.saturating_add(1);
                     }
                 }
                 Err(_) => {
                     // Failure to process corrupted data is acceptable
-                    detected_corruptions += 1;
+                    detected_corruptions = detected_corruptions.saturating_add(1);
                 }
             }
 
@@ -5898,7 +5898,7 @@ mod proof_carrying_decode_comprehensive_attack_resistance_tests {
 
             match result {
                 Ok(_) => {
-                    processed_fragments += 1;
+                    processed_fragments = processed_fragments.saturating_add(1);
 
                     // Check audit log size for memory pressure indicators
                     let audit_entries = decoder.audit_log();
@@ -6191,7 +6191,7 @@ mod proof_carrying_decode_comprehensive_attack_resistance_tests {
 
         for &(thread_id, attempt, success, proof_idx) in final_results.iter() {
             if success {
-                successful_attacks += 1;
+                successful_attacks = successful_attacks.saturating_add(1);
 
                 // Verify that only legitimate proofs succeeded
                 if proof_idx == 1 { // Hash mismatch proof
