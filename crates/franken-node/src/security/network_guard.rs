@@ -266,7 +266,7 @@ impl NetworkGuard {
             });
         }
 
-        Ok(action)
+        Ok(action);
 
         // Inline negative-path tests for process_egress method
         #[cfg(test)]

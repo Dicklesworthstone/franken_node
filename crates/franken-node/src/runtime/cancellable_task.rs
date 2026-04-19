@@ -1613,7 +1613,6 @@ impl CancellationRuntime {
             assert_eq!(parsed["detail"], very_long_detail);
         }
     }
-}
 
 impl Default for CancellationRuntime {
     fn default() -> Self {
