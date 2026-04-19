@@ -2172,6 +2172,12 @@ mod tests {
         let sample_count = 1000;
 
         // Create Unicode strings that could exhibit different processing times
+        // Store repeated strings in variables to avoid temporary value issues
+        let massive_decomposed = "e\u{0301}".repeat(1000);
+        let massive_emoji = "\u{1F600}".repeat(500);
+        let massive_combining = "\u{0300}".repeat(2000);
+        let heavily_accented = "a\u{0300}\u{0301}\u{0302}\u{0303}".repeat(500);
+
         let unicode_timing_cases = vec![
             // Composed vs decomposed forms that are visually identical
             ("café", "composed_single_codepoint"),
@@ -2182,12 +2188,12 @@ mod tests {
             ("\u{1E0C}\u{0307}", "different_complex_sequence"),  // Ḍ + combining dot above
 
             // Maximum length normalization cases
-            (&"e\u{0301}".repeat(1000), "massive_decomposed_accents"), // 1000 é characters decomposed
-            (&"\u{1F600}".repeat(500), "massive_emoji_sequence"),      // 500 emoji
+            (&massive_decomposed, "massive_decomposed_accents"), // 1000 é characters decomposed
+            (&massive_emoji, "massive_emoji_sequence"),          // 500 emoji
 
             // Potential normalization DoS patterns
-            (&"\u{0300}".repeat(2000), "massive_combining_only"),      // Only combining characters
-            (&"a\u{0300}\u{0301}\u{0302}\u{0303}".repeat(500), "heavily_accented_sequence"),
+            (&massive_combining, "massive_combining_only"),      // Only combining characters
+            (&heavily_accented, "heavily_accented_sequence"),
         ];
 
         let mut unicode_timings = std::collections::HashMap::new();
@@ -2708,7 +2714,7 @@ mod tests {
             (u64::MAX, "u64_max"),
         ];
 
-        for (test_length, test_name) in max_length_test_cases {
+        for (test_length, _test_name) in max_length_test_cases {
             // Test length encoding itself doesn't overflow
             let encoded_length = test_length.to_le_bytes();
             assert_eq!(encoded_length.len(), 8); // Should always be 8 bytes
