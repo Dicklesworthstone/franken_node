@@ -8,7 +8,7 @@ use frankenengine_node::supply_chain::trust_card::{
     TrustCardRegistry,
 };
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,6 +20,7 @@ const ARTIFACT_RELATIVE_PATH: &str = "artifacts/adversarial/compromise_reduction
 const TRUST_CARD_REGISTRY_RELATIVE_PATH: &str = ".franken-node/state/trust-card-registry.v1.json";
 const FIXTURE_SIGNING_KEY_BYTES: [u8; 32] = [0x43; 32];
 const RUNTIME_TIMEOUT: Duration = Duration::from_secs(2);
+const REQUIRED_RAW_BASELINE_RUNTIMES: usize = 2;
 
 #[derive(Clone, Copy)]
 struct AdversarialExtensionFixture {
@@ -345,9 +346,7 @@ function mark(detail) {{
         "unsigned-artifact" => {
             "fs.writeFileSync(markerPath + '.unsigned-artifact', 'unsigned payload executed');\nmark('unsigned artifact executed');\n"
         }
-        "stale-revocation-exploit" => {
-            "mark('stale revocation state accepted by raw runtime');\n"
-        }
+        "stale-revocation-exploit" => "mark('stale revocation state accepted by raw runtime');\n",
         "mislabeled-mime" => {
             "const declaredMime = 'image/png';\nif (declaredMime !== 'application/javascript') mark('mislabeled JavaScript executed');\n"
         }
@@ -661,8 +660,9 @@ fn build_payload(
         })
         .sum::<usize>();
     let franken_attempts = cases.len();
+    let expected_baseline_attempts = cases.len().saturating_mul(REQUIRED_RAW_BASELINE_RUNTIMES);
 
-    if !unavailable_runtimes.is_empty() {
+    if !unavailable_runtimes.is_empty() || baseline_attempts != expected_baseline_attempts {
         return CompromiseReductionV2Artifact {
             schema_version: "2.0.0",
             artifact_id: "compromise_reduction_v2",
@@ -691,6 +691,9 @@ fn build_payload(
         .count();
     let franken_compromised = cases.iter().filter(|case| case.franken.compromised).count();
     let ratio = baseline_compromised as f64 / franken_compromised.max(1) as f64;
+    let has_actual_baseline_numbers = baseline_attempts == expected_baseline_attempts
+        && baseline_compromised > 0
+        && franken_attempts == cases.len();
 
     CompromiseReductionV2Artifact {
         schema_version: "2.0.0",
@@ -699,7 +702,7 @@ fn build_payload(
         generated_at_utc: Utc::now().to_rfc3339(),
         pass_criterion: PassCriterion {
             criterion: ">=10x",
-            passed: ratio >= 10.0,
+            passed: has_actual_baseline_numbers && ratio >= 10.0,
         },
         ratio_method: "baseline_compromised / max(franken_compromised, 1)",
         baseline_compromised: Some(baseline_compromised),
@@ -785,18 +788,36 @@ fn compromise_reduction_v2_measures_raw_runtime_baseline_against_strict_policy()
         .map(|fixture| measure_case(fixture, &runtimes))
         .collect::<Vec<_>>();
     let payload = build_payload(&runtimes, cases);
-    let signed = write_signed_summary(&sign_artifact(payload));
+    let signed = sign_artifact(payload);
+    let expected_baseline_attempts = FIXTURES
+        .len()
+        .saturating_mul(REQUIRED_RAW_BASELINE_RUNTIMES);
 
-    if signed.payload.status == "baseline_unavailable" {
-        eprintln!(
-            "baseline unavailable; missing runtimes: {:?}",
-            signed.payload.unavailable_runtimes
-        );
-        return;
-    }
+    assert_ne!(
+        signed.payload.status,
+        "baseline_unavailable",
+        "raw baseline unavailable; missing runtimes: {:?}, attempts={}/{}",
+        signed.payload.unavailable_runtimes,
+        signed.payload.baseline_attempts,
+        expected_baseline_attempts
+    );
+    assert!(
+        signed.payload.baseline_compromised.is_some(),
+        "pass criterion requires actual baseline_compromised numbers"
+    );
+    assert!(
+        signed.payload.franken_compromised.is_some(),
+        "pass criterion requires actual franken_compromised numbers"
+    );
+    assert!(
+        signed.payload.ratio.is_some(),
+        "pass criterion requires an actual compromise-reduction ratio"
+    );
 
-    assert_eq!(signed.payload.baseline_attempts, 20);
-    assert_eq!(signed.payload.franken_attempts, 10);
+    let signed = write_signed_summary(&signed);
+
+    assert_eq!(signed.payload.baseline_attempts, expected_baseline_attempts);
+    assert_eq!(signed.payload.franken_attempts, FIXTURES.len());
     assert_eq!(signed.payload.baseline_compromised, Some(20));
     assert_eq!(signed.payload.franken_compromised, Some(0));
     assert_eq!(signed.payload.ratio, Some(20.0));
@@ -830,4 +851,64 @@ fn compromise_reduction_v2_measures_raw_runtime_baseline_against_strict_policy()
             case.case_id
         );
     }
+}
+
+#[test]
+fn baseline_unavailable_payload_is_not_green_without_raw_runtime_numbers() {
+    let runtimes = [
+        RuntimeInfo {
+            name: "bun",
+            path: None,
+            version: None,
+        },
+        RuntimeInfo {
+            name: "node",
+            path: Some(PathBuf::from("/usr/bin/node")),
+            version: Some("v20.fixture".to_string()),
+        },
+    ];
+    let cases = vec![CompromiseReductionCaseOutcome {
+        case_id: "missing-bun-baseline".to_string(),
+        extension_id: "npm:@adversarial/missing-bun-baseline".to_string(),
+        attack_vector: "missing raw runtime baseline".to_string(),
+        raw_runtimes: vec![
+            RawRuntimeCaseOutcome {
+                runtime: "bun".to_string(),
+                available: false,
+                version: None,
+                compromised: false,
+                exit_code: None,
+                timed_out: false,
+            },
+            RawRuntimeCaseOutcome {
+                runtime: "node".to_string(),
+                available: true,
+                version: Some("v20.fixture".to_string()),
+                compromised: true,
+                exit_code: Some(0),
+                timed_out: false,
+            },
+        ],
+        franken: FrankenCaseOutcome {
+            compromised: false,
+            blocked: true,
+            contained: true,
+            exit_code: Some(1),
+            typed_errors: vec!["revoked".to_string()],
+            result_statuses: vec!["revoked".to_string()],
+        },
+    }];
+
+    let payload = build_payload(&runtimes, cases);
+
+    assert_eq!(payload.status, "baseline_unavailable");
+    assert!(
+        !payload.pass_criterion.passed,
+        "baseline_unavailable must never satisfy the pass criterion"
+    );
+    assert_eq!(payload.baseline_compromised, None);
+    assert_eq!(payload.franken_compromised, None);
+    assert_eq!(payload.ratio, None);
+    assert_eq!(payload.baseline_attempts, 1);
+    assert_eq!(payload.franken_attempts, 1);
 }
