@@ -15,6 +15,9 @@ use crate::security::constant_time;
 
 const MAX_TRANSITIONS: usize = 4096;
 
+/// Maximum artifact name length to prevent memory exhaustion DoS attacks.
+const MAX_ARTIFACT_NAME_LEN: usize = 512;
+
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
         items.clear();
@@ -209,7 +212,8 @@ fn is_valid_sha256_hex(value: &str) -> bool {
 }
 
 fn is_valid_artifact_name(name: &str) -> bool {
-    !name.is_empty()
+    name.len() <= MAX_ARTIFACT_NAME_LEN
+        && !name.is_empty()
         && !name.starts_with('/')
         && !name.contains('\\')
         && !name.contains('\0')
