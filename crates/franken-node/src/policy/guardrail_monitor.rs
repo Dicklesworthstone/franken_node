@@ -318,8 +318,16 @@ impl GuardrailMonitor for MemoryBudgetGuardrail {
             GuardrailVerdict::Block {
                 reason: format!(
                     "memory utilization {:.1}% exceeds block threshold {:.1}%",
-                    if (util * 100.0).is_finite() { util * 100.0 } else { 0.0 },
-                    if (self.block_threshold * 100.0).is_finite() { self.block_threshold * 100.0 } else { 0.0 },
+                    if (util * 100.0).is_finite() {
+                        util * 100.0
+                    } else {
+                        0.0
+                    },
+                    if (self.block_threshold * 100.0).is_finite() {
+                        self.block_threshold * 100.0
+                    } else {
+                        0.0
+                    },
                 ),
                 budget_id: self.budget_id.clone(),
             }
@@ -327,8 +335,16 @@ impl GuardrailMonitor for MemoryBudgetGuardrail {
             GuardrailVerdict::Warn {
                 reason: format!(
                     "memory utilization {:.1}% exceeds warn threshold {:.1}%",
-                    if (util * 100.0).is_finite() { util * 100.0 } else { 0.0 },
-                    if (self.warn_threshold * 100.0).is_finite() { self.warn_threshold * 100.0 } else { 0.0 },
+                    if (util * 100.0).is_finite() {
+                        util * 100.0
+                    } else {
+                        0.0
+                    },
+                    if (self.warn_threshold * 100.0).is_finite() {
+                        self.warn_threshold * 100.0
+                    } else {
+                        0.0
+                    },
                 ),
             }
         } else {
@@ -455,8 +471,16 @@ impl GuardrailMonitor for MemoryTailRiskGuardrail {
             GuardrailVerdict::Block {
                 reason: format!(
                     "tail-risk memory envelope {:.1}% exceeds block threshold {:.1}% (n={}, alpha={:.4})",
-                    if (tail_util * 100.0).is_finite() { tail_util * 100.0 } else { 0.0 },
-                    if (self.block_threshold * 100.0).is_finite() { self.block_threshold * 100.0 } else { 0.0 },
+                    if (tail_util * 100.0).is_finite() {
+                        tail_util * 100.0
+                    } else {
+                        0.0
+                    },
+                    if (self.block_threshold * 100.0).is_finite() {
+                        self.block_threshold * 100.0
+                    } else {
+                        0.0
+                    },
                     telemetry.sample_count,
                     self.alpha,
                 ),
@@ -466,8 +490,16 @@ impl GuardrailMonitor for MemoryTailRiskGuardrail {
             GuardrailVerdict::Warn {
                 reason: format!(
                     "tail-risk memory envelope {:.1}% exceeds warn threshold {:.1}% (n={}, alpha={:.4})",
-                    if (tail_util * 100.0).is_finite() { tail_util * 100.0 } else { 0.0 },
-                    if (self.warn_threshold * 100.0).is_finite() { self.warn_threshold * 100.0 } else { 0.0 },
+                    if (tail_util * 100.0).is_finite() {
+                        tail_util * 100.0
+                    } else {
+                        0.0
+                    },
+                    if (self.warn_threshold * 100.0).is_finite() {
+                        self.warn_threshold * 100.0
+                    } else {
+                        0.0
+                    },
                     telemetry.sample_count,
                     self.alpha,
                 ),
@@ -1897,7 +1929,7 @@ mod tests {
         #[test]
         fn unicode_injection_in_budget_identifiers_and_reason_strings() {
             let malicious_budget_ids = [
-                "mem\u{202E}deilav",      // RLO override attack
+                "mem\u{202E}deilav",     // RLO override attack
                 "budget\u{200B}hidden",  // Zero-width space injection
                 "id\u{FEFF}bom",         // BOM insertion
                 "test\u{2028}break",     // Line separator injection
@@ -1964,7 +1996,12 @@ mod tests {
 
                 let verdict = guard.check(&state);
                 // Should produce a valid verdict even with extreme values
-                assert!(matches!(verdict, GuardrailVerdict::Allow | GuardrailVerdict::Warn { .. } | GuardrailVerdict::Block { .. }));
+                assert!(matches!(
+                    verdict,
+                    GuardrailVerdict::Allow
+                        | GuardrailVerdict::Warn { .. }
+                        | GuardrailVerdict::Block { .. }
+                ));
             }
 
             // Test tail-risk calculations with overflow-prone statistical values
@@ -1981,7 +2018,12 @@ mod tests {
 
             // Statistical calculations should be bounded and finite
             let verdict = tail_guard.check(&state);
-            assert!(matches!(verdict, GuardrailVerdict::Allow | GuardrailVerdict::Warn { .. } | GuardrailVerdict::Block { .. }));
+            assert!(matches!(
+                verdict,
+                GuardrailVerdict::Allow
+                    | GuardrailVerdict::Warn { .. }
+                    | GuardrailVerdict::Block { .. }
+            ));
         }
 
         #[test]
@@ -2118,15 +2160,29 @@ mod tests {
                 let tail_verdict = tail_guard.check(&state);
                 let conformal_verdict = conformal_guard.check(&state);
 
-                assert!(matches!(tail_verdict, GuardrailVerdict::Allow | GuardrailVerdict::Warn { .. } | GuardrailVerdict::Block { .. }));
-                assert!(matches!(conformal_verdict, GuardrailVerdict::Allow | GuardrailVerdict::Warn { .. } | GuardrailVerdict::Block { .. }));
+                assert!(matches!(
+                    tail_verdict,
+                    GuardrailVerdict::Allow
+                        | GuardrailVerdict::Warn { .. }
+                        | GuardrailVerdict::Block { .. }
+                ));
+                assert!(matches!(
+                    conformal_verdict,
+                    GuardrailVerdict::Allow
+                        | GuardrailVerdict::Warn { .. }
+                        | GuardrailVerdict::Block { .. }
+                ));
 
                 // Verify no infinite/NaN values leak into verdict strings
-                if let GuardrailVerdict::Block { reason, .. } | GuardrailVerdict::Warn { reason } = &tail_verdict {
+                if let GuardrailVerdict::Block { reason, .. } | GuardrailVerdict::Warn { reason } =
+                    &tail_verdict
+                {
                     assert!(!reason.contains("inf"));
                     assert!(!reason.contains("NaN"));
                 }
-                if let GuardrailVerdict::Block { reason, .. } | GuardrailVerdict::Warn { reason } = &conformal_verdict {
+                if let GuardrailVerdict::Block { reason, .. } | GuardrailVerdict::Warn { reason } =
+                    &conformal_verdict
+                {
                     assert!(!reason.contains("inf"));
                     assert!(!reason.contains("NaN"));
                 }
@@ -2138,23 +2194,30 @@ mod tests {
             // Test extreme threshold configurations that could cause issues
             let extreme_configs = [
                 // Memory guards with extreme values
-                (f64::EPSILON, f64::EPSILON),                    // Tiny thresholds
-                (1.0 - f64::EPSILON, 1.0 - f64::EPSILON),       // Nearly 100%
-                (0.5, 1.5),                                     // Warn > block (should clamp)
-                (f64::MIN_POSITIVE, f64::MAX),                  // Min positive vs max
+                (f64::EPSILON, f64::EPSILON), // Tiny thresholds
+                (1.0 - f64::EPSILON, 1.0 - f64::EPSILON), // Nearly 100%
+                (0.5, 1.5),                   // Warn > block (should clamp)
+                (f64::MIN_POSITIVE, f64::MAX), // Min positive vs max
             ];
 
             for (block_thresh, warn_thresh) in extreme_configs {
                 let memory_guard = MemoryBudgetGuardrail::new(block_thresh, warn_thresh);
-                let durability_guard = DurabilityLossGuardrail::new(block_thresh.min(1.0), warn_thresh.min(0.5));
+                let durability_guard =
+                    DurabilityLossGuardrail::new(block_thresh.min(1.0), warn_thresh.min(0.5));
 
                 // Guards should clamp values to safe ranges
-                assert!(memory_guard.block_threshold >= MemoryBudgetGuardrail::ENVELOPE_MIN_BLOCK_THRESHOLD);
+                assert!(
+                    memory_guard.block_threshold
+                        >= MemoryBudgetGuardrail::ENVELOPE_MIN_BLOCK_THRESHOLD
+                );
                 assert!(memory_guard.block_threshold <= 1.0);
                 assert!(memory_guard.warn_threshold <= memory_guard.block_threshold);
                 assert!(memory_guard.warn_threshold >= 0.0);
 
-                assert!(durability_guard.min_durability >= DurabilityLossGuardrail::ENVELOPE_MIN_DURABILITY);
+                assert!(
+                    durability_guard.min_durability
+                        >= DurabilityLossGuardrail::ENVELOPE_MIN_DURABILITY
+                );
                 assert!(durability_guard.min_durability <= 1.0);
                 assert!(durability_guard.warn_margin >= 0.0);
 
@@ -2163,7 +2226,10 @@ mod tests {
                     {
                         let mut s = healthy_state();
                         let computed = s.memory_budget_bytes as f64 * memory_guard.block_threshold;
-                        s.memory_used_bytes = if computed.is_finite() && computed >= 0.0 && computed <= u64::MAX as f64 {
+                        s.memory_used_bytes = if computed.is_finite()
+                            && computed >= 0.0
+                            && computed <= u64::MAX as f64
+                        {
                             computed as u64
                         } else {
                             s.memory_budget_bytes // Safe fallback
@@ -2174,12 +2240,16 @@ mod tests {
                     {
                         let mut s = healthy_state();
                         let computed = s.memory_budget_bytes as f64 * memory_guard.warn_threshold;
-                        s.memory_used_bytes = if computed.is_finite() && computed >= 0.0 && computed <= u64::MAX as f64 {
+                        s.memory_used_bytes = if computed.is_finite()
+                            && computed >= 0.0
+                            && computed <= u64::MAX as f64
+                        {
                             computed as u64
                         } else {
                             s.memory_budget_bytes // Safe fallback
                         };
-                        s.durability_level = durability_guard.min_durability + durability_guard.warn_margin;
+                        s.durability_level =
+                            durability_guard.min_durability + durability_guard.warn_margin;
                         s
                     },
                 ];
@@ -2218,7 +2288,7 @@ mod tests {
                         sample_count: 1000,
                         mean_utilization: 0.3,
                         variance_utilization: 0.8, // Inconsistent: high variance, low mean
-                        peak_utilization: 0.1, // Inconsistent: peak < mean
+                        peak_utilization: 0.1,     // Inconsistent: peak < mean
                     });
                     s
                 },
@@ -2237,30 +2307,63 @@ mod tests {
             for (i, state) in inconsistent_states.iter().enumerate() {
                 // System should handle inconsistent states gracefully
                 let certificate = set.certify(state);
-                assert_eq!(certificate.findings.len(), 6, "State {i} findings count mismatch");
-                assert_eq!(certificate.epoch_id, state.epoch_id, "State {i} epoch mismatch");
+                assert_eq!(
+                    certificate.findings.len(),
+                    6,
+                    "State {i} findings count mismatch"
+                );
+                assert_eq!(
+                    certificate.epoch_id, state.epoch_id,
+                    "State {i} epoch mismatch"
+                );
 
                 // At least one monitor should detect issues in most inconsistent states
-                let has_blocks = certificate.findings.iter().any(|f| f.verdict.severity() >= 2);
-                if i > 0 { // Skip the first state which might be borderline
-                    assert!(has_blocks, "State {i} should have at least one block verdict");
+                let has_blocks = certificate
+                    .findings
+                    .iter()
+                    .any(|f| f.verdict.severity() >= 2);
+                if i > 0 {
+                    // Skip the first state which might be borderline
+                    assert!(
+                        has_blocks,
+                        "State {i} should have at least one block verdict"
+                    );
                 }
 
                 // Certificate should be internally consistent
                 let dominant_severity = certificate.dominant_verdict.severity();
-                let max_finding_severity = certificate.findings.iter().map(|f| f.verdict.severity()).max().unwrap_or(0);
-                assert_eq!(dominant_severity, max_finding_severity, "State {i} dominant verdict mismatch");
+                let max_finding_severity = certificate
+                    .findings
+                    .iter()
+                    .map(|f| f.verdict.severity())
+                    .max()
+                    .unwrap_or(0);
+                assert_eq!(
+                    dominant_severity, max_finding_severity,
+                    "State {i} dominant verdict mismatch"
+                );
 
                 // Blocking budget IDs should match block verdicts
-                let actual_blocks: std::collections::HashSet<_> = certificate.findings
+                let actual_blocks: std::collections::HashSet<_> = certificate
+                    .findings
                     .iter()
-                    .filter_map(|f| if f.verdict.severity() >= 2 { Some(f.budget_id.as_str()) } else { None })
+                    .filter_map(|f| {
+                        if f.verdict.severity() >= 2 {
+                            Some(f.budget_id.as_str())
+                        } else {
+                            None
+                        }
+                    })
                     .collect();
-                let reported_blocks: std::collections::HashSet<_> = certificate.blocking_budget_ids
+                let reported_blocks: std::collections::HashSet<_> = certificate
+                    .blocking_budget_ids
                     .iter()
                     .map(|b| b.as_str())
                     .collect();
-                assert_eq!(actual_blocks, reported_blocks, "State {i} blocking budget ID mismatch");
+                assert_eq!(
+                    actual_blocks, reported_blocks,
+                    "State {i} blocking budget ID mismatch"
+                );
             }
         }
 
@@ -2292,20 +2395,37 @@ mod tests {
                 Box::new(EvidenceEmissionGuardrail::new()),
             ];
 
-            push_bounded_box(&mut test_monitors, Box::new(HardeningRegressionGuardrail::new()), 0);
-            assert!(test_monitors.is_empty(), "Zero capacity should clear all monitors");
+            push_bounded_box(
+                &mut test_monitors,
+                Box::new(HardeningRegressionGuardrail::new()),
+                0,
+            );
+            assert!(
+                test_monitors.is_empty(),
+                "Zero capacity should clear all monitors"
+            );
 
             // Test push_bounded_box with capacity overflow
             let mut overflow_monitors: Vec<Box<dyn GuardrailMonitor>> = Vec::new();
             for i in 0..10 {
-                overflow_monitors.push(Box::new(MemoryBudgetGuardrail::new(0.5 + i as f64 * 0.01, 0.4)));
+                overflow_monitors.push(Box::new(MemoryBudgetGuardrail::new(
+                    0.5 + i as f64 * 0.01,
+                    0.4,
+                )));
             }
 
-            push_bounded_box(&mut overflow_monitors, Box::new(EvidenceEmissionGuardrail::new()), 5);
+            push_bounded_box(
+                &mut overflow_monitors,
+                Box::new(EvidenceEmissionGuardrail::new()),
+                5,
+            );
             assert_eq!(overflow_monitors.len(), 5, "Should maintain capacity limit");
 
             // Should preserve most recent monitors (FIFO eviction)
-            assert_eq!(overflow_monitors.last().unwrap().name(), "EvidenceEmissionGuardrail");
+            assert_eq!(
+                overflow_monitors.last().unwrap().name(),
+                "EvidenceEmissionGuardrail"
+            );
         }
 
         #[test]
@@ -2327,7 +2447,9 @@ mod tests {
             for (i, reason) in injection_attempts.iter().enumerate() {
                 let verdicts = [
                     GuardrailVerdict::Allow,
-                    GuardrailVerdict::Warn { reason: reason.to_string() },
+                    GuardrailVerdict::Warn {
+                        reason: reason.to_string(),
+                    },
                     GuardrailVerdict::Block {
                         reason: reason.to_string(),
                         budget_id: budget_id.clone(),
@@ -2341,8 +2463,14 @@ mod tests {
                     let severity = verdict.severity();
 
                     // Basic sanity checks
-                    assert!(!display_str.is_empty(), "Display string should not be empty for injection {i}");
-                    assert!(event_code.starts_with("EVD-GUARD-"), "Event code should follow expected format for injection {i}");
+                    assert!(
+                        !display_str.is_empty(),
+                        "Display string should not be empty for injection {i}"
+                    );
+                    assert!(
+                        event_code.starts_with("EVD-GUARD-"),
+                        "Event code should follow expected format for injection {i}"
+                    );
                     assert!(severity <= 2, "Severity should be valid for injection {i}");
 
                     // Test in certificate generation
@@ -2359,7 +2487,11 @@ mod tests {
                         epoch_id: 12345,
                         dominant_verdict: verdict.clone(),
                         findings: vec![finding],
-                        blocking_budget_ids: if verdict.severity() >= 2 { vec![budget_id.clone()] } else { vec![] },
+                        blocking_budget_ids: if verdict.severity() >= 2 {
+                            vec![budget_id.clone()]
+                        } else {
+                            vec![]
+                        },
                     };
 
                     // Should handle injected content without issues

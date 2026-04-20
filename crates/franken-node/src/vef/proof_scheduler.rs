@@ -1584,13 +1584,21 @@ mod tests {
         // Fill scheduler with maximum jobs + simulate overflow scenario
         for seq in 0..=MAX_JOBS {
             let window_id = format!("massive-win-{}", seq);
-            let window = make_window(&window_id, WorkloadTier::Critical, 1_701_500_000_000, "trace-massive");
+            let window = make_window(
+                &window_id,
+                WorkloadTier::Critical,
+                1_701_500_000_000,
+                "trace-massive",
+            );
 
             // This should either succeed (within capacity) or fail gracefully (at capacity)
             let result = scheduler.enqueue_windows(&[window], 1_701_500_000_000);
             if seq >= MAX_JOBS {
                 // At or beyond capacity, should fail closed without panic
-                assert!(result.is_err(), "Should fail gracefully at capacity boundary");
+                assert!(
+                    result.is_err(),
+                    "Should fail gracefully at capacity boundary"
+                );
                 break;
             }
         }
@@ -1609,8 +1617,8 @@ mod tests {
             "窓口-🔥-测试",           // Mixed unicode with emoji
             "نافذة-العمل-٧٨٩",        // Arabic RTL text with numbers
             "win\u{200B}dow\u{FEFF}", // Zero-width space and BOM
-            "win‌dow",                  // Zero-width non-joiner
-            "𝓦𝓲𝓷𝓭𝓸𝔀",             // Mathematical script unicode
+            "win‌dow",                 // Zero-width non-joiner
+            "𝓦𝓲𝓷𝓭𝓸𝔀",                 // Mathematical script unicode
             "win\u{0301}dow\u{0302}", // Combining diacritical marks
         ];
 
@@ -1628,7 +1636,10 @@ mod tests {
 
             // Should handle unicode gracefully without panicking
             let result = scheduler.enqueue_windows(&[window], 1_701_500_100_000);
-            assert!(result.is_ok(), "Unicode window ID should be handled gracefully");
+            assert!(
+                result.is_ok(),
+                "Unicode window ID should be handled gracefully"
+            );
         }
 
         // Verify no corruption in internal state
@@ -1642,13 +1653,18 @@ mod tests {
 
         // Test with extreme timestamps that could cause overflow
         let extreme_cases = vec![
-            (u64::MAX - 1000, 2000),     // Near max timestamp with large deadline span
+            (u64::MAX - 1000, 2000),      // Near max timestamp with large deadline span
             (u64::MAX / 2, u64::MAX / 2), // Two large values
-            (1, u64::MAX),               // Small base + maximum span
+            (1, u64::MAX),                // Small base + maximum span
         ];
 
         for (base_millis, deadline_span) in extreme_cases {
-            let window = make_window("extreme-deadline", WorkloadTier::Critical, base_millis, "trace-extreme");
+            let window = make_window(
+                "extreme-deadline",
+                WorkloadTier::Critical,
+                base_millis,
+                "trace-extreme",
+            );
 
             // Manually override deadline span to test arithmetic
             let policy = SchedulerPolicy {
@@ -1667,7 +1683,10 @@ mod tests {
                 if let Some(job_id) = job_ids.first() {
                     let job = scheduler.jobs().get(job_id).unwrap();
                     // Deadline should be calculated with saturating arithmetic
-                    assert!(job.deadline_millis >= base_millis, "Deadline should not underflow");
+                    assert!(
+                        job.deadline_millis >= base_millis,
+                        "Deadline should not underflow"
+                    );
                     // Should either be sum or saturated at max
                     assert!(job.deadline_millis == base_millis.saturating_add(deadline_span));
                 }
@@ -1680,24 +1699,29 @@ mod tests {
         // Test zero and extreme policy values
         let problematic_policies = vec![
             SchedulerPolicy {
-                max_receipts_per_window: 0,      // Zero receipts
-                max_concurrent_jobs: 0,          // Zero concurrency
-                max_compute_millis_per_tick: 0,  // Zero compute budget
-                max_memory_mib_per_tick: 0,      // Zero memory budget
+                max_receipts_per_window: 0,            // Zero receipts
+                max_concurrent_jobs: 0,                // Zero concurrency
+                max_compute_millis_per_tick: 0,        // Zero compute budget
+                max_memory_mib_per_tick: 0,            // Zero memory budget
                 tier_deadline_millis: BTreeMap::new(), // Empty deadline map
             },
             SchedulerPolicy {
-                max_receipts_per_window: usize::MAX, // Maximum receipts
-                max_concurrent_jobs: usize::MAX,     // Maximum concurrency
+                max_receipts_per_window: usize::MAX,   // Maximum receipts
+                max_concurrent_jobs: usize::MAX,       // Maximum concurrency
                 max_compute_millis_per_tick: u64::MAX, // Maximum compute
-                max_memory_mib_per_tick: u64::MAX,   // Maximum memory
+                max_memory_mib_per_tick: u64::MAX,     // Maximum memory
                 tier_deadline_millis: BTreeMap::new(),
             },
         ];
 
         for policy in problematic_policies {
             let mut scheduler = VefProofScheduler::new(policy);
-            let window = make_window("malformed-policy", WorkloadTier::Standard, 1_701_500_200_000, "trace-malformed");
+            let window = make_window(
+                "malformed-policy",
+                WorkloadTier::Standard,
+                1_701_500_200_000,
+                "trace-malformed",
+            );
 
             // Should either work or fail gracefully, never panic
             let _ = scheduler.enqueue_windows(&[window], 1_701_500_200_000);
@@ -1717,13 +1741,48 @@ mod tests {
         scheduler.next_job_seq = u64::MAX - 5;
 
         let windows = vec![
-            make_window("seq-overflow-1", WorkloadTier::Standard, 1_701_500_300_000, "trace-seq-overflow"),
-            make_window("seq-overflow-2", WorkloadTier::Standard, 1_701_500_300_000, "trace-seq-overflow"),
-            make_window("seq-overflow-3", WorkloadTier::Standard, 1_701_500_300_000, "trace-seq-overflow"),
-            make_window("seq-overflow-4", WorkloadTier::Standard, 1_701_500_300_000, "trace-seq-overflow"),
-            make_window("seq-overflow-5", WorkloadTier::Standard, 1_701_500_300_000, "trace-seq-overflow"),
-            make_window("seq-overflow-6", WorkloadTier::Standard, 1_701_500_300_000, "trace-seq-overflow"),
-            make_window("seq-overflow-7", WorkloadTier::Standard, 1_701_500_300_000, "trace-seq-overflow"),
+            make_window(
+                "seq-overflow-1",
+                WorkloadTier::Standard,
+                1_701_500_300_000,
+                "trace-seq-overflow",
+            ),
+            make_window(
+                "seq-overflow-2",
+                WorkloadTier::Standard,
+                1_701_500_300_000,
+                "trace-seq-overflow",
+            ),
+            make_window(
+                "seq-overflow-3",
+                WorkloadTier::Standard,
+                1_701_500_300_000,
+                "trace-seq-overflow",
+            ),
+            make_window(
+                "seq-overflow-4",
+                WorkloadTier::Standard,
+                1_701_500_300_000,
+                "trace-seq-overflow",
+            ),
+            make_window(
+                "seq-overflow-5",
+                WorkloadTier::Standard,
+                1_701_500_300_000,
+                "trace-seq-overflow",
+            ),
+            make_window(
+                "seq-overflow-6",
+                WorkloadTier::Standard,
+                1_701_500_300_000,
+                "trace-seq-overflow",
+            ),
+            make_window(
+                "seq-overflow-7",
+                WorkloadTier::Standard,
+                1_701_500_300_000,
+                "trace-seq-overflow",
+            ),
         ];
 
         for window in &windows {
@@ -1731,7 +1790,10 @@ mod tests {
 
             // Should either succeed (if within sequence range) or fail gracefully on overflow
             if scheduler.next_job_seq == u64::MAX {
-                assert!(result.is_err(), "Should fail gracefully on sequence overflow");
+                assert!(
+                    result.is_err(),
+                    "Should fail gracefully on sequence overflow"
+                );
                 break;
             }
         }
@@ -1746,9 +1808,9 @@ mod tests {
 
         // Test problematic characters in trace IDs
         let problematic_traces = vec![
-            "trace\0null",           // Null byte
-            "trace\x01\x02control", // Control characters
-            "trace\r\ninjection",   // Line breaks
+            "trace\0null",                                                   // Null byte
+            "trace\x01\x02control",                                          // Control characters
+            "trace\r\ninjection",                                            // Line breaks
             &format!("trace\x7F{}", String::from_utf8_lossy(&[0x80, 0xFF])), // High bytes and DEL
             "trace\u{FFFE}\u{FFFF}", // Unicode non-characters
         ];
@@ -1767,12 +1829,18 @@ mod tests {
 
             // Should handle control characters without corruption or panic
             let result = scheduler.enqueue_windows(&[window], 1_701_500_400_000);
-            assert!(result.is_ok(), "Control characters in trace ID should be handled");
+            assert!(
+                result.is_ok(),
+                "Control characters in trace ID should be handled"
+            );
 
             if let Ok(job_ids) = result {
                 if let Some(job_id) = job_ids.first() {
                     let job = scheduler.jobs().get(job_id).unwrap();
-                    assert_eq!(&job.trace_id, trace_id, "Trace ID should be preserved exactly");
+                    assert_eq!(
+                        &job.trace_id, trace_id,
+                        "Trace ID should be preserved exactly"
+                    );
                 }
             }
         }
@@ -1789,13 +1857,18 @@ mod tests {
 
         // Create jobs with extreme resource estimates that could overflow
         let extreme_jobs = vec![
-            ("extreme-compute", u64::MAX / 2, 100),  // Massive compute estimate
-            ("extreme-memory", 100, u64::MAX / 2),   // Massive memory estimate
+            ("extreme-compute", u64::MAX / 2, 100), // Massive compute estimate
+            ("extreme-memory", 100, u64::MAX / 2),  // Massive memory estimate
             ("both-extreme", u64::MAX / 4, u64::MAX / 4), // Both extreme
         ];
 
         for (job_suffix, compute_estimate, memory_estimate) in extreme_jobs {
-            let mut job = make_job(job_suffix, ProofJobStatus::Pending, 1_701_500_500_000, "trace-resource-extreme");
+            let mut job = make_job(
+                job_suffix,
+                ProofJobStatus::Pending,
+                1_701_500_500_000,
+                "trace-resource-extreme",
+            );
             job.estimated_compute_millis = compute_estimate;
             job.estimated_memory_mib = memory_estimate;
 
@@ -1804,7 +1877,10 @@ mod tests {
 
         // Dispatch should use saturating arithmetic and not overflow
         let result = scheduler.dispatch_jobs(1_701_500_500_100);
-        assert!(result.is_ok(), "Resource budget calculation should not panic on overflow");
+        assert!(
+            result.is_ok(),
+            "Resource budget calculation should not panic on overflow"
+        );
 
         // Get metrics (which accumulates resource usage)
         let metrics = scheduler.backlog_metrics(1_701_500_500_200, "trace-resource-extreme");
@@ -1845,7 +1921,12 @@ mod tests {
         }
 
         // Window selection should handle large data sets without excessive memory usage
-        let result = scheduler.select_windows(&entries, &checkpoints, 1_701_600_100_000, "trace-massive-checkpoints");
+        let result = scheduler.select_windows(
+            &entries,
+            &checkpoints,
+            1_701_600_100_000,
+            "trace-massive-checkpoints",
+        );
 
         match result {
             Ok(windows) => {
@@ -1858,10 +1939,13 @@ mod tests {
                     assert!(window.entry_count > 0);
                     assert!(window.entry_count < 1000); // Reasonable size
                 }
-            },
+            }
             Err(e) => {
                 // If it fails due to resource constraints, should fail gracefully
-                assert!(!e.message.is_empty(), "Error should have descriptive message");
+                assert!(
+                    !e.message.is_empty(),
+                    "Error should have descriptive message"
+                );
             }
         }
 
@@ -1884,11 +1968,16 @@ mod tests {
         // Generate multiple jobs to test counter overflow protection
         for i in 0..10 {
             let windows = scheduler
-                .select_proof_windows(&entries, &checkpoints, 1_701_100_000_000_u64.saturating_add(i * 1000))
+                .select_proof_windows(
+                    &entries,
+                    &checkpoints,
+                    1_701_100_000_000_u64.saturating_add(i * 1000),
+                )
                 .expect("window selection should succeed");
 
             if !windows.is_empty() {
-                let result = scheduler.queue_proof_jobs(&windows, 1_701_100_000_000_u64.saturating_add(i * 1000));
+                let result = scheduler
+                    .queue_proof_jobs(&windows, 1_701_100_000_000_u64.saturating_add(i * 1000));
                 // Should handle near-overflow gracefully using saturating_add
                 match result {
                     Ok(_) => {
@@ -1957,7 +2046,11 @@ mod tests {
         let exceeded_at_boundary = scheduler.enforce_deadlines(exact_deadline);
 
         // Correct pattern: >= means "expired" (fail-closed, includes boundary)
-        assert_eq!(exceeded_at_boundary.len(), 1, "Job should be considered expired at exact deadline boundary");
+        assert_eq!(
+            exceeded_at_boundary.len(),
+            1,
+            "Job should be considered expired at exact deadline boundary"
+        );
 
         let job_state = scheduler.jobs.get("deadline-boundary-test").unwrap();
         assert_eq!(job_state.status, ProofJobStatus::DeadlineExceeded);
@@ -1973,11 +2066,19 @@ mod tests {
         scheduler2.jobs.insert(job2.job_id.clone(), job2);
 
         let not_exceeded_before = scheduler2.enforce_deadlines(exact_deadline.saturating_sub(1));
-        assert_eq!(not_exceeded_before.len(), 0, "Job should not be expired before deadline");
+        assert_eq!(
+            not_exceeded_before.len(),
+            0,
+            "Job should not be expired before deadline"
+        );
 
         // Test after deadline (should be expired)
         let exceeded_after = scheduler2.enforce_deadlines(exact_deadline.saturating_add(1));
-        assert_eq!(exceeded_after.len(), 1, "Job should be expired after deadline");
+        assert_eq!(
+            exceeded_after.len(),
+            1,
+            "Job should be expired after deadline"
+        );
     }
 
     #[test]
@@ -1991,21 +2092,36 @@ mod tests {
         let job_hash_3 = b"proof_job_hash_v1_abcdef123456788"; // Different by one byte
 
         // Correct pattern: use constant-time comparison for hash verification
-        assert!(constant_time::ct_eq_bytes(job_hash_1, job_hash_2), "Identical job hashes should match");
-        assert!(!constant_time::ct_eq_bytes(job_hash_1, job_hash_3), "Different job hashes should not match");
+        assert!(
+            constant_time::ct_eq_bytes(job_hash_1, job_hash_2),
+            "Identical job hashes should match"
+        );
+        assert!(
+            !constant_time::ct_eq_bytes(job_hash_1, job_hash_3),
+            "Different job hashes should not match"
+        );
 
         // Test with different length hashes (should fail fast but still constant-time)
         let short_hash = b"short_hash";
         let long_hash = b"much_longer_proof_job_hash_value";
-        assert!(!constant_time::ct_eq_bytes(short_hash, long_hash), "Different length hashes should not match");
+        assert!(
+            !constant_time::ct_eq_bytes(short_hash, long_hash),
+            "Different length hashes should not match"
+        );
 
         // Test with proof window ID comparison (could be security-sensitive)
         let window_id_1 = b"proof_window_12345";
         let window_id_2 = b"proof_window_12345";
         let window_id_3 = b"proof_window_12346";
 
-        assert!(constant_time::ct_eq_bytes(window_id_1, window_id_2), "Identical window IDs should match");
-        assert!(!constant_time::ct_eq_bytes(window_id_1, window_id_3), "Different window IDs should not match");
+        assert!(
+            constant_time::ct_eq_bytes(window_id_1, window_id_2),
+            "Identical window IDs should match"
+        );
+        assert!(
+            !constant_time::ct_eq_bytes(window_id_1, window_id_3),
+            "Different window IDs should not match"
+        );
     }
 
     #[test]
@@ -2034,8 +2150,11 @@ mod tests {
         let job_hash_without_domain = job_hasher_without_domain.finalize();
 
         // Should be different due to domain separation
-        assert_ne!(job_hash_with_domain[..], job_hash_without_domain[..],
-                   "Domain separator should change hash output");
+        assert_ne!(
+            job_hash_with_domain[..],
+            job_hash_without_domain[..],
+            "Domain separator should change hash output"
+        );
 
         // Test window hashing with domain separation
         let window_domain_separator = b"vef_proof_window_v1:";
@@ -2058,8 +2177,11 @@ mod tests {
         window_hasher_different_domain.update(&end_index.to_le_bytes());
         let window_hash_different_domain = window_hasher_different_domain.finalize();
 
-        assert_ne!(window_hash_with_domain[..], window_hash_different_domain[..],
-                   "Different domain separators should produce different hashes");
+        assert_ne!(
+            window_hash_with_domain[..],
+            window_hash_different_domain[..],
+            "Different domain separators should produce different hashes"
+        );
 
         // Test length-prefixed inputs to prevent delimiter collision
         let field1 = "proof_data_field1";
@@ -2109,7 +2231,9 @@ mod tests {
             trace_id: "trace-high-compute".to_string(),
         };
 
-        scheduler.jobs.insert(high_compute_job.job_id.clone(), high_compute_job);
+        scheduler
+            .jobs
+            .insert(high_compute_job.job_id.clone(), high_compute_job);
 
         // Dispatch should use saturating arithmetic and not overflow
         let result = scheduler.dispatch_ready_jobs(1_701_100_005_000, "trace-dispatch");

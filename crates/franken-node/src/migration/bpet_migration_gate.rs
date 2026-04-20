@@ -1349,9 +1349,13 @@ mod tests {
 
             // Verify delta computation doesn't panic and handles extreme cases
             if extreme_value.is_finite() {
-                assert!(delta.instability_delta.is_finite() || delta.instability_delta.is_infinite());
+                assert!(
+                    delta.instability_delta.is_finite() || delta.instability_delta.is_infinite()
+                );
                 assert!(delta.drift_delta.is_finite() || delta.drift_delta.is_infinite());
-                assert!(delta.regime_shift_delta.is_finite() || delta.regime_shift_delta.is_infinite());
+                assert!(
+                    delta.regime_shift_delta.is_finite() || delta.regime_shift_delta.is_infinite()
+                );
             } else {
                 // NaN or infinite inputs should produce NaN or infinite deltas
                 assert!(delta.instability_delta.is_nan() || delta.instability_delta.is_infinite());
@@ -1361,7 +1365,12 @@ mod tests {
             if extreme_value.is_finite() && extreme_value >= 0.0 && extreme_value <= 1.0 {
                 let result = evaluate_migration_gate("test-extreme", &extreme_snapshot);
                 // Should not panic, might allow/reject based on thresholds
-                assert!(matches!(result.verdict, GateVerdict::Allow | GateVerdict::RequireAdditionalEvidence | GateVerdict::StagedRolloutRequired));
+                assert!(matches!(
+                    result.verdict,
+                    GateVerdict::Allow
+                        | GateVerdict::RequireAdditionalEvidence
+                        | GateVerdict::StagedRolloutRequired
+                ));
             }
         }
     }
@@ -1405,7 +1414,12 @@ mod tests {
             let result = gate.evaluate("test-bypass", &test_trajectory);
 
             // Verify gate still produces valid verdicts even with extreme thresholds
-            assert!(matches!(result.verdict, GateVerdict::Allow | GateVerdict::RequireAdditionalEvidence | GateVerdict::StagedRolloutRequired));
+            assert!(matches!(
+                result.verdict,
+                GateVerdict::Allow
+                    | GateVerdict::RequireAdditionalEvidence
+                    | GateVerdict::StagedRolloutRequired
+            ));
 
             // Test serialization of malicious thresholds
             let json = serde_json::to_string(&malicious_thresholds);
@@ -1482,14 +1496,14 @@ mod tests {
         use crate::security::constant_time;
 
         let malicious_trace_ids = [
-            "trace\u{202E}fake\u{202C}",           // BiDi override attack
-            "trace\x1b[31mred\x1b[0m",             // ANSI escape injection
-            "trace\0null\r\n\t",                   // Control character injection
+            "trace\u{202E}fake\u{202C}",          // BiDi override attack
+            "trace\x1b[31mred\x1b[0m",            // ANSI escape injection
+            "trace\0null\r\n\t",                  // Control character injection
             "trace\"}{\"admin\":true,\"bypass\"", // JSON injection attempt
-            "trace/../../etc/passwd",              // Path traversal attempt
-            "trace\u{FEFF}BOM",                    // Byte order mark
+            "trace/../../etc/passwd",             // Path traversal attempt
+            "trace\u{FEFF}BOM",                   // Byte order mark
             "trace\u{200B}\u{200C}\u{200D}",      // Zero-width characters
-            "trace".repeat(1000),                   // Extremely long trace ID
+            "trace".repeat(1000),                 // Extremely long trace ID
         ];
 
         let test_trajectory = TrajectorySnapshot {
@@ -1503,28 +1517,44 @@ mod tests {
             let result = evaluate_migration_gate(malicious_trace_id, &test_trajectory);
 
             // Verify result contains the trace ID but is safely contained
-            assert_eq!(result.event.trace_id, malicious_trace_id, "trace ID should be preserved for forensics");
+            assert_eq!(
+                result.event.trace_id, malicious_trace_id,
+                "trace ID should be preserved for forensics"
+            );
 
             // Verify JSON serialization is safe
             let json = serde_json::to_string(&result).expect("serialization should work");
-            let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON should be valid");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&json).expect("JSON should be valid");
 
             // Verify no injection occurred in JSON structure
-            assert!(parsed.get("admin").is_none(), "JSON injection should not create admin field");
-            assert!(parsed.get("bypass").is_none(), "JSON injection should not create bypass field");
+            assert!(
+                parsed.get("admin").is_none(),
+                "JSON injection should not create admin field"
+            );
+            assert!(
+                parsed.get("bypass").is_none(),
+                "JSON injection should not create bypass field"
+            );
 
             // Verify trace ID is properly escaped in JSON
             if let Some(event) = parsed.get("event") {
                 if let Some(trace_id) = event.get("trace_id") {
                     if let Some(trace_str) = trace_id.as_str() {
-                        assert_eq!(trace_str, malicious_trace_id, "trace ID should be preserved");
+                        assert_eq!(
+                            trace_str, malicious_trace_id,
+                            "trace ID should be preserved"
+                        );
                     }
                 }
             }
 
             // Test constant-time comparison for trace IDs
             let normal_trace = "normal-trace-123";
-            assert!(!constant_time::ct_eq(malicious_trace_id, normal_trace), "trace ID comparison should be constant-time");
+            assert!(
+                !constant_time::ct_eq(malicious_trace_id, normal_trace),
+                "trace ID comparison should be constant-time"
+            );
 
             // Test rollout evaluation with malicious trace ID
             let rollout = RolloutPlan {
@@ -1558,7 +1588,10 @@ mod tests {
             let rollback = evaluate_rollout_health(malicious_trace_id, &rollout, &health);
 
             // Verify rollback evaluation works with malicious trace ID
-            assert_eq!(rollback.event.trace_id, malicious_trace_id, "rollback trace ID should be preserved");
+            assert_eq!(
+                rollback.event.trace_id, malicious_trace_id,
+                "rollback trace ID should be preserved"
+            );
         }
     }
 
@@ -1574,12 +1607,19 @@ mod tests {
         };
 
         // Verify serialization handles massive message
-        let json = serde_json::to_string(&massive_event).expect("serialization should handle massive message");
-        assert!(json.len() >= massive_message.len(), "JSON should include massive message");
+        let json = serde_json::to_string(&massive_event)
+            .expect("serialization should handle massive message");
+        assert!(
+            json.len() >= massive_message.len(),
+            "JSON should include massive message"
+        );
 
         // Verify deserialization works
         let parsed: GateEvent = serde_json::from_str(&json).expect("deserialization should work");
-        assert_eq!(parsed.message, massive_message, "massive message should be preserved");
+        assert_eq!(
+            parsed.message, massive_message,
+            "massive message should be preserved"
+        );
 
         // Test with injection patterns in message
         let injection_messages = [
@@ -1600,20 +1640,27 @@ mod tests {
 
             // Verify serialization contains injection safely
             let json = serde_json::to_string(&injection_event).expect("serialization should work");
-            let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON should be valid");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&json).expect("JSON should be valid");
 
             // Verify no additional fields were injected
             let expected_keys = ["code", "level", "trace_id", "message"];
             if let Some(obj) = parsed.as_object() {
                 for key in obj.keys() {
-                    assert!(expected_keys.contains(&key.as_str()),
-                           "unexpected field '{}' - possible JSON injection", key);
+                    assert!(
+                        expected_keys.contains(&key.as_str()),
+                        "unexpected field '{}' - possible JSON injection",
+                        key
+                    );
                 }
             }
 
             // Verify message content is properly escaped
             if let Some(message) = parsed.get("message").and_then(|m| m.as_str()) {
-                assert_eq!(message, injection_message, "message should be preserved exactly");
+                assert_eq!(
+                    message, injection_message,
+                    "message should be preserved exactly"
+                );
             }
         }
     }
@@ -1660,7 +1707,11 @@ mod tests {
         for invalid_json in invalid_phase_jsons {
             let result: Result<RolloutStep, _> = serde_json::from_str(invalid_json);
             // Should fail to deserialize invalid enum variants
-            assert!(result.is_err(), "invalid phase should fail deserialization: {}", invalid_json);
+            assert!(
+                result.is_err(),
+                "invalid phase should fail deserialization: {}",
+                invalid_json
+            );
         }
 
         // Test with extreme threshold values
@@ -1688,7 +1739,10 @@ mod tests {
 
         // Should handle extreme thresholds without panic
         let rollback = evaluate_rollout_health("test-extreme-thresholds", &rollout, &normal_health);
-        assert!(!rollback.should_rollback, "extreme thresholds should allow rollout");
+        assert!(
+            !rollback.should_rollback,
+            "extreme thresholds should allow rollout"
+        );
     }
 
     #[test]
@@ -1781,13 +1835,21 @@ mod tests {
             all_trace_ids.push(trace_id.clone());
 
             // Verify each evaluation produces a valid result
-            assert!(matches!(result.verdict, GateVerdict::Allow | GateVerdict::RequireAdditionalEvidence | GateVerdict::StagedRolloutRequired));
+            assert!(matches!(
+                result.verdict,
+                GateVerdict::Allow
+                    | GateVerdict::RequireAdditionalEvidence
+                    | GateVerdict::StagedRolloutRequired
+            ));
             assert_eq!(result.event.trace_id, trace_id);
         }
 
         // Verify recent events are bounded (implementation detail, but should not grow unbounded)
         if gate.recent_events.len() > MAX_EVENTS * 2 {
-            panic!("event storage should be bounded, got {} events", gate.recent_events.len());
+            panic!(
+                "event storage should be bounded, got {} events",
+                gate.recent_events.len()
+            );
         }
 
         // Test with malicious trace IDs that might cause memory issues
@@ -1807,7 +1869,12 @@ mod tests {
 
         // Verify gate still functions after stress testing
         let final_result = gate.evaluate("final-test", &test_trajectory);
-        assert!(matches!(final_result.verdict, GateVerdict::Allow | GateVerdict::RequireAdditionalEvidence | GateVerdict::StagedRolloutRequired));
+        assert!(matches!(
+            final_result.verdict,
+            GateVerdict::Allow
+                | GateVerdict::RequireAdditionalEvidence
+                | GateVerdict::StagedRolloutRequired
+        ));
     }
 
     #[test]
@@ -1851,10 +1918,14 @@ mod tests {
         let fallback = generate_fallback_plan("malicious-config-test", &malicious_rollout);
 
         // Should produce a valid fallback plan despite malicious input
-        assert!(!fallback.steps.is_empty(), "fallback plan should have steps");
+        assert!(
+            !fallback.steps.is_empty(),
+            "fallback plan should have steps"
+        );
 
         // Test rollout health evaluation with malicious configuration
-        let rollback = evaluate_rollout_health("malicious-rollout-test", &malicious_rollout, &health);
+        let rollback =
+            evaluate_rollout_health("malicious-rollout-test", &malicious_rollout, &health);
 
         // Should not panic and should produce a valid rollback decision
         assert_eq!(rollback.event.trace_id, "malicious-rollout-test");
@@ -1896,8 +1967,14 @@ mod tests {
 
         // Should use push_bounded to prevent memory exhaustion
         // Currently vulnerable: requirements.push("item") without bounds checking
-        assert!(requirements.len() <= 10, "Evidence requirements should be bounded");
-        assert!(!requirements.is_empty(), "Should generate some requirements for high instability");
+        assert!(
+            requirements.len() <= 10,
+            "Evidence requirements should be bounded"
+        );
+        assert!(
+            !requirements.is_empty(),
+            "Should generate some requirements for high instability"
+        );
 
         // Test that repeated calls don't cause unbounded growth
         let mut all_requirements = Vec::new();
@@ -1907,13 +1984,17 @@ mod tests {
                 drift_score: 0.5,
                 regime_shift_probability: 0.5,
             };
-            let mut batch_requirements = gather_evidence_requirements(baseline, test_projected, &thresholds);
+            let mut batch_requirements =
+                gather_evidence_requirements(baseline, test_projected, &thresholds);
 
             // Simulate what should be push_bounded behavior
             const MAX_TOTAL_REQUIREMENTS: usize = 100;
             for req in batch_requirements.drain(..) {
                 if all_requirements.len() >= MAX_TOTAL_REQUIREMENTS {
-                    let overflow = all_requirements.len().saturating_sub(MAX_TOTAL_REQUIREMENTS).saturating_add(1);
+                    let overflow = all_requirements
+                        .len()
+                        .saturating_sub(MAX_TOTAL_REQUIREMENTS)
+                        .saturating_add(1);
                     all_requirements.drain(0..overflow);
                 }
                 all_requirements.push(req);
@@ -1921,7 +2002,10 @@ mod tests {
         }
 
         // Requirements should be bounded despite 1000 iterations
-        assert!(all_requirements.len() <= 100, "Requirements should be bounded with push_bounded pattern");
+        assert!(
+            all_requirements.len() <= 100,
+            "Requirements should be bounded with push_bounded pattern"
+        );
 
         // Production code should use: push_bounded(&mut requirements, item, MAX_REQUIREMENTS) ✓
         // NOT: requirements.push(item) ✗ (unbounded growth)
@@ -1946,17 +2030,22 @@ mod tests {
             let result = gate.evaluate(&trace_id, &projected);
 
             // Events should be bounded (currently uses manual length checking)
-            assert!(result.events.len() <= MAX_EVENTS * 2,
-                   "Events should be bounded at iteration {}", i);
+            assert!(
+                result.events.len() <= MAX_EVENTS * 2,
+                "Events should be bounded at iteration {}",
+                i
+            );
         }
 
         // Verify gate's internal event storage is also bounded
-        assert!(gate.recent_events.len() <= MAX_EVENTS * 3,
-               "Gate's recent events should be bounded");
+        assert!(
+            gate.recent_events.len() <= MAX_EVENTS * 3,
+            "Gate's recent events should be bounded"
+        );
 
         // Test with large event generation in single call
         let high_instability_projected = TrajectorySnapshot {
-            instability_score: 0.9,  // Triggers multiple event types
+            instability_score: 0.9, // Triggers multiple event types
             drift_score: 0.9,
             regime_shift_probability: 0.9,
         };
@@ -1964,8 +2053,10 @@ mod tests {
         let large_result = gate.evaluate("large-event-test", &high_instability_projected);
 
         // Single evaluation should not exceed reasonable event count
-        assert!(large_result.events.len() <= 20,
-               "Single evaluation should not generate excessive events");
+        assert!(
+            large_result.events.len() <= 20,
+            "Single evaluation should not generate excessive events"
+        );
 
         // Production code should use: push_bounded(&mut events, event, MAX_EVENTS) ✓
         // NOT: events.push(event); if events.len() > MAX_EVENTS { drain... } ✗
@@ -1985,7 +2076,8 @@ mod tests {
         };
 
         // Test evidence requirements length conversion
-        let requirements = gather_evidence_requirements(baseline, projected, &StabilityThresholds::default());
+        let requirements =
+            gather_evidence_requirements(baseline, projected, &StabilityThresholds::default());
 
         // Safe length conversion
         let safe_count = u32::try_from(requirements.len()).unwrap_or(u32::MAX);
@@ -2056,17 +2148,27 @@ mod tests {
                 &format!("boundary-test-{}", i),
             );
 
-            let is_at_boundary = (projected.instability_score - thresholds.max_instability_score_for_staged_rollout).abs() < f64::EPSILON;
-            let is_above_threshold = projected.instability_score > thresholds.max_instability_score_for_staged_rollout;
+            let is_at_boundary = (projected.instability_score
+                - thresholds.max_instability_score_for_staged_rollout)
+                .abs()
+                < f64::EPSILON;
+            let is_above_threshold =
+                projected.instability_score > thresholds.max_instability_score_for_staged_rollout;
 
             if is_at_boundary {
                 // Boundary case: fail-closed should reject (use >=, not >)
-                assert!(matches!(decision.verdict, GateVerdict::StagedRolloutRequired),
-                       "Boundary case should be rejected with fail-closed semantics for test {}", i);
+                assert!(
+                    matches!(decision.verdict, GateVerdict::StagedRolloutRequired),
+                    "Boundary case should be rejected with fail-closed semantics for test {}",
+                    i
+                );
             } else if is_above_threshold {
                 // Above threshold: should definitely be rejected
-                assert!(matches!(decision.verdict, GateVerdict::StagedRolloutRequired),
-                       "Above threshold should be rejected for test {}", i);
+                assert!(
+                    matches!(decision.verdict, GateVerdict::StagedRolloutRequired),
+                    "Above threshold should be rejected for test {}",
+                    i
+                );
             } else {
                 // Below threshold: should be allowed (unless other constraints apply)
                 // May still require evidence due to other factors, but not staged rollout for this metric
@@ -2089,8 +2191,10 @@ mod tests {
         );
 
         // Boundary regime shift probability should trigger staged rollout (fail-closed)
-        assert!(matches!(regime_decision.verdict, GateVerdict::StagedRolloutRequired),
-               "Boundary regime shift probability should be fail-closed");
+        assert!(
+            matches!(regime_decision.verdict, GateVerdict::StagedRolloutRequired),
+            "Boundary regime shift probability should be fail-closed"
+        );
 
         // Production code should use: value >= threshold ✓ (fail-closed)
         // NOT: value > threshold ✗ (allows boundary values through)
@@ -2117,7 +2221,8 @@ mod tests {
         // Hash with domain separator (proper approach)
         let mut hasher_with_domain = Sha256::new();
         hasher_with_domain.update(b"bpet_trajectory_v1:");
-        let trajectory1_json = serde_json::to_string(&trajectory1).expect("trajectory1 serialization");
+        let trajectory1_json =
+            serde_json::to_string(&trajectory1).expect("trajectory1 serialization");
         hasher_with_domain.update(trajectory1_json.as_bytes());
         let hash_with_domain = hasher_with_domain.finalize();
 
@@ -2127,8 +2232,11 @@ mod tests {
         let hash_without_domain = hasher_without_domain.finalize();
 
         // Domain separator should change hash value
-        assert_ne!(hash_with_domain.as_slice(), hash_without_domain.as_slice(),
-                  "Domain separator should change hash value");
+        assert_ne!(
+            hash_with_domain.as_slice(),
+            hash_without_domain.as_slice(),
+            "Domain separator should change hash value"
+        );
 
         // Test different types with different domain separators
         let thresholds = StabilityThresholds::default();
@@ -2145,8 +2253,11 @@ mod tests {
         let thresholds_hash = thresholds_hasher.finalize();
 
         // Different types should have different hash domains
-        assert_ne!(trajectory_hash.as_slice(), thresholds_hash.as_slice(),
-                  "Different types should have different hash domains");
+        assert_ne!(
+            trajectory_hash.as_slice(),
+            thresholds_hash.as_slice(),
+            "Different types should have different hash domains"
+        );
 
         // Test length-prefixed domain separation
         let mut length_prefixed_hasher = Sha256::new();
@@ -2157,8 +2268,11 @@ mod tests {
         length_prefixed_hasher.update(trajectory1_json.as_bytes());
         let length_prefixed_hash = length_prefixed_hasher.finalize();
 
-        assert_ne!(length_prefixed_hash.as_slice(), hash_with_domain.as_slice(),
-                  "Length-prefixed domain separation should be distinct");
+        assert_ne!(
+            length_prefixed_hash.as_slice(),
+            hash_with_domain.as_slice(),
+            "Length-prefixed domain separation should be distinct"
+        );
 
         // Test rollout phase hashing with domain separation
         let phase = RolloutPhase::Canary;
@@ -2169,8 +2283,11 @@ mod tests {
         phase_hasher.update(phase_json.as_bytes());
         let phase_hash = phase_hasher.finalize();
 
-        assert_ne!(phase_hash.as_slice(), trajectory_hash.as_slice(),
-                  "Rollout phase should have different hash domain");
+        assert_ne!(
+            phase_hash.as_slice(),
+            trajectory_hash.as_slice(),
+            "Rollout phase should have different hash domain"
+        );
 
         // Production code should use domain separators:
         // hasher.update(b"bpet_trajectory_v1:");  ✓
@@ -2198,32 +2315,60 @@ mod tests {
 
             // Test safe length conversion throughout
             let events_count = result.events.len();
-            let safe_events_count = std::convert::TryFrom::try_from(events_count).unwrap_or(u32::MAX);
-            assert!(safe_events_count <= 50, "Events should be reasonably bounded for iteration {}", i);
+            let safe_events_count =
+                std::convert::TryFrom::try_from(events_count).unwrap_or(u32::MAX);
+            assert!(
+                safe_events_count <= 50,
+                "Events should be reasonably bounded for iteration {}",
+                i
+            );
 
             // Test evidence requirements (should use push_bounded)
             let requirements = gather_evidence_requirements(baseline, projected, &thresholds);
-            assert!(requirements.len() <= 20, "Requirements should be bounded for iteration {}", i);
+            assert!(
+                requirements.len() <= 20,
+                "Requirements should be bounded for iteration {}",
+                i
+            );
 
             // Test threshold comparisons (should use fail-closed semantics)
-            let is_high_risk = projected.instability_score >= thresholds.max_instability_score_for_staged_rollout
-                || projected.regime_shift_probability >= thresholds.max_regime_shift_probability_for_staged_rollout;
+            let is_high_risk = projected.instability_score
+                >= thresholds.max_instability_score_for_staged_rollout
+                || projected.regime_shift_probability
+                    >= thresholds.max_regime_shift_probability_for_staged_rollout;
 
             if is_high_risk {
-                assert!(matches!(result.verdict, GateVerdict::StagedRolloutRequired),
-                       "High risk should require staged rollout for iteration {}", i);
+                assert!(
+                    matches!(result.verdict, GateVerdict::StagedRolloutRequired),
+                    "High risk should require staged rollout for iteration {}",
+                    i
+                );
             }
 
             // Verify no arithmetic overflow in delta calculations
             let delta = TrajectoryDelta::between(baseline, projected);
-            assert!(delta.instability_delta.is_finite(), "Instability delta should be finite for iteration {}", i);
-            assert!(delta.drift_delta.is_finite(), "Drift delta should be finite for iteration {}", i);
-            assert!(delta.regime_shift_delta.is_finite(), "Regime shift delta should be finite for iteration {}", i);
+            assert!(
+                delta.instability_delta.is_finite(),
+                "Instability delta should be finite for iteration {}",
+                i
+            );
+            assert!(
+                delta.drift_delta.is_finite(),
+                "Drift delta should be finite for iteration {}",
+                i
+            );
+            assert!(
+                delta.regime_shift_delta.is_finite(),
+                "Regime shift delta should be finite for iteration {}",
+                i
+            );
         }
 
         // Test gate's internal state remains bounded
-        assert!(gate.recent_events.len() <= MAX_EVENTS * 5,
-               "Gate recent events should be bounded after comprehensive testing");
+        assert!(
+            gate.recent_events.len() <= MAX_EVENTS * 5,
+            "Gate recent events should be bounded after comprehensive testing"
+        );
 
         // Test rollout plan generation with boundary conditions
         let boundary_projected = TrajectorySnapshot {
@@ -2237,7 +2382,10 @@ mod tests {
         // Rollout should have reasonable step count (bounded)
         let steps_count = rollout.steps.len();
         let safe_steps_count = std::convert::TryFrom::try_from(steps_count).unwrap_or(u32::MAX);
-        assert!(safe_steps_count <= 10, "Rollout steps should be reasonably bounded");
+        assert!(
+            safe_steps_count <= 10,
+            "Rollout steps should be reasonably bounded"
+        );
 
         // Verify all hardening patterns work together without conflicts
         assert!(matches!(rollout.canary.phase, RolloutPhase::Canary));

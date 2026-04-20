@@ -1372,11 +1372,13 @@ mod tests {
 
         // Add some receipts
         for i in 0..5 {
-            chain.append(
-                receipt(ExecutionActionType::NetworkAccess, i),
-                1_705_000_000_000 + i,
-                "trace-overflow",
-            ).expect("append receipt");
+            chain
+                .append(
+                    receipt(ExecutionActionType::NetworkAccess, i),
+                    1_705_000_000_000 + i,
+                    "trace-overflow",
+                )
+                .expect("append receipt");
         }
 
         let mut scheduler = VefProofScheduler::new(SchedulerPolicy::default());
@@ -1451,9 +1453,9 @@ mod tests {
 
         // Test with timestamps near overflow boundaries
         let base_timestamps = vec![
-            u64::MAX - 1000,  // Near maximum
-            0,                // Minimum
-            u64::MAX / 2,     // Middle range
+            u64::MAX - 1000, // Near maximum
+            0,               // Minimum
+            u64::MAX / 2,    // Middle range
         ];
 
         for base_timestamp in base_timestamps {
@@ -1480,7 +1482,10 @@ mod tests {
                 );
 
                 // Should succeed - testing that timestamp arithmetic doesn't overflow internally
-                assert!(result.is_ok(), "Receipt append should handle extreme timestamps gracefully");
+                assert!(
+                    result.is_ok(),
+                    "Receipt append should handle extreme timestamps gracefully"
+                );
             }
 
             // Test proof generation with extreme timestamps
@@ -1498,7 +1503,10 @@ mod tests {
             );
 
             // Should succeed or fail gracefully, not panic from timestamp overflow
-            assert!(windows_result.is_ok(), "Window selection should handle extreme timestamps");
+            assert!(
+                windows_result.is_ok(),
+                "Window selection should handle extreme timestamps"
+            );
         }
     }
 
@@ -1533,11 +1541,7 @@ mod tests {
 
             // This should either succeed with a well-formed proof ID or fail validation
             // It should NOT panic from unicode issues in .chars().take(16)
-            let generate_result = backend.generate(
-                &input,
-                1_705_300_000_000,
-                &BTreeMap::new(),
-            );
+            let generate_result = backend.generate(&input, 1_705_300_000_000, &BTreeMap::new());
 
             match generate_result {
                 Ok(proof_output) => {
@@ -1546,15 +1550,21 @@ mod tests {
                     assert!(!proof_output.proof_id.contains('\x00'));
 
                     // The suffix extraction should handle unicode gracefully
-                    assert!(proof_output.proof_id.starts_with("proof-hash_attestation_v1-"));
+                    assert!(
+                        proof_output
+                            .proof_id
+                            .starts_with("proof-hash_attestation_v1-")
+                    );
 
                     // Verify proof material is properly formatted
                     assert!(proof_output.proof_material.starts_with("sha256:"));
                 }
                 Err(err) => {
                     // If it failed, should be due to validation, not unicode panic
-                    assert!(err.code == error_codes::ERR_VEF_PROOF_INPUT ||
-                           err.code == error_codes::ERR_VEF_PROOF_VERIFY);
+                    assert!(
+                        err.code == error_codes::ERR_VEF_PROOF_INPUT
+                            || err.code == error_codes::ERR_VEF_PROOF_VERIFY
+                    );
                     assert!(err.message.len() > 0);
                 }
             }
@@ -1598,7 +1608,11 @@ mod tests {
                 assert!(validation_result.is_ok(), "Correct schema should validate");
             } else {
                 // Wrong schema should fail validation
-                assert!(validation_result.is_err(), "Wrong schema '{}' should fail validation", test_schema);
+                assert!(
+                    validation_result.is_err(),
+                    "Wrong schema '{}' should fail validation",
+                    test_schema
+                );
 
                 if let Err(err) = validation_result {
                     assert_eq!(err.code, error_codes::ERR_VEF_PROOF_INPUT);
@@ -1613,8 +1627,12 @@ mod tests {
                 proof_id: "test-proof".to_string(),
                 backend_id: ProofBackendId::HashAttestationV1,
                 backend_version: "test-v1".to_string(),
-                input_commitment_hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-                proof_material: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                input_commitment_hash:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_string(),
+                proof_material:
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_string(),
                 generated_at_millis: 1_705_300_000_000,
                 verification_metadata: BTreeMap::new(),
                 trace_id: input.trace_id.clone(),
@@ -1693,7 +1711,10 @@ mod tests {
 
                 if sorted_a != sorted_original {
                     // This would be a real collision concern
-                    panic!("Hash collision detected: different policy predicate sets produced same hash: {}", hash_a);
+                    panic!(
+                        "Hash collision detected: different policy predicate sets produced same hash: {}",
+                        hash_a
+                    );
                 }
             }
 

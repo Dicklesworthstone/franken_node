@@ -1037,9 +1037,9 @@ mod dgis_migration_gate_hardening_negative_tests {
     #[test]
     fn negative_vec_push_without_bounded_capacity_protection_reasons() {
         let delta = HealthDelta {
-            cascade_risk_delta: 2.0,  // Way over threshold
-            new_fragility_findings: 1000,  // Way over threshold
-            new_articulation_points: 500,  // Way over threshold
+            cascade_risk_delta: 2.0,      // Way over threshold
+            new_fragility_findings: 1000, // Way over threshold
+            new_articulation_points: 500, // Way over threshold
         };
 
         let thresholds = MigrationGateThresholds {
@@ -1052,21 +1052,30 @@ mod dgis_migration_gate_hardening_negative_tests {
         let mut simulated_reasons = Vec::new();
 
         // Simulate the vulnerable pattern from evaluate_policy function
-        for _ in 0..100 {  // Attempt to overflow rejection reasons vector
+        for _ in 0..100 {
+            // Attempt to overflow rejection reasons vector
             if delta.cascade_risk_delta > thresholds.max_cascade_risk_delta {
-                simulated_reasons.push(format!("cascade_risk_delta_violation_{}", simulated_reasons.len()));
+                simulated_reasons.push(format!(
+                    "cascade_risk_delta_violation_{}",
+                    simulated_reasons.len()
+                ));
             }
             if delta.new_fragility_findings > i64::from(thresholds.max_new_fragility_findings) {
                 simulated_reasons.push(format!("fragility_violation_{}", simulated_reasons.len()));
             }
             if delta.new_articulation_points > i64::from(thresholds.max_new_articulation_points) {
-                simulated_reasons.push(format!("articulation_violation_{}", simulated_reasons.len()));
+                simulated_reasons.push(format!(
+                    "articulation_violation_{}",
+                    simulated_reasons.len()
+                ));
             }
         }
 
         // Without push_bounded, this vector could grow without bounds
-        assert!(simulated_reasons.len() > MAX_REJECTION_REASONS,
-            "unbounded rejection reasons should exceed safe capacity");
+        assert!(
+            simulated_reasons.len() > MAX_REJECTION_REASONS,
+            "unbounded rejection reasons should exceed safe capacity"
+        );
 
         // Test proper bounded version
         let mut bounded_reasons = Vec::new();
@@ -1082,8 +1091,10 @@ mod dgis_migration_gate_hardening_negative_tests {
         }
 
         // With push_bounded, vector should be capped
-        assert!(bounded_reasons.len() <= MAX_REJECTION_REASONS,
-            "bounded rejection reasons should respect capacity limit");
+        assert!(
+            bounded_reasons.len() <= MAX_REJECTION_REASONS,
+            "bounded rejection reasons should respect capacity limit"
+        );
     }
 
     #[test]
@@ -1096,30 +1107,54 @@ mod dgis_migration_gate_hardening_negative_tests {
 
         // Test exact boundary values that could bypass security with > instead of >=
         let boundary_delta = HealthDelta {
-            cascade_risk_delta: 0.12,  // Exactly at threshold
+            cascade_risk_delta: 0.12,   // Exactly at threshold
             new_fragility_findings: 2,  // Exactly at threshold
-            new_articulation_points: 1,  // Exactly at threshold
+            new_articulation_points: 1, // Exactly at threshold
         };
 
         // With > comparison (vulnerable): boundary values pass incorrectly
-        let vulnerable_cascade_check = boundary_delta.cascade_risk_delta > thresholds.max_cascade_risk_delta;
-        let vulnerable_fragility_check = boundary_delta.new_fragility_findings > i64::from(thresholds.max_new_fragility_findings);
-        let vulnerable_articulation_check = boundary_delta.new_articulation_points > i64::from(thresholds.max_new_articulation_points);
+        let vulnerable_cascade_check =
+            boundary_delta.cascade_risk_delta > thresholds.max_cascade_risk_delta;
+        let vulnerable_fragility_check = boundary_delta.new_fragility_findings
+            > i64::from(thresholds.max_new_fragility_findings);
+        let vulnerable_articulation_check = boundary_delta.new_articulation_points
+            > i64::from(thresholds.max_new_articulation_points);
 
         // These should all be false with > (vulnerable to boundary bypass)
-        assert!(!vulnerable_cascade_check, "boundary cascade risk bypasses > comparison");
-        assert!(!vulnerable_fragility_check, "boundary fragility bypasses > comparison");
-        assert!(!vulnerable_articulation_check, "boundary articulation bypasses > comparison");
+        assert!(
+            !vulnerable_cascade_check,
+            "boundary cascade risk bypasses > comparison"
+        );
+        assert!(
+            !vulnerable_fragility_check,
+            "boundary fragility bypasses > comparison"
+        );
+        assert!(
+            !vulnerable_articulation_check,
+            "boundary articulation bypasses > comparison"
+        );
 
         // With >= comparison (secure): boundary values are properly rejected
-        let secure_cascade_check = boundary_delta.cascade_risk_delta >= thresholds.max_cascade_risk_delta;
-        let secure_fragility_check = boundary_delta.new_fragility_findings >= i64::from(thresholds.max_new_fragility_findings);
-        let secure_articulation_check = boundary_delta.new_articulation_points >= i64::from(thresholds.max_new_articulation_points);
+        let secure_cascade_check =
+            boundary_delta.cascade_risk_delta >= thresholds.max_cascade_risk_delta;
+        let secure_fragility_check = boundary_delta.new_fragility_findings
+            >= i64::from(thresholds.max_new_fragility_findings);
+        let secure_articulation_check = boundary_delta.new_articulation_points
+            >= i64::from(thresholds.max_new_articulation_points);
 
         // These should all be true with >= (fail-closed at boundary)
-        assert!(secure_cascade_check, "fail-closed cascade risk should reject boundary");
-        assert!(secure_fragility_check, "fail-closed fragility should reject boundary");
-        assert!(secure_articulation_check, "fail-closed articulation should reject boundary");
+        assert!(
+            secure_cascade_check,
+            "fail-closed cascade risk should reject boundary"
+        );
+        assert!(
+            secure_fragility_check,
+            "fail-closed fragility should reject boundary"
+        );
+        assert!(
+            secure_articulation_check,
+            "fail-closed articulation should reject boundary"
+        );
 
         // Test the actual evaluate_policy function behavior on boundary
         let actual_reasons = evaluate_policy(boundary_delta, thresholds);
@@ -1136,14 +1171,14 @@ mod dgis_migration_gate_hardening_negative_tests {
         // Test potential overflow in i64::from conversions
         let max_thresholds = MigrationGateThresholds {
             max_cascade_risk_delta: 1.0,
-            max_new_fragility_findings: u32::MAX,  // Maximum u32 value
-            max_new_articulation_points: u32::MAX,  // Maximum u32 value
+            max_new_fragility_findings: u32::MAX, // Maximum u32 value
+            max_new_articulation_points: u32::MAX, // Maximum u32 value
         };
 
         let overflow_delta = HealthDelta {
             cascade_risk_delta: 0.1,
             new_fragility_findings: i64::MAX,  // Maximum i64 value
-            new_articulation_points: i64::MAX,  // Maximum i64 value
+            new_articulation_points: i64::MAX, // Maximum i64 value
         };
 
         // Test i64::from(u32::MAX) conversion - this is safe but worth verifying
@@ -1157,22 +1192,36 @@ mod dgis_migration_gate_hardening_negative_tests {
         let fragility_exceeds = overflow_delta.new_fragility_findings > max_fragility_i64;
         let articulation_exceeds = overflow_delta.new_articulation_points > max_articulation_i64;
 
-        assert!(fragility_exceeds, "i64::MAX should exceed u32::MAX converted to i64");
-        assert!(articulation_exceeds, "i64::MAX should exceed u32::MAX converted to i64");
+        assert!(
+            fragility_exceeds,
+            "i64::MAX should exceed u32::MAX converted to i64"
+        );
+        assert!(
+            articulation_exceeds,
+            "i64::MAX should exceed u32::MAX converted to i64"
+        );
 
         // Test with boundary conditions around integer limits
         let boundary_tests = vec![
-            (i64::from(u32::MAX) - 1, false),  // Just under max u32
-            (i64::from(u32::MAX), false),      // Exactly max u32 (should use >= for fail-closed)
-            (i64::from(u32::MAX) + 1, true),   // Just over max u32
+            (i64::from(u32::MAX) - 1, false), // Just under max u32
+            (i64::from(u32::MAX), false),     // Exactly max u32 (should use >= for fail-closed)
+            (i64::from(u32::MAX) + 1, true),  // Just over max u32
         ];
 
         for (test_value, should_exceed) in boundary_tests {
             let test_exceeds = test_value > max_fragility_i64;
             if should_exceed {
-                assert!(test_exceeds, "value {} should exceed threshold {}", test_value, max_fragility_i64);
+                assert!(
+                    test_exceeds,
+                    "value {} should exceed threshold {}",
+                    test_value, max_fragility_i64
+                );
             } else {
-                assert!(!test_exceeds, "value {} should not exceed threshold {} with > comparison", test_value, max_fragility_i64);
+                assert!(
+                    !test_exceeds,
+                    "value {} should not exceed threshold {} with > comparison",
+                    test_value, max_fragility_i64
+                );
             }
         }
     }
@@ -1196,8 +1245,10 @@ mod dgis_migration_gate_hardening_negative_tests {
         let delta = HealthDelta::between(max_baseline, min_projected);
 
         // Verify cascade_risk_delta handles extreme differences
-        assert!(delta.cascade_risk_delta.is_finite() || delta.cascade_risk_delta.is_infinite(),
-            "cascade risk delta should not be NaN");
+        assert!(
+            delta.cascade_risk_delta.is_finite() || delta.cascade_risk_delta.is_infinite(),
+            "cascade risk delta should not be NaN"
+        );
 
         // Verify integer differences handle u32::MAX correctly
         assert_eq!(delta.new_fragility_findings, -(i64::from(u32::MAX)));
@@ -1206,8 +1257,11 @@ mod dgis_migration_gate_hardening_negative_tests {
         // Test reverse case: min baseline to max projected
         let reverse_delta = HealthDelta::between(min_projected, max_baseline);
 
-        assert!(reverse_delta.cascade_risk_delta.is_finite() || reverse_delta.cascade_risk_delta.is_infinite(),
-            "reverse cascade risk delta should not be NaN");
+        assert!(
+            reverse_delta.cascade_risk_delta.is_finite()
+                || reverse_delta.cascade_risk_delta.is_infinite(),
+            "reverse cascade risk delta should not be NaN"
+        );
         assert_eq!(reverse_delta.new_fragility_findings, i64::from(u32::MAX));
         assert_eq!(reverse_delta.new_articulation_points, i64::from(u32::MAX));
     }
@@ -1222,7 +1276,7 @@ mod dgis_migration_gate_hardening_negative_tests {
         };
 
         let projected = GraphHealthSnapshot {
-            cascade_risk: 0.9,  // High risk to trigger rejections
+            cascade_risk: 0.9, // High risk to trigger rejections
             fragility_findings: 100,
             articulation_points: 50,
         };
@@ -1262,8 +1316,10 @@ mod dgis_migration_gate_hardening_negative_tests {
         }
 
         // Verify replan suggestions are properly bounded to 3
-        assert!(evaluation.replan_suggestions.len() <= 3,
-            "replan suggestions should be limited to 3 regardless of candidate count");
+        assert!(
+            evaluation.replan_suggestions.len() <= 3,
+            "replan suggestions should be limited to 3 regardless of candidate count"
+        );
     }
 
     #[test]
@@ -1276,12 +1332,15 @@ mod dgis_migration_gate_hardening_negative_tests {
         let event_b = gate_event("CODE", "info", trace_id, "key=valuedata=test".to_string());
 
         // Without domain separation, these strings could collide
-        assert_ne!(event_a.message, event_b.message, "messages should be distinct");
+        assert_ne!(
+            event_a.message, event_b.message,
+            "messages should be distinct"
+        );
 
         let phase_tests = vec![
             ("phase", "separator", "data"),
-            ("phaseseparator", "", "data"),  // Different structure, same chars
-            ("pha", "seseparator", "data"),  // Different split points
+            ("phaseseparator", "", "data"), // Different structure, same chars
+            ("pha", "seseparator", "data"), // Different split points
         ];
         let encode_fields = |phase: &str, separator: &str, data: &str| {
             let mut encoded = Vec::new();
@@ -1360,7 +1419,12 @@ mod dgis_migration_gate_hardening_negative_tests {
             let reasons = evaluate_policy(*delta, thresholds);
 
             // Should generate exactly 3 rejection reasons without unbounded Vec growth
-            assert_eq!(reasons.len(), 3, "Attack vector {} should generate exactly 3 rejections", i);
+            assert_eq!(
+                reasons.len(),
+                3,
+                "Attack vector {} should generate exactly 3 rejections",
+                i
+            );
 
             // Verify each Vec::push call was executed
             let codes: Vec<&str> = reasons.iter().map(|r| r.code.as_str()).collect();
@@ -1421,7 +1485,11 @@ mod dgis_migration_gate_hardening_negative_tests {
 
         // Events vector should be populated but not unbounded
         assert!(!evaluation.events.is_empty(), "Should generate events");
-        assert!(evaluation.events.len() <= 50, "Events should be bounded to prevent memory exhaustion: {}", evaluation.events.len());
+        assert!(
+            evaluation.events.len() <= 50,
+            "Events should be bounded to prevent memory exhaustion: {}",
+            evaluation.events.len()
+        );
 
         // Verify expected event types are present
         let event_codes: Vec<&str> = evaluation.events.iter().map(|e| e.code.as_str()).collect();
@@ -1434,7 +1502,10 @@ mod dgis_migration_gate_hardening_negative_tests {
             assert!(!event.level.is_empty());
             assert!(!event.trace_id.is_empty());
             assert!(!event.message.is_empty());
-            assert!(event.message.len() < 2000, "Event message should be bounded");
+            assert!(
+                event.message.len() < 2000,
+                "Event message should be bounded"
+            );
         }
     }
 
@@ -1491,7 +1562,12 @@ mod dgis_migration_gate_hardening_negative_tests {
             };
 
             let over_reasons = evaluate_policy(over_threshold, thresholds);
-            assert_eq!(over_reasons.len(), 3, "Values over threshold should trigger all rejections ({})", attack_description);
+            assert_eq!(
+                over_reasons.len(),
+                3,
+                "Values over threshold should trigger all rejections ({})",
+                attack_description
+            );
         }
     }
 
@@ -1512,40 +1588,48 @@ mod dgis_migration_gate_hardening_negative_tests {
 
         // Generate candidate list to test performance
         let exhaustion_candidates: Vec<MigrationPathCandidate> = (0..1000)
-            .map(|i| {
-                MigrationPathCandidate {
-                    path_id: format!("exhaust_candidate_{:05}", i),
-                    projected: GraphHealthSnapshot {
-                        cascade_risk: baseline.cascade_risk + (i as f64 * 0.00001),
-                        fragility_findings: baseline
-                            .fragility_findings
-                            .saturating_add(i as u32 % 3),
-                        articulation_points: baseline
-                            .articulation_points
-                            .saturating_add(i as u32 % 2),
-                    },
-                    notes: "A".repeat(100 + (i % 50)),
-                }
+            .map(|i| MigrationPathCandidate {
+                path_id: format!("exhaust_candidate_{:05}", i),
+                projected: GraphHealthSnapshot {
+                    cascade_risk: baseline.cascade_risk + (i as f64 * 0.00001),
+                    fragility_findings: baseline.fragility_findings.saturating_add(i as u32 % 3),
+                    articulation_points: baseline.articulation_points.saturating_add(i as u32 % 2),
+                },
+                notes: "A".repeat(100 + (i % 50)),
             })
             .collect();
 
         let thresholds = MigrationGateThresholds::default();
 
         let start_time = std::time::Instant::now();
-        let suggestions = suggest_replans(baseline, blocked_delta, &exhaustion_candidates, thresholds);
+        let suggestions =
+            suggest_replans(baseline, blocked_delta, &exhaustion_candidates, thresholds);
         let duration = start_time.elapsed();
 
         // Should complete in reasonable time despite large input
-        assert!(duration.as_millis() < 500, "Processing took too long: {}ms", duration.as_millis());
+        assert!(
+            duration.as_millis() < 500,
+            "Processing took too long: {}ms",
+            duration.as_millis()
+        );
 
         // Should respect the take(3) limit regardless of input size
-        assert!(suggestions.len() <= 3, "Returned too many suggestions: {}", suggestions.len());
+        assert!(
+            suggestions.len() <= 3,
+            "Returned too many suggestions: {}",
+            suggestions.len()
+        );
 
         // Memory usage should be bounded
-        let total_suggestion_size: usize = suggestions.iter()
+        let total_suggestion_size: usize = suggestions
+            .iter()
             .map(|s| s.path_id.len() + s.rationale.len())
             .sum();
 
-        assert!(total_suggestion_size < 5000, "Used too much memory: {} bytes", total_suggestion_size);
+        assert!(
+            total_suggestion_size < 5000,
+            "Used too much memory: {} bytes",
+            total_suggestion_size
+        );
     }
 }
