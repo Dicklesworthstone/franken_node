@@ -775,6 +775,10 @@ pub struct DoctorCloseConditionArgs {
     /// Emit the close-condition receipt JSON to stdout.
     #[arg(long)]
     pub json: bool,
+
+    /// Ed25519 trusted key used to sign the close-condition receipt.
+    #[arg(long)]
+    pub receipt_signing_key: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]

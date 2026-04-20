@@ -12,6 +12,20 @@ fn write_fixture(path: &Path, contents: &str) {
     fs::write(path, contents).expect("fixture file");
 }
 
+fn write_test_signing_key(
+    root: &Path,
+    file_name: &str,
+    seed_byte: u8,
+) -> (std::path::PathBuf, ed25519_dalek::SigningKey) {
+    let path = root.join(file_name);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("signing key parent directory");
+    }
+    let seed = [seed_byte; 32];
+    fs::write(&path, hex::encode(seed)).expect("signing key seed");
+    (path, ed25519_dalek::SigningKey::from_bytes(&seed))
+}
+
 fn fixture_root() -> TempDir {
     let root = TempDir::new().expect("fixture root");
     write_fixture(
@@ -120,6 +134,9 @@ fn canonical_json_value(value: &Value) -> String {
 #[test]
 fn doctor_close_condition_writes_dual_oracle_receipt() {
     let root = fixture_root();
+    let (signing_key_path, signing_key) =
+        write_test_signing_key(root.path(), ".franken-node/keys/oracle-close.key", 41);
+    let signing_key_path = signing_key_path.display().to_string();
     let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
     let output = command
         .current_dir(root.path())
@@ -127,7 +144,13 @@ fn doctor_close_condition_writes_dual_oracle_receipt() {
             "FRANKEN_NODE_CLOSE_CONDITION_TIMESTAMP_UTC",
             "2026-02-21T00:00:00Z",
         )
-        .args(["doctor", "close-condition", "--json"])
+        .args([
+            "doctor",
+            "close-condition",
+            "--json",
+            "--receipt-signing-key",
+            signing_key_path.as_str(),
+        ])
         .output()
         .expect("doctor close-condition should run");
 
@@ -176,4 +199,80 @@ fn doctor_close_condition_writes_dual_oracle_receipt() {
         ))
     );
     assert_eq!(stdout_receipt["tamper_evidence"]["sha256"], expected_hash);
+
+    let signature = &stdout_receipt["tamper_evidence"]["signature"];
+    assert_eq!(signature["algorithm"], "ed25519");
+    assert_eq!(signature["key_source"], "cli");
+    assert_eq!(signature["signing_identity"], "oracle-close-condition");
+    assert_eq!(signature["trust_scope"], "oracle_close_condition");
+    assert_eq!(
+        signature["signed_payload_sha256"],
+        expected_hash
+            .strip_prefix("sha256:")
+            .expect("expected prefixed hash")
+    );
+    assert_eq!(
+        signature["public_key_hex"],
+        hex::encode(signing_key.verifying_key().to_bytes())
+    );
+    assert_eq!(
+        signature["key_id"],
+        frankenengine_node::supply_chain::artifact_signing::KeyId::from_verifying_key(
+            &signing_key.verifying_key()
+        )
+        .to_string()
+    );
+
+    let public_key_bytes: [u8; 32] = hex::decode(
+        signature["public_key_hex"]
+            .as_str()
+            .expect("public key hex"),
+    )
+    .expect("decode public key")
+    .try_into()
+    .expect("public key length");
+    let verifying_key =
+        ed25519_dalek::VerifyingKey::from_bytes(&public_key_bytes).expect("verifying key");
+    let signature_bytes = hex::decode(signature["signature_hex"].as_str().expect("signature hex"))
+        .expect("decode signature");
+    frankenengine_verifier_sdk::bundle::verify_ed25519_signature(
+        &verifying_key,
+        canonical_json_value(&unsigned_receipt).as_bytes(),
+        &signature_bytes,
+    )
+    .expect("trusted oracle close-condition signature should verify");
+
+    let mut tampered_receipt = unsigned_receipt;
+    tampered_receipt["composite_verdict"] = Value::String("RED".to_string());
+    assert!(
+        frankenengine_verifier_sdk::bundle::verify_ed25519_signature(
+            &verifying_key,
+            canonical_json_value(&tampered_receipt).as_bytes(),
+            &signature_bytes,
+        )
+        .is_err(),
+        "trusted oracle signature must reject tampered receipt core"
+    );
+}
+
+#[test]
+fn doctor_close_condition_requires_trusted_signing_key() {
+    let root = fixture_root();
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let output = command
+        .current_dir(root.path())
+        .env_remove("FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH")
+        .args(["doctor", "close-condition", "--json"])
+        .output()
+        .expect("doctor close-condition should run");
+
+    assert!(
+        !output.status.success(),
+        "doctor close-condition should fail closed without a trusted key"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no signing key was configured"),
+        "unexpected stderr: {stderr}"
+    );
 }

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use ed25519_dalek::{Signer, Verifier};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -68,12 +69,31 @@ pub struct ReleasePolicyLinkage {
     pub blocking_findings: Vec<String>,
 }
 
+pub struct CloseConditionSigningMaterial<'a> {
+    pub signing_key: &'a ed25519_dalek::SigningKey,
+    pub key_source: &'a str,
+    pub signing_identity: &'a str,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CloseConditionReceiptSignature {
+    pub algorithm: String,
+    pub public_key_hex: String,
+    pub key_id: String,
+    pub key_source: String,
+    pub signing_identity: String,
+    pub trust_scope: String,
+    pub signed_payload_sha256: String,
+    pub signature_hex: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TamperEvidence {
     pub algorithm: String,
     pub canonicalization: String,
     pub hash_scope: String,
     pub sha256: String,
+    pub signature: CloseConditionReceiptSignature,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -97,7 +117,10 @@ pub struct CloseConditionReceipt {
     pub tamper_evidence: TamperEvidence,
 }
 
-pub fn generate_close_condition_receipt(root: &Path) -> Result<CloseConditionReceipt> {
+pub fn generate_close_condition_receipt(
+    root: &Path,
+    signing_material: &CloseConditionSigningMaterial<'_>,
+) -> Result<CloseConditionReceipt> {
     let l1_product_oracle = evaluate_l1_product_oracle(root);
     let l2_engine_boundary_oracle = evaluate_l2_engine_boundary_oracle(root)?;
     let release_policy_linkage = evaluate_release_policy_linkage(root);
@@ -131,20 +154,92 @@ pub fn generate_close_condition_receipt(root: &Path) -> Result<CloseConditionRec
     };
 
     let canonical = canonical_json_value(&serde_json::to_value(&core)?);
+    let payload_sha256 = hex::encode(Sha256::digest(canonical.as_bytes()));
+    let signature = signing_material.signing_key.sign(canonical.as_bytes());
+    let verifying_key = signing_material.signing_key.verifying_key();
     let tamper_evidence = TamperEvidence {
         algorithm: "SHA-256".to_string(),
         canonicalization: "lexicographically-sorted-json-keys/no-whitespace".to_string(),
         hash_scope: "receipt_without_tamper_evidence".to_string(),
-        sha256: format!(
-            "sha256:{}",
-            hex::encode(Sha256::digest(canonical.as_bytes()))
-        ),
+        sha256: format!("sha256:{payload_sha256}"),
+        signature: CloseConditionReceiptSignature {
+            algorithm: "ed25519".to_string(),
+            public_key_hex: hex::encode(verifying_key.to_bytes()),
+            key_id: crate::supply_chain::artifact_signing::KeyId::from_verifying_key(
+                &verifying_key,
+            )
+            .to_string(),
+            key_source: signing_material.key_source.to_string(),
+            signing_identity: signing_material.signing_identity.to_string(),
+            trust_scope: "oracle_close_condition".to_string(),
+            signed_payload_sha256: payload_sha256,
+            signature_hex: hex::encode(signature.to_bytes()),
+        },
     };
 
     Ok(CloseConditionReceipt {
         core,
         tamper_evidence,
     })
+}
+
+pub fn verify_close_condition_receipt_signature(
+    receipt: &CloseConditionReceipt,
+    trusted_key_id: &str,
+) -> Result<()> {
+    let signature = &receipt.tamper_evidence.signature;
+    if signature.algorithm != "ed25519" {
+        anyhow::bail!(
+            "unsupported close-condition receipt signature algorithm {}",
+            signature.algorithm
+        );
+    }
+    if signature.key_id != trusted_key_id {
+        anyhow::bail!(
+            "close-condition receipt key id {} is not trusted key id {}",
+            signature.key_id,
+            trusted_key_id
+        );
+    }
+
+    let public_key_bytes = hex::decode(&signature.public_key_hex)
+        .context("close-condition receipt public key must be hex")?;
+    let public_key_bytes: [u8; 32] = public_key_bytes.try_into().map_err(|bytes: Vec<u8>| {
+        anyhow::anyhow!("expected 32 public key bytes, got {}", bytes.len())
+    })?;
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&public_key_bytes)
+        .context("close-condition receipt public key is invalid")?;
+    let derived_key_id =
+        crate::supply_chain::artifact_signing::KeyId::from_verifying_key(&verifying_key)
+            .to_string();
+    if signature.key_id != derived_key_id {
+        anyhow::bail!(
+            "close-condition receipt key id {} does not match public key {}",
+            signature.key_id,
+            derived_key_id
+        );
+    }
+
+    let canonical = canonical_json_value(&serde_json::to_value(&receipt.core)?);
+    let payload_sha256 = hex::encode(Sha256::digest(canonical.as_bytes()));
+    if receipt.tamper_evidence.sha256 != format!("sha256:{payload_sha256}") {
+        anyhow::bail!("close-condition receipt tamper hash does not match canonical payload");
+    }
+    if signature.signed_payload_sha256 != payload_sha256 {
+        anyhow::bail!(
+            "close-condition receipt signed payload hash does not match canonical payload"
+        );
+    }
+
+    let signature_bytes = hex::decode(&signature.signature_hex)
+        .context("close-condition receipt signature must be hex")?;
+    let signature_bytes: [u8; 64] = signature_bytes.try_into().map_err(|bytes: Vec<u8>| {
+        anyhow::anyhow!("expected 64 signature bytes, got {}", bytes.len())
+    })?;
+    let signature = ed25519_dalek::Signature::from_bytes(&signature_bytes);
+    verifying_key
+        .verify(canonical.as_bytes(), &signature)
+        .context("close-condition receipt signature verification failed")
 }
 
 pub fn write_close_condition_receipt(

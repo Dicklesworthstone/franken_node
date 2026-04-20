@@ -5207,8 +5207,18 @@ fn handle_bench_run(args: &cli::BenchRunArgs) -> Result<()> {
 fn handle_doctor_close_condition(args: &DoctorCloseConditionArgs) -> Result<()> {
     let root = std::env::current_dir()
         .context("failed resolving current working directory for close-condition receipt")?;
-    let receipt = ops::close_condition::generate_close_condition_receipt(&root)
-        .context("failed generating close-condition receipt")?;
+    let signing_material = load_receipt_signing_material(args.receipt_signing_key.as_deref())?
+        .ok_or_else(missing_receipt_signing_key_error)?;
+    let close_condition_signing_material = ops::close_condition::CloseConditionSigningMaterial {
+        signing_key: &signing_material.signing_key,
+        key_source: signing_material.source,
+        signing_identity: "oracle-close-condition",
+    };
+    let receipt = ops::close_condition::generate_close_condition_receipt(
+        &root,
+        &close_condition_signing_material,
+    )
+    .context("failed generating close-condition receipt")?;
     let receipt_path = ops::close_condition::write_close_condition_receipt(&root, &receipt)
         .context("failed writing close-condition receipt")?;
     let rendered = ops::close_condition::render_close_condition_receipt_json(&receipt)?;
