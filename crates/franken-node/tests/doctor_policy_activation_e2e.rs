@@ -416,61 +416,19 @@ fn doctor_policy_activation_pass_fixture_has_json_contract_shape() {
 
 #[test]
 fn doctor_structured_logs_jsonl_emits_parseable_stderr_events() {
-    let output = run_doctor_args(
-        &[
-            "doctor".to_string(),
-            "--json".to_string(),
-            "--structured-logs-jsonl".to_string(),
-            "--trace-id".to_string(),
-            "doctor-policy-e2e-jsonl".to_string(),
-            "--policy-activation-input".to_string(),
-            fixture_path("doctor_policy_activation_block.json")
-                .to_str()
-                .expect("policy fixture path must be utf-8")
-                .to_string(),
-        ],
-        None,
+    let (_report, log_lines) = run_doctor_structured_logs_jsonl(
+        doctor_structured_log_args(
+            "doctor-policy-e2e-jsonl",
+            vec![
+                "--policy-activation-input".to_string(),
+                fixture_path("doctor_policy_activation_block.json")
+                    .to_str()
+                    .expect("policy fixture path must be utf-8")
+                    .to_string(),
+            ],
+        ),
+        "doctor-policy-e2e-jsonl",
     );
-
-    assert!(
-        output.status.success(),
-        "doctor command failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let report: Value = serde_json::from_slice(&output.stdout).expect("stdout report JSON");
-    let log_lines = parse_jsonl_lines(&output.stderr);
-    let report_logs = report["structured_logs"]
-        .as_array()
-        .expect("report structured_logs array");
-
-    assert_eq!(log_lines.len(), report_logs.len());
-    assert!(!log_lines.is_empty());
-
-    for (line, report_log) in log_lines.iter().zip(report_logs) {
-        assert_eq!(line["trace_id"], "doctor-policy-e2e-jsonl");
-        assert_eq!(line["event_code"], report_log["event_code"]);
-        assert_eq!(line["check_code"], report_log["check_code"]);
-        assert_eq!(line["scope"], report_log["scope"]);
-        assert_eq!(line["status"], report_log["status"]);
-        assert_eq!(line["surface"], "OPS-CLI");
-        assert!(line["timestamp"].as_str().is_some());
-        assert!(
-            line["message"]
-                .as_str()
-                .is_some_and(|message| !message.is_empty())
-        );
-        assert_eq!(
-            line["span_id"].as_str().map(str::len),
-            Some(16),
-            "span_id must be 16 lowercase hex chars"
-        );
-        assert!(
-            line["metric_refs"]
-                .as_array()
-                .is_some_and(|metrics| !metrics.is_empty())
-        );
-        assert!(line["recovery_hint"].is_object());
-    }
 
     assert!(log_lines.iter().any(|line| {
         line["level"] == "error"
@@ -479,6 +437,83 @@ fn doctor_structured_logs_jsonl_emits_parseable_stderr_events() {
                 .is_some_and(|code| code.starts_with("FRANKEN_DOCTOR_"))
             && line["recovery_hint"]["action"] == "escalate"
     }));
+}
+
+#[test]
+fn doctor_structured_logs_jsonl_covers_policy_pass_missing_fixture_and_strict_profile_warning() {
+    let mut covered_event_types = Vec::new();
+
+    let (pass_report, pass_logs) = run_doctor_structured_logs_jsonl(
+        doctor_structured_log_args(
+            "doctor-structured-logs-policy-activation-pass",
+            vec![
+                "--policy-activation-input".to_string(),
+                fixture_path("doctor_policy_activation_pass.json")
+                    .to_str()
+                    .expect("policy fixture path must be utf-8")
+                    .to_string(),
+            ],
+        ),
+        "doctor-structured-logs-policy-activation-pass",
+    );
+    assert_eq!(check_status(&pass_report, "DR-POLICY-009"), "pass");
+    assert!(pass_report["policy_activation"].is_object());
+    let policy_pass_log = structured_log_for(&pass_logs, "DR-POLICY-009");
+    assert_eq!(policy_pass_log["level"], "info");
+    assert!(policy_pass_log.get("error_code").is_none());
+    assert_eq!(policy_pass_log["recovery_hint"]["action"], "ignore");
+    covered_event_types.push("policy_activation_pass");
+
+    let missing_path = fixture_path("doctor_policy_activation_missing.json");
+    let (missing_report, missing_logs) = run_doctor_structured_logs_jsonl(
+        doctor_structured_log_args(
+            "doctor-structured-logs-missing-fixture-fallback",
+            vec![
+                "--policy-activation-input".to_string(),
+                missing_path
+                    .to_str()
+                    .expect("missing fixture path must be utf-8")
+                    .to_string(),
+            ],
+        ),
+        "doctor-structured-logs-missing-fixture-fallback",
+    );
+    assert_eq!(missing_report["overall_status"], "fail");
+    assert_eq!(check_status(&missing_report, "DR-POLICY-009"), "fail");
+    assert!(missing_report.get("policy_activation").is_none());
+    let missing_log = structured_log_for(&missing_logs, "DR-POLICY-009");
+    assert_eq!(missing_log["level"], "error");
+    assert_eq!(missing_log["error_code"], "FRANKEN_DOCTOR_DR_POLICY_009");
+    assert_eq!(missing_log["recovery_hint"]["action"], "escalate");
+    covered_event_types.push("missing_fixture_fallback");
+
+    let (strict_report, strict_logs) = run_doctor_structured_logs_jsonl(
+        doctor_structured_log_args(
+            "doctor-structured-logs-strict-profile-warning",
+            vec!["--profile".to_string(), "strict".to_string()],
+        ),
+        "doctor-structured-logs-strict-profile-warning",
+    );
+    assert_eq!(strict_report["selected_profile"], "strict");
+    assert_eq!(check_status(&strict_report, "DR-PROFILE-003"), "pass");
+    assert_eq!(check_status(&strict_report, "DR-CONFIG-002"), "warn");
+    let strict_warning_log = structured_log_for(&strict_logs, "DR-CONFIG-002");
+    assert_eq!(strict_warning_log["level"], "warn");
+    assert_eq!(
+        strict_warning_log["error_code"],
+        "FRANKEN_DOCTOR_DR_CONFIG_002"
+    );
+    assert_eq!(strict_warning_log["recovery_hint"]["action"], "reconfigure");
+    covered_event_types.push("strict_profile_warning");
+
+    assert_eq!(
+        covered_event_types,
+        vec![
+            "policy_activation_pass",
+            "missing_fixture_fallback",
+            "strict_profile_warning"
+        ]
+    );
 }
 
 #[test]
