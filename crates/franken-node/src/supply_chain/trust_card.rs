@@ -24,6 +24,9 @@ const MAX_TELEMETRY: usize = 4096;
 const MAX_CARD_VERSIONS: usize = 512;
 const MAX_AUDIT_HISTORY: usize = 256;
 
+/// Maximum extension ID length to prevent memory exhaustion DoS attacks.
+const MAX_EXTENSION_ID_LEN: usize = 256;
+
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
         items.clear();
@@ -1076,6 +1079,9 @@ impl TrustCardRegistry {
     }
 
     fn latest_card(&self, extension_id: &str) -> Option<&TrustCard> {
+        if extension_id.len() > MAX_EXTENSION_ID_LEN {
+            return None;
+        }
         self.cards_by_extension
             .get(extension_id)
             .and_then(|history| history.last())
@@ -1085,6 +1091,15 @@ impl TrustCardRegistry {
         &self,
         extension_id: &str,
     ) -> Result<Option<&TrustCard>, TrustCardError> {
+        if extension_id.len() > MAX_EXTENSION_ID_LEN {
+            return Err(TrustCardError::InvalidInput {
+                reason: format!(
+                    "extension_id too long: {} bytes exceeds maximum of {}",
+                    extension_id.len(),
+                    MAX_EXTENSION_ID_LEN
+                ),
+            });
+        }
         let latest = self.latest_card(extension_id);
         if let Some(card) = latest {
             verify_card_signature(card, &self.registry_key)?;
