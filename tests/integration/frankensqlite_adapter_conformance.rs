@@ -742,6 +742,10 @@ fn canonical_classes() -> Vec<PersistenceClass> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier, Mutex};
+    use std::thread;
+
+    const MAX_CONFORMANCE_KEY_BYTES: usize = 4096;
 
     // -- SafetyTier tests --
 
@@ -1016,6 +1020,96 @@ mod tests {
         let mut adapter = FrankensqliteAdapter::new(AdapterConfig::default());
         let err = adapter.tier1_write("nonexistent", "k", b"v").unwrap_err();
         assert!(matches!(err, AdapterError::TierViolation(_)));
+    }
+
+    #[test]
+    fn test_tier1_empty_payload_roundtrips_without_sentinel_substitution() {
+        let mut adapter = FrankensqliteAdapter::new(AdapterConfig::default());
+        adapter.register_class(canonical_classes().into_iter().next().unwrap());
+
+        adapter
+            .tier1_write("fencing_token_state", "empty-payload", b"")
+            .expect("empty payload write should succeed");
+
+        let val = adapter
+            .tier1_read("fencing_token_state", "empty-payload")
+            .expect("empty payload read should succeed");
+        assert_eq!(val, Some(Vec::new()));
+        assert!(adapter.events().iter().any(|event| {
+            event.code == FRANKENSQLITE_WRITE_SUCCESS
+                && event.persistence_class == "fencing_token_state"
+                && event.detail == "wrote 0 bytes"
+        }));
+    }
+
+    #[test]
+    fn test_tier1_max_len_key_roundtrips_exactly() {
+        let mut adapter = FrankensqliteAdapter::new(AdapterConfig::default());
+        adapter.register_class(canonical_classes().into_iter().next().unwrap());
+        let key = "k".repeat(MAX_CONFORMANCE_KEY_BYTES);
+        let value = b"max-key-payload";
+
+        adapter
+            .tier1_write("fencing_token_state", &key, value)
+            .expect("max-length key write should succeed");
+
+        let val = adapter
+            .tier1_read("fencing_token_state", &key)
+            .expect("max-length key read should succeed");
+        assert_eq!(val, Some(value.to_vec()));
+        assert!(adapter.events().iter().any(|event| {
+            event.code == FRANKENSQLITE_WRITE_SUCCESS
+                && event.transaction_id == format!("tx-fencing_token_state-{key}")
+        }));
+    }
+
+    #[test]
+    fn test_tier1_concurrent_writer_interleave_preserves_all_rows() {
+        let mut adapter = FrankensqliteAdapter::new(AdapterConfig::default());
+        adapter.register_class(canonical_classes().into_iter().next().unwrap());
+        let adapter = Arc::new(Mutex::new(adapter));
+        let start = Arc::new(Barrier::new(4));
+        let mut handles = Vec::new();
+
+        for writer_id in 0..4 {
+            let adapter = Arc::clone(&adapter);
+            let start = Arc::clone(&start);
+            handles.push(thread::spawn(move || {
+                start.wait();
+                for sequence in 0..8 {
+                    let key = format!("writer-{writer_id}-seq-{sequence}");
+                    let value = format!("payload-{writer_id}-{sequence}");
+                    adapter
+                        .lock()
+                        .expect("adapter lock should not be poisoned")
+                        .tier1_write("fencing_token_state", &key, value.as_bytes())
+                        .expect("concurrent writer should persist row");
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("writer thread should complete");
+        }
+
+        let adapter = adapter.lock().expect("adapter lock should not be poisoned");
+        for writer_id in 0..4 {
+            for sequence in 0..8 {
+                let key = format!("writer-{writer_id}-seq-{sequence}");
+                let expected = format!("payload-{writer_id}-{sequence}").into_bytes();
+                let actual = adapter
+                    .tier1_read("fencing_token_state", &key)
+                    .expect("concurrent row read should succeed");
+                assert_eq!(actual, Some(expected));
+            }
+        }
+
+        let write_events = adapter
+            .events()
+            .iter()
+            .filter(|event| event.code == FRANKENSQLITE_WRITE_SUCCESS)
+            .count();
+        assert_eq!(write_events, 32);
     }
 
     // -- Tier 1 audit tests --
