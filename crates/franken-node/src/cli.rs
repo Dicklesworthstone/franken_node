@@ -763,8 +763,25 @@ pub struct BenchRunArgs {
 
 // -- doctor --
 
+#[derive(Debug, Subcommand)]
+pub enum DoctorCommand {
+    /// Emit the dual-oracle close-condition receipt.
+    #[command(name = "close-condition")]
+    CloseCondition(DoctorCloseConditionArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct DoctorCloseConditionArgs {
+    /// Emit the close-condition receipt JSON to stdout.
+    #[arg(long)]
+    pub json: bool,
+}
+
 #[derive(Debug, Parser)]
 pub struct DoctorArgs {
+    #[command(subcommand)]
+    pub command: Option<DoctorCommand>,
+
     /// Config file override (default discovery is used when omitted).
     #[arg(long)]
     pub config: Option<PathBuf>,

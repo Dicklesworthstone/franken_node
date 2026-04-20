@@ -54,10 +54,10 @@ use crate::api::{
     },
 };
 use crate::cli::{
-    BenchCommand, Cli, Command, FleetAgentArgs, FleetCommand, IncidentCommand, MigrateCommand,
-    RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs, TrustCardCommand, TrustCommand,
-    VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
-    VerifyModuleArgs, VerifyReleaseArgs,
+    BenchCommand, Cli, Command, DoctorCloseConditionArgs, DoctorCommand, FleetAgentArgs,
+    FleetCommand, IncidentCommand, MigrateCommand, RegistryCommand, RemoteCapCommand,
+    RemoteCapIssueArgs, TrustCardCommand, TrustCommand, VerifyCommand, VerifyCompatibilityArgs,
+    VerifyCorpusArgs, VerifyMigrationArgs, VerifyModuleArgs, VerifyReleaseArgs,
 };
 use crate::policy::{
     bayesian_diagnostics::{BayesianDiagnostics, CandidateRef, Observation},
@@ -5187,6 +5187,27 @@ fn handle_bench_run(args: &cli::BenchRunArgs) -> Result<()> {
         benchmark_suite_to_json(&report).context("failed serializing benchmark suite report")?;
     println!("{rendered}");
     eprintln!("{}", benchmark_suite_render_human_summary(&report));
+    Ok(())
+}
+
+fn handle_doctor_close_condition(args: &DoctorCloseConditionArgs) -> Result<()> {
+    let root = std::env::current_dir()
+        .context("failed resolving current working directory for close-condition receipt")?;
+    let receipt = ops::close_condition::generate_close_condition_receipt(&root)
+        .context("failed generating close-condition receipt")?;
+    let receipt_path = ops::close_condition::write_close_condition_receipt(&root, &receipt)
+        .context("failed writing close-condition receipt")?;
+    let rendered = ops::close_condition::render_close_condition_receipt_json(&receipt)?;
+
+    if args.json {
+        println!("{rendered}");
+    } else {
+        println!(
+            "doctor close-condition: verdict={:?} receipt={}",
+            receipt.core.composite_verdict,
+            receipt_path.display()
+        );
+    }
     Ok(())
 }
 
@@ -18019,6 +18040,11 @@ fn main() -> Result<()> {
         },
 
         Command::Doctor(args) => {
+            if let Some(DoctorCommand::CloseCondition(close_args)) = &args.command {
+                handle_doctor_close_condition(close_args)?;
+                return Ok(());
+            }
+
             let profile_override = parse_profile_override(args.profile.as_deref())?;
             let resolved = config::Config::resolve(
                 args.config.as_deref(),
