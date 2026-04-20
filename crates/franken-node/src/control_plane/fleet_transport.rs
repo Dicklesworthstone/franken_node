@@ -3,6 +3,8 @@
 //! This module defines the transport-facing action log, node heartbeat/state shape,
 //! and object-safe transport trait used by the fleet-control track.
 
+#[cfg(feature = "asupersync-transport")]
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::{
     fs::{self, File, OpenOptions, TryLockError},
     io::{BufRead, BufReader, Write},
@@ -356,6 +358,188 @@ pub trait FleetTransport {
             actions,
             nodes,
         })
+    }
+}
+
+#[cfg(feature = "asupersync-transport")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AsupersyncFleetControlEvent {
+    pub operation: String,
+    pub node_id: String,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[cfg(feature = "asupersync-transport")]
+#[derive(Debug, Clone, Default)]
+pub struct AsupersyncFleetNetwork {
+    inner: Arc<Mutex<AsupersyncFleetNetworkState>>,
+}
+
+#[cfg(feature = "asupersync-transport")]
+#[derive(Debug, Clone, Default)]
+struct AsupersyncFleetNetworkState {
+    initialized: bool,
+    actions: Vec<FleetActionRecord>,
+    nodes: Vec<NodeStatus>,
+    control_events: Vec<AsupersyncFleetControlEvent>,
+}
+
+#[cfg(feature = "asupersync-transport")]
+impl AsupersyncFleetNetwork {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn control_events(&self) -> Result<Vec<AsupersyncFleetControlEvent>, FleetTransportError> {
+        Ok(self.lock()?.control_events.clone())
+    }
+
+    fn lock(&self) -> Result<MutexGuard<'_, AsupersyncFleetNetworkState>, FleetTransportError> {
+        self.inner
+            .lock()
+            .map_err(|err| FleetTransportError::lock_contention(err.to_string()))
+    }
+}
+
+#[cfg(feature = "asupersync-transport")]
+#[derive(Debug, Clone)]
+pub struct AsupersyncFleetTransport {
+    cx: asupersync::Cx,
+    node_id: String,
+    network: AsupersyncFleetNetwork,
+}
+
+#[cfg(feature = "asupersync-transport")]
+impl AsupersyncFleetTransport {
+    #[must_use]
+    pub fn for_request(node_id: impl Into<String>, network: AsupersyncFleetNetwork) -> Self {
+        Self {
+            cx: asupersync::Cx::for_request(),
+            node_id: node_id.into(),
+            network,
+        }
+    }
+
+    #[must_use]
+    pub fn for_testing(node_id: impl Into<String>, network: AsupersyncFleetNetwork) -> Self {
+        Self {
+            cx: asupersync::Cx::for_testing(),
+            node_id: node_id.into(),
+            network,
+        }
+    }
+
+    #[must_use]
+    pub fn network(&self) -> &AsupersyncFleetNetwork {
+        &self.network
+    }
+
+    fn checkpoint(&self, operation: &'static str) -> Result<(), FleetTransportError> {
+        self.cx.trace_with_fields(
+            "fleet asupersync control-lane transport operation",
+            &[
+                ("transport", "asupersync"),
+                ("operation", operation),
+                ("node_id", &self.node_id),
+            ],
+        );
+        self.cx.checkpoint().map_err(|err| {
+            FleetTransportError::stale_state(format!(
+                "asupersync control-lane checkpoint failed during {operation}: {err}"
+            ))
+        })
+    }
+
+    fn record_event(&self, state: &mut AsupersyncFleetNetworkState, operation: &'static str) {
+        state.control_events.push(AsupersyncFleetControlEvent {
+            operation: operation.to_string(),
+            node_id: self.node_id.clone(),
+            observed_at: Utc::now(),
+        });
+    }
+
+    fn ensure_initialized(
+        &self,
+        state: &AsupersyncFleetNetworkState,
+    ) -> Result<(), FleetTransportError> {
+        if state.initialized {
+            Ok(())
+        } else {
+            Err(FleetTransportError::not_initialized(
+                "call initialize() before using the asupersync fleet transport",
+            ))
+        }
+    }
+}
+
+#[cfg(feature = "asupersync-transport")]
+impl FleetTransport for AsupersyncFleetTransport {
+    fn initialize(&mut self) -> Result<(), FleetTransportError> {
+        self.checkpoint("initialize")?;
+        let mut state = self.network.lock()?;
+        state.initialized = true;
+        self.record_event(&mut state, "initialize");
+        Ok(())
+    }
+
+    fn publish_action(&mut self, action: &FleetActionRecord) -> Result<(), FleetTransportError> {
+        self.checkpoint("publish_action")?;
+        validate_action_record(action)?;
+        let payload = serde_json::to_vec(action).map_err(|err| {
+            FleetTransportError::serialization(format!(
+                "failed serializing asupersync fleet action {}: {err}",
+                action.action_id
+            ))
+        })?;
+        if payload.len() > MAX_ACTION_RECORD_BYTES {
+            return Err(FleetTransportError::serialization(format!(
+                "serialized fleet action {} exceeds {} bytes",
+                action.action_id, MAX_ACTION_RECORD_BYTES
+            )));
+        }
+
+        let mut state = self.network.lock()?;
+        self.ensure_initialized(&state)?;
+        push_bounded(&mut state.actions, action.clone(), MAX_ACTION_LOG_ENTRIES);
+        self.record_event(&mut state, "publish_action");
+        Ok(())
+    }
+
+    fn list_actions(&self) -> Result<Vec<FleetActionRecord>, FleetTransportError> {
+        self.checkpoint("list_actions")?;
+        let mut state = self.network.lock()?;
+        self.ensure_initialized(&state)?;
+        self.record_event(&mut state, "list_actions");
+        Ok(state.actions.clone())
+    }
+
+    fn upsert_node_status(&mut self, status: &NodeStatus) -> Result<(), FleetTransportError> {
+        self.checkpoint("upsert_node_status")?;
+        validate_zone_id(&status.zone_id)?;
+        validate_node_id(&status.node_id)?;
+
+        let mut state = self.network.lock()?;
+        self.ensure_initialized(&state)?;
+        if let Some(existing) = state
+            .nodes
+            .iter_mut()
+            .find(|existing| existing.node_id == status.node_id)
+        {
+            *existing = status.clone();
+        } else {
+            push_bounded(&mut state.nodes, status.clone(), MAX_NODES_CAP);
+        }
+        self.record_event(&mut state, "upsert_node_status");
+        Ok(())
+    }
+
+    fn list_node_statuses(&self) -> Result<Vec<NodeStatus>, FleetTransportError> {
+        self.checkpoint("list_node_statuses")?;
+        let mut state = self.network.lock()?;
+        self.ensure_initialized(&state)?;
+        self.record_event(&mut state, "list_node_statuses");
+        Ok(state.nodes.clone())
     }
 }
 

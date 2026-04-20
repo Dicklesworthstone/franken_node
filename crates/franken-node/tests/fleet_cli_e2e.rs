@@ -3,6 +3,10 @@ use std::process::{Child, Command, Output};
 use std::time::{Duration, Instant};
 
 use chrono::{TimeDelta, Utc};
+#[cfg(feature = "asupersync-transport")]
+use frankenengine_node::control_plane::fleet_transport::{
+    AsupersyncFleetNetwork, AsupersyncFleetTransport, wait_until_fleet_converged_or_timeout,
+};
 use frankenengine_node::control_plane::fleet_transport::{
     FileFleetTransport, FleetAction, FleetActionRecord, FleetTargetKind, FleetTransport,
     NodeHealth, NodeStatus, canonical_fleet_convergence_receipt_payload,
@@ -553,6 +557,82 @@ fn fleet_reconcile_receipt_default_timeout_overrun_is_non_converged() {
     assert_eq!(
         fleet_convergence_receipt_verdict(false, 120_001, 120, true),
         "non_converged"
+    );
+}
+
+#[cfg(feature = "asupersync-transport")]
+#[test]
+fn asupersync_fleet_transport_converges_simulated_two_node_mode() {
+    let network = AsupersyncFleetNetwork::new();
+    let mut coordinator = AsupersyncFleetTransport::for_testing("coordinator", network.clone());
+    let mut node_a = AsupersyncFleetTransport::for_testing("node-a", network.clone());
+    let mut node_b = AsupersyncFleetTransport::for_testing("node-b", network.clone());
+
+    coordinator.initialize().expect("initialize coordinator");
+    node_a.initialize().expect("initialize node-a");
+    node_b.initialize().expect("initialize node-b");
+
+    coordinator
+        .publish_action(&FleetActionRecord {
+            action_id: "fleet-op-asupersync-quarantine".to_string(),
+            emitted_at: Utc::now(),
+            action: FleetAction::Quarantine {
+                zone_id: "zone-asupersync".to_string(),
+                incident_id: "inc-asupersync".to_string(),
+                target_id: "sha256:asupersync".to_string(),
+                target_kind: FleetTargetKind::Artifact,
+                reason: "simulated asupersync two-node convergence".to_string(),
+                quarantine_version: 7,
+            },
+        })
+        .expect("publish asupersync quarantine");
+
+    node_a
+        .upsert_node_status(&NodeStatus {
+            zone_id: "zone-asupersync".to_string(),
+            node_id: "node-a".to_string(),
+            last_seen: Utc::now(),
+            quarantine_version: 7,
+            health: NodeHealth::Healthy,
+        })
+        .expect("node-a status");
+    node_b
+        .upsert_node_status(&NodeStatus {
+            zone_id: "zone-asupersync".to_string(),
+            node_id: "node-b".to_string(),
+            last_seen: Utc::now(),
+            quarantine_version: 7,
+            health: NodeHealth::Healthy,
+        })
+        .expect("node-b status");
+
+    let outcome = wait_until_fleet_converged_or_timeout(Duration::from_secs(1), || {
+        let state = coordinator.read_shared_state()?;
+        let converged_nodes = state
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.zone_id == "zone-asupersync"
+                    && node.quarantine_version == 7
+                    && node.health == NodeHealth::Healthy
+            })
+            .count();
+        Ok(converged_nodes == 2)
+    })
+    .expect("wait for asupersync convergence");
+
+    assert!(!outcome.timed_out, "asupersync transport should converge");
+    assert_eq!(
+        coordinator.read_shared_state().expect("state").nodes.len(),
+        2
+    );
+    assert!(
+        network
+            .control_events()
+            .expect("control events")
+            .iter()
+            .any(|event| event.operation == "publish_action"),
+        "asupersync control-lane should record publish operation"
     );
 }
 

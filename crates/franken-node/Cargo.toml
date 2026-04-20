@@ -9,6 +9,7 @@ name = "franken-node"
 path = "src/main.rs"
 
 [features]
+asupersync-transport = ["dep:asupersync"]
 extended-surfaces = []
 test-support = []
 fuzz = ["arbitrary"]
@@ -32,6 +33,7 @@ ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 getrandom = "0.2.17"
 serde_cbor = "0.11.2"
 flate2 = "1.0.35"
+asupersync = { path = "/dp/asupersync", optional = true }
 frankentui = { package = "ftui", path = "/dp/frankentui/crates/ftui", default-features = false }
 frankenengine-engine = { path = "../../../franken_engine/crates/franken-engine" }
 frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-extension-host" }
