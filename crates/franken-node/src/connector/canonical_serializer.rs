@@ -589,6 +589,7 @@ fn canonical_decode(bytes: &[u8]) -> Result<Vec<u8>, String> {
 fn contains_float_marker(payload: &[u8]) -> bool {
     // Check if payload looks like JSON with float values
     if let Ok(s) = std::str::from_utf8(payload) {
+        let s = s.trim_start();
         // Reject common float patterns in JSON: digits followed by ".digits"
         // but only if the payload appears to be JSON
         if s.starts_with('{') || s.starts_with('[') {
@@ -866,6 +867,23 @@ mod tests {
     fn test_float_detection_json_float() {
         let json = br#"{"value": 3.14}"#;
         assert!(contains_float_marker(json));
+    }
+
+    #[test]
+    fn test_float_detection_json_float_with_leading_whitespace() {
+        let cases = [
+            b" {\"value\": 3.14}".as_slice(),
+            b"\n{\"value\": 1e9}".as_slice(),
+            b"\r\n\t[{\"value\": Infinity}]".as_slice(),
+        ];
+
+        for json in cases {
+            assert!(
+                contains_float_marker(json),
+                "leading JSON whitespace must not bypass float detection: {}",
+                String::from_utf8_lossy(json)
+            );
+        }
     }
 
     #[test]

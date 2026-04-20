@@ -426,6 +426,9 @@ fn fuzz_json_float_payloads_are_rejected_as_non_canonical() {
     let mut serializer = CanonicalSerializer::with_all_schemas();
     let cases = [
         br#"{"score":3.14}"#.as_slice(),
+        b" {\"score\":3.14}".as_slice(),
+        b"\n\t{\"score\":1e9}".as_slice(),
+        b"\r\n[{\"score\":Infinity}]".as_slice(),
         br#"[1,2.5,3]"#.as_slice(),
         br#"{"nested":{"score":9.5}}"#.as_slice(),
     ];
