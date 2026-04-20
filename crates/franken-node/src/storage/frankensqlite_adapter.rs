@@ -1032,6 +1032,74 @@ mod tests {
         );
     }
 
+    #[test]
+    fn frankensqlite_conformance_matrix_covers_every_class_and_tier() {
+        let matrix = [
+            (
+                PersistenceClass::ControlState,
+                DurabilityTier::Tier1,
+                false,
+                true,
+            ),
+            (PersistenceClass::AuditLog, DurabilityTier::Tier1, false, true),
+            (PersistenceClass::Snapshot, DurabilityTier::Tier2, false, false),
+            (PersistenceClass::Cache, DurabilityTier::Tier3, true, false),
+        ];
+        assert_eq!(matrix.len(), PersistenceClass::all().len());
+
+        let mut adapter = FrankensqliteAdapter::default();
+        for (index, (class, expected_tier, expected_cache_hit, _recoverable)) in
+            matrix.iter().enumerate()
+        {
+            let key = format!("matrix-{index}");
+            let value = format!("value-{index}");
+            let write = adapter
+                .write(*class, &key, value.as_bytes())
+                .expect("matrix write should succeed");
+            assert_eq!(write.persistence_class, *class);
+            assert_eq!(write.tier, *expected_tier);
+
+            let read = adapter.read(*class, &key);
+            assert!(read.found, "matrix row should round-trip {}", class.label());
+            assert_eq!(read.value.as_deref(), Some(value.as_bytes()));
+            assert_eq!(read.persistence_class, *class);
+            assert_eq!(read.tier, *expected_tier);
+            assert_eq!(read.cache_hit, *expected_cache_hit);
+        }
+
+        let recovered = adapter.crash_recovery();
+        let expected_recovered = matrix
+            .iter()
+            .filter(|(_, _, _, recoverable)| *recoverable)
+            .count();
+        assert_eq!(recovered, expected_recovered);
+
+        let summary = adapter.summary();
+        assert_eq!(
+            summary.writes_by_tier.get(DurabilityTier::Tier1.label()),
+            Some(&2)
+        );
+        assert_eq!(
+            summary.writes_by_tier.get(DurabilityTier::Tier2.label()),
+            Some(&1)
+        );
+        assert_eq!(
+            summary.writes_by_tier.get(DurabilityTier::Tier3.label()),
+            Some(&1)
+        );
+
+        let report = adapter.to_report();
+        let rows = report["persistence_classes"]
+            .as_array()
+            .expect("report should include persistence class rows");
+        assert_eq!(rows.len(), matrix.len());
+        for (class, expected_tier, _, _) in matrix {
+            assert!(rows.iter().any(|row| {
+                row["class"] == class.label() && row["tier"] == expected_tier.label()
+            }));
+        }
+    }
+
     // -- Concurrent access simulation --
 
     #[test]

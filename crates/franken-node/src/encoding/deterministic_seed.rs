@@ -576,7 +576,7 @@ fn derive_seed_negative_path_regression_coverage() {
 
     let mut boundary_seeds = Vec::new();
     for (i, hash) in boundary_hashes.iter().enumerate() {
-        let (seed, _) = deriver.derive_seed(&DomainTag::Process, hash, &boundary_config);
+        let (seed, _) = deriver.derive_seed(&DomainTag::Verification, hash, &boundary_config);
         boundary_seeds.push((i, seed.bytes));
     }
 
@@ -1387,6 +1387,69 @@ mod tests {
 
             assert_eq!(config, decoded);
             assert_eq!(seed_before.bytes, seed_after.bytes);
+        }
+
+        #[test]
+        fn canonical_seed_artifacts_roundtrip_matrix_preserves_derivation() {
+            let content_hashes = [ContentHash([0x00; 32]), ContentHash([0xff; 32])];
+            let configs = [
+                ScheduleConfig::new(1),
+                ScheduleConfig::new(2)
+                    .with_param("mode", "canonical")
+                    .with_param("chunk_size", "65536"),
+            ];
+
+            for domain in DomainTag::all() {
+                for content_hash in &content_hashes {
+                    for config in &configs {
+                        let config_json =
+                            serde_json::to_string(config).expect("config should serialize");
+                        let config_roundtrip: ScheduleConfig =
+                            serde_json::from_str(&config_json).expect("config should deserialize");
+                        assert_eq!(config.config_hash(), config_roundtrip.config_hash());
+
+                        let content_json =
+                            serde_json::to_string(content_hash).expect("hash should serialize");
+                        let content_roundtrip: ContentHash =
+                            serde_json::from_str(&content_json).expect("hash should deserialize");
+                        assert_eq!(*content_hash, content_roundtrip);
+                        assert_eq!(
+                            serde_json::to_string(&content_roundtrip)
+                                .expect("round-tripped hash should serialize"),
+                            content_json
+                        );
+
+                        let seed_before = derive_seed(domain, content_hash, config);
+                        let seed_after = derive_seed(domain, &content_roundtrip, &config_roundtrip);
+                        assert_eq!(seed_before.bytes, seed_after.bytes);
+
+                        let seed_json =
+                            serde_json::to_string(&seed_before).expect("seed should serialize");
+                        let seed_roundtrip: DeterministicSeed =
+                            serde_json::from_str(&seed_json).expect("seed should deserialize");
+                        assert_eq!(seed_before, seed_roundtrip);
+                        assert_eq!(
+                            serde_json::to_string(&seed_roundtrip)
+                                .expect("round-tripped seed should serialize"),
+                            seed_json
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn schedule_config_json_uses_sorted_parameter_keys() {
+            let config = ScheduleConfig::new(3)
+                .with_param("zeta", "last")
+                .with_param("alpha", "first");
+
+            let encoded = serde_json::to_string(&config).expect("config should serialize");
+
+            assert_eq!(
+                encoded,
+                r#"{"version":3,"parameters":{"alpha":"first","zeta":"last"}}"#
+            );
         }
 
         #[test]

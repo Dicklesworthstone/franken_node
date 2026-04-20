@@ -1226,7 +1226,11 @@ mod encoding_root_negative_tests {
                         .expect("thread content should be valid");
 
                     // Cycle through domains to stress tracking logic
-                    let domains = [DomainTag::Encoding, DomainTag::Storage, DomainTag::Runtime];
+                    let domains = [
+                        DomainTag::Encoding,
+                        DomainTag::Repair,
+                        DomainTag::Scheduling,
+                    ];
                     let domain = &domains[iteration % domains.len()];
 
                     let config = ScheduleConfig::new((thread_id * 1000 + iteration) as u32)
@@ -1353,8 +1357,10 @@ mod encoding_root_negative_tests {
         let domain_probe_vectors = [
             // Known valid domains (should succeed)
             "\"Encoding\"",
-            "\"Storage\"",
-            "\"Runtime\"",
+            "\"Repair\"",
+            "\"Scheduling\"",
+            "\"Placement\"",
+            "\"Verification\"",
 
             // Case variation attacks
             "\"encoding\"",
@@ -1418,14 +1424,14 @@ mod encoding_root_negative_tests {
         }
 
         // Verify only legitimate domains were accepted
-        assert!(successful_domains.len() <= 3,
+        assert!(successful_domains.len() <= DomainTag::all().len(),
             "Should only accept known valid domains, got: {:?}",
             successful_domains);
 
         for (domain, probe_str) in successful_domains {
             // Verify each successful domain is genuinely valid
             assert!(
-                matches!(domain, DomainTag::Encoding | DomainTag::Storage | DomainTag::Runtime),
+                DomainTag::all().contains(&domain),
                 "Unexpected domain variant accepted: {:?} from probe {}",
                 domain, probe_str
             );
