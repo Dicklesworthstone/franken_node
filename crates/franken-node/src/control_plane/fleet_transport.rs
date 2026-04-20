@@ -2215,7 +2215,12 @@ mod tests {
                         });
 
                         // Should reject malicious identifiers gracefully
-                        assert!(node_result.is_err(), "Should reject malicious zone/node: {}/{}", malicious_zone, malicious_node);
+                        assert!(
+                            node_result.is_err(),
+                            "Should reject malicious zone/node: {}/{}",
+                            malicious_zone,
+                            malicious_node
+                        );
 
                         // Test action validation
                         let action_result = transport.publish_action(&FleetActionRecord {
@@ -2229,7 +2234,12 @@ mod tests {
                         });
 
                         // Should reject malicious action/zone identifiers gracefully
-                        assert!(action_result.is_err(), "Should reject malicious action/zone: {}/{}", malicious_action, malicious_zone);
+                        assert!(
+                            action_result.is_err(),
+                            "Should reject malicious action/zone: {}/{}",
+                            malicious_action,
+                            malicious_zone
+                        );
                     }
                 }
             }
@@ -2243,10 +2253,7 @@ mod tests {
             transport.initialize().expect("initialize");
 
             // Test with extreme quarantine version numbers
-            let extreme_versions = vec![
-                u64::MAX - 1,
-                u64::MAX,
-            ];
+            let extreme_versions = vec![u64::MAX - 1, u64::MAX];
 
             for &extreme_version in &extreme_versions {
                 let status_result = transport.upsert_node_status(&NodeStatus {
@@ -2258,7 +2265,11 @@ mod tests {
                 });
 
                 // Should handle extreme version numbers gracefully
-                assert!(status_result.is_ok(), "Should handle extreme version: {}", extreme_version);
+                assert!(
+                    status_result.is_ok(),
+                    "Should handle extreme version: {}",
+                    extreme_version
+                );
 
                 let action_result = transport.publish_action(&FleetActionRecord {
                     action_id: format!("action-overflow-{}", extreme_version),
@@ -2274,7 +2285,11 @@ mod tests {
                 });
 
                 // Should handle extreme quarantine versions in actions
-                assert!(action_result.is_ok(), "Should handle extreme quarantine version: {}", extreme_version);
+                assert!(
+                    action_result.is_ok(),
+                    "Should handle extreme quarantine version: {}",
+                    extreme_version
+                );
             }
 
             // Verify stored values maintain integrity
@@ -2314,7 +2329,11 @@ mod tests {
                 });
 
                 // Should handle large actions within bounds
-                assert!(action_result.is_ok(), "Should handle large action at index {}", action_idx);
+                assert!(
+                    action_result.is_ok(),
+                    "Should handle large action at index {}",
+                    action_idx
+                );
             }
 
             // Test oversized action rejection
@@ -2399,13 +2418,25 @@ mod tests {
             let final_nodes = transport.list_node_statuses().expect("final nodes");
 
             // Should have some results from concurrent operations
-            assert!(!final_actions.is_empty(), "Should have some actions from concurrent ops");
-            assert!(!final_nodes.is_empty(), "Should have some nodes from concurrent ops");
+            assert!(
+                !final_actions.is_empty(),
+                "Should have some actions from concurrent ops"
+            );
+            assert!(
+                !final_nodes.is_empty(),
+                "Should have some nodes from concurrent ops"
+            );
 
             // Verify no corruption in action log
             for action in &final_actions {
-                assert!(!action.action_id.is_empty(), "Action ID should not be empty");
-                assert!(!action.action_id.contains('\0'), "Action ID should not contain null bytes");
+                assert!(
+                    !action.action_id.is_empty(),
+                    "Action ID should not be empty"
+                );
+                assert!(
+                    !action.action_id.contains('\0'),
+                    "Action ID should not contain null bytes"
+                );
             }
         }
 
@@ -2441,11 +2472,19 @@ mod tests {
                 });
 
                 // Should reject path traversal attempts
-                assert!(status_result.is_err(), "Should reject path traversal: {}", malicious_path);
+                assert!(
+                    status_result.is_err(),
+                    "Should reject path traversal: {}",
+                    malicious_path
+                );
 
                 // Verify layout path generation rejects malicious paths
                 let path_result = transport.layout().node_status_path(malicious_path);
-                assert!(path_result.is_err(), "Layout should reject malicious path: {}", malicious_path);
+                assert!(
+                    path_result.is_err(),
+                    "Layout should reject malicious path: {}",
+                    malicious_path
+                );
             }
 
             // Verify no files were created outside the expected directory
@@ -2454,7 +2493,10 @@ mod tests {
 
             // Check that no unexpected files exist
             let entries: Vec<_> = fs::read_dir(nodes_dir).expect("read nodes dir").collect();
-            assert!(entries.is_empty(), "No files should be created from malicious attempts");
+            assert!(
+                entries.is_empty(),
+                "No files should be created from malicious attempts"
+            );
         }
 
         #[test]
@@ -2471,51 +2513,67 @@ mod tests {
 
             // Action exactly at retention boundary
             let boundary_time = now - chrono::TimeDelta::days(ACTION_LOG_RETENTION_DAYS);
-            transport.publish_action(&FleetActionRecord {
-                action_id: "boundary-action".to_string(),
-                emitted_at: boundary_time,
-                action: FleetAction::Release {
-                    zone_id: "prod".to_string(),
-                    incident_id: "boundary-inc".to_string(),
-                    reason: None,
-                },
-            }).expect("publish boundary action");
+            transport
+                .publish_action(&FleetActionRecord {
+                    action_id: "boundary-action".to_string(),
+                    emitted_at: boundary_time,
+                    action: FleetAction::Release {
+                        zone_id: "prod".to_string(),
+                        incident_id: "boundary-inc".to_string(),
+                        reason: None,
+                    },
+                })
+                .expect("publish boundary action");
 
             // Action just before boundary (should be retained)
             let before_boundary = boundary_time + chrono::TimeDelta::seconds(1);
-            transport.publish_action(&FleetActionRecord {
-                action_id: "before-boundary-action".to_string(),
-                emitted_at: before_boundary,
-                action: FleetAction::Release {
-                    zone_id: "prod".to_string(),
-                    incident_id: "before-boundary-inc".to_string(),
-                    reason: None,
-                },
-            }).expect("publish before boundary action");
+            transport
+                .publish_action(&FleetActionRecord {
+                    action_id: "before-boundary-action".to_string(),
+                    emitted_at: before_boundary,
+                    action: FleetAction::Release {
+                        zone_id: "prod".to_string(),
+                        incident_id: "before-boundary-inc".to_string(),
+                        reason: None,
+                    },
+                })
+                .expect("publish before boundary action");
 
             // Action just after boundary (should be removed)
             let after_boundary = boundary_time - chrono::TimeDelta::seconds(1);
-            transport.publish_action(&FleetActionRecord {
-                action_id: "after-boundary-action".to_string(),
-                emitted_at: after_boundary,
-                action: FleetAction::Release {
-                    zone_id: "prod".to_string(),
-                    incident_id: "after-boundary-inc".to_string(),
-                    reason: None,
-                },
-            }).expect("publish after boundary action");
+            transport
+                .publish_action(&FleetActionRecord {
+                    action_id: "after-boundary-action".to_string(),
+                    emitted_at: after_boundary,
+                    action: FleetAction::Release {
+                        zone_id: "prod".to_string(),
+                        incident_id: "after-boundary-inc".to_string(),
+                        reason: None,
+                    },
+                })
+                .expect("publish after boundary action");
 
             // Force compaction
-            transport.compact_action_log_if_needed(1, ACTION_LOG_RETENTION_DAYS, now)
+            transport
+                .compact_action_log_if_needed(1, ACTION_LOG_RETENTION_DAYS, now)
                 .expect("compact log");
 
             let retained_actions = transport.list_actions().expect("list actions");
 
             // Should retain actions within the retention window (fail-closed at boundary)
             let retained_ids: Vec<_> = retained_actions.iter().map(|a| &a.action_id).collect();
-            assert!(retained_ids.contains(&&"boundary-action".to_string()), "Boundary action should be retained");
-            assert!(retained_ids.contains(&&"before-boundary-action".to_string()), "Before-boundary action should be retained");
-            assert!(!retained_ids.contains(&&"after-boundary-action".to_string()), "After-boundary action should be removed");
+            assert!(
+                retained_ids.contains(&&"boundary-action".to_string()),
+                "Boundary action should be retained"
+            );
+            assert!(
+                retained_ids.contains(&&"before-boundary-action".to_string()),
+                "Before-boundary action should be retained"
+            );
+            assert!(
+                !retained_ids.contains(&&"after-boundary-action".to_string()),
+                "After-boundary action should be removed"
+            );
         }
 
         #[test]
@@ -2552,7 +2610,11 @@ mod tests {
                 });
 
                 // Should serialize safely without breaking JSON structure
-                assert!(action_result.is_ok(), "Should handle malicious string safely: {:?}", malicious_string);
+                assert!(
+                    action_result.is_ok(),
+                    "Should handle malicious string safely: {:?}",
+                    malicious_string
+                );
 
                 let status_result = transport.upsert_node_status(&NodeStatus {
                     zone_id: "prod".to_string(),
@@ -2577,7 +2639,8 @@ mod tests {
             let stored_actions = transport.list_actions().expect("list actions");
             for action in &stored_actions {
                 let serialized = serde_json::to_string(action).expect("serialize action");
-                let deserialized: FleetActionRecord = serde_json::from_str(&serialized).expect("deserialize action");
+                let deserialized: FleetActionRecord =
+                    serde_json::from_str(&serialized).expect("deserialize action");
                 assert_eq!(deserialized.action_id, action.action_id);
             }
         }
@@ -2597,41 +2660,62 @@ mod tests {
             let staleness_threshold = Duration::from_secs(300); // 5 minutes
 
             // Node exactly at staleness boundary
-            transport.upsert_node_status(&NodeStatus {
-                zone_id: "prod".to_string(),
-                node_id: "boundary-node".to_string(),
-                last_seen: base_time - chrono::TimeDelta::from_std(staleness_threshold).unwrap(),
-                quarantine_version: 1,
-                health: NodeHealth::Healthy,
-            }).expect("upsert boundary node");
+            transport
+                .upsert_node_status(&NodeStatus {
+                    zone_id: "prod".to_string(),
+                    node_id: "boundary-node".to_string(),
+                    last_seen: base_time
+                        - chrono::TimeDelta::from_std(staleness_threshold).unwrap(),
+                    quarantine_version: 1,
+                    health: NodeHealth::Healthy,
+                })
+                .expect("upsert boundary node");
 
             // Node just before staleness (should not be stale)
-            transport.upsert_node_status(&NodeStatus {
-                zone_id: "prod".to_string(),
-                node_id: "fresh-node".to_string(),
-                last_seen: base_time - chrono::TimeDelta::from_std(staleness_threshold).unwrap() + chrono::TimeDelta::seconds(1),
-                quarantine_version: 1,
-                health: NodeHealth::Healthy,
-            }).expect("upsert fresh node");
+            transport
+                .upsert_node_status(&NodeStatus {
+                    zone_id: "prod".to_string(),
+                    node_id: "fresh-node".to_string(),
+                    last_seen: base_time
+                        - chrono::TimeDelta::from_std(staleness_threshold).unwrap()
+                        + chrono::TimeDelta::seconds(1),
+                    quarantine_version: 1,
+                    health: NodeHealth::Healthy,
+                })
+                .expect("upsert fresh node");
 
             // Node just after staleness (should be stale)
-            transport.upsert_node_status(&NodeStatus {
-                zone_id: "prod".to_string(),
-                node_id: "stale-node".to_string(),
-                last_seen: base_time - chrono::TimeDelta::from_std(staleness_threshold).unwrap() - chrono::TimeDelta::seconds(1),
-                quarantine_version: 1,
-                health: NodeHealth::Healthy,
-            }).expect("upsert stale node");
+            transport
+                .upsert_node_status(&NodeStatus {
+                    zone_id: "prod".to_string(),
+                    node_id: "stale-node".to_string(),
+                    last_seen: base_time
+                        - chrono::TimeDelta::from_std(staleness_threshold).unwrap()
+                        - chrono::TimeDelta::seconds(1),
+                    quarantine_version: 1,
+                    health: NodeHealth::Healthy,
+                })
+                .expect("upsert stale node");
 
-            let stale_nodes = transport.list_stale_nodes(base_time, staleness_threshold)
+            let stale_nodes = transport
+                .list_stale_nodes(base_time, staleness_threshold)
                 .expect("list stale nodes");
 
             let stale_ids: Vec<_> = stale_nodes.iter().map(|n| &n.node_id).collect();
 
             // Boundary behavior: exactly at threshold should be considered stale (fail-closed)
-            assert!(stale_ids.contains(&&"boundary-node".to_string()), "Boundary node should be stale");
-            assert!(!stale_ids.contains(&&"fresh-node".to_string()), "Fresh node should not be stale");
-            assert!(stale_ids.contains(&&"stale-node".to_string()), "Stale node should be stale");
+            assert!(
+                stale_ids.contains(&&"boundary-node".to_string()),
+                "Boundary node should be stale"
+            );
+            assert!(
+                !stale_ids.contains(&&"fresh-node".to_string()),
+                "Fresh node should not be stale"
+            );
+            assert!(
+                stale_ids.contains(&&"stale-node".to_string()),
+                "Stale node should be stale"
+            );
         }
 
         #[test]
@@ -2652,18 +2736,42 @@ mod tests {
                 let layout = FleetTransportLayout::new(extreme_root);
 
                 // Layout creation should handle extreme paths gracefully
-                assert!(layout.root_dir().to_str().is_some(), "Root path should be valid UTF-8");
-                assert!(layout.actions_path().to_str().is_some(), "Actions path should be valid UTF-8");
-                assert!(layout.nodes_dir().to_str().is_some(), "Nodes dir should be valid UTF-8");
-                assert!(layout.locks_dir().to_str().is_some(), "Locks dir should be valid UTF-8");
+                assert!(
+                    layout.root_dir().to_str().is_some(),
+                    "Root path should be valid UTF-8"
+                );
+                assert!(
+                    layout.actions_path().to_str().is_some(),
+                    "Actions path should be valid UTF-8"
+                );
+                assert!(
+                    layout.nodes_dir().to_str().is_some(),
+                    "Nodes dir should be valid UTF-8"
+                );
+                assert!(
+                    layout.locks_dir().to_str().is_some(),
+                    "Locks dir should be valid UTF-8"
+                );
 
                 // Initialization should handle extreme paths
                 let init_result = layout.initialize();
                 if init_result.is_ok() {
-                    assert!(layout.root_dir().is_dir(), "Root directory should be created");
-                    assert!(layout.nodes_dir().is_dir(), "Nodes directory should be created");
-                    assert!(layout.locks_dir().is_dir(), "Locks directory should be created");
-                    assert!(layout.actions_path().is_file(), "Actions file should be created");
+                    assert!(
+                        layout.root_dir().is_dir(),
+                        "Root directory should be created"
+                    );
+                    assert!(
+                        layout.nodes_dir().is_dir(),
+                        "Nodes directory should be created"
+                    );
+                    assert!(
+                        layout.locks_dir().is_dir(),
+                        "Locks directory should be created"
+                    );
+                    assert!(
+                        layout.actions_path().is_file(),
+                        "Actions file should be created"
+                    );
                 }
             }
 
@@ -2672,18 +2780,28 @@ mod tests {
             layout.initialize().expect("initialize layout");
 
             let boundary_node_ids = vec![
-                "a", // Minimum length
-                &"b".repeat(MAX_NODE_ID_LEN), // Maximum length
+                "a",                             // Minimum length
+                &"b".repeat(MAX_NODE_ID_LEN),    // Maximum length
                 "node-with-all.valid_chars-123", // All valid characters
             ];
 
             for node_id in &boundary_node_ids {
                 let path_result = layout.node_status_path(node_id);
-                assert!(path_result.is_ok(), "Should accept valid node ID: {}", node_id);
+                assert!(
+                    path_result.is_ok(),
+                    "Should accept valid node ID: {}",
+                    node_id
+                );
 
                 let path = path_result.unwrap();
-                assert!(path.to_str().is_some(), "Generated path should be valid UTF-8");
-                assert!(path.file_name().is_some(), "Generated path should have filename");
+                assert!(
+                    path.to_str().is_some(),
+                    "Generated path should be valid UTF-8"
+                );
+                assert!(
+                    path.file_name().is_some(),
+                    "Generated path should have filename"
+                );
             }
         }
     }

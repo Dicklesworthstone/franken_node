@@ -48,8 +48,8 @@ ctrlc = "3"
 [dev-dependencies]
 assert_cmd = "2.0.16"
 assert2 = "0.4.0"
-fastapi_rust = { package = "fastapi-rust", path = "/dp/fastapi_rust/crates/fastapi", default-features = false }
 frankenengine-verifier-sdk = { path = "../../sdk/verifier" }
+fastapi_rust = { package = "fastapi-rust", path = "/dp/fastapi_rust/crates/fastapi", default-features = false }
 sqlmodel = { path = "/dp/sqlmodel_rust/crates/sqlmodel", default-features = false }
 sqlmodel-core = { path = "/dp/sqlmodel_rust/crates/sqlmodel-core" }
 sqlmodel-schema = { path = "/dp/sqlmodel_rust/crates/sqlmodel-schema" }
