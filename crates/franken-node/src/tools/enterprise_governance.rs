@@ -711,11 +711,7 @@ mod tests {
     #[test]
     fn register_empty_rule_id_does_not_store_rule() {
         let mut engine = EnterpriseGovernance::default();
-        let rule = sample_rule(
-            "",
-            RuleCategory::AccessControl,
-            EnforcementLevel::Mandatory,
-        );
+        let rule = sample_rule("", RuleCategory::AccessControl, EnforcementLevel::Mandatory);
 
         let err = engine
             .register_rule(rule, "trace-empty-rule-id")

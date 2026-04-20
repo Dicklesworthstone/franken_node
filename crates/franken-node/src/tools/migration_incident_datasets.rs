@@ -1227,9 +1227,12 @@ mod tests {
 
     #[test]
     fn dataset_entry_deserialize_rejects_string_record_count() {
-        let mut value =
-            serde_json::to_value(sample_entry("ds-string-records", DatasetType::TrustEvidence, 500))
-                .expect("sample dataset entry should serialize");
+        let mut value = serde_json::to_value(sample_entry(
+            "ds-string-records",
+            DatasetType::TrustEvidence,
+            500,
+        ))
+        .expect("sample dataset entry should serialize");
         value["record_count"] = serde_json::json!("500");
 
         let err = serde_json::from_value::<DatasetEntry>(value).unwrap_err();

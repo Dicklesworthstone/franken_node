@@ -1119,8 +1119,8 @@ pub fn render_human_summary(report: &BenchmarkReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     use crate::security::constant_time;
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_scoring_lower_is_better_perfect() {
@@ -2108,7 +2108,11 @@ mod tests {
             lower_is_better: false,
         };
 
-        assert_eq!(neg_inf_config.score(50.0), 0, "Negative infinity should result in 0 score");
+        assert_eq!(
+            neg_inf_config.score(50.0),
+            0,
+            "Negative infinity should result in 0 score"
+        );
     }
 
     #[test]
@@ -2121,9 +2125,21 @@ mod tests {
         };
 
         // Should handle division by zero case
-        assert_eq!(identical_config.score(50.0), 100, "At ideal value should score 100");
-        assert_eq!(identical_config.score(49.0), 100, "Below ideal should score 100");
-        assert_eq!(identical_config.score(51.0), 0, "Above ideal should score 0");
+        assert_eq!(
+            identical_config.score(50.0),
+            100,
+            "At ideal value should score 100"
+        );
+        assert_eq!(
+            identical_config.score(49.0),
+            100,
+            "Below ideal should score 100"
+        );
+        assert_eq!(
+            identical_config.score(51.0),
+            0,
+            "Above ideal should score 0"
+        );
 
         // Test higher-is-better with identical values
         let identical_higher_config = ScoringConfig {
@@ -2141,17 +2157,21 @@ mod tests {
     fn negative_benchmark_dimension_serialization_with_malformed_json() {
         // Test BenchmarkDimension deserialization with invalid JSON
         let invalid_json_cases = vec![
-            "null",                           // Wrong type
-            "\"unknown_dimension\"",          // Unknown variant
-            "\"COMPATIBILITY_CORRECTNESS\"",  // Wrong case
-            "\"compatibility-correctness\"",  // Wrong delimiter
+            "null",                          // Wrong type
+            "\"unknown_dimension\"",         // Unknown variant
+            "\"COMPATIBILITY_CORRECTNESS\"", // Wrong case
+            "\"compatibility-correctness\"", // Wrong delimiter
             "42",                            // Numeric instead of string
             "\"\"",                          // Empty string
         ];
 
         for invalid_json in invalid_json_cases {
             let result: Result<BenchmarkDimension, _> = serde_json::from_str(invalid_json);
-            assert!(result.is_err(), "Should reject invalid JSON: {}", invalid_json);
+            assert!(
+                result.is_err(),
+                "Should reject invalid JSON: {}",
+                invalid_json
+            );
         }
 
         // Test that valid serialization still works
@@ -2167,22 +2187,26 @@ mod tests {
     fn negative_default_scoring_with_problematic_scenario_names() {
         // Test default_scoring with various problematic input strings
         let problematic_names = vec![
-            "",                               // Empty string
-            "   ",                           // Whitespace only
-            "\0null_terminated",             // Null byte
-            "scenario\nwith\nnewlines",      // Multiline
-            "🚀emoji_scenario🔥",             // Unicode emoji
-            "\u{FFFF}max_unicode",           // Max BMP character
+            "",                                                       // Empty string
+            "   ",                                                    // Whitespace only
+            "\0null_terminated",                                      // Null byte
+            "scenario\nwith\nnewlines",                               // Multiline
+            "🚀emoji_scenario🔥",                                     // Unicode emoji
+            "\u{FFFF}max_unicode",                                    // Max BMP character
             "very_".to_string() + &"long_".repeat(1000) + "scenario", // Very long name
-            "../../../etc/passwd",           // Path traversal
-            "<script>alert('xss')</script>", // XSS attempt
-            "{\"json\": \"injection\"}",     // JSON injection
+            "../../../etc/passwd",                                    // Path traversal
+            "<script>alert('xss')</script>",                          // XSS attempt
+            "{\"json\": \"injection\"}",                              // JSON injection
         ];
 
         for name in problematic_names {
             let result = default_scoring(&name);
             // Should return None for unknown scenarios without panicking
-            assert!(result.is_none(), "Should return None for unknown scenario: {}", name);
+            assert!(
+                result.is_none(),
+                "Should return None for unknown scenario: {}",
+                name
+            );
         }
 
         // Verify that known scenarios still work correctly
@@ -2211,7 +2235,11 @@ mod tests {
         // Test capacity larger than current size
         let mut small_vec = vec![10, 20];
         push_bounded(&mut small_vec, 30, 100);
-        assert_eq!(small_vec, vec![10, 20, 30], "Should not drain when under capacity");
+        assert_eq!(
+            small_vec,
+            vec![10, 20, 30],
+            "Should not drain when under capacity"
+        );
 
         // Test edge case: capacity equals current size
         let mut exact_vec = vec![1, 2, 3];
@@ -2235,13 +2263,13 @@ mod tests {
                 disk_type: "\u{FFFF}\u{10FFFF}".to_string(),
             },
             HardwareProfile {
-                cpu: "".to_string(), // Empty CPU
-                memory_gb: 0,        // Zero memory
+                cpu: "".to_string(),          // Empty CPU
+                memory_gb: 0,                 // Zero memory
                 disk_type: "   ".to_string(), // Whitespace disk type
             },
             HardwareProfile {
                 cpu: "../../../proc/cpuinfo".to_string(), // Path traversal
-                memory_gb: u32::MAX, // Maximum memory
+                memory_gb: u32::MAX,                      // Maximum memory
                 disk_type: "<script>alert('hardware')</script>".to_string(), // XSS
             },
         ];
@@ -2289,7 +2317,9 @@ mod tests {
             assert!(
                 score <= 100,
                 "Score should be bounded [0,100] for {}: {} -> {}",
-                description, value, score
+                description,
+                value,
+                score
             );
 
             // Score computation should not panic or produce invalid results
@@ -2325,7 +2355,11 @@ mod tests {
             // Display string should be valid identifier-like
             assert!(!display_str.is_empty());
             assert!(!display_str.contains(' '));
-            assert!(display_str.chars().all(|c| c.is_ascii_lowercase() || c == '_'));
+            assert!(
+                display_str
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c == '_')
+            );
         }
 
         // Test ordering consistency
@@ -2335,9 +2369,10 @@ mod tests {
         // Should maintain consistent ordering
         for i in 1..dimensions.len() {
             assert!(
-                dimensions[i-1] <= dimensions[i],
+                dimensions[i - 1] <= dimensions[i],
                 "Ordering should be consistent: {:?} <= {:?}",
-                dimensions[i-1], dimensions[i]
+                dimensions[i - 1],
+                dimensions[i]
             );
         }
 
@@ -2372,6 +2407,9 @@ mod tests {
 
         // Test MAX_SCENARIOS bound
         assert!(MAX_SCENARIOS > 0);
-        assert!(MAX_SCENARIOS <= 1_000_000, "Should have reasonable upper bound");
+        assert!(
+            MAX_SCENARIOS <= 1_000_000,
+            "Should have reasonable upper bound"
+        );
     }
 }

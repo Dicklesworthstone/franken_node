@@ -857,7 +857,10 @@ mod tests {
         let mut engine = TransparentReports::default();
 
         let err = engine
-            .create_report(sample_report("", ReportCategory::SecurityIncident), &trace())
+            .create_report(
+                sample_report("", ReportCategory::SecurityIncident),
+                &trace(),
+            )
             .expect_err("empty report id must fail");
 
         assert!(err.contains("Report id"));
@@ -1086,9 +1089,11 @@ mod tests {
             .expect_err("empty action ids must fail");
 
         assert!(err.contains("Action id"));
-        assert!(engine.reports()["r-empty-action"]
-            .corrective_actions
-            .is_empty());
+        assert!(
+            engine.reports()["r-empty-action"]
+                .corrective_actions
+                .is_empty()
+        );
         assert_eq!(engine.audit_log().len(), audit_count_before);
     }
 
@@ -1110,9 +1115,11 @@ mod tests {
             .expect_err("blank action owners must fail");
 
         assert!(err.contains("owner"));
-        assert!(engine.reports()["r-blank-owner"]
-            .corrective_actions
-            .is_empty());
+        assert!(
+            engine.reports()["r-blank-owner"]
+                .corrective_actions
+                .is_empty()
+        );
         assert_eq!(engine.audit_log().len(), audit_count_before);
     }
 

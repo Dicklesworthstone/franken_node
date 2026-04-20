@@ -311,7 +311,10 @@ impl MigrationValidationCohorts {
             .map(|r| r.outcome_hash.as_str())
             .collect();
 
-        let det = prior_hashes.is_empty() || prior_hashes.iter().all(|h| constant_time::ct_eq(h, outcome_hash));
+        let det = prior_hashes.is_empty()
+            || prior_hashes
+                .iter()
+                .all(|h| constant_time::ct_eq(h, outcome_hash));
         let run = self
             .runs
             .iter_mut()
@@ -857,7 +860,9 @@ mod tests {
         e.create_cohort(sample_cohort("c1", CohortCategory::NodeMinimal), &trace())
             .unwrap();
 
-        let err = e.add_project("c1", "  ", "trace-space-project").unwrap_err();
+        let err = e
+            .add_project("c1", "  ", "trace-space-project")
+            .unwrap_err();
 
         assert!(err.contains("project id"));
         assert!(e.cohorts()["c1"].project_ids.is_empty());
@@ -888,9 +893,7 @@ mod tests {
             .unwrap();
         let rid = e.start_run("c1", "cmd", &trace()).unwrap();
 
-        let err = e
-            .complete_run(&rid, " \n", "trace-space-hash")
-            .unwrap_err();
+        let err = e.complete_run(&rid, " \n", "trace-space-hash").unwrap_err();
 
         assert!(err.contains("outcome hash"));
         assert!(e.runs()[0].completed_at.is_none());

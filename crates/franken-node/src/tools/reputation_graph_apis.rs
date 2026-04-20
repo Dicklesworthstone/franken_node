@@ -1486,7 +1486,10 @@ mod tests {
             .unwrap();
 
         let err = g
-            .add_edge(sample_edge("e-too-high", "n1", "n2", 1.01), "trace-edge-high")
+            .add_edge(
+                sample_edge("e-too-high", "n1", "n2", 1.01),
+                "trace-edge-high",
+            )
             .unwrap_err();
 
         assert!(err.contains("between -1.0 and 1.0"));

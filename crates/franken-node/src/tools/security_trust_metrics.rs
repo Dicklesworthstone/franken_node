@@ -439,12 +439,20 @@ impl CoMetricEngine {
         let sec_count = security_measurements.len();
         let sec_total = SecurityMetricCategory::all().len().max(1);
         let sec_covered = sec_count as f64 / sec_total as f64;
-        let sec_covered = if !sec_covered.is_finite() { 0.0 } else { sec_covered };
+        let sec_covered = if !sec_covered.is_finite() {
+            0.0
+        } else {
+            sec_covered
+        };
 
         let trust_count = trust_measurements.len();
         let trust_total = TrustMetricCategory::all().len().max(1);
         let trust_covered = trust_count as f64 / trust_total as f64;
-        let trust_covered = if !trust_covered.is_finite() { 0.0 } else { trust_covered };
+        let trust_covered = if !trust_covered.is_finite() {
+            0.0
+        } else {
+            trust_covered
+        };
 
         let all_gates_pass = gate_results.iter().all(|g| g.passed);
         let coverage_ok =

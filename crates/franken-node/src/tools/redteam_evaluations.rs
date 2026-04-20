@@ -1074,7 +1074,11 @@ mod tests {
             .expect_err("empty finding id must be rejected");
 
         assert!(err.contains("Finding id"));
-        assert!(engine.engagements()["eng-empty-finding"].findings.is_empty());
+        assert!(
+            engine.engagements()["eng-empty-finding"]
+                .findings
+                .is_empty()
+        );
         assert_eq!(engine.audit_log().len(), audit_count_before);
     }
 
@@ -1093,9 +1097,11 @@ mod tests {
             .expect_err("blank finding descriptions must be rejected");
 
         assert!(err.contains("description"));
-        assert!(engine.engagements()["eng-blank-description"]
-            .findings
-            .is_empty());
+        assert!(
+            engine.engagements()["eng-blank-description"]
+                .findings
+                .is_empty()
+        );
         assert_eq!(engine.audit_log().len(), audit_count_before);
     }
 
@@ -1114,9 +1120,11 @@ mod tests {
             .expect_err("blank affected components must be rejected");
 
         assert!(err.contains("affected component"));
-        assert!(engine.engagements()["eng-blank-component"]
-            .findings
-            .is_empty());
+        assert!(
+            engine.engagements()["eng-blank-component"]
+                .findings
+                .is_empty()
+        );
         assert_eq!(engine.audit_log().len(), audit_count_before);
     }
 

@@ -1299,9 +1299,7 @@ mod tests {
         let measurement =
             sample_measurement(VefOperation::ReceiptEmission, BudgetMode::Normal, 30, 60);
 
-        let err = gate
-            .evaluate(&[measurement], "test-nan-noise")
-            .unwrap_err();
+        let err = gate.evaluate(&[measurement], "test-nan-noise").unwrap_err();
 
         assert!(matches!(err, VefPerfBudgetError::InvalidConfig(_)));
         assert!(gate.audit_log.is_empty());

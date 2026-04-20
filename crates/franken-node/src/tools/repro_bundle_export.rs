@@ -660,7 +660,9 @@ impl ReproBundleExporter {
 
     /// Find a bundle by ID.
     pub fn find_bundle(&self, bundle_id: &str) -> Option<&ReproBundle> {
-        self.bundles.iter().find(|b| constant_time::ct_eq(&b.bundle_id, bundle_id))
+        self.bundles
+            .iter()
+            .find(|b| constant_time::ct_eq(&b.bundle_id, bundle_id))
     }
 
     /// Export bundles for a time range (manual export).
