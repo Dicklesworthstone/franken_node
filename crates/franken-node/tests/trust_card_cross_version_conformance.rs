@@ -10,7 +10,8 @@
 //! from /testing-conformance-harnesses skill.
 
 use std::collections::BTreeMap;
-use serde_json::Value;
+
+#[cfg(test)]
 use insta::assert_json_snapshot;
 
 use frankenengine_node::supply_chain::trust_card::{
@@ -18,8 +19,7 @@ use frankenengine_node::supply_chain::trust_card::{
     ExtensionIdentity, PublisherIdentity, CertificationLevel,
     CapabilityDeclaration, CapabilityRisk, BehavioralProfile,
     RevocationStatus, ProvenanceSummary, ReputationTrend, RiskLevel, RiskAssessment,
-    DependencyTrustStatus, AuditRecord, verify_card_signature, TrustCardError,
-    TRUST_CARD_REGISTRY_SNAPSHOT_SCHEMA
+    DependencyTrustStatus, verify_card_signature, TrustCardError,
 };
 use frankenengine_node::supply_chain::certification::{VerifiedEvidenceRef, EvidenceType};
 
@@ -98,7 +98,7 @@ fn create_test_input_v1() -> TrustCardInput {
         evidence_refs: vec![
             VerifiedEvidenceRef {
                 evidence_id: "conformance-evidence-1".to_string(),
-                evidence_type: EvidenceType::ProvenanceAttestation,
+                evidence_type: EvidenceType::ProvenanceChain,
                 verified_at_epoch: 1000,
                 verification_receipt_hash: "conformance-receipt-hash-1".to_string(),
             },
