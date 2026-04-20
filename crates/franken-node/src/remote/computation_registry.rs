@@ -697,6 +697,11 @@ impl ComputationRegistry {
 /// - `vN`: literal `v` followed by one or more digits
 #[must_use]
 pub fn is_canonical_computation_name(name: &str) -> bool {
+    // Bounds check: prevent resource exhaustion from oversized computation names
+    if name.len() > MAX_COMPUTATION_NAME_LENGTH {
+        return false;
+    }
+
     let mut parts = name.split('.');
     let Some(domain) = parts.next() else {
         return false;
@@ -714,7 +719,15 @@ pub fn is_canonical_computation_name(name: &str) -> bool {
     is_component(domain) && is_component(action) && is_version_component(version)
 }
 
+const MAX_COMPONENT_LENGTH: usize = 128;
+const MAX_COMPUTATION_NAME_LENGTH: usize = 512;
+
 fn is_component(component: &str) -> bool {
+    // Bounds check: prevent resource exhaustion from oversized components
+    if component.len() > MAX_COMPONENT_LENGTH {
+        return false;
+    }
+
     let mut chars = component.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -726,6 +739,11 @@ fn is_component(component: &str) -> bool {
 }
 
 fn is_version_component(component: &str) -> bool {
+    // Bounds check: prevent resource exhaustion from oversized version components
+    if component.len() > MAX_COMPONENT_LENGTH {
+        return false;
+    }
+
     let Some(suffix) = component.strip_prefix('v') else {
         return false;
     };
@@ -1606,5 +1624,69 @@ mod tests {
         assert_eq!(err.code(), ERR_REGISTRY_VERSION_REGRESSION);
         assert_eq!(registry.registry_version(), 0);
         assert_eq!(registry.audit_events().len(), audit_len_before);
+    }
+
+    #[test]
+    fn bounds_check_prevents_resource_exhaustion_attacks() {
+        // Test the specific attack vector from audit findings
+        let malicious_name = format!("{}.action.v1", "a".repeat(1_000_000));
+        assert!(
+            !is_canonical_computation_name(&malicious_name),
+            "Malicious oversized name should be rejected to prevent resource exhaustion"
+        );
+
+        // Test component bounds (MAX_COMPONENT_LENGTH = 128)
+        let at_limit_component = "a".repeat(128);
+        let over_limit_component = "a".repeat(129);
+
+        // Component at limit should pass validation
+        assert!(
+            is_component(&at_limit_component),
+            "Component at MAX_COMPONENT_LENGTH should be accepted"
+        );
+
+        // Component over limit should be rejected
+        assert!(
+            !is_component(&over_limit_component),
+            "Component over MAX_COMPONENT_LENGTH should be rejected"
+        );
+
+        // Version component bounds
+        let at_limit_version = format!("v{}", "1".repeat(127)); // 'v' + 127 digits = 128
+        let over_limit_version = format!("v{}", "1".repeat(128)); // 'v' + 128 digits = 129
+
+        assert!(
+            is_version_component(&at_limit_version),
+            "Version component at MAX_COMPONENT_LENGTH should be accepted"
+        );
+
+        assert!(
+            !is_version_component(&over_limit_version),
+            "Version component over MAX_COMPONENT_LENGTH should be rejected"
+        );
+
+        // Full computation name bounds (MAX_COMPUTATION_NAME_LENGTH = 512)
+        // Build name at exactly 512 chars: component1 + '.' + component2 + '.' + version
+        // Use 128-char components: 128 + 1 + 128 + 1 + remaining = 512
+        let remaining_for_version = 512 - 128 - 1 - 128 - 1; // 254 chars for version
+        let at_limit_name = format!(
+            "{}.{}.v{}",
+            "a".repeat(128),
+            "b".repeat(128),
+            "1".repeat(remaining_for_version - 1) // -1 for 'v' prefix
+        );
+        assert_eq!(at_limit_name.len(), 512);
+
+        assert!(
+            is_canonical_computation_name(&at_limit_name),
+            "Computation name at MAX_COMPUTATION_NAME_LENGTH should be accepted"
+        );
+
+        // Name over limit should be rejected
+        let over_limit_name = format!("{}_extra", at_limit_name);
+        assert!(
+            !is_canonical_computation_name(&over_limit_name),
+            "Computation name over MAX_COMPUTATION_NAME_LENGTH should be rejected"
+        );
     }
 }
