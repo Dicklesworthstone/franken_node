@@ -6,6 +6,8 @@ description = "Structural-only verifier SDK for replaying structurally bound cap
 license = "MIT"
 
 [dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 sha2 = "0.10.8"
 hex = "0.4.3"
 subtle = "2.6.1"

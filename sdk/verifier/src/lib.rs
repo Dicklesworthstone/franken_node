@@ -43,6 +43,7 @@
 //! - INV-CAPSULE-NO-PRIVILEGED-ACCESS: External replay requires no privileged internal access.
 //! - INV-CAPSULE-VERDICT-REPRODUCIBLE: Same capsule always produces the same verdict.
 
+pub mod bundle;
 pub mod capsule;
 
 /// SDK version string for compatibility checks.
