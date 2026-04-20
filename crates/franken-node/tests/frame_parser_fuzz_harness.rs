@@ -9,6 +9,10 @@ use frankenengine_node::connector::frame_parser::{
     DecodeAuditEntry, DecodeVerdict, FrameInput, GuardrailViolation, ParserConfig, ParserError,
     check_batch, check_frame,
 };
+use frankenengine_node::tools::replay_bundle::{
+    EventType, RawEvent, generate_replay_bundle, to_canonical_json,
+};
+use serde_json::Value;
 
 const TEST_TAG: u8 = 0xA7;
 const WIRE_HEADER_LEN: usize = 5;
@@ -78,6 +82,74 @@ fn encode_with_declared_len(declared_len: u32, body: &[u8]) -> Vec<u8> {
     push_len_prefix(&mut encoded, declared_len);
     encoded.extend_from_slice(body);
     encoded
+}
+
+fn replay_json_depth(value: &Value) -> usize {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .map(replay_json_depth)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1),
+        Value::Object(fields) => fields
+            .values()
+            .map(replay_json_depth)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1),
+        _ => 1,
+    }
+}
+
+fn replay_claimed_depth(payload: &[u8]) -> u8 {
+    serde_json::from_slice::<Value>(payload).map_or(1, |value| {
+        u8::try_from(replay_json_depth(&value).min(usize::from(u8::MAX))).expect("depth capped")
+    })
+}
+
+fn replay_claimed_cpu_ms(payload: &[u8]) -> u16 {
+    u16::try_from(payload.len().min(9)).expect("payload length capped below parser cpu limit")
+}
+
+fn encode_replay_frame(frame_id: &str, payload: &[u8]) -> Vec<u8> {
+    encode_structured_frame(
+        TEST_TAG,
+        frame_id.as_bytes(),
+        replay_claimed_depth(payload),
+        replay_claimed_cpu_ms(payload),
+        payload,
+    )
+}
+
+fn replay_event_frame_payload(sequence_number: u64) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "e": sequence_number,
+        "t": "policy_eval"
+    }))
+    .expect("small replay event payload should serialize")
+}
+
+fn replay_bundle_json_frame() -> Vec<u8> {
+    let events = vec![
+        RawEvent::new(
+            "2026-02-20T10:00:00.000001Z",
+            EventType::ExternalSignal,
+            serde_json::json!({"signal":"anomaly","severity":"high"}),
+        )
+        .with_state_snapshot(serde_json::json!({"epoch":7_u64,"mode":"strict"}))
+        .with_policy_version("1.2.3"),
+        RawEvent::new(
+            "2026-02-20T10:00:00.000002Z",
+            EventType::PolicyEval,
+            serde_json::json!({"decision":"quarantine","confidence":91_u64}),
+        )
+        .with_causal_parent(1),
+    ];
+    let bundle = generate_replay_bundle("INC-FRAME-FUZZ", &events)
+        .expect("replay bundle grammar should build");
+    let canonical_json = to_canonical_json(&bundle).expect("bundle should canonicalize");
+    encode_replay_frame("replay:bundle", canonical_json.as_bytes())
 }
 
 fn run_harness(input: &[u8]) -> HarnessOutcome {
@@ -180,6 +252,15 @@ fn seed_corpus() -> Vec<(&'static str, Vec<u8>)> {
             "depth-and-cpu-boundary",
             encode_structured_frame(TEST_TAG, b"busy", 4, 10, b"x"),
         ),
+        (
+            "replay-event-valid",
+            encode_replay_frame("r:1", &replay_event_frame_payload(1)),
+        ),
+        (
+            "replay-frame-id-nul",
+            encode_replay_frame("r:\0bad", &replay_event_frame_payload(2)),
+        ),
+        ("replay-bundle-json-size-guard", replay_bundle_json_frame()),
     ]
 }
 
@@ -195,6 +276,9 @@ fn seed_corpus_covers_required_frame_parser_fuzz_shapes() {
         "invalid-tag-byte",
         "overlapping-fields",
         "empty-frame-id",
+        "replay-event-valid",
+        "replay-frame-id-nul",
+        "replay-bundle-json-size-guard",
     ] {
         assert!(
             seeds.iter().any(|(name, _)| *name == required),
@@ -306,14 +390,18 @@ fn depth_and_cpu_boundary_seed_is_fail_closed() {
 
     assert!(!verdict.allowed);
     assert_eq!(audit.verdict, "BLOCK");
-    assert!(verdict
-        .violations
-        .iter()
-        .any(|violation| matches!(violation, GuardrailViolation::DepthExceeded { .. })));
-    assert!(verdict
-        .violations
-        .iter()
-        .any(|violation| matches!(violation, GuardrailViolation::CpuExceeded { .. })));
+    assert!(
+        verdict
+            .violations
+            .iter()
+            .any(|violation| matches!(violation, GuardrailViolation::DepthExceeded { .. }))
+    );
+    assert!(
+        verdict
+            .violations
+            .iter()
+            .any(|violation| matches!(violation, GuardrailViolation::CpuExceeded { .. }))
+    );
 }
 
 #[test]
@@ -339,4 +427,59 @@ fn batch_harness_preserves_seed_order_for_parser_reachable_frames() {
         assert_eq!(verdict.frame_id, frames[idx].frame_id);
         assert_eq!(audit.frame_id, frames[idx].frame_id);
     }
+}
+
+#[test]
+fn replay_event_wire_grammar_reaches_parser_with_allow_verdict() {
+    let payload = replay_event_frame_payload(7);
+    let input = encode_replay_frame("r:7", &payload);
+    let HarnessOutcome::Parsed { verdict, audit } = run_harness(&input) else {
+        panic!("valid replay event frame should reach parser guard");
+    };
+
+    assert!(verdict.allowed);
+    assert!(verdict.violations.is_empty());
+    assert_eq!(verdict.frame_id, "r:7");
+    assert_eq!(verdict.resource_usage.bytes_parsed, len_u64(input.len()));
+    assert_eq!(
+        verdict.resource_usage.nesting_depth,
+        u32::from(replay_claimed_depth(&payload))
+    );
+    assert_eq!(audit.verdict, "ALLOW");
+}
+
+#[test]
+fn replay_frame_id_with_nul_is_rejected_by_actual_parser_guard() {
+    let input = encode_replay_frame("r:\0bad", &replay_event_frame_payload(8));
+    let HarnessOutcome::ParserError(error) = run_harness(&input) else {
+        panic!("NUL-bearing replay frame id should be rejected by parser guard");
+    };
+
+    assert_eq!(error.code(), "BPG_MALFORMED_FRAME");
+    assert!(
+        error
+            .to_string()
+            .contains("frame_id must not contain NUL bytes")
+    );
+}
+
+#[test]
+fn replay_bundle_json_frame_hits_size_guard_before_payload_decode() {
+    let input = replay_bundle_json_frame();
+    let declared_len = u32::from_be_bytes(input[0..4].try_into().expect("prefix present"));
+    assert!(u64::from(declared_len).saturating_add(4) >= fuzz_config().max_frame_bytes);
+
+    let HarnessOutcome::Parsed { verdict, audit } = run_harness(&input) else {
+        panic!("large replay bundle JSON frame should hit parser size guard");
+    };
+
+    assert!(!verdict.allowed);
+    assert_eq!(verdict.frame_id, format!("declared-len-{declared_len}"));
+    assert_eq!(audit.verdict, "BLOCK");
+    assert!(verdict.violations.iter().any(|violation| matches!(
+        violation,
+        GuardrailViolation::SizeExceeded { actual, limit }
+            if *actual == u64::from(declared_len).saturating_add(4)
+                && *limit == fuzz_config().max_frame_bytes
+    )));
 }

@@ -1,0 +1,10 @@
+{
+  "engines": {
+    "node": ">=20 <23"
+  },
+  "name": "demo",
+  "scripts": {
+    "test": "node test.js"
+  },
+  "version": "1.0.0"
+}

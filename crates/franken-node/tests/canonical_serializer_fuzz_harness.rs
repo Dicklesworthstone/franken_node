@@ -1,7 +1,10 @@
 use frankenengine_node::connector::canonical_serializer::{
     CanonicalSerializer, SerializerError, SignaturePreimage, TrustObjectType,
 };
-use serde_json::Value;
+use frankenengine_node::tools::replay_bundle::{
+    EventType, RawEvent, generate_replay_bundle, replay_bundle, to_canonical_json,
+};
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
 const TEXT_DEPTH_LIMIT: usize = 12;
@@ -114,6 +117,98 @@ fn deeply_nested_json(depth: usize) -> Vec<u8> {
         text = format!(r#"{{"n":{text}}}"#);
     }
     text.into_bytes()
+}
+
+fn replay_grammar_event_logs() -> Vec<(&'static str, Vec<RawEvent>)> {
+    vec![
+        (
+            "minimal",
+            vec![
+                RawEvent::new(
+                    "2026-02-20T10:00:00.000001Z",
+                    EventType::ExternalSignal,
+                    json!({"signal":"anomaly","severity":"high"}),
+                )
+                .with_state_snapshot(json!({"epoch":7_u64,"mode":"strict"}))
+                .with_policy_version("1.2.3"),
+            ],
+        ),
+        (
+            "causal-chain",
+            vec![
+                RawEvent::new(
+                    "2026-02-20T10:00:00.000001Z",
+                    EventType::ExternalSignal,
+                    json!({"signal":"anomaly","severity":"high"}),
+                )
+                .with_state_snapshot(json!({"epoch":7_u64,"mode":"strict"}))
+                .with_policy_version("1.2.3"),
+                RawEvent::new(
+                    "2026-02-20T10:00:00.000002Z",
+                    EventType::PolicyEval,
+                    json!({"decision":"quarantine","confidence":91_u64}),
+                )
+                .with_causal_parent(1),
+                RawEvent::new(
+                    "2026-02-20T10:00:00.000003Z",
+                    EventType::OperatorAction,
+                    json!({"action":"seal","result":"accepted"}),
+                )
+                .with_causal_parent(2),
+            ],
+        ),
+        (
+            "out-of-order",
+            vec![
+                RawEvent::new(
+                    "2026-02-20T10:00:00.000300Z",
+                    EventType::OperatorAction,
+                    json!({"action":"seal","result":"accepted"}),
+                ),
+                RawEvent::new(
+                    "2026-02-20T10:00:00.000100Z",
+                    EventType::ExternalSignal,
+                    json!({"signal":"anomaly","severity":"medium"}),
+                )
+                .with_state_snapshot(json!({"epoch":8_u64,"mode":"balanced"}))
+                .with_policy_version("1.2.4"),
+            ],
+        ),
+        (
+            "nested-payload",
+            vec![
+                RawEvent::new(
+                    "2026-02-20T10:00:00.000001Z",
+                    EventType::ExternalSignal,
+                    json!({
+                        "signal": "anomaly",
+                        "evidence": {
+                            "artifacts": [
+                                {"kind": "hash", "value": "sha256:abc"},
+                                {"kind": "receipt", "value": "receipt-1"}
+                            ],
+                            "scores": {"risk": 95_u64, "impact": 7_u64}
+                        }
+                    }),
+                )
+                .with_state_snapshot(json!({"epoch":9_u64,"mode":"strict"}))
+                .with_policy_version("1.2.5"),
+            ],
+        ),
+    ]
+}
+
+fn replay_bundle_payloads() -> Vec<(&'static str, Vec<u8>)> {
+    replay_grammar_event_logs()
+        .into_iter()
+        .map(|(name, events)| {
+            let incident_id = format!("INC-FUZZ-{name}");
+            let bundle =
+                generate_replay_bundle(&incident_id, &events).expect("replay grammar should build");
+            let canonical_json = to_canonical_json(&bundle).expect("bundle should canonicalize");
+            (name, canonical_json.into_bytes())
+        })
+        .collect()
 }
 
 #[test]
@@ -340,6 +435,92 @@ fn fuzz_json_float_payloads_are_rejected_as_non_canonical() {
         assert!(
             matches!(result, Err(SerializerError::FloatingPointRejected { .. })),
             "float payload should be rejected: {}",
+            String::from_utf8_lossy(payload)
+        );
+    }
+}
+
+#[test]
+fn fuzz_replay_bundle_grammar_payloads_round_trip_through_serializer() {
+    let mut serializer = CanonicalSerializer::with_all_schemas();
+
+    for (name, payload) in replay_bundle_payloads() {
+        let canonical = serializer
+            .serialize(
+                TrustObjectType::OperatorReceipt,
+                &payload,
+                "fuzz-replay-grammar",
+            )
+            .expect("replay bundle grammar payload should serialize");
+        assert_eq!(canonical, encoded_payload(&payload), "{name}");
+
+        let decoded = serializer
+            .deserialize(TrustObjectType::OperatorReceipt, &canonical)
+            .expect("replay bundle grammar payload should deserialize");
+        assert_eq!(decoded, payload, "{name}");
+
+        let decoded_value: Value =
+            serde_json::from_slice(&decoded).expect("decoded replay bundle should be JSON");
+        assert_eq!(decoded_value["incident_id"], format!("INC-FUZZ-{name}"));
+        assert!(decoded_value.get("manifest").is_some(), "{name}");
+        assert!(decoded_value.get("chunks").is_some(), "{name}");
+    }
+}
+
+#[test]
+fn fuzz_replay_bundle_grammar_is_stable_across_generation_and_serializer_instances() {
+    for (name, events) in replay_grammar_event_logs() {
+        let incident_id = format!("INC-FUZZ-{name}");
+        let first_bundle =
+            generate_replay_bundle(&incident_id, &events).expect("first grammar bundle");
+        let second_bundle =
+            generate_replay_bundle(&incident_id, &events).expect("second grammar bundle");
+        let first_replay = replay_bundle(&first_bundle).expect("first bundle should replay");
+        assert!(first_replay.matched, "{name}");
+
+        let first_json = to_canonical_json(&first_bundle).expect("first canonical JSON");
+        let second_json = to_canonical_json(&second_bundle).expect("second canonical JSON");
+        assert_eq!(first_json, second_json, "{name}");
+
+        let mut first_serializer = CanonicalSerializer::with_all_schemas();
+        let mut second_serializer = CanonicalSerializer::with_all_schemas();
+        let first_canonical = first_serializer
+            .serialize(
+                TrustObjectType::PolicyCheckpoint,
+                first_json.as_bytes(),
+                "fuzz-replay-stable-a",
+            )
+            .expect("first replay JSON should serialize");
+        let second_canonical = second_serializer
+            .serialize(
+                TrustObjectType::PolicyCheckpoint,
+                second_json.as_bytes(),
+                "fuzz-replay-stable-b",
+            )
+            .expect("second replay JSON should serialize");
+
+        assert_eq!(first_canonical, second_canonical, "{name}");
+    }
+}
+
+#[test]
+fn fuzz_replay_bundle_grammar_float_mutations_fail_closed() {
+    let mut serializer = CanonicalSerializer::with_all_schemas();
+    let cases = [
+        br#"{"timeline":[{"payload":{"score":3.14}}]}"#.as_slice(),
+        br#"{"initial_state_snapshot":{"load":1e9},"timeline":[]}"#.as_slice(),
+        br#"{"chunks":[{"events":[{"payload":{"ratio":NaN}}]}]}"#.as_slice(),
+    ];
+
+    for payload in cases {
+        let result = serializer.serialize(
+            TrustObjectType::OperatorReceipt,
+            payload,
+            "fuzz-replay-float",
+        );
+        assert!(
+            matches!(result, Err(SerializerError::FloatingPointRejected { .. })),
+            "replay grammar float payload should be rejected: {}",
             String::from_utf8_lossy(payload)
         );
     }

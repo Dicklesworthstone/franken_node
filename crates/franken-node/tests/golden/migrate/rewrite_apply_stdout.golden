@@ -1,0 +1,7 @@
+franken-node migrate rewrite
+target: [PATH]
+mode: apply
+summary: manifests=1 rewrites_planned=1 rewrites_applied=1 manual_review_items=0
+entries (1):
+- [mig-rewrite-001:PinNodeEngine] set engines.node to >=20 <23 to reduce migration runtime drift (path: package.json) (applied=true)
+

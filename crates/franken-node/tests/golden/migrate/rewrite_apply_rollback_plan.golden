@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0.0",
+  "project_path": "[PATH]",
+  "generated_at_utc": "[TIMESTAMP]",
+  "apply_mode": true,
+  "entry_count": 1,
+  "entries": [
+    {
+      "path": "package.json",
+      "original_content": "{\n  \"name\": \"demo\",\n  \"version\": \"1.0.0\",\n  \"scripts\": {\n    \"test\": \"node test.js\"\n  }\n}\n",
+      "rewritten_content": "{\n  \"engines\": {\n    \"node\": \">=20 <23\"\n  },\n  \"name\": \"demo\",\n  \"scripts\": {\n    \"test\": \"node test.js\"\n  },\n  \"version\": \"1.0.0\"\n}\n"
+    }
+  ]
+}

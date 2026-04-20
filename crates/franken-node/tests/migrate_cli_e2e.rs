@@ -3,6 +3,9 @@ use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
+#[path = "golden/mod.rs"]
+mod golden;
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -75,6 +78,11 @@ fn migrate_rewrite_apply_emits_rollback_plan_and_updates_manifest() {
     assert!(stdout.contains("mode: apply"));
     assert!(stdout.contains("rewrites_planned=1"));
     assert!(stdout.contains("rewrites_applied=1"));
+    golden::assert_scrubbed_golden("migrate/rewrite_apply_stdout", &stdout);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("migration rollback artifact written:"));
+    golden::assert_scrubbed_golden("migrate/rewrite_apply_stderr", &stderr);
 
     let rollback_json =
         std::fs::read_to_string(&rollback_path).expect("rollback artifact should be written");
@@ -90,9 +98,11 @@ fn migrate_rewrite_apply_emits_rollback_plan_and_updates_manifest() {
         1,
         "expected exactly one rollback entry"
     );
+    golden::assert_scrubbed_json_golden("migrate/rewrite_apply_rollback_plan", &rollback);
 
     let rewritten_package =
         std::fs::read_to_string(project_path.join("package.json")).expect("read rewritten package");
+    golden::assert_scrubbed_golden("migrate/rewrite_apply_manifest", &rewritten_package);
     let rewritten: serde_json::Value = serde_json::from_str(&rewritten_package)
         .unwrap_or_else(|err| panic!("rewritten package should be valid json: {err}"));
     assert_eq!(
