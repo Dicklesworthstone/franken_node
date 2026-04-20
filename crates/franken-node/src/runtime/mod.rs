@@ -30,6 +30,9 @@ pub mod speculation;
 pub mod time_travel;
 
 #[cfg(test)]
+mod metamorphic_scheduler_tests;
+
+#[cfg(test)]
 mod tests {
     use super::bulkhead::{self, BulkheadError, GlobalBulkhead};
     use super::safe_mode::{
