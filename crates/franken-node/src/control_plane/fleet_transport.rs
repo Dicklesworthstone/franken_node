@@ -47,6 +47,9 @@ pub struct FleetConvergenceReceiptSignature {
     pub algorithm: String,
     pub public_key_hex: String,
     pub key_id: String,
+    pub key_source: String,
+    pub signing_identity: String,
+    pub trust_scope: String,
     pub signed_payload_sha256: String,
     pub signature_hex: String,
 }
@@ -78,6 +81,8 @@ pub fn canonical_fleet_convergence_receipt_payload<T: Serialize>(
 pub fn sign_fleet_convergence_receipt_payload<T: Serialize>(
     payload: &T,
     signing_key: &ed25519_dalek::SigningKey,
+    key_source: &str,
+    signing_identity: &str,
 ) -> Result<FleetConvergenceReceiptSignature, FleetTransportError> {
     let canonical_payload = canonical_fleet_convergence_receipt_payload(payload)?;
     let signature = signing_key.sign(&canonical_payload);
@@ -90,6 +95,9 @@ pub fn sign_fleet_convergence_receipt_payload<T: Serialize>(
         public_key_hex: hex::encode(verifying_key.to_bytes()),
         key_id: crate::supply_chain::artifact_signing::KeyId::from_verifying_key(&verifying_key)
             .to_string(),
+        key_source: key_source.to_string(),
+        signing_identity: signing_identity.to_string(),
+        trust_scope: "fleet_convergence".to_string(),
         signed_payload_sha256: hex::encode(payload_hasher.finalize()),
         signature_hex: hex::encode(signature.to_bytes()),
     })

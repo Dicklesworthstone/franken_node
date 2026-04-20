@@ -896,7 +896,6 @@ dependencies = [
  "frankenengine-extension-host",
  "frankenengine-verifier-sdk",
  "ftui",
- "getrandom 0.2.17",
  "hex",
  "hkdf",
  "hmac",

@@ -67,6 +67,7 @@ fn run_cli_in_dir_with_fleet_state_and_env(
         .args(args)
         .env("FRANKEN_NODE_FLEET_STATE_DIR", fleet_state_dir)
         .env_remove("FRANKEN_NODE_PROFILE")
+        .env_remove("FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH")
         .envs(extra_env.iter().copied())
         .output()
         .unwrap_or_else(|err| panic!("failed running `{}`: {err}", args.join(" ")))
@@ -95,6 +96,20 @@ fn seed_transport(fleet_state_dir: &std::path::Path) -> FileFleetTransport {
     let mut transport = FileFleetTransport::new(fleet_state_dir);
     transport.initialize().expect("initialize fleet transport");
     transport
+}
+
+fn write_test_signing_key(
+    root: &std::path::Path,
+    file_name: &str,
+    seed_byte: u8,
+) -> (PathBuf, ed25519_dalek::SigningKey) {
+    let path = root.join(file_name);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("signing key parent");
+    }
+    let seed = [seed_byte; 32];
+    std::fs::write(&path, hex::encode(seed)).expect("write signing key seed");
+    (path, ed25519_dalek::SigningKey::from_bytes(&seed))
 }
 
 fn write_fixture_registry_to(root: &std::path::Path) {
@@ -153,9 +168,27 @@ fn seed_fleet_quarantine(
         .expect("publish quarantine");
 }
 
-fn assert_convergence_receipt_signature_round_trips(receipt: &serde_json::Value) {
+fn assert_convergence_receipt_signature_round_trips(
+    receipt: &serde_json::Value,
+    expected_fleet_key: &ed25519_dalek::SigningKey,
+) {
     let signature = &receipt["signature"];
     assert_eq!(signature["algorithm"], "ed25519");
+    assert_eq!(signature["key_source"], "env");
+    assert_eq!(signature["signing_identity"], "fleet-control-plane");
+    assert_eq!(signature["trust_scope"], "fleet_convergence");
+    assert_ne!(signature["key_source"], "local");
+    assert_eq!(
+        signature["public_key_hex"],
+        hex::encode(expected_fleet_key.verifying_key().to_bytes())
+    );
+    assert_eq!(
+        signature["key_id"],
+        frankenengine_node::supply_chain::artifact_signing::KeyId::from_verifying_key(
+            &expected_fleet_key.verifying_key()
+        )
+        .to_string()
+    );
 
     let mut signed_payload = receipt.clone();
     signed_payload
@@ -183,12 +216,8 @@ fn assert_convergence_receipt_signature_round_trips(receipt: &serde_json::Value)
     .expect("decode public key")
     .try_into()
     .expect("public key length");
-    let signature_bytes = hex::decode(
-        signature["signature_hex"]
-            .as_str()
-            .expect("signature hex"),
-    )
-    .expect("decode signature");
+    let signature_bytes = hex::decode(signature["signature_hex"].as_str().expect("signature hex"))
+        .expect("decode signature");
     let verifying_key =
         ed25519_dalek::VerifyingKey::from_bytes(&public_key_bytes).expect("verifying key");
 
@@ -218,7 +247,20 @@ fn fleet_status_reports_zone_state() {
 
 #[test]
 fn fleet_reconcile_executes_and_reports_operation() {
-    let output = run_cli(&["fleet", "reconcile"]);
+    let fleet_state = tempdir().expect("tempdir");
+    let fleet_state_dir = fleet_state.path().join("fleet-state");
+    let (signing_key_path, _) = write_test_signing_key(fleet_state.path(), "keys/fleet.key", 11);
+    let signing_key_path = signing_key_path.display().to_string();
+
+    let output = run_cli_in_dir_with_fleet_state_and_env(
+        &repo_root(),
+        &["fleet", "reconcile"],
+        &fleet_state_dir,
+        &[(
+            "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+            signing_key_path.as_str(),
+        )],
+    );
     assert!(
         output.status.success(),
         "fleet reconcile failed: {}",
@@ -229,6 +271,31 @@ fn fleet_reconcile_executes_and_reports_operation() {
     assert!(stdout.contains("fleet action: type=reconcile"));
     assert!(stdout.contains("success=true"));
     assert!(stdout.contains("event_code=FLEET-005"));
+}
+
+#[test]
+fn fleet_reconcile_rejects_local_state_dir_self_attestation_key() {
+    let fleet_state = tempdir().expect("tempdir");
+    let fleet_state_dir = fleet_state.path().join("fleet-state");
+    seed_transport(&fleet_state_dir);
+    write_test_signing_key(&fleet_state_dir, "fleet-signing.ed25519", 12);
+
+    let output = run_cli_in_dir_with_fleet_state(
+        &repo_root(),
+        &["fleet", "reconcile", "--json"],
+        &fleet_state_dir,
+    );
+
+    assert!(
+        !output.status.success(),
+        "fleet reconcile should reject local self-attestation key"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("configured fleet-level signing key")
+            && stderr.contains("self-attestation is not trusted"),
+        "unexpected stderr: {stderr}",
+    );
 }
 
 #[test]
@@ -361,6 +428,9 @@ fn fleet_release_publishes_release_action_to_transport() {
 fn fleet_reconcile_republishes_pending_quarantines_for_stale_nodes() {
     let fleet_state = tempdir().expect("tempdir");
     let fleet_state_dir = fleet_state.path().join("fleet-state");
+    let (signing_key_path, signing_key) =
+        write_test_signing_key(fleet_state.path(), "keys/fleet.key", 21);
+    let signing_key_path = signing_key_path.display().to_string();
     let mut transport = seed_transport(&fleet_state_dir);
     let now = Utc::now();
 
@@ -392,7 +462,13 @@ fn fleet_reconcile_republishes_pending_quarantines_for_stale_nodes() {
         &repo_root(),
         &["fleet", "reconcile", "--json"],
         &fleet_state_dir,
-        &[("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "1")],
+        &[
+            ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "1"),
+            (
+                "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+                signing_key_path.as_str(),
+            ),
+        ],
     );
     assert!(
         output.status.success(),
@@ -413,7 +489,7 @@ fn fleet_reconcile_republishes_pending_quarantines_for_stale_nodes() {
             .expect("elapsed_ms")
             >= 1_000
     );
-    assert_convergence_receipt_signature_round_trips(&payload["convergence_receipt"]);
+    assert_convergence_receipt_signature_round_trips(&payload["convergence_receipt"], &signing_key);
 
     let actions = transport.list_actions().expect("list actions");
     assert_eq!(actions.len(), 2);
@@ -438,6 +514,9 @@ fn fleet_reconcile_republishes_pending_quarantines_for_stale_nodes() {
 fn fleet_reconcile_waits_for_delayed_node_convergence_receipt() {
     let fleet_state = tempdir().expect("tempdir");
     let fleet_state_dir = fleet_state.path().join("fleet-state");
+    let (signing_key_path, signing_key) =
+        write_test_signing_key(fleet_state.path(), "keys/fleet.key", 22);
+    let signing_key_path = signing_key_path.display().to_string();
     let mut transport = seed_transport(&fleet_state_dir);
     let now = Utc::now();
     let delay = Duration::from_millis(350);
@@ -522,7 +601,13 @@ fn fleet_reconcile_waits_for_delayed_node_convergence_receipt() {
         &repo_root(),
         &["fleet", "reconcile", "--json"],
         &fleet_state_dir,
-        &[("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "3")],
+        &[
+            ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "3"),
+            (
+                "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+                signing_key_path.as_str(),
+            ),
+        ],
     );
     updater
         .join()
@@ -549,7 +634,7 @@ fn fleet_reconcile_waits_for_delayed_node_convergence_receipt() {
             .expect("elapsed_ms")
             >= u64::try_from(delay.as_millis()).expect("delay fits u64")
     );
-    assert_convergence_receipt_signature_round_trips(&payload["convergence_receipt"]);
+    assert_convergence_receipt_signature_round_trips(&payload["convergence_receipt"], &signing_key);
 }
 
 #[test]
@@ -1661,7 +1746,21 @@ fn fleet_release_human_output_shape_is_stable() {
 
 #[test]
 fn fleet_reconcile_json_output_shape_is_stable() {
-    let output = run_cli(&["fleet", "reconcile", "--json"]);
+    let fleet_state = tempdir().expect("tempdir");
+    let fleet_state_dir = fleet_state.path().join("fleet-state");
+    let (signing_key_path, signing_key) =
+        write_test_signing_key(fleet_state.path(), "keys/fleet.key", 31);
+    let signing_key_path = signing_key_path.display().to_string();
+
+    let output = run_cli_in_dir_with_fleet_state_and_env(
+        &repo_root(),
+        &["fleet", "reconcile", "--json"],
+        &fleet_state_dir,
+        &[(
+            "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+            signing_key_path.as_str(),
+        )],
+    );
     assert!(
         output.status.success(),
         "fleet reconcile failed: {}",
@@ -1680,7 +1779,7 @@ fn fleet_reconcile_json_output_shape_is_stable() {
             .starts_with("fleet-op-reconcile-")
     );
     assert_eq!(payload["action"]["receipt"]["issuer"], "cli-fleet-operator");
-    assert_convergence_receipt_signature_round_trips(&payload["convergence_receipt"]);
+    assert_convergence_receipt_signature_round_trips(&payload["convergence_receipt"], &signing_key);
     assert_eq!(payload["status"]["zone_id"], "all");
     assert!(payload["state"]["actions"].is_array());
 }
