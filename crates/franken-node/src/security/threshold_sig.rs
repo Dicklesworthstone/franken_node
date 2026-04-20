@@ -2581,4 +2581,176 @@ mod tests {
             );
         }
     }
+
+    // ── Metamorphic Relations ──────────────────────────────────────────────
+
+    /// MR1: Sign-then-verify roundtrip (Invertive pattern: f(T(T(x))) = f(x))
+    /// Property: If we sign a message then verify, it must succeed
+    #[test]
+    fn mr_threshold_sig_sign_verify_roundtrip() {
+        use ed25519_dalek::SigningKey;
+        use rand::thread_rng;
+
+        let mut rng = thread_rng();
+        let signing_key = SigningKey::generate(&mut rng);
+        let verifying_key = signing_key.verifying_key();
+        let key_id = "test-signer";
+
+        // Create threshold config with single signer
+        let config = ThresholdConfig {
+            threshold: 1,
+            total_signers: 1,
+            signer_keys: vec![SignerKey {
+                key_id: key_id.to_string(),
+                public_key_hex: hex::encode(verifying_key.to_bytes()),
+            }],
+        };
+
+        // Test multiple content hashes
+        let test_hashes = vec![
+            "content-hash-1",
+            "different-content",
+            "special-chars-!@#$%^&*()",
+            "",  // Edge case: empty hash
+            "x".repeat(1000),  // Large hash
+        ];
+
+        for content_hash in test_hashes {
+            // MR: Sign then verify must succeed
+            let signature = sign(&signing_key, key_id, &content_hash);
+
+            let artifact = PublicationArtifact {
+                artifact_id: "test-artifact".to_string(),
+                connector_id: "test-connector".to_string(),
+                content_hash: content_hash.to_string(),
+                signatures: vec![signature],
+            };
+
+            let result = verify_threshold(&config, &artifact, "trace-1", "2026-01-01T00:00:00Z");
+
+            assert!(result.verified,
+                   "MR violated: sign-then-verify roundtrip failed for content_hash: '{}'",
+                   content_hash);
+            assert_eq!(result.valid_signatures, 1);
+            assert!(result.failure_reason.is_none());
+        }
+    }
+
+    /// MR2: Signature permutation invariance (Permutative pattern: f(permute(x)) = permute(f(x)))
+    /// Property: Order of signatures in threshold verification shouldn't matter
+    #[test]
+    fn mr_threshold_sig_permutation_invariance() {
+        use ed25519_dalek::SigningKey;
+        use rand::{seq::SliceRandom, thread_rng};
+
+        let mut rng = thread_rng();
+        let content_hash = "test-content-for-permutation";
+
+        // Create 3 signers for 2-of-3 threshold
+        let signers: Vec<(SigningKey, String)> = (0..3)
+            .map(|i| (SigningKey::generate(&mut rng), format!("signer-{}", i)))
+            .collect();
+
+        let config = ThresholdConfig {
+            threshold: 2,
+            total_signers: 3,
+            signer_keys: signers.iter().map(|(signing_key, key_id)| SignerKey {
+                key_id: key_id.clone(),
+                public_key_hex: hex::encode(signing_key.verifying_key().to_bytes()),
+            }).collect(),
+        };
+
+        // Create signatures from all 3 signers
+        let mut signatures: Vec<PartialSignature> = signers.iter()
+            .map(|(signing_key, key_id)| sign(signing_key, key_id, content_hash))
+            .collect();
+
+        // Test original order
+        let artifact_original = PublicationArtifact {
+            artifact_id: "permutation-test".to_string(),
+            connector_id: "test-connector".to_string(),
+            content_hash: content_hash.to_string(),
+            signatures: signatures.clone(),
+        };
+
+        let result_original = verify_threshold(&config, &artifact_original, "trace-1", "2026-01-01T00:00:00Z");
+
+        // Test 10 random permutations
+        for i in 0..10 {
+            signatures.shuffle(&mut rng);
+
+            let artifact_permuted = PublicationArtifact {
+                artifact_id: "permutation-test".to_string(),
+                connector_id: "test-connector".to_string(),
+                content_hash: content_hash.to_string(),
+                signatures: signatures.clone(),
+            };
+
+            let result_permuted = verify_threshold(&config, &artifact_permuted,
+                                                 &format!("trace-{}", i), "2026-01-01T00:00:00Z");
+
+            // MR: Permuted signatures must have same verification outcome
+            assert_eq!(result_original.verified, result_permuted.verified,
+                      "MR violated: permutation {} changed verification result", i);
+            assert_eq!(result_original.valid_signatures, result_permuted.valid_signatures,
+                      "MR violated: permutation {} changed valid signature count", i);
+
+            // Both should succeed with 3 valid signatures
+            assert!(result_permuted.verified, "Permuted signatures should verify successfully");
+            assert_eq!(result_permuted.valid_signatures, 3);
+        }
+    }
+
+    /// MR3: Message preservation (Equivalence pattern with negation)
+    /// Property: Changing the message must cause verification to fail
+    #[test]
+    fn mr_threshold_sig_message_preservation() {
+        use ed25519_dalek::SigningKey;
+        use rand::thread_rng;
+
+        let mut rng = thread_rng();
+        let signing_key = SigningKey::generate(&mut rng);
+        let verifying_key = signing_key.verifying_key();
+        let key_id = "test-signer";
+
+        let config = ThresholdConfig {
+            threshold: 1,
+            total_signers: 1,
+            signer_keys: vec![SignerKey {
+                key_id: key_id.to_string(),
+                public_key_hex: hex::encode(verifying_key.to_bytes()),
+            }],
+        };
+
+        let original_content = "original-content-hash";
+        let signature = sign(&signing_key, key_id, original_content);
+
+        // Test various message modifications
+        let tampered_messages = vec![
+            "different-content",           // Completely different
+            "original-content-hash2",      // Appended character
+            "Original-content-hash",       // Case change
+            "original-content-has",        // Character substitution
+            "",                           // Empty
+            "original-content-hash\0",     // Null byte appended
+        ];
+
+        for tampered_content in tampered_messages {
+            let artifact = PublicationArtifact {
+                artifact_id: "message-preservation-test".to_string(),
+                connector_id: "test-connector".to_string(),
+                content_hash: tampered_content.to_string(),
+                signatures: vec![signature.clone()],
+            };
+
+            let result = verify_threshold(&config, &artifact, "trace-1", "2026-01-01T00:00:00Z");
+
+            // MR: Modified message must cause verification failure
+            assert!(!result.verified,
+                   "MR violated: signature verified with tampered message: '{}'",
+                   tampered_content);
+            assert_eq!(result.valid_signatures, 0);
+            assert!(result.failure_reason.is_some());
+        }
+    }
 }

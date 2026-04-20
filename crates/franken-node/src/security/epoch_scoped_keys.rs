@@ -1145,4 +1145,218 @@ mod tests {
             }
         }
     }
+
+    // ── Metamorphic Relations ──────────────────────────────────────────────
+
+    /// MR1: Derive-then-derive idempotence (Equivalence pattern: f(x) = f(x))
+    /// Property: Deriving the same key multiple times must yield identical results
+    #[test]
+    fn mr_epoch_key_derive_idempotence() {
+        let secret = root_secret();
+
+        // Test idempotence across multiple parameter combinations
+        let test_cases = vec![
+            (ControlEpoch::new(1), "marker"),
+            (ControlEpoch::new(42), "test-domain"),
+            (ControlEpoch::new(0), ""),  // Edge case: empty domain
+            (ControlEpoch::new(u64::MAX), "boundary-epoch"),
+            (ControlEpoch::new(1), "special-chars-!@#$%^&*()"),
+            (ControlEpoch::new(100), "unicode-域名"),
+            (ControlEpoch::new(1), &"x".repeat(1000)),  // Large domain
+        ];
+
+        for (epoch, domain) in test_cases {
+            // MR: Multiple derivations must be identical
+            let key1 = derive_epoch_key(&secret, epoch, domain);
+            let key2 = derive_epoch_key(&secret, epoch, domain);
+            let key3 = derive_epoch_key(&secret, epoch, domain);
+
+            assert_eq!(key1, key2,
+                      "MR violated: derive idempotence failed for epoch={}, domain='{}'",
+                      epoch.value(), domain);
+            assert_eq!(key2, key3,
+                      "MR violated: derive idempotence failed on third call for epoch={}, domain='{}'",
+                      epoch.value(), domain);
+
+            // Verify byte-level equality
+            assert_eq!(key1.as_bytes(), key2.as_bytes());
+            assert_eq!(key1.to_hex(), key2.to_hex());
+            assert_eq!(key1.fingerprint(), key2.fingerprint());
+        }
+    }
+
+    /// MR2: Domain separation (Exclusive pattern: different domains → different keys)
+    /// Property: Different domains must produce different derived keys
+    #[test]
+    fn mr_epoch_key_domain_separation() {
+        let secret = root_secret();
+        let epoch = ControlEpoch::new(1);
+
+        let domain_pairs = vec![
+            ("marker", "manifest"),
+            ("", "x"),  // Empty vs single char
+            ("domain", "domain2"),  // Similar domains
+            ("a", "A"),  // Case sensitivity
+            ("test", "test "),  // Trailing space
+            ("domain", "domain\0"),  // Null byte
+            ("unicode", "unicode域"),  // Unicode difference
+            ("short", &"x".repeat(100)),  // Length difference
+        ];
+
+        for (domain_a, domain_b) in domain_pairs {
+            let key_a = derive_epoch_key(&secret, epoch, domain_a);
+            let key_b = derive_epoch_key(&secret, epoch, domain_b);
+
+            // MR: Different domains must produce different keys
+            assert_ne!(key_a, key_b,
+                      "MR violated: domain separation failed for '{}' vs '{}'",
+                      domain_a, domain_b);
+            assert_ne!(key_a.as_bytes(), key_b.as_bytes());
+            assert_ne!(key_a.to_hex(), key_b.to_hex());
+            assert_ne!(key_a.fingerprint(), key_b.fingerprint());
+        }
+    }
+
+    /// MR3: Epoch separation (Exclusive pattern: different epochs → different keys)
+    /// Property: Different epochs must produce different derived keys
+    #[test]
+    fn mr_epoch_key_epoch_separation() {
+        let secret = root_secret();
+        let domain = "marker";
+
+        let epoch_pairs = vec![
+            (ControlEpoch::new(1), ControlEpoch::new(2)),
+            (ControlEpoch::new(0), ControlEpoch::new(1)),
+            (ControlEpoch::new(42), ControlEpoch::new(43)),
+            (ControlEpoch::new(u64::MAX - 1), ControlEpoch::new(u64::MAX)),
+            (ControlEpoch::new(1000), ControlEpoch::new(2000)),
+        ];
+
+        for (epoch_a, epoch_b) in epoch_pairs {
+            let key_a = derive_epoch_key(&secret, epoch_a, domain);
+            let key_b = derive_epoch_key(&secret, epoch_b, domain);
+
+            // MR: Different epochs must produce different keys
+            assert_ne!(key_a, key_b,
+                      "MR violated: epoch separation failed for epoch {} vs {}",
+                      epoch_a.value(), epoch_b.value());
+            assert_ne!(key_a.as_bytes(), key_b.as_bytes());
+            assert_ne!(key_a.to_hex(), key_b.to_hex());
+            assert_ne!(key_a.fingerprint(), key_b.fingerprint());
+        }
+    }
+
+    /// MR4: Sign-verify roundtrip (Invertive pattern: f(T(T(x))) = f(x))
+    /// Property: Sign with derived key, then verify must succeed
+    #[test]
+    fn mr_epoch_key_sign_verify_roundtrip() {
+        let secret = root_secret();
+
+        let test_cases = vec![
+            (ControlEpoch::new(1), "marker", b"test-artifact".as_slice()),
+            (ControlEpoch::new(42), "domain", b"".as_slice()),  // Empty artifact
+            (ControlEpoch::new(0), "zero-epoch", b"large-artifact".repeat(1000).as_slice()),
+            (ControlEpoch::new(u64::MAX), "max-epoch", b"boundary-test".as_slice()),
+            (ControlEpoch::new(100), "special-domain-!@#", b"special-chars-artifact-!@#$%^&*()".as_slice()),
+        ];
+
+        for (epoch, domain, artifact) in test_cases {
+            // MR: Sign then verify must succeed
+            let signature = sign_epoch_artifact(artifact, epoch, domain, &secret)
+                .expect("Signing should succeed");
+
+            let verify_result = verify_epoch_signature(artifact, &signature, epoch, domain, &secret);
+            assert!(verify_result.is_ok(),
+                   "MR violated: sign-verify roundtrip failed for epoch={}, domain='{}', artifact_len={}",
+                   epoch.value(), domain, artifact.len());
+        }
+    }
+
+    /// MR5: Root secret consistency (Additive pattern with identity element)
+    /// Property: Same root secret produces deterministic derivation regardless of order
+    #[test]
+    fn mr_epoch_key_root_secret_consistency() {
+        // Create two identical root secrets
+        let secret_bytes = [0x42u8; DERIVED_KEY_LEN];
+        let secret_a = RootSecret::from_bytes(secret_bytes);
+        let secret_b = RootSecret::from_bytes(secret_bytes);
+
+        let test_params = vec![
+            (ControlEpoch::new(1), "marker"),
+            (ControlEpoch::new(100), "test-domain"),
+            (ControlEpoch::new(0), ""),
+        ];
+
+        for (epoch, domain) in test_params {
+            // MR: Identical root secrets must produce identical derived keys
+            let key_a = derive_epoch_key(&secret_a, epoch, domain);
+            let key_b = derive_epoch_key(&secret_b, epoch, domain);
+
+            assert_eq!(key_a, key_b,
+                      "MR violated: root secret consistency failed for epoch={}, domain='{}'",
+                      epoch.value(), domain);
+            assert_eq!(key_a.as_bytes(), key_b.as_bytes());
+
+            // Also test signing consistency
+            let artifact = b"consistency-test";
+            let sig_a = sign_epoch_artifact(artifact, epoch, domain, &secret_a).unwrap();
+            let sig_b = sign_epoch_artifact(artifact, epoch, domain, &secret_b).unwrap();
+
+            assert_eq!(sig_a, sig_b,
+                      "MR violated: signing consistency failed for epoch={}, domain='{}'",
+                      epoch.value(), domain);
+        }
+    }
+
+    /// MR6: Cross-epoch non-correlation (Independence pattern)
+    /// Property: Keys from different epochs should appear uncorrelated
+    #[test]
+    fn mr_epoch_key_cross_epoch_independence() {
+        let secret = root_secret();
+        let domain = "marker";
+
+        // Test that keys from consecutive epochs don't have obvious patterns
+        let epochs: Vec<ControlEpoch> = (1..=20).map(ControlEpoch::new).collect();
+        let keys: Vec<DerivedKey> = epochs.iter()
+            .map(|&epoch| derive_epoch_key(&secret, epoch, domain))
+            .collect();
+
+        // MR: Keys should not have trivial relationships
+        for (i, key_a) in keys.iter().enumerate() {
+            for (j, key_b) in keys.iter().enumerate() {
+                if i != j {
+                    assert_ne!(key_a, key_b,
+                              "MR violated: epochs {} and {} produced identical keys",
+                              epochs[i].value(), epochs[j].value());
+
+                    // Check for simple XOR patterns (shouldn't be all same value)
+                    let xor_result: Vec<u8> = key_a.as_bytes().iter()
+                        .zip(key_b.as_bytes().iter())
+                        .map(|(a, b)| a ^ b)
+                        .collect();
+
+                    let all_same = xor_result.windows(2).all(|w| w[0] == w[1]);
+                    assert!(!all_same,
+                           "MR violated: trivial XOR pattern between epochs {} and {}",
+                           epochs[i].value(), epochs[j].value());
+                }
+            }
+        }
+
+        // Test that bit differences are well-distributed (rough entropy check)
+        for window in keys.windows(2) {
+            let key_a = &window[0];
+            let key_b = &window[1];
+
+            let bit_differences: u32 = key_a.as_bytes().iter()
+                .zip(key_b.as_bytes().iter())
+                .map(|(a, b)| (a ^ b).count_ones())
+                .sum();
+
+            // Should have reasonable bit differences (not too few, not too many)
+            assert!(bit_differences >= 32 && bit_differences <= 224,
+                   "MR violated: suspicious bit difference count {} between consecutive epochs",
+                   bit_differences);
+        }
+    }
 }
