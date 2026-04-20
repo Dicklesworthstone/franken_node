@@ -3262,4 +3262,145 @@ mod tests {
             }
         }
     }
+
+    // ---------------------------------------------------------------------------
+    // Metamorphic Testing Relations
+    // ---------------------------------------------------------------------------
+
+    /// MR1: Trust-card add+revoke commutativity (Equivalence + Permutative)
+    ///
+    /// Property: create(input) → mutate(revoke) should yield same final state
+    /// as create(input_with_revoked_status). Since revocation is irreversible,
+    /// we test that direct creation with revoked status == create then revoke.
+    ///
+    /// Detects: State corruption, mutation ordering bugs, cache inconsistencies
+    #[cfg(test)]
+    #[test]
+    fn mr_trust_card_add_revoke_commutativity() {
+        let mut registry1 = TrustCardRegistry::new(60, b"metamorphic-test-key");
+        let mut registry2 = TrustCardRegistry::new(60, b"metamorphic-test-key");
+
+        let base_input = sample_input();
+        let revoke_reason = "metamorphic test revocation".to_string();
+        let revoke_time = "2024-01-01T12:00:00Z".to_string();
+        let now_secs = 1000;
+
+        // Path 1: Create active, then revoke via mutation
+        let card1 = registry1.create(base_input.clone(), now_secs, "trace1")
+            .expect("create active card");
+
+        let revoke_mutation = TrustCardMutation {
+            certification_level: None,
+            revocation_status: Some(RevocationStatus::Revoked {
+                reason: revoke_reason.clone(),
+                revoked_at: revoke_time.clone(),
+            }),
+            active_quarantine: None,
+            reputation_score_basis_points: None,
+            reputation_trend: None,
+            user_facing_risk_assessment: None,
+            last_verified_timestamp: None,
+            evidence_refs: None,
+        };
+
+        let final_card1 = registry1.mutate(
+            &card1.extension.extension_id,
+            revoke_mutation,
+            now_secs + 100,
+            "trace1-revoke"
+        ).expect("revoke card");
+
+        // Path 2: Create with revoked status directly
+        let mut revoked_input = base_input;
+        revoked_input.revocation_status = RevocationStatus::Revoked {
+            reason: revoke_reason,
+            revoked_at: revoke_time,
+        };
+
+        let final_card2 = registry2.create(revoked_input, now_secs, "trace2")
+            .expect("create revoked card");
+
+        // Metamorphic relation: Both paths should result in equivalent revoked state
+        assert!(matches!(final_card1.revocation_status, RevocationStatus::Revoked { .. }));
+        assert!(matches!(final_card2.revocation_status, RevocationStatus::Revoked { .. }));
+
+        // Core properties should be identical (ignoring version-specific fields)
+        assert_eq!(final_card1.extension, final_card2.extension);
+        assert_eq!(final_card1.publisher, final_card2.publisher);
+        assert_eq!(final_card1.certification_level, final_card2.certification_level);
+
+        // Both should have revoked status with same reason
+        match (&final_card1.revocation_status, &final_card2.revocation_status) {
+            (RevocationStatus::Revoked { reason: r1, .. }, RevocationStatus::Revoked { reason: r2, .. }) => {
+                assert_eq!(r1, r2, "Revocation reasons should match");
+            },
+            _ => panic!("Both cards should be revoked"),
+        }
+    }
+
+    /// MR2: Trust-card mutation sequence commutativity for independent fields
+    ///
+    /// Property: mutate(field_A) → mutate(field_B) == mutate(field_B) → mutate(field_A)
+    /// when field_A and field_B are independent (don't affect each other).
+    ///
+    /// Detects: Field coupling bugs, mutation ordering dependencies, side effects
+    #[cfg(test)]
+    #[test]
+    fn mr_trust_card_mutation_commutativity() {
+        let input = sample_input();
+        let now_secs = 1000;
+
+        // Create base card in two registries
+        let mut registry1 = TrustCardRegistry::new(60, b"metamorphic-test-key");
+        let mut registry2 = TrustCardRegistry::new(60, b"metamorphic-test-key");
+
+        let extension_id = &input.extension.extension_id;
+
+        registry1.create(input.clone(), now_secs, "trace1").expect("create card1");
+        registry2.create(input, now_secs, "trace2").expect("create card2");
+
+        // Independent mutations: reputation score + quarantine status
+        let reputation_mutation = TrustCardMutation {
+            certification_level: None,
+            revocation_status: None,
+            active_quarantine: None,
+            reputation_score_basis_points: Some(7500),
+            reputation_trend: None,
+            user_facing_risk_assessment: None,
+            last_verified_timestamp: None,
+            evidence_refs: None,
+        };
+
+        let quarantine_mutation = TrustCardMutation {
+            certification_level: None,
+            revocation_status: None,
+            active_quarantine: Some(true),
+            reputation_score_basis_points: None,
+            reputation_trend: None,
+            user_facing_risk_assessment: None,
+            last_verified_timestamp: None,
+            evidence_refs: None,
+        };
+
+        // Path 1: reputation then quarantine
+        registry1.mutate(extension_id, reputation_mutation.clone(), now_secs + 100, "trace1a")
+            .expect("reputation mutation");
+        let final1 = registry1.mutate(extension_id, quarantine_mutation.clone(), now_secs + 200, "trace1b")
+            .expect("quarantine mutation");
+
+        // Path 2: quarantine then reputation
+        registry2.mutate(extension_id, quarantine_mutation, now_secs + 100, "trace2a")
+            .expect("quarantine mutation");
+        let final2 = registry2.mutate(extension_id, reputation_mutation, now_secs + 200, "trace2b")
+            .expect("reputation mutation");
+
+        // Metamorphic relation: Final state should be identical
+        assert_eq!(final1.reputation_score_basis_points, final2.reputation_score_basis_points);
+        assert_eq!(final1.active_quarantine, final2.active_quarantine);
+
+        // Core properties should remain unchanged
+        assert_eq!(final1.extension, final2.extension);
+        assert_eq!(final1.publisher, final2.publisher);
+        assert_eq!(final1.certification_level, final2.certification_level);
+    }
 }

@@ -1624,4 +1624,176 @@ mod tests {
             "New deposit meeting new minimum should succeed"
         );
     }
+
+    // ---------------------------------------------------------------------------
+    // Metamorphic Testing Relations
+    // ---------------------------------------------------------------------------
+
+    /// MR3: Registry admission+eviction idempotence (Invertive)
+    ///
+    /// Property: deposit → withdraw → deposit should yield equivalent final state
+    /// as just deposit. The registry should cleanly handle admission/eviction cycles
+    /// without state corruption or resource leaks.
+    ///
+    /// Detects: State corruption, resource leaks, cleanup failures, cache inconsistencies
+    #[cfg(test)]
+    #[test]
+    fn mr_registry_admission_eviction_idempotence() {
+        let publisher_id = "mr-publisher";
+        let stake_amount = 100u64;
+        let risk_tier = RiskTier::Medium;
+
+        // Path 1: Simple deposit
+        let mut ledger1 = StakingLedger::new();
+        let stake_id1 = ledger1.deposit(publisher_id, stake_amount, risk_tier, 1000)
+            .expect("initial deposit should succeed");
+
+        // Path 2: Deposit → withdraw → deposit (admission/eviction cycle)
+        let mut ledger2 = StakingLedger::new();
+        let stake_id_temp = ledger2.deposit(publisher_id, stake_amount, risk_tier, 1000)
+            .expect("first deposit should succeed");
+
+        ledger2.withdraw(stake_id_temp, 2000)
+            .expect("withdrawal should succeed");
+
+        let stake_id2 = ledger2.deposit(publisher_id, stake_amount, risk_tier, 3000)
+            .expect("re-deposit should succeed");
+
+        // Metamorphic relation: Both paths should result in equivalent final state
+        let stake1 = ledger1.get_stake(stake_id1).expect("stake1 should exist");
+        let stake2 = ledger2.get_stake(stake_id2).expect("stake2 should exist");
+
+        // Core stake properties should be equivalent
+        assert_eq!(stake1.publisher_id, stake2.publisher_id);
+        assert_eq!(stake1.amount, stake2.amount);
+        assert_eq!(stake1.risk_tier, stake2.risk_tier);
+        assert_eq!(stake1.state, stake2.state); // Both should be Active
+
+        // Account state should be equivalent
+        let account1 = ledger1.get_account(publisher_id).expect("account1 should exist");
+        let account2 = ledger2.get_account(publisher_id).expect("account2 should exist");
+
+        assert_eq!(account1.balance, account2.balance);
+        assert_eq!(account1.deposited, account2.deposited);
+        // Note: account2 may have different total_withdrawn due to the cycle, which is expected
+
+        // Registry integrity should be maintained
+        assert_eq!(ledger1.accounts.len(), ledger2.accounts.len());
+
+        // Gate checks should be equivalent
+        let gate = CapabilityStakeGate::new(StakePolicy::default_policy());
+        let (allowed1, code1, _) = gate.check_stake(&ledger1, publisher_id, &risk_tier, 4000);
+        let (allowed2, code2, _) = gate.check_stake(&ledger2, publisher_id, &risk_tier, 4000);
+
+        assert_eq!(allowed1, allowed2);
+        assert_eq!(code1, code2);
+    }
+
+    /// MR4: Registry stake operation commutativity for independent publishers
+    ///
+    /// Property: Operations on different publishers should be commutative.
+    /// deposit(A) → deposit(B) == deposit(B) → deposit(A) in final registry state.
+    ///
+    /// Detects: Publisher isolation failures, global state coupling, ordering dependencies
+    #[cfg(test)]
+    #[test]
+    fn mr_registry_publisher_operation_commutativity() {
+        let publisher_a = "publisher-A";
+        let publisher_b = "publisher-B";
+
+        // Path 1: A then B
+        let mut ledger1 = StakingLedger::new();
+        let stake_a1 = ledger1.deposit(publisher_a, 100, RiskTier::Low, 1000)
+            .expect("deposit A first");
+        let stake_b1 = ledger1.deposit(publisher_b, 200, RiskTier::High, 2000)
+            .expect("deposit B second");
+
+        // Path 2: B then A
+        let mut ledger2 = StakingLedger::new();
+        let stake_b2 = ledger2.deposit(publisher_b, 200, RiskTier::High, 2000)
+            .expect("deposit B first");
+        let stake_a2 = ledger2.deposit(publisher_a, 100, RiskTier::Low, 1000)
+            .expect("deposit A second");
+
+        // Metamorphic relation: Final state should be equivalent
+        let final_a1 = ledger1.get_stake(stake_a1).expect("stake A1");
+        let final_b1 = ledger1.get_stake(stake_b1).expect("stake B1");
+        let final_a2 = ledger2.get_stake(stake_a2).expect("stake A2");
+        let final_b2 = ledger2.get_stake(stake_b2).expect("stake B2");
+
+        // Individual stake properties should match regardless of order
+        assert_eq!(final_a1.amount, final_a2.amount);
+        assert_eq!(final_a1.risk_tier, final_a2.risk_tier);
+        assert_eq!(final_a1.publisher_id, final_a2.publisher_id);
+
+        assert_eq!(final_b1.amount, final_b2.amount);
+        assert_eq!(final_b1.risk_tier, final_b2.risk_tier);
+        assert_eq!(final_b1.publisher_id, final_b2.publisher_id);
+
+        // Account states should be equivalent
+        let account_a1 = ledger1.get_account(publisher_a).expect("account A1");
+        let account_a2 = ledger2.get_account(publisher_a).expect("account A2");
+        assert_eq!(account_a1.balance, account_a2.balance);
+
+        let account_b1 = ledger1.get_account(publisher_b).expect("account B1");
+        let account_b2 = ledger2.get_account(publisher_b).expect("account B2");
+        assert_eq!(account_b1.balance, account_b2.balance);
+
+        // Registry-level state should be equivalent
+        assert_eq!(ledger1.accounts.len(), ledger2.accounts.len());
+        assert_eq!(ledger1.state.stakes.len(), ledger2.state.stakes.len());
+    }
+
+    /// MR5: Registry slash+restore idempotence for appeal resolution
+    ///
+    /// Property: slash → appeal → resolve(restore) should return stake to equivalent
+    /// state as if no slash occurred (for successful appeals).
+    ///
+    /// Detects: Incomplete restoration, state corruption in appeal resolution, audit inconsistency
+    #[cfg(test)]
+    #[test]
+    fn mr_registry_slash_restore_idempotence() {
+        let publisher_id = "mr-slash-restore";
+
+        // Path 1: Clean stake (no slash)
+        let mut ledger1 = StakingLedger::new();
+        let stake_id1 = ledger1.deposit(publisher_id, 1000, RiskTier::Critical, 1000)
+            .expect("clean deposit");
+
+        // Path 2: Stake with slash → appeal → successful restoration
+        let mut ledger2 = StakingLedger::new();
+        let stake_id2 = ledger2.deposit(publisher_id, 1000, RiskTier::Critical, 1000)
+            .expect("deposit for slash test");
+
+        let slash_event = ledger2.slash(stake_id2, evidence("test-slash"), 2000)
+            .expect("slash should succeed");
+
+        let appeal_event = ledger2.file_appeal(stake_id2, slash_event.slash_id, "false positive", 3000)
+            .expect("appeal should succeed");
+
+        ledger2.resolve_appeal(appeal_event.appeal_id, true, 4000)
+            .expect("appeal resolution should succeed");
+
+        // Metamorphic relation: After successful appeal resolution, stake should be equivalent to clean stake
+        let clean_stake = ledger1.get_stake(stake_id1).expect("clean stake");
+        let restored_stake = ledger2.get_stake(stake_id2).expect("restored stake");
+
+        // Core properties should be equivalent after restoration
+        assert_eq!(clean_stake.publisher_id, restored_stake.publisher_id);
+        assert_eq!(clean_stake.amount, restored_stake.amount); // Amount should be restored
+        assert_eq!(clean_stake.risk_tier, restored_stake.risk_tier);
+        // Note: state might differ (Active vs Restored) but functionality should be equivalent
+
+        // Account balance should be restored to equivalent state
+        let clean_account = ledger1.get_account(publisher_id).expect("clean account");
+        let restored_account = ledger2.get_account(publisher_id).expect("restored account");
+        assert_eq!(clean_account.balance, restored_account.balance);
+
+        // Gate checks should be equivalent for both
+        let gate = CapabilityStakeGate::new(StakePolicy::default_policy());
+        let (allowed_clean, _, _) = gate.check_stake(&ledger1, publisher_id, &RiskTier::Critical, 5000);
+        let (allowed_restored, _, _) = gate.check_stake(&ledger2, publisher_id, &RiskTier::Critical, 5000);
+
+        assert_eq!(allowed_clean, allowed_restored, "Gate checks should be equivalent after restoration");
+    }
 }

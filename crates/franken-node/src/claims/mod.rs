@@ -464,4 +464,136 @@ mod tests {
 
         assert!(snapshot.is_none());
     }
+
+    // === METAMORPHIC TESTING ===
+    // MR: Claim-envelope encode/decode/re-encode invariance (Invertive Pattern)
+    // Property: serialize(x) == serialize(deserialize(serialize(x)))
+    // Detects: serialization instability, data loss, format drift
+    #[cfg(test)]
+    mod metamorphic_roundtrip_tests {
+        use super::*;
+
+        fn test_claim_roundtrip_invariance(claim: &ExternalClaim) {
+            // Step 1: Serialize (encode) the original claim
+            let encoded_original = serde_json::to_string(&claim)
+                .expect("original claim should serialize");
+
+            // Step 2: Deserialize (decode) back to struct
+            let decoded_claim: ExternalClaim = serde_json::from_str(&encoded_original)
+                .expect("encoded claim should deserialize");
+
+            // Step 3: Re-serialize (re-encode) the decoded struct
+            let re_encoded = serde_json::to_string(&decoded_claim)
+                .expect("decoded claim should re-serialize");
+
+            // MR assertion: encode/decode/re-encode invariance
+            assert_eq!(encoded_original, re_encoded,
+                "Claim envelope serialization not invariant under roundtrip:\n\
+                 Original:   {encoded_original}\n\
+                 Re-encoded: {re_encoded}\n\
+                 This indicates serialization instability or data loss");
+
+            // Verify structural equivalence too (catches non-canonical serialization)
+            assert_eq!(*claim, decoded_claim,
+                "Claim structure changed during roundtrip - data corruption detected");
+        }
+
+        fn test_contract_roundtrip_invariance(contract: &CompiledContract) {
+            let encoded_original = serde_json::to_string(&contract)
+                .expect("original contract should serialize");
+
+            let decoded_contract: CompiledContract = serde_json::from_str(&encoded_original)
+                .expect("encoded contract should deserialize");
+
+            let re_encoded = serde_json::to_string(&decoded_contract)
+                .expect("decoded contract should re-serialize");
+
+            assert_eq!(encoded_original, re_encoded,
+                "Contract envelope serialization not invariant under roundtrip");
+
+            assert_eq!(*contract, decoded_contract,
+                "Contract structure changed during roundtrip");
+        }
+
+        #[test]
+        fn mr_claim_envelope_roundtrip_invariance() {
+            // Test with basic claim
+            let basic_claim = make_test_claim("mr-basic-claim", "mr-source");
+            test_claim_roundtrip_invariance(&basic_claim);
+
+            // Test with multi-evidence claim
+            let multi_evidence = ExternalClaim {
+                evidence_uris: vec![
+                    "https://evidence1.example.com/proof".to_string(),
+                    "file://local/evidence.json".to_string(),
+                    "urn:evidence:hash:abc123".to_string(),
+                ],
+                ..make_test_claim("mr-multi-evidence", "mr-source")
+            };
+            test_claim_roundtrip_invariance(&multi_evidence);
+
+            // Test with empty evidence
+            let no_evidence = ExternalClaim {
+                evidence_uris: vec![],
+                ..make_test_claim("mr-no-evidence", "mr-source")
+            };
+            test_claim_roundtrip_invariance(&no_evidence);
+
+            // Test with special characters in fields
+            let special_chars = ExternalClaim {
+                claim_id: "claim_with-special.chars@domain".to_string(),
+                claim_text: "Claim with \"quotes\", newlines\n, and unicode: 🔒".to_string(),
+                source_id: "source/with/slashes".to_string(),
+                evidence_uris: vec!["https://example.com/path?param=value&other=true".to_string()],
+            };
+            test_claim_roundtrip_invariance(&special_chars);
+        }
+
+        #[test]
+        fn mr_contract_envelope_roundtrip_invariance() {
+            let claim = make_test_claim("mr-contract-roundtrip", "mr-source");
+            let compiler = ClaimCompiler::new(CompilerConfig::new(
+                "mr-signer", "mr-key", 10_000
+            ));
+
+            if let CompilationResult::Compiled { contract, .. } = compiler.compile(&claim) {
+                test_contract_roundtrip_invariance(&contract);
+
+                // Test contract with modified signature (still should roundtrip)
+                let modified_contract = CompiledContract {
+                    signature: "0".repeat(128), // Different signature format
+                    ..contract
+                };
+                test_contract_roundtrip_invariance(&modified_contract);
+            } else {
+                panic!("Test fixture claim should compile for MR test");
+            }
+        }
+
+        #[test]
+        fn mr_compilation_result_roundtrip_invariance() {
+            let claim = make_test_claim("mr-result-roundtrip", "mr-source");
+            let compiler = ClaimCompiler::new(CompilerConfig::new(
+                "mr-signer", "mr-key", 10_000
+            ));
+
+            let result = compiler.compile(&claim);
+
+            // Test CompilationResult roundtrip
+            let encoded_result = serde_json::to_string(&result)
+                .expect("compilation result should serialize");
+
+            let decoded_result: CompilationResult = serde_json::from_str(&encoded_result)
+                .expect("encoded result should deserialize");
+
+            let re_encoded_result = serde_json::to_string(&decoded_result)
+                .expect("decoded result should re-serialize");
+
+            assert_eq!(encoded_result, re_encoded_result,
+                "CompilationResult serialization not invariant under roundtrip");
+
+            assert_eq!(result, decoded_result,
+                "CompilationResult structure changed during roundtrip");
+        }
+    }
 }
