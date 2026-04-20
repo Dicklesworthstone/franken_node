@@ -4,11 +4,11 @@
   "section": "13",
   "trace_id": "trace-bd-28sz-corpus-gate",
   "corpus": {
-    "corpus_version": "compat-corpus-v2026.02.20",
+    "corpus_version": "compat-corpus-v2026.04.20-stream",
     "franken_node_version": "0.1.0-dev",
     "lockstep_oracle_version": "oracle-v0.3.2",
-    "generated_at_utc": "2026-02-21T00:43:05.228392+00:00",
-    "result_digest": "sha256:bd28szccg540dataset"
+    "generated_at_utc": "2026-04-20T21:40:00.000000+00:00",
+    "result_digest": "sha256:bd28szccg560streamdataset"
   },
   "thresholds": {
     "overall_pass_rate_min_pct": 95.0,
@@ -20,12 +20,12 @@
     }
   },
   "totals": {
-    "total_test_cases": 540,
-    "passed_test_cases": 533,
+    "total_test_cases": 560,
+    "passed_test_cases": 553,
     "failed_test_cases": 7,
     "errored_test_cases": 0,
     "skipped_test_cases": 0,
-    "overall_pass_rate_pct": 98.7
+    "overall_pass_rate_pct": 98.75
   },
   "bands": [
     {
@@ -42,9 +42,9 @@
     },
     {
       "band": "high-value",
-      "total": 185,
-      "passed": 181,
-      "pass_rate_pct": 97.84
+      "total": 205,
+      "passed": 201,
+      "pass_rate_pct": 98.05
     }
   ],
   "api_families": [
@@ -116,9 +116,9 @@
     },
     {
       "family": "stream",
-      "total": 45,
-      "passed": 44,
-      "pass_rate_pct": 97.78
+      "total": 65,
+      "passed": 64,
+      "pass_rate_pct": 98.46
     },
     {
       "family": "timers",
@@ -3924,6 +3924,146 @@
       "api_family": "tls",
       "band": "high-value",
       "risk_band": "critical",
+      "status": "pass"
+    },
+    {
+      "test_id": "tc::stream::0046",
+      "api_family": "stream",
+      "band": "high-value",
+      "risk_band": "high",
+      "status": "pass"
+    },
+    {
+      "test_id": "tc::stream::0047",
+      "api_family": "stream",
+      "band": "high-value",
+      "risk_band": "high",
+      "status": "pass"
+    },
+    {
+      "test_id": "tc::stream::0048",
+      "api_family": "stream",
+      "band": "high-value",
+      "risk_band": "high",
+      "status": "pass"
+    },
+    {
+      "test_id": "tc::stream::0049",
+      "api_family": "stream",
+      "band": "high-value",
+      "risk_band": "high",
+      "status": "pass"
+    },
+    {
+      "test_id": "tc::stream::0050",
+      "api_family": "stream",
+      "band": "high-value",
+      "risk_band": "high",
+      "status": "pass"
+    },
+    {
+      "test_id": "tc::stream::0051",
+      "api_family": "stream",
+      "band": "high-value",
+      "risk_band": "high",
+      "status": "pass"
+    },
+    {
+      "test_id": "tc::stream::0052",
+      "api_family": "stream",
+      "band": "high-value",
+      "risk_band": "high",
+      "status": "pass"
+    },
+    {
+      "test_id": "tc::stream::0053",
+      "api_family": "stream",
+      "band": "high-value",
+      "risk_band": "high",
+      "status": "pass"
+    },
+    {
+      "test_id": "tc::stream::0054",
+      "api_family": "stream",
+      "band": "high-value",
+      "risk_band": "high",
+      "status": "pass"
+    },
+    {
+      "test_id": "tc::stream::0055",
+      "api_family": "stream",
+      "band": "high-value",
+      "risk_band": "high",
+      "status": "pass"
+    },
+    {
+      "test_id": "tc::stream::0056",
+      "api_family": "stream",
+      "band": "high-value",
+      "risk_band": "high",
+      "status": "pass"
+    },
+    {
+      "test_id": "tc::stream::0057",
+      "api_family": "stream",
+      "band": "high-value",
+      "risk_band": "high",
+      "status": "pass"
+    },
+    {
+      "test_id": "tc::stream::0058",
+      "api_family": "stream",
+      "band": "high-value",
+      "risk_band": "high",
+      "status": "pass"
+    },
+    {
+      "test_id": "tc::stream::0059",
+      "api_family": "stream",
+      "band": "high-value",
+      "risk_band": "high",
+      "status": "pass"
+    },
+    {
+      "test_id": "tc::stream::0060",
+      "api_family": "stream",
+      "band": "high-value",
+      "risk_band": "high",
+      "status": "pass"
+    },
+    {
+      "test_id": "tc::stream::0061",
+      "api_family": "stream",
+      "band": "high-value",
+      "risk_band": "high",
+      "status": "pass"
+    },
+    {
+      "test_id": "tc::stream::0062",
+      "api_family": "stream",
+      "band": "high-value",
+      "risk_band": "high",
+      "status": "pass"
+    },
+    {
+      "test_id": "tc::stream::0063",
+      "api_family": "stream",
+      "band": "high-value",
+      "risk_band": "high",
+      "status": "pass"
+    },
+    {
+      "test_id": "tc::stream::0064",
+      "api_family": "stream",
+      "band": "high-value",
+      "risk_band": "high",
+      "status": "pass"
+    },
+    {
+      "test_id": "tc::stream::0065",
+      "api_family": "stream",
+      "band": "high-value",
+      "risk_band": "high",
       "status": "pass"
     }
   ],

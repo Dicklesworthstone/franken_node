@@ -1,0 +1,171 @@
+{
+  "schema_version": "compat-corpus-fixture-v1",
+  "api_family": "stream",
+  "description": "Lockstep compatibility fixtures for Node stream.Readable, stream.Writable, and stream.Transform event ordering and backpressure semantics.",
+  "lockstep": {
+    "runtimes": ["node", "bun", "franken-node"],
+    "harness": "franken-node verify lockstep crates/franken-node/tests/fixtures/compat_corpus/stream --runtimes node,bun,franken-node"
+  },
+  "cases": [
+    {
+      "id": "tc::stream::0046",
+      "file": "readable_from_array_event_order.mjs",
+      "api": "stream.Readable.from",
+      "requirement": "Readable emits data before end and close for finite iterable input.",
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0047",
+      "file": "readable_paused_explicit_read.mjs",
+      "api": "stream.Readable.read",
+      "requirement": "Paused Readable exposes data via readable/read before end.",
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0048",
+      "file": "readable_async_iterator_order.mjs",
+      "api": "stream.Readable async iterator",
+      "requirement": "Readable async iterator yields chunks in source order and completes once.",
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0049",
+      "file": "readable_object_mode_event_order.mjs",
+      "api": "stream.Readable objectMode",
+      "requirement": "Object-mode Readable preserves object chunk identity and end ordering.",
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0050",
+      "file": "readable_destroy_error_close_order.mjs",
+      "api": "stream.Readable.destroy",
+      "requirement": "Readable error signaling is observable before close during teardown.",
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0051",
+      "file": "writable_write_finish_order.mjs",
+      "api": "stream.Writable.write/end",
+      "requirement": "Writable write callbacks settle before final finish/close ordering.",
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0052",
+      "file": "writable_cork_uncork_batch_order.mjs",
+      "api": "stream.Writable.cork/uncork",
+      "requirement": "Corked Writable batches writes until uncork while preserving write order.",
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0053",
+      "file": "writable_backpressure_drain_order.mjs",
+      "api": "stream.Writable backpressure",
+      "requirement": "Writable returns false under highWaterMark pressure and later emits drain.",
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0054",
+      "file": "writable_final_before_finish.mjs",
+      "api": "stream.Writable _final",
+      "requirement": "Writable _final callback runs before prefinish, finish, and close.",
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0055",
+      "file": "writable_destroy_error_close_order.mjs",
+      "api": "stream.Writable.destroy",
+      "requirement": "Writable error signaling is observable before close during teardown.",
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0056",
+      "file": "transform_uppercase_pipeline.mjs",
+      "api": "stream.Transform pipeline",
+      "requirement": "Transform emits transformed bytes in order through pipeline.",
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0057",
+      "file": "transform_object_mode_map.mjs",
+      "api": "stream.Transform objectMode",
+      "requirement": "Object-mode Transform maps object chunks in source order.",
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0058",
+      "file": "transform_flush_order.mjs",
+      "api": "stream.Transform _flush",
+      "requirement": "Transform _flush output is delivered after transformed input and before finish.",
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0059",
+      "file": "transform_backpressure_drain_order.mjs",
+      "api": "stream.Transform backpressure",
+      "requirement": "Transform writable side participates in write false/drain backpressure semantics.",
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0060",
+      "file": "pipeline_success_event_order.mjs",
+      "api": "stream/promises.pipeline",
+      "requirement": "Successful pipeline resolves after source end and destination finish.",
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0061",
+      "file": "pipeline_error_propagation.mjs",
+      "api": "stream/promises.pipeline error",
+      "requirement": "Pipeline rejects with the transform error and closes participating streams.",
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0062",
+      "file": "pipe_readable_to_writable_order.mjs",
+      "api": "stream.Readable.pipe",
+      "requirement": "Readable.pipe delivers chunks to Writable in order before finish.",
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0063",
+      "file": "unpipe_event_order.mjs",
+      "api": "stream.Readable.unpipe",
+      "requirement": "Readable.unpipe triggers destination unpipe notification before manual end.",
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0064",
+      "file": "pass_through_event_order.mjs",
+      "api": "stream.PassThrough",
+      "requirement": "PassThrough preserves chunk order and normal end/close events.",
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::stream::0065",
+      "file": "async_transform_callback_order.mjs",
+      "api": "stream.Transform async callback",
+      "requirement": "Async Transform callbacks preserve output ordering before pipeline resolution.",
+      "band": "high-value",
+      "risk_band": "high"
+    }
+  ]
+}

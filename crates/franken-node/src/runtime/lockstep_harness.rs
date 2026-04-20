@@ -4,17 +4,30 @@ use crate::runtime::nversion_oracle::{
 };
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 // Security: bounds for push_bounded to prevent memory exhaustion
 const MAX_COMBINED_OUTPUT_BYTES: usize = 16_777_216; // 16MB limit per runtime execution
+const MAX_LOCKSTEP_CORPUS_CASES: usize = 256;
 const MAX_SANITIZED_STRACE_LINES: usize = 65_536; // 64K syscall lines max
 const MAX_THREAD_HANDLES: usize = 64; // Maximum concurrent runtime threads
+
+#[derive(Debug, Deserialize)]
+struct LockstepCorpusManifest {
+    cases: Vec<LockstepCorpusCase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LockstepCorpusCase {
+    id: String,
+    file: String,
+}
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
@@ -296,6 +309,117 @@ impl LockstepHarness {
     /// and feeds the results to the Oracle.
     pub fn verify_lockstep(&self, app_path: &Path, emit_fixtures: bool) -> Result<()> {
         self.validate_runtimes()?;
+        if let Some(corpus_entries) = Self::resolve_lockstep_corpus_entries(app_path)? {
+            for entry in corpus_entries {
+                self.verify_lockstep_entry(&entry, emit_fixtures)
+                    .with_context(|| {
+                        format!("lockstep corpus fixture failed: {}", entry.display())
+                    })?;
+            }
+            return Ok(());
+        }
+
+        self.verify_lockstep_entry(app_path, emit_fixtures)
+    }
+
+    fn resolve_lockstep_corpus_entries(app_path: &Path) -> Result<Option<Vec<PathBuf>>> {
+        let manifest_path = if app_path.is_dir() {
+            app_path.join("manifest.json")
+        } else if app_path.file_name().and_then(std::ffi::OsStr::to_str) == Some("manifest.json") {
+            app_path.to_path_buf()
+        } else {
+            return Ok(None);
+        };
+
+        if !manifest_path.is_file() {
+            return Ok(None);
+        }
+
+        let corpus_root = manifest_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("lockstep corpus manifest has no parent directory"))?;
+        let raw = std::fs::read(&manifest_path).with_context(|| {
+            format!(
+                "failed reading lockstep corpus manifest {}",
+                manifest_path.display()
+            )
+        })?;
+        let manifest: LockstepCorpusManifest = serde_json::from_slice(&raw).with_context(|| {
+            format!(
+                "invalid lockstep corpus manifest JSON in {}",
+                manifest_path.display()
+            )
+        })?;
+
+        if manifest.cases.is_empty() {
+            anyhow::bail!(
+                "lockstep corpus manifest {} has no cases",
+                manifest_path.display()
+            );
+        }
+        if manifest.cases.len() > MAX_LOCKSTEP_CORPUS_CASES {
+            anyhow::bail!(
+                "lockstep corpus manifest {} has {} cases, above limit {}",
+                manifest_path.display(),
+                manifest.cases.len(),
+                MAX_LOCKSTEP_CORPUS_CASES
+            );
+        }
+
+        let mut entries = Vec::new();
+        let mut seen_ids = BTreeSet::new();
+        let mut seen_paths = BTreeSet::new();
+        for case in manifest.cases {
+            if !seen_ids.insert(case.id.clone()) {
+                anyhow::bail!("duplicate lockstep corpus case id `{}`", case.id);
+            }
+            let relative_path = Self::validated_corpus_case_path(&case)?;
+            let entry = corpus_root.join(relative_path);
+            if !entry.is_file() || !Self::path_within_project(corpus_root, &entry) {
+                anyhow::bail!(
+                    "lockstep corpus case `{}` points outside corpus root or missing file: {}",
+                    case.id,
+                    entry.display()
+                );
+            }
+            if !seen_paths.insert(entry.clone()) {
+                anyhow::bail!(
+                    "duplicate lockstep corpus case file in manifest: {}",
+                    entry.display()
+                );
+            }
+            push_bounded(&mut entries, entry, MAX_LOCKSTEP_CORPUS_CASES);
+        }
+
+        Ok(Some(entries))
+    }
+
+    fn validated_corpus_case_path(case: &LockstepCorpusCase) -> Result<PathBuf> {
+        let raw = case.file.trim();
+        if raw.is_empty() || raw.contains('\\') || raw.contains('\0') {
+            anyhow::bail!(
+                "lockstep corpus case `{}` has an invalid fixture path",
+                case.id
+            );
+        }
+        let relative_path = PathBuf::from(raw);
+        if relative_path.is_absolute()
+            || relative_path.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::Prefix(_) | Component::RootDir
+                )
+            })
+        {
+            anyhow::bail!(
+                "lockstep corpus case `{}` path must stay within the corpus root",
+                case.id
+            );
+        }
+        Ok(relative_path)
+    }
+
+    fn verify_lockstep_entry(&self, app_path: &Path, emit_fixtures: bool) -> Result<()> {
         let mut oracle = RuntimeOracle::new("lockstep-harness-trace", 100);
 
         for rt in &self.runtimes {
@@ -613,23 +737,51 @@ impl LockstepHarness {
             .unwrap_or_else(|_| b"__thread_panic:stderr".to_vec());
 
         let mut combined_output = Vec::new();
-        extend_bounded(&mut combined_output, &stdout_bytes, MAX_COMBINED_OUTPUT_BYTES);
-        extend_bounded(&mut combined_output, b"\n--- STDERR ---\n", MAX_COMBINED_OUTPUT_BYTES);
-        extend_bounded(&mut combined_output, &stderr_bytes, MAX_COMBINED_OUTPUT_BYTES);
-        extend_bounded(&mut combined_output, b"\n--- EXIT CODE ---\n", MAX_COMBINED_OUTPUT_BYTES);
+        extend_bounded(
+            &mut combined_output,
+            &stdout_bytes,
+            MAX_COMBINED_OUTPUT_BYTES,
+        );
+        extend_bounded(
+            &mut combined_output,
+            b"\n--- STDERR ---\n",
+            MAX_COMBINED_OUTPUT_BYTES,
+        );
+        extend_bounded(
+            &mut combined_output,
+            &stderr_bytes,
+            MAX_COMBINED_OUTPUT_BYTES,
+        );
+        extend_bounded(
+            &mut combined_output,
+            b"\n--- EXIT CODE ---\n",
+            MAX_COMBINED_OUTPUT_BYTES,
+        );
         if is_timeout {
             extend_bounded(&mut combined_output, b"TIMEOUT", MAX_COMBINED_OUTPUT_BYTES);
         } else {
-            extend_bounded(&mut combined_output, exit_code.to_string().as_bytes(), MAX_COMBINED_OUTPUT_BYTES);
+            extend_bounded(
+                &mut combined_output,
+                exit_code.to_string().as_bytes(),
+                MAX_COMBINED_OUTPUT_BYTES,
+            );
         }
 
         // Append deterministic strace output to detect behavioral divergences
-        extend_bounded(&mut combined_output, b"\n--- SYSTEM CALL BOUNDARIES ---\n", MAX_COMBINED_OUTPUT_BYTES);
+        extend_bounded(
+            &mut combined_output,
+            b"\n--- SYSTEM CALL BOUNDARIES ---\n",
+            MAX_COMBINED_OUTPUT_BYTES,
+        );
         let strace_content = Self::read_strace_output(strace_output_file.path(), runtime)?;
         // Filter out non-deterministic pointers/PIDs from strace output using simple heuristics
         // so we don't get false positive divergences for different runtimes doing the same thing.
         let deterministic_strace = Self::sanitize_strace_output(&strace_content);
-        extend_bounded(&mut combined_output, &deterministic_strace, MAX_COMBINED_OUTPUT_BYTES);
+        extend_bounded(
+            &mut combined_output,
+            &deterministic_strace,
+            MAX_COMBINED_OUTPUT_BYTES,
+        );
 
         Ok(combined_output)
     }
