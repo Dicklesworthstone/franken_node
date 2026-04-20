@@ -925,7 +925,7 @@ mod tests {
     }
 }
 
-#[cfg(feature = "extended-surfaces")]
+#[cfg(any(feature = "extended-surfaces", feature = "test-support"))]
 pub mod api;
 #[cfg(any(test, feature = "extended-surfaces"))]
 pub mod atc;

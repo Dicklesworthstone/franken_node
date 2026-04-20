@@ -951,7 +951,7 @@ impl SharedFleetControlOwner {
             .map_err(|e| map_fleet_control_error("reconcile", trace, e))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn reset_for_tests(&self) {
         let mut guard = match self.inner.lock() {
             Ok(guard) => guard,
@@ -967,13 +967,13 @@ fn shared_fleet_control_manager() -> &'static SharedFleetControlOwner {
     SHARED_FLEET_CONTROL_MANAGER.get_or_init(SharedFleetControlOwner::new)
 }
 
-#[cfg(test)]
-fn reset_shared_fleet_control_manager_for_tests() {
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_shared_fleet_control_manager_for_tests() {
     shared_fleet_control_manager().reset_for_tests();
 }
 
-#[cfg(test)]
-fn activate_shared_fleet_control_manager_for_tests() {
+#[cfg(any(test, feature = "test-support"))]
+pub fn activate_shared_fleet_control_manager_for_tests() {
     let mut guard = match shared_fleet_control_manager().inner.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
