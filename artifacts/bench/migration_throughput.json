@@ -1,0 +1,78 @@
+{
+  "baseline_cpu_mean_ms": 58.0,
+  "baseline_mean_ms": 58.587,
+  "benchmark_id": "migration_throughput_audit_rewrite_v1",
+  "charter_claim": "section_5_migration_throughput_ge_3x",
+  "commands": {
+    "baseline_pipeline": "node/bun baseline_audit.js && node/bun baseline_rewrite.js",
+    "baseline_runtime": "/home/ubuntu/.bun/bin/node",
+    "baseline_runtime_version": "bun-node-wrapper 1.3.11",
+    "franken_node_binary": "/tmp/franken_node_target_migration_bench/release/franken-node",
+    "franken_node_binary_source": "FRANKEN_NODE_BENCH_BIN",
+    "franken_pipeline": "franken-node migrate audit --format json && franken-node migrate rewrite --apply"
+  },
+  "equivalence_checks": {
+    "expected_package_manifests": 96,
+    "rewrite_engines_match": true,
+    "rewritten_manifests_with_node_engine": 96,
+    "summary_counts_match": true
+  },
+  "fixture": {
+    "lockfiles": 1,
+    "missing_engine_period": 3,
+    "package_manifests": 96,
+    "project_kind": "generated_js_workspace",
+    "risky_script_period": 8
+  },
+  "franken_cpu_mean_ms": 10.0,
+  "franken_mean_ms": 15.303,
+  "generated_at_utc": "2026-04-20T20:57:37.747844579+00:00",
+  "measurement": {
+    "cpu_time_source": "/usr/bin/time -p user+sys",
+    "fixture_setup_excluded": true,
+    "measured_runs": 5,
+    "wall_time_source": "std::time::Instant around /usr/bin/time child",
+    "warmup_runs": 1
+  },
+  "pass_criterion": {
+    "minimum_ratio": 3.0,
+    "passed": true
+  },
+  "ratio": 3.828,
+  "samples": {
+    "baseline_cpu_ms": [
+      60.0,
+      60.0,
+      50.0,
+      60.0,
+      60.0
+    ],
+    "baseline_wall_ms": [
+      58.02,
+      58.991,
+      58.47,
+      59.216,
+      58.236
+    ],
+    "franken_cpu_ms": [
+      10.0,
+      10.0,
+      10.0,
+      10.0,
+      10.0
+    ],
+    "franken_wall_ms": [
+      16.529,
+      14.219,
+      14.74,
+      15.64,
+      15.387
+    ]
+  },
+  "schema_version": "1.0.0",
+  "signature": {
+    "algorithm": "hmac-sha256",
+    "key_id": "migration-throughput-bench-local-v1",
+    "value": "hmac-sha256:650261faeab85d120d1f63c7be4c2e48fcdf033bc7e4fc394e36ba6fcc5a0e53"
+  }
+}
