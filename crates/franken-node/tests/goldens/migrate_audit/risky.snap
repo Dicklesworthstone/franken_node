@@ -1,0 +1,74 @@
+---
+source: tests/migrate_audit_goldens.rs
+---
+{
+  "schema_version": "1.0.0",
+  "project_path": "[PATH]",
+  "generated_at_utc": "[TIMESTAMP]",
+  "summary": {
+    "files_scanned": 1,
+    "js_files": 0,
+    "ts_files": 0,
+    "package_manifests": 1,
+    "risky_scripts": 1,
+    "lockfiles": []
+  },
+  "findings": [
+    {
+      "id": "mig-audit-001",
+      "category": "scripts",
+      "severity": "high",
+      "message": "detected 1 potentially risky install/build script(s)",
+      "path": null,
+      "recommendation": "Review and harden install/build scripts before enabling strict trust policy."
+    },
+    {
+      "id": "mig-audit-002",
+      "category": "scripts",
+      "severity": "high",
+      "message": "risky install/build script pattern detected in package.json",
+      "path": "package.json",
+      "recommendation": "Replace dynamic install hooks with deterministic build steps before migration."
+    },
+    {
+      "id": "mig-audit-003",
+      "category": "dependencies",
+      "severity": "medium",
+      "message": "no JavaScript lockfile detected",
+      "path": null,
+      "recommendation": "Generate and commit a lockfile (package-lock.json, pnpm-lock.yaml, yarn.lock, or bun.lockb) before migration."
+    },
+    {
+      "id": "mig-audit-004",
+      "category": "runtime",
+      "severity": "low",
+      "message": "1 package manifest(s) missing engines.node",
+      "path": null,
+      "recommendation": "Pin engines.node across packages to improve migration determinism."
+    },
+    {
+      "id": "mig-audit-005",
+      "category": "runtime",
+      "severity": "low",
+      "message": "no JavaScript/TypeScript source files found",
+      "path": null,
+      "recommendation": "Confirm the migration target path points to the intended JS/TS project."
+    },
+    {
+      "id": "mig-audit-006",
+      "category": "runtime",
+      "severity": "low",
+      "message": "package.json is missing engines.node version pin",
+      "path": "package.json",
+      "recommendation": "Add engines.node to reduce runtime drift during migration verification."
+    },
+    {
+      "id": "mig-audit-007",
+      "category": "project",
+      "severity": "info",
+      "message": "detected 1 package manifest(s)",
+      "path": null,
+      "recommendation": null
+    }
+  ]
+}

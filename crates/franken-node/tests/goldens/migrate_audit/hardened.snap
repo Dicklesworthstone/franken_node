@@ -1,0 +1,44 @@
+---
+source: tests/migrate_audit_goldens.rs
+---
+{
+  "schema_version": "1.0.0",
+  "project_path": "[PATH]",
+  "generated_at_utc": "[TIMESTAMP]",
+  "summary": {
+    "files_scanned": 2,
+    "js_files": 0,
+    "ts_files": 0,
+    "package_manifests": 1,
+    "risky_scripts": 0,
+    "lockfiles": [
+      "package-lock.json"
+    ]
+  },
+  "findings": [
+    {
+      "id": "mig-audit-001",
+      "category": "runtime",
+      "severity": "low",
+      "message": "no JavaScript/TypeScript source files found",
+      "path": null,
+      "recommendation": "Confirm the migration target path points to the intended JS/TS project."
+    },
+    {
+      "id": "mig-audit-002",
+      "category": "project",
+      "severity": "info",
+      "message": "detected 1 package manifest(s)",
+      "path": null,
+      "recommendation": null
+    },
+    {
+      "id": "mig-audit-003",
+      "category": "dependencies",
+      "severity": "info",
+      "message": "detected 1 lockfile(s)",
+      "path": null,
+      "recommendation": null
+    }
+  ]
+}
