@@ -56,6 +56,14 @@ fn parse_successful_json(output: Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("doctor output must be valid JSON")
 }
 
+fn parse_jsonl_lines(bytes: &[u8]) -> Vec<Value> {
+    let stderr = String::from_utf8_lossy(bytes);
+    stderr
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("structured log line must be valid JSON"))
+        .collect()
+}
+
 fn run_doctor(policy_input_path: &Path, trace_id: &str) -> Value {
     parse_successful_json(run_doctor_args(
         &[
@@ -313,6 +321,69 @@ fn doctor_policy_activation_pass_fixture_has_json_contract_shape() {
     assert!(policy["decision_outcome"].is_object());
     assert!(policy["explanation"].is_object());
     assert!(policy["wording_validation"].is_object());
+}
+
+#[test]
+fn doctor_structured_logs_jsonl_emits_parseable_stderr_events() {
+    let output = run_doctor_args(
+        &[
+            "doctor".to_string(),
+            "--json".to_string(),
+            "--structured-logs-jsonl".to_string(),
+            "--trace-id".to_string(),
+            "doctor-policy-e2e-jsonl".to_string(),
+            "--policy-activation-input".to_string(),
+            fixture_path("doctor_policy_activation_block.json")
+                .to_str()
+                .expect("policy fixture path must be utf-8")
+                .to_string(),
+        ],
+        None,
+    );
+
+    assert!(
+        output.status.success(),
+        "doctor command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("stdout report JSON");
+    let log_lines = parse_jsonl_lines(&output.stderr);
+    let report_logs = report["structured_logs"]
+        .as_array()
+        .expect("report structured_logs array");
+
+    assert_eq!(log_lines.len(), report_logs.len());
+    assert!(!log_lines.is_empty());
+
+    for (line, report_log) in log_lines.iter().zip(report_logs) {
+        assert_eq!(line["trace_id"], "doctor-policy-e2e-jsonl");
+        assert_eq!(line["event_code"], report_log["event_code"]);
+        assert_eq!(line["check_code"], report_log["check_code"]);
+        assert_eq!(line["scope"], report_log["scope"]);
+        assert_eq!(line["status"], report_log["status"]);
+        assert_eq!(line["surface"], "OPS-CLI");
+        assert!(line["timestamp"].as_str().is_some());
+        assert!(line["message"].as_str().is_some_and(|message| !message.is_empty()));
+        assert_eq!(
+            line["span_id"].as_str().map(str::len),
+            Some(16),
+            "span_id must be 16 lowercase hex chars"
+        );
+        assert!(
+            line["metric_refs"]
+                .as_array()
+                .is_some_and(|metrics| !metrics.is_empty())
+        );
+        assert!(line["recovery_hint"].is_object());
+    }
+
+    assert!(log_lines.iter().any(|line| {
+        line["level"] == "error"
+            && line["error_code"]
+                .as_str()
+                .is_some_and(|code| code.starts_with("FRANKEN_DOCTOR_"))
+            && line["recovery_hint"]["action"] == "escalate"
+    }));
 }
 
 #[test]

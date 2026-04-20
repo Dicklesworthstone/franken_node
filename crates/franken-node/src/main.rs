@@ -6291,6 +6291,34 @@ struct DoctorLogEvent {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct DoctorRecoveryHintLog {
+    action: &'static str,
+    target: String,
+    confidence: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    escalation_path: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorStructuredLogLine {
+    timestamp: String,
+    level: &'static str,
+    message: String,
+    trace_id: String,
+    span_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<String>,
+    surface: &'static str,
+    metric_refs: Vec<String>,
+    recovery_hint: DoctorRecoveryHintLog,
+    event_code: String,
+    check_code: String,
+    scope: String,
+    status: DoctorStatus,
+    duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct DoctorStatusCounts {
     pass: usize,
     warn: usize,
@@ -6997,6 +7025,95 @@ fn build_doctor_report_with_cwd_and_policy_input(
         merge_decisions: resolved.decisions.clone(),
         policy_activation,
     }
+}
+
+fn doctor_log_level(status: DoctorStatus) -> &'static str {
+    match status {
+        DoctorStatus::Pass => "info",
+        DoctorStatus::Warn => "warn",
+        DoctorStatus::Fail => "error",
+    }
+}
+
+fn doctor_recovery_action(status: DoctorStatus) -> &'static str {
+    match status {
+        DoctorStatus::Pass => "ignore",
+        DoctorStatus::Warn => "reconfigure",
+        DoctorStatus::Fail => "escalate",
+    }
+}
+
+fn doctor_log_error_code(check: &DoctorCheck) -> Option<String> {
+    if matches!(check.status, DoctorStatus::Pass) {
+        None
+    } else {
+        Some(format!("FRANKEN_DOCTOR_{}", check.code.replace('-', "_")))
+    }
+}
+
+fn doctor_log_span_id(trace_id: &str, check: &DoctorCheck) -> String {
+    let digest = sha2::Sha256::digest(
+        [
+            b"doctor_structured_log_span_v1:" as &[u8],
+            trace_id.as_bytes(),
+            b":",
+            check.event_code.as_bytes(),
+            b":",
+            check.code.as_bytes(),
+        ]
+        .concat(),
+    );
+    hex::encode(&digest[..8])
+}
+
+fn doctor_structured_log_line(
+    report: &DoctorReport,
+    check: &DoctorCheck,
+) -> DoctorStructuredLogLine {
+    let escalation_path = if matches!(check.status, DoctorStatus::Fail) {
+        Some("platform-ops")
+    } else {
+        None
+    };
+
+    DoctorStructuredLogLine {
+        timestamp: report.generated_at_utc.clone(),
+        level: doctor_log_level(check.status),
+        message: check.message.clone(),
+        trace_id: report.trace_id.clone(),
+        span_id: doctor_log_span_id(&report.trace_id, check),
+        error_code: doctor_log_error_code(check),
+        surface: "OPS-CLI",
+        metric_refs: vec![
+            "franken.doctor.check.duration_ms".to_string(),
+            "franken.doctor.check.status".to_string(),
+        ],
+        recovery_hint: DoctorRecoveryHintLog {
+            action: doctor_recovery_action(check.status),
+            target: check.scope.clone(),
+            confidence: match check.status {
+                DoctorStatus::Pass => 1.0,
+                DoctorStatus::Warn => 0.75,
+                DoctorStatus::Fail => 0.9,
+            },
+            escalation_path,
+        },
+        event_code: check.event_code.clone(),
+        check_code: check.code.clone(),
+        scope: check.scope.clone(),
+        status: check.status,
+        duration_ms: check.duration_ms,
+    }
+}
+
+fn render_doctor_structured_logs_jsonl(report: &DoctorReport) -> Result<String> {
+    let mut lines = String::new();
+    for check in &report.checks {
+        let line = doctor_structured_log_line(report, check);
+        lines.push_str(&serde_json::to_string(&line)?);
+        lines.push('\n');
+    }
+    Ok(lines)
 }
 
 fn render_doctor_report_human(report: &DoctorReport, verbose: bool) -> String {
@@ -17906,6 +18023,10 @@ fn main() -> Result<()> {
                 &args.trace_id,
                 args.policy_activation_input.as_deref(),
             );
+
+            if args.structured_logs_jsonl {
+                eprint!("{}", render_doctor_structured_logs_jsonl(&report)?);
+            }
 
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);

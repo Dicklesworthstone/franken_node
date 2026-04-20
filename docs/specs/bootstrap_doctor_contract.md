@@ -6,8 +6,9 @@ Define deterministic diagnostics output for `franken-node doctor` so operators a
 
 ## Command Surface
 
-- `franken-node doctor [--config <path>] [--profile <profile>] [--policy-activation-input <path>] [--json] [--trace-id <id>] [--verbose]`
+- `franken-node doctor [--config <path>] [--profile <profile>] [--policy-activation-input <path>] [--json] [--structured-logs-jsonl] [--trace-id <id>] [--verbose]`
 - `--json` emits machine-readable report.
+- `--structured-logs-jsonl` emits one structured diagnostic log event per line to stderr without changing stdout.
 - default output is human-readable text.
 - `--trace-id` binds all check log events to a stable correlation identifier.
 - `--policy-activation-input` activates live policy pipeline diagnostics (guardrails, decision engine, explainer wording) from JSON input.
@@ -85,6 +86,23 @@ Top-level fields:
   - `decision_outcome`
   - `explanation`
   - `wording_validation`
+
+When `--structured-logs-jsonl` is present, stderr contains newline-delimited JSON log entries derived from the same doctor checks. Each line includes:
+
+- `timestamp`
+- `level`
+- `message`
+- `trace_id`
+- `span_id`
+- `error_code` for warn/fail events
+- `surface`
+- `metric_refs[]`
+- `recovery_hint`
+- `event_code`
+- `check_code`
+- `scope`
+- `status`
+- `duration_ms`
 
 ## CI Artifacts
 

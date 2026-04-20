@@ -777,6 +777,10 @@ pub struct DoctorArgs {
     #[arg(long)]
     pub json: bool,
 
+    /// Emit structured diagnostic log events as JSONL to stderr.
+    #[arg(long)]
+    pub structured_logs_jsonl: bool,
+
     /// Stable trace ID for correlating diagnostics.
     #[arg(long, default_value = "doctor-bootstrap")]
     pub trace_id: String,
