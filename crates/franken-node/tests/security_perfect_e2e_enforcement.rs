@@ -1,10 +1,13 @@
-//! Real-DB-backed integration tests for security domain enforcement.
+//! Perfect E2E security enforcement tests with structured logging.
 //!
-//! Tests remote capability enforcement and trust-card validation with:
-//! - Real in-memory persistence (no mocks)
-//! - Structured JSON-line logging for failure analysis
-//! - Test data factories for realistic scenarios
-//! - Production safety guards (env validation)
+//! Complements integration_remote_capability_real_enforcement.rs by focusing on:
+//! - Perfect E2E methodology (no mocks, real components)
+//! - Structured JSON-line logging for CI failure analysis
+//! - Test data factories for realistic security scenarios
+//! - Production safety guards and environment validation
+//!
+//! This differs from the existing remote capability test by emphasizing
+//! the Perfect E2E testing patterns rather than concurrent/timing behavior.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Once};
