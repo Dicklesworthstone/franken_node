@@ -45,6 +45,7 @@ ctrlc = "3"
 [dev-dependencies]
 assert_cmd = "2.0.16"
 assert2 = "0.4.0"
+asupersync = { path = "/dp/asupersync" }
 syn = { version = "2.0", features = ["full"] }
 tracing-subscriber = { workspace = true }
 insta = { version = "1.40", features = ["json"] }
