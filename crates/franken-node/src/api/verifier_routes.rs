@@ -460,7 +460,7 @@ pub fn get_evidence(
         state.append_audit(
             "evidence.read",
             &identity.principal,
-            check_id,
+            &check_id,
             "success",
             &trace.trace_id,
         )?;
