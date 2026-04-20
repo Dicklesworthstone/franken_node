@@ -2,12 +2,13 @@
 name = "frankenengine-verifier-sdk"
 version = "0.1.0"
 edition = "2024"
-description = "Structural-only verifier SDK for replaying structurally bound capsules and reproducing claim verdicts"
+description = "Verifier SDK for replaying bundles, checking canonical hashes, and verifying Ed25519 signatures"
 license = "MIT"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+ed25519-dalek = "2.1.1"
 sha2 = "0.10.8"
 hex = "0.4.3"
 subtle = "2.6.1"

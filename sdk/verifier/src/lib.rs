@@ -4,15 +4,15 @@
 //!
 //! This module re-exports the core verifier SDK types and operations for
 //! external consumption. External verifiers depend on this crate to replay
-//! structurally bound capsules and reproduce claim verdicts without privileged
-//! internal access.
+//! capsules, verify signed replay bundles, and reproduce claim verdicts
+//! without privileged internal access.
 //!
 //! # Security Posture
 //!
-//! This workspace crate is structural-only. It publishes deterministic schema,
-//! digest, and replay helpers for external tooling, but it is not the
-//! replacement-critical canonical verifier and it does not claim detached
-//! cryptographic verification authority.
+//! This workspace crate publishes deterministic schema, digest, replay, and
+//! Ed25519 signed-bundle helpers for external tooling. It remains separate
+//! from the replacement-critical canonical verifier, but detached replay
+//! bundle signatures are cryptographically verified.
 //!
 //! # Schema Version
 //!

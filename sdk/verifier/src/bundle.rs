@@ -1,12 +1,13 @@
 //! Canonical replay bundle serialization and verification helpers.
 //!
-//! The verifier SDK intentionally keeps this surface structural-only: it
-//! verifies deterministic bytes, stable hashes, and in-bundle artifact
-//! integrity without claiming detached cryptographic authority.
+//! The verifier SDK verifies deterministic bytes, stable hashes, in-bundle
+//! artifact integrity, and detached Ed25519 signatures over sealed bundle
+//! identity.
 
 use std::collections::BTreeMap;
 use std::fmt;
 
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -22,6 +23,8 @@ pub const REPLAY_BUNDLE_HASH_ALGORITHM: &str = "sha256";
 
 const HASH_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:canonical-hash:v1:";
 const SIGNATURE_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:structural-signature:v1:";
+const ED25519_BUNDLE_SIGNATURE_DOMAIN: &[u8] =
+    b"frankenengine-verifier-sdk:ed25519-bundle-signature:v1:";
 
 /// A deterministic replay bundle that external verifiers can serialize, hash,
 /// and verify without depending on privileged product internals.
@@ -165,6 +168,10 @@ pub enum BundleError {
         expected: String,
         actual: String,
     },
+    Ed25519SignatureMalformed {
+        length: usize,
+    },
+    Ed25519SignatureInvalid,
 }
 
 impl fmt::Display for BundleError {
@@ -262,6 +269,16 @@ impl fmt::Display for BundleError {
                 formatter,
                 "replay bundle signature mismatch: expected {expected}, got {actual}"
             ),
+            Self::Ed25519SignatureMalformed { length } => write!(
+                formatter,
+                "replay bundle Ed25519 signature has invalid length {length}"
+            ),
+            Self::Ed25519SignatureInvalid => {
+                write!(
+                    formatter,
+                    "replay bundle Ed25519 signature verification failed"
+                )
+            }
         }
     }
 }
@@ -335,6 +352,36 @@ pub fn seal(bundle: &mut ReplayBundle) -> Result<(), BundleError> {
         signature_hex: compute_signature_hex(&bundle.integrity_hash),
     };
     Ok(())
+}
+
+/// Sign a sealed replay bundle with Ed25519.
+///
+/// The signature preimage is domain-separated and binds the public bundle
+/// schema, SDK version, bundle id, incident id, creation timestamp, and
+/// structural `integrity_hash`. Callers should `seal` the bundle before
+/// signing; `verify_signed_bundle` enforces that structural seal before
+/// checking the detached Ed25519 signature.
+#[must_use]
+pub fn sign_bundle(signing_key: &SigningKey, bundle: &ReplayBundle) -> Signature {
+    signing_key.sign(&ed25519_bundle_signature_payload(bundle))
+}
+
+/// Verify a detached Ed25519 signature over a sealed replay bundle.
+pub fn verify_signed_bundle(
+    verifying_key: &VerifyingKey,
+    bundle: &ReplayBundle,
+    signature_bytes: &[u8],
+) -> Result<(), BundleError> {
+    let canonical = serialize(bundle)?;
+    verify(&canonical)?;
+    let signature = Signature::from_slice(signature_bytes).map_err(|_| {
+        BundleError::Ed25519SignatureMalformed {
+            length: signature_bytes.len(),
+        }
+    })?;
+    verifying_key
+        .verify(&ed25519_bundle_signature_payload(bundle), &signature)
+        .map_err(|_| BundleError::Ed25519SignatureInvalid)
 }
 
 /// Verify canonical encoding, schema, artifact hashes, and bundle integrity.
@@ -587,6 +634,23 @@ fn compute_signature_hex(integrity_hash: &str) -> String {
     hasher.update(SIGNATURE_DOMAIN);
     hasher.update(integrity_hash.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+fn ed25519_bundle_signature_payload(bundle: &ReplayBundle) -> Vec<u8> {
+    let mut payload = Vec::new();
+    push_length_prefixed(&mut payload, ED25519_BUNDLE_SIGNATURE_DOMAIN);
+    push_length_prefixed(&mut payload, bundle.schema_version.as_bytes());
+    push_length_prefixed(&mut payload, bundle.sdk_version.as_bytes());
+    push_length_prefixed(&mut payload, bundle.bundle_id.as_bytes());
+    push_length_prefixed(&mut payload, bundle.incident_id.as_bytes());
+    push_length_prefixed(&mut payload, bundle.created_at.as_bytes());
+    push_length_prefixed(&mut payload, bundle.integrity_hash.as_bytes());
+    payload
+}
+
+fn push_length_prefixed(buffer: &mut Vec<u8>, bytes: &[u8]) {
+    buffer.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    buffer.extend_from_slice(bytes);
 }
 
 fn canonical_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, BundleError> {
