@@ -1,0 +1,174 @@
+{
+  "schema_version": "1.0.0",
+  "artifact_id": "detection_latency_v1",
+  "generated_at_utc": "2026-04-20T22:01:03.978018764+00:00",
+  "measurement_boundary": "std::time::Instant around franken-node run process spawn until strict policy block JSON is returned",
+  "pass_criterion": {
+    "criterion": "p95<=50ms",
+    "passed": true
+  },
+  "sample_count": 10,
+  "p50_ms": 6.641,
+  "p95_ms": 7.96,
+  "p99_ms": 7.96,
+  "max_ms": 7.96,
+  "cases": [
+    {
+      "case_id": "malicious-postinstall",
+      "extension_id": "npm:@adversarial/malicious-postinstall",
+      "attack_vector": "malicious package postinstall hook",
+      "spawn_to_block_ms": 6.418000999999999,
+      "blocked": true,
+      "contained": true,
+      "exit_code": 1,
+      "typed_errors": [
+        "revoked"
+      ],
+      "result_statuses": [
+        "revoked"
+      ]
+    },
+    {
+      "case_id": "prototype-pollution",
+      "extension_id": "npm:@adversarial/prototype-pollution",
+      "attack_vector": "Object prototype pollution during extension bootstrap",
+      "spawn_to_block_ms": 5.691427,
+      "blocked": true,
+      "contained": true,
+      "exit_code": 1,
+      "typed_errors": [
+        "revoked"
+      ],
+      "result_statuses": [
+        "revoked"
+      ]
+    },
+    {
+      "case_id": "ambient-authority-abuse",
+      "extension_id": "npm:@adversarial/ambient-authority-abuse",
+      "attack_vector": "ambient filesystem and environment authority abuse",
+      "spawn_to_block_ms": 7.162168,
+      "blocked": true,
+      "contained": true,
+      "exit_code": 1,
+      "typed_errors": [
+        "revoked"
+      ],
+      "result_statuses": [
+        "revoked"
+      ]
+    },
+    {
+      "case_id": "egress-to-unknown-host",
+      "extension_id": "npm:@adversarial/egress-to-unknown-host",
+      "attack_vector": "network egress to an undeclared external host",
+      "spawn_to_block_ms": 7.916984,
+      "blocked": true,
+      "contained": true,
+      "exit_code": 1,
+      "typed_errors": [
+        "revoked"
+      ],
+      "result_statuses": [
+        "revoked"
+      ]
+    },
+    {
+      "case_id": "memory-exhaust",
+      "extension_id": "npm:@adversarial/memory-exhaust",
+      "attack_vector": "unbounded heap allocation during extension init",
+      "spawn_to_block_ms": 7.403438,
+      "blocked": true,
+      "contained": true,
+      "exit_code": 1,
+      "typed_errors": [
+        "revoked"
+      ],
+      "result_statuses": [
+        "revoked"
+      ]
+    },
+    {
+      "case_id": "infinite-eval-loop",
+      "extension_id": "npm:@adversarial/infinite-eval-loop",
+      "attack_vector": "non-terminating eval loop",
+      "spawn_to_block_ms": 6.482542,
+      "blocked": true,
+      "contained": true,
+      "exit_code": 1,
+      "typed_errors": [
+        "revoked"
+      ],
+      "result_statuses": [
+        "revoked"
+      ]
+    },
+    {
+      "case_id": "trust-card-forgery-attempt",
+      "extension_id": "npm:@adversarial/trust-card-forgery-attempt",
+      "attack_vector": "forged trust-card metadata shipped inside the extension",
+      "spawn_to_block_ms": 6.640585,
+      "blocked": true,
+      "contained": true,
+      "exit_code": 1,
+      "typed_errors": [
+        "revoked"
+      ],
+      "result_statuses": [
+        "revoked"
+      ]
+    },
+    {
+      "case_id": "unsigned-artifact",
+      "extension_id": "npm:@adversarial/unsigned-artifact",
+      "attack_vector": "extension artifact without provenance signature",
+      "spawn_to_block_ms": 7.960235,
+      "blocked": true,
+      "contained": true,
+      "exit_code": 1,
+      "typed_errors": [
+        "revoked"
+      ],
+      "result_statuses": [
+        "revoked"
+      ]
+    },
+    {
+      "case_id": "stale-revocation-exploit",
+      "extension_id": "npm:@adversarial/stale-revocation-exploit",
+      "attack_vector": "attempt to rely on stale revocation state",
+      "spawn_to_block_ms": 6.2531039999999996,
+      "blocked": true,
+      "contained": true,
+      "exit_code": 1,
+      "typed_errors": [
+        "revoked"
+      ],
+      "result_statuses": [
+        "revoked"
+      ]
+    },
+    {
+      "case_id": "mislabeled-mime",
+      "extension_id": "npm:@adversarial/mislabeled-mime",
+      "attack_vector": "JavaScript payload mislabeled as a benign MIME type",
+      "spawn_to_block_ms": 6.833866,
+      "blocked": true,
+      "contained": true,
+      "exit_code": 1,
+      "typed_errors": [
+        "revoked"
+      ],
+      "result_statuses": [
+        "revoked"
+      ]
+    }
+  ],
+  "signature": {
+    "algorithm": "ed25519-fixture-v1",
+    "key_id": "adversarial-detection-latency-v1",
+    "public_key": "d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48",
+    "payload_sha256": "sha256:453cecf3ada7b75d115a47e69bf2ac12dcce5bf24b93ab9735163cc5e5bb1532",
+    "value": "ed25519:14467c4d279ce1756157db70792a188a23e0d058b2dc639b435ea2404a48496451740a204b63ac1cfb6d101ea952a4f3aacea22a0d63ca6f7e0dc8564e318b0e"
+  }
+}
