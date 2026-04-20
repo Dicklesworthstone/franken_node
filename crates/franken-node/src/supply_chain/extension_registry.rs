@@ -769,28 +769,34 @@ impl SignedExtensionRegistry {
 
         // Check for name uniqueness after admission succeeds
         // INV-SER-NAME-UNIQUE: Extension names must be unique across active extensions
-        for existing_extension in self.extensions.values() {
-            if existing_extension.name == request.name && existing_extension.status == ExtensionStatus::Active {
-                self.log(
-                    event_codes::SER_ERR_DUPLICATE_NAME,
-                    "",
-                    trace_id,
-                    serde_json::json!({
-                        "name": &request.name,
-                        "existing_id": &existing_extension.extension_id,
-                        "reason": "duplicate_extension_name",
-                    }),
-                );
-                return RegistryResult {
-                    success: false,
-                    extension_id: None,
-                    error_code: Some(event_codes::SER_ERR_DUPLICATE_NAME.to_string()),
-                    detail: format!(
-                        "Extension name '{}' already exists (ID: {}). Extension names must be unique.",
-                        request.name, existing_extension.extension_id
-                    ),
-                };
-            }
+        let duplicate_extension_id = self
+            .extensions
+            .values()
+            .find(|existing_extension| {
+                existing_extension.name == request.name
+                    && existing_extension.status == ExtensionStatus::Active
+            })
+            .map(|existing_extension| existing_extension.extension_id.clone());
+        if let Some(existing_extension_id) = duplicate_extension_id {
+            self.log(
+                event_codes::SER_ERR_DUPLICATE_NAME,
+                "",
+                trace_id,
+                serde_json::json!({
+                    "name": &request.name,
+                    "existing_id": &existing_extension_id,
+                    "reason": "duplicate_extension_name",
+                }),
+            );
+            return RegistryResult {
+                success: false,
+                extension_id: None,
+                error_code: Some(event_codes::SER_ERR_DUPLICATE_NAME.to_string()),
+                detail: format!(
+                    "Extension name '{}' already exists (ID: {}). Extension names must be unique.",
+                    request.name, existing_extension_id
+                ),
+            };
         }
 
         // Signature verified

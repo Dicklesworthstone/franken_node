@@ -122,6 +122,8 @@ pub enum TrustCardError {
     InvalidRegistryKey,
     #[error("invalid pagination: page={page}, per_page={per_page}")]
     InvalidPagination { page: usize, per_page: usize },
+    #[error("invalid trust-card input: {reason}")]
+    InvalidInput { reason: String },
     #[error("trust card derivation requires at least one verified evidence reference")]
     EvidenceMissing,
     #[error("upgrading certification level requires evidence references")]
