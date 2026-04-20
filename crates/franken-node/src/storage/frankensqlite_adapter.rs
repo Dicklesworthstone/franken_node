@@ -678,6 +678,43 @@ mod tests {
         assert_eq!(back.version, 1);
     }
 
+    #[test]
+    fn schema_version_v1_roundtrips_under_declared_v1_consumer_exactly() {
+        const DECLARED_SCHEMA_VERSION: u32 = 1;
+
+        #[derive(Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+        #[serde(deny_unknown_fields)]
+        struct DeclaredV1SchemaConsumer {
+            version: u32,
+            applied_at: String,
+            description: String,
+        }
+
+        let schema = SchemaVersion {
+            version: DECLARED_SCHEMA_VERSION,
+            applied_at: "2026-04-20T00:00:00Z".into(),
+            description: "declared schema v1".into(),
+        };
+
+        let encoded = serde_json::to_vec(&schema).expect("schema v1 should serialize");
+        assert_eq!(
+            encoded.as_slice(),
+            br#"{"version":1,"applied_at":"2026-04-20T00:00:00Z","description":"declared schema v1"}"#
+        );
+
+        let consumer: DeclaredV1SchemaConsumer =
+            serde_json::from_slice(&encoded).expect("declared v1 consumer should deserialize");
+        assert_eq!(consumer.version, DECLARED_SCHEMA_VERSION);
+
+        let reencoded =
+            serde_json::to_vec(&consumer).expect("declared v1 consumer should reserialize");
+        assert_eq!(reencoded, encoded);
+
+        let decoded: SchemaVersion =
+            serde_json::from_slice(&reencoded).expect("schema v1 should deserialize");
+        assert_eq!(decoded, schema);
+    }
+
     // -- WriteResult / ReadResult tests --
 
     #[test]
