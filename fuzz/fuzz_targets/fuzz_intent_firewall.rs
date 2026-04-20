@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use arbitrary::{Arbitrary, Unstructured};
+use arbitrary::{Arbitrary, Unstructured, Result as ArbitraryResult};
 use std::collections::BTreeMap;
 use std::hint::black_box;
 
@@ -19,6 +19,38 @@ const MAX_METADATA_ENTRIES: usize = 50;
 
 /// Maximum policy rules to prevent excessive computation.
 const MAX_POLICY_RULES: usize = 20;
+
+// Custom Arbitrary implementations for enums that don't derive it
+impl<'a> Arbitrary<'a> for IntentClassification {
+    fn arbitrary(u: &mut Unstructured<'a>) -> ArbitraryResult<Self> {
+        let choice = u.int_in_range(0..=9)?;
+        Ok(match choice {
+            0 => IntentClassification::DataFetch,
+            1 => IntentClassification::DataMutation,
+            2 => IntentClassification::WebhookDispatch,
+            3 => IntentClassification::AnalyticsExport,
+            4 => IntentClassification::Exfiltration,
+            5 => IntentClassification::CredentialForward,
+            6 => IntentClassification::SideChannel,
+            7 => IntentClassification::ServiceDiscovery,
+            8 => IntentClassification::HealthCheck,
+            _ => IntentClassification::ConfigSync,
+        })
+    }
+}
+
+impl<'a> Arbitrary<'a> for FirewallVerdict {
+    fn arbitrary(u: &mut Unstructured<'a>) -> ArbitraryResult<Self> {
+        let choice = u.int_in_range(0..=4)?;
+        Ok(match choice {
+            0 => FirewallVerdict::Allow,
+            1 => FirewallVerdict::Challenge,
+            2 => FirewallVerdict::Simulate,
+            3 => FirewallVerdict::Deny,
+            _ => FirewallVerdict::Quarantine,
+        })
+    }
+}
 
 #[derive(Arbitrary, Debug)]
 struct FuzzRemoteEffect {

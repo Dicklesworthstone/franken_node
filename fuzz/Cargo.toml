@@ -44,3 +44,9 @@ path = "fuzz_targets/fuzz_intent_firewall.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "fuzz_ssrf_policy"
+path = "fuzz_targets/fuzz_ssrf_policy.rs"
+test = false
+doc = false
+

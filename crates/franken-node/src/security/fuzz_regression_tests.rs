@@ -394,4 +394,190 @@ mod fuzz_regression {
             }
         }
     }
+
+    /// Regression tests for SSRF policy discovered through structure-aware fuzzing
+    mod ssrf_policy_regression {
+        use crate::security::ssrf_policy::{CidrRange, SsrfPolicyTemplate};
+        use crate::security::network_guard::Protocol;
+
+        /// Regression test for CIDR range boundary conditions
+        #[test]
+        fn regression_ssrf_cidr_boundary_conditions() {
+            // Test edge cases in CIDR range calculations
+            let cidr = CidrRange::new([192, 168, 1, 0], 24, "test_network");
+
+            // Boundary addresses
+            assert!(cidr.contains([192, 168, 1, 0]));   // Network address
+            assert!(cidr.contains([192, 168, 1, 255])); // Broadcast address
+            assert!(cidr.contains([192, 168, 1, 127])); // Mid-range address
+
+            // Addresses outside range
+            assert!(!cidr.contains([192, 168, 0, 255])); // Just below
+            assert!(!cidr.contains([192, 168, 2, 0]));   // Just above
+            assert!(!cidr.contains([192, 167, 1, 128])); // Different second octet
+        }
+
+        /// Regression test for edge cases in prefix length handling
+        #[test]
+        fn regression_ssrf_prefix_length_edge_cases() {
+            // Test /32 (single host)
+            let host_cidr = CidrRange::new([127, 0, 0, 1], 32, "localhost");
+            assert!(host_cidr.contains([127, 0, 0, 1]));
+            assert!(!host_cidr.contains([127, 0, 0, 2]));
+
+            // Test /0 (everything)
+            let all_cidr = CidrRange::new([0, 0, 0, 0], 0, "all_networks");
+            assert!(all_cidr.contains([192, 168, 1, 1]));
+            assert!(all_cidr.contains([8, 8, 8, 8]));
+
+            // Test invalid prefix length (should be handled safely)
+            let invalid_cidr = CidrRange::new([192, 168, 1, 0], 33, "invalid");
+            // Should not panic - contains() should handle gracefully
+            let _result = invalid_cidr.contains([192, 168, 1, 1]);
+        }
+
+        /// Regression test for IPv4 address parsing edge cases
+        #[test]
+        fn regression_ssrf_ipv4_parsing_attacks() {
+            let mut policy = SsrfPolicyTemplate::new("test-connector", vec![], vec![]);
+
+            // Test various IPv4 parsing bypass attempts
+            let malicious_hosts = vec![
+                "127.0.0.1",           // Standard loopback
+                "127.1",               // Compressed format
+                "2130706433",          // 32-bit integer format
+                "0x7f000001",          // Hexadecimal
+                "017700000001",        // Octal
+                "127.000.000.001",     // Leading zeros
+                "[127.0.0.1]",         // Bracketed
+                "localhost",           // Hostname
+                "127.0.0.1.",          // Trailing dot
+                "127.0.0.1..",         // Multiple trailing dots
+            ];
+
+            for host in malicious_hosts {
+                // Should not panic on any input, regardless of format
+                let _result = policy.check_ssrf(
+                    host,
+                    80,
+                    Protocol::Tcp,
+                    "test-trace",
+                    "2026-01-01T00:00:00Z"
+                );
+            }
+        }
+
+        /// Regression test for null byte injection in hostnames
+        #[test]
+        fn regression_ssrf_null_byte_injection() {
+            let mut policy = SsrfPolicyTemplate::new("test-connector", vec![], vec![]);
+
+            let malicious_hosts = vec![
+                "evil.com\0trusted.com",
+                "127.0.0.1\0",
+                "\0127.0.0.1",
+                "api\0.example.com",
+            ];
+
+            for host in malicious_hosts {
+                // Null byte injection should be detected and rejected
+                let result = policy.check_ssrf(
+                    host,
+                    443,
+                    Protocol::Tcp,
+                    "test-trace",
+                    "2026-01-01T00:00:00Z"
+                );
+                assert!(result.is_err(), "Null byte injection should be rejected for host: {}", host);
+            }
+        }
+
+        /// Regression test for IPv6 loopback handling
+        #[test]
+        fn regression_ssrf_ipv6_loopback() {
+            let mut policy = SsrfPolicyTemplate::new("test-connector", vec![], vec![]);
+
+            // IPv6 loopback variants should be consistently blocked
+            let ipv6_loopbacks = vec!["::1", "[::1]"];
+
+            for host in ipv6_loopbacks {
+                let result = policy.check_ssrf(
+                    host,
+                    80,
+                    Protocol::Tcp,
+                    "test-trace",
+                    "2026-01-01T00:00:00Z"
+                );
+                assert!(result.is_err(), "IPv6 loopback should be blocked: {}", host);
+            }
+        }
+
+        /// Regression test for path-like hostname injection
+        #[test]
+        fn regression_ssrf_path_like_hostname_injection() {
+            let mut policy = SsrfPolicyTemplate::new("test-connector", vec![], vec![]);
+
+            let path_like_hosts = vec![
+                "api.example.com/../../etc/passwd",
+                "api.example.com\\..\\..\\windows\\system32",
+                "api.example.com/./././admin",
+                "api.example.com/../admin/../config",
+            ];
+
+            for host in path_like_hosts {
+                // Path-like syntax in hostnames should be detected and rejected
+                let result = policy.check_ssrf(
+                    host,
+                    443,
+                    Protocol::Tcp,
+                    "test-trace",
+                    "2026-01-01T00:00:00Z"
+                );
+                assert!(result.is_err(), "Path-like hostname should be rejected: {}", host);
+            }
+        }
+
+        /// Regression test for CIDR range consistency across multiple calls
+        #[test]
+        fn regression_ssrf_cidr_consistency() {
+            let cidr = CidrRange::new([10, 0, 0, 0], 8, "rfc1918_class_a");
+            let test_ip = [10, 50, 100, 150];
+
+            // Multiple calls should return consistent results
+            let results: Vec<bool> = (0..10)
+                .map(|_| cidr.contains(test_ip))
+                .collect();
+
+            assert!(results.windows(2).all(|w| w[0] == w[1]),
+                   "CIDR contains() must return consistent results");
+        }
+
+        /// Regression test for private IP range detection
+        #[test]
+        fn regression_ssrf_private_ip_ranges() {
+            let private_ips = vec![
+                ([127, 0, 0, 1], "loopback"),
+                ([10, 0, 0, 1], "rfc1918_class_a"),
+                ([172, 16, 0, 1], "rfc1918_class_b"),
+                ([192, 168, 1, 1], "rfc1918_class_c"),
+                ([169, 254, 1, 1], "link_local"),
+                ([100, 64, 0, 1], "cgnat_tailnet"),
+            ];
+
+            for (ip, _label) in private_ips {
+                let mut policy = SsrfPolicyTemplate::new("test-connector", vec![], vec![]);
+                let ip_string = format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+
+                // Private IP ranges should be blocked by default
+                let result = policy.check_ssrf(
+                    &ip_string,
+                    80,
+                    Protocol::Tcp,
+                    "test-trace",
+                    "2026-01-01T00:00:00Z"
+                );
+                assert!(result.is_err(), "Private IP should be blocked: {}", ip_string);
+            }
+        }
+    }
 }
