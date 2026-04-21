@@ -64,7 +64,6 @@ fn valid_input() -> VerificationInput {
             },
         ],
         verification_complete: true,
-        simulated_elapsed_ms: 1,
     }
 }
 

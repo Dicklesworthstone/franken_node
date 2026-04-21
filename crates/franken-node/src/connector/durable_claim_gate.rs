@@ -117,7 +117,6 @@ pub struct VerificationInput {
     pub available_markers: BTreeSet<String>,
     pub proofs: Vec<ProofArtifact>,
     pub verification_complete: bool,
-    pub simulated_elapsed_ms: u64,
 }
 
 /// Evidence ledger entry emitted for accepted durable claims.
@@ -229,6 +228,27 @@ impl DurableClaimGate {
         input: &VerificationInput,
         current_epoch: u64,
     ) -> Result<ClaimGateDecision, DurableClaimGateError> {
+        self.evaluate_claim_internal(claim, input, current_epoch, None)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn evaluate_claim_with_test_elapsed_ms(
+        &mut self,
+        claim: &DurableClaim,
+        input: &VerificationInput,
+        current_epoch: u64,
+        elapsed_ms: u64,
+    ) -> Result<ClaimGateDecision, DurableClaimGateError> {
+        self.evaluate_claim_internal(claim, input, current_epoch, Some(elapsed_ms))
+    }
+
+    fn evaluate_claim_internal(
+        &mut self,
+        claim: &DurableClaim,
+        input: &VerificationInput,
+        current_epoch: u64,
+        elapsed_override_ms: Option<u64>,
+    ) -> Result<ClaimGateDecision, DurableClaimGateError> {
         validate_claim(claim)?;
 
         let start = Instant::now();
@@ -245,17 +265,22 @@ impl DurableClaimGate {
             input.proofs.len(),
         );
 
-        if input.simulated_elapsed_ms >= self.config.verification_timeout_ms
-            || !input.verification_complete
-        {
-            let reason = ClaimDenialReason::ProofVerificationTimeout {
-                timeout_ms: self.config.verification_timeout_ms,
-                elapsed_ms: input.simulated_elapsed_ms,
-            };
-            return Ok(self.deny(claim, reason, start));
+        if !input.verification_complete || self.has_timed_out(start, elapsed_override_ms) {
+            return Ok(self.deny(
+                claim,
+                self.timeout_reason(start, elapsed_override_ms),
+                start,
+            ));
         }
 
         for marker_id in &claim.required_markers {
+            if self.has_timed_out(start, elapsed_override_ms) {
+                return Ok(self.deny(
+                    claim,
+                    self.timeout_reason(start, elapsed_override_ms),
+                    start,
+                ));
+            }
             if !input.available_markers.contains(marker_id) {
                 return Ok(self.deny(
                     claim,
@@ -269,6 +294,13 @@ impl DurableClaimGate {
 
         let mut proof_hashes = Vec::new();
         for required_type in &claim.required_proofs {
+            if self.has_timed_out(start, elapsed_override_ms) {
+                return Ok(self.deny(
+                    claim,
+                    self.timeout_reason(start, elapsed_override_ms),
+                    start,
+                ));
+            }
             let maybe_proof = input.proofs.iter().find(|proof| {
                 proof.proof_type == *required_type && proof.claim_id == claim.claim_id
             });
@@ -390,6 +422,14 @@ impl DurableClaimGate {
             proof_hashes.push(proof.proof_hash.clone());
         }
 
+        if self.has_timed_out(start, elapsed_override_ms) {
+            return Ok(self.deny(
+                claim,
+                self.timeout_reason(start, elapsed_override_ms),
+                start,
+            ));
+        }
+
         proof_hashes.sort();
         let proof_artifact_hash = hash_witnesses(&proof_hashes);
         let evidence = EvidenceEntry {
@@ -440,6 +480,21 @@ impl DurableClaimGate {
             denial_reason: Some(reason),
             evidence_entry: None,
             latency_us: start.elapsed().as_micros(),
+        }
+    }
+
+    fn has_timed_out(&self, start: Instant, elapsed_override_ms: Option<u64>) -> bool {
+        elapsed_millis(start, elapsed_override_ms) >= self.config.verification_timeout_ms
+    }
+
+    fn timeout_reason(
+        &self,
+        start: Instant,
+        elapsed_override_ms: Option<u64>,
+    ) -> ClaimDenialReason {
+        ClaimDenialReason::ProofVerificationTimeout {
+            timeout_ms: self.config.verification_timeout_ms,
+            elapsed_ms: elapsed_millis(start, elapsed_override_ms),
         }
     }
 
@@ -567,6 +622,11 @@ fn contains_nul(value: &str) -> bool {
     value.as_bytes().contains(&0)
 }
 
+fn elapsed_millis(start: Instant, elapsed_override_ms: Option<u64>) -> u64 {
+    elapsed_override_ms
+        .unwrap_or_else(|| u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX))
+}
+
 fn hash_witnesses(proof_hashes: &[String]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"durable_claim_merkle_v1:");
@@ -647,7 +707,6 @@ mod tests {
                 },
             ],
             verification_complete: true,
-            simulated_elapsed_ms: 1,
         }
     }
 
@@ -721,10 +780,11 @@ mod tests {
     #[test]
     fn denial_reason_verification_timeout() {
         let mut gate = DurableClaimGate::new(DurableClaimGateConfig::default()).unwrap();
-        let mut input = valid_input();
-        input.simulated_elapsed_ms = 5_000;
+        let input = valid_input();
 
-        let decision = gate.evaluate_claim(&base_claim(), &input, 10).unwrap();
+        let decision = gate
+            .evaluate_claim_with_test_elapsed_ms(&base_claim(), &input, 10, 5_000)
+            .unwrap();
         let reason = decision.denial_reason.unwrap();
         assert_eq!(reason.code(), "CLAIM_PROOF_VERIFICATION_TIMEOUT");
     }
@@ -1125,10 +1185,11 @@ mod tests {
             freshness_window_epochs: 1,
         })
         .unwrap();
-        let mut input = valid_input();
-        input.simulated_elapsed_ms = 10;
+        let input = valid_input();
 
-        let decision = gate.evaluate_claim(&base_claim(), &input, 10).unwrap();
+        let decision = gate
+            .evaluate_claim_with_test_elapsed_ms(&base_claim(), &input, 10, 10)
+            .unwrap();
 
         assert!(!decision.accepted);
         assert_eq!(
@@ -1154,6 +1215,37 @@ mod tests {
             decision.denial_reason,
             Some(ClaimDenialReason::ProofVerificationTimeout { .. })
         ));
+    }
+
+    #[test]
+    fn caller_input_cannot_control_timeout_outcome() {
+        let input = valid_input();
+
+        let mut production_gate = DurableClaimGate::new(DurableClaimGateConfig {
+            verification_timeout_ms: 10,
+            freshness_window_epochs: 1,
+        })
+        .unwrap();
+        let production_decision = production_gate
+            .evaluate_claim(&base_claim(), &input, 10)
+            .unwrap();
+        assert!(production_decision.accepted);
+
+        let mut test_gate = DurableClaimGate::new(DurableClaimGateConfig {
+            verification_timeout_ms: 10,
+            freshness_window_epochs: 1,
+        })
+        .unwrap();
+        let forced_timeout = test_gate
+            .evaluate_claim_with_test_elapsed_ms(&base_claim(), &input, 10, 10)
+            .unwrap();
+        assert_eq!(
+            forced_timeout.denial_reason,
+            Some(ClaimDenialReason::ProofVerificationTimeout {
+                timeout_ms: 10,
+                elapsed_ms: 10,
+            })
+        );
     }
 
     #[test]
