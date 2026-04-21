@@ -3,7 +3,9 @@ use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{BufRead, BufReader, ErrorKind};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -22,18 +24,42 @@ const ACCEPT_POLL_INTERVAL_MS: u64 = 100;
 const CONNECTION_READ_TIMEOUT_MS: u64 = 500;
 const DEFAULT_DRAIN_TIMEOUT_MS: u64 = 5000;
 
-/// Global registry of socket path locks to prevent race conditions between bridge instances.
-static SOCKET_PATH_LOCKS: OnceLock<Mutex<BTreeMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+/// Cross-process file lock guard for socket setup/teardown operations
+struct SocketLockGuard {
+    _lock_file: File,
+}
 
-/// Acquire a lock for the given socket path to prevent concurrent access.
-fn acquire_socket_path_lock(socket_path: &str) -> Arc<Mutex<()>> {
-    let registry = SOCKET_PATH_LOCKS.get_or_init(|| Mutex::new(BTreeMap::new()));
-    let mut locks = registry.lock().expect("socket path registry lock");
+impl SocketLockGuard {
+    /// Acquire exclusive file lock adjacent to socket path to prevent cross-process races
+    fn acquire(socket_path: &str) -> Result<Self, anyhow::Error> {
+        let lock_path = format!("{}.lock", socket_path);
 
-    locks
-        .entry(socket_path.to_string())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone()
+        // Create lock file with appropriate permissions (only owner can read/write)
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .mode(0o600)
+            .open(&lock_path)
+            .map_err(|e| anyhow::anyhow!("failed to create lock file {}: {}", lock_path, e))?;
+
+        // Acquire exclusive lock with non-blocking behavior
+        // If another process holds the lock, this will fail immediately
+        match lock_file.try_lock() {
+            Ok(()) => Ok(SocketLockGuard {
+                _lock_file: lock_file,
+            }),
+            Err(TryLockError::WouldBlock) => Err(anyhow::anyhow!(
+                "failed to acquire exclusive lock on {}: another process is active",
+                lock_path
+            )),
+            Err(TryLockError::Error(e)) => Err(anyhow::anyhow!(
+                "failed to acquire lock on {}: {}",
+                lock_path,
+                e
+            )),
+        }
+        // Lock is automatically released when SocketLockGuard is dropped
+    }
 }
 
 /// Probe if a Unix domain socket at the given path is still live by attempting to connect.
@@ -586,6 +612,21 @@ impl TelemetryRuntimeHandle {
                 // Signal shutdown to remaining workers by setting stop flag
                 self.stop_flag.store(true, Ordering::SeqCst);
                 worker_timed_out = true;
+
+                // CRITICAL: Give worker brief grace period to notice stop flag and exit cleanly
+                // Without this, handle.join() could hang indefinitely if worker is blocked in I/O
+                let grace_start = Instant::now();
+                let grace_period = Duration::from_millis(100); // 100ms grace to notice stop flag
+
+                while grace_start.elapsed() < grace_period {
+                    if handle.is_finished() {
+                        break; // Worker noticed stop flag and exited cleanly
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+
+                // Continue to join() - even if still running, we must join to prevent detachment
+                // handle.join() call below will complete this worker's lifecycle
             } else {
                 // Wait for handle with remaining deadline
                 let remaining_time = deadline.saturating_sub(join_start.elapsed());
@@ -740,11 +781,9 @@ impl TelemetryBridge {
         let connection_worker_panicked = Arc::new(AtomicBool::new(false));
         let (sender, receiver) = mpsc::sync_channel(PERSIST_QUEUE_CAPACITY);
 
-        // Acquire socket path lock to prevent race conditions with other bridge instances
-        let socket_path_lock = acquire_socket_path_lock(&socket_path);
-        let _socket_lock = socket_path_lock
-            .lock()
-            .map_err(|_| anyhow::anyhow!("socket path lock poisoned for {}", socket_path))?;
+        // SECURITY: Acquire cross-process file lock to prevent race conditions between franken-node processes
+        // This prevents Process A from binding, then Process B unlinking A's live socket
+        let _socket_lock = SocketLockGuard::acquire(&socket_path)?;
 
         // Probe socket liveness before attempting removal to prevent unlinking live sockets
         let socket_path_buf = PathBuf::from(&socket_path);
@@ -3903,5 +3942,52 @@ mod tests {
             report.accepted_total > 0,
             "connection should remain functional after slowloris attack"
         );
+    }
+
+    #[test]
+    fn socket_lock_prevents_concurrent_access() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket_path = tmp.path().join("test_lock.sock");
+        let socket_path_str = socket_path.to_str().expect("utf8");
+
+        // First lock should succeed
+        let _guard1 = SocketLockGuard::acquire(socket_path_str)
+            .expect("first lock should succeed");
+
+        // Second lock on same path should fail with WouldBlock
+        let result2 = SocketLockGuard::acquire(socket_path_str);
+        assert!(
+            result2.is_err(),
+            "second lock on same path should fail"
+        );
+
+        let err_msg = result2.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("another process is active"),
+            "error should indicate another process is active: {}",
+            err_msg
+        );
+
+        // After dropping first lock, second attempt should succeed
+        drop(_guard1);
+        let _guard2 = SocketLockGuard::acquire(socket_path_str)
+            .expect("lock should succeed after first is dropped");
+    }
+
+    #[test]
+    fn socket_lock_different_paths_no_conflict() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket_path1 = tmp.path().join("test1.sock");
+        let socket_path2 = tmp.path().join("test2.sock");
+
+        // Locks on different paths should not conflict
+        let _guard1 = SocketLockGuard::acquire(socket_path1.to_str().expect("utf8"))
+            .expect("lock on first path should succeed");
+        let _guard2 = SocketLockGuard::acquire(socket_path2.to_str().expect("utf8"))
+            .expect("lock on second path should succeed");
+
+        // Both guards can coexist
+        drop(_guard1);
+        drop(_guard2);
     }
 }
