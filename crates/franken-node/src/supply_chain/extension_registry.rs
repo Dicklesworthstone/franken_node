@@ -277,6 +277,67 @@ pub struct RegistrationRequest {
     pub transparency_proof: Option<tv::InclusionProof>,
 }
 
+pub const EXTENSION_REGISTRATION_MANIFEST_SCHEMA: &str =
+    "franken-node/extension-registration-manifest/v1";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionRegistrationManifest {
+    pub schema_version: String,
+    pub name: String,
+    pub publisher_id: String,
+    pub initial_version: VersionEntry,
+    pub tags: Vec<String>,
+}
+
+pub fn canonical_registration_manifest_bytes(
+    name: &str,
+    publisher_id: &str,
+    initial_version: &VersionEntry,
+    tags: &[String],
+) -> Result<Vec<u8>, serde_json::Error> {
+    serde_json::to_vec(&ExtensionRegistrationManifest {
+        schema_version: EXTENSION_REGISTRATION_MANIFEST_SCHEMA.to_string(),
+        name: name.to_string(),
+        publisher_id: publisher_id.to_string(),
+        initial_version: initial_version.clone(),
+        tags: tags.to_vec(),
+    })
+}
+
+fn parse_signed_registration_manifest(
+    manifest_bytes: &[u8],
+) -> Result<ExtensionRegistrationManifest, String> {
+    let manifest = serde_json::from_slice::<ExtensionRegistrationManifest>(manifest_bytes)
+        .map_err(|err| format!("invalid signed extension registration manifest: {err}"))?;
+    if manifest.schema_version != EXTENSION_REGISTRATION_MANIFEST_SCHEMA {
+        return Err(format!(
+            "unsupported signed extension registration manifest schema `{}`",
+            manifest.schema_version
+        ));
+    }
+    Ok(manifest)
+}
+
+fn registration_manifest_divergence(
+    request: &RegistrationRequest,
+    manifest: &ExtensionRegistrationManifest,
+) -> Option<&'static str> {
+    if request.name != manifest.name {
+        return Some("name");
+    }
+    if request.publisher_id != manifest.publisher_id {
+        return Some("publisher_id");
+    }
+    if request.initial_version != manifest.initial_version {
+        return Some("initial_version");
+    }
+    if request.tags != manifest.tags {
+        return Some("tags");
+    }
+    None
+}
+
 /// Result of a registry operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RegistryResult {
@@ -802,13 +863,57 @@ impl SignedExtensionRegistry {
             };
         }
 
+        let signed_manifest = match parse_signed_registration_manifest(&request.manifest_bytes) {
+            Ok(manifest) => manifest,
+            Err(detail) => {
+                self.log(
+                    event_codes::SER_ERR_INVALID_INPUT,
+                    "",
+                    trace_id,
+                    serde_json::json!({
+                        "field": "manifest_bytes",
+                        "reason": &detail,
+                    }),
+                );
+                return RegistryResult {
+                    success: false,
+                    extension_id: None,
+                    error_code: Some(event_codes::SER_ERR_INVALID_INPUT.to_string()),
+                    detail,
+                };
+            }
+        };
+
+        if let Some(field) = registration_manifest_divergence(&request, &signed_manifest) {
+            let detail = format!(
+                "registration request field `{field}` diverges from signed extension manifest"
+            );
+            self.log(
+                event_codes::SER_ERR_INVALID_INPUT,
+                "",
+                trace_id,
+                serde_json::json!({
+                    "field": field,
+                    "reason": "signed_manifest_divergence",
+                    "signed_name": &signed_manifest.name,
+                    "request_name": &request.name,
+                }),
+            );
+            return RegistryResult {
+                success: false,
+                extension_id: None,
+                error_code: Some(event_codes::SER_ERR_INVALID_INPUT.to_string()),
+                detail,
+            };
+        }
+
         // Check for name uniqueness after admission succeeds
         // INV-SER-NAME-UNIQUE: Extension names must be unique across active extensions
         let duplicate_extension_id = self
             .extensions
             .values()
             .find(|existing_extension| {
-                existing_extension.name == request.name
+                existing_extension.name == signed_manifest.name
                     && existing_extension.status == ExtensionStatus::Active
             })
             .map(|existing_extension| existing_extension.extension_id.clone());
@@ -818,7 +923,7 @@ impl SignedExtensionRegistry {
                 "",
                 trace_id,
                 serde_json::json!({
-                    "name": &request.name,
+                    "name": &signed_manifest.name,
                     "existing_id": &existing_extension_id,
                     "reason": "duplicate_extension_name",
                 }),
@@ -829,7 +934,7 @@ impl SignedExtensionRegistry {
                 error_code: Some(event_codes::SER_ERR_DUPLICATE_NAME.to_string()),
                 detail: format!(
                     "Extension name '{}' already exists (ID: {}). Extension names must be unique.",
-                    request.name, existing_extension_id
+                    signed_manifest.name, existing_extension_id
                 ),
             };
         }
@@ -840,7 +945,7 @@ impl SignedExtensionRegistry {
             "",
             trace_id,
             serde_json::json!({
-                "name": &request.name,
+                "name": &signed_manifest.name,
                 "key_id": &request.signature.key_id,
             }),
         );
@@ -861,14 +966,14 @@ impl SignedExtensionRegistry {
 
         let extension = SignedExtension {
             extension_id: extension_id.clone(),
-            name: request.name.clone(),
+            name: signed_manifest.name.clone(),
             description: request.description,
-            publisher_id: request.publisher_id,
+            publisher_id: signed_manifest.publisher_id.clone(),
             status: ExtensionStatus::Active,
             signature: request.signature,
             provenance: request.provenance,
-            versions: vec![request.initial_version],
-            tags: request.tags,
+            versions: vec![signed_manifest.initial_version.clone()],
+            tags: signed_manifest.tags.clone(),
             registered_at: now.clone(),
             updated_at: now,
         };
@@ -879,7 +984,7 @@ impl SignedExtensionRegistry {
             event_codes::SER_EXTENSION_REGISTERED,
             &extension_id,
             trace_id,
-            serde_json::json!({"name": &request.name}),
+            serde_json::json!({"name": &signed_manifest.name}),
         );
 
         RegistryResult {
@@ -1313,7 +1418,11 @@ mod tests {
 
     /// Build a valid registration request signed by the given key.
     fn valid_request(name: &str, sk: &SigningKey, now_epoch: u64) -> RegistrationRequest {
-        let manifest_bytes = format!("manifest:{}:1.0.0", name).into_bytes();
+        let initial_version = valid_version("1.0.0");
+        let tags = vec!["test".to_string()];
+        let manifest_bytes =
+            canonical_registration_manifest_bytes(name, "pub-001", &initial_version, &tags)
+                .expect("canonical manifest");
         let signature_bytes = artifact_signing::sign_bytes(sk, &manifest_bytes);
         let key_id = KeyId::from_verifying_key(&sk.verifying_key());
 
@@ -1328,8 +1437,8 @@ mod tests {
                 signed_at: Utc::now().to_rfc3339(),
             },
             provenance: valid_provenance(now_epoch),
-            initial_version: valid_version("1.0.0"),
-            tags: vec!["test".to_string()],
+            initial_version,
+            tags,
             manifest_bytes,
             transparency_proof: None,
         }
@@ -1426,6 +1535,40 @@ mod tests {
             result.error_code.as_deref(),
             Some(event_codes::SER_ERR_INVALID_SIGNATURE)
         );
+    }
+
+    #[test]
+    fn adversarial_unsigned_registration_field_divergence_rejected() {
+        let (sk, vk) = test_keypair();
+        for field in ["name", "publisher_id", "initial_version", "tags"] {
+            let mut reg = test_registry(&vk);
+            let mut req = valid_request("ext-a", &sk, now_epoch());
+            match field {
+                "name" => req.name = "ext-forged".to_string(),
+                "publisher_id" => req.publisher_id = "pub-forged".to_string(),
+                "initial_version" => req.initial_version.version = "9.9.9".to_string(),
+                "tags" => req.tags = vec!["forged".to_string()],
+                _ => unreachable!(),
+            }
+
+            let result = reg.register(req, &make_trace(), now_epoch());
+
+            assert!(!result.success, "{field} divergence must fail");
+            assert_eq!(
+                result.error_code.as_deref(),
+                Some(event_codes::SER_ERR_INVALID_INPUT),
+                "{field} divergence must be an invalid input error"
+            );
+            assert!(
+                result.detail.contains(field),
+                "{field} divergence detail should name field: {}",
+                result.detail
+            );
+            assert!(
+                reg.list(None).is_empty(),
+                "{field} divergence must not register an extension"
+            );
+        }
     }
 
     #[test]
