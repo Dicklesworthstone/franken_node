@@ -1,0 +1,63 @@
+#!/bin/bash
+# Pre-commit hook to validate security commit messages
+# Install with: cp scripts/pre-commit-security-validation .git/hooks/pre-commit
+
+set -euo pipefail
+
+# Get the commit message from the temporary file
+commit_msg_file="${1:-.git/COMMIT_EDITMSG}"
+if [ ! -f "$commit_msg_file" ]; then
+    # In pre-commit hook, we need to get staged changes instead
+    exit 0
+fi
+
+commit_msg=$(cat "$commit_msg_file")
+
+# Check if this is a security commit
+if echo "$commit_msg" | grep -qi -E "(security|SECURITY|fix.*security|Security.*fix|auth.*fix|rate.*limit.*fix)"; then
+    echo "🔍 Security commit detected, validating..."
+
+    # Get staged files
+    staged_files=$(git diff --cached --name-only)
+
+    # Define security-relevant paths
+    security_paths=(
+        "crates/franken-node/src/api/middleware.rs"
+        "crates/franken-node/src/security/"
+        "crates/franken-node/src/supply_chain/"
+        "crates/franken-node/Cargo.toml"
+        "crates/franken-node/src/storage/"
+        "crates/franken-node/src/runtime/"
+    )
+
+    # Check if any security files are being modified
+    security_changes=false
+    for path in "${security_paths[@]}"; do
+        if echo "$staged_files" | grep -q "$path"; then
+            security_changes=true
+            break
+        fi
+    done
+
+    if [ "$security_changes" = "false" ]; then
+        echo "❌ COMMIT REJECTED: Security claim with no security file changes"
+        echo ""
+        echo "Commit message claims security fix but no security-relevant files are modified."
+        echo ""
+        echo "Files being changed:"
+        echo "$staged_files" | sed 's/^/  /'
+        echo ""
+        echo "Security-relevant paths:"
+        printf '  %s\n' "${security_paths[@]}"
+        echo ""
+        echo "Either:"
+        echo "1. Remove security claims from commit message, or"
+        echo "2. Include actual security-related changes"
+        echo ""
+        exit 1
+    else
+        echo "✅ Security commit validated: modifies security-relevant files"
+    fi
+fi
+
+exit 0
