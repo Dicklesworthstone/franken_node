@@ -99,7 +99,6 @@ fn receipt_schema_vectors_round_trip_without_byte_drift() {
 }
 
 #[test]
-#[ignore = "bd-11ek9: receipt_hash_sha256 drifts from bd-p73r golden vectors"]
 fn receipt_schema_vectors_match_published_hashes() {
     let bundle = receipt_schema_vectors();
 

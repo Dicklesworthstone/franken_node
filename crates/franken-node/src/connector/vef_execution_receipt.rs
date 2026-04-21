@@ -298,8 +298,6 @@ pub fn serialize_canonical(receipt: &ExecutionReceipt) -> Result<Vec<u8>, Execut
 pub fn receipt_hash_sha256(receipt: &ExecutionReceipt) -> Result<String, ExecutionReceiptError> {
     let bytes = serialize_canonical(receipt)?;
     let mut hasher = Sha256::new();
-    hasher.update(b"vef_exec_receipt_v1:");
-    hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(bytes.as_slice());
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
@@ -607,24 +605,22 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_length_prefixes_canonical_bytes() {
+    fn test_hash_uses_canonical_bytes_as_sole_substrate() {
         let receipt = make_receipt();
         let bytes = serialize_canonical(&receipt).unwrap();
         let mut expected_hasher = Sha256::new();
-        expected_hasher.update(b"vef_exec_receipt_v1:");
-        expected_hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
         expected_hasher.update(bytes.as_slice());
 
-        let mut unprefixed_hasher = Sha256::new();
-        unprefixed_hasher.update(b"vef_exec_receipt_v1:");
-        unprefixed_hasher.update(bytes.as_slice());
+        let mut prefixed_hasher = Sha256::new();
+        prefixed_hasher.update(b"vef_exec_receipt_v1:");
+        prefixed_hasher.update(bytes.as_slice());
 
         let actual = receipt_hash_sha256(&receipt).unwrap();
         let expected = format!("sha256:{:x}", expected_hasher.finalize());
-        let unprefixed = format!("sha256:{:x}", unprefixed_hasher.finalize());
+        let prefixed = format!("sha256:{:x}", prefixed_hasher.finalize());
 
         assert_eq!(actual, expected);
-        assert_ne!(actual, unprefixed);
+        assert_ne!(actual, prefixed);
     }
 
     #[test]

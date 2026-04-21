@@ -25,7 +25,7 @@
         ],
         "trace_id": "trace-rcpt-001"
       },
-      "expected_hash": "sha256:adf3b2a92ca3862f4c9449d0d8220e4f9b77dd0d6033ad307a9112e7ea8b26cb",
+      "expected_hash": "sha256:ecd2a8c8449c06869783a65744a391a480b5917b96c016ca0c081dab8c6e820d",
       "expected_canonical_witnesses": [
         "witness:a",
         "witness:b"
@@ -53,7 +53,7 @@
         ],
         "trace_id": "trace-rcpt-002"
       },
-      "expected_hash": "sha256:eb6f69a8f9eca57be58b4d4e23f7cdced16035097a31f7f3f80c92374f5cfc5e",
+      "expected_hash": "sha256:d15a5a7363a367c6f1b6b8af21d60372ce9068f4f2038efd26cd22b7f965fc37",
       "expected_canonical_witnesses": [
         "witness:alpha",
         "witness:zeta"
@@ -81,7 +81,7 @@
         ],
         "trace_id": "trace-rcpt-003"
       },
-      "expected_hash": "sha256:c2992e0348fd3f602665719a8458abf1ff302e9dc2d86d8a3af40ad6e2e3b8e6",
+      "expected_hash": "sha256:aae3ad5f3c3e45e272ee729507e81693cffa81726d9c634adba0570c8542b324",
       "expected_canonical_witnesses": [
         "witness:quorum-1",
         "witness:quorum-2",
@@ -109,7 +109,7 @@
         ],
         "trace_id": "trace-rcpt-004"
       },
-      "expected_hash": "sha256:af2f6bbd4f4b7d4f09d7ac8e08484d43bcf9f58d65ba750e68be1864e67a70a0",
+      "expected_hash": "sha256:5c47529d02a4080adc410a3a9a7d32693ba7167a02cc3b5f8b574941a9dfee1f",
       "expected_canonical_witnesses": [
         "witness:disk-guard",
         "witness:policy-daemon"
@@ -136,7 +136,7 @@
         ],
         "trace_id": "trace-rcpt-005"
       },
-      "expected_hash": "sha256:7d6b6f6461af23bcf8d4a9d548fddf6ebc9c17effeeb9bce3f846d0a6f2f1f5e",
+      "expected_hash": "sha256:abf0c09c4c2d1ce3f71dbb74a9cfa974913fd88e6a7cf418ab50d45e0e3c8834",
       "expected_canonical_witnesses": [
         "witness:deny-rule",
         "witness:spawn-monitor"
@@ -163,7 +163,7 @@
         ],
         "trace_id": "trace-rcpt-006"
       },
-      "expected_hash": "sha256:af0966199d755fce6f65a27372fbc28ec17fe59af80f535af59db17ca6f5f4ab",
+      "expected_hash": "sha256:68cdfc19708a2f0f48c6abfc28685f5af1d92d120c68b88a8ed83219adb139b4",
       "expected_canonical_witnesses": [
         "witness:quorum-check",
         "witness:vault-audit"
