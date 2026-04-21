@@ -1290,7 +1290,7 @@ mod tests {
             serializer
                 .deserialize(TrustObjectType::PolicyCheckpoint, &canonical_bytes)
                 .expect("canonical payload decodes"),
-            canonical_order
+            canonical_order.as_slice()
         );
     }
 
@@ -1669,10 +1669,14 @@ mod tests {
     #[test]
     fn test_signature_preimage_construction() {
         let mut serializer = CanonicalSerializer::with_all_schemas();
-        let payload = b"test payload data";
+        let payload = sample_payload_for_type(TrustObjectType::PolicyCheckpoint);
 
         let preimage = serializer
-            .build_preimage(TrustObjectType::PolicyCheckpoint, payload, "test-trace")
+            .build_preimage(
+                TrustObjectType::PolicyCheckpoint,
+                payload.as_bytes(),
+                "test-trace",
+            )
             .unwrap();
 
         // Verify preimage structure
@@ -1725,15 +1729,11 @@ mod tests {
             description: &'static str,
         }
 
-        /// Generate test data for all trust object types
-        fn generate_test_payloads() -> Vec<(&'static str, Vec<u8>)> {
+        /// Generate schema-valid test data for a trust object type.
+        fn generate_test_payloads(object_type: TrustObjectType) -> Vec<(&'static str, Vec<u8>)> {
+            let sample = sample_payload_for_type(object_type);
             vec![
-                ("simple_json", br#"{"id":"test","value":42}"#.to_vec()),
-                ("complex_json", br#"{"checkpoint_id":"cp-001","epoch":123,"sequence":456,"policy_hash":"abc123","timestamp":"2026-04-17T05:54:27Z"}"#.to_vec()),
-                ("minimal", br#"{"id":"x"}"#.to_vec()),
-                ("binary_data", vec![0x01, 0x02, 0x03, 0x04, 0xFF]),
-                ("unicode", "测试数据".as_bytes().to_vec()),
-                ("empty_object", br#"{}"#.to_vec()),
+                ("sample", sample.into_bytes()),
             ]
         }
 
@@ -1757,7 +1757,7 @@ mod tests {
             let mut serializer = CanonicalSerializer::with_all_schemas();
 
             for obj_type in TrustObjectType::all() {
-                for (name, payload) in generate_test_payloads() {
+                for (name, payload) in generate_test_payloads(*obj_type) {
                     // Serialize same payload multiple times
                     let result1 = serializer.serialize(*obj_type, &payload, "trace1").unwrap();
                     let result2 = serializer.serialize(*obj_type, &payload, "trace2").unwrap();
@@ -1777,7 +1777,7 @@ mod tests {
         fn conformance_inv_can_deterministic_cross_instance() {
             // Test determinism across different serializer instances
             for obj_type in TrustObjectType::all() {
-                for (name, payload) in generate_test_payloads() {
+                for (name, payload) in generate_test_payloads(*obj_type) {
                     let mut s1 = CanonicalSerializer::with_all_schemas();
                     let mut s2 = CanonicalSerializer::with_all_schemas();
 
@@ -1835,24 +1835,15 @@ mod tests {
         fn conformance_inv_can_no_float_integer_allowed() {
             let mut serializer = CanonicalSerializer::with_all_schemas();
 
-            // Integer values should NOT be rejected
-            let integer_payloads = vec![
-                br#"{"count":42}"#.to_vec(),
-                br#"{"negative":-1}"#.to_vec(),
-                br#"{"zero":0}"#.to_vec(),
-                br#"{"large":1000000}"#.to_vec(),
-            ];
-
             for obj_type in TrustObjectType::all() {
-                for payload in &integer_payloads {
-                    let result = serializer.serialize(*obj_type, payload, "trace");
-                    assert!(
-                        result.is_ok(),
-                        "Integer payload should be allowed for {}: {:?}",
-                        obj_type.label(),
-                        String::from_utf8_lossy(payload)
-                    );
-                }
+                let payload = sample_payload_for_type(*obj_type);
+                let result = serializer.serialize(*obj_type, payload.as_bytes(), "trace");
+                assert!(
+                    result.is_ok(),
+                    "Schema-valid integer-bearing payload should be allowed for {}: {:?}",
+                    obj_type.label(),
+                    payload
+                );
             }
         }
 
@@ -1865,9 +1856,9 @@ mod tests {
             let mut serializer = CanonicalSerializer::with_all_schemas();
 
             for obj_type in TrustObjectType::all() {
-                let payload = br#"{"test":"data"}"#;
+                let payload = sample_payload_for_type(*obj_type);
                 let preimage = serializer
-                    .build_preimage(*obj_type, payload, "trace")
+                    .build_preimage(*obj_type, payload.as_bytes(), "trace")
                     .unwrap();
 
                 // Verify domain tag matches expected value
@@ -1918,10 +1909,10 @@ mod tests {
         fn conformance_inv_can_no_bypass_schema_required() {
             // Test that serialization fails without registered schema
             let mut serializer = CanonicalSerializer::new(); // No schemas registered
-            let payload = br#"{"test":"data"}"#;
 
             for obj_type in TrustObjectType::all() {
-                let result = serializer.serialize(*obj_type, payload, "trace");
+                let payload = sample_payload_for_type(*obj_type);
+                let result = serializer.serialize(*obj_type, payload.as_bytes(), "trace");
 
                 match result {
                     Err(SerializerError::SchemaNotFound { .. }) => {
@@ -1946,7 +1937,7 @@ mod tests {
             let mut serializer = CanonicalSerializer::with_all_schemas();
 
             for obj_type in TrustObjectType::all() {
-                for (name, payload) in generate_test_payloads() {
+                for (name, payload) in generate_test_payloads(*obj_type) {
                     let result = serializer.round_trip_canonical(*obj_type, &payload, "trace");
 
                     match result {
@@ -2023,11 +2014,15 @@ mod tests {
         #[test]
         fn conformance_edge_cases_large_payloads() {
             let mut serializer = CanonicalSerializer::with_all_schemas();
-            let large_payload = vec![0x42; 1024 * 1024]; // 1MB
 
             // Should handle large payloads without overflow
             for obj_type in TrustObjectType::all() {
-                let result = serializer.serialize(*obj_type, &large_payload, "trace");
+                let mut payload: Value =
+                    serde_json::from_str(&sample_payload_for_type(*obj_type)).unwrap();
+                let first_field = default_schema(*obj_type).field_order[0].clone();
+                payload[&first_field] = Value::String("x".repeat(1024 * 1024));
+                let payload = payload.to_string();
+                let result = serializer.serialize(*obj_type, payload.as_bytes(), "trace");
                 assert!(
                     result.is_ok(),
                     "Large payload serialization failed for {}",
@@ -2044,20 +2039,10 @@ mod tests {
             for obj_type in TrustObjectType::all() {
                 let result = serializer.serialize(*obj_type, &empty, "trace");
                 assert!(
-                    result.is_ok(),
-                    "Empty payload serialization failed for {}",
+                    result.is_err(),
+                    "Empty payload must be rejected for {}",
                     obj_type.label()
                 );
-
-                if let Ok(serialized) = result {
-                    // Empty payload should produce 4-byte length prefix + 0 bytes
-                    assert_eq!(
-                        serialized.len(),
-                        4,
-                        "Empty payload should produce 4-byte output for {}",
-                        obj_type.label()
-                    );
-                }
             }
         }
 
@@ -4624,11 +4609,16 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         let mut serializer = CanonicalSerializer::new();
         let schema = default_schema(TrustObjectType::PolicyCheckpoint);
         serializer.register_schema(schema);
+        let payload = sample_payload_for_type(TrustObjectType::PolicyCheckpoint);
 
         // Generate more events than MAX_EVENTS to test capacity bounds
         for i in 0..(MAX_EVENTS + 50) {
             let trace_id = format!("overflow_trace_{}", i);
-            let _ = serializer.serialize(TrustObjectType::PolicyCheckpoint, b"test", &trace_id);
+            let _ = serializer.serialize(
+                TrustObjectType::PolicyCheckpoint,
+                payload.as_bytes(),
+                &trace_id,
+            );
         }
 
         // Events should be capped by push_bounded, not grow without limit

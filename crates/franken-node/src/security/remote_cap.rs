@@ -584,6 +584,7 @@ pub struct CapabilityGate {
     connectivity_mode: ConnectivityMode,
     consumed_tokens: ReplayTokenSet,
     revoked_tokens: ReplayTokenSet,
+    replay_store: ReplayStoreBackend,
     audit_log: Vec<RemoteCapAuditEvent>,
 }
 
@@ -595,6 +596,7 @@ impl CapabilityGate {
             connectivity_mode: ConnectivityMode::Connected,
             consumed_tokens: ReplayTokenSet::default(),
             revoked_tokens: ReplayTokenSet::default(),
+            replay_store: ReplayStoreBackend::from_env(),
             audit_log: Vec::new(),
         }
     }
@@ -604,6 +606,30 @@ impl CapabilityGate {
         let mut gate = Self::new(verification_secret);
         gate.connectivity_mode = mode;
         gate
+    }
+
+    pub fn with_durable_replay_store(
+        verification_secret: &str,
+        store_dir: impl AsRef<Path>,
+    ) -> Result<Self, RemoteCapError> {
+        Ok(Self {
+            verification_secret: verification_secret.to_string(),
+            connectivity_mode: ConnectivityMode::Connected,
+            consumed_tokens: ReplayTokenSet::default(),
+            revoked_tokens: ReplayTokenSet::default(),
+            replay_store: ReplayStoreBackend::Durable(DurableReplayStore::open(store_dir)?),
+            audit_log: Vec::new(),
+        })
+    }
+
+    pub fn with_mode_and_durable_replay_store(
+        verification_secret: &str,
+        mode: ConnectivityMode,
+        store_dir: impl AsRef<Path>,
+    ) -> Result<Self, RemoteCapError> {
+        let mut gate = Self::with_durable_replay_store(verification_secret, store_dir)?;
+        gate.connectivity_mode = mode;
+        Ok(gate)
     }
 
     pub fn set_mode(&mut self, mode: ConnectivityMode) {
@@ -844,6 +870,7 @@ impl CapabilityGate {
             return Err(err);
         }
 
+        let replay_key = cap.single_use.then(|| replay_store_key(cap));
         if cap.single_use && self.consumed_tokens.contains(&cap.token_id) {
             let err = RemoteCapError::ReplayDetected {
                 token_id: cap.token_id.clone(),
@@ -863,7 +890,84 @@ impl CapabilityGate {
             return Err(err);
         }
 
+        if let Some(replay_key) = replay_key.as_deref() {
+            match self.replay_store.contains_consumed(replay_key) {
+                Ok(false) => {}
+                Ok(true) => {
+                    let err = RemoteCapError::ReplayDetected {
+                        token_id: cap.token_id.clone(),
+                    };
+                    self.push_audit(build_audit_event(
+                        "REMOTECAP_DENIED",
+                        "RC_CHECK_DENIED",
+                        Some(cap.token_id.clone()),
+                        Some(cap.issuer_identity.clone()),
+                        Some(operation),
+                        Some(endpoint.to_string()),
+                        trace_id.to_string(),
+                        now_epoch_secs,
+                        false,
+                        Some(err.code().to_string()),
+                    ));
+                    return Err(err);
+                }
+                Err(err) => {
+                    self.push_audit(build_audit_event(
+                        "REMOTECAP_DENIED",
+                        "RC_CHECK_DENIED",
+                        Some(cap.token_id.clone()),
+                        Some(cap.issuer_identity.clone()),
+                        Some(operation),
+                        Some(endpoint.to_string()),
+                        trace_id.to_string(),
+                        now_epoch_secs,
+                        false,
+                        Some(err.code().to_string()),
+                    ));
+                    return Err(err);
+                }
+            }
+        }
+
         if cap.single_use && consume_single_use {
+            if let Some(replay_key) = replay_key.as_deref() {
+                match self.replay_store.consume(cap, replay_key) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let err = RemoteCapError::ReplayDetected {
+                            token_id: cap.token_id.clone(),
+                        };
+                        self.push_audit(build_audit_event(
+                            "REMOTECAP_DENIED",
+                            "RC_CHECK_DENIED",
+                            Some(cap.token_id.clone()),
+                            Some(cap.issuer_identity.clone()),
+                            Some(operation),
+                            Some(endpoint.to_string()),
+                            trace_id.to_string(),
+                            now_epoch_secs,
+                            false,
+                            Some(err.code().to_string()),
+                        ));
+                        return Err(err);
+                    }
+                    Err(err) => {
+                        self.push_audit(build_audit_event(
+                            "REMOTECAP_DENIED",
+                            "RC_CHECK_DENIED",
+                            Some(cap.token_id.clone()),
+                            Some(cap.issuer_identity.clone()),
+                            Some(operation),
+                            Some(endpoint.to_string()),
+                            trace_id.to_string(),
+                            now_epoch_secs,
+                            false,
+                            Some(err.code().to_string()),
+                        ));
+                        return Err(err);
+                    }
+                }
+            }
             self.consumed_tokens.insert(cap.token_id.clone());
         }
 
@@ -975,6 +1079,45 @@ fn keyed_digest(secret: &str, payload: &str) -> Result<String, RemoteCapError> {
     mac.update(b"remote_cap_keyed_digest_v1:");
     mac.update(payload.as_bytes());
     Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+fn replay_store_error(action: &str, path: &Path, source: std::io::Error) -> RemoteCapError {
+    RemoteCapError::CryptoEngineUnavailable {
+        detail: format!(
+            "remote capability replay store {action} failed for {}: {source}",
+            path.display()
+        ),
+    }
+}
+
+fn sync_directory(path: &Path) -> Result<(), RemoteCapError> {
+    std::fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| replay_store_error("fsync directory", path, source))
+}
+
+fn replay_store_key(cap: &RemoteCap) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"remote_cap_replay_store_key_v1:");
+    update_length_prefixed_bytes(&mut hasher, cap.token_id.as_bytes());
+    update_length_prefixed_bytes(&mut hasher, cap.issuer_identity.as_bytes());
+    let scope = scope_fingerprint(&cap.scope);
+    update_length_prefixed_bytes(&mut hasher, scope.as_bytes());
+    update_length_prefixed_bytes(&mut hasher, cap.signature.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn durable_replay_record(cap: &RemoteCap, replay_key: &str) -> String {
+    format!(
+        "remote_cap_replay_marker_v1\nreplay_key={replay_key}\ntoken_id_len={}:{}\nissuer_len={}:{}\nissued_at={}\nexpires_at={}\nsingle_use={}\n",
+        u64::try_from(cap.token_id.len()).unwrap_or(u64::MAX),
+        cap.token_id.as_str(),
+        u64::try_from(cap.issuer_identity.len()).unwrap_or(u64::MAX),
+        cap.issuer_identity.as_str(),
+        cap.issued_at_epoch_secs,
+        cap.expires_at_epoch_secs,
+        cap.single_use
+    )
 }
 
 fn update_length_prefixed_bytes(hasher: &mut Sha256, value: &[u8]) {
@@ -1252,6 +1395,53 @@ mod tests {
                 "trace-11",
             )
             .expect_err("replay must fail");
+        assert_eq!(err.code(), "REMOTECAP_REPLAY");
+    }
+
+    #[test]
+    fn durable_replay_store_rejects_single_use_token_after_gate_restart() {
+        let provider = CapabilityProvider::new("secret-a");
+        let (cap, _) = provider
+            .issue(
+                "operator",
+                scope(),
+                1_700_000_000,
+                300,
+                true,
+                true,
+                "trace-durable-replay",
+            )
+            .expect("issue");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store_dir = dir.path().join("remote-cap-replay");
+
+        {
+            let mut first_gate =
+                CapabilityGate::with_durable_replay_store("secret-a", &store_dir)
+                    .expect("open durable store");
+            first_gate
+                .authorize_network(
+                    Some(&cap),
+                    RemoteOperation::TelemetryExport,
+                    "https://telemetry.example.com/v1",
+                    1_700_000_010,
+                    "trace-durable-replay-first",
+                )
+                .expect("first use should pass");
+        }
+
+        let mut restarted_gate = CapabilityGate::with_durable_replay_store("secret-a", &store_dir)
+            .expect("reopen durable store");
+        let err = restarted_gate
+            .authorize_network(
+                Some(&cap),
+                RemoteOperation::TelemetryExport,
+                "https://telemetry.example.com/v1",
+                1_700_000_011,
+                "trace-durable-replay-second",
+            )
+            .expect_err("replay after gate restart must fail");
+
         assert_eq!(err.code(), "REMOTECAP_REPLAY");
     }
 
