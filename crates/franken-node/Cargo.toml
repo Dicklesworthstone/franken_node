@@ -105,6 +105,10 @@ name = "artifact_signing_key_loading"
 path = "tests/artifact_signing_key_loading.rs"
 
 [[test]]
+name = "verify_release_cli_e2e"
+path = "tests/verify_release_cli_e2e.rs"
+
+[[test]]
 name = "replay_bundle_adversarial_fuzz"
 path = "tests/replay_bundle_adversarial_fuzz.rs"
 

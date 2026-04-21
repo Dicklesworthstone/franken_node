@@ -1,0 +1,234 @@
+---
+source: crates/franken-node/tests/verify_release_cli_e2e.rs
+expression: matrix
+---
+[
+  {
+    "name": "module_pass",
+    "args": [
+      "verify",
+      "module",
+      "config",
+      "--json"
+    ],
+    "exit_code": 0,
+    "success": true,
+    "stdout_json": {
+      "command": "verify module",
+      "contract_version": "3.0.0",
+      "schema_version": "verifier-cli-contract-v1",
+      "compat_version": null,
+      "verdict": "PASS",
+      "status": "pass",
+      "exit_code": 0,
+      "reason": "module `config` resolved to [repo]/crates/franken-node/src/config.rs and all declared module dependencies are present",
+      "details": {
+        "module_id": "config",
+        "exists": true,
+        "source_path": "[repo]/crates/franken-node/src/config.rs",
+        "declared_in": "[repo]/crates/franken-node/src/lib.rs",
+        "integrity": {
+          "algorithm": "sha256",
+          "sha256": "[sha256]"
+        },
+        "deps_satisfied": true,
+        "dependencies": [],
+        "health": "not_declared"
+      }
+    },
+    "stderr": ""
+  },
+  {
+    "name": "module_unknown",
+    "args": [
+      "verify",
+      "module",
+      "definitely-not-a-real-module",
+      "--json"
+    ],
+    "exit_code": 1,
+    "success": false,
+    "stdout_json": {
+      "command": "verify module",
+      "contract_version": "3.0.0",
+      "schema_version": "verifier-cli-contract-v1",
+      "compat_version": null,
+      "verdict": "FAIL",
+      "status": "fail",
+      "exit_code": 1,
+      "reason": "unknown module `definitely-not-a-real-module`; no source file found under [repo]/crates/franken-node/src (examples: api, claims, cli, config, conformance, connector, control_plane, encoding, extensions, federation, ...)",
+      "details": {
+        "module_id": "definitely_not_a_real_module",
+        "exists": false,
+        "search_root": "[repo]/crates/franken-node/src"
+      }
+    },
+    "stderr": ""
+  },
+  {
+    "name": "module_compat_error",
+    "args": [
+      "verify",
+      "module",
+      "runtime",
+      "--compat-version",
+      "1",
+      "--json"
+    ],
+    "exit_code": 2,
+    "success": false,
+    "stdout_json": {
+      "command": "verify module",
+      "contract_version": "3.0.0",
+      "schema_version": "verifier-cli-contract-v1",
+      "compat_version": 1,
+      "verdict": "ERROR",
+      "status": "error",
+      "exit_code": 2,
+      "reason": "unsupported --compat-version=1; supported versions: 3 or 2"
+    },
+    "stderr": ""
+  },
+  {
+    "name": "migration_pass",
+    "args": [
+      "verify",
+      "migration",
+      "rewrite",
+      "--json"
+    ],
+    "exit_code": 0,
+    "success": true,
+    "stdout_json": {
+      "command": "verify migration",
+      "contract_version": "3.0.0",
+      "schema_version": "verifier-cli-contract-v1",
+      "compat_version": null,
+      "verdict": "PASS",
+      "status": "pass",
+      "exit_code": 0,
+      "reason": "migration lane `rewrite` resolved to [repo]/crates/franken-node/src/migration/mod.rs with no state record present under [repo]/.franken-node/state/migrations",
+      "details": {
+        "migration_id": "rewrite",
+        "record_path": null,
+        "status": "source_present",
+        "post_conditions_met": null,
+        "diff_summary": "no state record declared",
+        "lane_source": "[repo]/crates/franken-node/src/migration/mod.rs"
+      }
+    },
+    "stderr": ""
+  },
+  {
+    "name": "migration_unknown",
+    "args": [
+      "verify",
+      "migration",
+      "definitely-not-a-lane",
+      "--json"
+    ],
+    "exit_code": 1,
+    "success": false,
+    "stdout_json": {
+      "command": "verify migration",
+      "contract_version": "3.0.0",
+      "schema_version": "verifier-cli-contract-v1",
+      "compat_version": null,
+      "verdict": "FAIL",
+      "status": "fail",
+      "exit_code": 1,
+      "reason": "unknown migration target `definitely-not-a-lane`; no state record found under [repo]/.franken-node/state/migrations and no verify lane source resolved (expected one of: audit, rewrite, validate, bpet_migration_gate, dgis_migration_gate)",
+      "details": {
+        "migration_id": "definitely_not_a_lane",
+        "record_path": null,
+        "status": "missing",
+        "post_conditions_met": false,
+        "diff_summary": "no migration record or lane source resolved"
+      }
+    },
+    "stderr": ""
+  },
+  {
+    "name": "compat_profile_pass",
+    "args": [
+      "verify",
+      "compatibility",
+      "strict",
+      "--json"
+    ],
+    "exit_code": 0,
+    "success": true,
+    "stdout_json": {
+      "command": "verify compatibility",
+      "contract_version": "3.0.0",
+      "schema_version": "verifier-cli-contract-v1",
+      "compat_version": null,
+      "verdict": "PASS",
+      "status": "pass",
+      "exit_code": 0,
+      "reason": "compatibility target `strict` resolved to profile `strict`",
+      "details": {
+        "target": "strict",
+        "target_kind": "profile",
+        "profile": "strict"
+      }
+    },
+    "stderr": ""
+  },
+  {
+    "name": "corpus_pass",
+    "args": [
+      "verify",
+      "corpus",
+      "[corpus]",
+      "--json"
+    ],
+    "exit_code": 0,
+    "success": true,
+    "stdout_json": {
+      "command": "verify corpus",
+      "contract_version": "3.0.0",
+      "schema_version": "verifier-cli-contract-v1",
+      "compat_version": null,
+      "verdict": "PASS",
+      "status": "pass",
+      "exit_code": 0,
+      "reason": "corpus path `[corpus]` matched 1 artifact(s); sample match: [corpus]"
+    },
+    "stderr": ""
+  },
+  {
+    "name": "release_extra_artifact_fail",
+    "args": [
+      "verify",
+      "release",
+      "[release]",
+      "--key-dir",
+      "[keys]",
+      "--json"
+    ],
+    "exit_code": 1,
+    "success": false,
+    "stdout_json": {
+      "release_path": "[release]",
+      "manifest_signature_ok": true,
+      "results": [
+        {
+          "artifact_name": "franken-node-linux-x64.tar.xz",
+          "passed": true,
+          "key_id": "4b077d42181dd752",
+          "failure_reason": null
+        },
+        {
+          "artifact_name": "rogue-extra.bin",
+          "passed": false,
+          "key_id": "4b077d42181dd752",
+          "failure_reason": "artifact present but not listed in SHA256SUMS"
+        }
+      ],
+      "overall_pass": false,
+      "unlisted_artifact_count": 1
+    },
+    "stderr": "Error: release verification failed"
+  }
+]

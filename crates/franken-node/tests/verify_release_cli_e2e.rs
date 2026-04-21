@@ -125,6 +125,87 @@ fn parse_json_stdout(output: &Output) -> serde_json::Value {
         .unwrap_or_else(|err| panic!("invalid JSON output: {err}\nstdout:\n{stdout}"))
 }
 
+fn run_cli_with_string_args(args: &[String]) -> Output {
+    let borrowed_args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_cli(&borrowed_args)
+}
+
+fn path_scrubbers(paths: &[(&Path, &str)]) -> Vec<(String, String)> {
+    let mut scrubbers = paths
+        .iter()
+        .map(|(path, replacement)| (path.display().to_string(), (*replacement).to_string()))
+        .collect::<Vec<_>>();
+    scrubbers.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+    scrubbers
+}
+
+fn scrub_paths_in_text(text: &str, scrubbers: &[(String, String)]) -> String {
+    let mut scrubbed = text.to_string();
+    for (path, replacement) in scrubbers {
+        scrubbed = scrubbed.replace(path, replacement);
+    }
+    scrubbed
+}
+
+fn is_sha256_hex(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn scrub_paths_in_json(value: &mut serde_json::Value, scrubbers: &[(String, String)]) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                scrub_paths_in_json(item, scrubbers);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, nested) in map {
+                if key == "sha256"
+                    && let Some(hash) = nested.as_str()
+                    && is_sha256_hex(hash)
+                {
+                    *nested = serde_json::Value::String("[sha256]".to_string());
+                    continue;
+                }
+                scrub_paths_in_json(nested, scrubbers);
+            }
+        }
+        serde_json::Value::String(text) => {
+            *text = scrub_paths_in_text(text, scrubbers);
+        }
+        _ => {}
+    }
+}
+
+fn verify_json_matrix_case(
+    name: &str,
+    args: Vec<String>,
+    scrubbed_paths: &[(&Path, &str)],
+) -> serde_json::Value {
+    let output = run_cli_with_string_args(&args);
+    let mut stdout_json = parse_json_stdout(&output);
+    let repo_root = repo_root();
+    let mut scrubbers = path_scrubbers(&[(&repo_root, "[repo]")]);
+    scrubbers.extend(path_scrubbers(scrubbed_paths));
+    scrubbers.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+    scrub_paths_in_json(&mut stdout_json, &scrubbers);
+
+    let args = args
+        .iter()
+        .map(|arg| scrub_paths_in_text(arg, &scrubbers))
+        .collect::<Vec<_>>();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    serde_json::json!({
+        "name": name,
+        "args": args,
+        "exit_code": output.status.code().unwrap_or(-1),
+        "success": output.status.success(),
+        "stdout_json": stdout_json,
+        "stderr": scrub_paths_in_text(stderr.trim(), &scrubbers),
+    })
+}
+
 fn canonicalize_verify_release_snapshot(
     mut payload: serde_json::Value,
     release_dir: &Path,
@@ -486,6 +567,112 @@ fn verify_corpus_rejects_unsupported_compat_version_before_path_checks() {
             .unwrap_or_default()
             .contains("unsupported --compat-version=1")
     );
+}
+
+#[test]
+fn verify_json_outputs_match_golden_matrix() {
+    let corpus_temp = TempDir::new().expect("corpus temp dir");
+    let corpus_file = corpus_temp.path().join("sample-corpus.json");
+    std::fs::write(&corpus_file, b"{\"events\":[]}\n").expect("write corpus fixture");
+
+    let release_temp = TempDir::new().expect("release temp dir");
+    let release_dir = release_temp.path().join("release");
+    let key_dir = release_temp.path().join("keys");
+    std::fs::create_dir_all(&release_dir).expect("release dir");
+    let release_artifacts = [(
+        "franken-node-linux-x64.tar.xz",
+        b"artifact-linux-x64" as &[u8],
+    )];
+    write_signed_release_fixture(&release_dir, &release_artifacts);
+    write_release_key_dir(&key_dir);
+    std::fs::write(release_dir.join("rogue-extra.bin"), b"rogue payload")
+        .expect("write rogue artifact");
+
+    let corpus_arg = corpus_file.to_string_lossy().to_string();
+    let release_arg = release_dir.to_string_lossy().to_string();
+    let key_dir_arg = key_dir.to_string_lossy().to_string();
+
+    let matrix = vec![
+        verify_json_matrix_case(
+            "module_pass",
+            vec!["verify", "module", "config", "--json"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            &[],
+        ),
+        verify_json_matrix_case(
+            "module_unknown",
+            vec!["verify", "module", "definitely-not-a-real-module", "--json"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            &[],
+        ),
+        verify_json_matrix_case(
+            "module_compat_error",
+            vec![
+                "verify",
+                "module",
+                "runtime",
+                "--compat-version",
+                "1",
+                "--json",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+            &[],
+        ),
+        verify_json_matrix_case(
+            "migration_pass",
+            vec!["verify", "migration", "rewrite", "--json"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            &[],
+        ),
+        verify_json_matrix_case(
+            "migration_unknown",
+            vec!["verify", "migration", "definitely-not-a-lane", "--json"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            &[],
+        ),
+        verify_json_matrix_case(
+            "compat_profile_pass",
+            vec!["verify", "compatibility", "strict", "--json"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            &[],
+        ),
+        verify_json_matrix_case(
+            "corpus_pass",
+            vec![
+                "verify".to_string(),
+                "corpus".to_string(),
+                corpus_arg,
+                "--json".to_string(),
+            ],
+            &[(&corpus_file, "[corpus]")],
+        ),
+        verify_json_matrix_case(
+            "release_extra_artifact_fail",
+            vec![
+                "verify".to_string(),
+                "release".to_string(),
+                release_arg,
+                "--key-dir".to_string(),
+                key_dir_arg,
+                "--json".to_string(),
+            ],
+            &[(&release_dir, "[release]"), (&key_dir, "[keys]")],
+        ),
+    ];
+
+    assert_json_snapshot!("verify_json_output_matrix", matrix);
 }
 
 #[test]
