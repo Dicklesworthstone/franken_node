@@ -169,13 +169,13 @@ impl ComplianceEvidenceStore {
     /// Compute the content-addressed hash for a piece of content.
     #[must_use]
     pub fn compute_content_hash(content: &str) -> String {
-        let digest = Sha256::digest(
-            [
-                b"ecosystem_compliance_hash_v1:" as &[u8],
-                content.as_bytes(),
-            ]
-            .concat(),
-        );
+        let content_bytes = content.as_bytes();
+        let content_len = u64::try_from(content_bytes.len()).unwrap_or(u64::MAX);
+        let mut hasher = Sha256::new();
+        hasher.update(b"ecosystem_compliance_hash_v1:");
+        hasher.update(content_len.to_le_bytes());
+        hasher.update(content_bytes);
+        let digest = hasher.finalize();
         format!("sha256:{}", hex::encode(digest))
     }
 
@@ -475,6 +475,22 @@ mod tests {
         let h1 = ComplianceEvidenceStore::compute_content_hash("content A");
         let h2 = ComplianceEvidenceStore::compute_content_hash("content B");
         assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_compute_content_hash_differs_from_legacy_unframed_digest() {
+        let content = "legacy boundary payload";
+        let framed = ComplianceEvidenceStore::compute_content_hash(content);
+        let legacy_digest = Sha256::digest(
+            [
+                b"ecosystem_compliance_hash_v1:" as &[u8],
+                content.as_bytes(),
+            ]
+            .concat(),
+        );
+        let legacy = format!("sha256:{}", hex::encode(legacy_digest));
+
+        assert_ne!(framed, legacy);
     }
 
     #[test]
@@ -869,6 +885,47 @@ mod tests {
 
         let result = store.retrieve_evidence(&hash, &ts(2), "t");
         assert!(matches!(result, Err(ComplianceError::TamperDetected(_))));
+    }
+
+    #[test]
+    fn test_retrieve_legacy_unframed_digest_rejected_as_tamper() {
+        let mut store = ComplianceEvidenceStore::new();
+        let content = "legacy-payload";
+        let legacy_digest = Sha256::digest(
+            [
+                b"ecosystem_compliance_hash_v1:" as &[u8],
+                content.as_bytes(),
+            ]
+            .concat(),
+        );
+        let legacy_hash = format!("sha256:{}", hex::encode(legacy_digest));
+
+        store.artifacts.insert(
+            legacy_hash.clone(),
+            ComplianceEvidence {
+                content_hash: legacy_hash.clone(),
+                publisher_id: "pub-1".to_owned(),
+                source: EvidenceSource::MigrationSingularity,
+                title: "Legacy Digest Test".to_owned(),
+                content: content.to_owned(),
+                submitted_at: ts(1),
+                attestation: None,
+                tags: vec![],
+            },
+        );
+
+        let result = store.retrieve_evidence(&legacy_hash, &ts(2), "trace-legacy");
+
+        assert!(matches!(
+            result,
+            Err(ComplianceError::TamperDetected(ref hash)) if hash == &legacy_hash
+        ));
+        let events = store.take_events();
+        assert_eq!(
+            events.last().unwrap().event_code,
+            ENE_008_COMPLIANCE_TAMPER_CHECK_FAIL
+        );
+        assert!(events.last().unwrap().detail.contains("tamper detected"));
     }
 
     #[test]

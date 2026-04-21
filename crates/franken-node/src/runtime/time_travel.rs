@@ -607,7 +607,9 @@ impl ReplaySession {
 
     /// Return the current frame (at the cursor).
     pub fn current_frame(&self) -> Option<&CaptureFrame> {
-        self.snapshot.frames.get(usize::try_from(self.cursor).unwrap_or(usize::MAX))
+        self.snapshot
+            .frames
+            .get(usize::try_from(self.cursor).unwrap_or(usize::MAX))
     }
 
     /// Step the replay forward by one frame.
@@ -623,7 +625,9 @@ impl ReplaySession {
         }
         self.cursor = next;
         self.emit_event(event_codes::TTR_004.to_string());
-        self.snapshot.frames.get(usize::try_from(self.cursor).unwrap_or(usize::MAX))
+        self.snapshot
+            .frames
+            .get(usize::try_from(self.cursor).unwrap_or(usize::MAX))
             .ok_or_else(|| TimeTravelError::StepOutOfBounds {
                 requested: self.cursor,
                 total_frames: self.snapshot.frame_count,
@@ -642,7 +646,9 @@ impl ReplaySession {
         }
         self.cursor = self.cursor.saturating_sub(1);
         self.emit_event(event_codes::TTR_005.to_string());
-        self.snapshot.frames.get(usize::try_from(self.cursor).unwrap_or(usize::MAX))
+        self.snapshot
+            .frames
+            .get(usize::try_from(self.cursor).unwrap_or(usize::MAX))
             .ok_or_else(|| TimeTravelError::StepOutOfBounds {
                 requested: self.cursor,
                 total_frames: self.snapshot.frame_count,
@@ -663,7 +669,9 @@ impl ReplaySession {
             self.emit_event(event_codes::TTR_005.to_string());
         }
         self.cursor = frame_index;
-        self.snapshot.frames.get(usize::try_from(self.cursor).unwrap_or(usize::MAX))
+        self.snapshot
+            .frames
+            .get(usize::try_from(self.cursor).unwrap_or(usize::MAX))
             .ok_or_else(|| TimeTravelError::StepOutOfBounds {
                 requested: self.cursor,
                 total_frames: self.snapshot.frame_count,
@@ -676,7 +684,10 @@ impl ReplaySession {
     /// INV-TTR-DIVERGENCE-DETECTED: returns a [`DivergenceExplanation`] on mismatch.
     /// INV-TTR-DETERMINISTIC: identical seed + input => matching digest.
     pub fn verify_decision(&mut self, replayed: &ControlDecision) -> Result<(), TimeTravelError> {
-        let frame = self.snapshot.frames.get(usize::try_from(self.cursor).unwrap_or(usize::MAX))
+        let frame = self
+            .snapshot
+            .frames
+            .get(usize::try_from(self.cursor).unwrap_or(usize::MAX))
             .ok_or_else(|| TimeTravelError::StepOutOfBounds {
                 requested: self.cursor,
                 total_frames: self.snapshot.frame_count,
@@ -803,7 +814,7 @@ impl Default for TimeTravelRuntime {
 fn hash_bytes(input: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"time_travel_hash_v1:");
-    hasher.update((input.len() as u64).to_le_bytes());
+    hasher.update(len_to_u64(input.len()).to_le_bytes());
     hasher.update(input);
     hex::encode(hasher.finalize())
 }
@@ -858,9 +869,7 @@ mod tests {
         for (i, input) in inputs.iter().enumerate() {
             let tick = u64::try_from(i).unwrap_or(u64::MAX).saturating_add(1);
             let decision = deterministic_decision(seed, tick, input);
-            session
-                .capture_frame(tick, input, decision)
-                .unwrap();
+            session.capture_frame(tick, input, decision).unwrap();
         }
         session.finalize()
     }
@@ -1532,45 +1541,28 @@ mod tests {
     fn hash_bytes_uses_length_prefix_for_collision_resistance() {
         use sha2::{Digest, Sha256};
 
-        // Test data that could collide without length prefixes:
-        // "ab" + "cd" vs "a" + "bcd" would both be "abcd" without length framing
-        let input1 = b"ab";
-        let input2_part1 = b"a";
-        let input2_part2 = b"bcd";
+        let input = b"ab";
+        let actual_hash = hash_bytes(input);
 
-        // Manually construct what the concatenation would be without length prefix
-        let mut combined_input2 = Vec::new();
-        combined_input2.extend_from_slice(input2_part1);
-        combined_input2.extend_from_slice(input2_part2);
-        assert_eq!(&combined_input2, b"abcd"); // Same raw bytes as case below
-
-        let input3 = b"abcd"; // Same concatenated result
-
-        // Get hashes with new length-prefixed implementation
-        let hash1 = hash_bytes(input1);
-        let hash2 = hash_bytes(&combined_input2);
-        let hash3 = hash_bytes(input3);
-
-        // With length prefixes, different length inputs should produce different hashes
-        // even if their concatenation would be the same
-        assert_ne!(hash1, hash3, "2-byte vs 4-byte input should have different hashes with length prefix");
-        assert_eq!(hash2, hash3, "Same input should produce same hash");
-
-        // Verify the hash includes length prefix by manually computing legacy format
         let mut legacy_hasher = Sha256::new();
         legacy_hasher.update(b"time_travel_hash_v1:");
-        legacy_hasher.update(input1); // No length prefix
+        legacy_hasher.update(input);
         let legacy_hash = hex::encode(legacy_hasher.finalize());
 
-        assert_ne!(hash1, legacy_hash, "Length-prefixed hash should differ from legacy format");
+        assert_ne!(
+            actual_hash, legacy_hash,
+            "length-prefixed hash should differ from legacy format"
+        );
 
-        // Verify the new hash follows expected pattern
         let mut expected_hasher = Sha256::new();
         expected_hasher.update(b"time_travel_hash_v1:");
-        expected_hasher.update((input1.len() as u64).to_le_bytes());
-        expected_hasher.update(input1);
+        expected_hasher.update(len_to_u64(input.len()).to_le_bytes());
+        expected_hasher.update(input);
         let expected_hash = hex::encode(expected_hasher.finalize());
 
-        assert_eq!(hash1, expected_hash, "Hash should match expected length-prefixed pattern");
+        assert_eq!(
+            actual_hash, expected_hash,
+            "hash should match length-prefixed pattern"
+        );
     }
 }

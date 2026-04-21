@@ -298,9 +298,15 @@ pub fn serialize_canonical(receipt: &ExecutionReceipt) -> Result<Vec<u8>, Execut
 
 pub fn receipt_hash_sha256(receipt: &ExecutionReceipt) -> Result<String, ExecutionReceiptError> {
     let bytes = serialize_canonical(receipt)?;
+    let byte_len = u64::try_from(bytes.len()).map_err(|_| {
+        ExecutionReceiptError::new(
+            error_codes::ERR_VEF_RECEIPT_INTERNAL,
+            "canonical receipt bytes exceed u64 length prefix",
+        )
+    })?;
     let mut hasher = Sha256::new();
     hasher.update(VEF_EXECUTION_RECEIPT_HASH_DOMAIN);
-    hasher.update((u64::try_from(bytes.len()).unwrap_or(u64::MAX)).to_le_bytes());
+    hasher.update(byte_len.to_le_bytes());
     hasher.update(bytes.as_slice());
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
@@ -613,7 +619,11 @@ mod tests {
         let bytes = serialize_canonical(&receipt).unwrap();
         let mut expected_hasher = Sha256::new();
         expected_hasher.update(VEF_EXECUTION_RECEIPT_HASH_DOMAIN);
-        expected_hasher.update((u64::try_from(bytes.len()).unwrap_or(u64::MAX)).to_le_bytes());
+        expected_hasher.update(
+            u64::try_from(bytes.len())
+                .expect("canonical receipt length fits u64")
+                .to_le_bytes(),
+        );
         expected_hasher.update(bytes.as_slice());
 
         let mut raw_hasher = Sha256::new();

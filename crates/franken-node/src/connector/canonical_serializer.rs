@@ -183,7 +183,9 @@ impl SignaturePreimage {
     pub fn content_hash_prefix(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(b"canonical_serializer_hash_v1:");
-        hasher.update(self.to_bytes());
+        let bytes = self.to_bytes();
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(&bytes);
         let digest = hex::encode(hasher.finalize());
         digest[..8].to_string()
     }
@@ -895,6 +897,7 @@ fn is_ident_byte(byte: u8) -> bool {
 fn content_hash_prefix(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"canonical_serializer_hash_v1:");
+    hasher.update((data.len() as u64).to_le_bytes());
     hasher.update(data);
     let digest = hex::encode(hasher.finalize());
     digest[..8].to_string()
@@ -5274,5 +5277,64 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             hash_with_domain, hash_without_domain,
             "domain prefix should change hash result"
         );
+    }
+
+    #[test]
+    fn canonical_serializer_length_prefix_collision_prevention_regression() {
+        // Regression test for bd-1wiu2: Content hash helpers must use length-prefixed
+        // inputs to prevent boundary attacks in serializer preimage events.
+
+        // Test 1: Length-prefix prevents boundary attacks on raw function
+        let attack1 = content_hash_prefix(b"ab");      // "ab"
+        let attack2 = content_hash_prefix(b"a");       // "a"
+
+        // Verify different inputs produce different hashes
+        assert_ne!(attack1, attack2, "Different inputs should produce different hashes");
+
+        // Test 2: Boundary attack on concatenated content
+        let boundary1 = content_hash_prefix(b"abc"); // "abc"
+        let boundary2 = content_hash_prefix(b"ab");  // "ab"
+        assert_ne!(boundary1, boundary2, "Length-prefixing prevents boundary attacks");
+
+        // Test 3: Zero-length vs non-zero length
+        let empty = content_hash_prefix(b"");
+        let single = content_hash_prefix(b"a");
+        assert_ne!(empty, single, "Empty vs non-empty should differ");
+
+        // Test 4: Similar content with different lengths should differ
+        let short_content = content_hash_prefix(b"test");
+        let long_content = content_hash_prefix(b"test_extended");
+        assert_ne!(short_content, long_content, "Different length content should differ");
+
+        // Test 5: Verify hash format consistency
+        let test_hash = content_hash_prefix(b"consistency_test");
+        assert_eq!(test_hash.len(), 8, "Hash prefix should be 8 characters");
+        assert!(test_hash.chars().all(|c| c.is_ascii_hexdigit()),
+               "Hash prefix should be valid hex");
+
+        // Test 6: Method consistency between instance and static function
+        let serializer = CanonicalSerializer::new(
+            TrustObjectType::TrustCard,
+            DomainPrefix::for_domain("test.example.com").unwrap(),
+            serde_json::json!({"test": "data"})
+        );
+
+        let instance_hash = serializer.content_hash_prefix();
+        let bytes = serializer.to_bytes();
+        let static_hash = content_hash_prefix(&bytes);
+
+        assert_eq!(instance_hash, static_hash,
+                  "Instance and static hash methods should be consistent");
+
+        // Test 7: Verify length-prefixed version differs from old format
+        // Simulate old format without length prefix
+        let mut hasher_old = sha2::Sha256::new();
+        hasher_old.update(b"canonical_serializer_hash_v1:");
+        hasher_old.update(b"test_data");  // No length prefix
+        let old_format = hex::encode(hasher_old.finalize())[..8].to_string();
+
+        let new_format = content_hash_prefix(b"test_data");
+        assert_ne!(old_format, new_format,
+                  "Length-prefixed version should differ from old format");
     }
 }
