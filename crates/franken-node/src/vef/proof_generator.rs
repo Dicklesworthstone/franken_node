@@ -361,6 +361,7 @@ pub struct ProofRequestStatus {
     pub proof: Option<ComplianceProof>,
     pub error: Option<ProofGeneratorError>,
     pub created_at_millis: u64,
+    pub timeout_deadline_millis: u64,
     pub completed_at_millis: Option<u64>,
     pub trace_id: String,
 }
@@ -466,6 +467,7 @@ impl ProofGenerator {
             proof: None,
             error: None,
             created_at_millis: now_millis,
+            timeout_deadline_millis: now_millis.saturating_add(self.config.default_timeout_millis),
             completed_at_millis: None,
             trace_id: trace_id.to_string(),
         };
@@ -551,13 +553,26 @@ impl ProofGenerator {
                     ))
                 })?;
                 if status.status != ProofStatus::Generating {
-                    return Err(ProofGeneratorError::internal(format!(
-                        "cannot complete proof for request {request_id}: current status is {:?}, expected Generating",
-                        status.status
-                    )));
+                    let timed_out = status
+                        .error
+                        .as_ref()
+                        .is_some_and(|err| err.code == error_codes::ERR_PGN_TIMEOUT);
+                    if !(status.status == ProofStatus::Failed
+                        && timed_out
+                        && now_millis < status.timeout_deadline_millis)
+                    {
+                        if timed_out && now_millis >= status.timeout_deadline_millis {
+                            return Err(status.error.clone().expect("timeout error exists"));
+                        }
+                        return Err(ProofGeneratorError::internal(format!(
+                            "cannot complete proof for request {request_id}: current status is {:?}, expected Generating",
+                            status.status
+                        )));
+                    }
                 }
                 status.status = ProofStatus::Complete;
                 status.proof = Some(proof.clone());
+                status.error = None;
                 status.completed_at_millis = Some(now_millis);
 
                 self.emit_event(ProofGeneratorEvent {
@@ -578,10 +593,22 @@ impl ProofGenerator {
                     ))
                 })?;
                 if status.status != ProofStatus::Generating {
-                    return Err(ProofGeneratorError::internal(format!(
-                        "cannot fail proof for request {request_id}: current status is {:?}, expected Generating",
-                        status.status
-                    )));
+                    let timed_out = status
+                        .error
+                        .as_ref()
+                        .is_some_and(|existing| existing.code == error_codes::ERR_PGN_TIMEOUT);
+                    if !(status.status == ProofStatus::Failed
+                        && timed_out
+                        && now_millis < status.timeout_deadline_millis)
+                    {
+                        if timed_out && now_millis >= status.timeout_deadline_millis {
+                            return Err(status.error.clone().expect("timeout error exists"));
+                        }
+                        return Err(ProofGeneratorError::internal(format!(
+                            "cannot fail proof for request {request_id}: current status is {:?}, expected Generating",
+                            status.status
+                        )));
+                    }
                 }
                 status.status = ProofStatus::Failed;
                 status.error = Some(err.clone());
@@ -625,9 +652,8 @@ impl ProofGenerator {
             if matches!(
                 status.status,
                 ProofStatus::Pending | ProofStatus::Generating
-            ) {
-                let elapsed = now_millis.saturating_sub(status.created_at_millis);
-                if elapsed >= self.config.default_timeout_millis {
+            ) && now_millis >= status.timeout_deadline_millis
+            {
                     status.status = ProofStatus::Failed;
                     status.error = Some(ProofGeneratorError::timeout(format!(
                         "request {} exceeded timeout of {}ms",
@@ -640,7 +666,6 @@ impl ProofGenerator {
                         trace_id: status.trace_id.clone(),
                         detail: format!("request={} timed out", status.request_id),
                     });
-                }
             }
         }
         for event in timeout_events {
@@ -726,6 +751,13 @@ impl ConcurrentProofGenerator {
             .lock()
             .map_err(|_| ProofGeneratorError::internal("proof generator mutex poisoned"))?
             .finish_generate_proof(&proof_request, now_millis, result)
+    }
+
+    pub fn enforce_timeouts(&self, now_millis: u64) -> Vec<String> {
+        self.inner
+            .lock()
+            .map(|mut generator| generator.enforce_timeouts(now_millis))
+            .unwrap_or_default()
     }
 }
 

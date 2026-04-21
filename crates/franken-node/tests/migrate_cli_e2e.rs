@@ -37,7 +37,7 @@ fn run_cli(args: &[&str]) -> Output {
         .unwrap_or_else(|err| panic!("failed running `{}`: {err}", args.join(" ")))
 }
 
-fn run_cli_with_wall_timeout(args: &[&str], timeout: Duration) -> Output {
+fn run_cli_with_wall_timeout(args: &[&str], timeout: Duration, envs: &[(&str, String)]) -> Output {
     let binary_path = resolve_binary_path();
     assert!(
         binary_path.is_file(),
@@ -47,6 +47,7 @@ fn run_cli_with_wall_timeout(args: &[&str], timeout: Duration) -> Output {
     let mut child = Command::new(&binary_path)
         .current_dir(repo_root())
         .args(args)
+        .envs(envs.iter().map(|(key, value)| (*key, value)))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -336,34 +337,42 @@ fn migrate_validate_passes_for_hardened_project() {
 
 #[test]
 fn migrate_validate_timeout_path_does_not_block_on_inherited_pipes() {
-    let node_available = Command::new("node")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success());
-    if !node_available {
-        eprintln!("skipping inherited-pipe timeout regression: node unavailable");
+    #[cfg(not(unix))]
+    {
+        eprintln!("skipping inherited-pipe timeout regression: unix shell unavailable");
         return;
     }
 
+    #[cfg(unix)]
     let temp = TempDir::new().expect("temp dir");
-    let project_path = temp.path().join("project");
-    std::fs::create_dir_all(project_path.join("scripts")).expect("project scripts dir");
-    std::fs::write(
-        project_path.join("scripts/hang.js"),
-        r#"
-const { spawn } = require('node:child_process');
-spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
-  stdio: ['ignore', 'inherit', 'inherit']
-});
-setTimeout(() => {}, 60000);
-"#,
-    )
-    .expect("write hanging smoke script");
-    std::fs::write(
-        project_path.join("package.json"),
-        r#"{
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let shim_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&shim_dir).expect("shim dir");
+        let node_shim = shim_dir.join("node");
+        std::fs::write(&node_shim, "#!/bin/sh\n(sleep 60 >&1 2>&2) &\nsleep 60\n")
+            .expect("write node shim");
+        let mut permissions = std::fs::metadata(&node_shim)
+            .expect("node shim metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&node_shim, permissions).expect("chmod node shim");
+
+        let previous_path = std::env::var("PATH").unwrap_or_default();
+        let shimmed_path = format!("{}:{previous_path}", shim_dir.display());
+
+        let project_path = temp.path().join("project");
+        std::fs::create_dir_all(project_path.join("scripts")).expect("project scripts dir");
+        std::fs::write(
+            project_path.join("scripts/hang.js"),
+            "this is intentionally invalid JavaScript so franken-node falls back to node\n",
+        )
+        .expect("write hanging smoke script");
+        std::fs::write(
+            project_path.join("package.json"),
+            r#"{
   "name": "demo-timeout",
   "version": "1.0.0",
   "engines": {
@@ -374,26 +383,28 @@ setTimeout(() => {}, 60000);
   }
 }
 "#,
-    )
-    .expect("write package manifest");
-    std::fs::write(project_path.join("package-lock.json"), "{}\n").expect("write lockfile");
+        )
+        .expect("write package manifest");
+        std::fs::write(project_path.join("package-lock.json"), "{}\n").expect("write lockfile");
 
-    let project_arg = project_path.to_string_lossy().to_string();
-    let started = Instant::now();
-    let output = run_cli_with_wall_timeout(
-        &["migrate", "validate", &project_arg],
-        Duration::from_secs(20),
-    );
+        let project_arg = project_path.to_string_lossy().to_string();
+        let started = Instant::now();
+        let output = run_cli_with_wall_timeout(
+            &["migrate", "validate", &project_arg],
+            Duration::from_secs(20),
+            &[("PATH", shimmed_path)],
+        );
 
-    assert!(
-        started.elapsed() < Duration::from_secs(20),
-        "migrate validate should fail fast on smoke timeout"
-    );
-    assert!(
-        !output.status.success(),
-        "validate should fail when runtime smoke times out"
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[mig-validate-005] FAIL"));
-    assert!(stdout.contains("runtime smoke command timed out after"));
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "migrate validate should fail fast on smoke timeout"
+        );
+        assert!(
+            !output.status.success(),
+            "validate should fail when runtime smoke times out"
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("[mig-validate-005] FAIL"));
+        assert!(stdout.contains("runtime smoke command timed out after"));
+    }
 }
