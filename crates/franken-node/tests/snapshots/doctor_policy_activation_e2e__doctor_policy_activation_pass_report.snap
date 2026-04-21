@@ -1,0 +1,312 @@
+---
+source: crates/franken-node/tests/doctor_policy_activation_e2e.rs
+expression: canonicalize_doctor_snapshot(report)
+---
+{
+  "command": "doctor",
+  "trace_id": "doctor-policy-e2e-snapshot",
+  "generated_at_utc": "[generated-at]",
+  "selected_profile": "balanced",
+  "source_path": null,
+  "overall_status": "warn",
+  "status_counts": {
+    "pass": 10,
+    "warn": 1,
+    "fail": 0
+  },
+  "checks": [
+    {
+      "code": "DR-CONFIG-001",
+      "event_code": "DOC-001",
+      "scope": "config.resolve",
+      "status": "pass",
+      "message": "Configuration resolved successfully.",
+      "remediation": "No action required.",
+      "duration_ms": 0
+    },
+    {
+      "code": "DR-CONFIG-002",
+      "event_code": "DOC-002",
+      "scope": "config.source",
+      "status": "warn",
+      "message": "No config file discovered; defaults are active.",
+      "remediation": "Create franken_node.toml or pass --config to lock deterministic project settings.",
+      "duration_ms": 0
+    },
+    {
+      "code": "DR-PROFILE-003",
+      "event_code": "DOC-003",
+      "scope": "profile.safety",
+      "status": "pass",
+      "message": "Profile safety level is acceptable.",
+      "remediation": "No action required.",
+      "duration_ms": 0
+    },
+    {
+      "code": "DR-TRUST-004",
+      "event_code": "DOC-004",
+      "scope": "registry.assurance",
+      "status": "pass",
+      "message": "Registry assurance level meets bootstrap target.",
+      "remediation": "No action required.",
+      "duration_ms": 0
+    },
+    {
+      "code": "DR-MIGRATE-005",
+      "event_code": "DOC-005",
+      "scope": "migration.lockstep",
+      "status": "pass",
+      "message": "Lockstep validation requirement is enabled.",
+      "remediation": "No action required.",
+      "duration_ms": 0
+    },
+    {
+      "code": "DR-OBS-006",
+      "event_code": "DOC-006",
+      "scope": "observability.audit_events",
+      "status": "pass",
+      "message": "Structured audit events are enabled.",
+      "remediation": "No action required.",
+      "duration_ms": 0
+    },
+    {
+      "code": "DR-ENV-007",
+      "event_code": "DOC-007",
+      "scope": "environment.cwd",
+      "status": "pass",
+      "message": "Current working directory is available: [repo-root]",
+      "remediation": "No action required.",
+      "duration_ms": 0
+    },
+    {
+      "code": "DR-CONFIG-008",
+      "event_code": "DOC-008",
+      "scope": "config.provenance",
+      "status": "pass",
+      "message": "Merge provenance recorded (1 decisions).",
+      "remediation": "No action required.",
+      "duration_ms": 0
+    },
+    {
+      "code": "DR-POLICY-009",
+      "event_code": "DOC-009",
+      "scope": "policy.guardrails",
+      "status": "pass",
+      "message": "Policy guardrails passed with dominant verdict allow across 6 monitors.",
+      "remediation": "No action required.",
+      "duration_ms": 0
+    },
+    {
+      "code": "DR-POLICY-010",
+      "event_code": "DOC-010",
+      "scope": "policy.decision_engine",
+      "status": "pass",
+      "message": "Decision engine selected top candidate `balanced_patch`.",
+      "remediation": "No action required.",
+      "duration_ms": 0
+    },
+    {
+      "code": "DR-POLICY-011",
+      "event_code": "DOC-011",
+      "scope": "policy.explainer_wording",
+      "status": "pass",
+      "message": "Policy explanation wording passed diagnostic/guarantee separation checks.",
+      "remediation": "No action required.",
+      "duration_ms": 0
+    }
+  ],
+  "structured_logs": [
+    {
+      "trace_id": "doctor-policy-e2e-snapshot",
+      "event_code": "DOC-001",
+      "check_code": "DR-CONFIG-001",
+      "scope": "config.resolve",
+      "status": "pass",
+      "duration_ms": 0
+    },
+    {
+      "trace_id": "doctor-policy-e2e-snapshot",
+      "event_code": "DOC-002",
+      "check_code": "DR-CONFIG-002",
+      "scope": "config.source",
+      "status": "warn",
+      "duration_ms": 0
+    },
+    {
+      "trace_id": "doctor-policy-e2e-snapshot",
+      "event_code": "DOC-003",
+      "check_code": "DR-PROFILE-003",
+      "scope": "profile.safety",
+      "status": "pass",
+      "duration_ms": 0
+    },
+    {
+      "trace_id": "doctor-policy-e2e-snapshot",
+      "event_code": "DOC-004",
+      "check_code": "DR-TRUST-004",
+      "scope": "registry.assurance",
+      "status": "pass",
+      "duration_ms": 0
+    },
+    {
+      "trace_id": "doctor-policy-e2e-snapshot",
+      "event_code": "DOC-005",
+      "check_code": "DR-MIGRATE-005",
+      "scope": "migration.lockstep",
+      "status": "pass",
+      "duration_ms": 0
+    },
+    {
+      "trace_id": "doctor-policy-e2e-snapshot",
+      "event_code": "DOC-006",
+      "check_code": "DR-OBS-006",
+      "scope": "observability.audit_events",
+      "status": "pass",
+      "duration_ms": 0
+    },
+    {
+      "trace_id": "doctor-policy-e2e-snapshot",
+      "event_code": "DOC-007",
+      "check_code": "DR-ENV-007",
+      "scope": "environment.cwd",
+      "status": "pass",
+      "duration_ms": 0
+    },
+    {
+      "trace_id": "doctor-policy-e2e-snapshot",
+      "event_code": "DOC-008",
+      "check_code": "DR-CONFIG-008",
+      "scope": "config.provenance",
+      "status": "pass",
+      "duration_ms": 0
+    },
+    {
+      "trace_id": "doctor-policy-e2e-snapshot",
+      "event_code": "DOC-009",
+      "check_code": "DR-POLICY-009",
+      "scope": "policy.guardrails",
+      "status": "pass",
+      "duration_ms": 0
+    },
+    {
+      "trace_id": "doctor-policy-e2e-snapshot",
+      "event_code": "DOC-010",
+      "check_code": "DR-POLICY-010",
+      "scope": "policy.decision_engine",
+      "status": "pass",
+      "duration_ms": 0
+    },
+    {
+      "trace_id": "doctor-policy-e2e-snapshot",
+      "event_code": "DOC-011",
+      "check_code": "DR-POLICY-011",
+      "scope": "policy.explainer_wording",
+      "status": "pass",
+      "duration_ms": 0
+    }
+  ],
+  "merge_decision_count": 1,
+  "merge_decisions": [
+    {
+      "stage": "default",
+      "field": "profile",
+      "value": "balanced"
+    }
+  ],
+  "policy_activation": {
+    "input_path": "fixtures/policy_activation/doctor_policy_activation_pass.json",
+    "candidate_count": 3,
+    "observation_count": 6,
+    "prefiltered_candidate_count": 0,
+    "top_ranked_candidate": "balanced_patch",
+    "guardrail_certificate": {
+      "epoch_id": 4242,
+      "dominant_verdict": "allow",
+      "findings": [
+        {
+          "monitor_name": "MemoryBudgetGuardrail",
+          "budget_id": "memory_budget",
+          "verdict": "allow",
+          "event_code": "EVD-GUARD-001",
+          "anytime_valid": true,
+          "reason": null
+        },
+        {
+          "monitor_name": "MemoryTailRiskGuardrail",
+          "budget_id": "memory_tail_risk",
+          "verdict": "allow",
+          "event_code": "EVD-GUARD-001",
+          "anytime_valid": true,
+          "reason": null
+        },
+        {
+          "monitor_name": "ConformalRiskGuardrail",
+          "budget_id": "conformal_risk",
+          "verdict": "allow",
+          "event_code": "EVD-GUARD-001",
+          "anytime_valid": true,
+          "reason": null
+        },
+        {
+          "monitor_name": "DurabilityLossGuardrail",
+          "budget_id": "durability_budget",
+          "verdict": "allow",
+          "event_code": "EVD-GUARD-001",
+          "anytime_valid": true,
+          "reason": null
+        },
+        {
+          "monitor_name": "HardeningRegressionGuardrail",
+          "budget_id": "hardening_regression",
+          "verdict": "allow",
+          "event_code": "EVD-GUARD-001",
+          "anytime_valid": true,
+          "reason": null
+        },
+        {
+          "monitor_name": "EvidenceEmissionGuardrail",
+          "budget_id": "evidence_emission",
+          "verdict": "allow",
+          "event_code": "EVD-GUARD-001",
+          "anytime_valid": true,
+          "reason": null
+        }
+      ],
+      "blocking_budget_ids": []
+    },
+    "decision_outcome": {
+      "chosen": "balanced_patch",
+      "blocked": [],
+      "reason": "TopCandidateAccepted",
+      "epoch_id": 4242
+    },
+    "explanation": {
+      "diagnostic_confidence": {
+        "posterior_prob": 1.0,
+        "observation_count": 6,
+        "confidence_interval": [
+          0.47993334027633144,
+          1.0
+        ],
+        "confidence_level": "medium",
+        "summary": "Data indicates the chosen action is statistically suggested with medium diagnostic confidence based on 6 observations. This is a heuristic estimate, not a safety guarantee."
+      },
+      "guarantee_confidence": {
+        "all_guardrails_passed": true,
+        "guardrails_checked": [],
+        "invariants_verified": [
+          "INV-DECIDE-PRECEDENCE",
+          "INV-GUARD-ANYTIME"
+        ],
+        "summary": "All guardrails passed. The chosen action is verified by guardrail checks and proven within bounds of all monitored invariants."
+      },
+      "action_summary": "Action 'balanced_patch' selected: top-ranked candidate passed all guardrails.",
+      "blocked_alternatives": [],
+      "epoch_id": 4242
+    },
+    "wording_validation": {
+      "valid": true,
+      "violations": []
+    }
+  }
+}

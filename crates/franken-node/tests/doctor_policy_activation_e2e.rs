@@ -1,3 +1,4 @@
+use insta::assert_json_snapshot;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -244,6 +245,57 @@ fn check_codes(report: &Value) -> Vec<&str> {
         .collect()
 }
 
+fn canonicalize_doctor_snapshot(mut report: Value) -> Value {
+    let repo_root_exact = repo_root().display().to_string();
+    let repo_root_prefix = format!("{}/", repo_root().display());
+
+    fn scrub(value: &mut Value, repo_root_exact: &str, repo_root_prefix: &str) {
+        match value {
+            Value::Array(items) => {
+                for item in items {
+                    scrub(item, repo_root_exact, repo_root_prefix);
+                }
+            }
+            Value::Object(map) => {
+                for (key, nested) in map {
+                    match key.as_str() {
+                        "generated_at_utc" => {
+                            *nested = Value::String("[generated-at]".to_string());
+                        }
+                        "timestamp" => {
+                            *nested = Value::String("[timestamp]".to_string());
+                        }
+                        "span_id" => {
+                            *nested = Value::String("[span-id]".to_string());
+                        }
+                        "input_path" => {
+                            if let Some(path) = nested.as_str() {
+                                *nested = Value::String(
+                                    path.strip_prefix(repo_root_prefix)
+                                        .unwrap_or(path)
+                                        .to_string(),
+                                );
+                            }
+                        }
+                        _ => scrub(nested, repo_root_exact, repo_root_prefix),
+                    }
+                }
+            }
+            Value::String(text) => {
+                if let Some(path) = text.strip_prefix(repo_root_prefix) {
+                    *value = Value::String(path.to_string());
+                } else if text.contains(repo_root_exact) {
+                    *value = Value::String(text.replace(repo_root_exact, "[repo-root]"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    scrub(&mut report, &repo_root_exact, &repo_root_prefix);
+    report
+}
+
 fn assert_policy_check_triad(report: &Value, status: &str) {
     assert_eq!(check_status(report, "DR-POLICY-009"), status);
     assert_eq!(check_status(report, "DR-POLICY-010"), status);
@@ -412,6 +464,19 @@ fn doctor_policy_activation_pass_fixture_has_json_contract_shape() {
     assert!(policy["decision_outcome"].is_object());
     assert!(policy["explanation"].is_object());
     assert!(policy["wording_validation"].is_object());
+}
+
+#[test]
+fn doctor_policy_activation_pass_fixture_matches_snapshot() {
+    let report = run_doctor(
+        &fixture_path("doctor_policy_activation_pass.json"),
+        "doctor-policy-e2e-snapshot",
+    );
+
+    assert_json_snapshot!(
+        "doctor_policy_activation_pass_report",
+        canonicalize_doctor_snapshot(report)
+    );
 }
 
 #[test]
