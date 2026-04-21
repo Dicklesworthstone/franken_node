@@ -27,11 +27,12 @@ fn doctor_command(repo: &Path) -> Command {
         command.current_dir(repo);
         command
     } else {
-        let mut command = Command::new("cargo");
-        command
-            .current_dir(repo)
-            .args(["run", "-q", "-p", "frankenengine-node", "--"]);
-        command
+        panic!(
+            "franken-node binary not found for e2e test. \
+             Expected CARGO_BIN_EXE_franken-node env var or binary at target/debug/franken-node. \
+             Run `cargo build --bin franken-node` or use `cargo test` to prepare the binary. \
+             Refusing cargo-run fallback to maintain subprocess semantics and rch discipline."
+        );
     }
 }
 
