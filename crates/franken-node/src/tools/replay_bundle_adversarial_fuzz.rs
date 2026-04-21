@@ -252,7 +252,7 @@ fn adversarial_corpus_events(incident_id: &str) -> Vec<RawEvent> {
             json!({
                 "policy": "quarantine-on-high-risk",
                 "decision": "quarantine",
-                "risk_score": 0.93
+                "risk_score_basis_points": 9_300_u64
             }),
         )
         .with_policy_version("1.0.0"),

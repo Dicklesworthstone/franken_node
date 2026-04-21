@@ -1204,7 +1204,8 @@ fn reject_future_timestamp(path: &str, timestamp: &str) -> Result<(), ReplayBund
     Ok(())
 }
 
-/// Deterministic fixture-only incident timeline for unit tests and examples.
+/// Deterministic fixture-only incident timeline for unit tests and test-support harnesses.
+#[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn fixture_incident_events(incident_id: &str) -> Vec<RawEvent> {
     vec![
