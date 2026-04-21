@@ -30,6 +30,7 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 pub const SCHEMA_VERSION: &str = "vtf-v1.0";
 pub const DEFAULT_MAX_FAULT_LOG_ENTRIES: usize = 4_096;
 pub const DEFAULT_MAX_AUDIT_LOG_ENTRIES: usize = 4_096;
+pub const MAX_CORRUPT_BITS: usize = 4_096;
 
 fn default_max_fault_log_entries() -> usize {
     DEFAULT_MAX_FAULT_LOG_ENTRIES
@@ -118,6 +119,11 @@ impl FaultConfig {
         }
         if self.corrupt_probability > 0.0 && self.corrupt_bit_count == 0 {
             return Err("corrupt_bit_count must be > 0 when corrupt_probability > 0".to_string());
+        }
+        if self.corrupt_bit_count > MAX_CORRUPT_BITS {
+            return Err(format!(
+                "corrupt_bit_count must be <= {MAX_CORRUPT_BITS}"
+            ));
         }
         if self.max_faults == 0 {
             return Err("max_faults must be > 0".to_string());
@@ -209,6 +215,14 @@ pub struct FaultSchedule {
 impl FaultSchedule {
     /// Create a deterministic schedule from seed and config.
     pub fn from_seed(seed: u64, config: &FaultConfig, total_messages: usize) -> Self {
+        if config.validate().is_err() {
+            return FaultSchedule {
+                seed,
+                faults: Vec::new(),
+                total_messages,
+            };
+        }
+
         let mut faults = Vec::new();
         let mut rng_state = if seed == 0 { 1 } else { seed };
         let mut fault_count = 0;
@@ -247,8 +261,9 @@ impl FaultSchedule {
             } else if roll
                 < config.drop_probability + config.reorder_probability + config.corrupt_probability
             {
-                let mut bits = Vec::new();
-                for i in 0..config.corrupt_bit_count {
+                let corrupt_bit_count = config.corrupt_bit_count.min(MAX_CORRUPT_BITS);
+                let mut bits = Vec::with_capacity(corrupt_bit_count);
+                for i in 0..corrupt_bit_count {
                     rng_state ^= rng_state << 13;
                     rng_state ^= rng_state >> 7;
                     rng_state ^= rng_state << 17;
@@ -912,6 +927,25 @@ mod tests {
     }
 
     #[test]
+    fn test_fault_config_rejects_corrupt_probability_nan() {
+        let bad = FaultConfig {
+            drop_probability: 0.0,
+            reorder_probability: 0.0,
+            reorder_max_depth: 0,
+            corrupt_probability: f64::NAN,
+            corrupt_bit_count: 1,
+            max_faults: 1,
+        };
+
+        let err = bad
+            .validate()
+            .expect_err("NaN corruption probability must fail");
+        assert!(err.contains("corrupt_probability"));
+        let schedule = FaultSchedule::from_seed(42, &bad, 10);
+        assert!(schedule.faults.is_empty());
+    }
+
+    #[test]
     fn test_fault_config_zero_budget() {
         let bad = FaultConfig {
             drop_probability: 0.5,
@@ -961,6 +995,66 @@ mod tests {
             max_faults: 1,
         };
         assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn test_fault_config_rejects_corrupt_bit_count_zero_when_enabled() {
+        let bad = FaultConfig {
+            drop_probability: 0.0,
+            reorder_probability: 0.0,
+            reorder_max_depth: 0,
+            corrupt_probability: 0.5,
+            corrupt_bit_count: 0,
+            max_faults: 1,
+        };
+
+        let err = bad
+            .validate()
+            .expect_err("zero corrupt bit count must fail when corruption is enabled");
+        assert!(err.contains("corrupt_bit_count"));
+        let schedule = FaultSchedule::from_seed(42, &bad, 10);
+        assert!(schedule.faults.is_empty());
+    }
+
+    #[test]
+    fn test_fault_config_rejects_corrupt_bit_count_above_cap() {
+        let bad = FaultConfig {
+            drop_probability: 0.0,
+            reorder_probability: 0.0,
+            reorder_max_depth: 0,
+            corrupt_probability: 0.5,
+            corrupt_bit_count: MAX_CORRUPT_BITS.saturating_add(1),
+            max_faults: 1,
+        };
+
+        let err = bad
+            .validate()
+            .expect_err("corrupt bit count above cap must fail");
+        assert!(err.contains("corrupt_bit_count"));
+        let schedule = FaultSchedule::from_seed(42, &bad, 10);
+        assert!(schedule.faults.is_empty());
+    }
+
+    #[test]
+    fn test_fault_config_accepts_corrupt_bit_count_just_below_cap() {
+        let good = FaultConfig {
+            drop_probability: 0.0,
+            reorder_probability: 0.0,
+            reorder_max_depth: 0,
+            corrupt_probability: 1.0,
+            corrupt_bit_count: MAX_CORRUPT_BITS.saturating_sub(1),
+            max_faults: 1,
+        };
+
+        assert!(good.validate().is_ok());
+        let schedule = FaultSchedule::from_seed(42, &good, 1);
+        assert_eq!(schedule.faults.len(), 1);
+        match &schedule.faults[0].fault {
+            FaultClass::Corrupt { bit_positions } => {
+                assert_eq!(bit_positions.len(), MAX_CORRUPT_BITS.saturating_sub(1));
+            }
+            other => panic!("expected corrupt fault, got {other:?}"),
+        }
     }
 
     #[test]
