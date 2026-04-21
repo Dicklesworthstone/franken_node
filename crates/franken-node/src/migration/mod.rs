@@ -31,6 +31,10 @@ const MAX_PENDING_DIRS: usize = 10_000;
 const MAX_TOTAL_FINDINGS: usize = 1_000;
 const MIGRATION_BACKUP_DIR: &str = ".migrate-backup";
 const MIGRATION_VALIDATE_RUNTIME_TIMEOUT: Duration = Duration::from_secs(10);
+const MIGRATION_RUNTIME_SMOKE_OUTPUT_HASH_DOMAIN: &[u8] =
+    b"franken-node/migrate-validate-runtime-smoke/output-sha256/v1:";
+const MIGRATION_RUNTIME_SMOKE_STDOUT_FIELD: &[u8] = b"stdout";
+const MIGRATION_RUNTIME_SMOKE_STDERR_FIELD: &[u8] = b"stderr";
 const MIGRATION_RUNTIME_PIPE_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const MIGRATION_RUNTIME_PROCESS_KILL_GRACE: Duration = Duration::from_millis(50);
 
@@ -907,8 +911,14 @@ fn execute_migration_runtime_smoke_with_target(
         runtime: runtime.label().to_string(),
         target: smoke_target.display.clone(),
         exit_code,
-        stdout_sha256: sha256_hex(&output.stdout),
-        stderr_sha256: sha256_hex(&output.stderr),
+        stdout_sha256: migration_runtime_smoke_output_sha256_hex(
+            MIGRATION_RUNTIME_SMOKE_STDOUT_FIELD,
+            &output.stdout,
+        ),
+        stderr_sha256: migration_runtime_smoke_output_sha256_hex(
+            MIGRATION_RUNTIME_SMOKE_STDERR_FIELD,
+            &output.stderr,
+        ),
     };
     verify_runtime_smoke_receipt_round_trip(&receipt)?;
     Ok(receipt)
@@ -1384,10 +1394,21 @@ fn verify_json_round_trip(value: &serde_json::Value, label: &str) -> anyhow::Res
     Ok(())
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+fn migration_runtime_smoke_output_sha256_hex(
+    stream_field: &'static [u8],
+    bytes: &[u8],
+) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(bytes);
+    hasher.update(MIGRATION_RUNTIME_SMOKE_OUTPUT_HASH_DOMAIN);
+    update_sha256_len_prefixed(&mut hasher, stream_field);
+    update_sha256_len_prefixed(&mut hasher, bytes);
     hex::encode(hasher.finalize())
+}
+
+fn update_sha256_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+    let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    hasher.update(len.to_le_bytes());
+    hasher.update(bytes);
 }
 
 pub fn run_validate(project_path: &Path) -> anyhow::Result<MigrationValidateReport> {
@@ -3738,6 +3759,42 @@ mod tests {
 
     fn write_lockfile(project: &Path) {
         write_project_file(project, "package-lock.json", "{}\n");
+    }
+
+    #[test]
+    fn migration_runtime_smoke_output_hashes_are_domain_and_length_framed() {
+        let stdout_hash = migration_runtime_smoke_output_sha256_hex(
+            MIGRATION_RUNTIME_SMOKE_STDOUT_FIELD,
+            b"same output",
+        );
+        let stderr_hash = migration_runtime_smoke_output_sha256_hex(
+            MIGRATION_RUNTIME_SMOKE_STDERR_FIELD,
+            b"same output",
+        );
+        assert_ne!(
+            stdout_hash, stderr_hash,
+            "stream field must be part of the framed digest"
+        );
+
+        let mut bare_hasher = Sha256::new();
+        bare_hasher.update(b"same output");
+        assert_ne!(
+            stdout_hash,
+            hex::encode(bare_hasher.finalize()),
+            "runtime smoke output must not be a bare SHA-256 of bytes"
+        );
+
+        let mut framed_hasher = Sha256::new();
+        framed_hasher.update(MIGRATION_RUNTIME_SMOKE_OUTPUT_HASH_DOMAIN);
+        update_sha256_len_prefixed(&mut framed_hasher, MIGRATION_RUNTIME_SMOKE_STDOUT_FIELD);
+        update_sha256_len_prefixed(&mut framed_hasher, b"same output");
+        assert_eq!(stdout_hash, hex::encode(framed_hasher.finalize()));
+
+        assert_ne!(
+            migration_runtime_smoke_output_sha256_hex(b"ab", b"c"),
+            migration_runtime_smoke_output_sha256_hex(b"a", b"bc"),
+            "length framing must prevent field-boundary collisions"
+        );
     }
 
     #[test]

@@ -803,6 +803,7 @@ impl Default for TimeTravelRuntime {
 fn hash_bytes(input: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"time_travel_hash_v1:");
+    hasher.update((input.len() as u64).to_le_bytes());
     hasher.update(input);
     hex::encode(hasher.finalize())
 }
@@ -1525,5 +1526,51 @@ mod tests {
         push_bounded(&mut items, event_codes::TTR_002.to_string(), 0);
 
         assert!(items.is_empty());
+    }
+
+    #[test]
+    fn hash_bytes_uses_length_prefix_for_collision_resistance() {
+        use sha2::{Digest, Sha256};
+
+        // Test data that could collide without length prefixes:
+        // "ab" + "cd" vs "a" + "bcd" would both be "abcd" without length framing
+        let input1 = b"ab";
+        let input2_part1 = b"a";
+        let input2_part2 = b"bcd";
+
+        // Manually construct what the concatenation would be without length prefix
+        let mut combined_input2 = Vec::new();
+        combined_input2.extend_from_slice(input2_part1);
+        combined_input2.extend_from_slice(input2_part2);
+        assert_eq!(&combined_input2, b"abcd"); // Same raw bytes as case below
+
+        let input3 = b"abcd"; // Same concatenated result
+
+        // Get hashes with new length-prefixed implementation
+        let hash1 = hash_bytes(input1);
+        let hash2 = hash_bytes(&combined_input2);
+        let hash3 = hash_bytes(input3);
+
+        // With length prefixes, different length inputs should produce different hashes
+        // even if their concatenation would be the same
+        assert_ne!(hash1, hash3, "2-byte vs 4-byte input should have different hashes with length prefix");
+        assert_eq!(hash2, hash3, "Same input should produce same hash");
+
+        // Verify the hash includes length prefix by manually computing legacy format
+        let mut legacy_hasher = Sha256::new();
+        legacy_hasher.update(b"time_travel_hash_v1:");
+        legacy_hasher.update(input1); // No length prefix
+        let legacy_hash = hex::encode(legacy_hasher.finalize());
+
+        assert_ne!(hash1, legacy_hash, "Length-prefixed hash should differ from legacy format");
+
+        // Verify the new hash follows expected pattern
+        let mut expected_hasher = Sha256::new();
+        expected_hasher.update(b"time_travel_hash_v1:");
+        expected_hasher.update((input1.len() as u64).to_le_bytes());
+        expected_hasher.update(input1);
+        let expected_hash = hex::encode(expected_hasher.finalize());
+
+        assert_eq!(hash1, expected_hash, "Hash should match expected length-prefixed pattern");
     }
 }

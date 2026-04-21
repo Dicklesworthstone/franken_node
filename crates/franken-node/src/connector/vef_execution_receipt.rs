@@ -300,6 +300,7 @@ pub fn receipt_hash_sha256(receipt: &ExecutionReceipt) -> Result<String, Executi
     let bytes = serialize_canonical(receipt)?;
     let mut hasher = Sha256::new();
     hasher.update(VEF_EXECUTION_RECEIPT_HASH_DOMAIN);
+    hasher.update((u64::try_from(bytes.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(bytes.as_slice());
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
@@ -612,6 +613,7 @@ mod tests {
         let bytes = serialize_canonical(&receipt).unwrap();
         let mut expected_hasher = Sha256::new();
         expected_hasher.update(VEF_EXECUTION_RECEIPT_HASH_DOMAIN);
+        expected_hasher.update((u64::try_from(bytes.len()).unwrap_or(u64::MAX)).to_le_bytes());
         expected_hasher.update(bytes.as_slice());
 
         let mut raw_hasher = Sha256::new();
@@ -623,6 +625,21 @@ mod tests {
 
         assert_eq!(actual, expected);
         assert_ne!(actual, raw);
+    }
+
+    #[test]
+    fn test_verify_hash_rejects_legacy_domain_raw_bytes_hash() {
+        let receipt = make_receipt();
+        let bytes = serialize_canonical(&receipt).unwrap();
+        let mut legacy_hasher = Sha256::new();
+        legacy_hasher.update(VEF_EXECUTION_RECEIPT_HASH_DOMAIN);
+        legacy_hasher.update(bytes.as_slice());
+        let legacy_hash = format!("sha256:{:x}", legacy_hasher.finalize());
+
+        let err = verify_hash(&receipt, &legacy_hash).unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VEF_RECEIPT_HASH_MISMATCH);
+        assert_ne!(receipt_hash_sha256(&receipt).unwrap(), legacy_hash);
     }
 
     #[test]

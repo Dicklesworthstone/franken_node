@@ -12,10 +12,9 @@ use frankenengine_node::registry::staking_governance::{
 };
 use frankenengine_node::supply_chain::trust_card::{
     AuditRecord, BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
-    DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary,
-    PublisherIdentity, ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel,
-    TrustCard, TrustCardComparison, TrustCardDiffEntry,
-    render_comparison_human, render_trust_card_human, to_canonical_json
+    DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
+    ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCard, TrustCardComparison,
+    TrustCardDiffEntry, render_comparison_human, render_trust_card_human, to_canonical_json,
 };
 
 use regex::Regex;
@@ -25,15 +24,13 @@ fn scrub_output(output: &str) -> String {
     let mut scrubbed = output.to_string();
 
     // UUIDs → [UUID]
-    let uuid_re = Regex::new(
-        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-    ).unwrap();
+    let uuid_re =
+        Regex::new(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").unwrap();
     scrubbed = uuid_re.replace_all(&scrubbed, "[UUID]").to_string();
 
     // ISO timestamps → [TIMESTAMP]
-    let ts_re = Regex::new(
-        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?"
-    ).unwrap();
+    let ts_re =
+        Regex::new(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?").unwrap();
     scrubbed = ts_re.replace_all(&scrubbed, "[TIMESTAMP]").to_string();
 
     // Epoch timestamps → [EPOCH]
@@ -87,7 +84,10 @@ fn canonical_trust_card_fixture() -> TrustCard {
         provenance_summary: ProvenanceSummary {
             attestation_level: "L3-verified-build".to_string(),
             source_uri: "https://github.com/acme-corp/security-scanner".to_string(),
-            artifact_hashes: vec!["sha256:abc123def456".to_string(), "sha256:fed456cba987".to_string()],
+            artifact_hashes: vec![
+                "sha256:abc123def456".to_string(),
+                "sha256:fed456cba987".to_string(),
+            ],
             verified_at: "2026-04-21T00:00:00Z".to_string(),
         },
         dependency_trust_summary: vec![
@@ -213,8 +213,7 @@ fn golden_trust_card_comparison_human_rendering() {
 #[test]
 fn golden_external_claim_envelope_serialization() {
     let claim = canonical_external_claim();
-    let serialized = serde_json::to_string_pretty(&claim)
-        .expect("claim should serialize");
+    let serialized = serde_json::to_string_pretty(&claim).expect("claim should serialize");
     let scrubbed = scrub_output(&serialized);
 
     insta::assert_snapshot!("external_claim_envelope", scrubbed);
@@ -260,8 +259,7 @@ fn golden_staking_audit_entry_receipt() {
         ],
     };
 
-    let json = serde_json::to_string_pretty(&audit_entry)
-        .expect("audit entry should serialize");
+    let json = serde_json::to_string_pretty(&audit_entry).expect("audit entry should serialize");
     let scrubbed = scrub_output(&json);
 
     insta::assert_snapshot!("staking_audit_entry_receipt", scrubbed);
@@ -291,7 +289,7 @@ fn golden_slash_event_receipt() {
     };
 
     let slash_record = SlashRecord {
-            violation_id: "VIOL-2026-001".to_string(),
+        violation_id: "VIOL-2026-001".to_string(),
         amount: 500,
         reason: ViolationType::PolicyViolation,
         evidence_hash: evidence.evidence_hash.clone(),
@@ -327,7 +325,12 @@ fn golden_registry_complete_lifecycle_receipt() {
         .expect("slash should succeed");
 
     let appeal_record = ledger
-        .file_appeal(stake_id, slash_event.slash_id, "False positive test appeal", 1300)
+        .file_appeal(
+            stake_id,
+            slash_event.slash_id,
+            "False positive test appeal",
+            1300,
+        )
         .expect("appeal should succeed");
 
     let _restore_result = ledger
@@ -335,8 +338,7 @@ fn golden_registry_complete_lifecycle_receipt() {
         .expect("restore should succeed");
 
     // Serialize just the governance state (not the full ledger for size)
-    let json = serde_json::to_string_pretty(&ledger.state)
-        .expect("ledger state should serialize");
+    let json = serde_json::to_string_pretty(&ledger.state).expect("ledger state should serialize");
     let scrubbed = scrub_output(&json);
 
     insta::assert_snapshot!("registry_complete_lifecycle_receipt", scrubbed);

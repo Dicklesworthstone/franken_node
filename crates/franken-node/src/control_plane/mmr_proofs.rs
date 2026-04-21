@@ -451,7 +451,11 @@ pub fn verify_prefix(
 
 #[must_use]
 pub fn marker_leaf_hash(marker_hash: &str) -> Hash {
-    sha256_hex(format!("leaf:{marker_hash}").as_bytes())
+    let mut hasher = Sha256::new();
+    hasher.update(b"mmr_proofs_leaf_v1:");
+    hasher.update((marker_hash.len() as u64).to_le_bytes());
+    hasher.update(marker_hash.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 fn retained_window_start(stream: &MarkerStream) -> Result<u64, ProofError> {
@@ -529,7 +533,13 @@ fn merkle_root_from_leaf_hashes(leaf_hashes: &[Hash]) -> Option<Hash> {
 }
 
 fn hash_pair(left: &str, right: &str) -> Hash {
-    sha256_hex(format!("node:{left}:{right}").as_bytes())
+    let mut hasher = Sha256::new();
+    hasher.update(b"mmr_proofs_node_v1:");
+    hasher.update((left.len() as u64).to_le_bytes());
+    hasher.update(left.as_bytes());
+    hasher.update((right.len() as u64).to_le_bytes());
+    hasher.update(right.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 fn sha256_hex(input: &[u8]) -> Hash {
@@ -1392,5 +1402,52 @@ mod tests {
         let marker_hash = marker_leaf_hash("test");
         let direct_sha = sha256_hex(b"test");
         assert_ne!(marker_hash, direct_sha, "Domain separation should prevent direct hash matches");
+    }
+
+    #[test]
+    fn mmr_hash_collision_prevention_regression() {
+        // Regression test for bd-1kesy: MMR hash helpers must use length-prefixed
+        // domain-separated inputs to prevent hash collisions in verifier-facing proofs.
+
+        // Test 1: Leaf hash domain separation
+        let leaf1 = marker_leaf_hash("boundary");
+        let leaf2 = marker_leaf_hash("boundary");
+        assert_eq!(leaf1, leaf2, "Same leaf input should produce same hash");
+
+        // Verify leaf uses distinct domain from formatted version
+        let formatted_leaf = sha256_hex(b"leaf:boundary");
+        assert_ne!(leaf1, formatted_leaf, "Length-prefixed leaf should differ from formatted version");
+
+        // Test 2: Node hash domain separation
+        let node1 = hash_pair("left", "right");
+        let node2 = hash_pair("left", "right");
+        assert_eq!(node1, node2, "Same node inputs should produce same hash");
+
+        // Verify node uses distinct domain from formatted version
+        let formatted_node = sha256_hex(b"node:left:right");
+        assert_ne!(node1, formatted_node, "Length-prefixed node should differ from formatted version");
+
+        // Test 3: Length-prefix prevents boundary attacks
+        // These should produce different hashes despite same concatenated content
+        let attack1 = hash_pair("ab", "cd");     // ab + cd
+        let attack2 = hash_pair("a", "bcd");     // a + bcd
+        assert_ne!(attack1, attack2, "Length-prefixing prevents boundary attacks");
+
+        // Test 4: Cross-domain separation (leaf vs node)
+        // A leaf hash should never equal a node hash even with same content
+        let leaf = marker_leaf_hash("content");
+        let node = hash_pair("content", "");
+        assert_ne!(leaf, node, "Leaf and node domains must be separate");
+
+        // Test 5: Sibling mutation detection
+        let original_node = hash_pair("original_left", "original_right");
+        let mutated_left = hash_pair("tampered_left", "original_right");
+        let mutated_right = hash_pair("original_left", "tampered_right");
+        let both_mutated = hash_pair("tampered_left", "tampered_right");
+
+        assert_ne!(original_node, mutated_left, "Left sibling mutation should change hash");
+        assert_ne!(original_node, mutated_right, "Right sibling mutation should change hash");
+        assert_ne!(original_node, both_mutated, "Both sibling mutations should change hash");
+        assert_ne!(mutated_left, mutated_right, "Different mutations should produce different hashes");
     }
 }

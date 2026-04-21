@@ -1,6 +1,7 @@
 use frankenengine_node::{
     connector::vef_execution_receipt::{
-        ExecutionActionType, ExecutionReceipt, RECEIPT_SCHEMA_VERSION,
+        error_codes, receipt_hash_sha256, serialize_canonical, verify_hash, ExecutionActionType,
+        ExecutionReceipt, RECEIPT_SCHEMA_VERSION,
     },
     vef::{
         proof_generator::{
@@ -11,6 +12,7 @@ use frankenengine_node::{
         receipt_chain::{ReceiptChain, ReceiptChainConfig, ReceiptChainEntry},
     },
 };
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Barrier},
@@ -92,6 +94,23 @@ fn sample_window() -> ProofWindow {
         created_at_millis: 10_000,
         trace_id: "trace-window".to_string(),
     }
+}
+
+#[test]
+fn execution_receipt_hash_rejects_legacy_unframed_preimage() {
+    let receipt = receipt(7);
+    let canonical_bytes = serialize_canonical(&receipt).expect("receipt should serialize");
+    let mut legacy_hasher = Sha256::new();
+    legacy_hasher.update(b"vef_execution_receipt_v1:");
+    legacy_hasher.update(canonical_bytes.as_slice());
+    let legacy_hash = format!("sha256:{:x}", legacy_hasher.finalize());
+
+    assert_ne!(
+        receipt_hash_sha256(&receipt).expect("receipt hash should compute"),
+        legacy_hash
+    );
+    let err = verify_hash(&receipt, &legacy_hash).expect_err("legacy unframed hash must fail");
+    assert_eq!(err.code, error_codes::ERR_VEF_RECEIPT_HASH_MISMATCH);
 }
 
 #[test]
