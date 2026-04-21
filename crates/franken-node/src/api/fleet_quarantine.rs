@@ -23,7 +23,9 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
+use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Maximum fleet control events before oldest are evicted.
 const MAX_FLEET_EVENTS: usize = 4096;
@@ -72,6 +74,8 @@ pub const FLEET_CONVERGENCE_TIMEOUT: &str = "FLEET_CONVERGENCE_TIMEOUT";
 pub const FLEET_ROLLBACK_FAILED: &str = "FLEET_ROLLBACK_FAILED";
 pub const FLEET_NOT_ACTIVATED: &str = "FLEET_NOT_ACTIVATED";
 pub const FLEET_OPERATION_ID_EXHAUSTED: &str = "FLEET_OPERATION_ID_EXHAUSTED";
+pub const FLEET_RECEIPT_SIGNING_MATERIAL_MISSING: &str =
+    "FLEET_RECEIPT_SIGNING_MATERIAL_MISSING";
 #[cfg(any(test, feature = "extended-surfaces"))]
 pub const FLEET_INCIDENT_CAPACITY_EXCEEDED: &str = "FLEET_INCIDENT_CAPACITY_EXCEEDED";
 #[cfg(any(test, feature = "extended-surfaces"))]
@@ -189,6 +193,126 @@ pub struct DecisionReceipt {
     pub zone_id: String,
     /// Hash of the decision payload for tamper detection.
     pub payload_hash: String,
+    /// Detached Ed25519 signature over the decision receipt fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<DecisionReceiptSignature>,
+}
+
+/// Ed25519 signature envelope for fleet decision receipts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionReceiptSignature {
+    /// Signature algorithm.
+    pub algorithm: String,
+    /// Hex-encoded Ed25519 verifying key.
+    pub public_key_hex: String,
+    /// Stable key identifier derived from the verifying key.
+    pub key_id: String,
+    /// Where signing material was sourced from.
+    pub key_source: String,
+    /// Identity that produced the receipt signature.
+    pub signing_identity: String,
+    /// Scope the signature is valid for.
+    pub trust_scope: String,
+    /// SHA-256 of the signed receipt payload.
+    pub signed_payload_sha256: String,
+    /// Hex-encoded Ed25519 signature.
+    pub signature_hex: String,
+}
+
+fn extend_len_prefixed(buffer: &mut Vec<u8>, field: &str) {
+    let field_len = u64::try_from(field.len()).unwrap_or(u64::MAX);
+    buffer.extend_from_slice(&field_len.to_le_bytes());
+    buffer.extend_from_slice(field.as_bytes());
+}
+
+fn decision_receipt_payload_bytes(receipt: &DecisionReceipt) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"franken_node_fleet_decision_receipt_v1:");
+    for field in [
+        receipt.receipt_id.as_str(),
+        receipt.issuer.as_str(),
+        receipt.issued_at.as_str(),
+        receipt.zone_id.as_str(),
+        receipt.payload_hash.as_str(),
+    ] {
+        extend_len_prefixed(&mut payload, field);
+    }
+    payload
+}
+
+/// Create an Ed25519 signature envelope for a fleet decision receipt.
+#[must_use]
+pub fn sign_decision_receipt(
+    receipt: &DecisionReceipt,
+    signing_key: &ed25519_dalek::SigningKey,
+    key_source: &str,
+    signing_identity: &str,
+) -> DecisionReceiptSignature {
+    let payload = decision_receipt_payload_bytes(receipt);
+    let signature = signing_key.sign(&payload);
+    let verifying_key = signing_key.verifying_key();
+    let mut payload_hasher = Sha256::new();
+    payload_hasher.update(&payload);
+
+    DecisionReceiptSignature {
+        algorithm: "ed25519".to_string(),
+        public_key_hex: hex::encode(verifying_key.to_bytes()),
+        key_id: crate::supply_chain::artifact_signing::KeyId::from_verifying_key(&verifying_key)
+            .to_string(),
+        key_source: key_source.to_string(),
+        signing_identity: signing_identity.to_string(),
+        trust_scope: "fleet_decision".to_string(),
+        signed_payload_sha256: hex::encode(payload_hasher.finalize()),
+        signature_hex: hex::encode(signature.to_bytes()),
+    }
+}
+
+/// Verify the embedded Ed25519 signature on a fleet decision receipt.
+#[must_use]
+pub fn verify_decision_receipt_signature(receipt: &DecisionReceipt) -> bool {
+    let Some(signature) = &receipt.signature else {
+        return false;
+    };
+    if !crate::security::constant_time::ct_eq(&signature.algorithm, "ed25519")
+        || !crate::security::constant_time::ct_eq(&signature.trust_scope, "fleet_decision")
+    {
+        return false;
+    }
+
+    let Ok(public_key_bytes) = hex::decode(&signature.public_key_hex) else {
+        return false;
+    };
+    let Ok(public_key_bytes) = <[u8; 32]>::try_from(public_key_bytes.as_slice()) else {
+        return false;
+    };
+    let Ok(verifying_key) = VerifyingKey::from_bytes(&public_key_bytes) else {
+        return false;
+    };
+    let expected_key_id =
+        crate::supply_chain::artifact_signing::KeyId::from_verifying_key(&verifying_key)
+            .to_string();
+    if !crate::security::constant_time::ct_eq(&signature.key_id, &expected_key_id) {
+        return false;
+    }
+
+    let payload = decision_receipt_payload_bytes(receipt);
+    let mut payload_hasher = Sha256::new();
+    payload_hasher.update(&payload);
+    let expected_payload_hash = hex::encode(payload_hasher.finalize());
+    if !crate::security::constant_time::ct_eq(
+        &signature.signed_payload_sha256,
+        &expected_payload_hash,
+    ) {
+        return false;
+    }
+
+    let Ok(signature_bytes) = hex::decode(&signature.signature_hex) else {
+        return false;
+    };
+    let Ok(signature) = Signature::from_slice(&signature_bytes) else {
+        return false;
+    };
+    verifying_key.verify(&payload, &signature).is_ok()
 }
 
 /// Convergence tracking for fleet propagation.
@@ -619,6 +743,8 @@ pub enum FleetControlError {
     NotActivated { code: String },
     /// Operation identifier space exhausted.
     OperationIdExhausted { code: String },
+    /// Required decision-receipt signing material is unavailable.
+    ReceiptSigningMaterialMissing { code: String },
     /// Incident registry is full of unreleased entries.
     #[cfg(any(test, feature = "extended-surfaces"))]
     IncidentCapacityExceeded { code: String },
@@ -671,6 +797,12 @@ impl FleetControlError {
         }
     }
 
+    pub fn receipt_signing_material_missing() -> Self {
+        Self::ReceiptSigningMaterialMissing {
+            code: FLEET_RECEIPT_SIGNING_MATERIAL_MISSING.to_string(),
+        }
+    }
+
     #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn incident_capacity_exceeded() -> Self {
         Self::IncidentCapacityExceeded {
@@ -696,6 +828,7 @@ impl FleetControlError {
             Self::RollbackFailed { code, .. } => code,
             Self::NotActivated { code } => code,
             Self::OperationIdExhausted { code } => code,
+            Self::ReceiptSigningMaterialMissing { code } => code,
             #[cfg(any(test, feature = "extended-surfaces"))]
             Self::IncidentCapacityExceeded { code } => code,
             #[cfg(any(test, feature = "extended-surfaces"))]
@@ -796,6 +929,42 @@ impl FleetControlEvent {
 
 // ── Fleet Control Manager ─────────────────────────────────────────────────
 
+#[derive(Clone)]
+struct FleetDecisionSigningMaterial {
+    signing_key: ed25519_dalek::SigningKey,
+    key_source: &'static str,
+    signing_identity: &'static str,
+}
+
+impl FleetDecisionSigningMaterial {
+    fn new(
+        signing_key: ed25519_dalek::SigningKey,
+        key_source: &'static str,
+        signing_identity: &'static str,
+    ) -> Self {
+        Self {
+            signing_key,
+            key_source,
+            signing_identity,
+        }
+    }
+}
+
+fn default_decision_signing_material() -> Option<FleetDecisionSigningMaterial> {
+    #[cfg(test)]
+    {
+        Some(FleetDecisionSigningMaterial::new(
+            ed25519_dalek::SigningKey::from_bytes(&[24_u8; 32]),
+            "test",
+            "fleet-control-plane",
+        ))
+    }
+    #[cfg(not(test))]
+    {
+        None
+    }
+}
+
 /// Central manager for fleet quarantine/revocation operations.
 ///
 /// Starts in read-only mode (INV-FLEET-SAFE-START) and must be explicitly
@@ -817,6 +986,8 @@ pub struct FleetControlManager {
     op_epoch: u64,
     /// Set after the final unique operation ID has been allocated.
     operation_ids_exhausted: bool,
+    /// Signing material required for every decision receipt.
+    decision_signing_material: Option<FleetDecisionSigningMaterial>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -994,6 +1165,7 @@ impl FleetControlManager {
             next_op_id: 1,
             op_epoch: 0,
             operation_ids_exhausted: false,
+            decision_signing_material: default_decision_signing_material(),
         }
     }
 
@@ -1024,6 +1196,7 @@ impl FleetControlManager {
             return Err(FleetControlError::not_activated());
         }
         let zone_id = Self::validated_zone_id(&scope.zone_id)?;
+        self.ensure_decision_signing_material()?;
 
         let planned_slot = self.peek_operation_slot()?;
         let planned_op_id = planned_slot.operation_id();
@@ -1069,7 +1242,7 @@ impl FleetControlManager {
         zone.active_quarantines = zone.active_quarantines.saturating_add(1);
 
         // Build receipt (INV-FLEET-RECEIPT)
-        let receipt = self.build_receipt(&op_id, &identity.principal, zone_id, &now);
+        let receipt = self.build_receipt(&op_id, &identity.principal, zone_id, &now)?;
 
         // Convergence state (INV-FLEET-CONVERGENCE)
         let total_nodes = scope.affected_nodes;
@@ -1122,6 +1295,7 @@ impl FleetControlManager {
             return Err(FleetControlError::not_activated());
         }
         let zone_id = Self::validated_zone_id(&scope.zone_id)?;
+        self.ensure_decision_signing_material()?;
 
         let planned_slot = self.peek_operation_slot()?;
         let planned_op_id = planned_slot.operation_id();
@@ -1155,7 +1329,7 @@ impl FleetControlManager {
             });
         zone.active_revocations = zone.active_revocations.saturating_add(1);
 
-        let receipt = self.build_receipt(&op_id, &identity.principal, zone_id, &now);
+        let receipt = self.build_receipt(&op_id, &identity.principal, zone_id, &now)?;
 
         // Emergency revocations create incidents
         if scope.severity == RevocationSeverity::Emergency {
@@ -1214,6 +1388,7 @@ impl FleetControlManager {
 
             (incident.zone_id.clone(), incident.action_type.clone())
         };
+        self.ensure_decision_signing_material()?;
 
         let op_id = self.next_operation_id()?;
         let now = chrono::Utc::now().to_rfc3339();
@@ -1235,7 +1410,7 @@ impl FleetControlManager {
         self.incident_convergences.remove(incident_id);
         self.sync_zone_pending_convergences(&zone_id);
 
-        let receipt = self.build_receipt(&op_id, &identity.principal, &zone_id, &now);
+        let receipt = self.build_receipt(&op_id, &identity.principal, &zone_id, &now)?;
 
         let event = FleetControlEvent::fleet_released(&trace.trace_id, &zone_id, incident_id);
         push_bounded(&mut self.events, event, MAX_FLEET_EVENTS);
@@ -1284,6 +1459,7 @@ impl FleetControlManager {
         if !self.activated {
             return Err(FleetControlError::not_activated());
         }
+        self.ensure_decision_signing_material()?;
 
         let op_id = self.next_operation_id()?;
         let now = chrono::Utc::now().to_rfc3339();
@@ -1308,7 +1484,7 @@ impl FleetControlManager {
             self.sync_zone_pending_convergences(&zone_id);
         }
 
-        let receipt = self.build_receipt(&op_id, &identity.principal, "all", &now);
+        let receipt = self.build_receipt(&op_id, &identity.principal, "all", &now)?;
 
         let convergence = ConvergenceState {
             converged_nodes: u32::try_from(zone_count).unwrap_or(u32::MAX),
@@ -1500,29 +1676,45 @@ impl FleetControlManager {
         Ok(zone_id)
     }
 
+    fn ensure_decision_signing_material(
+        &self,
+    ) -> Result<&FleetDecisionSigningMaterial, FleetControlError> {
+        self.decision_signing_material
+            .as_ref()
+            .ok_or_else(FleetControlError::receipt_signing_material_missing)
+    }
+
     fn build_receipt(
         &self,
         op_id: &str,
         principal: &str,
         zone_id: &str,
         timestamp: &str,
-    ) -> DecisionReceipt {
+    ) -> Result<DecisionReceipt, FleetControlError> {
+        let signing_material = self.ensure_decision_signing_material()?;
         // Length-prefixed encoding prevents delimiter-collision ambiguity.
-        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(b"fleet_receipt_v1:");
         for field in [op_id, principal, zone_id, timestamp] {
-            hasher.update((field.len() as u64).to_le_bytes());
+            hasher.update(u64::try_from(field.len()).unwrap_or(u64::MAX).to_le_bytes());
             hasher.update(field.as_bytes());
         }
         let payload_hash = hex::encode(hasher.finalize());
-        DecisionReceipt {
+        let mut receipt = DecisionReceipt {
             receipt_id: format!("rcpt-{op_id}"),
             issuer: principal.to_string(),
             issued_at: timestamp.to_string(),
             zone_id: zone_id.to_string(),
             payload_hash,
-        }
+            signature: None,
+        };
+        receipt.signature = Some(sign_decision_receipt(
+            &receipt,
+            &signing_material.signing_key,
+            signing_material.key_source,
+            signing_material.signing_identity,
+        ));
+        Ok(receipt)
     }
 }
 
