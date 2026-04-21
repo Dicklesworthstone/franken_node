@@ -50,3 +50,9 @@ path = "fuzz_targets/fuzz_ssrf_policy.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "fuzz_replay_bundle_deserialization"
+path = "fuzz_targets/fuzz_replay_bundle_deserialization.rs"
+test = false
+doc = false
+
