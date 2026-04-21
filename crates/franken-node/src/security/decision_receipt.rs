@@ -460,13 +460,29 @@ pub fn write_receipts_markdown(
     })
 }
 
+#[cfg(any(test, feature = "test-support"))]
+fn fixture_signing_key(label: &[u8]) -> Ed25519PrivateKey {
+    let mut hasher = Sha256::new();
+    hasher.update(b"decision_receipt_test_fixture_key_v1:");
+    hasher.update(
+        u64::try_from(label.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    hasher.update(label);
+    let seed: [u8; 32] = hasher.finalize().into();
+    SigningKey::from_bytes(&seed)
+}
+
 /// Deterministic fixture signing key for tests and sample artifacts.
+#[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn demo_signing_key() -> Ed25519PrivateKey {
-    SigningKey::from_bytes(&[42_u8; 32])
+    fixture_signing_key(b"decision-receipt-demo-key-1")
 }
 
 /// Deterministic fixture verification key matching [`demo_signing_key`].
+#[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn demo_public_key() -> Ed25519PublicKey {
     demo_signing_key().verifying_key()
@@ -631,6 +647,16 @@ mod tests {
             signed.signer_key_id,
             signing_key_id(&signing_key.verifying_key())
         );
+    }
+
+    #[test]
+    fn demo_signing_key_is_test_support_fixture_only() {
+        let first = demo_signing_key();
+        let second = demo_signing_key();
+
+        assert_eq!(first.to_bytes(), second.to_bytes());
+        assert_ne!(first.to_bytes(), [42_u8; 32]);
+        assert_eq!(demo_public_key().as_bytes(), first.verifying_key().as_bytes());
     }
 
     #[test]
