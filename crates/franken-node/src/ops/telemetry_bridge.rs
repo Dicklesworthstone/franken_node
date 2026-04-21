@@ -2,12 +2,13 @@ use crate::storage::frankensqlite_adapter::{FrankensqliteAdapter, PersistenceCla
 use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, ErrorKind};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -20,6 +21,37 @@ const MAX_ACTIVE_CONNECTIONS: usize = 64;
 const ACCEPT_POLL_INTERVAL_MS: u64 = 100;
 const CONNECTION_READ_TIMEOUT_MS: u64 = 500;
 const DEFAULT_DRAIN_TIMEOUT_MS: u64 = 5000;
+
+/// Global registry of socket path locks to prevent race conditions between bridge instances.
+static SOCKET_PATH_LOCKS: OnceLock<Mutex<BTreeMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+
+/// Acquire a lock for the given socket path to prevent concurrent access.
+fn acquire_socket_path_lock(socket_path: &str) -> Arc<Mutex<()>> {
+    let registry = SOCKET_PATH_LOCKS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut locks = registry.lock().expect("socket path registry lock");
+
+    locks
+        .entry(socket_path.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+/// Probe if a Unix domain socket at the given path is still live by attempting to connect.
+fn is_socket_live(socket_path: &Path) -> bool {
+    if !socket_path.exists() {
+        return false;
+    }
+
+    // Attempt to connect to see if it's live
+    match UnixStream::connect(socket_path) {
+        Ok(_) => true,  // Connection succeeded, socket is live
+        Err(err) => match err.kind() {
+            ErrorKind::ConnectionRefused => false, // Socket exists but no listener
+            ErrorKind::NotFound => false,           // Socket file doesn't exist
+            _ => true, // Other errors assume socket might be live (fail closed)
+        }
+    }
+}
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
@@ -665,13 +697,29 @@ impl TelemetryBridge {
         let connection_worker_panicked = Arc::new(AtomicBool::new(false));
         let (sender, receiver) = mpsc::sync_channel(PERSIST_QUEUE_CAPACITY);
 
-        // Clean up stale socket
-        match std::fs::remove_file(&socket_path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == ErrorKind::NotFound => {}
-            Err(err) => {
+        // Acquire socket path lock to prevent race conditions with other bridge instances
+        let _socket_lock = acquire_socket_path_lock(&socket_path).lock().map_err(|_| {
+            anyhow::anyhow!("socket path lock poisoned for {}", socket_path)
+        })?;
+
+        // Probe socket liveness before attempting removal to prevent unlinking live sockets
+        let socket_path_buf = PathBuf::from(&socket_path);
+        if socket_path_buf.exists() {
+            if is_socket_live(&socket_path_buf) {
                 lifecycle.store(BridgeLifecycleState::Failed as u8, Ordering::SeqCst);
-                return Err(err.into());
+                return Err(anyhow::anyhow!(
+                    "cannot start telemetry bridge: live socket already exists at {}",
+                    socket_path
+                ));
+            }
+            // Socket exists but is stale - safe to remove
+            match std::fs::remove_file(&socket_path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == ErrorKind::NotFound => {}
+                Err(err) => {
+                    lifecycle.store(BridgeLifecycleState::Failed as u8, Ordering::SeqCst);
+                    return Err(err.into());
+                }
             }
         }
 
