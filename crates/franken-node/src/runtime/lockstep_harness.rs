@@ -1048,8 +1048,7 @@ mod tests {
         });
 
         let start = Instant::now();
-        let output =
-            LockstepHarness::join_pipe_drain(handle, "stderr", Duration::from_millis(30));
+        let output = LockstepHarness::join_pipe_drain(handle, "stderr", Duration::from_millis(30));
 
         assert_eq!(output, b"__pipe_drain_timeout:stderr".to_vec());
         assert!(start.elapsed() < Duration::from_secs(1));
