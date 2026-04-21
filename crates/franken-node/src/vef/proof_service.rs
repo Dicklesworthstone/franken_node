@@ -687,10 +687,10 @@ impl VefProofService {
             };
         }
 
-        let params = self.parameters_for(backend_id);
-        let proof = self.run_backend_generate(backend_id, input, now_millis, params)?;
+        let params = self.parameters_for(backend_id)?;
+        let proof = self.run_backend_generate(backend_id, input, now_millis, &params)?;
         proof.validate_against(input)?;
-        self.run_backend_verify(backend_id, input, &proof, params)?;
+        self.run_backend_verify(backend_id, input, &proof, &params)?;
 
         self.emit_event(ProofServiceEvent {
             event_code: event_codes::VEF_PROOF_003_PROOF_GENERATED.to_string(),
@@ -721,8 +721,8 @@ impl VefProofService {
             )));
         }
 
-        let params = self.parameters_for(proof.backend_id);
-        self.run_backend_verify(proof.backend_id, input, proof, params)
+        let params = self.parameters_for(proof.backend_id)?;
+        self.run_backend_verify(proof.backend_id, input, proof, &params)
     }
 
     fn resolve_backend(
@@ -739,15 +739,19 @@ impl VefProofService {
         Ok(backend_id)
     }
 
-    fn parameters_for(&self, backend_id: ProofBackendId) -> &BTreeMap<String, String> {
+    fn parameters_for(
+        &self,
+        backend_id: ProofBackendId,
+    ) -> Result<BTreeMap<String, String>, ProofServiceError> {
         self.config
             .backend_parameters
             .get(&backend_id)
-            .unwrap_or_else(|| {
-                // Fall back to empty deterministic parameter set if absent.
-                static EMPTY: std::sync::OnceLock<BTreeMap<String, String>> =
-                    std::sync::OnceLock::new();
-                EMPTY.get_or_init(BTreeMap::new)
+            .cloned()
+            .ok_or_else(|| {
+                ProofServiceError::backend_unavailable(format!(
+                    "backend {} missing backend_parameters configuration",
+                    backend_id.as_str()
+                ))
             })
     }
 
