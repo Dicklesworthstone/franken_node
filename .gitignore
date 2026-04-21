@@ -3,6 +3,11 @@
 /dist/
 /tmp/
 
+# Nested cargo build targets (fuzz/target/ was accidentally committed in d8efc6b5;
+# history was filter-repo'd to strip it, and this pattern prevents recurrence).
+fuzz/target/
+**/target/
+
 # Local/editor noise
 .DS_Store
 .idea/
