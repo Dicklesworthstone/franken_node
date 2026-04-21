@@ -497,7 +497,10 @@ fn fleet_release_publishes_release_action_to_transport() {
     assert_eq!(payload["action"]["event_code"], "FLEET-004");
     assert_eq!(payload["action"]["convergence"]["phase"], "Converged");
     assert_eq!(payload["convergence_receipt"]["event_code"], "FLEET-004");
-    assert_convergence_receipt_signature_round_trips(&payload["convergence_receipt"], &signing_key);
+    assert_convergence_receipt_signature_round_trips(
+        &payload["convergence_receipt"],
+        &signing_key,
+    );
 
     let actions = transport.list_actions().expect("list actions");
     assert!(matches!(
