@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 pub const RECEIPT_SCHEMA_VERSION: &str = "vef-execution-receipt-v1";
+const VEF_EXECUTION_RECEIPT_HASH_DOMAIN: &[u8] = b"vef_execution_receipt_v1:";
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 
 pub mod event_codes {
@@ -298,6 +299,7 @@ pub fn serialize_canonical(receipt: &ExecutionReceipt) -> Result<Vec<u8>, Execut
 pub fn receipt_hash_sha256(receipt: &ExecutionReceipt) -> Result<String, ExecutionReceiptError> {
     let bytes = serialize_canonical(receipt)?;
     let mut hasher = Sha256::new();
+    hasher.update(VEF_EXECUTION_RECEIPT_HASH_DOMAIN);
     hasher.update(bytes.as_slice());
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
@@ -605,22 +607,22 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_uses_canonical_bytes_as_sole_substrate() {
+    fn test_hash_uses_domain_separator_and_canonical_bytes() {
         let receipt = make_receipt();
         let bytes = serialize_canonical(&receipt).unwrap();
         let mut expected_hasher = Sha256::new();
+        expected_hasher.update(VEF_EXECUTION_RECEIPT_HASH_DOMAIN);
         expected_hasher.update(bytes.as_slice());
 
-        let mut prefixed_hasher = Sha256::new();
-        prefixed_hasher.update(b"vef_exec_receipt_v1:");
-        prefixed_hasher.update(bytes.as_slice());
+        let mut raw_hasher = Sha256::new();
+        raw_hasher.update(bytes.as_slice());
 
         let actual = receipt_hash_sha256(&receipt).unwrap();
         let expected = format!("sha256:{:x}", expected_hasher.finalize());
-        let prefixed = format!("sha256:{:x}", prefixed_hasher.finalize());
+        let raw = format!("sha256:{:x}", raw_hasher.finalize());
 
         assert_eq!(actual, expected);
-        assert_ne!(actual, prefixed);
+        assert_ne!(actual, raw);
     }
 
     #[test]
