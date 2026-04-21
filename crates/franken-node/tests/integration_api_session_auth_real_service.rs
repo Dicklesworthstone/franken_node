@@ -17,7 +17,7 @@ use frankenengine_node::security::epoch_scoped_keys::{RootSecret, SIGNATURE_LEN}
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{RwLock, Semaphore};
 
 /// Test harness for real session-authenticated API testing under load
@@ -333,14 +333,11 @@ impl SessionAuthTestHarness {
             self.epoch,
         )));
 
-        // Establish multiple sessions rapidly
-        let mut session_ids = Vec::new();
+        let base_timestamp = 1_776_792_600_000;
+        let mut session_records = Vec::new();
         for i in 0..10 {
             let session_id = format!("timeout-test-{:04x}", i);
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
+            let timestamp = base_timestamp;
 
             let handshake_mac = self.generate_handshake_mac(
                 &session_id,
@@ -364,7 +361,7 @@ impl SessionAuthTestHarness {
             );
 
             if result.is_ok() {
-                session_ids.push(session_id);
+                session_records.push((session_id, handshake_mac));
             }
         }
 
@@ -385,35 +382,57 @@ impl SessionAuthTestHarness {
             })
         );
 
-        // Wait for timeouts to occur
-        tokio::time::sleep(Duration::from_millis(150)).await;
-
-        // Try to process a message on an expired session (this should trigger cleanup)
-        if let Some(session_id) = session_ids.first() {
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-
-            // Generate a valid message MAC (though session should be expired)
-            let handshake_mac = [0u8; SIGNATURE_LEN]; // Placeholder
-            let message_mac = self.generate_message_mac(
-                session_id,
-                MessageDirection::Inbound,
-                1,
-                "sha256:test-payload",
-                &handshake_mac,
+        let Some((pre_expiry_session_id, pre_expiry_handshake_mac)) = session_records.first()
+        else {
+            return Err("No sessions established for timeout test".to_string());
+        };
+        let Some((expired_session_id, expired_handshake_mac)) = session_records.get(1) else {
+            return Err(
+                "Fewer than two sessions established for timeout boundary test".to_string(),
             );
+        };
 
+        let pre_expiry_payload_hash = "sha256:pre-expiry-payload";
+        let pre_expiry_mac = self.generate_message_mac(
+            pre_expiry_session_id,
+            MessageDirection::Receive,
+            0,
+            pre_expiry_payload_hash,
+            pre_expiry_handshake_mac,
+        );
+        let pre_expiry_accepted = {
+            let mut manager = short_timeout_manager.write().await;
+            manager
+                .process_message(
+                    pre_expiry_session_id,
+                    MessageDirection::Receive,
+                    0,
+                    pre_expiry_payload_hash,
+                    &pre_expiry_mac,
+                    base_timestamp.saturating_add(99),
+                    "timeout-pre-expiry-boundary",
+                )
+                .is_ok()
+        };
+
+        let expired_payload_hash = "sha256:expired-payload";
+        let expired_mac = self.generate_message_mac(
+            expired_session_id,
+            MessageDirection::Receive,
+            0,
+            expired_payload_hash,
+            expired_handshake_mac,
+        );
+        {
             let mut manager = short_timeout_manager.write().await;
             let message_result = manager.process_message(
-                session_id,
-                MessageDirection::Inbound,
-                1,
-                "sha256:test-payload",
-                &message_mac,
-                timestamp,
-                "timeout-message-test",
+                expired_session_id,
+                MessageDirection::Receive,
+                0,
+                expired_payload_hash,
+                &expired_mac,
+                base_timestamp.saturating_add(100),
+                "timeout-expiry-boundary",
             );
 
             let expired_detected =
@@ -429,15 +448,16 @@ impl SessionAuthTestHarness {
                     "event": "timeout_verification",
                     "initial_active_sessions": initial_active_sessions,
                     "final_active_sessions": final_active_sessions,
+                    "pre_expiry_accepted": pre_expiry_accepted,
                     "expired_detected": expired_detected,
                     "message_error": format!("{:?}", message_result.err())
                 })
             );
 
             // Should have fewer active sessions and expired session should be detected
-            Ok(final_active_sessions < initial_active_sessions && expired_detected)
-        } else {
-            Err("No sessions established for timeout test".to_string())
+            Ok(pre_expiry_accepted
+                && final_active_sessions < initial_active_sessions
+                && expired_detected)
         }
     }
 
