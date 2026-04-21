@@ -246,12 +246,26 @@ impl AcknowledgementReceipt {
         Ok(())
     }
 
-    pub fn content_hash(&self) -> String {
-        let canonical = serde_json::to_string(self).unwrap_or_else(|e| format!("__serde_err:{e}"));
-        let digest =
-            Sha256::digest([b"update_copilot_hash_v1:" as &[u8], canonical.as_bytes()].concat());
-        hex::encode(digest)
+    pub fn content_hash(&self) -> Result<String, serde_json::Error> {
+        content_hash_for_serializable(self)
     }
+}
+
+fn content_hash_for_serializable<T: Serialize>(value: &T) -> Result<String, serde_json::Error> {
+    let canonical = serde_json::to_string(value)?;
+    Ok(content_hash_for_canonical_json(&canonical))
+}
+
+fn content_hash_for_canonical_json(canonical: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"update_copilot_hash_v1:");
+    hasher.update(len_to_u64(canonical.len()).to_le_bytes());
+    hasher.update(canonical.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn len_to_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
 }
 
 // ---------------------------------------------------------------------------
@@ -1234,10 +1248,59 @@ mod tests {
             timestamp: "2026-02-21T00:00:00Z".to_string(),
             signature_hex: "aabb".to_string(),
         };
-        let h1 = ack.content_hash();
-        let h2 = ack.content_hash();
+        let h1 = ack.content_hash().expect("acknowledgement hash");
+        let h2 = ack.content_hash().expect("acknowledgement hash");
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 64);
+    }
+
+    #[test]
+    fn acknowledgement_content_hash_uses_length_prefixed_canonical_json() {
+        let ack = AcknowledgementReceipt {
+            receipt_id: "fixed-id".to_string(),
+            proposal_id: "prop-1".to_string(),
+            operator_identity: "admin".to_string(),
+            decision: AcknowledgementDecision::Approved,
+            reason: "ok".to_string(),
+            timestamp: "2026-02-21T00:00:00Z".to_string(),
+            signature_hex: "aabb".to_string(),
+        };
+        let canonical = serde_json::to_string(&ack).expect("canonical acknowledgement JSON");
+        let mut expected_hasher = Sha256::new();
+        expected_hasher.update(b"update_copilot_hash_v1:");
+        expected_hasher.update(len_to_u64(canonical.len()).to_le_bytes());
+        expected_hasher.update(canonical.as_bytes());
+        let expected = hex::encode(expected_hasher.finalize());
+
+        let old_unframed =
+            Sha256::digest([b"update_copilot_hash_v1:" as &[u8], canonical.as_bytes()].concat());
+
+        assert_eq!(ack.content_hash().expect("acknowledgement hash"), expected);
+        assert_ne!(expected, hex::encode(old_unframed));
+    }
+
+    struct SerializationFailure;
+
+    impl Serialize for SerializationFailure {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom(
+                "forced acknowledgement serialization failure",
+            ))
+        }
+    }
+
+    #[test]
+    fn acknowledgement_content_hash_fails_closed_on_serde_error() {
+        let err = content_hash_for_serializable(&SerializationFailure)
+            .expect_err("serialization failure must not produce a sentinel digest");
+
+        assert!(
+            err.to_string()
+                .contains("forced acknowledgement serialization failure")
+        );
     }
 
     // === Topology risk aggregate ===
@@ -1751,7 +1814,9 @@ mod tests {
         ack.operator_identity = " ".to_string();
         ack.signature_hex = "\n".to_string();
 
-        let err = ack.validate().expect_err("identity should fail before signature");
+        let err = ack
+            .validate()
+            .expect_err("identity should fail before signature");
 
         assert!(err.to_string().contains("operator_identity required"));
         assert!(!err.to_string().contains("signature required"));
