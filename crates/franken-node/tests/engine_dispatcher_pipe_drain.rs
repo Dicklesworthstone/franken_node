@@ -56,3 +56,15 @@ fn engine_dispatcher_reaps_descendant_pipe_holders() {}
 fn telemetry_join_timeout_does_not_detach_connection_worker() {
     frankenengine_node::ops::telemetry_bridge::assert_timed_out_connection_join_does_not_detach_worker_for_tests();
 }
+
+#[cfg(feature = "test-support")]
+#[test]
+fn telemetry_socket_lock_blocks_stale_cleanup_under_contention() {
+    frankenengine_node::ops::telemetry_bridge::assert_socket_lock_blocks_stale_cleanup_for_tests();
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn telemetry_slowloris_partial_fragments_exceed_cap_after_timeout_shed() {
+    frankenengine_node::ops::telemetry_bridge::assert_slowloris_partial_fragments_exceed_cap_after_timeout_shed_for_tests();
+}

@@ -2,7 +2,6 @@ use crate::storage::frankensqlite_adapter::{FrankensqliteAdapter, PersistenceCla
 use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{BufRead, BufReader, ErrorKind};
 use std::os::unix::fs::OpenOptionsExt;
@@ -10,7 +9,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -1439,6 +1438,97 @@ fn assert_timed_out_connection_join_does_not_detach_worker_impl() {
 #[cfg(feature = "test-support")]
 pub fn assert_timed_out_connection_join_does_not_detach_worker_for_tests() {
     assert_timed_out_connection_join_does_not_detach_worker_impl();
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn assert_socket_lock_blocks_stale_cleanup_impl() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket_path = tmp.path().join("locked.sock");
+    let socket_path_str = socket_path.to_str().expect("socket path should be utf8");
+    std::fs::write(&socket_path, b"stale").expect("write stale socket marker");
+
+    let _held_lock = SocketLockGuard::acquire(socket_path_str).expect("hold socket start lock");
+    let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+    let bridge = TelemetryBridge::new(socket_path_str, adapter);
+
+    let err = bridge
+        .start()
+        .map(|_| ())
+        .expect_err("start must fail while another process holds the socket start lock");
+    assert!(
+        err.to_string().contains("another process is active"),
+        "start should fail on the cross-process socket lock before stale cleanup: {err}"
+    );
+    assert_eq!(
+        std::fs::read(&socket_path).expect("read stale socket marker"),
+        b"stale",
+        "stale cleanup must not run while the socket start lock is held"
+    );
+}
+
+#[cfg(feature = "test-support")]
+pub fn assert_socket_lock_blocks_stale_cleanup_for_tests() {
+    assert_socket_lock_blocks_stale_cleanup_impl();
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn assert_slowloris_partial_fragments_exceed_cap_after_timeout_shed_impl() {
+    use std::io::Write;
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let sock = tmp.path().join("test_slowloris.sock");
+    let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+    let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
+    let handle = bridge.start().expect("start");
+
+    let mut stream = UnixStream::connect(&sock).expect("connect");
+
+    let fragment_size = 8192;
+    let fragment = "x".repeat(fragment_size);
+    let num_fragments = (MAX_EVENT_BYTES / fragment_size) + 2;
+
+    for _i in 0..num_fragments {
+        stream
+            .write_all(fragment.as_bytes())
+            .expect("write fragment");
+        thread::sleep(Duration::from_millis(CONNECTION_READ_TIMEOUT_MS + 50));
+    }
+
+    writeln!(stream, r#"{{"event":"after_attack"}}"#).expect("write valid event");
+    drop(stream);
+
+    thread::sleep(Duration::from_millis(500));
+
+    let report = handle
+        .stop_and_join(ShutdownReason::Requested)
+        .expect("stop_and_join");
+    assert!(report.drain_completed);
+
+    assert!(
+        report.shed_total > 0,
+        "slowloris attack should trigger buffer shedding after timeout"
+    );
+
+    assert!(
+        report
+            .recent_events
+            .iter()
+            .any(|e| e.code == event_codes::ADMISSION_SHED
+                && e.reason_code.as_deref() == Some(reason_codes::EVENT_TOO_LARGE)
+                && e.detail.contains("after timeout")
+                && e.detail.contains("slowloris protection")),
+        "should record timeout-specific slowloris protection shed event"
+    );
+
+    assert!(
+        report.accepted_total > 0,
+        "connection should remain functional after slowloris attack"
+    );
+}
+
+#[cfg(feature = "test-support")]
+pub fn assert_slowloris_partial_fragments_exceed_cap_after_timeout_shed_for_tests() {
+    assert_slowloris_partial_fragments_exceed_cap_after_timeout_shed_impl();
 }
 
 #[cfg(test)]
@@ -3885,63 +3975,7 @@ mod tests {
 
     #[test]
     fn slowloris_partial_fragments_exceed_cap_after_timeout_shed() {
-        use std::io::Write;
-        use std::os::unix::net::UnixStream;
-
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let sock = tmp.path().join("test_slowloris.sock");
-        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
-        let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
-        let handle = bridge.start().expect("start");
-
-        let mut stream = UnixStream::connect(&sock).expect("connect");
-
-        // Send fragments that accumulate to exceed MAX_EVENT_BYTES (64KB) without newlines
-        // This simulates a slowloris attack where partial reads timeout but buffer grows
-        let fragment_size = 8192; // 8KB fragments
-        let fragment = "x".repeat(fragment_size);
-        let num_fragments = (MAX_EVENT_BYTES / fragment_size) + 2; // Exceed cap by 2 fragments
-
-        for _i in 0..num_fragments {
-            stream.write_all(fragment.as_bytes()).expect("write fragment");
-            // Force timeout by waiting longer than CONNECTION_READ_TIMEOUT_MS
-            thread::sleep(Duration::from_millis(CONNECTION_READ_TIMEOUT_MS + 50));
-        }
-
-        // Send a valid event after the attack to verify connection still works
-        writeln!(stream, r#"{{"event":"after_attack"}}"#).expect("write valid event");
-        drop(stream);
-
-        thread::sleep(Duration::from_millis(500));
-
-        let report = handle
-            .stop_and_join(ShutdownReason::Requested)
-            .expect("stop_and_join");
-        assert!(report.drain_completed);
-
-        // The slowloris attack should trigger shedding when buffer exceeds cap after timeouts
-        assert!(
-            report.shed_total > 0,
-            "slowloris attack should trigger buffer shedding after timeout"
-        );
-
-        // Verify the specific shed reason is recorded
-        assert!(
-            report
-                .recent_events
-                .iter()
-                .any(|e| e.code == event_codes::ADMISSION_SHED
-                    && e.reason_code.as_deref() == Some(reason_codes::EVENT_TOO_LARGE)
-                    && e.description.contains("after timeout")
-                    && e.description.contains("slowloris protection")),
-            "should record timeout-specific slowloris protection shed event"
-        );
-
-        // The valid event after attack should still be processed
-        assert!(
-            report.accepted_total > 0,
-            "connection should remain functional after slowloris attack"
-        );
+        assert_slowloris_partial_fragments_exceed_cap_after_timeout_shed_impl();
     }
 
     #[test]
@@ -3951,15 +3985,11 @@ mod tests {
         let socket_path_str = socket_path.to_str().expect("utf8");
 
         // First lock should succeed
-        let _guard1 = SocketLockGuard::acquire(socket_path_str)
-            .expect("first lock should succeed");
+        let _guard1 = SocketLockGuard::acquire(socket_path_str).expect("first lock should succeed");
 
         // Second lock on same path should fail with WouldBlock
         let result2 = SocketLockGuard::acquire(socket_path_str);
-        assert!(
-            result2.is_err(),
-            "second lock on same path should fail"
-        );
+        assert!(result2.is_err(), "second lock on same path should fail");
 
         let err_msg = result2.unwrap_err().to_string();
         assert!(
