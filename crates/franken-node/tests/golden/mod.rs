@@ -150,3 +150,6 @@ mod tests {
         assert_eq!(output, "npm:@acme/auth-guard@[VERSION]");
     }
 }
+
+// Include incident golden tests module
+pub mod incident_golden_tests;

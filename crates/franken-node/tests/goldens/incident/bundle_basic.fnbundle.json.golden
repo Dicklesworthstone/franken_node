@@ -1,0 +1,68 @@
+{
+  "schema_version": "v1",
+  "incident_id": "INC-GOLDEN-001",
+  "collected_at": "2026-02-20T10:05:00.000000Z",
+  "trace_id": "trace-incident-e2e",
+  "severity": "High",
+  "incident_type": "security",
+  "detector": "incident-cli-e2e",
+  "policy_version": "1.2.3",
+  "initial_state_snapshot": {
+    "epoch": 7,
+    "mode": "strict"
+  },
+  "timeline": [
+    {
+      "event_id": "evt-001",
+      "timestamp": "2026-02-20T10:00:00.000100Z",
+      "event_type": "ExternalSignal",
+      "payload": {
+        "signal": "anomaly",
+        "severity": "high"
+      },
+      "provenance_ref": "refs/logs/event-001.json"
+    },
+    {
+      "event_id": "evt-002",
+      "timestamp": "2026-02-20T10:00:30.000200Z",
+      "event_type": "PolicyActivation",
+      "payload": {
+        "policy": "strict-security",
+        "triggered_by": "evt-001"
+      },
+      "provenance_ref": "refs/logs/event-002.json"
+    },
+    {
+      "event_id": "evt-003",
+      "timestamp": "2026-02-20T10:01:00.000300Z",
+      "event_type": "RemediationAction",
+      "payload": {
+        "action": "quarantine",
+        "target": "suspicious_process"
+      },
+      "provenance_ref": "refs/logs/event-003.json"
+    }
+  ],
+  "signature": {
+    "algorithm": "ed25519",
+    "key_source": "config",
+    "signing_identity": "incident-control-plane",
+    "trust_scope": "incident_replay_bundle",
+    "key_id": "[KEY_ID]",
+    "signature_hex": "[HASH]"
+  },
+  "metadata": {
+    "evidence_collection_method": "automated",
+    "analysis_tools": ["franken-detector", "baseline-analyzer"],
+    "chain_of_custody": "secure-evidence-pipeline",
+    "integrity_verified": true,
+    "retention_policy": "90-day-security-incident",
+    "related_incidents": ["INC-E2E-000"],
+    "escalation_path": "security-team",
+    "impact_assessment": {
+      "systems_affected": 3,
+      "data_exposed": false,
+      "recovery_time": "15m"
+    }
+  }
+}

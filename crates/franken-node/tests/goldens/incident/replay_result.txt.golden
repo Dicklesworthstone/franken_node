@@ -1,0 +1,33 @@
+Replay Bundle Analysis
+=====================
+
+Bundle: INC-REPLAY-001.fnbundle
+Signature: Verified ([KEY_ID])
+Timeline Events: 3
+Replay Duration: [DURATION]
+
+Event Sequence:
+  1. [TIMESTAMP] ExternalSignal (evt-001)
+     - Anomaly detection triggered
+     - Signal strength: high
+     - Source: external monitoring
+
+  2. [TIMESTAMP] PolicyActivation (evt-002)
+     - Policy: strict-security
+     - Trigger: evt-001
+     - Activation time: [DURATION]
+
+  3. [TIMESTAMP] RemediationAction (evt-003)
+     - Action: quarantine
+     - Target: suspicious_process
+     - Result: success
+
+Integrity Verification:
+  ✓ Timeline order preserved
+  ✓ Event signatures valid
+  ✓ Provenance chain intact
+  ✓ Policy compliance verified
+
+Outcome: Incident successfully contained
+Recovery time: 15 minutes
+Systems affected: 3

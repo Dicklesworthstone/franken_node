@@ -1,0 +1,25 @@
+{
+  "receipt_id": "[UUID]",
+  "incident_id": "INC-RECEIPT-001",
+  "export_timestamp": "[TIMESTAMP]",
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "[KEY_ID]",
+    "signature_hex": "[HASH]"
+  },
+  "bundle_integrity": {
+    "events_count": 3,
+    "timeline_hash": "[HASH]",
+    "metadata_hash": "[HASH]"
+  },
+  "verification_status": {
+    "signature_valid": true,
+    "timeline_coherent": true,
+    "policy_compliant": true
+  },
+  "export_metadata": {
+    "format_version": "v1",
+    "export_method": "cli",
+    "retention_policy": "90-day-security-incident"
+  }
+}

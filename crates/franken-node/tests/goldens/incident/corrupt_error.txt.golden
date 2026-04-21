@@ -1,0 +1,20 @@
+Error: Failed to parse incident bundle
+
+Bundle file: CORRUPT.fnbundle
+Error type: JSON parse error
+Details: invalid JSON syntax at line 1, column 34
+
+Expected: valid incident bundle with required fields:
+  - schema_version (string)
+  - incident_id (string)
+  - timeline (array)
+  - signature (object)
+
+Found: malformed JSON with syntax error
+
+Suggested actions:
+  1. Verify bundle file integrity
+  2. Re-export bundle from original evidence
+  3. Check for file corruption during transfer
+
+For more information, run with --verbose flag.

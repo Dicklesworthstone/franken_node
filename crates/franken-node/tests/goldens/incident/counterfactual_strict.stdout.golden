@@ -1,0 +1,33 @@
+Counterfactual Analysis Results
+==============================
+
+Incident ID: INC-CF-001
+Analysis Mode: strict
+Timeline Events: 3
+
+Timeline Replay:
+  [TIMESTAMP] evt-001: ExternalSignal - anomaly detected (high severity)
+  [TIMESTAMP] evt-002: PolicyActivation - strict-security policy triggered
+  [TIMESTAMP] evt-003: RemediationAction - quarantine action applied
+
+Counterfactual Scenarios:
+  1. Without evt-001 (anomaly signal):
+     - Policy would not have activated
+     - No remediation action would have occurred
+     - System would remain in baseline state
+
+  2. Without evt-002 (policy activation):
+     - Anomaly would have been detected but not acted upon
+     - Manual intervention would be required
+     - Potential security exposure window: [DURATION]
+
+  3. Without evt-003 (remediation):
+     - Policy activated but no mitigation applied
+     - Threat would persist in system
+     - Escalation to security team required
+
+Summary:
+  - Critical path dependencies: evt-001 → evt-002 → evt-003
+  - Automation effectiveness: 100%
+  - Manual intervention required: No
+  - Timeline integrity: Verified
