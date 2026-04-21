@@ -3086,6 +3086,63 @@ mod tests {
     }
 
     #[test]
+    fn run_rewrite_rewrites_commonjs_destructuring_exports_and_nested_requires() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = temp.path();
+        let original_source = "#!/usr/bin/env node\nconst { readFile, writeFile: write } = require('fs'); // fs api\nconst literal = \"require('path') remains a string\";\n// const fake = require('crypto');\nfunction platform() {\n  const os = require(\"os\");\n  return os.platform();\n}\nmodule.exports = { readFile, writer: write };\n";
+
+        write_hardened_manifest(project);
+        write_project_file(project, "index.js", original_source);
+
+        let report = run_rewrite(project, true).expect("applied ast-aware source rewrite");
+
+        assert_eq!(report.rewrites_planned, 1);
+        assert_eq!(report.rewrites_applied, 1);
+        assert_eq!(report.rollback_entries.len(), 1);
+        let rewritten = std::fs::read_to_string(project.join("index.js")).expect("read source");
+        assert!(rewritten.starts_with("#!/usr/bin/env node\n"));
+        assert!(
+            rewritten
+                .contains("import { readFile, writeFile as write } from \"node:fs\"; // fs api")
+        );
+        assert!(rewritten.contains("import os from \"node:os\";"));
+        assert!(rewritten.contains("export { readFile, write as writer };"));
+        assert!(rewritten.contains("const literal = \"require('path') remains a string\";"));
+        assert!(rewritten.contains("// const fake = require('crypto');"));
+        assert!(!rewritten.contains("const os = require(\"os\")"));
+        assert_eq!(
+            std::fs::read_to_string(project.join(".migrate-backup/index.js"))
+                .expect("read source backup"),
+            original_source
+        );
+    }
+
+    #[test]
+    fn rewrite_commonjs_requires_ignores_comment_and_string_require_calls() {
+        let source = "const literal = \"require('fs')\";\n// const fake = require('path');\nconst path = require('path');\n";
+
+        let rewrite = rewrite_commonjs_requires(source);
+
+        assert_eq!(rewrite.rewrite_count, 1);
+        assert!(rewrite.manual_findings.is_empty());
+        assert!(
+            rewrite
+                .rewritten_content
+                .contains("import path from \"node:path\";")
+        );
+        assert!(
+            rewrite
+                .rewritten_content
+                .contains("const literal = \"require('fs')\";")
+        );
+        assert!(
+            rewrite
+                .rewritten_content
+                .contains("// const fake = require('path');")
+        );
+    }
+
+    #[test]
     fn run_rewrite_flags_non_automatable_module_transforms() {
         let temp = tempfile::tempdir().expect("tempdir");
         let project = temp.path();
