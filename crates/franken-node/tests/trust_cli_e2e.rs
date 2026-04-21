@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use frankenengine_node::control_plane::fleet_transport::{
-    FileFleetTransport, FleetAction, FleetTransport, NodeHealth, NodeStatus,
+    FileFleetTransport, FleetAction, FleetTargetKind, FleetTransport, NodeHealth, NodeStatus,
 };
 use frankenengine_node::supply_chain::trust_card::{
     fixture_registry, TrustCardListFilter, TrustCardMutation, TrustCardRegistry,
@@ -1014,6 +1014,13 @@ fn trust_quarantine_propagates_through_fleet_transport_pipeline() {
         .expect("shared fleet state dir should be utf8");
     let env = [("FRANKEN_NODE_FLEET_STATE_DIR", fleet_state_env)];
     let mut transport = shared_fleet_transport(&shared_fleet_dir);
+    let quarantine_target = "npm:@acme/auth-guard";
+    fs::write(
+        workspace.path().join("franken_node.toml"),
+        "profile = \"balanced\"\n\n[security]\ndecision_receipt_signing_key_path = \"keys/receipt-signing.key\"\n",
+    )
+    .expect("configure fleet signing key");
+    write_receipt_signing_key(&workspace.path().join("keys/receipt-signing.key"));
 
     for node_id in ["node-a", "node-b", "node-c"] {
         let node_workspace = workspace.path().join("nodes").join(node_id);
@@ -1032,7 +1039,7 @@ fn trust_quarantine_propagates_through_fleet_transport_pipeline() {
 
     let quarantine_output = run_cli_in_workspace_with_env(
         workspace.path(),
-        &["trust", "quarantine", "--artifact", "sha256:deadbeef"],
+        &["trust", "quarantine", "--artifact", quarantine_target],
         &env,
     );
     assert!(
@@ -1054,25 +1061,43 @@ fn trust_quarantine_propagates_through_fleet_transport_pipeline() {
         })
         .to_string();
 
-    let propagation_deadline = Instant::now() + Duration::from_secs(1);
-    let quarantine_version = loop {
-        let actions = transport.list_actions().expect("list fleet actions");
-        if let Some(version) = actions.iter().find_map(|record| match &record.action {
-            FleetAction::Quarantine {
-                incident_id: action_incident_id,
-                quarantine_version,
-                ..
-            } if action_incident_id == &incident_id => Some(*quarantine_version),
-            _ => None,
-        }) {
-            break version;
+    let actions = transport.list_actions().expect("list fleet actions");
+    let action_record = actions
+        .iter()
+        .find(|record| {
+            matches!(
+                &record.action,
+                FleetAction::Quarantine {
+                    incident_id: action_incident_id,
+                    ..
+                } if action_incident_id == &incident_id
+            )
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "quarantine action did not reach shared fleet state after CLI returned\nstdout:\n{}\nactions:\n{actions:#?}",
+                quarantine_stdout
+            )
+        });
+    let quarantine_version = match &action_record.action {
+        FleetAction::Quarantine {
+            zone_id,
+            incident_id: action_incident_id,
+            target_id,
+            target_kind,
+            reason,
+            quarantine_version,
+        } => {
+            assert_eq!(zone_id, "all");
+            assert_eq!(action_incident_id, &incident_id);
+            assert_eq!(target_id, quarantine_target);
+            assert_eq!(*target_kind, FleetTargetKind::Artifact);
+            assert_eq!(reason, "manual trust quarantine via CLI; affected_cards=1");
+            *quarantine_version
         }
-        assert!(
-            Instant::now() < propagation_deadline,
-            "quarantine action did not reach shared fleet state within 1s\nstdout:\n{}",
-            quarantine_stdout
-        );
-        thread::sleep(Duration::from_millis(10));
+        FleetAction::Release { .. } | FleetAction::PolicyUpdate { .. } => {
+            panic!("expected quarantine action: {action_record:#?}")
+        }
     };
 
     let status_payload = parse_json_stdout(
@@ -1095,35 +1120,38 @@ fn trust_quarantine_propagates_through_fleet_transport_pipeline() {
         status_payload["status"]["active_quarantines"], 1,
         "fleet status should show one active quarantine after trust quarantine: {status_payload:#}"
     );
+    assert_eq!(
+        status_payload["active_incidents"][0]["incident_id"],
+        incident_id,
+        "fleet status should expose the exact active incident: {status_payload:#}"
+    );
+    assert_eq!(
+        status_payload["active_incidents"][0]["convergence"]["progress_pct"],
+        0,
+        "fleet status should report unconverged nodes before node receipts advance: {status_payload:#}"
+    );
 
+    let converged_last_seen = chrono::Utc::now() + chrono::Duration::seconds(60);
     for node_id in ["node-a", "node-b", "node-c"] {
         transport
             .upsert_node_status(&NodeStatus {
                 zone_id: "zone-shared".to_string(),
                 node_id: node_id.to_string(),
-                last_seen: chrono::Utc::now(),
+                last_seen: converged_last_seen,
                 quarantine_version,
                 health: NodeHealth::Healthy,
             })
             .expect("advance node convergence");
     }
 
-    let converge_started = Instant::now();
-    let converged_payload = loop {
-        let payload = parse_json_stdout(
-            &run_cli_in_workspace_with_env(workspace.path(), &["fleet", "status", "--json"], &env),
-            "fleet status while waiting for convergence",
-        );
-        let progress = payload["status"]["pending_convergences"][0]["progress_pct"].as_u64();
-        if progress == Some(100) {
-            break payload;
-        }
-        assert!(
-            converge_started.elapsed() < Duration::from_secs(1),
-            "fleet convergence did not reach 100% within 1s: {payload:#}"
-        );
-        thread::sleep(Duration::from_millis(10));
-    };
+    let converged_payload = parse_json_stdout(
+        &run_cli_in_workspace_with_env(workspace.path(), &["fleet", "status", "--json"], &env),
+        "fleet status after deterministic convergence receipts",
+    );
+    assert_eq!(
+        converged_payload["status"]["pending_convergences"][0]["progress_pct"], 100,
+        "fleet convergence should reach 100% after exact node receipts advance: {converged_payload:#}"
+    );
     assert_eq!(
         converged_payload["status"]["pending_convergences"][0]["phase"], "Converged",
         "fleet convergence should be marked converged: {converged_payload:#}"
