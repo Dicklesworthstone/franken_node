@@ -381,12 +381,13 @@ impl CapabilityProvider {
 
         let expires_at_epoch_secs = now_epoch_secs.saturating_add(ttl_secs);
         let normalized_scope = RemoteScope::new(scope.operations, scope.endpoint_prefixes);
-        let token_id = sha256_hex(
-            format!(
-                "id:v1|issuer={issuer_identity}|issued={now_epoch_secs}|expires={expires_at_epoch_secs}|scope={}|single_use={single_use}|trace_id={trace_id}",
-                scope_fingerprint(&normalized_scope)
-            )
-            .as_bytes(),
+        let token_id = token_id_hash(
+            issuer_identity,
+            &normalized_scope,
+            now_epoch_secs,
+            expires_at_epoch_secs,
+            single_use,
+            trace_id,
         );
 
         let unsigned_payload = canonical_payload(
@@ -827,10 +828,29 @@ fn keyed_digest(secret: &str, payload: &str) -> Result<String, RemoteCapError> {
     Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
-fn sha256_hex(input: &[u8]) -> String {
+fn update_length_prefixed_bytes(hasher: &mut Sha256, value: &[u8]) {
+    let len = u64::try_from(value.len()).unwrap_or(u64::MAX);
+    hasher.update(len.to_le_bytes());
+    hasher.update(value);
+}
+
+fn token_id_hash(
+    issuer_identity: &str,
+    scope: &RemoteScope,
+    issued_at_epoch_secs: u64,
+    expires_at_epoch_secs: u64,
+    single_use: bool,
+    trace_id: &str,
+) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"remote_cap_hash_v1:");
-    hasher.update(input);
+    hasher.update(b"remote_cap_token_id_v1:");
+    update_length_prefixed_bytes(&mut hasher, issuer_identity.as_bytes());
+    hasher.update(issued_at_epoch_secs.to_le_bytes());
+    hasher.update(expires_at_epoch_secs.to_le_bytes());
+    let scope_fingerprint = scope_fingerprint(scope);
+    update_length_prefixed_bytes(&mut hasher, scope_fingerprint.as_bytes());
+    hasher.update([u8::from(single_use)]);
+    update_length_prefixed_bytes(&mut hasher, trace_id.as_bytes());
     hex::encode(hasher.finalize())
 }
 
@@ -858,6 +878,20 @@ mod tests {
                 .iter()
                 .map(|entry| (*entry).to_string())
                 .collect(),
+        )
+    }
+
+    fn legacy_token_id_transcript(
+        issuer_identity: &str,
+        scope: &RemoteScope,
+        issued_at_epoch_secs: u64,
+        expires_at_epoch_secs: u64,
+        single_use: bool,
+        trace_id: &str,
+    ) -> String {
+        format!(
+            "id:v1|issuer={issuer_identity}|issued={issued_at_epoch_secs}|expires={expires_at_epoch_secs}|scope={}|single_use={single_use}|trace_id={trace_id}",
+            scope_fingerprint(scope)
         )
     }
 
@@ -1361,6 +1395,73 @@ mod tests {
 
         assert_eq!(lhs.token_id(), rhs.token_id());
         assert_eq!(lhs.signature(), rhs.signature());
+    }
+
+    #[test]
+    fn token_ids_resist_legacy_boundary_shift_collisions() {
+        let provider = CapabilityProvider::new("secret-a");
+        let baseline_scope = scope_with_endpoint_prefixes(&["https://safe.example.com/base"]);
+        let shifted_scope = scope_with_endpoint_prefixes(&["https://safe.example.com/shifted"]);
+
+        let baseline_issued = 1_700_000_000;
+        let baseline_expires = 1_700_000_300;
+        let shifted_issued = 1_700_000_123;
+        let shifted_expires = 1_700_000_523;
+        let baseline_trace_prefix = "boundary";
+        let shifted_trace_tail = "tail";
+
+        let shifted_issuer = format!(
+            "operator|issued={baseline_issued}|expires={baseline_expires}|scope={}|single_use=false|trace_id={baseline_trace_prefix}",
+            scope_fingerprint(&baseline_scope)
+        );
+        let baseline_trace = format!(
+            "{baseline_trace_prefix}|issued={shifted_issued}|expires={shifted_expires}|scope={}|single_use=true|trace_id={shifted_trace_tail}",
+            scope_fingerprint(&shifted_scope)
+        );
+
+        let shifted_legacy = legacy_token_id_transcript(
+            &shifted_issuer,
+            &shifted_scope,
+            shifted_issued,
+            shifted_expires,
+            true,
+            shifted_trace_tail,
+        );
+        let baseline_legacy = legacy_token_id_transcript(
+            "operator",
+            &baseline_scope,
+            baseline_issued,
+            baseline_expires,
+            false,
+            &baseline_trace,
+        );
+
+        assert_eq!(shifted_legacy, baseline_legacy);
+
+        let (shifted_token, _) = provider
+            .issue(
+                &shifted_issuer,
+                shifted_scope,
+                shifted_issued,
+                shifted_expires - shifted_issued,
+                true,
+                true,
+                shifted_trace_tail,
+            )
+            .expect("shifted token should issue");
+        let (baseline_token, _) = provider
+            .issue(
+                "operator",
+                baseline_scope,
+                baseline_issued,
+                baseline_expires - baseline_issued,
+                true,
+                false,
+                &baseline_trace,
+            )
+            .expect("baseline token should issue");
+
+        assert_ne!(shifted_token.token_id(), baseline_token.token_id());
     }
 
     #[test]
