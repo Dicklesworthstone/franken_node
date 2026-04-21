@@ -41,7 +41,7 @@ fn builds_artifact_from_signed_caller_supplied_metadata() {
 }
 
 #[test]
-fn rejects_artifact_when_provenance_signature_is_not_bound_to_inputs() {
+fn rejects_artifact_when_provenance_publisher_differs_from_author() {
     let mut input = signed_input(vec![CapabilityRequirement::new(
         "cap:fs:read",
         "read project manifest",
@@ -50,6 +50,24 @@ fn rejects_artifact_when_provenance_signature_is_not_bound_to_inputs() {
     input.identity.author = "publisher-beta".to_string();
 
     let err = build_extension_artifact(input).expect_err("tampered identity should fail");
+
+    assert!(matches!(
+        err,
+        ArtifactError::InvalidEnvelope { ref detail, .. }
+            if detail == "publisher must match artifact author"
+    ));
+}
+
+#[test]
+fn rejects_artifact_when_provenance_signature_is_not_bound_to_inputs() {
+    let mut input = signed_input(vec![CapabilityRequirement::new(
+        "cap:fs:read",
+        "read project manifest",
+        true,
+    )]);
+    input.provenance.signature = format!("sha256:{}", "b".repeat(64));
+
+    let err = build_extension_artifact(input).expect_err("tampered signature should fail");
 
     assert!(matches!(
         err,

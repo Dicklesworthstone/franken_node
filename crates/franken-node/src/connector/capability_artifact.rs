@@ -507,6 +507,12 @@ pub fn build_extension_artifact(
             detail,
         });
     }
+    if input.provenance.publisher != input.identity.author {
+        return Err(ArtifactError::InvalidEnvelope {
+            artifact_id,
+            detail: "publisher must match artifact author".to_string(),
+        });
+    }
     if let Some(detail) =
         validate_trimmed_nonempty(&input.provenance.source_digest, "source_digest")
     {
@@ -524,6 +530,12 @@ pub fn build_extension_artifact(
         });
     }
     if let Some(detail) = validate_trimmed_nonempty(&input.provenance.signature, "signature") {
+        return Err(ArtifactError::InvalidEnvelope {
+            artifact_id,
+            detail,
+        });
+    }
+    if let Some(detail) = validate_lower_hex_digest(&input.provenance.signature, "signature") {
         return Err(ArtifactError::InvalidEnvelope {
             artifact_id,
             detail,
