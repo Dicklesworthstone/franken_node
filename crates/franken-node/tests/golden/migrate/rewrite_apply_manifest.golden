@@ -4,7 +4,7 @@
   },
   "name": "demo",
   "scripts": {
-    "test": "node test.js"
+    "test": "franken-node test.js"
   },
   "version": "1.0.0"
 }
