@@ -1948,6 +1948,64 @@ mod tests {
     }
 
     #[test]
+    fn file_fleet_node_status_scan_waits_for_inflight_snapshot_write() {
+        let tempdir = tempdir().expect("tempdir");
+        let root = tempdir.path().join("fleet-state");
+        let mut transport = FileFleetTransport::new(&root);
+        transport.initialize().expect("initialize");
+
+        transport
+            .upsert_node_status(&node_status(
+                "prod",
+                "node-ready",
+                "2026-04-06T01:02:05Z",
+                1,
+                NodeHealth::Healthy,
+            ))
+            .expect("write ready node");
+
+        let lock_path = transport.shared_state_lock_path();
+        let lock_file = transport.lock_file(&lock_path).expect("open snapshot lock");
+        lock_file.lock().expect("take exclusive snapshot lock");
+
+        let reader_root = root.clone();
+        let reader = std::thread::spawn(move || {
+            let transport = FileFleetTransport::new(reader_root);
+            transport.list_node_statuses()
+        });
+
+        let wait_started = Instant::now();
+        while wait_started.elapsed() < Duration::from_millis(120) {
+            assert!(
+                !reader.is_finished(),
+                "node status scan must wait for the shared snapshot lock"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let pending_node = node_status(
+            "prod",
+            "node-pending",
+            "2026-04-06T01:02:06Z",
+            2,
+            NodeHealth::Healthy,
+        );
+        transport
+            .write_node_status_unlocked(&pending_node)
+            .expect("write pending node");
+        lock_file.unlock().expect("release snapshot lock");
+
+        let mut nodes = reader
+            .join()
+            .expect("reader join")
+            .expect("node scan after writer completes");
+        nodes.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].node_id, "node-pending");
+        assert_eq!(nodes[1].node_id, "node-ready");
+    }
+
+    #[test]
     fn node_status_path_uses_validated_node_ids() {
         let tempdir = tempdir().expect("tempdir");
         let layout = FleetTransportLayout::new(tempdir.path());
