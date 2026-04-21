@@ -1,5 +1,7 @@
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
@@ -33,6 +35,45 @@ fn run_cli(args: &[&str]) -> Output {
         .args(args)
         .output()
         .unwrap_or_else(|err| panic!("failed running `{}`: {err}", args.join(" ")))
+}
+
+fn run_cli_with_wall_timeout(args: &[&str], timeout: Duration) -> Output {
+    let binary_path = resolve_binary_path();
+    assert!(
+        binary_path.is_file(),
+        "franken-node binary not found at {}",
+        binary_path.display()
+    );
+    let mut child = Command::new(&binary_path)
+        .current_dir(repo_root())
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|err| panic!("failed spawning `{}`: {err}", args.join(" ")));
+    let started = Instant::now();
+
+    loop {
+        if child
+            .try_wait()
+            .unwrap_or_else(|err| panic!("failed polling `{}`: {err}", args.join(" ")))
+            .is_some()
+        {
+            return child
+                .wait_with_output()
+                .unwrap_or_else(|err| panic!("failed collecting `{}`: {err}", args.join(" ")));
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "`{}` exceeded external test timeout of {}ms",
+                args.join(" "),
+                timeout.as_millis()
+            );
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 #[test]
@@ -291,4 +332,68 @@ fn migrate_validate_passes_for_hardened_project() {
     assert!(stdout.contains("[mig-validate-005] PASS"));
     assert!(stdout.contains("runtime smoke test passed"));
     assert!(stdout.contains("receipt_round_trip=true"));
+}
+
+#[test]
+fn migrate_validate_timeout_path_does_not_block_on_inherited_pipes() {
+    let node_available = Command::new("node")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if !node_available {
+        eprintln!("skipping inherited-pipe timeout regression: node unavailable");
+        return;
+    }
+
+    let temp = TempDir::new().expect("temp dir");
+    let project_path = temp.path().join("project");
+    std::fs::create_dir_all(project_path.join("scripts")).expect("project scripts dir");
+    std::fs::write(
+        project_path.join("scripts/hang.js"),
+        r#"
+const { spawn } = require('node:child_process');
+spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
+  stdio: ['ignore', 'inherit', 'inherit']
+});
+setTimeout(() => {}, 60000);
+"#,
+    )
+    .expect("write hanging smoke script");
+    std::fs::write(
+        project_path.join("package.json"),
+        r#"{
+  "name": "demo-timeout",
+  "version": "1.0.0",
+  "engines": {
+    "node": ">=20 <23"
+  },
+  "scripts": {
+    "smoke": "node scripts/hang.js"
+  }
+}
+"#,
+    )
+    .expect("write package manifest");
+    std::fs::write(project_path.join("package-lock.json"), "{}\n").expect("write lockfile");
+
+    let project_arg = project_path.to_string_lossy().to_string();
+    let started = Instant::now();
+    let output = run_cli_with_wall_timeout(
+        &["migrate", "validate", &project_arg],
+        Duration::from_secs(20),
+    );
+
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "migrate validate should fail fast on smoke timeout"
+    );
+    assert!(
+        !output.status.success(),
+        "validate should fail when runtime smoke times out"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[mig-validate-005] FAIL"));
+    assert!(stdout.contains("runtime smoke command timed out after"));
 }

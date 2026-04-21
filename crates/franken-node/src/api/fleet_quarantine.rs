@@ -360,10 +360,8 @@ impl FleetDecisionTrustRoot {
     #[must_use]
     pub fn from_verifying_key(verifying_key: &VerifyingKey) -> Self {
         Self {
-            key_id: crate::supply_chain::artifact_signing::KeyId::from_verifying_key(
-                verifying_key,
-            )
-            .to_string(),
+            key_id: crate::supply_chain::artifact_signing::KeyId::from_verifying_key(verifying_key)
+                .to_string(),
             public_key_hex: hex::encode(verifying_key.to_bytes()),
         }
     }
@@ -544,10 +542,8 @@ fn trusted_receipt_verifying_key(
         else {
             continue;
         };
-        if !crate::security::constant_time::ct_eq_bytes(
-            &signature_public_key,
-            &trusted_public_key,
-        ) {
+        if !crate::security::constant_time::ct_eq_bytes(&signature_public_key, &trusted_public_key)
+        {
             continue;
         }
 

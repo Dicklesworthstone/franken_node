@@ -9,10 +9,14 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 use tree_sitter::{Language, Node, Parser as JsParser};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 #[cfg(any(test, feature = "extended-surfaces"))]
 #[allow(dead_code)]
@@ -27,6 +31,8 @@ const MAX_PENDING_DIRS: usize = 10_000;
 const MAX_TOTAL_FINDINGS: usize = 1_000;
 const MIGRATION_BACKUP_DIR: &str = ".migrate-backup";
 const MIGRATION_VALIDATE_RUNTIME_TIMEOUT: Duration = Duration::from_secs(10);
+const MIGRATION_RUNTIME_PIPE_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
+const MIGRATION_RUNTIME_PROCESS_KILL_GRACE: Duration = Duration::from_millis(50);
 
 /// Push item to vector with capacity bounds checking to prevent memory exhaustion.
 fn push_bounded<T>(vec: &mut Vec<T>, item: T, max_cap: usize) {
@@ -257,6 +263,11 @@ struct MigrationRuntimeSmokeTarget {
     working_dir: PathBuf,
     entry_path: PathBuf,
     display: String,
+}
+
+struct RuntimeSmokePipeReader {
+    label: &'static str,
+    receiver: Receiver<io::Result<Vec<u8>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1181,6 +1192,9 @@ fn run_command_with_timeout(command: &mut Command, timeout: Duration) -> anyhow:
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+
     let mut child = command
         .spawn()
         .map_err(|err| anyhow::anyhow!("failed launching runtime smoke command: {err}"))?;
@@ -1192,8 +1206,8 @@ fn run_command_with_timeout(command: &mut Command, timeout: Duration) -> anyhow:
         .stderr
         .take()
         .ok_or_else(|| anyhow::anyhow!("runtime smoke stderr pipe unavailable"))?;
-    let stdout_reader = thread::spawn(move || read_to_end(stdout));
-    let stderr_reader = thread::spawn(move || read_to_end(stderr));
+    let stdout_reader = spawn_pipe_reader(stdout, "stdout");
+    let stderr_reader = spawn_pipe_reader(stderr, "stderr");
     let started = Instant::now();
 
     loop {
@@ -1201,8 +1215,19 @@ fn run_command_with_timeout(command: &mut Command, timeout: Duration) -> anyhow:
             .try_wait()
             .map_err(|err| anyhow::anyhow!("failed polling runtime smoke command: {err}"))?
         {
-            let stdout = join_reader(stdout_reader, "stdout")?;
-            let stderr = join_reader(stderr_reader, "stderr")?;
+            let (stdout, stderr) = match collect_runtime_smoke_output(
+                stdout_reader,
+                stderr_reader,
+                MIGRATION_RUNTIME_PIPE_DRAIN_TIMEOUT,
+            ) {
+                Ok(output) => output,
+                Err(err) => {
+                    terminate_runtime_smoke_process_tree(&mut child);
+                    return Err(anyhow::anyhow!(
+                        "runtime smoke command exited but output pipes remained open: {err}"
+                    ));
+                }
+            };
             return Ok(Output {
                 status,
                 stdout,
@@ -1211,10 +1236,9 @@ fn run_command_with_timeout(command: &mut Command, timeout: Duration) -> anyhow:
         }
 
         if started.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = join_reader(stdout_reader, "stdout");
-            let _ = join_reader(stderr_reader, "stderr");
+            terminate_runtime_smoke_process_tree(&mut child);
+            drop(stdout_reader);
+            drop(stderr_reader);
             anyhow::bail!(
                 "runtime smoke command timed out after {}ms",
                 timeout.as_millis()
@@ -1225,23 +1249,80 @@ fn run_command_with_timeout(command: &mut Command, timeout: Duration) -> anyhow:
     }
 }
 
+fn spawn_pipe_reader(
+    reader: impl Read + Send + 'static,
+    label: &'static str,
+) -> RuntimeSmokePipeReader {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = sender.send(read_to_end(reader));
+    });
+    RuntimeSmokePipeReader { label, receiver }
+}
+
 fn read_to_end(mut reader: impl Read) -> io::Result<Vec<u8>> {
     let mut output = Vec::new();
     reader.read_to_end(&mut output)?;
     Ok(output)
 }
 
-fn join_reader(
-    handle: thread::JoinHandle<io::Result<Vec<u8>>>,
-    label: &'static str,
+fn collect_runtime_smoke_output(
+    stdout_reader: RuntimeSmokePipeReader,
+    stderr_reader: RuntimeSmokePipeReader,
+    timeout: Duration,
+) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+    let stdout = collect_pipe_reader(stdout_reader, timeout)?;
+    let stderr = collect_pipe_reader(stderr_reader, timeout)?;
+    Ok((stdout, stderr))
+}
+
+fn collect_pipe_reader(
+    reader: RuntimeSmokePipeReader,
+    timeout: Duration,
 ) -> anyhow::Result<Vec<u8>> {
-    match handle.join() {
+    match reader.receiver.recv_timeout(timeout) {
         Ok(Ok(output)) => Ok(output),
         Ok(Err(err)) => Err(anyhow::anyhow!(
-            "failed reading runtime smoke {label}: {err}"
+            "failed reading runtime smoke {}: {err}",
+            reader.label
         )),
-        Err(_) => Err(anyhow::anyhow!("runtime smoke {label} reader panicked")),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow::anyhow!(
+            "runtime smoke {} pipe did not close within {}ms",
+            reader.label,
+            timeout.as_millis()
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(anyhow::anyhow!(
+            "runtime smoke {} reader terminated without output",
+            reader.label
+        )),
     }
+}
+
+fn terminate_runtime_smoke_process_tree(child: &mut Child) {
+    #[cfg(unix)]
+    terminate_runtime_smoke_process_group(child.id());
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+fn terminate_runtime_smoke_process_group(pid: u32) {
+    signal_runtime_smoke_process_group(pid, "-TERM");
+    thread::sleep(MIGRATION_RUNTIME_PROCESS_KILL_GRACE);
+    signal_runtime_smoke_process_group(pid, "-KILL");
+}
+
+#[cfg(unix)]
+fn signal_runtime_smoke_process_group(pid: u32, signal: &str) {
+    let process_group = format!("-{pid}");
+    let _ = Command::new("kill")
+        .arg(signal)
+        .arg("--")
+        .arg(process_group)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 fn verify_franken_node_smoke_receipt_round_trip(output: &Output) -> anyhow::Result<()> {
@@ -1907,11 +1988,7 @@ fn analyze_commonjs_with_js_parser(source: &str) -> Result<CommonJsParserAnalysi
     Ok(analysis)
 }
 
-fn analyze_commonjs_js_node(
-    node: Node<'_>,
-    source: &[u8],
-    analysis: &mut CommonJsParserAnalysis,
-) {
+fn analyze_commonjs_js_node(node: Node<'_>, source: &[u8], analysis: &mut CommonJsParserAnalysis) {
     match node.kind() {
         "variable_declarator" => analyze_commonjs_variable_declarator(node, source, analysis),
         "call_expression" => analyze_commonjs_call_expression(node, source, analysis),
@@ -2800,7 +2877,9 @@ fn tokenize_package_script_command(command: &str) -> Option<Vec<PackageScriptShe
 
         while index < command.len() {
             let ch = command[index..].chars().next()?;
-            if quote.is_none() && (ch.is_whitespace() || package_script_control_token(command, index).is_some()) {
+            if quote.is_none()
+                && (ch.is_whitespace() || package_script_control_token(command, index).is_some())
+            {
                 break;
             }
 
@@ -2903,9 +2982,10 @@ fn classify_package_script_segment(
         command_index = skip_shell_env_assignments(tokens, command_index.saturating_add(1));
     }
 
-    if tokens.get(command_index).is_some_and(|token| {
-        matches!(token.unquoted.as_str(), "cross-env" | "cross-env-shell")
-    }) {
+    if tokens
+        .get(command_index)
+        .is_some_and(|token| matches!(token.unquoted.as_str(), "cross-env" | "cross-env-shell"))
+    {
         command_index = skip_shell_env_assignments(tokens, command_index.saturating_add(1));
     }
 
@@ -2956,7 +3036,10 @@ fn package_manager_wrapped_runtime_index(
     let command = tokens.get(command_index)?.unquoted.as_str();
     match command {
         "npm" | "pnpm" => {
-            let subcommand = tokens.get(command_index.saturating_add(1))?.unquoted.as_str();
+            let subcommand = tokens
+                .get(command_index.saturating_add(1))?
+                .unquoted
+                .as_str();
             if !matches!(subcommand, "exec" | "x" | "dlx") {
                 return None;
             }
@@ -2987,7 +3070,10 @@ fn package_manager_wrapped_runtime_index(
     }
 }
 
-fn skip_package_manager_exec_options(tokens: &[PackageScriptShellToken], mut index: usize) -> usize {
+fn skip_package_manager_exec_options(
+    tokens: &[PackageScriptShellToken],
+    mut index: usize,
+) -> usize {
     loop {
         let Some(token) = tokens.get(index) else {
             return index;
@@ -3044,8 +3130,7 @@ fn package_script_entry_index(
 fn package_script_runtime_option_takes_value(word: &str) -> bool {
     matches!(
         word,
-        "-e"
-            | "--eval"
+        "-e" | "--eval"
             | "-p"
             | "--print"
             | "-r"
@@ -4072,7 +4157,10 @@ mod tests {
             parsed["scripts"]["pnpm"],
             "pnpm exec -- franken-node scripts/check.js"
         );
-        assert_eq!(parsed["scripts"]["yarn"], "yarn franken-node scripts/check.js");
+        assert_eq!(
+            parsed["scripts"]["yarn"],
+            "yarn franken-node scripts/check.js"
+        );
         assert_eq!(parsed["scripts"]["inline"], "node -e \"console.log(1)\"");
         assert_eq!(parsed["scripts"]["delegated"], "npm run build");
         assert_eq!(
@@ -4349,10 +4437,12 @@ mod tests {
 
         assert_eq!(rewrite.rewrite_count, 0);
         assert_eq!(rewrite.rewritten_content, source);
-        assert!(rewrite
-            .manual_findings
-            .iter()
-            .any(|finding| finding.contains("createRequire() usage detected")));
+        assert!(
+            rewrite
+                .manual_findings
+                .iter()
+                .any(|finding| finding.contains("createRequire() usage detected"))
+        );
     }
 
     #[test]

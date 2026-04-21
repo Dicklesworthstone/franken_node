@@ -69,6 +69,10 @@ tracing-subscriber = { workspace = true }
 insta = { version = "1.40", features = ["json"] }
 
 [[test]]
+name = "migrate_cli_e2e"
+path = "tests/migrate_cli_e2e.rs"
+
+[[test]]
 name = "asupersync_control_lane_integration"
 path = "tests/asupersync_control_lane_integration.rs"
 required-features = ["asupersync-transport"]
@@ -86,6 +90,10 @@ required-features = ["extended-surfaces"]
 name = "fastapi_rust_control_plane_integration"
 path = "tests/fastapi_rust_control_plane_integration.rs"
 required-features = ["test-support"]
+
+[[test]]
+name = "engine_dispatcher_pipe_drain"
+path = "tests/engine_dispatcher_pipe_drain.rs"
 
 [[test]]
 name = "artifact_gate_goldens"

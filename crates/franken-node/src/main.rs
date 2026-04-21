@@ -644,7 +644,8 @@ fn parse_signing_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::SigningKey> 
                 let seed = <[u8; 32]>::try_from(&raw[..32]).ok()?;
                 let public = <[u8; 32]>::try_from(&raw[32..]).ok()?;
                 let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
-                if signing_key.verifying_key().to_bytes() == public {
+                let derived_public = signing_key.verifying_key().to_bytes();
+                if security::constant_time::ct_eq_bytes(&derived_public, &public) {
                     Some(signing_key)
                 } else {
                     None
@@ -11740,8 +11741,17 @@ fn build_registry_seed_request(
     publisher_id: &str,
     version: &str,
     tags: &[&str],
+    signing_key: &ed25519_dalek::SigningKey,
 ) -> Result<RegistrationRequest> {
-    build_registry_seed_request_with_config(name, description, publisher_id, version, tags, None)
+    build_registry_seed_request_with_config(
+        name,
+        description,
+        publisher_id,
+        version,
+        tags,
+        signing_key,
+        None,
+    )
 }
 
 fn build_registry_seed_request_with_config(
@@ -11750,6 +11760,7 @@ fn build_registry_seed_request_with_config(
     publisher_id: &str,
     version: &str,
     tags: &[&str],
+    signing_key: &ed25519_dalek::SigningKey,
     config_builder_identity: Option<&str>,
 ) -> Result<RegistrationRequest> {
     // Detect real build context from environment and git state
@@ -11781,26 +11792,17 @@ fn build_registry_seed_request_with_config(
         registered_at: chrono::Utc::now().to_rfc3339(),
         compatible_with: vec!["franken-node".to_string()],
     };
-    let tags_vec = tags.iter().map(|tag| (*tag).to_string()).collect::<Vec<_>>();
+    let tags_vec = tags
+        .iter()
+        .map(|tag| (*tag).to_string())
+        .collect::<Vec<_>>();
     let manifest_bytes =
         canonical_registration_manifest_bytes(name, publisher_id, &initial_version, &tags_vec)
             .map_err(|e| anyhow::anyhow!("failed building registry seed manifest: {e}"))?;
 
-    // Generate a deterministic seed key for CLI demos
-    let seed_bytes = {
-        use sha2::Digest;
-        let mut h = sha2::Sha256::new();
-        h.update(b"registry_seed_key_v1:");
-        h.update(publisher_id.as_bytes());
-        let d = h.finalize();
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&d);
-        arr
-    };
-    let sk = ed25519_dalek::SigningKey::from_bytes(&seed_bytes);
-    let vk = sk.verifying_key();
+    let vk = signing_key.verifying_key();
     let key_id = supply_chain::artifact_signing::KeyId::from_verifying_key(&vk);
-    let signature_bytes = supply_chain::artifact_signing::sign_bytes(&sk, &manifest_bytes);
+    let signature_bytes = supply_chain::artifact_signing::sign_bytes(signing_key, &manifest_bytes);
 
     let now_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -11871,22 +11873,22 @@ fn build_registry_seed_request_with_config(
     })
 }
 
+fn generate_registry_seed_signing_key() -> ed25519_dalek::SigningKey {
+    let mut rng = rand::rngs::OsRng;
+    ed25519_dalek::SigningKey::generate(&mut rng)
+}
+
 fn registry_cli_registry() -> Result<SignedExtensionRegistry> {
-    // Build a key ring with the deterministic seed keys for all publishers
     let mut key_ring = supply_chain::artifact_signing::KeyRing::new();
-    for publisher_id in ["acme-sec", "beta-observability", "gamma-runtime"] {
-        let seed_bytes = {
-            use sha2::Digest;
-            let mut h = sha2::Sha256::new();
-            h.update(b"registry_seed_key_v1:");
-            h.update(publisher_id.as_bytes());
-            let d = h.finalize();
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&d);
-            arr
-        };
-        let sk = ed25519_dalek::SigningKey::from_bytes(&seed_bytes);
-        key_ring.add_key(sk.verifying_key());
+    let acme_seed_key = generate_registry_seed_signing_key();
+    let beta_seed_key = generate_registry_seed_signing_key();
+    let gamma_seed_key = generate_registry_seed_signing_key();
+    for verifying_key in [
+        acme_seed_key.verifying_key(),
+        beta_seed_key.verifying_key(),
+        gamma_seed_key.verifying_key(),
+    ] {
+        key_ring.add_key(verifying_key);
     }
 
     let admission_kernel = AdmissionKernel {
@@ -11915,6 +11917,7 @@ fn registry_cli_registry() -> Result<SignedExtensionRegistry> {
             "acme-sec",
             "1.4.0",
             &["auth", "security", "policy"],
+            &acme_seed_key,
         )?,
         build_registry_seed_request(
             "telemetry-bridge",
@@ -11922,6 +11925,7 @@ fn registry_cli_registry() -> Result<SignedExtensionRegistry> {
             "beta-observability",
             "2.1.3",
             &["telemetry", "metrics", "export"],
+            &beta_seed_key,
         )?,
         build_registry_seed_request(
             "sandbox-runner",
@@ -11929,6 +11933,7 @@ fn registry_cli_registry() -> Result<SignedExtensionRegistry> {
             "gamma-runtime",
             "0.9.2",
             &["runtime", "sandbox", "worker"],
+            &gamma_seed_key,
         )?,
     ];
 
@@ -12525,27 +12530,72 @@ fn run_command_capture_stdout(
     args: &[&str],
     timeout: Duration,
 ) -> std::result::Result<String, String> {
+    const PIPE_DRAIN_GRACE: Duration = Duration::from_millis(100);
+
+    #[cfg(unix)]
+    fn isolate_process_group(command: &mut ProcessCommand) {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+
+    #[cfg(not(unix))]
+    fn isolate_process_group(_command: &mut ProcessCommand) {}
+
+    #[cfg(unix)]
+    fn terminate_process_group(child_id: u32) {
+        let process_group = format!("-{child_id}");
+        let _ = ProcessCommand::new("kill")
+            .args(["-TERM", "--", &process_group])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        std::thread::sleep(Duration::from_millis(25));
+        let _ = ProcessCommand::new("kill")
+            .args(["-KILL", "--", &process_group])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    #[cfg(not(unix))]
+    fn terminate_process_group(_child_id: u32) {}
+
     fn spawn_reader<R: std::io::Read + Send + 'static>(
         mut reader: R,
         label: &'static str,
-    ) -> std::thread::JoinHandle<std::result::Result<Vec<u8>, String>> {
+    ) -> std::sync::mpsc::Receiver<std::result::Result<Vec<u8>, String>> {
+        let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut buf = Vec::new();
-            reader
+            let result = reader
                 .read_to_end(&mut buf)
-                .map_err(|err| format!("{label} read error: {err}"))?;
-            Ok(buf)
-        })
+                .map(|_| buf)
+                .map_err(|err| format!("{label} read error: {err}"));
+            let _ = sender.send(result);
+        });
+        receiver
     }
 
-    fn join_reader(
-        handle: std::thread::JoinHandle<std::result::Result<Vec<u8>, String>>,
+    fn receive_reader(
+        receiver: &std::sync::mpsc::Receiver<std::result::Result<Vec<u8>, String>>,
         label: &'static str,
+        deadline: Instant,
     ) -> std::result::Result<Vec<u8>, String> {
-        match handle.join() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!("{label} reader did not finish before deadline"));
+        }
+        match receiver.recv_timeout(remaining) {
             Ok(Ok(buf)) => Ok(buf),
             Ok(Err(err)) => Err(err),
-            Err(_) => Err(format!("{label} reader thread panicked")),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                Err(format!("{label} reader did not finish before deadline"))
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err(format!("{label} reader thread ended without result"))
+            }
         }
     }
 
@@ -12559,10 +12609,12 @@ fn run_command_capture_stdout(
     if let Some(dir) = current_dir {
         command.current_dir(dir);
     }
+    isolate_process_group(&mut command);
 
     let mut child = command
         .spawn()
         .map_err(|error| format!("{command_label} failed to start: {error}"))?;
+    let child_id = child.id();
     let stdout = child
         .stdout
         .take()
@@ -12574,14 +12626,21 @@ fn run_command_capture_stdout(
     let stdout_reader = spawn_reader(stdout, "stdout");
     let stderr_reader = spawn_reader(stderr, "stderr");
     let start = Instant::now();
+    let drain_deadline = start.checked_add(timeout).unwrap_or_else(Instant::now);
 
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let stdout = join_reader(stdout_reader, "stdout")
-                    .map_err(|err| format!("{command_label} failed collecting stdout: {err}"))?;
-                let stderr = join_reader(stderr_reader, "stderr")
-                    .map_err(|err| format!("{command_label} failed collecting stderr: {err}"))?;
+                let stdout =
+                    receive_reader(&stdout_reader, "stdout", drain_deadline).map_err(|err| {
+                        terminate_process_group(child_id);
+                        format!("{command_label} failed collecting stdout: {err}")
+                    })?;
+                let stderr =
+                    receive_reader(&stderr_reader, "stderr", drain_deadline).map_err(|err| {
+                        terminate_process_group(child_id);
+                        format!("{command_label} failed collecting stderr: {err}")
+                    })?;
                 if !status.success() {
                     let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
                     let stdout = String::from_utf8_lossy(&stdout).trim().to_string();
@@ -12595,10 +12654,14 @@ fn run_command_capture_stdout(
             }
             Ok(None) => {
                 if start.elapsed() >= timeout {
+                    terminate_process_group(child_id);
                     let _ = child.kill();
                     let _ = child.wait();
-                    let _ = join_reader(stdout_reader, "stdout");
-                    let _ = join_reader(stderr_reader, "stderr");
+                    let cleanup_deadline = Instant::now()
+                        .checked_add(PIPE_DRAIN_GRACE)
+                        .unwrap_or_else(Instant::now);
+                    let _ = receive_reader(&stdout_reader, "stdout", cleanup_deadline);
+                    let _ = receive_reader(&stderr_reader, "stderr", cleanup_deadline);
                     return Err(format!(
                         "{command_label} timed out after {}ms",
                         timeout.as_millis()
@@ -12607,10 +12670,14 @@ fn run_command_capture_stdout(
                 std::thread::sleep(Duration::from_millis(25));
             }
             Err(error) => {
+                terminate_process_group(child_id);
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = join_reader(stdout_reader, "stdout");
-                let _ = join_reader(stderr_reader, "stderr");
+                let cleanup_deadline = Instant::now()
+                    .checked_add(PIPE_DRAIN_GRACE)
+                    .unwrap_or_else(Instant::now);
+                let _ = receive_reader(&stdout_reader, "stdout", cleanup_deadline);
+                let _ = receive_reader(&stderr_reader, "stderr", cleanup_deadline);
                 return Err(format!("{command_label} wait failed: {error}"));
             }
         }

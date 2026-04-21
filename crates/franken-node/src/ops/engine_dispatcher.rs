@@ -551,54 +551,138 @@ fn captured_output_from(output: Output) -> CapturedProcessOutput {
 }
 
 fn run_command_capture_output(cmd: &mut Command) -> io::Result<Output> {
-    fn join_reader(
-        handle: thread::JoinHandle<io::Result<Vec<u8>>>,
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    const MAX_CAPTURED_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
+    const PIPE_READER_TIMEOUT: Duration = Duration::from_secs(2);
+
+    fn spawn_bounded_reader(
+        mut stream: impl Read + Send + 'static,
+        label: &'static str,
+    ) -> mpsc::Receiver<io::Result<Vec<u8>>> {
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            let mut temp_buf = [0u8; 8192];
+            let mut exceeded_cap = false;
+
+            loop {
+                match stream.read(&mut temp_buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let available = MAX_CAPTURED_OUTPUT_BYTES.saturating_sub(buf.len());
+                        if available >= n {
+                            buf.extend_from_slice(&temp_buf[..n]);
+                        } else {
+                            if available > 0 {
+                                buf.extend_from_slice(&temp_buf[..available]);
+                            }
+                            exceeded_cap = true;
+                        }
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(err) => {
+                        let _ = sender.send(Err(err));
+                        return;
+                    }
+                }
+            }
+
+            let result = if exceeded_cap {
+                Err(io::Error::other(format!(
+                    "{label} output exceeded {MAX_CAPTURED_OUTPUT_BYTES} bytes"
+                )))
+            } else {
+                Ok(buf)
+            };
+            let _ = sender.send(result);
+        });
+        receiver
+    }
+
+    fn receive_reader(
+        receiver: mpsc::Receiver<io::Result<Vec<u8>>>,
         label: &'static str,
     ) -> io::Result<Vec<u8>> {
-        match handle.join() {
-            Ok(Ok(buf)) => Ok(buf),
-            Ok(Err(err)) => Err(err),
-            Err(_) => Err(io::Error::other(format!("{label} reader thread panicked"))),
+        match receiver.recv_timeout(PIPE_READER_TIMEOUT) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("{label} pipe reader did not finish after process exit"),
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::other(format!(
+                "{label} pipe reader stopped without returning output"
+            ))),
         }
     }
+
+    #[cfg(unix)]
+    fn configure_process_group(cmd: &mut Command) {
+        use std::os::unix::process::CommandExt;
+
+        cmd.process_group(0);
+    }
+
+    #[cfg(not(unix))]
+    fn configure_process_group(_cmd: &mut Command) {}
+
+    #[cfg(unix)]
+    fn kill_process_group(process_group_id: u32) {
+        if process_group_id == 0 {
+            return;
+        }
+
+        let _ = Command::new("kill")
+            .arg("-KILL")
+            .arg("--")
+            .arg(format!("-{process_group_id}"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    #[cfg(not(unix))]
+    fn kill_process_group(_process_group_id: u32) {}
+
+    configure_process_group(cmd);
 
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
-    let mut stdout = child
+    let child_id = child.id();
+
+    let stdout = child
         .stdout
         .take()
         .ok_or_else(|| io::Error::other("stdout pipe unavailable after spawn"))?;
-    let mut stderr = child
+    let stderr = child
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("stderr pipe unavailable after spawn"))?;
 
-    let stdout_thread = thread::spawn(move || {
-        let mut buf = Vec::new();
-        stdout.read_to_end(&mut buf)?;
-        Ok(buf)
-    });
-    let stderr_thread = thread::spawn(move || {
-        let mut buf = Vec::new();
-        stderr.read_to_end(&mut buf)?;
-        Ok(buf)
-    });
+    let stdout_reader = spawn_bounded_reader(stdout, "stdout");
+    let stderr_reader = spawn_bounded_reader(stderr, "stderr");
 
     let status = match child.wait() {
-        Ok(status) => status,
+        Ok(status) => {
+            kill_process_group(child_id);
+            status
+        }
         Err(err) => {
+            kill_process_group(child_id);
             let _ = child.kill();
             let _ = child.wait();
-            let _ = join_reader(stdout_thread, "stdout");
-            let _ = join_reader(stderr_thread, "stderr");
+            let _ = receive_reader(stdout_reader, "stdout");
+            let _ = receive_reader(stderr_reader, "stderr");
             return Err(err);
         }
     };
 
-    let stdout = join_reader(stdout_thread, "stdout")?;
-    let stderr = join_reader(stderr_thread, "stderr")?;
+    let stdout = receive_reader(stdout_reader, "stdout")?;
+    let stderr = receive_reader(stderr_reader, "stderr")?;
 
     Ok(Output {
         status,
