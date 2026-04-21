@@ -63,7 +63,7 @@ pub fn fleet_convergence_receipt_verdict(
     timeout_seconds: u64,
     converged: bool,
 ) -> &'static str {
-    if timed_out || elapsed_ms > timeout_seconds.saturating_mul(1_000) || !converged {
+    if timed_out || elapsed_ms >= timeout_seconds.saturating_mul(1_000) || !converged {
         "non_converged"
     } else {
         "converged"
@@ -1403,6 +1403,14 @@ mod tests {
     }
 
     fn accepts_dyn_transport(_transport: &mut dyn FleetTransport) {}
+
+    #[test]
+    fn convergence_receipt_verdict_exact_timeout_fails_closed() {
+        assert_eq!(
+            fleet_convergence_receipt_verdict(false, 120_000, 120, true),
+            "non_converged"
+        );
+    }
 
     fn release_action_record(
         action_id: impl Into<String>,
