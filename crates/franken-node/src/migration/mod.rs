@@ -24,6 +24,7 @@ const MAX_FINDINGS_PER_CATEGORY: usize = 16;
 const MAX_PROJECT_FILES: usize = 100_000;
 const MAX_PENDING_DIRS: usize = 10_000;
 const MAX_TOTAL_FINDINGS: usize = 1_000;
+const MIGRATION_BACKUP_DIR: &str = ".migrate-backup";
 const MIGRATION_VALIDATE_RUNTIME_TIMEOUT: Duration = Duration::from_secs(10);
 const MIGRATION_VALIDATE_SMOKE_SOURCE: &str = r#"
 const fs = require('fs');
@@ -165,6 +166,8 @@ pub struct MigrationAuditReport {
 #[serde(rename_all = "snake_case")]
 pub enum MigrationRewriteAction {
     PinNodeEngine,
+    RewriteCommonJsRequire,
+    ManualModuleReview,
     ManualScriptReview,
     ManifestReadError,
     ManifestParseError,
@@ -394,16 +397,118 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
     let mut rollback_entries = Vec::new();
 
     for path in files {
+        let relative_path = relative_display(project_path, &path);
         let is_package_manifest = path
             .file_name()
             .and_then(std::ffi::OsStr::to_str)
             .is_some_and(|name| name == "package.json");
-        if !is_package_manifest {
+
+        if is_package_manifest {
+            package_manifests_scanned = package_manifests_scanned.saturating_add(1);
+            let raw = match std::fs::read_to_string(&path) {
+                Ok(content) => content,
+                Err(err) => {
+                    manual_review_items = manual_review_items.saturating_add(1);
+                    push_bounded(
+                        &mut entries,
+                        MigrationRewriteEntry {
+                            id: String::new(),
+                            path: Some(relative_path),
+                            action: MigrationRewriteAction::ManifestReadError,
+                            detail: format!("unable to read package manifest: {err}"),
+                            applied: false,
+                        },
+                        MAX_TOTAL_FINDINGS,
+                    );
+                    continue;
+                }
+            };
+
+            let mut manifest = match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(value) => value,
+                Err(err) => {
+                    manual_review_items = manual_review_items.saturating_add(1);
+                    push_bounded(
+                        &mut entries,
+                        MigrationRewriteEntry {
+                            id: String::new(),
+                            path: Some(relative_path),
+                            action: MigrationRewriteAction::ManifestParseError,
+                            detail: format!("package manifest JSON parse failed: {err}"),
+                            applied: false,
+                        },
+                        MAX_TOTAL_FINDINGS,
+                    );
+                    continue;
+                }
+            };
+
+            for script_name in collect_risky_script_names(&manifest) {
+                manual_review_items = manual_review_items.saturating_add(1);
+                push_bounded(
+                    &mut entries,
+                    MigrationRewriteEntry {
+                        id: String::new(),
+                        path: Some(relative_path.clone()),
+                        action: MigrationRewriteAction::ManualScriptReview,
+                        detail: format!("script `{script_name}` requires manual hardening review"),
+                        applied: false,
+                    },
+                    MAX_TOTAL_FINDINGS,
+                );
+            }
+
+            if ensure_node_engine_pin(&mut manifest) {
+                rewrites_planned = rewrites_planned.saturating_add(1);
+                let rewritten = serde_json::to_string_pretty(&manifest)
+                    .map(|rendered| format!("{rendered}\n"))
+                    .map_err(|err| {
+                        anyhow::anyhow!(
+                            "failed serializing rewritten package manifest {}: {err}",
+                            relative_path
+                        )
+                    })?;
+
+                if apply {
+                    write_migration_backup(project_path, &path, &raw)?;
+                    std::fs::write(&path, rewritten.as_bytes()).map_err(|err| {
+                        anyhow::anyhow!(
+                            "failed writing rewritten package manifest {}: {err}",
+                            path.display()
+                        )
+                    })?;
+                    rewrites_applied = rewrites_applied.saturating_add(1);
+                }
+
+                push_bounded(
+                    &mut entries,
+                    MigrationRewriteEntry {
+                        id: String::new(),
+                        path: Some(relative_path.clone()),
+                        action: MigrationRewriteAction::PinNodeEngine,
+                        detail: "set engines.node to >=20 <23 to reduce migration runtime drift"
+                            .to_string(),
+                        applied: apply,
+                    },
+                    MAX_TOTAL_FINDINGS,
+                );
+                push_bounded(
+                    &mut rollback_entries,
+                    MigrationRollbackEntry {
+                        path: relative_path,
+                        original_content: raw,
+                        rewritten_content: rewritten,
+                    },
+                    MAX_TOTAL_FINDINGS,
+                );
+            }
             continue;
         }
 
-        package_manifests_scanned = package_manifests_scanned.saturating_add(1);
-        let relative_path = relative_display(project_path, &path);
+        if !is_migration_source_file(&path) {
+            continue;
+        }
+
         let raw = match std::fs::read_to_string(&path) {
             Ok(content) => content,
             Err(err) => {
@@ -413,8 +518,8 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
                     MigrationRewriteEntry {
                         id: String::new(),
                         path: Some(relative_path),
-                        action: MigrationRewriteAction::ManifestReadError,
-                        detail: format!("unable to read package manifest: {err}"),
+                        action: MigrationRewriteAction::ManualModuleReview,
+                        detail: format!("unable to read JavaScript source for module rewrite: {err}"),
                         applied: false,
                     },
                     MAX_TOTAL_FINDINGS,
@@ -423,58 +528,29 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
             }
         };
 
-        let mut manifest = match serde_json::from_str::<serde_json::Value>(&raw) {
-            Ok(value) => value,
-            Err(err) => {
-                manual_review_items = manual_review_items.saturating_add(1);
-                push_bounded(
-                    &mut entries,
-                    MigrationRewriteEntry {
-                        id: String::new(),
-                        path: Some(relative_path),
-                        action: MigrationRewriteAction::ManifestParseError,
-                        detail: format!("package manifest JSON parse failed: {err}"),
-                        applied: false,
-                    },
-                    MAX_TOTAL_FINDINGS,
-                );
-                continue;
-            }
-        };
-
-        for script_name in collect_risky_script_names(&manifest) {
+        let source_rewrite = rewrite_commonjs_requires(&raw);
+        for detail in source_rewrite.manual_findings {
             manual_review_items = manual_review_items.saturating_add(1);
             push_bounded(
                 &mut entries,
                 MigrationRewriteEntry {
                     id: String::new(),
                     path: Some(relative_path.clone()),
-                    action: MigrationRewriteAction::ManualScriptReview,
-                    detail: format!("script `{script_name}` requires manual hardening review"),
+                    action: MigrationRewriteAction::ManualModuleReview,
+                    detail,
                     applied: false,
                 },
                 MAX_TOTAL_FINDINGS,
             );
         }
 
-        if ensure_node_engine_pin(&mut manifest) {
+        if source_rewrite.rewrite_count > 0 {
             rewrites_planned = rewrites_planned.saturating_add(1);
-            let rewritten = serde_json::to_string_pretty(&manifest)
-                .map(|rendered| format!("{rendered}\n"))
-                .map_err(|err| {
-                    anyhow::anyhow!(
-                        "failed serializing rewritten package manifest {}: {err}",
-                        relative_path
-                    )
-                })?;
-
             if apply {
-                std::fs::write(&path, rewritten.as_bytes()).map_err(|err| {
-                    anyhow::anyhow!(
-                        "failed writing rewritten package manifest {}: {err}",
-                        path.display()
-                    )
-                })?;
+                write_migration_backup(project_path, &path, &raw)?;
+                std::fs::write(&path, source_rewrite.rewritten_content.as_bytes()).map_err(
+                    |err| anyhow::anyhow!("failed writing rewritten source {}: {err}", path.display()),
+                )?;
                 rewrites_applied = rewrites_applied.saturating_add(1);
             }
 
@@ -483,9 +559,11 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
                 MigrationRewriteEntry {
                     id: String::new(),
                     path: Some(relative_path.clone()),
-                    action: MigrationRewriteAction::PinNodeEngine,
-                    detail: "set engines.node to >=20 <23 to reduce migration runtime drift"
-                        .to_string(),
+                    action: MigrationRewriteAction::RewriteCommonJsRequire,
+                    detail: format!(
+                        "rewrote {} top-level CommonJS require declaration(s) to ESM imports",
+                        source_rewrite.rewrite_count
+                    ),
                     applied: apply,
                 },
                 MAX_TOTAL_FINDINGS,
@@ -495,7 +573,7 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
                 MigrationRollbackEntry {
                     path: relative_path,
                     original_content: raw,
-                    rewritten_content: rewritten,
+                    rewritten_content: source_rewrite.rewritten_content,
                 },
                 MAX_TOTAL_FINDINGS,
             );
@@ -510,7 +588,7 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
                 id: String::new(),
                 path: None,
                 action: MigrationRewriteAction::NoPackageManifest,
-                detail: "no package.json files found; nothing to rewrite".to_string(),
+                detail: "no package.json files found; manifest pin rewrite unavailable".to_string(),
                 applied: false,
             },
             MAX_TOTAL_FINDINGS,
