@@ -6,7 +6,10 @@ use frankenengine_verifier_sdk::bundle::{
     REPLAY_BUNDLE_SCHEMA_VERSION, ReplayBundle, TimelineEvent, hash, seal, serialize,
 };
 use frankenengine_verifier_sdk::capsule;
-use frankenengine_verifier_sdk::{VerificationVerdict, VerifierSdkError, create_verifier_sdk};
+use frankenengine_verifier_sdk::{
+    ValidationWorkflow, VerificationOperation, VerificationVerdict, VerifierSdkError,
+    create_verifier_sdk,
+};
 use serde_json::json;
 
 #[test]
@@ -58,6 +61,68 @@ fn verifier_sdk_facade_verifies_claim_artifact_trust_state_and_session() {
         .record_session_step(&mut session, &trust_result)
         .expect_err("sealed session should reject later steps");
     assert!(matches!(sealed_error, VerifierSdkError::SessionSealed(_)));
+}
+
+#[test]
+fn verifier_sdk_facade_validates_bundles_workflows_and_transparency_log() {
+    let sdk = create_verifier_sdk("verifier://facade-test");
+    let bundle = canonical_replay_bundle();
+    let bundle_bytes = serialize(&bundle).expect("bundle should serialize");
+
+    sdk.validate_bundle(&bundle_bytes)
+        .expect("canonical replay bundle should validate");
+    let mut tampered_bundle = bundle_bytes.clone();
+    let tamper_index = tampered_bundle
+        .iter()
+        .position(|byte| *byte == b'7')
+        .expect("fixture should contain a tamperable byte");
+    tampered_bundle[tamper_index] = b'8';
+    assert!(sdk.validate_bundle(&tampered_bundle).is_err());
+
+    for workflow in [
+        ValidationWorkflow::ReleaseValidation,
+        ValidationWorkflow::IncidentValidation,
+        ValidationWorkflow::ComplianceAudit,
+    ] {
+        let workflow_result = sdk
+            .execute_workflow(workflow, &bundle_bytes)
+            .expect("workflow should execute against verified bundle");
+        assert_eq!(workflow_result.operation, VerificationOperation::Workflow);
+        assert_eq!(workflow_result.verdict, VerificationVerdict::Pass);
+        assert!(
+            workflow_result
+                .checked_assertions
+                .iter()
+                .any(|assertion| assertion.assertion.starts_with("workflow_"))
+        );
+    }
+
+    let workflow_result = sdk
+        .execute_workflow(ValidationWorkflow::ReleaseValidation, &bundle_bytes)
+        .expect("workflow should produce transparency-loggable result");
+    let migration_result = sdk
+        .verify_migration_artifact(&bundle_bytes)
+        .expect("migration result should be loggable");
+    let mut log = Vec::new();
+    let first_entry = sdk
+        .append_transparency_log(&mut log, &workflow_result)
+        .expect("first transparency log append should succeed");
+    assert_eq!(first_entry.merkle_proof[0], "0".repeat(64));
+    assert_eq!(first_entry.verifier_id, "verifier://facade-test");
+
+    let second_entry = sdk
+        .append_transparency_log(&mut log, &migration_result)
+        .expect("second transparency log append should succeed");
+    assert_eq!(second_entry.merkle_proof[0], first_entry.result_hash);
+    assert_eq!(log.len(), 2);
+
+    let mut forged_result = workflow_result;
+    forged_result.verifier_signature = "not-the-facade-signature".to_string();
+    assert!(
+        sdk.append_transparency_log(&mut log, &forged_result)
+            .is_err()
+    );
+    assert_eq!(log.len(), 2);
 }
 
 fn canonical_replay_bundle() -> ReplayBundle {
