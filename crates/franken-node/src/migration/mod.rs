@@ -2661,9 +2661,7 @@ fn tokenize_package_script_command(command: &str) -> Option<Vec<PackageScriptShe
 
         while index < command.len() {
             let ch = command[index..].chars().next()?;
-            if quote.is_none()
-                && (ch.is_whitespace() || package_script_control_token(command, index).is_some())
-            {
+            if quote.is_none() && (ch.is_whitespace() || package_script_control_token(command, index).is_some()) {
                 break;
             }
 
