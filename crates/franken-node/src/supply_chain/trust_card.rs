@@ -106,6 +106,8 @@ pub const TRUST_CARD_DIFF_COMPUTED: &str = "TRUST_CARD_DIFF_COMPUTED";
 const DEFAULT_CACHE_TTL_SECS: u64 = 60;
 const DEFAULT_REGISTRY_KEY: &[u8] = b"franken-node-trust-card-registry-key-v1";
 pub const TRUST_CARD_REGISTRY_SNAPSHOT_SCHEMA: &str = "franken-node/trust-card-registry-state/v1";
+const TRUST_CARD_REGISTRY_HIGH_WATER_SCHEMA: &str =
+    "franken-node/trust-card-registry-high-water/v1";
 const SNAPSHOT_LOCK_RETRY_BACKOFF_MILLIS: [u64; 3] = [100, 200, 400];
 
 type HmacSha256 = Hmac<Sha256>;
@@ -368,8 +370,21 @@ pub struct TrustCardSyncReport {
 #[serde(deny_unknown_fields)]
 pub struct TrustCardRegistrySnapshot {
     pub schema_version: String,
+    pub snapshot_epoch: u64,
+    pub previous_snapshot_hash: Option<String>,
     pub cache_ttl_secs: u64,
     pub cards_by_extension: BTreeMap<String, Vec<TrustCard>>,
+    pub snapshot_hash: String,
+    pub registry_signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrustCardRegistrySnapshotHighWater {
+    schema_version: String,
+    snapshot_epoch: u64,
+    snapshot_hash: String,
+    high_water_signature: String,
 }
 
 #[derive(Debug, Clone)]
@@ -379,6 +394,9 @@ pub struct TrustCardRegistry {
     cache_ttl_secs: u64,
     registry_key: Vec<u8>,
     telemetry: Vec<TelemetryEvent>,
+    snapshot_epoch: u64,
+    previous_snapshot_hash: Option<String>,
+    last_snapshot_hash: Option<String>,
 }
 
 impl Default for TrustCardRegistry {
@@ -396,16 +414,38 @@ impl TrustCardRegistry {
             cache_ttl_secs: cache_ttl_secs.max(1),
             registry_key: registry_key.to_vec(),
             telemetry: Vec::new(),
+            snapshot_epoch: 0,
+            previous_snapshot_hash: None,
+            last_snapshot_hash: None,
         }
     }
 
     #[must_use]
     pub fn snapshot(&self) -> TrustCardRegistrySnapshot {
-        TrustCardRegistrySnapshot {
+        let mut snapshot = TrustCardRegistrySnapshot {
             schema_version: TRUST_CARD_REGISTRY_SNAPSHOT_SCHEMA.to_string(),
+            snapshot_epoch: self.snapshot_epoch,
+            previous_snapshot_hash: self.previous_snapshot_hash.clone(),
             cache_ttl_secs: self.cache_ttl_secs,
             cards_by_extension: self.cards_by_extension.clone(),
-        }
+            snapshot_hash: String::new(),
+            registry_signature: String::new(),
+        };
+        sign_snapshot_in_place(&mut snapshot, &self.registry_key)
+            .expect("registry key should sign trust-card snapshots");
+        snapshot
+    }
+
+    fn advance_snapshot_sequence_for_mutation(&mut self) {
+        self.previous_snapshot_hash = if self.snapshot_epoch == 0 && self.cards_by_extension.is_empty() {
+            None
+        } else {
+            self.last_snapshot_hash
+                .clone()
+                .or_else(|| Some(self.snapshot().snapshot_hash))
+        };
+        self.snapshot_epoch = self.snapshot_epoch.saturating_add(1);
+        self.last_snapshot_hash = None;
     }
 
     pub fn from_snapshot(
@@ -420,7 +460,7 @@ impl TrustCardRegistry {
         }
 
         let mut registry = Self::new(snapshot.cache_ttl_secs, registry_key);
-        registry.cards_by_extension = snapshot.cards_by_extension;
+        registry.cards_by_extension = snapshot.cards_by_extension.clone();
 
         for (extension_id, history) in &registry.cards_by_extension {
             validate_snapshot_history(extension_id, history, &registry.registry_key)?;
@@ -437,6 +477,11 @@ impl TrustCardRegistry {
                 },
             );
         }
+
+        verify_snapshot_signature(&snapshot, registry_key)?;
+        registry.snapshot_epoch = snapshot.snapshot_epoch;
+        registry.previous_snapshot_hash = snapshot.previous_snapshot_hash;
+        registry.last_snapshot_hash = Some(snapshot.snapshot_hash);
 
         Ok(registry)
     }
@@ -456,13 +501,24 @@ impl TrustCardRegistry {
                 detail: err.to_string(),
             }
         })?;
+        let high_water = read_snapshot_high_water(path, DEFAULT_REGISTRY_KEY)?;
+        validate_snapshot_high_water(path, &snapshot, high_water.as_ref())?;
+        let trusted_snapshot = snapshot.clone();
         let mut registry = Self::from_snapshot(snapshot, DEFAULT_REGISTRY_KEY, loaded_at_secs)?;
         registry.cache_ttl_secs = cache_ttl_secs.max(1);
+        persist_snapshot_high_water_if_newer(path, &trusted_snapshot, high_water.as_ref())?;
         Ok(registry)
     }
 
     pub fn persist_authoritative_state(&self, path: &Path) -> Result<(), TrustCardError> {
-        let encoded = to_canonical_json(&self.snapshot())?;
+        let snapshot = self.snapshot();
+        let high_water = read_snapshot_high_water(path, &self.registry_key)?;
+        validate_snapshot_high_water(path, &snapshot, high_water.as_ref())?;
+        let encoded = to_canonical_json(&snapshot)?;
+        let next_high_water =
+            signed_snapshot_high_water(&snapshot, &self.registry_key)?;
+        let high_water_encoded = to_canonical_json(&next_high_water)?;
+        let high_water_path = authoritative_snapshot_high_water_path(path);
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         with_authoritative_snapshot_persist_lock(path, || {
             let mut temp =
@@ -486,6 +542,29 @@ impl TrustCardRegistry {
                     path: path.to_path_buf(),
                     detail: err.error.to_string(),
                 })?;
+            let mut high_water_temp =
+                NamedTempFile::new_in(parent).map_err(|err| TrustCardError::SnapshotWrite {
+                    path: high_water_path.clone(),
+                    detail: err.to_string(),
+                })?;
+            high_water_temp.write_all(high_water_encoded.as_bytes()).map_err(|err| {
+                TrustCardError::SnapshotWrite {
+                    path: high_water_path.clone(),
+                    detail: err.to_string(),
+                }
+            })?;
+            high_water_temp.as_file().sync_all().map_err(|err| {
+                TrustCardError::SnapshotWrite {
+                    path: high_water_path.clone(),
+                    detail: err.to_string(),
+                }
+            })?;
+            high_water_temp.persist(&high_water_path).map_err(|err| {
+                TrustCardError::SnapshotWrite {
+                    path: high_water_path.clone(),
+                    detail: err.error.to_string(),
+                }
+            })?;
             if let Ok(dir) = File::open(parent) {
                 let _ = dir.sync_all();
             }
@@ -546,6 +625,7 @@ impl TrustCardRegistry {
             registry_signature: String::new(),
         };
         sign_card_in_place(&mut card, &self.registry_key)?;
+        self.advance_snapshot_sequence_for_mutation();
 
         push_bounded(
             self.cards_by_extension
@@ -667,6 +747,7 @@ impl TrustCardRegistry {
         );
 
         sign_card_in_place(&mut next, &self.registry_key)?;
+        self.advance_snapshot_sequence_for_mutation();
         push_bounded(
             self.cards_by_extension
                 .entry(extension_id.to_string())
