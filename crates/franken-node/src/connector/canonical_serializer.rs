@@ -12,6 +12,7 @@
 //! - INV-CAN-NO-BYPASS: All signing must route through CanonicalSerializer.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -333,10 +334,11 @@ impl CanonicalSerializer {
         &self.events
     }
 
-    /// Serialize a payload deterministically.
+    /// Serialize a JSON payload deterministically.
     ///
     /// # INV-CAN-DETERMINISTIC
-    /// Sorts keys, uses length-prefixed encoding, rejects floats.
+    /// Parses typed JSON, applies schema field order, canonicalizes values, and
+    /// uses length-prefixed encoding.
     ///
     /// # INV-CAN-NO-FLOAT
     /// Rejects any payload containing float markers.
@@ -374,8 +376,37 @@ impl CanonicalSerializer {
             });
         }
 
-        // Canonical form: [length_prefix: 4 bytes BE] [payload]
-        let canonical = canonical_encode(payload)?;
+        let value =
+            serde_json::from_slice::<Value>(payload).map_err(|error| SerializerError::NonCanonicalInput {
+                object_type: object_type.label().to_string(),
+                reason: format!("payload must be a JSON trust object: {error}"),
+            })?;
+
+        self.serialize_value(object_type, &value, trace_id)
+    }
+
+    /// Serialize a typed JSON trust object deterministically.
+    ///
+    /// # INV-CAN-DETERMINISTIC
+    /// Top-level fields follow the registered schema `field_order`; nested
+    /// object keys are sorted lexicographically; strings and integers use
+    /// canonical JSON value encodings without whitespace.
+    pub fn serialize_value(
+        &mut self,
+        object_type: TrustObjectType,
+        value: &Value,
+        trace_id: &str,
+    ) -> Result<Vec<u8>, SerializerError> {
+        let schema =
+            self.schemas
+                .get(&object_type)
+                .ok_or_else(|| SerializerError::SchemaNotFound {
+                    object_type: object_type.label().to_string(),
+                })?;
+
+        let domain_tag = schema.domain_tag;
+        let canonical_payload = canonicalize_schema_value(schema, value)?;
+        let canonical = canonical_encode(&canonical_payload)?;
 
         let hash_prefix = content_hash_prefix(&canonical);
         push_bounded(
@@ -383,7 +414,7 @@ impl CanonicalSerializer {
             SerializerEvent {
                 event_code: event_codes::CAN_SERIALIZE.to_string(),
                 object_type: object_type.label().to_string(),
-                domain_tag: format!("{:02x}{:02x}", schema.domain_tag[0], schema.domain_tag[1]),
+                domain_tag: format!("{:02x}{:02x}", domain_tag[0], domain_tag[1]),
                 byte_length: canonical.len(),
                 content_hash_prefix: hash_prefix,
                 trace_id: trace_id.to_string(),
@@ -429,7 +460,7 @@ impl CanonicalSerializer {
     ) -> Result<Vec<u8>, SerializerError> {
         let serialized = self.serialize(object_type, payload, trace_id)?;
         let deserialized = self.deserialize(object_type, &serialized)?;
-        let re_serialized = self.serialize(object_type, &deserialized, trace_id)?;
+        let re_serialized = canonical_encode(&deserialized)?;
 
         if serialized != re_serialized {
             return Err(SerializerError::RoundTripDivergence {
@@ -552,6 +583,30 @@ fn default_schema(object_type: TrustObjectType) -> CanonicalSchema {
     }
 }
 
+fn sample_payload_for_type(object_type: TrustObjectType) -> String {
+    match object_type {
+        TrustObjectType::PolicyCheckpoint => {
+            r#"{"checkpoint_id":"cp-001","epoch":1,"sequence":1,"policy_hash":"sha256:policy","timestamp":"2026-04-21T00:00:00Z"}"#
+        }
+        TrustObjectType::DelegationToken => {
+            r#"{"token_id":"tok-001","issuer":"issuer-a","delegate":"delegate-b","scope":"read:fleet","expiry":4102444800}"#
+        }
+        TrustObjectType::RevocationAssertion => {
+            r#"{"assertion_id":"rev-001","target_id":"tok-001","reason":"compromise","effective_at":"2026-04-21T00:00:00Z","evidence_hash":"sha256:evidence"}"#
+        }
+        TrustObjectType::SessionTicket => {
+            r#"{"session_id":"sess-001","client_id":"client-a","server_id":"server-b","issued_at":"2026-04-21T00:00:00Z","ttl":300}"#
+        }
+        TrustObjectType::ZoneBoundaryClaim => {
+            r#"{"zone_id":"zone-a","boundary_type":"trust","peer_zone":"zone-b","trust_level":"strict","established_at":"2026-04-21T00:00:00Z"}"#
+        }
+        TrustObjectType::OperatorReceipt => {
+            r#"{"receipt_id":"rec-001","operator_id":"operator-a","action":"approve","artifact_hash":"sha256:artifact","timestamp":"2026-04-21T00:00:00Z"}"#
+        }
+    }
+    .to_string()
+}
+
 /// Canonical encoding: 4-byte big-endian length prefix + payload.
 fn canonical_encode(payload: &[u8]) -> Result<Vec<u8>, SerializerError> {
     let len =
@@ -579,6 +634,116 @@ fn canonical_decode(bytes: &[u8]) -> Result<Vec<u8>, String> {
         ));
     }
     Ok(bytes[4..].to_vec())
+}
+
+fn canonicalize_schema_value(
+    schema: &CanonicalSchema,
+    value: &Value,
+) -> Result<Vec<u8>, SerializerError> {
+    let object = value.as_object().ok_or_else(|| SerializerError::NonCanonicalInput {
+        object_type: schema.object_type.label().to_string(),
+        reason: "payload must be a JSON object".to_string(),
+    })?;
+
+    for field in object.keys() {
+        if !schema.field_order.iter().any(|expected| expected == field) {
+            return Err(SerializerError::NonCanonicalInput {
+                object_type: schema.object_type.label().to_string(),
+                reason: format!("unknown field `{field}` outside canonical schema"),
+            });
+        }
+    }
+
+    let mut canonical = Vec::new();
+    canonical.push(b'{');
+    for (index, field) in schema.field_order.iter().enumerate() {
+        let field_value = object
+            .get(field)
+            .ok_or_else(|| SerializerError::NonCanonicalInput {
+                object_type: schema.object_type.label().to_string(),
+                reason: format!("missing required field `{field}`"),
+            })?;
+
+        if index > 0 {
+            canonical.push(b',');
+        }
+        canonical.extend_from_slice(canonical_string(field)?.as_bytes());
+        canonical.push(b':');
+        write_canonical_value(
+            &mut canonical,
+            field_value,
+            schema.object_type,
+            field.as_str(),
+            schema.no_float,
+        )?;
+    }
+    canonical.push(b'}');
+    Ok(canonical)
+}
+
+fn write_canonical_value(
+    out: &mut Vec<u8>,
+    value: &Value,
+    object_type: TrustObjectType,
+    field_path: &str,
+    no_float: bool,
+) -> Result<(), SerializerError> {
+    match value {
+        Value::Null => out.extend_from_slice(b"null"),
+        Value::Bool(true) => out.extend_from_slice(b"true"),
+        Value::Bool(false) => out.extend_from_slice(b"false"),
+        Value::Number(number) => {
+            if let Some(value) = number.as_i64() {
+                out.extend_from_slice(value.to_string().as_bytes());
+            } else if let Some(value) = number.as_u64() {
+                out.extend_from_slice(value.to_string().as_bytes());
+            } else if no_float {
+                return Err(SerializerError::FloatingPointRejected {
+                    object_type: object_type.label().to_string(),
+                    field: field_path.to_string(),
+                });
+            } else {
+                return Err(SerializerError::NonCanonicalInput {
+                    object_type: object_type.label().to_string(),
+                    reason: format!("non-integer number at `{field_path}` is not canonical"),
+                });
+            }
+        }
+        Value::String(value) => out.extend_from_slice(canonical_string(value)?.as_bytes()),
+        Value::Array(values) => {
+            out.push(b'[');
+            for (index, item) in values.iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                let child_path = format!("{field_path}[{index}]");
+                write_canonical_value(out, item, object_type, &child_path, no_float)?;
+            }
+            out.push(b']');
+        }
+        Value::Object(values) => {
+            out.push(b'{');
+            let mut entries: Vec<_> = values.iter().collect();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            for (index, (key, nested_value)) in entries.iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                out.extend_from_slice(canonical_string(key)?.as_bytes());
+                out.push(b':');
+                let child_path = format!("{field_path}.{key}");
+                write_canonical_value(out, nested_value, object_type, &child_path, no_float)?;
+            }
+            out.push(b'}');
+        }
+    }
+    Ok(())
+}
+
+fn canonical_string(value: &str) -> Result<String, SerializerError> {
+    serde_json::to_string(value).map_err(|error| SerializerError::PreimageConstructionFailed {
+        reason: format!("failed to encode canonical string: {error}"),
+    })
 }
 
 /// Check for floating-point markers in payload.
@@ -673,7 +838,7 @@ pub fn demo_canonical_serialization() -> Vec<SerializerEvent> {
     let mut serializer = CanonicalSerializer::with_all_schemas();
 
     for obj_type in TrustObjectType::all() {
-        let payload = format!(r#"{{"type":"{}","data":"sample"}}"#, obj_type.label());
+        let payload = sample_payload_for_type(*obj_type);
         let _ = serializer.round_trip_canonical(*obj_type, payload.as_bytes(), "trace-demo");
         let _ = serializer.build_preimage(*obj_type, payload.as_bytes(), "trace-demo");
     }
@@ -1049,7 +1214,8 @@ mod tests {
     #[test]
     fn test_serialize_success() {
         let mut s = CanonicalSerializer::with_all_schemas();
-        let result = s.serialize(TrustObjectType::PolicyCheckpoint, b"test-payload", "t1");
+        let payload = sample_payload_for_type(TrustObjectType::PolicyCheckpoint);
+        let result = s.serialize(TrustObjectType::PolicyCheckpoint, payload.as_bytes(), "t1");
         assert!(result.is_ok());
     }
 
@@ -1079,7 +1245,8 @@ mod tests {
     #[test]
     fn test_serialize_emits_event() {
         let mut s = CanonicalSerializer::with_all_schemas();
-        let _ = s.serialize(TrustObjectType::PolicyCheckpoint, b"data", "t1");
+        let payload = sample_payload_for_type(TrustObjectType::PolicyCheckpoint);
+        let _ = s.serialize(TrustObjectType::PolicyCheckpoint, payload.as_bytes(), "t1");
         assert!(!s.events().is_empty());
         assert_eq!(s.events()[0].event_code, event_codes::CAN_SERIALIZE);
     }
@@ -1087,25 +1254,77 @@ mod tests {
     #[test]
     fn test_serialize_deterministic() {
         let mut s = CanonicalSerializer::with_all_schemas();
+        let payload = sample_payload_for_type(TrustObjectType::PolicyCheckpoint);
         let r1 = s
-            .serialize(TrustObjectType::PolicyCheckpoint, b"same", "t1")
+            .serialize(TrustObjectType::PolicyCheckpoint, payload.as_bytes(), "t1")
             .unwrap();
         let r2 = s
-            .serialize(TrustObjectType::PolicyCheckpoint, b"same", "t2")
+            .serialize(TrustObjectType::PolicyCheckpoint, payload.as_bytes(), "t2")
             .unwrap();
         assert_eq!(r1, r2);
     }
 
     #[test]
+    fn serialize_applies_schema_field_order_to_reordered_json() {
+        let mut serializer = CanonicalSerializer::with_all_schemas();
+        let canonical_order = br#"{"checkpoint_id":"cp-001","epoch":1,"sequence":2,"policy_hash":"sha256:policy","timestamp":"2026-04-21T00:00:00Z"}"#;
+        let caller_order = br#"{"timestamp":"2026-04-21T00:00:00Z","policy_hash":"sha256:policy","sequence":2,"epoch":1,"checkpoint_id":"cp-001"}"#;
+
+        let canonical_bytes = serializer
+            .serialize(
+                TrustObjectType::PolicyCheckpoint,
+                canonical_order,
+                "trace-canonical-order",
+            )
+            .expect("schema-valid object serializes");
+        let caller_bytes = serializer
+            .serialize(
+                TrustObjectType::PolicyCheckpoint,
+                caller_order,
+                "trace-caller-order",
+            )
+            .expect("reordered object serializes to canonical order");
+
+        assert_eq!(canonical_bytes, caller_bytes);
+        assert_eq!(
+            serializer
+                .deserialize(TrustObjectType::PolicyCheckpoint, &canonical_bytes)
+                .expect("canonical payload decodes"),
+            canonical_order
+        );
+    }
+
+    #[test]
+    fn serialize_rejects_unknown_schema_field() {
+        let mut serializer = CanonicalSerializer::with_all_schemas();
+        let payload = br#"{"checkpoint_id":"cp-001","epoch":1,"sequence":2,"policy_hash":"sha256:policy","timestamp":"2026-04-21T00:00:00Z","admin_override":true}"#;
+
+        let err = serializer
+            .serialize(
+                TrustObjectType::PolicyCheckpoint,
+                payload,
+                "trace-unknown-field",
+            )
+            .expect_err("unknown schema fields must be rejected");
+
+        assert_eq!(err.code(), error_codes::ERR_CAN_NON_CANONICAL);
+        assert!(
+            err.to_string().contains("unknown field `admin_override`"),
+            "error should identify the rejected field: {err}"
+        );
+    }
+
+    #[test]
     fn test_deserialize_success() {
         let mut s = CanonicalSerializer::with_all_schemas();
+        let payload = sample_payload_for_type(TrustObjectType::PolicyCheckpoint);
         let serialized = s
-            .serialize(TrustObjectType::PolicyCheckpoint, b"payload", "t1")
+            .serialize(TrustObjectType::PolicyCheckpoint, payload.as_bytes(), "t1")
             .unwrap();
         let deserialized = s
             .deserialize(TrustObjectType::PolicyCheckpoint, &serialized)
             .unwrap();
-        assert_eq!(deserialized, b"payload");
+        assert_eq!(deserialized, payload.into_bytes());
     }
 
     #[test]
@@ -1121,7 +1340,7 @@ mod tests {
     fn test_round_trip_all_types() {
         let mut s = CanonicalSerializer::with_all_schemas();
         for t in TrustObjectType::all() {
-            let payload = format!(r#"{{"type":"{}"}}"#, t.label());
+            let payload = sample_payload_for_type(*t);
             let result = s.round_trip_canonical(*t, payload.as_bytes(), "rt-test");
             assert!(result.is_ok(), "round-trip failed for {:?}", t);
         }
@@ -1130,15 +1349,36 @@ mod tests {
     #[test]
     fn test_round_trip_empty_payload() {
         let mut s = CanonicalSerializer::with_all_schemas();
-        let result = s.round_trip_canonical(TrustObjectType::OperatorReceipt, b"", "rt-empty");
+        let payload = sample_payload_for_type(TrustObjectType::OperatorReceipt);
+        let result =
+            s.round_trip_canonical(TrustObjectType::OperatorReceipt, payload.as_bytes(), "rt-empty");
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_round_trip_large_payload() {
         let mut s = CanonicalSerializer::with_all_schemas();
-        let large = vec![0x42u8; 10_000];
-        let result = s.round_trip_canonical(TrustObjectType::SessionTicket, &large, "rt-large");
+        let payload = serde_json::json!({
+            "session_id": "sess-large",
+            "client_id": "client-a",
+            "server_id": "server-b",
+            "issued_at": "2026-04-21T00:00:00Z",
+            "ttl": 300,
+            "metadata": "x".repeat(10_000),
+        });
+        let result = s.round_trip_canonical(
+            TrustObjectType::SessionTicket,
+            payload.to_string().as_bytes(),
+            "rt-large",
+        );
+        assert!(result.is_err(), "unknown large metadata field must be rejected");
+
+        let valid_payload = sample_payload_for_type(TrustObjectType::SessionTicket);
+        let result = s.round_trip_canonical(
+            TrustObjectType::SessionTicket,
+            valid_payload.as_bytes(),
+            "rt-large-valid",
+        );
         assert!(result.is_ok());
     }
 
@@ -1147,7 +1387,12 @@ mod tests {
     #[test]
     fn test_build_preimage_success() {
         let mut s = CanonicalSerializer::with_all_schemas();
-        let result = s.build_preimage(TrustObjectType::PolicyCheckpoint, b"test", "pi-test");
+        let payload = sample_payload_for_type(TrustObjectType::PolicyCheckpoint);
+        let result = s.build_preimage(
+            TrustObjectType::PolicyCheckpoint,
+            payload.as_bytes(),
+            "pi-test",
+        );
         assert!(result.is_ok());
         let pi = result.unwrap();
         assert_eq!(pi.version, 1);
@@ -1158,7 +1403,7 @@ mod tests {
     fn test_build_preimage_all_types() {
         let mut s = CanonicalSerializer::with_all_schemas();
         for t in TrustObjectType::all() {
-            let payload = format!(r#"{{"t":"{}"}}"#, t.label());
+            let payload = sample_payload_for_type(*t);
             let pi = s.build_preimage(*t, payload.as_bytes(), "pi-all").unwrap();
             assert_eq!(pi.domain_tag, t.domain_tag());
         }
@@ -1167,7 +1412,12 @@ mod tests {
     #[test]
     fn test_build_preimage_emits_event() {
         let mut s = CanonicalSerializer::with_all_schemas();
-        let _ = s.build_preimage(TrustObjectType::DelegationToken, b"token", "pi-evt");
+        let payload = sample_payload_for_type(TrustObjectType::DelegationToken);
+        let _ = s.build_preimage(
+            TrustObjectType::DelegationToken,
+            payload.as_bytes(),
+            "pi-evt",
+        );
         let preimage_events: Vec<_> = s
             .events()
             .iter()
@@ -1179,11 +1429,12 @@ mod tests {
     #[test]
     fn test_build_preimage_deterministic() {
         let mut s = CanonicalSerializer::with_all_schemas();
+        let payload = sample_payload_for_type(TrustObjectType::PolicyCheckpoint);
         let pi1 = s
-            .build_preimage(TrustObjectType::PolicyCheckpoint, b"same", "t1")
+            .build_preimage(TrustObjectType::PolicyCheckpoint, payload.as_bytes(), "t1")
             .unwrap();
         let pi2 = s
-            .build_preimage(TrustObjectType::PolicyCheckpoint, b"same", "t2")
+            .build_preimage(TrustObjectType::PolicyCheckpoint, payload.as_bytes(), "t2")
             .unwrap();
         assert_eq!(pi1.to_bytes(), pi2.to_bytes());
     }

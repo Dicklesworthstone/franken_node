@@ -8,6 +8,8 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -16,6 +18,7 @@ use sha2::{Digest, Sha256};
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 
 const MAX_REPLAY_ENTRIES: usize = 4_096;
+const REMOTE_CAP_REPLAY_STORE_ENV: &str = "FRANKEN_NODE_REMOTECAP_REPLAY_STORE";
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
@@ -78,6 +81,98 @@ impl ReplayTokenSet {
     #[must_use]
     fn ordered_ids(&self) -> &[String] {
         &self.insertion_order
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ReplayStoreBackend {
+    MemoryOnly,
+    Durable(DurableReplayStore),
+    Unavailable { detail: String },
+}
+
+impl ReplayStoreBackend {
+    fn from_env() -> Self {
+        let Some(root) = std::env::var_os(REMOTE_CAP_REPLAY_STORE_ENV) else {
+            return Self::MemoryOnly;
+        };
+        DurableReplayStore::open(PathBuf::from(root)).map_or_else(
+            |err| Self::Unavailable {
+                detail: err.to_string(),
+            },
+            Self::Durable,
+        )
+    }
+
+    fn contains_consumed(&self, replay_key: &str) -> Result<bool, RemoteCapError> {
+        match self {
+            Self::MemoryOnly => Ok(false),
+            Self::Durable(store) => store.contains_consumed(replay_key),
+            Self::Unavailable { detail } => Err(RemoteCapError::CryptoEngineUnavailable {
+                detail: detail.clone(),
+            }),
+        }
+    }
+
+    fn consume(&self, cap: &RemoteCap, replay_key: &str) -> Result<bool, RemoteCapError> {
+        match self {
+            Self::MemoryOnly => Ok(true),
+            Self::Durable(store) => store.consume(cap, replay_key),
+            Self::Unavailable { detail } => Err(RemoteCapError::CryptoEngineUnavailable {
+                detail: detail.clone(),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DurableReplayStore {
+    consumed_dir: PathBuf,
+}
+
+impl DurableReplayStore {
+    fn open(root: impl AsRef<Path>) -> Result<Self, RemoteCapError> {
+        let root = root.as_ref().to_path_buf();
+        let consumed_dir = root.join("consumed");
+        std::fs::create_dir_all(&consumed_dir)
+            .map_err(|source| replay_store_error("create", &consumed_dir, source))?;
+        sync_directory(&consumed_dir)?;
+        Ok(Self { consumed_dir })
+    }
+
+    fn contains_consumed(&self, replay_key: &str) -> Result<bool, RemoteCapError> {
+        let path = self.marker_path(replay_key);
+        match std::fs::metadata(&path) {
+            Ok(_) => Ok(true),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(replay_store_error("stat", &path, source)),
+        }
+    }
+
+    fn consume(&self, cap: &RemoteCap, replay_key: &str) -> Result<bool, RemoteCapError> {
+        let path = self.marker_path(replay_key);
+        let mut marker = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(marker) => marker,
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Ok(false);
+            }
+            Err(source) => return Err(replay_store_error("create marker", &path, source)),
+        };
+
+        marker
+            .write_all(durable_replay_record(cap, replay_key).as_bytes())
+            .and_then(|()| marker.sync_all())
+            .map_err(|source| replay_store_error("fsync marker", &path, source))?;
+        sync_directory(&self.consumed_dir)?;
+        Ok(true)
+    }
+
+    fn marker_path(&self, replay_key: &str) -> PathBuf {
+        self.consumed_dir.join(format!("{replay_key}.seen"))
     }
 }
 
