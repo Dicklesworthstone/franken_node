@@ -352,6 +352,211 @@ impl ExtensionArtifact {
 }
 
 // ---------------------------------------------------------------------------
+// Production artifact construction
+// ---------------------------------------------------------------------------
+
+/// Caller-supplied provenance material for building an extension artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactProvenance {
+    /// Publisher identity that signed the artifact metadata.
+    pub publisher: String,
+    /// Digest of the source bundle used to build the artifact.
+    pub source_digest: String,
+    /// Deterministic signature binding identity, source, and capabilities.
+    pub signature: String,
+}
+
+impl ArtifactProvenance {
+    pub fn new(
+        publisher: impl Into<String>,
+        source_digest: impl Into<String>,
+        signature: impl Into<String>,
+    ) -> Self {
+        Self {
+            publisher: publisher.into(),
+            source_digest: source_digest.into(),
+            signature: signature.into(),
+        }
+    }
+}
+
+/// Explicit production input for constructing a capability-carrying artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtensionArtifactInput {
+    pub identity: ArtifactIdentity,
+    pub capabilities: Vec<CapabilityRequirement>,
+    pub provenance: ArtifactProvenance,
+}
+
+impl ExtensionArtifactInput {
+    pub fn new(
+        identity: ArtifactIdentity,
+        capabilities: Vec<CapabilityRequirement>,
+        provenance: ArtifactProvenance,
+    ) -> Self {
+        Self {
+            identity,
+            capabilities,
+            provenance,
+        }
+    }
+}
+
+fn update_len_prefixed(hasher: &mut sha2::Sha256, value: &str) {
+    use sha2::Digest as _;
+
+    hasher.update(len_to_u64(value.len()).to_le_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn update_requirement_preimage(hasher: &mut sha2::Sha256, req: &CapabilityRequirement) {
+    use sha2::Digest as _;
+
+    update_len_prefixed(hasher, &req.capability);
+    update_len_prefixed(hasher, &req.justification);
+    hasher.update([req.mandatory as u8]);
+}
+
+fn canonical_capability_map(
+    artifact_id: &str,
+    capabilities: &[CapabilityRequirement],
+) -> Result<BTreeMap<String, CapabilityRequirement>, ArtifactError> {
+    if capabilities.is_empty() {
+        return Err(ArtifactError::EmptyCapabilities {
+            artifact_id: artifact_id.to_string(),
+        });
+    }
+
+    let mut requirements = BTreeMap::new();
+    for req in capabilities {
+        if requirements
+            .insert(req.capability.clone(), req.clone())
+            .is_some()
+        {
+            return Err(ArtifactError::InvalidEnvelope {
+                artifact_id: artifact_id.to_string(),
+                detail: format!("duplicate capability requirement: {}", req.capability),
+            });
+        }
+    }
+
+    Ok(requirements)
+}
+
+fn validate_lower_hex_digest(value: &str, field_name: &str) -> Option<String> {
+    let Some(hex_value) = value.strip_prefix("sha256:") else {
+        return Some(format!("{field_name} must use sha256: prefix"));
+    };
+    if hex_value.len() != 64 {
+        return Some(format!("{field_name} must contain 64 lowercase hex bytes"));
+    }
+    if !hex_value
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Some(format!("{field_name} must be lowercase hex"));
+    }
+    None
+}
+
+fn validate_trimmed_nonempty(value: &str, field_name: &str) -> Option<String> {
+    if value.trim().is_empty() {
+        return Some(format!("{field_name} is empty"));
+    }
+    if value != value.trim() {
+        return Some(format!("{field_name} has leading or trailing whitespace"));
+    }
+    None
+}
+
+/// Compute the deterministic provenance signature expected by artifact construction.
+pub fn compute_artifact_provenance_signature(
+    identity: &ArtifactIdentity,
+    capabilities: &[CapabilityRequirement],
+    publisher: &str,
+    source_digest: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"capability_artifact_provenance_v1:");
+    let identity_repr = identity.canonical_repr();
+    update_len_prefixed(&mut hasher, &identity_repr);
+    update_len_prefixed(&mut hasher, publisher);
+    update_len_prefixed(&mut hasher, source_digest);
+
+    let capability_map = canonical_capability_map(&identity.artifact_id, capabilities)
+        .unwrap_or_else(|_| BTreeMap::new());
+    hasher.update(len_to_u64(capability_map.len()).to_le_bytes());
+    for (capability, req) in capability_map {
+        update_len_prefixed(&mut hasher, &capability);
+        update_requirement_preimage(&mut hasher, &req);
+    }
+
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+/// Build a capability-carrying extension artifact from caller-supplied metadata.
+pub fn build_extension_artifact(
+    input: ExtensionArtifactInput,
+) -> Result<ExtensionArtifact, ArtifactError> {
+    let artifact_id = input.identity.artifact_id.clone();
+    if let Some(detail) = validate_trimmed_nonempty(&input.provenance.publisher, "publisher") {
+        return Err(ArtifactError::InvalidEnvelope {
+            artifact_id,
+            detail,
+        });
+    }
+    if let Some(detail) =
+        validate_trimmed_nonempty(&input.provenance.source_digest, "source_digest")
+    {
+        return Err(ArtifactError::InvalidEnvelope {
+            artifact_id,
+            detail,
+        });
+    }
+    if let Some(detail) =
+        validate_lower_hex_digest(&input.provenance.source_digest, "source_digest")
+    {
+        return Err(ArtifactError::InvalidEnvelope {
+            artifact_id,
+            detail,
+        });
+    }
+    if let Some(detail) = validate_trimmed_nonempty(&input.provenance.signature, "signature") {
+        return Err(ArtifactError::InvalidEnvelope {
+            artifact_id,
+            detail,
+        });
+    }
+
+    let requirements = canonical_capability_map(&artifact_id, &input.capabilities)?;
+    let expected_signature = compute_artifact_provenance_signature(
+        &input.identity,
+        &input.capabilities,
+        &input.provenance.publisher,
+        &input.provenance.source_digest,
+    );
+    if !crate::security::constant_time::ct_eq(&input.provenance.signature, &expected_signature) {
+        return Err(ArtifactError::InvalidEnvelope {
+            artifact_id,
+            detail: "artifact provenance signature mismatch".to_string(),
+        });
+    }
+
+    let mut envelope = CapabilityEnvelope::new();
+    for req in requirements.into_values() {
+        envelope.add_requirement(req);
+    }
+    envelope.bind_to(&input.identity);
+
+    let artifact = ExtensionArtifact::new(input.identity, Some(envelope));
+    let mut gate = AdmissionGate::new();
+    gate.admit(&artifact, &artifact.identity.created_at)?;
+    Ok(artifact)
+}
+
+// ---------------------------------------------------------------------------
 // ArtifactError
 // ---------------------------------------------------------------------------
 
@@ -1222,6 +1427,7 @@ impl AdmissionReport {
 // ---------------------------------------------------------------------------
 
 /// Build a well-formed extension artifact for testing/demonstration.
+#[cfg(any(test, feature = "test-support"))]
 pub fn build_test_artifact(artifact_id: &str, capabilities: &[(&str, &str)]) -> ExtensionArtifact {
     let identity = ArtifactIdentity::new(artifact_id, "test-author", "2026-02-21T00:00:00Z");
     let mut envelope = CapabilityEnvelope::new();
