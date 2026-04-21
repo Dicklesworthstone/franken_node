@@ -16,6 +16,8 @@ use crate::security::constant_time;
 
 pub const EVD_QUAR_CTRL_001: &str = "EVD-QUAR-CTRL-001";
 pub const EVD_QUAR_CTRL_002: &str = "EVD-QUAR-CTRL-002";
+pub const QUARANTINE_POLICY_VERSION: &str = "quarantine-threshold-policy-v1";
+pub const DEFAULT_QUARANTINE_SCOPE: &str = "global";
 
 /// Maximum control decisions to prevent memory exhaustion attacks.
 const MAX_DECISIONS: usize = 1024;
@@ -42,6 +44,10 @@ fn update_len_prefixed_mac(mac: &mut Hmac<Sha256>, field: &[u8]) {
     mac.update(field);
 }
 
+fn update_f64_mac(mac: &mut Hmac<Sha256>, value: f64) {
+    mac.update(&value.to_le_bytes());
+}
+
 #[derive(Debug, Clone, thiserror::Error, PartialEq)]
 pub enum QuarantineControllerError {
     #[error("threshold `{name}` must be in [0.0, 1.0], got {value}")]
@@ -50,6 +56,8 @@ pub enum QuarantineControllerError {
     InvalidThresholdOrder,
     #[error("signing key must not be empty")]
     InvalidSigningKey,
+    #[error("posterior {posterior} did not require quarantine control action")]
+    NoControlAction { posterior: f64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +129,12 @@ pub struct SignedEvidenceEntry {
     pub principal_id: String,
     pub action: ControlAction,
     pub posterior: f64,
+    pub threshold: f64,
+    pub policy_version: String,
+    pub policy_hash: String,
+    pub evidence_count: u64,
+    pub evidence_hash: String,
+    pub scope: String,
     pub trace_id: String,
     pub signature: String,
 }
@@ -131,6 +145,11 @@ pub struct ControlDecision {
     pub action: ControlAction,
     pub posterior: f64,
     pub threshold: f64,
+    pub policy_version: String,
+    pub policy_hash: String,
+    pub evidence_count: u64,
+    pub evidence_hash: String,
+    pub scope: String,
     pub signed_evidence: SignedEvidenceEntry,
 }
 
@@ -162,6 +181,18 @@ impl QuarantineController {
     }
 
     #[must_use]
+    pub fn policy_hash(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"quarantine_threshold_policy_v1:");
+        update_len_prefixed_hash(&mut hasher, QUARANTINE_POLICY_VERSION.as_bytes());
+        hasher.update(self.policy.throttle.to_le_bytes());
+        hasher.update(self.policy.isolate.to_le_bytes());
+        hasher.update(self.policy.quarantine.to_le_bytes());
+        hasher.update(self.policy.revoke.to_le_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
+    #[must_use]
     pub fn action_for_posterior(&self, posterior: f64) -> Option<ControlAction> {
         if !posterior.is_finite() || posterior >= self.policy.revoke {
             Some(ControlAction::Revoke)
@@ -183,6 +214,26 @@ impl QuarantineController {
         posterior: f64,
         trace_id: &str,
     ) -> Option<ControlDecision> {
+        self.decide_for_posterior_with_context(
+            principal_id,
+            posterior,
+            0,
+            "sha256:untracked",
+            DEFAULT_QUARANTINE_SCOPE,
+            trace_id,
+        )
+    }
+
+    #[must_use]
+    pub fn decide_for_posterior_with_context(
+        &self,
+        principal_id: &str,
+        posterior: f64,
+        evidence_count: u64,
+        evidence_hash: &str,
+        scope: &str,
+        trace_id: &str,
+    ) -> Option<ControlDecision> {
         let action = self.action_for_posterior(posterior)?;
         let threshold = match action {
             ControlAction::Throttle => self.policy.throttle,
@@ -190,21 +241,53 @@ impl QuarantineController {
             ControlAction::Quarantine => self.policy.quarantine,
             ControlAction::Revoke => self.policy.revoke,
         };
-        let signed_evidence = SignedEvidenceEntry {
+        let policy_hash = self.policy_hash();
+        let policy_version = QUARANTINE_POLICY_VERSION.to_string();
+        let mut signed_evidence = SignedEvidenceEntry {
             event_code: EVD_QUAR_CTRL_001.to_string(),
             principal_id: principal_id.to_string(),
             action,
             posterior,
+            threshold,
+            policy_version: policy_version.clone(),
+            policy_hash: policy_hash.clone(),
+            evidence_count,
+            evidence_hash: evidence_hash.to_string(),
+            scope: scope.to_string(),
             trace_id: trace_id.to_string(),
-            signature: self.sign_evidence(principal_id, action, posterior, trace_id),
+            signature: String::new(),
         };
+        signed_evidence.signature = self.sign_evidence(&signed_evidence);
 
         Some(ControlDecision {
             principal_id: principal_id.to_string(),
             action,
             posterior,
             threshold,
+            policy_version,
+            policy_hash,
+            evidence_count,
+            evidence_hash: evidence_hash.to_string(),
+            scope: scope.to_string(),
             signed_evidence,
+        })
+    }
+
+    pub fn evaluate(
+        &self,
+        posterior: &AdversaryPosterior,
+    ) -> Result<SignedEvidenceEntry, QuarantineControllerError> {
+        self.decide_for_posterior_with_context(
+            &posterior.principal_id,
+            posterior.posterior,
+            posterior.evidence_count,
+            &posterior.evidence_hash,
+            DEFAULT_QUARANTINE_SCOPE,
+            &posterior.last_trace_id,
+        )
+        .map(|decision| decision.signed_evidence)
+        .ok_or(QuarantineControllerError::NoControlAction {
+            posterior: posterior.posterior,
         })
     }
 
@@ -214,9 +297,12 @@ impl QuarantineController {
 
         // Bounded collection to prevent memory exhaustion attacks
         for posterior in posteriors {
-            if let Some(decision) = self.decide_for_posterior(
+            if let Some(decision) = self.decide_for_posterior_with_context(
                 &posterior.principal_id,
                 posterior.posterior,
+                posterior.evidence_count,
+                &posterior.evidence_hash,
+                DEFAULT_QUARANTINE_SCOPE,
                 &posterior.last_trace_id,
             ) {
                 push_bounded(&mut decisions, decision, MAX_DECISIONS);
@@ -240,34 +326,69 @@ impl QuarantineController {
         if entry.event_code != EVD_QUAR_CTRL_001 {
             return false;
         }
-        let expected = self.sign_evidence(
-            &entry.principal_id,
-            entry.action,
-            entry.posterior,
-            &entry.trace_id,
-        );
+        if entry.policy_version != QUARANTINE_POLICY_VERSION {
+            return false;
+        }
+        if !constant_time::ct_eq(&entry.policy_hash, &self.policy_hash()) {
+            return false;
+        }
+        if self.action_for_posterior(entry.posterior) != Some(entry.action) {
+            return false;
+        }
+        let expected_threshold = match entry.action {
+            ControlAction::Throttle => self.policy.throttle,
+            ControlAction::Isolate => self.policy.isolate,
+            ControlAction::Quarantine => self.policy.quarantine,
+            ControlAction::Revoke => self.policy.revoke,
+        };
+        if entry.threshold.to_bits() != expected_threshold.to_bits() {
+            return false;
+        }
+
+        let expected = self.sign_evidence(entry);
         constant_time::ct_eq(&entry.signature, &expected)
     }
 
-    fn sign_evidence(
-        &self,
-        principal_id: &str,
-        action: ControlAction,
-        posterior: f64,
-        trace_id: &str,
-    ) -> String {
+    #[must_use]
+    pub fn verify_decision(&self, decision: &ControlDecision) -> bool {
+        if decision.principal_id != decision.signed_evidence.principal_id
+            || decision.action != decision.signed_evidence.action
+            || decision.posterior.to_bits() != decision.signed_evidence.posterior.to_bits()
+            || decision.threshold.to_bits() != decision.signed_evidence.threshold.to_bits()
+            || decision.policy_version != decision.signed_evidence.policy_version
+            || decision.policy_hash != decision.signed_evidence.policy_hash
+            || decision.evidence_count != decision.signed_evidence.evidence_count
+            || decision.evidence_hash != decision.signed_evidence.evidence_hash
+            || decision.scope != decision.signed_evidence.scope
+        {
+            return false;
+        }
+        self.verify_signature(&decision.signed_evidence)
+    }
+
+    fn sign_evidence(&self, entry: &SignedEvidenceEntry) -> String {
         let mut mac = Hmac::<Sha256>::new_from_slice(self.signing_key.as_bytes())
             .expect("HMAC accepts arbitrary signing key lengths");
-        let posterior_bytes = posterior.to_le_bytes();
-        mac.update(b"quarantine_evidence_v1:");
+        mac.update(b"quarantine_control_decision_v2:");
         update_len_prefixed_mac(&mut mac, EVD_QUAR_CTRL_001.as_bytes());
-        update_len_prefixed_mac(&mut mac, principal_id.as_bytes());
-        update_len_prefixed_mac(&mut mac, action.as_str().as_bytes());
-        update_len_prefixed_mac(&mut mac, &posterior_bytes);
-        update_len_prefixed_mac(&mut mac, trace_id.as_bytes());
+        update_len_prefixed_mac(&mut mac, entry.principal_id.as_bytes());
+        update_len_prefixed_mac(&mut mac, entry.action.as_str().as_bytes());
+        update_f64_mac(&mut mac, entry.posterior);
+        update_f64_mac(&mut mac, entry.threshold);
+        update_len_prefixed_mac(&mut mac, entry.policy_version.as_bytes());
+        update_len_prefixed_mac(&mut mac, entry.policy_hash.as_bytes());
+        mac.update(&entry.evidence_count.to_le_bytes());
+        update_len_prefixed_mac(&mut mac, entry.evidence_hash.as_bytes());
+        update_len_prefixed_mac(&mut mac, entry.scope.as_bytes());
+        update_len_prefixed_mac(&mut mac, entry.trace_id.as_bytes());
         let digest = mac.finalize().into_bytes();
         format!("sha256:{}", hex::encode(digest))
     }
+}
+
+fn update_len_prefixed_hash(hasher: &mut Sha256, field: &[u8]) {
+    hasher.update(len_to_u64(field.len()).to_le_bytes());
+    hasher.update(field);
 }
 
 #[cfg(test)]
