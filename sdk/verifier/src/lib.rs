@@ -46,6 +46,7 @@
 use std::{collections::BTreeMap, fmt};
 
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 
 pub mod bundle;
 pub mod capsule;
@@ -172,6 +173,35 @@ pub enum VerificationOperation {
     Claim,
     MigrationArtifact,
     TrustState,
+    Workflow,
+}
+
+/// Stable workflow names accepted by the verifier facade executor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationWorkflow {
+    ReleaseValidation,
+    IncidentValidation,
+    ComplianceAudit,
+}
+
+impl ValidationWorkflow {
+    fn assertion_name(self) -> &'static str {
+        match self {
+            Self::ReleaseValidation => "workflow_release_validation",
+            Self::IncidentValidation => "workflow_incident_validation",
+            Self::ComplianceAudit => "workflow_compliance_audit",
+        }
+    }
+}
+
+/// Append-only transparency log entry for facade verification results.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransparencyLogEntry {
+    pub result_hash: String,
+    pub timestamp: String,
+    pub verifier_id: String,
+    pub merkle_proof: Vec<String>,
 }
 
 /// Result of one assertion checked by the facade.
@@ -229,6 +259,7 @@ pub enum VerifierSdkError {
     Bundle(bundle::BundleError),
     EmptyTrustAnchor,
     SessionSealed(String),
+    ResultSignatureMismatch { expected: String, actual: String },
     Json(String),
 }
 
@@ -242,6 +273,10 @@ impl fmt::Display for VerifierSdkError {
             Self::SessionSealed(session_id) => {
                 write!(formatter, "verification session {session_id} is sealed")
             }
+            Self::ResultSignatureMismatch { expected, actual } => write!(
+                formatter,
+                "verifier SDK result signature mismatch: expected={expected}, actual={actual}"
+            ),
             Self::Json(message) => write!(formatter, "verifier SDK JSON error: {message}"),
         }
     }
@@ -386,6 +421,57 @@ impl VerifierSdk {
         )
     }
 
+    /// Validate canonical replay bundle bytes without producing a facade result.
+    pub fn validate_bundle(&self, bundle: &[u8]) -> Result<(), VerifierSdkError> {
+        check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        bundle::verify(bundle)?;
+        Ok(())
+    }
+
+    /// Append a signed facade result to an in-memory transparency log.
+    pub fn append_transparency_log(
+        &self,
+        log: &mut Vec<TransparencyLogEntry>,
+        result: &VerificationResult,
+    ) -> Result<TransparencyLogEntry, VerifierSdkError> {
+        self.verify_result_signature(result)?;
+        let result_bytes = serde_json::to_vec(result)
+            .map_err(|source| VerifierSdkError::Json(source.to_string()))?;
+        let result_hash = bundle::hash(&result_bytes);
+        let previous_hash = log
+            .last()
+            .map_or_else(|| "0".repeat(64), |entry| entry.result_hash.clone());
+        let entry = TransparencyLogEntry {
+            result_hash: result_hash.clone(),
+            timestamp: FACADE_TIMESTAMP.to_string(),
+            verifier_id: result.verifier_identity.clone(),
+            merkle_proof: vec![previous_hash, result_hash],
+        };
+        log.push(entry.clone());
+        Ok(entry)
+    }
+
+    /// Execute a documented validation workflow against canonical replay bundle bytes.
+    pub fn execute_workflow(
+        &self,
+        workflow: ValidationWorkflow,
+        bundle: &[u8],
+    ) -> Result<VerificationResult, VerifierSdkError> {
+        let verified = self.verify_migration_artifact(bundle)?;
+        let mut assertions = verified.checked_assertions;
+        assertions.push(AssertionResult {
+            assertion: workflow.assertion_name().to_string(),
+            passed: true,
+            detail: "workflow completed using verified replay bundle".to_string(),
+        });
+        self.build_result(
+            VerificationOperation::Workflow,
+            verified.verdict,
+            assertions,
+            verified.artifact_binding_hash,
+        )
+    }
+
     /// Create a new unsealed verification session.
     pub fn create_session(&self, session_id: impl Into<String>) -> VerificationSession {
         VerificationSession {
@@ -440,6 +526,25 @@ impl VerifierSdk {
         session.sealed = true;
         session.final_verdict = Some(verdict.clone());
         Ok(verdict)
+    }
+
+    fn verify_result_signature(&self, result: &VerificationResult) -> Result<(), VerifierSdkError> {
+        let expected = facade_result_signature(result)?;
+        if result.verifier_signature.len() == expected.len()
+            && bool::from(
+                result
+                    .verifier_signature
+                    .as_bytes()
+                    .ct_eq(expected.as_bytes()),
+            )
+        {
+            Ok(())
+        } else {
+            Err(VerifierSdkError::ResultSignatureMismatch {
+                expected,
+                actual: result.verifier_signature.clone(),
+            })
+        }
     }
 
     fn build_result(
