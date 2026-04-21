@@ -1527,6 +1527,7 @@ pub fn to_canonical_json<T: Serialize>(value: &T) -> Result<String, TrustCardErr
     Ok(serde_json::to_string(&canonical)?)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn fixture_evidence_refs() -> Vec<VerifiedEvidenceRef> {
     use super::certification::EvidenceType;
     vec![
@@ -1548,6 +1549,7 @@ fn fixture_evidence_refs() -> Vec<VerifiedEvidenceRef> {
 /// Deterministic trust-card fixture registry for tests and seeded fixture state.
 ///
 /// This helper must remain unreachable from operator-facing trust flows.
+#[cfg(any(test, feature = "test-support"))]
 pub fn fixture_registry(now_secs: u64) -> Result<TrustCardRegistry, TrustCardError> {
     let mut registry = TrustCardRegistry::default();
     let base_trace = "trace-fixture-registry";
