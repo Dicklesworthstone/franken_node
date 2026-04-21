@@ -438,6 +438,60 @@ fn write_pipeline_lockfile(workspace: &Path) {
     .expect("write package lockfile");
 }
 
+#[cfg(unix)]
+fn runtime_bin_path(name: &str) -> PathBuf {
+    let path = std::env::var_os("PATH").expect("PATH must be set for runtime discovery");
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| panic!("required runtime `{name}` missing from PATH"))
+}
+
+#[cfg(unix)]
+fn runtime_path_env(required: &[&str]) -> String {
+    let mut directories = Vec::new();
+    for name in required {
+        let parent = runtime_bin_path(name)
+            .parent()
+            .expect("runtime parent dir")
+            .to_path_buf();
+        if !directories.iter().any(|existing: &PathBuf| existing == &parent) {
+            directories.push(parent);
+        }
+    }
+    std::env::join_paths(directories)
+        .expect("join runtime PATH")
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn write_runtime_probe_script(workspace: &Path, entrypoint: &str, marker: &str) {
+    fs::write(
+        workspace.join(entrypoint),
+        format!(
+            r#"const path = require("path");
+console.log(JSON.stringify({{
+  marker: "{marker}",
+  runtime: path.basename(process.argv0),
+  release: process.release?.name ?? null,
+  policy: process.env.FRANKEN_NODE_REQUESTED_POLICY_MODE ?? null
+}}));
+"#
+        ),
+    )
+    .expect("write runtime probe script");
+}
+
+fn parse_captured_runtime_probe(run_payload: &Value, context: &str) -> Value {
+    let stdout = run_payload["dispatch"]["captured_output"]["stdout"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{context} should capture runtime stdout"));
+    let trimmed = stdout.trim();
+    serde_json::from_str(trimmed).unwrap_or_else(|err| {
+        panic!("{context} should capture a runtime probe json line: {err}\nstdout:\n{trimmed}")
+    })
+}
+
 fn collect_workspace_entries(root: &Path, current: &Path, entries: &mut Vec<String>) {
     let mut children = fs::read_dir(current)
         .unwrap_or_else(|err| panic!("read_dir {}: {err}", current.display()))
@@ -683,15 +737,14 @@ fn run_respects_configured_preferred_runtime_over_bun_heuristics() {
         serde_json::to_string_pretty(&serde_json::json!({
             "name": "trust-gate-e2e",
             "version": "1.0.0",
-            "main": "index.ts",
+            "main": "index.js",
             "packageManager": "bun@1.2.0",
             "dependencies": {}
         }))
         .expect("manifest"),
     )
     .expect("write package.json");
-    fs::write(workspace.path().join("index.ts"), "console.log('hello');\n")
-        .expect("write index.ts");
+    write_runtime_probe_script(workspace.path(), "index.js", "preferred-runtime");
     fs::write(workspace.path().join("bun.lockb"), "").expect("write bun.lockb");
     fs::write(
         workspace.path().join("franken_node.toml"),
@@ -702,15 +755,13 @@ preferred = "node"
     )
     .expect("write config");
 
-    let runtime_dir = workspace.path().join("fake-bin");
-    write_fake_runtime(&runtime_dir, "node", "node");
-    write_fake_runtime(&runtime_dir, "bun", "bun");
+    let runtime_path = runtime_path_env(&["node", "bun"]);
 
     let output = run_cli_in_workspace_with_env(
         workspace.path(),
-        &["run", "--policy", "balanced", "."],
+        &["run", "--policy", "balanced", "--json", "."],
         &[
-            ("PATH", runtime_dir.to_str().expect("utf8 path")),
+            ("PATH", runtime_path.as_str()),
             ("FRANKEN_ENGINE_BIN", ""),
             ("FRANKEN_NODE_ENGINE_BINARY_PATH", ""),
         ],
@@ -721,10 +772,17 @@ preferred = "node"
         "run should succeed with configured preferred runtime: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("runtime=node"));
-    assert!(!stdout.contains("runtime=bun"));
-    assert!(stdout.contains("policy=balanced"));
+    let preflight_payload = parse_json_stderr(&output, "preferred runtime preflight");
+    let run_payload = parse_json_stdout(&output, "preferred runtime completion");
+    let runtime_probe =
+        parse_captured_runtime_probe(&run_payload, "preferred runtime captured output");
+
+    assert_eq!(preflight_payload["verdict"]["status"], "passed");
+    assert_eq!(run_payload["dispatch"]["runtime"], "node");
+    assert_eq!(runtime_probe["marker"], "preferred-runtime");
+    assert_eq!(runtime_probe["runtime"], "node");
+    assert_eq!(runtime_probe["release"], "node");
+    assert_eq!(runtime_probe["policy"], "balanced");
 }
 
 #[test]
@@ -1405,6 +1463,7 @@ fn full_init_to_run_pipeline_empty_registry_warns_on_untracked_dependency_json()
     let started = Instant::now();
     let workspace = tempfile::tempdir().expect("tempdir");
     write_run_package_manifest(workspace.path(), &[("left-pad", "^1.3.0")]);
+    write_runtime_probe_script(workspace.path(), "index.js", "empty-registry");
 
     log_pipeline_step(
         1,
@@ -1435,9 +1494,7 @@ fn full_init_to_run_pipeline_empty_registry_warns_on_untracked_dependency_json()
         "run_with_empty_registry",
         "run succeeds and surfaces an untracked dependency warning in JSON",
     );
-    let runtime_dir = workspace.path().join("fake-bin");
-    write_fake_runtime(&runtime_dir, "node", "node");
-    let runtime_path = runtime_dir.to_str().expect("utf8 path").to_string();
+    let runtime_path = runtime_path_env(&["node"]);
     let run_args = [
         "run",
         "--policy",
@@ -1481,12 +1538,12 @@ fn full_init_to_run_pipeline_empty_registry_warns_on_untracked_dependency_json()
     assert2::assert!(preflight_payload["verdict"]["status"] == "passed");
     assert2::assert!(run_payload["success"].as_bool() == Some(true));
     assert2::assert!(run_payload["dispatch"]["runtime"] == "node");
-    assert2::assert!(
-        run_payload["dispatch"]["captured_output"]["stdout"]
-            .as_str()
-            .expect("captured stdout")
-            .contains("runtime=node")
-    );
+    let runtime_probe =
+        parse_captured_runtime_probe(&run_payload, "empty registry captured output");
+    assert2::assert!(runtime_probe["marker"] == "empty-registry");
+    assert2::assert!(runtime_probe["runtime"] == "node");
+    assert2::assert!(runtime_probe["release"] == "node");
+    assert2::assert!(runtime_probe["policy"] == "balanced");
     assert2::assert!(warnings.len() == 1);
     assert2::assert!(results.len() == 1);
     assert2::assert!(results[0]["status"] == "untracked");
@@ -1511,6 +1568,7 @@ fn full_init_to_run_pipeline_with_trust_data_reports_trusted_extensions_json() {
         &[("@types/node", "^24.9.2")],
     );
     write_pipeline_lockfile(workspace.path());
+    write_runtime_probe_script(workspace.path(), "index.js", "trusted-registry");
 
     log_pipeline_step(
         1,
@@ -1535,9 +1593,7 @@ fn full_init_to_run_pipeline_with_trust_data_reports_trusted_extensions_json() {
         "run_with_scanned_registry",
         "run succeeds and reports trusted per-extension JSON results",
     );
-    let runtime_dir = workspace.path().join("fake-bin");
-    write_fake_runtime(&runtime_dir, "node", "node");
-    let runtime_path = runtime_dir.to_str().expect("utf8 path").to_string();
+    let runtime_path = runtime_path_env(&["node"]);
     let run_args = [
         "run",
         "--policy",
@@ -1585,6 +1641,12 @@ fn full_init_to_run_pipeline_with_trust_data_reports_trusted_extensions_json() {
             .expect("warnings array")
             .is_empty()
     );
+    let runtime_probe =
+        parse_captured_runtime_probe(&run_payload, "trusted registry captured output");
+    assert2::assert!(runtime_probe["marker"] == "trusted-registry");
+    assert2::assert!(runtime_probe["runtime"] == "node");
+    assert2::assert!(runtime_probe["release"] == "node");
+    assert2::assert!(runtime_probe["policy"] == "balanced");
     assert2::assert!(results.len() == 3);
     assert2::assert!(results.iter().all(|result| result["status"] == "trusted"));
     assert2::assert!(
