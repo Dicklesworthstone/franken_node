@@ -485,7 +485,38 @@ const _: () = {
 /// Lab/test mode wrapper that spills every entry to a JSONL file.
 pub struct LabSpillMode {
     ledger: EvidenceLedger,
-    spill_writer: Box<dyn Write + Send>,
+    spill_writer: SpillWriter,
+}
+
+enum SpillWriter {
+    Generic(Box<dyn Write + Send>),
+    File(std::fs::File),
+}
+
+impl SpillWriter {
+    fn append_json_line(&mut self, json_line: &str) -> Result<(), LedgerError> {
+        match self {
+            Self::Generic(writer) => {
+                writeln!(writer, "{json_line}").map_err(|e| LedgerError::SpillError {
+                    reason: format!("write: {e}"),
+                })?;
+                writer.flush().map_err(|e| LedgerError::SpillError {
+                    reason: format!("flush: {e}"),
+                })
+            }
+            Self::File(file) => {
+                writeln!(file, "{json_line}").map_err(|e| LedgerError::SpillError {
+                    reason: format!("write: {e}"),
+                })?;
+                file.flush().map_err(|e| LedgerError::SpillError {
+                    reason: format!("flush: {e}"),
+                })?;
+                file.sync_all().map_err(|e| LedgerError::SpillError {
+                    reason: format!("sync: {e}"),
+                })
+            }
+        }
+    }
 }
 
 impl LabSpillMode {
@@ -493,7 +524,7 @@ impl LabSpillMode {
     pub fn new(capacity: LedgerCapacity, writer: Box<dyn Write + Send>) -> Self {
         Self {
             ledger: EvidenceLedger::new(capacity),
-            spill_writer: writer,
+            spill_writer: SpillWriter::Generic(writer),
         }
     }
 
@@ -509,7 +540,10 @@ impl LabSpillMode {
             .map_err(|e| LedgerError::SpillError {
                 reason: format!("failed to open: {e}"),
             })?;
-        Ok(Self::new(capacity, Box::new(file)))
+        Ok(Self {
+            ledger: EvidenceLedger::new(capacity),
+            spill_writer: SpillWriter::File(file),
+        })
     }
 
     /// Append an entry, also writing it to the spill file.
@@ -519,14 +553,7 @@ impl LabSpillMode {
         })?;
         let entry_size = self.ledger.validate_append(&entry)?;
 
-        writeln!(self.spill_writer, "{json_line}").map_err(|e| LedgerError::SpillError {
-            reason: format!("write: {e}"),
-        })?;
-        self.spill_writer
-            .flush()
-            .map_err(|e| LedgerError::SpillError {
-                reason: format!("flush: {e}"),
-            })?;
+        self.spill_writer.append_json_line(&json_line)?;
         let id = self.ledger.append_prevalidated(entry, entry_size);
 
         eprintln!("{}", format_ledger_spill_event(id, json_line.len()));
@@ -1206,6 +1233,32 @@ mod tests {
             let parsed: EvidenceEntry = serde_json::from_str(line).expect("should succeed");
             assert_eq!(parsed.schema_version, "1.0");
         }
+    }
+
+    #[test]
+    fn lab_spill_with_file_persists_acknowledged_entry_after_forced_drop() {
+        let dir = tempfile::tempdir().expect("should succeed");
+        let spill_path = dir.path().join("durable_evidence_spill.jsonl");
+
+        let acknowledged_id = {
+            let mut spill = LabSpillMode::with_file(LedgerCapacity::new(100, 100_000), &spill_path)
+                .expect("spill file should open");
+            let id = spill
+                .append(make_entry("DEC-DURABLE", 7))
+                .expect("file-backed spill append should sync before ack");
+            assert_eq!(spill.len(), 1);
+            drop(spill);
+            id
+        };
+
+        let content = std::fs::read_to_string(&spill_path).expect("synced spill file should exist");
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(acknowledged_id, EntryId(1));
+        assert_eq!(lines.len(), 1);
+
+        let parsed: EvidenceEntry = serde_json::from_str(lines[0]).expect("spill line should parse");
+        assert_eq!(parsed.decision_id, "DEC-DURABLE");
+        assert_eq!(parsed.epoch_id, 7);
     }
 
     #[test]
