@@ -29,6 +29,7 @@ const DEFAULT_POLICY_VERSION: &str = "0.1.0";
 const DEFAULT_CREATED_AT: &str = "1970-01-01T00:00:00.000000Z";
 pub const INCIDENT_EVIDENCE_SCHEMA: &str = "franken-node/incident-evidence-source/v1";
 const REPLAY_BUNDLE_SIGNATURE_TRUST_SCOPE: &str = "incident_replay_bundle";
+const REPLAY_BUNDLE_SIGNATURE_PAYLOAD_DOMAIN: &[u8] = b"replay_bundle_sig_v1:";
 
 /// RAII guard that orphans a temp file on drop (unless defused after rename).
 #[must_use]
@@ -866,7 +867,7 @@ pub fn verify_replay_bundle_signature(
 
     let payload = replay_bundle_signature_payload(bundle);
     let payload_sha256 = hex::encode(Sha256::digest(&payload));
-    if signature.signed_payload_sha256 != payload_sha256 {
+    if !constant_time::ct_eq(&signature.signed_payload_sha256, &payload_sha256) {
         return Err(ReplayBundleError::SignaturePayloadHashMismatch);
     }
 
@@ -1292,7 +1293,19 @@ fn compute_integrity_hash(bundle: &ReplayBundle) -> Result<String, ReplayBundleE
 }
 
 fn replay_bundle_signature_payload(bundle: &ReplayBundle) -> Vec<u8> {
-    bundle.integrity_hash.as_bytes().to_vec()
+    let integrity_hash = bundle.integrity_hash.as_bytes();
+    let mut payload = Vec::with_capacity(
+        REPLAY_BUNDLE_SIGNATURE_PAYLOAD_DOMAIN
+            .len()
+            .saturating_add(std::mem::size_of::<u64>())
+            .saturating_add(integrity_hash.len()),
+    );
+    payload.extend_from_slice(REPLAY_BUNDLE_SIGNATURE_PAYLOAD_DOMAIN);
+    payload.extend_from_slice(
+        &(u64::try_from(integrity_hash.len()).unwrap_or(u64::MAX)).to_le_bytes(),
+    );
+    payload.extend_from_slice(integrity_hash);
+    payload
 }
 
 fn validate_bundle_structure(bundle: &ReplayBundle) -> Result<(), ReplayBundleError> {
@@ -1771,6 +1784,27 @@ mod tests {
         assert_eq!(
             signature.public_key_hex,
             hex::encode(signing_key.verifying_key().to_bytes())
+        );
+    }
+
+    #[test]
+    fn replay_bundle_signature_payload_is_domain_separated() {
+        let bundle = signed_fixture_bundle("INC-RPL-SIG-DOMAIN");
+        let payload = replay_bundle_signature_payload(&bundle);
+        let integrity_hash = bundle.integrity_hash.as_bytes();
+        let mut expected = Vec::new();
+        expected.extend_from_slice(REPLAY_BUNDLE_SIGNATURE_PAYLOAD_DOMAIN);
+        expected.extend_from_slice(
+            &(u64::try_from(integrity_hash.len()).expect("hash length fits u64")).to_le_bytes(),
+        );
+        expected.extend_from_slice(integrity_hash);
+
+        assert_eq!(payload, expected);
+        assert_ne!(payload.as_slice(), integrity_hash);
+        let signature = bundle.signature.as_ref().expect("signature");
+        assert_ne!(
+            signature.signed_payload_sha256,
+            hex::encode(Sha256::digest(integrity_hash))
         );
     }
 
