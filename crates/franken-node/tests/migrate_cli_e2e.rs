@@ -143,6 +143,8 @@ fn migrate_validate_fails_for_risky_project_and_returns_non_zero_exit() {
     assert!(stdout.contains("status: FAIL"));
     assert!(stdout.contains("[mig-validate-002] FAIL"));
     assert!(stdout.contains("[mig-validate-003] FAIL"));
+    assert!(stdout.contains("[mig-validate-005] FAIL"));
+    assert!(stdout.contains("runtime smoke test skipped because static validation checks failed"));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("migration validation failed for"));
@@ -183,4 +185,7 @@ fn migrate_validate_passes_for_hardened_project() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("franken-node migrate validate"));
     assert!(stdout.contains("status: PASS"));
+    assert!(stdout.contains("[mig-validate-005] PASS"));
+    assert!(stdout.contains("runtime smoke test passed"));
+    assert!(stdout.contains("receipt_round_trip=true"));
 }

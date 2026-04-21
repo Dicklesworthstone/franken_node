@@ -600,6 +600,349 @@ pub fn render_rewrite_report(report: &MigrationRewriteReport) -> String {
     output
 }
 
+fn runtime_smoke_prerequisite_failure_check() -> MigrationValidationCheck {
+    MigrationValidationCheck {
+        id: "mig-validate-005".to_string(),
+        passed: false,
+        message: "runtime smoke test skipped because static validation checks failed".to_string(),
+        remediation: Some(
+            "Resolve static migration validation failures before executing transformed-runtime smoke validation."
+                .to_string(),
+        ),
+    }
+}
+
+fn runtime_smoke_validation_check(project_path: &Path) -> MigrationValidationCheck {
+    match execute_migration_runtime_smoke(project_path) {
+        Ok(receipt) => MigrationValidationCheck {
+            id: "mig-validate-005".to_string(),
+            passed: true,
+            message: format!(
+                "runtime smoke test passed: runtime={} target={} exit_code={} receipt_round_trip=true",
+                receipt.runtime, receipt.target, receipt.exit_code
+            ),
+            remediation: Some(
+                "Keep the transformed project executable under franken-node, node, or bun during migration rollout."
+                    .to_string(),
+            ),
+        },
+        Err(err) => MigrationValidationCheck {
+            id: "mig-validate-005".to_string(),
+            passed: false,
+            message: format!("runtime smoke test failed: {err}"),
+            remediation: Some(
+                "Install franken-node/node/bun and ensure the transformed package manifest can execute the canonical smoke fixture."
+                    .to_string(),
+            ),
+        },
+    }
+}
+
+fn execute_migration_runtime_smoke(
+    project_path: &Path,
+) -> anyhow::Result<MigrationRuntimeSmokeReceipt> {
+    let runtime = resolve_migration_runtime_target()?;
+    let (workspace, fixture_path) = prepare_migration_runtime_smoke_workspace(project_path)?;
+    let mut command = match &runtime {
+        MigrationRuntimeTarget::FrankenNode(path) => {
+            let mut command = Command::new(path);
+            command
+                .arg("run")
+                .arg(&fixture_path)
+                .arg("--runtime")
+                .arg("auto")
+                .arg("--policy")
+                .arg("balanced")
+                .arg("--json")
+                .current_dir(project_path);
+            command
+        }
+        MigrationRuntimeTarget::Node(path) | MigrationRuntimeTarget::Bun(path) => {
+            let mut command = Command::new(path);
+            command.arg(&fixture_path).current_dir(workspace.path());
+            command
+        }
+    };
+
+    let output = run_command_with_timeout(&mut command, MIGRATION_VALIDATE_RUNTIME_TIMEOUT)?;
+    let exit_code = output
+        .status
+        .code()
+        .ok_or_else(|| anyhow::anyhow!("runtime smoke process terminated by signal"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "runtime `{}` exited with code {exit_code}; stderr={}",
+            runtime.label(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    if matches!(runtime, MigrationRuntimeTarget::FrankenNode(_)) {
+        verify_franken_node_smoke_receipt_round_trip(&output)?;
+    } else {
+        verify_direct_runtime_smoke_output(&output)?;
+    }
+
+    let receipt = MigrationRuntimeSmokeReceipt {
+        schema_version: "franken-node/migrate-validate-runtime-smoke/v1".to_string(),
+        runtime: runtime.label().to_string(),
+        target: "canonical_fixture".to_string(),
+        exit_code,
+        stdout_sha256: sha256_hex(&output.stdout),
+        stderr_sha256: sha256_hex(&output.stderr),
+    };
+    verify_runtime_smoke_receipt_round_trip(&receipt)?;
+    Ok(receipt)
+}
+
+fn prepare_migration_runtime_smoke_workspace(
+    project_path: &Path,
+) -> anyhow::Result<(tempfile::TempDir, PathBuf)> {
+    let workspace = tempfile::Builder::new()
+        .prefix("franken-migrate-validate-smoke-")
+        .tempdir()
+        .map_err(|err| {
+            anyhow::anyhow!("failed creating migrate validate smoke workspace: {err}")
+        })?;
+    let manifest_path = select_smoke_package_manifest(project_path)?;
+    std::fs::copy(&manifest_path, workspace.path().join("package.json")).map_err(|err| {
+        anyhow::anyhow!(
+            "failed copying package manifest {} into smoke workspace: {err}",
+            manifest_path.display()
+        )
+    })?;
+
+    for lockfile in [
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "bun.lockb",
+        "bun.lock",
+    ] {
+        let source = project_path.join(lockfile);
+        if source.is_file() {
+            std::fs::copy(&source, workspace.path().join(lockfile)).map_err(|err| {
+                anyhow::anyhow!(
+                    "failed copying lockfile {} into smoke workspace: {err}",
+                    source.display()
+                )
+            })?;
+        }
+    }
+
+    let fixture_path = workspace.path().join("migrate_validate_smoke.js");
+    let mut fixture = std::fs::File::create(&fixture_path).map_err(|err| {
+        anyhow::anyhow!(
+            "failed creating migrate validate smoke fixture {}: {err}",
+            fixture_path.display()
+        )
+    })?;
+    fixture
+        .write_all(MIGRATION_VALIDATE_SMOKE_SOURCE.as_bytes())
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "failed writing migrate validate smoke fixture {}: {err}",
+                fixture_path.display()
+            )
+        })?;
+    Ok((workspace, fixture_path))
+}
+
+fn select_smoke_package_manifest(project_path: &Path) -> anyhow::Result<PathBuf> {
+    let root_manifest = project_path.join("package.json");
+    if root_manifest.is_file() {
+        return Ok(root_manifest);
+    }
+
+    collect_project_files(project_path)?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .is_some_and(|name| name == "package.json")
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no package.json found for transformed-runtime smoke validation under {}",
+                project_path.display()
+            )
+        })
+}
+
+fn resolve_migration_runtime_target() -> anyhow::Result<MigrationRuntimeTarget> {
+    if let Ok(exe_path) = std::env::current_exe()
+        && is_franken_node_binary(&exe_path)
+    {
+        return Ok(MigrationRuntimeTarget::FrankenNode(exe_path));
+    }
+
+    if let Ok(path) = which::which("node") {
+        return Ok(MigrationRuntimeTarget::Node(path));
+    }
+    if let Ok(path) = which::which("bun") {
+        return Ok(MigrationRuntimeTarget::Bun(path));
+    }
+
+    anyhow::bail!(
+        "no transformed-runtime executor found: franken-node, node, and bun are unavailable"
+    )
+}
+
+fn is_franken_node_binary(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|name| name == "franken-node")
+}
+
+fn run_command_with_timeout(command: &mut Command, timeout: Duration) -> anyhow::Result<Output> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|err| anyhow::anyhow!("failed launching runtime smoke command: {err}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("runtime smoke stdout pipe unavailable"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("runtime smoke stderr pipe unavailable"))?;
+    let stdout_reader = thread::spawn(move || read_to_end(stdout));
+    let stderr_reader = thread::spawn(move || read_to_end(stderr));
+    let started = Instant::now();
+
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|err| anyhow::anyhow!("failed polling runtime smoke command: {err}"))?
+        {
+            let stdout = join_reader(stdout_reader, "stdout")?;
+            let stderr = join_reader(stderr_reader, "stderr")?;
+            return Ok(Output {
+                status,
+                stdout,
+                stderr,
+            });
+        }
+
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = join_reader(stdout_reader, "stdout");
+            let _ = join_reader(stderr_reader, "stderr");
+            anyhow::bail!(
+                "runtime smoke command timed out after {}ms",
+                timeout.as_millis()
+            );
+        }
+
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn read_to_end(mut reader: impl Read) -> io::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    reader.read_to_end(&mut output)?;
+    Ok(output)
+}
+
+fn join_reader(
+    handle: thread::JoinHandle<io::Result<Vec<u8>>>,
+    label: &'static str,
+) -> anyhow::Result<Vec<u8>> {
+    match handle.join() {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(err)) => Err(anyhow::anyhow!(
+            "failed reading runtime smoke {label}: {err}"
+        )),
+        Err(_) => Err(anyhow::anyhow!("runtime smoke {label} reader panicked")),
+    }
+}
+
+fn verify_franken_node_smoke_receipt_round_trip(output: &Output) -> anyhow::Result<()> {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let output_json: serde_json::Value = serde_json::from_str(&stdout).map_err(|err| {
+        anyhow::anyhow!("franken-node smoke stdout was not JSON: {err}; stdout={stdout}")
+    })?;
+    if output_json
+        .get("success")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        anyhow::bail!("franken-node smoke output did not report success");
+    }
+
+    let receipt = output_json
+        .get("receipt")
+        .ok_or_else(|| anyhow::anyhow!("franken-node smoke output omitted receipt"))?;
+    verify_json_round_trip(receipt, "franken-node smoke receipt")?;
+
+    let receipt_path = output_json
+        .get("receipt_path")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("franken-node smoke output omitted receipt_path"))?;
+    let persisted = std::fs::read_to_string(receipt_path).map_err(|err| {
+        anyhow::anyhow!("failed reading franken-node smoke receipt {receipt_path}: {err}")
+    })?;
+    let persisted_receipt: serde_json::Value = serde_json::from_str(&persisted).map_err(|err| {
+        anyhow::anyhow!("persisted franken-node smoke receipt was not JSON: {err}")
+    })?;
+    verify_json_round_trip(&persisted_receipt, "persisted franken-node smoke receipt")?;
+    if &persisted_receipt != receipt {
+        anyhow::bail!("franken-node smoke stdout receipt did not match persisted receipt");
+    }
+    Ok(())
+}
+
+fn verify_direct_runtime_smoke_output(output: &Output) -> anyhow::Result<()> {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let event: serde_json::Value = serde_json::from_str(stdout.trim()).map_err(|err| {
+        anyhow::anyhow!("runtime smoke stdout was not canonical JSON: {err}; stdout={stdout}")
+    })?;
+    if event.get("event").and_then(serde_json::Value::as_str)
+        != Some("migration_validate_runtime_smoke")
+        || event.get("ok").and_then(serde_json::Value::as_bool) != Some(true)
+    {
+        anyhow::bail!("runtime smoke fixture emitted an invalid conformance event");
+    }
+    verify_json_round_trip(&event, "runtime smoke event")?;
+    Ok(())
+}
+
+fn verify_runtime_smoke_receipt_round_trip(
+    receipt: &MigrationRuntimeSmokeReceipt,
+) -> anyhow::Result<()> {
+    let encoded = serde_json::to_vec(receipt)
+        .map_err(|err| anyhow::anyhow!("failed serializing runtime smoke receipt: {err}"))?;
+    let decoded: MigrationRuntimeSmokeReceipt = serde_json::from_slice(&encoded)
+        .map_err(|err| anyhow::anyhow!("failed parsing runtime smoke receipt: {err}"))?;
+    if decoded != *receipt {
+        anyhow::bail!("runtime smoke receipt changed across JSON round-trip");
+    }
+    Ok(())
+}
+
+fn verify_json_round_trip(value: &serde_json::Value, label: &str) -> anyhow::Result<()> {
+    let encoded = serde_json::to_vec(value)
+        .map_err(|err| anyhow::anyhow!("failed serializing {label}: {err}"))?;
+    let decoded: serde_json::Value = serde_json::from_slice(&encoded)
+        .map_err(|err| anyhow::anyhow!("failed parsing {label}: {err}"))?;
+    if decoded != *value {
+        anyhow::bail!("{label} changed across JSON round-trip");
+    }
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
 pub fn run_validate(project_path: &Path) -> anyhow::Result<MigrationValidateReport> {
     let audit = run_audit(project_path)?;
 
@@ -657,6 +1000,11 @@ pub fn run_validate(project_path: &Path) -> anyhow::Result<MigrationValidateRepo
                 .to_string(),
         ),
     });
+    if checks.iter().all(|check| check.passed) {
+        checks.push(runtime_smoke_validation_check(project_path));
+    } else {
+        checks.push(runtime_smoke_prerequisite_failure_check());
+    }
 
     let status = if checks.iter().all(|check| check.passed) {
         MigrationValidateStatus::Pass
