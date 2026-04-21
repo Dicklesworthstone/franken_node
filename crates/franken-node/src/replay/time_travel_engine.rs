@@ -1006,6 +1006,7 @@ impl Default for ReplayEngine {
 
 /// Build a simple demo trace with the given number of steps.
 /// Useful for testing and verification scripts.
+#[cfg(any(test, feature = "test-support"))]
 pub fn build_demo_trace(trace_id: &str, workflow_name: &str, step_count: usize) -> WorkflowTrace {
     let env = EnvironmentSnapshot::new(
         1_000_000,

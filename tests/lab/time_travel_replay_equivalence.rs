@@ -3,6 +3,7 @@
 //! Validates that the replay engine produces byte-for-byte equivalent control
 //! decisions under the same seed/input, supports stepwise navigation, and
 //! provides structured divergence explanations.
+#![cfg(feature = "test-support")]
 
 use frankenengine_node::replay::time_travel_engine::{
     build_demo_trace, identity_replay, DivergenceKind, EnvironmentSnapshot, ReplayEngine,

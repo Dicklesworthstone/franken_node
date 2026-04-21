@@ -1,4 +1,8 @@
+#[cfg(feature = "test-support")]
 pub mod time_travel_engine;
+
+#[cfg(not(feature = "test-support"))]
+mod time_travel_engine;
 
 #[cfg(test)]
 mod replay_conformance_tests;
