@@ -27,6 +27,9 @@ use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 /// Maximum number of barriers per node before oldest-first eviction.
 const MAX_BARRIERS_PER_NODE: usize = 256;
 
+/// Maximum number of audit receipts a single barrier plan may emit.
+const MAX_BARRIER_RECEIPTS: usize = 1024;
+
 /// Stable event codes for DGIS barrier enforcement.
 pub mod event_codes {
     pub const BARRIER_APPLIED: &str = "DGIS-BARRIER-001";
@@ -80,6 +83,8 @@ pub enum BarrierError {
     InvalidProgressionCriteria(String),
     #[error("barrier not found: {0}")]
     NotFound(String),
+    #[error("barrier plan too large: count={count}, cap={cap}")]
+    PlanTooLarge { count: usize, cap: usize },
 }
 
 // ---------------------------------------------------------------------------
@@ -1223,11 +1228,22 @@ impl BarrierPlan {
         engine: &mut BarrierEngine,
         trace_id: &str,
     ) -> Result<Vec<BarrierAuditReceipt>, BarrierError> {
-        let mut receipts = Vec::with_capacity(self.barriers.len());
+        if self.barriers.len() > MAX_BARRIER_RECEIPTS {
+            return Err(BarrierError::PlanTooLarge {
+                count: self.barriers.len(),
+                cap: MAX_BARRIER_RECEIPTS,
+            });
+        }
+
+        let mut receipts = Vec::with_capacity(self.barriers.len().min(MAX_BARRIER_RECEIPTS));
         for barrier in &self.barriers {
             let mut b = barrier.clone();
             b.source_plan_id = Some(self.plan_id.clone());
-            receipts.push(engine.apply_barrier(b, trace_id)?);
+            push_bounded(
+                &mut receipts,
+                engine.apply_barrier(b, trace_id)?,
+                MAX_BARRIER_RECEIPTS,
+            );
         }
         Ok(receipts)
     }
@@ -1311,8 +1327,7 @@ mod tests {
         let mut criteria = BTreeMap::new();
         criteria.insert(
             "canary".to_string(),
-            ProgressionCriteria::new(60, 0.05, 10)
-                .expect("test rollout criteria must be valid"),
+            ProgressionCriteria::new(60, 0.05, 10).expect("test rollout criteria must be valid"),
         );
         Barrier {
             barrier_id: Uuid::now_v7().to_string(),
@@ -1809,6 +1824,33 @@ mod tests {
         for barrier in engine.barriers.values() {
             assert_eq!(barrier.source_plan_id.as_deref(), Some("plan-001"));
         }
+    }
+
+    #[test]
+    fn barrier_plan_rejects_oversized_receipt_vector_before_applying() {
+        let mut engine = BarrierEngine::new();
+        let trace = make_trace_id();
+        let barriers = (0..=MAX_BARRIER_RECEIPTS)
+            .map(|i| make_sandbox_barrier(&format!("oversized-plan-node-{i}"), SandboxTier::Strict))
+            .collect();
+        let plan = BarrierPlan {
+            plan_id: "oversized-plan".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            barriers,
+        };
+
+        let err = plan.apply_to(&mut engine, &trace).unwrap_err();
+
+        assert!(matches!(
+            err,
+            BarrierError::PlanTooLarge { count, cap }
+                if count == MAX_BARRIER_RECEIPTS + 1 && cap == MAX_BARRIER_RECEIPTS
+        ));
+        assert_eq!(
+            engine.active_barrier_count(),
+            0,
+            "oversized plans must fail before applying any barrier"
+        );
     }
 
     // === Explicit no-barrier behavior ===
