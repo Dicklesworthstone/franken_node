@@ -65,8 +65,13 @@ pub struct ReleasePolicyLinkage {
     pub ci_outputs_accessible: bool,
     pub ci_output_ref: Option<String>,
     pub consumed_oracles: Vec<String>,
-    pub placeholder_schema: Option<Value>,
     pub blocking_findings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ReleasePolicyLinkageError {
+    #[error("release-policy CI output not accessible: {detail}")]
+    CiOutputNotAccessible { detail: String },
 }
 
 pub struct CloseConditionSigningMaterial<'a> {
@@ -123,7 +128,8 @@ pub fn generate_close_condition_receipt(
 ) -> Result<CloseConditionReceipt> {
     let l1_product_oracle = evaluate_l1_product_oracle(root);
     let l2_engine_boundary_oracle = evaluate_l2_engine_boundary_oracle(root)?;
-    let release_policy_linkage = evaluate_release_policy_linkage(root);
+    let release_policy_linkage = evaluate_release_policy_linkage(root)
+        .context("failed evaluating release-policy linkage")?;
 
     let mut failing_dimensions = Vec::new();
     if l1_product_oracle.verdict != OracleColor::Green {
@@ -371,66 +377,51 @@ fn evaluate_l2_engine_boundary_oracle(root: &Path) -> Result<L2EngineBoundaryOra
     })
 }
 
-fn evaluate_release_policy_linkage(root: &Path) -> ReleasePolicyLinkage {
+fn evaluate_release_policy_linkage(
+    root: &Path,
+) -> std::result::Result<ReleasePolicyLinkage, ReleasePolicyLinkageError> {
     let source_path = root.join(SECTION_10N_GATE_VERDICT_PATH);
-    if let Ok(data) = read_json_value(&source_path) {
-        let oracle_check = data
-            .get("checks")
-            .and_then(Value::as_array)
-            .and_then(|checks| {
-                checks.iter().find(|check| {
-                    get_str(check, &["check_id"]) == Some("10N-ORACLE")
-                        || get_str(check, &["name"]) == Some("Dual-Oracle Close Condition Gate")
-                })
-            });
+    let data = read_json_value(&source_path)
+        .map_err(|detail| ReleasePolicyLinkageError::CiOutputNotAccessible { detail })?;
+    let oracle_check = data
+        .get("checks")
+        .and_then(Value::as_array)
+        .and_then(|checks| {
+            checks.iter().find(|check| {
+                get_str(check, &["check_id"]) == Some("10N-ORACLE")
+                    || get_str(check, &["name"]) == Some("Dual-Oracle Close Condition Gate")
+            })
+        })
+        .ok_or_else(|| ReleasePolicyLinkageError::CiOutputNotAccessible {
+            detail: format!(
+                "{}: missing Dual-Oracle Close Condition Gate result",
+                source_path.display()
+            ),
+        })?;
 
-        if let Some(check) = oracle_check {
-            let status = get_str(check, &["status"]).unwrap_or("FAIL");
-            let verdict = if status == "PASS" {
-                OracleColor::Green
-            } else {
-                OracleColor::Red
-            };
-            let blocking_findings = if verdict == OracleColor::Green {
-                Vec::new()
-            } else {
-                vec![format!("CI gate output status is {status}, expected PASS")]
-            };
-            return ReleasePolicyLinkage {
-                verdict,
-                source: "ci_gate_output".to_string(),
-                ci_outputs_accessible: true,
-                ci_output_ref: Some(SECTION_10N_GATE_VERDICT_PATH.to_string()),
-                consumed_oracles: vec![
-                    "L1_product_oracle".to_string(),
-                    "L2_engine_boundary_oracle".to_string(),
-                ],
-                placeholder_schema: None,
-                blocking_findings,
-            };
-        }
-    }
+    let status = get_str(oracle_check, &["status"]).unwrap_or("FAIL");
+    let verdict = if status == "PASS" {
+        OracleColor::Green
+    } else {
+        OracleColor::Red
+    };
+    let blocking_findings = if verdict == OracleColor::Green {
+        Vec::new()
+    } else {
+        vec![format!("CI gate output status is {status}, expected PASS")]
+    };
 
-    ReleasePolicyLinkage {
-        verdict: OracleColor::Red,
-        source: "placeholder_schema".to_string(),
-        ci_outputs_accessible: false,
-        ci_output_ref: None,
+    Ok(ReleasePolicyLinkage {
+        verdict,
+        source: "ci_gate_output".to_string(),
+        ci_outputs_accessible: true,
+        ci_output_ref: Some(SECTION_10N_GATE_VERDICT_PATH.to_string()),
         consumed_oracles: vec![
             "L1_product_oracle".to_string(),
             "L2_engine_boundary_oracle".to_string(),
         ],
-        placeholder_schema: Some(serde_json::json!({
-            "workflow_ref": "string",
-            "run_id": "string|null",
-            "consumed_oracles": ["L1_product_oracle", "L2_engine_boundary_oracle"],
-            "verdict": "GREEN|RED",
-            "artifact_ref": "artifacts/oracle/close_condition_receipt.json"
-        })),
-        blocking_findings: vec![
-            "release-policy CI output was not accessible; emitted placeholder schema".to_string(),
-        ],
-    }
+        blocking_findings,
+    })
 }
 
 fn check_no_local_engine_crates(root: &Path) -> SplitContractCheck {

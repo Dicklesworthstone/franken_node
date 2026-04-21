@@ -26,7 +26,7 @@ fn write_test_signing_key(
     (path, ed25519_dalek::SigningKey::from_bytes(&seed))
 }
 
-fn fixture_root() -> TempDir {
+fn fixture_root_with_ci_gate(include_ci_gate: bool) -> TempDir {
     let root = TempDir::new().expect("fixture root");
     write_fixture(
         &root.path().join("Cargo.toml"),
@@ -81,11 +81,12 @@ frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-
   }
 }"#,
     );
-    write_fixture(
-        &root
-            .path()
-            .join("artifacts/section/10.N/gate_verdict/bd-1neb_section_gate.json"),
-        r#"{
+    if include_ci_gate {
+        write_fixture(
+            &root
+                .path()
+                .join("artifacts/section/10.N/gate_verdict/bd-1neb_section_gate.json"),
+            r#"{
   "gate": "section_10n_verification",
   "checks": [
     {
@@ -95,8 +96,13 @@ frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-
     }
   ]
 }"#,
-    );
+        );
+    }
     root
+}
+
+fn fixture_root() -> TempDir {
+    fixture_root_with_ci_gate(true)
 }
 
 fn canonical_json_value(value: &Value) -> String {
@@ -274,5 +280,61 @@ fn doctor_close_condition_requires_trusted_signing_key() {
     assert!(
         stderr.contains("no signing key was configured"),
         "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn doctor_close_condition_fails_closed_when_release_policy_ci_output_is_missing() {
+    let root = fixture_root_with_ci_gate(false);
+    let (signing_key_path, _) =
+        write_test_signing_key(root.path(), ".franken-node/keys/oracle-close.key", 52);
+    let signing_key_path = signing_key_path.display().to_string();
+    let receipt_path = root
+        .path()
+        .join("artifacts/oracle/close_condition_receipt.json");
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let output = command
+        .current_dir(root.path())
+        .env(
+            "FRANKEN_NODE_CLOSE_CONDITION_TIMESTAMP_UTC",
+            "2026-02-21T00:00:00Z",
+        )
+        .args([
+            "doctor",
+            "close-condition",
+            "--json",
+            "--receipt-signing-key",
+            signing_key_path.as_str(),
+        ])
+        .output()
+        .expect("doctor close-condition should run");
+
+    assert!(
+        !output.status.success(),
+        "doctor close-condition should fail closed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed generating close-condition receipt"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("release-policy CI output not accessible"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("placeholder_schema"),
+        "stderr should not mention placeholder linkage fallback: {stderr}"
+    );
+    assert!(
+        !receipt_path.exists(),
+        "close-condition receipt must not be emitted without release-policy data"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "stdout should remain empty on fail-closed linkage outage: {}",
+        String::from_utf8_lossy(&output.stdout)
     );
 }
