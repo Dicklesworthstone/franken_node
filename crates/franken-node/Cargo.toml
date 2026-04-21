@@ -120,6 +120,10 @@ name = "trust_object_id_real_inputs"
 path = "tests/trust_object_id_real_inputs.rs"
 
 [[test]]
+name = "canonical_serializer_real_inputs"
+path = "tests/canonical_serializer_real_inputs.rs"
+
+[[test]]
 name = "capability_artifact_real_inputs"
 path = "tests/capability_artifact_real_inputs.rs"
 

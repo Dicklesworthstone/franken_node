@@ -205,6 +205,29 @@ pub struct SerializerEvent {
     pub detail: String,
 }
 
+/// Caller-provided trust object payload for canonical serialization.
+#[derive(Debug, Clone, Copy)]
+pub struct CanonicalSerializationRequest<'a> {
+    pub object_type: TrustObjectType,
+    pub payload: &'a [u8],
+    pub trace_id: &'a str,
+}
+
+/// Canonical serialization result for one caller-provided trust object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalSerializationRecord {
+    pub object_type: TrustObjectType,
+    pub canonical_payload: Vec<u8>,
+    pub signature_preimage: SignaturePreimage,
+}
+
+/// Canonical serialization result for a bounded batch of trust objects.
+#[derive(Debug, Clone)]
+pub struct CanonicalSerializationBatch {
+    pub records: Vec<CanonicalSerializationRecord>,
+    pub events: Vec<SerializerEvent>,
+}
+
 // ---------------------------------------------------------------------------
 // SerializerError
 // ---------------------------------------------------------------------------
@@ -376,11 +399,12 @@ impl CanonicalSerializer {
             });
         }
 
-        let value =
-            serde_json::from_slice::<Value>(payload).map_err(|error| SerializerError::NonCanonicalInput {
+        let value = serde_json::from_slice::<Value>(payload).map_err(|error| {
+            SerializerError::NonCanonicalInput {
                 object_type: object_type.label().to_string(),
                 reason: format!("payload must be a JSON trust object: {error}"),
-            })?;
+            }
+        })?;
 
         self.serialize_value(object_type, &value, trace_id)
     }
@@ -515,6 +539,45 @@ impl CanonicalSerializer {
 
         Ok(preimage)
     }
+
+    /// Serialize caller-provided trust objects and build signature preimages.
+    ///
+    /// # INV-CAN-NO-BYPASS
+    /// Every record is round-trip verified through this serializer before a
+    /// signature preimage is returned.
+    pub fn serialize_trust_objects(
+        &mut self,
+        requests: &[CanonicalSerializationRequest<'_>],
+    ) -> Result<Vec<CanonicalSerializationRecord>, SerializerError> {
+        let mut records = Vec::with_capacity(requests.len().min(MAX_EVENTS));
+
+        for request in requests {
+            if records.len() >= MAX_EVENTS {
+                return Err(SerializerError::PreimageConstructionFailed {
+                    reason: format!(
+                        "canonical serialization batch exceeded {MAX_EVENTS} trust objects"
+                    ),
+                });
+            }
+
+            let canonical_payload =
+                self.round_trip_canonical(request.object_type, request.payload, request.trace_id)?;
+            let signature_preimage =
+                self.build_preimage(request.object_type, request.payload, request.trace_id)?;
+
+            push_bounded(
+                &mut records,
+                CanonicalSerializationRecord {
+                    object_type: request.object_type,
+                    canonical_payload,
+                    signature_preimage,
+                },
+                MAX_EVENTS,
+            );
+        }
+
+        Ok(records)
+    }
 }
 
 impl Default for CanonicalSerializer {
@@ -583,6 +646,7 @@ fn default_schema(object_type: TrustObjectType) -> CanonicalSchema {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn sample_payload_for_type(object_type: TrustObjectType) -> String {
     match object_type {
         TrustObjectType::PolicyCheckpoint => {
@@ -625,7 +689,8 @@ fn canonical_decode(bytes: &[u8]) -> Result<Vec<u8>, String> {
         return Err("payload too short: need at least 4 bytes for length prefix".to_string());
     }
     let len_u32 = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    let len = usize::try_from(len_u32).map_err(|_| "length exceeds platform usize maximum".to_string())?;
+    let len = usize::try_from(len_u32)
+        .map_err(|_| "length exceeds platform usize maximum".to_string())?;
     if bytes.len().saturating_sub(4) != len {
         return Err(format!(
             "length mismatch: prefix says {} bytes, got {}",
@@ -640,10 +705,12 @@ fn canonicalize_schema_value(
     schema: &CanonicalSchema,
     value: &Value,
 ) -> Result<Vec<u8>, SerializerError> {
-    let object = value.as_object().ok_or_else(|| SerializerError::NonCanonicalInput {
-        object_type: schema.object_type.label().to_string(),
-        reason: "payload must be a JSON object".to_string(),
-    })?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| SerializerError::NonCanonicalInput {
+            object_type: schema.object_type.label().to_string(),
+            reason: "payload must be a JSON object".to_string(),
+        })?;
 
     for field in object.keys() {
         if !schema.field_order.iter().any(|expected| expected == field) {
@@ -833,17 +900,16 @@ fn content_hash_prefix(data: &[u8]) -> String {
     digest[..8].to_string()
 }
 
-/// Demonstrate canonical serialization for all object types.
-pub fn demo_canonical_serialization() -> Vec<SerializerEvent> {
+/// Serialize caller-provided trust objects with the default product schemas.
+pub fn canonical_serialization_round_trips(
+    requests: &[CanonicalSerializationRequest<'_>],
+) -> Result<CanonicalSerializationBatch, SerializerError> {
     let mut serializer = CanonicalSerializer::with_all_schemas();
-
-    for obj_type in TrustObjectType::all() {
-        let payload = sample_payload_for_type(*obj_type);
-        let _ = serializer.round_trip_canonical(*obj_type, payload.as_bytes(), "trace-demo");
-        let _ = serializer.build_preimage(*obj_type, payload.as_bytes(), "trace-demo");
-    }
-
-    serializer.events().to_vec()
+    let records = serializer.serialize_trust_objects(requests)?;
+    Ok(CanonicalSerializationBatch {
+        records,
+        events: serializer.events().to_vec(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1350,8 +1416,11 @@ mod tests {
     fn test_round_trip_empty_payload() {
         let mut s = CanonicalSerializer::with_all_schemas();
         let payload = sample_payload_for_type(TrustObjectType::OperatorReceipt);
-        let result =
-            s.round_trip_canonical(TrustObjectType::OperatorReceipt, payload.as_bytes(), "rt-empty");
+        let result = s.round_trip_canonical(
+            TrustObjectType::OperatorReceipt,
+            payload.as_bytes(),
+            "rt-empty",
+        );
         assert!(result.is_ok());
     }
 
@@ -1371,7 +1440,10 @@ mod tests {
             payload.to_string().as_bytes(),
             "rt-large",
         );
-        assert!(result.is_err(), "unknown large metadata field must be rejected");
+        assert!(
+            result.is_err(),
+            "unknown large metadata field must be rejected"
+        );
 
         let valid_payload = sample_payload_for_type(TrustObjectType::SessionTicket);
         let result = s.round_trip_canonical(
@@ -1479,14 +1551,55 @@ mod tests {
         assert!(e.to_string().contains("foo"));
     }
 
-    // ── Demo function ───────────────────────────────────────────────
+    // ── Caller-provided batch serialization ─────────────────────────
 
     #[test]
-    fn test_demo_canonical_serialization() {
-        let events = demo_canonical_serialization();
-        // 6 types × (2 serialize for round-trip + 1 serialize for preimage + 1 preimage event)
-        // = 6 × 4 = 24 minimum events
-        assert_eq!(events.len(), 24, "got {} events", events.len());
+    fn test_canonical_serialization_round_trips_real_caller_inputs() {
+        let payload = br#"{"checkpoint_id":"caller-cp","epoch":7,"sequence":9,"policy_hash":"sha256:caller-policy","timestamp":"2026-04-21T00:00:00Z"}"#;
+        let request = CanonicalSerializationRequest {
+            object_type: TrustObjectType::PolicyCheckpoint,
+            payload,
+            trace_id: "caller-trace",
+        };
+
+        let batch = canonical_serialization_round_trips(&[request]).unwrap();
+
+        assert_eq!(batch.records.len(), 1);
+        assert_eq!(
+            batch.records[0].object_type,
+            TrustObjectType::PolicyCheckpoint
+        );
+        assert_eq!(
+            batch.records[0].signature_preimage.domain_tag,
+            TrustObjectType::PolicyCheckpoint.domain_tag()
+        );
+        let decoded = canonical_decode(&batch.records[0].canonical_payload).unwrap();
+        assert!(
+            String::from_utf8(decoded)
+                .unwrap()
+                .contains("\"checkpoint_id\":\"caller-cp\"")
+        );
+        assert_eq!(batch.events.len(), 3, "got {} events", batch.events.len());
+        assert!(
+            batch
+                .events
+                .iter()
+                .all(|event| event.trace_id == "caller-trace")
+        );
+    }
+
+    #[test]
+    fn test_canonical_serialization_round_trips_propagates_errors() {
+        let bad_payload = br#"{"checkpoint_id":"bad-cp","epoch":7,"sequence":9,"policy_hash":"sha256:caller-policy","timestamp":"2026-04-21T00:00:00Z","unexpected":"field"}"#;
+        let request = CanonicalSerializationRequest {
+            object_type: TrustObjectType::PolicyCheckpoint,
+            payload: bad_payload,
+            trace_id: "bad-trace",
+        };
+
+        let err = canonical_serialization_round_trips(&[request]).unwrap_err();
+
+        assert_eq!(err.code(), error_codes::ERR_CAN_NON_CANONICAL);
     }
 
     // ── Serde roundtrip ─────────────────────────────────────────────
@@ -1732,9 +1845,7 @@ mod tests {
         /// Generate schema-valid test data for a trust object type.
         fn generate_test_payloads(object_type: TrustObjectType) -> Vec<(&'static str, Vec<u8>)> {
             let sample = sample_payload_for_type(object_type);
-            vec![
-                ("sample", sample.into_bytes()),
-            ]
+            vec![("sample", sample.into_bytes())]
         }
 
         /// Generate payloads that should trigger float rejection
@@ -2231,18 +2342,30 @@ mod tests {
             assert!(
                 seen_tags.insert(domain_tag),
                 "Duplicate domain tag found for {:?}: {:?}",
-                object_type, domain_tag
+                object_type,
+                domain_tag
             );
 
             // Domain tags should follow expected format [0x10, 0x0X]
-            assert_eq!(domain_tag[0], 0x10, "First byte should be 0x10 for {:?}", object_type);
-            assert!(domain_tag[1] >= 0x01 && domain_tag[1] <= 0x06,
-                    "Second byte should be 0x01-0x06 for {:?}, got 0x{:02x}",
-                    object_type, domain_tag[1]);
+            assert_eq!(
+                domain_tag[0], 0x10,
+                "First byte should be 0x10 for {:?}",
+                object_type
+            );
+            assert!(
+                domain_tag[1] >= 0x01 && domain_tag[1] <= 0x06,
+                "Second byte should be 0x01-0x06 for {:?}, got 0x{:02x}",
+                object_type,
+                domain_tag[1]
+            );
         }
 
         // Verify we have exactly 6 unique domain tags
-        assert_eq!(seen_tags.len(), 6, "Should have exactly 6 unique domain tags");
+        assert_eq!(
+            seen_tags.len(),
+            6,
+            "Should have exactly 6 unique domain tags"
+        );
     }
 
     #[test]
@@ -2252,23 +2375,59 @@ mod tests {
             let label = object_type.label();
 
             // Labels should be non-empty and snake_case
-            assert!(!label.is_empty(), "Label should not be empty for {:?}", object_type);
-            assert!(label.is_ascii(), "Label should be ASCII for {:?}", object_type);
-            assert!(!label.contains(' '), "Label should not contain spaces for {:?}: {}", object_type, label);
-            assert!(!label.contains('-'), "Label should use underscores, not dashes for {:?}: {}", object_type, label);
+            assert!(
+                !label.is_empty(),
+                "Label should not be empty for {:?}",
+                object_type
+            );
+            assert!(
+                label.is_ascii(),
+                "Label should be ASCII for {:?}",
+                object_type
+            );
+            assert!(
+                !label.contains(' '),
+                "Label should not contain spaces for {:?}: {}",
+                object_type,
+                label
+            );
+            assert!(
+                !label.contains('-'),
+                "Label should use underscores, not dashes for {:?}: {}",
+                object_type,
+                label
+            );
 
             // Should be lowercase
-            assert_eq!(label, label.to_lowercase(), "Label should be lowercase for {:?}: {}", object_type, label);
+            assert_eq!(
+                label,
+                label.to_lowercase(),
+                "Label should be lowercase for {:?}: {}",
+                object_type,
+                label
+            );
 
             // Should contain meaningful keywords
             let label_lower = label.to_lowercase();
             match object_type {
-                TrustObjectType::PolicyCheckpoint => assert!(label_lower.contains("policy") && label_lower.contains("checkpoint")),
-                TrustObjectType::DelegationToken => assert!(label_lower.contains("delegation") && label_lower.contains("token")),
-                TrustObjectType::RevocationAssertion => assert!(label_lower.contains("revocation") && label_lower.contains("assertion")),
-                TrustObjectType::SessionTicket => assert!(label_lower.contains("session") && label_lower.contains("ticket")),
-                TrustObjectType::ZoneBoundaryClaim => assert!(label_lower.contains("zone") && label_lower.contains("boundary")),
-                TrustObjectType::OperatorReceipt => assert!(label_lower.contains("operator") && label_lower.contains("receipt")),
+                TrustObjectType::PolicyCheckpoint => {
+                    assert!(label_lower.contains("policy") && label_lower.contains("checkpoint"))
+                }
+                TrustObjectType::DelegationToken => {
+                    assert!(label_lower.contains("delegation") && label_lower.contains("token"))
+                }
+                TrustObjectType::RevocationAssertion => {
+                    assert!(label_lower.contains("revocation") && label_lower.contains("assertion"))
+                }
+                TrustObjectType::SessionTicket => {
+                    assert!(label_lower.contains("session") && label_lower.contains("ticket"))
+                }
+                TrustObjectType::ZoneBoundaryClaim => {
+                    assert!(label_lower.contains("zone") && label_lower.contains("boundary"))
+                }
+                TrustObjectType::OperatorReceipt => {
+                    assert!(label_lower.contains("operator") && label_lower.contains("receipt"))
+                }
             }
         }
     }
@@ -2324,7 +2483,11 @@ mod tests {
             let bytes = preimage.to_bytes();
             assert_eq!(bytes[0], version, "First byte should be version");
             assert_eq!(&bytes[1..3], &domain_tag, "Bytes 1-2 should be domain tag");
-            assert_eq!(&bytes[3..], &test_payload, "Remaining bytes should be payload");
+            assert_eq!(
+                &bytes[3..],
+                &test_payload,
+                "Remaining bytes should be payload"
+            );
 
             // Hash should be deterministic for same inputs
             let hash1 = preimage.content_hash_prefix();
@@ -2390,15 +2553,15 @@ mod tests {
                 event_code: "\0event\x01code".to_string(), // Control characters
                 object_type: "type\nwith\nnewlines".to_string(),
                 domain_tag: "🚀domain💀".to_string(), // Unicode emoji
-                byte_length: usize::MAX, // Maximum size
+                byte_length: usize::MAX,              // Maximum size
                 content_hash_prefix: "\u{FFFF}prefix".to_string(),
                 trace_id: "../../../etc/passwd".to_string(), // Path traversal
                 detail: "<script>alert('event')</script>".to_string(), // XSS
             },
             SerializerEvent {
-                event_code: "x".repeat(10_000), // Very long event code
+                event_code: "x".repeat(10_000),  // Very long event code
                 object_type: "y".repeat(50_000), // Very long object type
-                domain_tag: "z".repeat(1_000), // Long domain tag
+                domain_tag: "z".repeat(1_000),   // Long domain tag
                 byte_length: 42,
                 content_hash_prefix: "a".repeat(100), // Long hash prefix
                 trace_id: "normal_trace".to_string(),
@@ -2413,7 +2576,8 @@ mod tests {
             match serialization_result {
                 Ok(json) => {
                     // If serialization succeeds, deserialization should round-trip
-                    let deserialization_result: Result<SerializerEvent, _> = serde_json::from_str(&json);
+                    let deserialization_result: Result<SerializerEvent, _> =
+                        serde_json::from_str(&json);
                     match deserialization_result {
                         Ok(restored) => {
                             // Basic field preservation checks
@@ -2556,25 +2720,45 @@ mod tests {
 
         for constant in &error_constants {
             assert!(!constant.is_empty());
-            assert!(constant.starts_with("ERR_CAN_"), "Error constant should start with ERR_CAN_: {}", constant);
-            assert!(constant.is_ascii(), "Error constant should be ASCII: {}", constant);
-            assert!(!constant.contains(' '), "Error constant should not contain spaces: {}", constant);
+            assert!(
+                constant.starts_with("ERR_CAN_"),
+                "Error constant should start with ERR_CAN_: {}",
+                constant
+            );
+            assert!(
+                constant.is_ascii(),
+                "Error constant should be ASCII: {}",
+                constant
+            );
+            assert!(
+                !constant.contains(' '),
+                "Error constant should not contain spaces: {}",
+                constant
+            );
         }
 
         // Test event constants
         use super::event_codes::*;
 
-        let event_constants = [
-            CAN_SERIALIZE,
-            CAN_PREIMAGE_CONSTRUCT,
-            CAN_REJECT,
-        ];
+        let event_constants = [CAN_SERIALIZE, CAN_PREIMAGE_CONSTRUCT, CAN_REJECT];
 
         for constant in &event_constants {
             assert!(!constant.is_empty());
-            assert!(constant.starts_with("CAN_"), "Event constant should start with CAN_: {}", constant);
-            assert!(constant.is_ascii(), "Event constant should be ASCII: {}", constant);
-            assert!(!constant.contains(' '), "Event constant should not contain spaces: {}", constant);
+            assert!(
+                constant.starts_with("CAN_"),
+                "Event constant should start with CAN_: {}",
+                constant
+            );
+            assert!(
+                constant.is_ascii(),
+                "Event constant should be ASCII: {}",
+                constant
+            );
+            assert!(
+                !constant.contains(' '),
+                "Event constant should not contain spaces: {}",
+                constant
+            );
         }
 
         // Test that TrustObjectType::all() contains exactly 6 elements
@@ -2593,8 +2777,8 @@ mod tests {
     fn negative_hash_determinism_with_edge_case_inputs() {
         // Test that hash computation is deterministic with edge case inputs
         let edge_case_inputs = vec![
-            (1, [0x00, 0x00], vec![]), // Zero domain tag, empty payload
-            (0, [0xFF, 0xFF], vec![0]), // Max domain tag, single byte
+            (1, [0x00, 0x00], vec![]),             // Zero domain tag, empty payload
+            (0, [0xFF, 0xFF], vec![0]),            // Max domain tag, single byte
             (255, [0x10, 0x01], vec![0xFF; 1000]), // Max version, large payload
             (128, [0x10, 0x01], b"\0\x01\x02\xFF\xFE".to_vec()), // Mid version, binary data
         ];
@@ -2647,7 +2831,10 @@ mod tests {
         let result = canonical_decode(&corrupted);
 
         // Should fail gracefully, not panic or cause memory issues
-        assert!(result.is_err(), "Corrupted length prefix should be rejected");
+        assert!(
+            result.is_err(),
+            "Corrupted length prefix should be rejected"
+        );
     }
 
     #[test]
@@ -2665,13 +2852,13 @@ mod tests {
     fn test_float_detection_with_malformed_json_boundaries() {
         // Test edge case: incomplete JSON that might confuse the parser
         let malformed_cases = [
-            br#"{"incomplete"#,           // Incomplete object
-            br#"{"key": 3.1"#,           // Missing closing brace
+            br#"{"incomplete"#,             // Incomplete object
+            br#"{"key": 3.1"#,              // Missing closing brace
             br#"{"key": "unclosed string"#, // Unclosed string
             br#"{"nested": {"inner": 1.5"#, // Deeply incomplete
-            b"3.14",                     // Raw number, no JSON structure
-            br#"{"key": 1e10}"#,         // Scientific notation (should detect)
-            br#"{"key": 1.0e-5}"#,       // Scientific with negative exponent
+            b"3.14",                        // Raw number, no JSON structure
+            br#"{"key": 1e10}"#,            // Scientific notation (should detect)
+            br#"{"key": 1.0e-5}"#,          // Scientific with negative exponent
         ];
 
         for (i, case) in malformed_cases.iter().enumerate() {
@@ -2708,8 +2895,16 @@ mod tests {
 
         // Both should be registered - the serializer doesn't check for domain tag conflicts
         assert_eq!(serializer.schema_count(), 2);
-        assert!(serializer.get_schema(TrustObjectType::PolicyCheckpoint).is_some());
-        assert!(serializer.get_schema(TrustObjectType::DelegationToken).is_some());
+        assert!(
+            serializer
+                .get_schema(TrustObjectType::PolicyCheckpoint)
+                .is_some()
+        );
+        assert!(
+            serializer
+                .get_schema(TrustObjectType::DelegationToken)
+                .is_some()
+        );
     }
 
     #[test]
@@ -2776,16 +2971,27 @@ mod tests {
             assert_eq!(tag[0], 0x10, "All domain tags should start with 0x10");
 
             // Second byte should be in valid range and unique
-            assert!(tag[1] >= 0x01 && tag[1] <= 0x06, "Second byte should be in range 0x01-0x06");
+            assert!(
+                tag[1] >= 0x01 && tag[1] <= 0x06,
+                "Second byte should be in range 0x01-0x06"
+            );
 
             // Should be unique
-            assert!(seen_tags.insert(tag), "Domain tag {:?} should be unique", tag);
+            assert!(
+                seen_tags.insert(tag),
+                "Domain tag {:?} should be unique",
+                tag
+            );
 
             // Should map to a valid DomainPrefix without panicking
             let _ = obj_type.to_domain_prefix();
         }
 
-        assert_eq!(seen_tags.len(), 6, "Should have exactly 6 unique domain tags");
+        assert_eq!(
+            seen_tags.len(),
+            6,
+            "Should have exactly 6 unique domain tags"
+        );
     }
 
     #[test]
@@ -2826,8 +3032,12 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
 
         for object_type in TrustObjectType::all() {
             let domain_tag = object_type.domain_tag();
-            assert!(domain_tag_combinations.insert(domain_tag),
-                "Domain tag collision detected for type {:?}: {:?}", object_type, domain_tag);
+            assert!(
+                domain_tag_combinations.insert(domain_tag),
+                "Domain tag collision detected for type {:?}: {:?}",
+                object_type,
+                domain_tag
+            );
 
             // Test same payload with different domain tags produces different preimages
             let test_payload = b"collision_resistance_test_payload".to_vec();
@@ -2835,14 +3045,24 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             let preimage_bytes = preimage.to_bytes();
             let content_hash = preimage.content_hash_prefix();
 
-            assert!(preimage_hashes.insert(content_hash.clone()),
-                "Hash collision detected for object type {:?}: {}", object_type, content_hash);
+            assert!(
+                preimage_hashes.insert(content_hash.clone()),
+                "Hash collision detected for object type {:?}: {}",
+                object_type,
+                content_hash
+            );
 
             // Verify domain tag is correctly embedded
-            assert_eq!(preimage_bytes[1], domain_tag[0],
-                "Domain tag byte 0 mismatch for {:?}", object_type);
-            assert_eq!(preimage_bytes[2], domain_tag[1],
-                "Domain tag byte 1 mismatch for {:?}", object_type);
+            assert_eq!(
+                preimage_bytes[1], domain_tag[0],
+                "Domain tag byte 0 mismatch for {:?}",
+                object_type
+            );
+            assert_eq!(
+                preimage_bytes[2], domain_tag[1],
+                "Domain tag byte 1 mismatch for {:?}",
+                object_type
+            );
         }
 
         // Test 2: Preimage collision resistance with crafted payloads
@@ -2850,24 +3070,31 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             // Length extension attacks
             (b"data".to_vec(), b"data\x00padding".to_vec()),
             (b"payload".to_vec(), b"payload\x01\x02\x03".to_vec()),
-
             // Unicode normalization attacks
-            ("test".as_bytes().to_vec(), "te\u{0301}st".as_bytes().to_vec()),
-            ("café".as_bytes().to_vec(), "cafe\u{0301}".as_bytes().to_vec()),
-
+            (
+                "test".as_bytes().to_vec(),
+                "te\u{0301}st".as_bytes().to_vec(),
+            ),
+            (
+                "café".as_bytes().to_vec(),
+                "cafe\u{0301}".as_bytes().to_vec(),
+            ),
             // Boundary condition attacks
             (b"".to_vec(), b"\x00".to_vec()),
             (b"a".to_vec(), b"\x61".to_vec()),
-
             // Domain separator confusion
-            (b"canonical_serializer_hash_v1:data".to_vec(), b"different:canonical_serializer_hash_v1:data".to_vec()),
-            (b"normal_payload".to_vec(), b"canonical_serializer_hash_v1:normal_payload".to_vec()),
-
+            (
+                b"canonical_serializer_hash_v1:data".to_vec(),
+                b"different:canonical_serializer_hash_v1:data".to_vec(),
+            ),
+            (
+                b"normal_payload".to_vec(),
+                b"canonical_serializer_hash_v1:normal_payload".to_vec(),
+            ),
             // Binary pattern attacks
             (vec![0x00; 1000], vec![0xFF; 1000]),
             (vec![0x42; 1000], vec![0x43; 1000]),
             ((0..255).collect(), (1..=255).collect()),
-
             // Very large payload attacks
             (vec![0x41; 1000000], vec![0x42; 1000000]), // 1MB payloads
         ];
@@ -2885,18 +3112,26 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             let bytes2 = preimage2.to_bytes();
 
             // Different payloads should produce different hashes and bytes
-            assert_ne!(hash1, hash2,
+            assert_ne!(
+                hash1,
+                hash2,
                 "Hash collision between payloads: {:?} vs {:?}",
                 payload1.get(..20).unwrap_or(&payload1),
-                payload2.get(..20).unwrap_or(&payload2));
-            assert_ne!(bytes1, bytes2,
-                "Byte collision between payloads");
+                payload2.get(..20).unwrap_or(&payload2)
+            );
+            assert_ne!(bytes1, bytes2, "Byte collision between payloads");
 
             // Verify hashes are unique across all tests
-            assert!(collision_hashes.insert(hash1.clone()),
-                "Duplicate hash detected: {}", hash1);
-            assert!(collision_hashes.insert(hash2.clone()),
-                "Duplicate hash detected: {}", hash2);
+            assert!(
+                collision_hashes.insert(hash1.clone()),
+                "Duplicate hash detected: {}",
+                hash1
+            );
+            assert!(
+                collision_hashes.insert(hash2.clone()),
+                "Duplicate hash detected: {}",
+                hash2
+            );
         }
 
         // Test 3: Version byte boundary conditions and collision resistance
@@ -2909,14 +3144,24 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             let hash = preimage.content_hash_prefix();
 
             // Verify version byte is correctly embedded
-            assert_eq!(bytes[0], version, "Version byte mismatch for version {}", version);
+            assert_eq!(
+                bytes[0], version,
+                "Version byte mismatch for version {}",
+                version
+            );
 
             // Verify hash uniqueness across versions
-            assert!(collision_hashes.insert(format!("v{}-{}", version, hash)),
-                "Version collision detected for version {}", version);
+            assert!(
+                collision_hashes.insert(format!("v{}-{}", version, hash)),
+                "Version collision detected for version {}",
+                version
+            );
         }
 
-        println!("Domain separation test completed: {} unique hashes generated", collision_hashes.len());
+        println!(
+            "Domain separation test completed: {} unique hashes generated",
+            collision_hashes.len()
+        );
     }
 
     #[test]
@@ -2940,33 +3185,26 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             // Standard float values
             serde_json::json!({"field1": 3.14159, "field2": "test"}),
             serde_json::json!({"field1": "test", "field2": 2.71828}),
-
             // Disguised floats
             serde_json::json!({"field1": 1.0, "field2": "test"}),
             serde_json::json!({"field1": 0.0, "field2": "test"}),
-
             // Special float values
             serde_json::json!({"field1": "NaN", "field2": "test"}),
             serde_json::json!({"field1": "Infinity", "field2": "test"}),
             serde_json::json!({"field1": "-Infinity", "field2": "test"}),
-
             // Scientific notation that could be interpreted as floats
             serde_json::json!({"field1": "1e10", "field2": "test"}),
             serde_json::json!({"field1": "1.5e-10", "field2": "test"}),
-
             // Nested float values
             serde_json::json!({"field1": {"nested": 3.14}, "field2": "test"}),
             serde_json::json!({"field1": "test", "field2": [1, 2.5, 3]}),
-
             // Float in string form (should be allowed as string)
             serde_json::json!({"field1": "3.14159", "field2": "test"}),
         ];
 
         for (idx, float_value) in float_attack_vectors.iter().enumerate() {
-            let result = serializer.serialize_canonical(
-                TrustObjectType::PolicyCheckpoint,
-                float_value,
-            );
+            let result =
+                serializer.serialize_canonical(TrustObjectType::PolicyCheckpoint, float_value);
 
             match result {
                 Ok(_) => {
@@ -2974,24 +3212,37 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                     // (string representations of floats should be allowed)
                     if let Some(field1) = float_value.get("field1") {
                         if field1.is_f64() {
-                            panic!("Float value should have been rejected at index {}: {:?}", idx, field1);
+                            panic!(
+                                "Float value should have been rejected at index {}: {:?}",
+                                idx, field1
+                            );
                         }
                     }
                     if let Some(field2) = float_value.get("field2") {
                         if field2.is_f64() {
-                            panic!("Float value should have been rejected at index {}: {:?}", idx, field2);
+                            panic!(
+                                "Float value should have been rejected at index {}: {:?}",
+                                idx, field2
+                            );
                         }
                     }
                 }
                 Err(CanonicalSerializerError::FloatRejected { field_path }) => {
                     // Expected rejection of float values
-                    assert!(!field_path.is_empty(),
-                        "Float rejection should specify field path for index {}", idx);
+                    assert!(
+                        !field_path.is_empty(),
+                        "Float rejection should specify field path for index {}",
+                        idx
+                    );
                 }
                 Err(other) => {
                     // Other errors may occur with malformed input
-                    assert!(!other.to_string().is_empty(),
-                        "Error should be meaningful for float attack {}: {:?}", idx, other);
+                    assert!(
+                        !other.to_string().is_empty(),
+                        "Error should be meaningful for float attack {}: {:?}",
+                        idx,
+                        other
+                    );
                 }
             }
         }
@@ -2999,38 +3250,50 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         // Test 2: Type confusion and coercion attacks
         let type_confusion_vectors = vec![
             // Number as string vs actual number
-            (serde_json::json!({"field1": "123", "field2": "test"}),
-             serde_json::json!({"field1": 123, "field2": "test"})),
-
+            (
+                serde_json::json!({"field1": "123", "field2": "test"}),
+                serde_json::json!({"field1": 123, "field2": "test"}),
+            ),
             // Boolean variations
-            (serde_json::json!({"field1": true, "field2": "test"}),
-             serde_json::json!({"field1": "true", "field2": "test"})),
-            (serde_json::json!({"field1": false, "field2": "test"}),
-             serde_json::json!({"field1": "false", "field2": "test"})),
-
+            (
+                serde_json::json!({"field1": true, "field2": "test"}),
+                serde_json::json!({"field1": "true", "field2": "test"}),
+            ),
+            (
+                serde_json::json!({"field1": false, "field2": "test"}),
+                serde_json::json!({"field1": "false", "field2": "test"}),
+            ),
             // Null vs string null
-            (serde_json::json!({"field1": null, "field2": "test"}),
-             serde_json::json!({"field1": "null", "field2": "test"})),
-
+            (
+                serde_json::json!({"field1": null, "field2": "test"}),
+                serde_json::json!({"field1": "null", "field2": "test"}),
+            ),
             // Array vs string representation
-            (serde_json::json!({"field1": [1, 2, 3], "field2": "test"}),
-             serde_json::json!({"field1": "[1,2,3]", "field2": "test"})),
-
+            (
+                serde_json::json!({"field1": [1, 2, 3], "field2": "test"}),
+                serde_json::json!({"field1": "[1,2,3]", "field2": "test"}),
+            ),
             // Object vs string representation
-            (serde_json::json!({"field1": {"nested": "value"}, "field2": "test"}),
-             serde_json::json!({"field1": "{\"nested\":\"value\"}", "field2": "test"})),
+            (
+                serde_json::json!({"field1": {"nested": "value"}, "field2": "test"}),
+                serde_json::json!({"field1": "{\"nested\":\"value\"}", "field2": "test"}),
+            ),
         ];
 
         for (value1, value2) in type_confusion_vectors {
-            let result1 = serializer.serialize_canonical(TrustObjectType::PolicyCheckpoint, &value1);
-            let result2 = serializer.serialize_canonical(TrustObjectType::PolicyCheckpoint, &value2);
+            let result1 =
+                serializer.serialize_canonical(TrustObjectType::PolicyCheckpoint, &value1);
+            let result2 =
+                serializer.serialize_canonical(TrustObjectType::PolicyCheckpoint, &value2);
 
             match (result1, result2) {
                 (Ok(preimage1), Ok(preimage2)) => {
                     // Type-confused values should produce different canonical forms
-                    assert_ne!(preimage1.canonical_payload, preimage2.canonical_payload,
+                    assert_ne!(
+                        preimage1.canonical_payload, preimage2.canonical_payload,
                         "Type confusion should produce different canonical forms: {:?} vs {:?}",
-                        value1, value2);
+                        value1, value2
+                    );
                 }
                 _ => {
                     // Some type confusions may be rejected, which is acceptable
@@ -3047,18 +3310,20 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             });
         }
 
-        let deep_result = serializer.serialize_canonical(
-            TrustObjectType::PolicyCheckpoint,
-            &deep_nested,
-        );
+        let deep_result =
+            serializer.serialize_canonical(TrustObjectType::PolicyCheckpoint, &deep_nested);
 
         match deep_result {
             Ok(preimage) => {
                 // If deep nesting succeeds, verify it's handled safely
-                assert!(preimage.canonical_payload.len() > 1000,
-                    "Deep nesting should produce substantial payload");
-                assert!(preimage.content_hash_prefix().len() == 8,
-                    "Hash should remain valid despite deep nesting");
+                assert!(
+                    preimage.canonical_payload.len() > 1000,
+                    "Deep nesting should produce substantial payload"
+                );
+                assert!(
+                    preimage.content_hash_prefix().len() == 8,
+                    "Hash should remain valid despite deep nesting"
+                );
             }
             Err(_) => {
                 // Rejection of deep nesting is also acceptable
@@ -3080,7 +3345,6 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 version: 1,
                 no_float: true,
             },
-
             // Duplicate field names
             CanonicalSchema {
                 object_type: TrustObjectType::DelegationToken,
@@ -3089,7 +3353,6 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 version: 1,
                 no_float: true,
             },
-
             // Very long field names
             CanonicalSchema {
                 object_type: TrustObjectType::RevocationAssertion,
@@ -3098,7 +3361,6 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 version: 1,
                 no_float: true,
             },
-
             // Malicious field names with control characters
             CanonicalSchema {
                 object_type: TrustObjectType::SessionTicket,
@@ -3111,7 +3373,6 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 version: 1,
                 no_float: true,
             },
-
             // Invalid domain tags
             CanonicalSchema {
                 object_type: TrustObjectType::ZoneBoundaryClaim,
@@ -3120,13 +3381,12 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 version: 1,
                 no_float: false, // Allow floats (policy violation)
             },
-
             // Extreme version numbers
             CanonicalSchema {
                 object_type: TrustObjectType::OperatorReceipt,
                 field_order: vec!["field1".to_string()],
                 domain_tag: [0xFF, 0xFF], // All ones
-                version: u8::MAX, // Maximum version
+                version: u8::MAX,         // Maximum version
                 no_float: true,
             },
         ];
@@ -3138,30 +3398,42 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 Ok(_) => {
                     // If registration succeeds, test serialization behavior
                     let test_data = serde_json::json!({"field1": "test_value"});
-                    let serialize_result = serializer.serialize_canonical(
-                        malicious_schema.object_type,
-                        &test_data,
-                    );
+                    let serialize_result =
+                        serializer.serialize_canonical(malicious_schema.object_type, &test_data);
 
                     match serialize_result {
                         Ok(preimage) => {
                             // Verify preimage structure remains safe
-                            assert!(!preimage.canonical_payload.is_empty(),
-                                "Payload should not be empty for malicious schema {}", idx);
-                            assert_eq!(preimage.domain_tag, malicious_schema.domain_tag,
-                                "Domain tag should match for schema {}", idx);
+                            assert!(
+                                !preimage.canonical_payload.is_empty(),
+                                "Payload should not be empty for malicious schema {}",
+                                idx
+                            );
+                            assert_eq!(
+                                preimage.domain_tag, malicious_schema.domain_tag,
+                                "Domain tag should match for schema {}",
+                                idx
+                            );
                         }
                         Err(error) => {
                             // Serialization errors are acceptable with malicious schemas
-                            assert!(!error.to_string().is_empty(),
-                                "Error should be meaningful for schema {}: {:?}", idx, error);
+                            assert!(
+                                !error.to_string().is_empty(),
+                                "Error should be meaningful for schema {}: {:?}",
+                                idx,
+                                error
+                            );
                         }
                     }
                 }
                 Err(error) => {
                     // Schema registration rejection is often expected
-                    assert!(!error.to_string().is_empty(),
-                        "Registration error should be meaningful for schema {}: {:?}", idx, error);
+                    assert!(
+                        !error.to_string().is_empty(),
+                        "Registration error should be meaningful for schema {}: {:?}",
+                        idx,
+                        error
+                    );
                 }
             }
         }
@@ -3178,9 +3450,9 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         let override_schema = CanonicalSchema {
             object_type: TrustObjectType::PolicyCheckpoint, // Same type
             field_order: vec!["malicious_field".to_string()], // Different fields
-            domain_tag: [0x99, 0x99], // Different domain tag
-            version: 2, // Different version
-            no_float: false, // Different policy
+            domain_tag: [0x99, 0x99],                       // Different domain tag
+            version: 2,                                     // Different version
+            no_float: false,                                // Different policy
         };
 
         let _ = serializer.register_schema(original_schema.clone());
@@ -3192,15 +3464,16 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             "malicious_field": "test2"
         });
 
-        let serialize_result = serializer.serialize_canonical(
-            TrustObjectType::PolicyCheckpoint,
-            &test_data,
-        );
+        let serialize_result =
+            serializer.serialize_canonical(TrustObjectType::PolicyCheckpoint, &test_data);
 
         match serialize_result {
             Ok(preimage) => {
                 // Verify which schema was used by checking domain tag
-                println!("Schema override test: domain tag used = {:?}", preimage.domain_tag);
+                println!(
+                    "Schema override test: domain tag used = {:?}",
+                    preimage.domain_tag
+                );
             }
             Err(_) => {
                 // Schema conflict may cause serialization to fail
@@ -3211,29 +3484,34 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         let concurrent_serializer = Arc::new(Mutex::new(CanonicalSerializer::new()));
         let registration_results = Arc::new(Mutex::new(Vec::new()));
 
-        let handles: Vec<_> = (0..20).map(|thread_id| {
-            let serializer_clone = concurrent_serializer.clone();
-            let results_clone = registration_results.clone();
+        let handles: Vec<_> = (0..20)
+            .map(|thread_id| {
+                let serializer_clone = concurrent_serializer.clone();
+                let results_clone = registration_results.clone();
 
-            thread::spawn(move || {
-                for schema_id in 0..10 {
-                    let schema = CanonicalSchema {
-                        object_type: TrustObjectType::all()[schema_id % 6], // Cycle through types
-                        field_order: vec![format!("field_{}_{}", thread_id, schema_id)],
-                        domain_tag: [(thread_id as u8) % 256, (schema_id as u8) % 256],
-                        version: ((thread_id + schema_id) as u8) % 256,
-                        no_float: thread_id % 2 == 0,
-                    };
+                thread::spawn(move || {
+                    for schema_id in 0..10 {
+                        let schema = CanonicalSchema {
+                            object_type: TrustObjectType::all()[schema_id % 6], // Cycle through types
+                            field_order: vec![format!("field_{}_{}", thread_id, schema_id)],
+                            domain_tag: [(thread_id as u8) % 256, (schema_id as u8) % 256],
+                            version: ((thread_id + schema_id) as u8) % 256,
+                            no_float: thread_id % 2 == 0,
+                        };
 
-                    let result = {
-                        let mut serializer_guard = serializer_clone.lock().unwrap();
-                        serializer_guard.register_schema(schema)
-                    };
+                        let result = {
+                            let mut serializer_guard = serializer_clone.lock().unwrap();
+                            serializer_guard.register_schema(schema)
+                        };
 
-                    results_clone.lock().unwrap().push((thread_id, schema_id, result.is_ok()));
-                }
+                        results_clone
+                            .lock()
+                            .unwrap()
+                            .push((thread_id, schema_id, result.is_ok()));
+                    }
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all concurrent registrations
         for handle in handles {
@@ -3244,7 +3522,11 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         let final_serializer = concurrent_serializer.lock().unwrap();
 
         // Verify concurrent registrations completed without corruption
-        assert_eq!(final_results.len(), 20 * 10, "All registration attempts should complete");
+        assert_eq!(
+            final_results.len(),
+            20 * 10,
+            "All registration attempts should complete"
+        );
 
         // Test that serializer state remains consistent
         let test_serialize = final_serializer.serialize_canonical(
@@ -3259,13 +3541,18 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             }
             Err(error) => {
                 // Failure should be meaningful, not a corruption indicator
-                assert!(!error.to_string().is_empty(),
-                    "Concurrent modification error should be meaningful: {:?}", error);
+                assert!(
+                    !error.to_string().is_empty(),
+                    "Concurrent modification error should be meaningful: {:?}",
+                    error
+                );
             }
         }
 
-        println!("Schema registration attack resistance test completed: {} concurrent operations",
-            final_results.len());
+        println!(
+            "Schema registration attack resistance test completed: {} concurrent operations",
+            final_results.len()
+        );
     }
 
     #[test]
@@ -3294,21 +3581,18 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 "field_m": "value_m",
                 "field_z": "value_z"
             }),
-
             // Reverse order
             serde_json::json!({
                 "field_z": "value_z",
                 "field_m": "value_m",
                 "field_a": "value_a"
             }),
-
             // Random order
             serde_json::json!({
                 "field_m": "value_m",
                 "field_z": "value_z",
                 "field_a": "value_a"
             }),
-
             // Extra fields not in schema
             serde_json::json!({
                 "field_z": "value_z",
@@ -3316,14 +3600,12 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 "field_m": "value_m",
                 "extra_field": "should_be_ignored"
             }),
-
             // Missing fields
             serde_json::json!({
                 "field_z": "value_z",
                 "field_a": "value_a"
                 // field_m missing
             }),
-
             // Duplicate field names with different values
             serde_json::json!({
                 "field_a": "value1",
@@ -3336,10 +3618,8 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         let mut canonical_outputs = HashMap::new();
 
         for (idx, attack_data) in field_ordering_attacks.iter().enumerate() {
-            let result = serializer.serialize_canonical(
-                TrustObjectType::PolicyCheckpoint,
-                attack_data,
-            );
+            let result =
+                serializer.serialize_canonical(TrustObjectType::PolicyCheckpoint, attack_data);
 
             match result {
                 Ok(preimage) => {
@@ -3349,13 +3629,24 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
 
                     // Verify preimage structure
                     assert_eq!(preimage.version, 1, "Version should match schema");
-                    assert_eq!(preimage.domain_tag, [0x10, 0x01], "Domain tag should match schema");
-                    assert!(!preimage.canonical_payload.is_empty(), "Payload should not be empty");
+                    assert_eq!(
+                        preimage.domain_tag,
+                        [0x10, 0x01],
+                        "Domain tag should match schema"
+                    );
+                    assert!(
+                        !preimage.canonical_payload.is_empty(),
+                        "Payload should not be empty"
+                    );
                 }
                 Err(error) => {
                     // Some malformed inputs may be rejected
-                    assert!(!error.to_string().is_empty(),
-                        "Error should be meaningful for attack {}: {:?}", idx, error);
+                    assert!(
+                        !error.to_string().is_empty(),
+                        "Error should be meaningful for attack {}: {:?}",
+                        idx,
+                        error
+                    );
                 }
             }
         }
@@ -3381,18 +3672,19 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
 
         let mut canonical_forms = Vec::new();
         for representation in &equivalent_representations {
-            if let Ok(preimage) = serializer.serialize_canonical(
-                TrustObjectType::PolicyCheckpoint,
-                representation,
-            ) {
+            if let Ok(preimage) =
+                serializer.serialize_canonical(TrustObjectType::PolicyCheckpoint, representation)
+            {
                 canonical_forms.push(preimage.canonical_payload);
             }
         }
 
         // All equivalent representations should produce identical canonical output
         for window in canonical_forms.windows(2) {
-            assert_eq!(window[0], window[1],
-                "Equivalent representations should produce identical canonical forms");
+            assert_eq!(
+                window[0], window[1],
+                "Equivalent representations should produce identical canonical forms"
+            );
         }
 
         // Test 3: Unicode and special character field name attacks
@@ -3420,7 +3712,6 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 "field_\u{202E}spoofed\u{202D}": "bidi",
                 "field\x00null": "null_test"
             }),
-
             // Different Unicode normalization forms
             serde_json::json!({
                 "field_α": "alpha", // NFC
@@ -3429,7 +3720,6 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 "field_\u{202E}spoofed\u{202D}": "bidi",
                 "field\x00null": "null_test"
             }),
-
             // Control character variations
             serde_json::json!({
                 "field_α": "alpha",
@@ -3441,25 +3731,35 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         ];
 
         for (idx, unicode_data) in unicode_attacks.iter().enumerate() {
-            let result = serializer.serialize_canonical(
-                TrustObjectType::DelegationToken,
-                unicode_data,
-            );
+            let result =
+                serializer.serialize_canonical(TrustObjectType::DelegationToken, unicode_data);
 
             match result {
                 Ok(preimage) => {
                     // Unicode content should be preserved exactly in canonical form
-                    assert!(!preimage.canonical_payload.is_empty(),
-                        "Unicode payload should not be empty for attack {}", idx);
+                    assert!(
+                        !preimage.canonical_payload.is_empty(),
+                        "Unicode payload should not be empty for attack {}",
+                        idx
+                    );
 
                     // Verify preimage is valid
                     let hash = preimage.content_hash_prefix();
-                    assert_eq!(hash.len(), 8, "Hash should be valid for Unicode attack {}", idx);
+                    assert_eq!(
+                        hash.len(),
+                        8,
+                        "Hash should be valid for Unicode attack {}",
+                        idx
+                    );
                 }
                 Err(error) => {
                     // Some Unicode attacks may be rejected
-                    assert!(!error.to_string().is_empty(),
-                        "Unicode error should be meaningful for attack {}: {:?}", idx, error);
+                    assert!(
+                        !error.to_string().is_empty(),
+                        "Unicode error should be meaningful for attack {}: {:?}",
+                        idx,
+                        error
+                    );
                 }
             }
         }
@@ -3493,7 +3793,6 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 "data": "normal_data",
                 "signature": "abc123def456"
             }),
-
             // Binary data as base64
             serde_json::json!({
                 "id": "test_002",
@@ -3501,7 +3800,6 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 "data": "VGVzdCBiaW5hcnkgZGF0YQ==", // "Test binary data" in base64
                 "signature": "xyz789uvw012"
             }),
-
             // Unicode content
             serde_json::json!({
                 "id": "test_003",
@@ -3509,7 +3807,6 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 "data": "Unicode: 🚀 α β γ \u{202E}test\u{202D}",
                 "signature": "unicode_sig"
             }),
-
             // Large content
             serde_json::json!({
                 "id": "test_004",
@@ -3517,7 +3814,6 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 "data": "x".repeat(100000), // 100KB data
                 "signature": "large_sig"
             }),
-
             // Nested JSON as string
             serde_json::json!({
                 "id": "test_005",
@@ -3525,7 +3821,6 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 "data": "{\"nested\": {\"deep\": \"value\"}}",
                 "signature": "nested_sig"
             }),
-
             // Special characters and escaping
             serde_json::json!({
                 "id": "test_006",
@@ -3536,10 +3831,8 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         ];
 
         for (idx, test_data) in integrity_test_vectors.iter().enumerate() {
-            let serialize_result = serializer.serialize_canonical(
-                TrustObjectType::SessionTicket,
-                test_data,
-            );
+            let serialize_result =
+                serializer.serialize_canonical(TrustObjectType::SessionTicket, test_data);
 
             match serialize_result {
                 Ok(original_preimage) => {
@@ -3552,34 +3845,53 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                         let domain_tag = [preimage_bytes[1], preimage_bytes[2]];
                         let payload = preimage_bytes[3..].to_vec();
 
-                        let reconstructed_preimage = SignaturePreimage::build(version, domain_tag, payload);
+                        let reconstructed_preimage =
+                            SignaturePreimage::build(version, domain_tag, payload);
 
                         // Round-trip should be identical
-                        assert_eq!(original_preimage, reconstructed_preimage,
-                            "Round-trip failed for test vector {}", idx);
-                        assert_eq!(original_preimage.to_bytes(), reconstructed_preimage.to_bytes(),
-                            "Byte representation should be identical after round-trip {}", idx);
-                        assert_eq!(original_preimage.content_hash_prefix(), reconstructed_preimage.content_hash_prefix(),
-                            "Content hash should be identical after round-trip {}", idx);
+                        assert_eq!(
+                            original_preimage, reconstructed_preimage,
+                            "Round-trip failed for test vector {}",
+                            idx
+                        );
+                        assert_eq!(
+                            original_preimage.to_bytes(),
+                            reconstructed_preimage.to_bytes(),
+                            "Byte representation should be identical after round-trip {}",
+                            idx
+                        );
+                        assert_eq!(
+                            original_preimage.content_hash_prefix(),
+                            reconstructed_preimage.content_hash_prefix(),
+                            "Content hash should be identical after round-trip {}",
+                            idx
+                        );
                     }
 
                     // Test determinism - serialize same data multiple times
                     for iteration in 0..10 {
-                        let repeat_result = serializer.serialize_canonical(
-                            TrustObjectType::SessionTicket,
-                            test_data,
-                        );
+                        let repeat_result = serializer
+                            .serialize_canonical(TrustObjectType::SessionTicket, test_data);
 
                         if let Ok(repeat_preimage) = repeat_result {
-                            assert_eq!(original_preimage.canonical_payload, repeat_preimage.canonical_payload,
-                                "Serialization should be deterministic for vector {} iteration {}", idx, iteration);
+                            assert_eq!(
+                                original_preimage.canonical_payload,
+                                repeat_preimage.canonical_payload,
+                                "Serialization should be deterministic for vector {} iteration {}",
+                                idx,
+                                iteration
+                            );
                         }
                     }
                 }
                 Err(error) => {
                     // Some test vectors may be rejected due to content
-                    assert!(!error.to_string().is_empty(),
-                        "Error should be meaningful for test vector {}: {:?}", idx, error);
+                    assert!(
+                        !error.to_string().is_empty(),
+                        "Error should be meaningful for test vector {}: {:?}",
+                        idx,
+                        error
+                    );
                 }
             }
         }
@@ -3592,18 +3904,17 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             "signature": "corruption_sig"
         });
 
-        if let Ok(original_preimage) = serializer.serialize_canonical(
-            TrustObjectType::SessionTicket,
-            &base_data,
-        ) {
+        if let Ok(original_preimage) =
+            serializer.serialize_canonical(TrustObjectType::SessionTicket, &base_data)
+        {
             let mut original_bytes = original_preimage.to_bytes();
 
             // Apply various byte corruptions
             let corruption_positions = vec![
-                0,  // Version byte
-                1,  // Domain tag byte 0
-                2,  // Domain tag byte 1
-                3,  // First payload byte
+                0,                        // Version byte
+                1,                        // Domain tag byte 0
+                2,                        // Domain tag byte 1
+                3,                        // First payload byte
                 original_bytes.len() / 2, // Middle of payload
                 original_bytes.len() - 1, // Last byte
             ];
@@ -3619,13 +3930,21 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                         let domain_tag = [corrupted_bytes[1], corrupted_bytes[2]];
                         let payload = corrupted_bytes[3..].to_vec();
 
-                        let corrupted_preimage = SignaturePreimage::build(version, domain_tag, payload);
+                        let corrupted_preimage =
+                            SignaturePreimage::build(version, domain_tag, payload);
 
                         // Corruption should be detectable
-                        assert_ne!(original_preimage, corrupted_preimage,
-                            "Corruption at position {} should be detectable", pos);
-                        assert_ne!(original_preimage.content_hash_prefix(), corrupted_preimage.content_hash_prefix(),
-                            "Corruption at position {} should change content hash", pos);
+                        assert_ne!(
+                            original_preimage, corrupted_preimage,
+                            "Corruption at position {} should be detectable",
+                            pos
+                        );
+                        assert_ne!(
+                            original_preimage.content_hash_prefix(),
+                            corrupted_preimage.content_hash_prefix(),
+                            "Corruption at position {} should change content hash",
+                            pos
+                        );
                     }
                 }
             }
@@ -3635,40 +3954,53 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         let concurrent_serializer = Arc::new(Mutex::new(serializer));
         let roundtrip_results = Arc::new(Mutex::new(Vec::new()));
 
-        let handles: Vec<_> = (0..20).map(|thread_id| {
-            let serializer_clone = concurrent_serializer.clone();
-            let results_clone = roundtrip_results.clone();
+        let handles: Vec<_> = (0..20)
+            .map(|thread_id| {
+                let serializer_clone = concurrent_serializer.clone();
+                let results_clone = roundtrip_results.clone();
 
-            thread::spawn(move || {
-                for iteration in 0..50 {
-                    let test_data = serde_json::json!({
-                        "id": format!("concurrent_{}_{}", thread_id, iteration),
-                        "timestamp": (thread_id * 1000000 + iteration) as u64,
-                        "data": format!("data_{}_{}", thread_id, "x".repeat(iteration * 10)),
-                        "signature": format!("sig_{}_{}", thread_id, iteration)
-                    });
+                thread::spawn(move || {
+                    for iteration in 0..50 {
+                        let test_data = serde_json::json!({
+                            "id": format!("concurrent_{}_{}", thread_id, iteration),
+                            "timestamp": (thread_id * 1000000 + iteration) as u64,
+                            "data": format!("data_{}_{}", thread_id, "x".repeat(iteration * 10)),
+                            "signature": format!("sig_{}_{}", thread_id, iteration)
+                        });
 
-                    let result = {
-                        let serializer_guard = serializer_clone.lock().unwrap();
-                        serializer_guard.serialize_canonical(TrustObjectType::SessionTicket, &test_data)
-                    };
+                        let result = {
+                            let serializer_guard = serializer_clone.lock().unwrap();
+                            serializer_guard
+                                .serialize_canonical(TrustObjectType::SessionTicket, &test_data)
+                        };
 
-                    match result {
-                        Ok(preimage) => {
-                            // Verify round-trip consistency
-                            let bytes = preimage.to_bytes();
-                            let hash = preimage.content_hash_prefix();
+                        match result {
+                            Ok(preimage) => {
+                                // Verify round-trip consistency
+                                let bytes = preimage.to_bytes();
+                                let hash = preimage.content_hash_prefix();
 
-                            results_clone.lock().unwrap().push((thread_id, iteration, bytes.len(), hash));
-                        }
-                        Err(_) => {
-                            // Track failures
-                            results_clone.lock().unwrap().push((thread_id, iteration, 0, "ERROR".to_string()));
+                                results_clone.lock().unwrap().push((
+                                    thread_id,
+                                    iteration,
+                                    bytes.len(),
+                                    hash,
+                                ));
+                            }
+                            Err(_) => {
+                                // Track failures
+                                results_clone.lock().unwrap().push((
+                                    thread_id,
+                                    iteration,
+                                    0,
+                                    "ERROR".to_string(),
+                                ));
+                            }
                         }
                     }
-                }
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all concurrent round-trips
         for handle in handles {
@@ -3676,7 +4008,11 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         }
 
         let final_roundtrip_results = roundtrip_results.lock().unwrap();
-        assert_eq!(final_roundtrip_results.len(), 20 * 50, "All round-trip tests should complete");
+        assert_eq!(
+            final_roundtrip_results.len(),
+            20 * 50,
+            "All round-trip tests should complete"
+        );
 
         // Verify consistency of results
         let mut seen_hashes = HashSet::new();
@@ -3696,10 +4032,18 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         }
 
         // Should have low error rate
-        assert!(error_count < 50, "Error rate should be low: {} errors out of {}", error_count, final_roundtrip_results.len());
+        assert!(
+            error_count < 50,
+            "Error rate should be low: {} errors out of {}",
+            error_count,
+            final_roundtrip_results.len()
+        );
 
-        println!("Round-trip integrity test completed: {} operations, {} errors",
-            final_roundtrip_results.len(), error_count);
+        println!(
+            "Round-trip integrity test completed: {} operations, {} errors",
+            final_roundtrip_results.len(),
+            error_count
+        );
     }
 
     #[test]
@@ -3716,30 +4060,55 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             let domain_prefix = object_type.to_domain_prefix();
 
             // Verify uniqueness of domain tags
-            assert!(domain_tags.insert(domain_tag),
-                "Domain tag collision detected for type {:?}: {:?}", object_type, domain_tag);
+            assert!(
+                domain_tags.insert(domain_tag),
+                "Domain tag collision detected for type {:?}: {:?}",
+                object_type,
+                domain_tag
+            );
 
             // Verify uniqueness of labels
-            assert!(labels.insert(label),
-                "Label collision detected for type {:?}: {}", object_type, label);
+            assert!(
+                labels.insert(label),
+                "Label collision detected for type {:?}: {}",
+                object_type,
+                label
+            );
 
             // Track domain prefixes (some sharing is allowed)
             domain_prefixes.insert(domain_prefix);
 
             // Verify domain tag format consistency
-            assert_eq!(domain_tag[0], 0x10,
-                "All domain tags should start with 0x10 for type {:?}", object_type);
-            assert!(domain_tag[1] >= 0x01 && domain_tag[1] <= 0x06,
-                "Domain tag second byte should be in valid range for type {:?}", object_type);
+            assert_eq!(
+                domain_tag[0], 0x10,
+                "All domain tags should start with 0x10 for type {:?}",
+                object_type
+            );
+            assert!(
+                domain_tag[1] >= 0x01 && domain_tag[1] <= 0x06,
+                "Domain tag second byte should be in valid range for type {:?}",
+                object_type
+            );
 
             // Verify label format
-            assert!(!label.is_empty(), "Label should not be empty for type {:?}", object_type);
-            assert!(label.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
-                "Label should be lowercase ASCII with underscores for type {:?}", object_type);
+            assert!(
+                !label.is_empty(),
+                "Label should not be empty for type {:?}",
+                object_type
+            );
+            assert!(
+                label.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "Label should be lowercase ASCII with underscores for type {:?}",
+                object_type
+            );
         }
 
         // Verify we have exactly 6 trust object types
-        assert_eq!(all_types.len(), 6, "Should have exactly 6 trust object types");
+        assert_eq!(
+            all_types.len(),
+            6,
+            "Should have exactly 6 trust object types"
+        );
         assert_eq!(domain_tags.len(), 6, "Should have 6 unique domain tags");
         assert_eq!(labels.len(), 6, "Should have 6 unique labels");
 
@@ -3749,11 +4118,9 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             ([0x10, 0x01], [0x11, 0x01]), // Flip bit in first byte
             ([0x10, 0x01], [0x10, 0x00]), // Flip bit in second byte
             ([0x10, 0x01], [0x10, 0x03]), // Bit arithmetic (1+2=3)
-
             // Overflow/underflow attacks
             ([0x10, 0x06], [0x10, 0x07]), // Beyond last valid type
             ([0x10, 0x01], [0x10, 0x00]), // Below first valid type
-
             // Pattern attacks
             ([0x10, 0x01], [0x20, 0x02]), // Double all values
             ([0x10, 0x01], [0x08, 0x00]), // Halve all values
@@ -3765,18 +4132,26 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
 
             if let Some(&orig_type) = original_type {
                 // Verify manipulated tag doesn't match any valid type
-                let manipulated_matches = all_types.iter().any(|t| t.domain_tag() == manipulated_tag);
+                let manipulated_matches =
+                    all_types.iter().any(|t| t.domain_tag() == manipulated_tag);
 
                 if manipulated_matches {
                     // If it matches, it should be a different type
-                    let manipulated_type = all_types.iter().find(|t| t.domain_tag() == manipulated_tag).unwrap();
-                    assert_ne!(orig_type, *manipulated_type,
+                    let manipulated_type = all_types
+                        .iter()
+                        .find(|t| t.domain_tag() == manipulated_tag)
+                        .unwrap();
+                    assert_ne!(
+                        orig_type, *manipulated_type,
                         "Domain tag manipulation should not map to same type: {:?} -> {:?}",
-                        original_tag, manipulated_tag);
+                        original_tag, manipulated_tag
+                    );
                 } else {
                     // Manipulated tag creates invalid type - this is good
-                    println!("Domain tag manipulation creates invalid tag: {:?} -> {:?}",
-                        original_tag, manipulated_tag);
+                    println!(
+                        "Domain tag manipulation creates invalid tag: {:?} -> {:?}",
+                        original_tag, manipulated_tag
+                    );
                 }
             }
         }
@@ -3796,8 +4171,16 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
 
             // Verify preimage structure
             assert_eq!(preimage_bytes[0], 1, "Version should be 1");
-            assert_eq!(&preimage_bytes[1..3], &domain_tag, "Domain tag should be embedded");
-            assert_eq!(&preimage_bytes[3..], &test_payload, "Payload should be appended");
+            assert_eq!(
+                &preimage_bytes[1..3],
+                &domain_tag,
+                "Domain tag should be embedded"
+            );
+            assert_eq!(
+                &preimage_bytes[3..],
+                &test_payload,
+                "Payload should be appended"
+            );
         }
 
         // Verify no collisions between types
@@ -3805,10 +4188,17 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         let mut seen_bytes = HashSet::new();
 
         for (object_type, (bytes, hash)) in &type_preimages {
-            assert!(seen_hashes.insert(hash.clone()),
-                "Content hash collision between object types at {:?}: {}", object_type, hash);
-            assert!(seen_bytes.insert(bytes.clone()),
-                "Byte sequence collision between object types at {:?}", object_type);
+            assert!(
+                seen_hashes.insert(hash.clone()),
+                "Content hash collision between object types at {:?}: {}",
+                object_type,
+                hash
+            );
+            assert!(
+                seen_bytes.insert(bytes.clone()),
+                "Byte sequence collision between object types at {:?}",
+                object_type
+            );
         }
 
         // Test 4: Cross-type serialization prevention
@@ -3834,8 +4224,11 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         for &object_type in all_types {
             if let Ok(preimage) = serializer.serialize_canonical(object_type, &test_data) {
                 let expected_tag = object_type.domain_tag();
-                assert_eq!(preimage.domain_tag, expected_tag,
-                    "Domain tag mismatch for type {:?}", object_type);
+                assert_eq!(
+                    preimage.domain_tag, expected_tag,
+                    "Domain tag mismatch for type {:?}",
+                    object_type
+                );
 
                 cross_type_results.insert(object_type, preimage.content_hash_prefix());
             }
@@ -3844,15 +4237,25 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         // Verify all types produce different results for same data
         let mut unique_results = HashSet::new();
         for (object_type, hash) in &cross_type_results {
-            assert!(unique_results.insert(hash.clone()),
-                "Cross-type hash collision for type {:?}: {}", object_type, hash);
+            assert!(
+                unique_results.insert(hash.clone()),
+                "Cross-type hash collision for type {:?}: {}",
+                object_type,
+                hash
+            );
         }
 
-        assert_eq!(unique_results.len(), cross_type_results.len(),
-            "All object types should produce unique hashes for same logical data");
+        assert_eq!(
+            unique_results.len(),
+            cross_type_results.len(),
+            "All object types should produce unique hashes for same logical data"
+        );
 
-        println!("Trust object type consistency test completed: {} types verified, {} unique domain separations",
-            all_types.len(), unique_results.len());
+        println!(
+            "Trust object type consistency test completed: {} types verified, {} unique domain separations",
+            all_types.len(),
+            unique_results.len()
+        );
     }
 
     #[test]
@@ -3894,7 +4297,8 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 })
             };
 
-            let result = serializer.serialize_canonical(TrustObjectType::OperatorReceipt, &test_data);
+            let result =
+                serializer.serialize_canonical(TrustObjectType::OperatorReceipt, &test_data);
             audit_results.push((operation, result.is_ok()));
 
             // Verify audit events are generated (implementation detail - would need access to internal events)
@@ -3905,8 +4309,11 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         for (operation, success) in &audit_results {
             match operation {
                 &"serialize_success" | &"preimage_construct" | &"schema_register" => {
-                    assert!(*success || !success, // Either outcome is acceptable based on implementation
-                        "Audit operation {} completed", operation);
+                    assert!(
+                        *success || !success, // Either outcome is acceptable based on implementation
+                        "Audit operation {} completed",
+                        operation
+                    );
                 }
                 &"serialize_failure" | &"rejection_logged" => {
                     // These may succeed or fail based on error handling
@@ -3919,26 +4326,33 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         let concurrent_serializer = Arc::new(Mutex::new(serializer));
         let concurrent_results = Arc::new(Mutex::new(Vec::new()));
 
-        let audit_handles: Vec<_> = (0..30).map(|thread_id| {
-            let serializer_clone = concurrent_serializer.clone();
-            let results_clone = concurrent_results.clone();
+        let audit_handles: Vec<_> = (0..30)
+            .map(|thread_id| {
+                let serializer_clone = concurrent_serializer.clone();
+                let results_clone = concurrent_results.clone();
 
-            thread::spawn(move || {
-                for operation_id in 0..20 {
-                    let test_data = serde_json::json!({
-                        "operation": format!("concurrent_op_{}_{}", thread_id, operation_id),
-                        "timestamp": (thread_id * 1000000 + operation_id) as u64
-                    });
+                thread::spawn(move || {
+                    for operation_id in 0..20 {
+                        let test_data = serde_json::json!({
+                            "operation": format!("concurrent_op_{}_{}", thread_id, operation_id),
+                            "timestamp": (thread_id * 1000000 + operation_id) as u64
+                        });
 
-                    let result = {
-                        let serializer_guard = serializer_clone.lock().unwrap();
-                        serializer_guard.serialize_canonical(TrustObjectType::OperatorReceipt, &test_data)
-                    };
+                        let result = {
+                            let serializer_guard = serializer_clone.lock().unwrap();
+                            serializer_guard
+                                .serialize_canonical(TrustObjectType::OperatorReceipt, &test_data)
+                        };
 
-                    results_clone.lock().unwrap().push((thread_id, operation_id, result.is_ok()));
-                }
+                        results_clone.lock().unwrap().push((
+                            thread_id,
+                            operation_id,
+                            result.is_ok(),
+                        ));
+                    }
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all concurrent operations
         for handle in audit_handles {
@@ -3946,13 +4360,23 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         }
 
         let final_concurrent_results = concurrent_results.lock().unwrap();
-        assert_eq!(final_concurrent_results.len(), 30 * 20, "All audit operations should complete");
+        assert_eq!(
+            final_concurrent_results.len(),
+            30 * 20,
+            "All audit operations should complete"
+        );
 
         // Verify audit integrity under concurrent access
-        let success_count = final_concurrent_results.iter().filter(|(_, _, success)| *success).count();
+        let success_count = final_concurrent_results
+            .iter()
+            .filter(|(_, _, success)| *success)
+            .count();
         let failure_count = final_concurrent_results.len() - success_count;
 
-        println!("Concurrent audit test: {} successes, {} failures", success_count, failure_count);
+        println!(
+            "Concurrent audit test: {} successes, {} failures",
+            success_count, failure_count
+        );
 
         // Test 3: Audit event data integrity and tampering resistance
         let integrity_serializer = concurrent_serializer.lock().unwrap();
@@ -3961,11 +4385,9 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             // Normal operations
             ("normal_operation", 1000000, true),
             ("standard_serialize", 2000000, true),
-
             // Edge case operations
-            ("edge_operation", 0, true), // Zero timestamp
+            ("edge_operation", 0, true),       // Zero timestamp
             ("max_timestamp", u64::MAX, true), // Maximum timestamp
-
             // Malicious operations
             ("malicious_op\x00null", 3000000, false), // Null bytes
             ("malicious_op\r\n\tcontrol", 4000000, false), // Control chars
@@ -3978,18 +4400,30 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 "timestamp": timestamp
             });
 
-            let result = integrity_serializer.serialize_canonical(TrustObjectType::OperatorReceipt, &test_data);
+            let result = integrity_serializer
+                .serialize_canonical(TrustObjectType::OperatorReceipt, &test_data);
 
             match result {
                 Ok(preimage) => {
                     // Verify preimage integrity
-                    assert!(!preimage.canonical_payload.is_empty(),
-                        "Preimage payload should not be empty for operation: {}", operation);
+                    assert!(
+                        !preimage.canonical_payload.is_empty(),
+                        "Preimage payload should not be empty for operation: {}",
+                        operation
+                    );
 
                     let hash = preimage.content_hash_prefix();
-                    assert_eq!(hash.len(), 8, "Hash should be valid for operation: {}", operation);
-                    assert!(hash.chars().all(|c| c.is_ascii_hexdigit()),
-                        "Hash should be valid hex for operation: {}", operation);
+                    assert_eq!(
+                        hash.len(),
+                        8,
+                        "Hash should be valid for operation: {}",
+                        operation
+                    );
+                    assert!(
+                        hash.chars().all(|c| c.is_ascii_hexdigit()),
+                        "Hash should be valid hex for operation: {}",
+                        operation
+                    );
 
                     if expect_success {
                         // Expected success case
@@ -4001,10 +4435,16 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 Err(error) => {
                     if !expect_success {
                         // Expected failure case
-                        assert!(!error.to_string().is_empty(),
-                            "Error should be meaningful for malicious operation: {}", operation);
+                        assert!(
+                            !error.to_string().is_empty(),
+                            "Error should be meaningful for malicious operation: {}",
+                            operation
+                        );
                     } else {
-                        panic!("Unexpected failure for normal operation {}: {:?}", operation, error);
+                        panic!(
+                            "Unexpected failure for normal operation {}: {:?}",
+                            operation, error
+                        );
                     }
                 }
             }
@@ -4027,7 +4467,9 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 "timestamp": timestamp
             });
 
-            if let Ok(preimage) = integrity_serializer.serialize_canonical(TrustObjectType::OperatorReceipt, &test_data) {
+            if let Ok(preimage) = integrity_serializer
+                .serialize_canonical(TrustObjectType::OperatorReceipt, &test_data)
+            {
                 first_run_results.push((operation.clone(), preimage.content_hash_prefix()));
             }
         }
@@ -4039,22 +4481,33 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 "timestamp": timestamp
             });
 
-            if let Ok(preimage) = integrity_serializer.serialize_canonical(TrustObjectType::OperatorReceipt, &test_data) {
+            if let Ok(preimage) = integrity_serializer
+                .serialize_canonical(TrustObjectType::OperatorReceipt, &test_data)
+            {
                 second_run_results.push((operation.clone(), preimage.content_hash_prefix()));
             }
         }
 
         // Verify deterministic replay
-        assert_eq!(first_run_results.len(), second_run_results.len(),
-            "Replay should produce same number of results");
+        assert_eq!(
+            first_run_results.len(),
+            second_run_results.len(),
+            "Replay should produce same number of results"
+        );
 
         for (first, second) in first_run_results.iter().zip(second_run_results.iter()) {
             assert_eq!(first.0, second.0, "Operation names should match");
-            assert_eq!(first.1, second.1, "Hashes should be identical on replay: {} vs {}", first.1, second.1);
+            assert_eq!(
+                first.1, second.1,
+                "Hashes should be identical on replay: {} vs {}",
+                first.1, second.1
+            );
         }
 
-        println!("Audit trail integrity test completed: {} operations verified for consistency",
-            replay_operations.len());
+        println!(
+            "Audit trail integrity test completed: {} operations verified for consistency",
+            replay_operations.len()
+        );
     }
 
     // -- Negative-path Security Tests ---------------------------------------
@@ -4074,9 +4527,15 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 version: 1,
                 metadata: {
                     let mut meta = BTreeMap::new();
-                    meta.insert("issuer".to_string(), "\u{202E}admin\u{202D}fake".to_string());  // BiDi override
-                    meta.insert("policy_id".to_string(), "policy\u{200B}001".to_string());  // Zero-width space
-                    meta.insert("description".to_string(), "Safe policy\u{FEFF}backdoor".to_string());  // Zero-width no-break
+                    meta.insert(
+                        "issuer".to_string(),
+                        "\u{202E}admin\u{202D}fake".to_string(),
+                    ); // BiDi override
+                    meta.insert("policy_id".to_string(), "policy\u{200B}001".to_string()); // Zero-width space
+                    meta.insert(
+                        "description".to_string(),
+                        "Safe policy\u{FEFF}backdoor".to_string(),
+                    ); // Zero-width no-break
                     meta
                 },
                 payload: b"policy_data".to_vec(),
@@ -4088,9 +4547,9 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 version: 1,
                 metadata: {
                     let mut meta = BTreeMap::new();
-                    meta.insert("delegator".to_string(), "user\u{2028}admin".to_string());  // Line separator
-                    meta.insert("scope".to_string(), "read\u{2029}write".to_string());  // Paragraph separator
-                    meta.insert("token_id".to_string(), "\u{0000}bypass".to_string());  // Null injection
+                    meta.insert("delegator".to_string(), "user\u{2028}admin".to_string()); // Line separator
+                    meta.insert("scope".to_string(), "read\u{2029}write".to_string()); // Paragraph separator
+                    meta.insert("token_id".to_string(), "\u{0000}bypass".to_string()); // Null injection
                     meta
                 },
                 payload: b"delegation_data".to_vec(),
@@ -4104,22 +4563,29 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             match serialization_result {
                 Ok(canonical_bytes) => {
                     // If serialization succeeded, verify Unicode doesn't affect determinism
-                    let second_serialization = serializer.serialize(&trust_object).expect("should serialize");
-                    assert_eq!(canonical_bytes, second_serialization,
-                             "Unicode injection should not affect deterministic serialization");
+                    let second_serialization = serializer
+                        .serialize(&trust_object)
+                        .expect("should serialize");
+                    assert_eq!(
+                        canonical_bytes, second_serialization,
+                        "Unicode injection should not affect deterministic serialization"
+                    );
 
                     // Verify round-trip preserves structure but not injection
-                    let deserialized = serializer.deserialize(&canonical_bytes, trust_object.object_type)
-                                                .expect("should deserialize");
+                    let deserialized = serializer
+                        .deserialize(&canonical_bytes, trust_object.object_type)
+                        .expect("should deserialize");
                     assert_eq!(deserialized.object_type, trust_object.object_type);
                     assert_eq!(deserialized.version, trust_object.version);
 
                     // Unicode should not create admin privileges through normalization
                     if let Some(issuer) = deserialized.metadata.get("issuer") {
-                        assert!(!constant_time::ct_eq(issuer.as_bytes(), b"admin"),
-                               "Unicode injection should not create admin privileges");
+                        assert!(
+                            !constant_time::ct_eq(issuer.as_bytes(), b"admin"),
+                            "Unicode injection should not create admin privileges"
+                        );
                     }
-                },
+                }
                 Err(_) => {
                     // Graceful rejection of Unicode injection is acceptable
                 }
@@ -4151,7 +4617,7 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 object_type: TrustObjectType::ZoneBoundaryClaim,
                 version: 1,
                 metadata: BTreeMap::new(),
-                payload: vec![0x42; 10_000_000],  // 10MB payload
+                payload: vec![0x42; 10_000_000], // 10MB payload
                 expires_at: None,
             },
         ];
@@ -4162,14 +4628,23 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             match serialization_result {
                 Ok(canonical_bytes) => {
                     // If processing succeeded, verify it didn't consume excessive memory
-                    assert!(canonical_bytes.len() > 0, "Serialization should produce output");
+                    assert!(
+                        canonical_bytes.len() > 0,
+                        "Serialization should produce output"
+                    );
 
                     // Verify determinism is maintained even with large objects
                     let second_result = serializer.serialize(&large_object);
-                    assert!(second_result.is_ok(), "Second serialization should also succeed");
-                    assert_eq!(canonical_bytes, second_result.unwrap(),
-                             "Large object serialization should be deterministic");
-                },
+                    assert!(
+                        second_result.is_ok(),
+                        "Second serialization should also succeed"
+                    );
+                    assert_eq!(
+                        canonical_bytes,
+                        second_result.unwrap(),
+                        "Large object serialization should be deterministic"
+                    );
+                }
                 Err(_) => {
                     // Graceful rejection due to size limits is acceptable
                 }
@@ -4186,17 +4661,17 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         let float_injection_metadata = vec![
             {
                 let mut meta = BTreeMap::new();
-                meta.insert("value".to_string(), "3.14159".to_string());  // Float as string
-                meta.insert("scientific".to_string(), "1.23e-4".to_string());  // Scientific notation
-                meta.insert("infinity".to_string(), "inf".to_string());  // Infinity string
-                meta.insert("nan".to_string(), "NaN".to_string());  // NaN string
+                meta.insert("value".to_string(), "3.14159".to_string()); // Float as string
+                meta.insert("scientific".to_string(), "1.23e-4".to_string()); // Scientific notation
+                meta.insert("infinity".to_string(), "inf".to_string()); // Infinity string
+                meta.insert("nan".to_string(), "NaN".to_string()); // NaN string
                 meta
             },
             {
                 let mut meta = BTreeMap::new();
-                meta.insert("hex_float".to_string(), "0x1.5p+3".to_string());  // Hex float format
-                meta.insert("special".to_string(), "-0.0".to_string());  // Negative zero
-                meta.insert("large".to_string(), format!("{}", f64::MAX));  // Max float
+                meta.insert("hex_float".to_string(), "0x1.5p+3".to_string()); // Hex float format
+                meta.insert("special".to_string(), "-0.0".to_string()); // Negative zero
+                meta.insert("large".to_string(), format!("{}", f64::MAX)); // Max float
                 meta
             },
         ];
@@ -4217,16 +4692,26 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 let canonical_str = String::from_utf8_lossy(&canonical_bytes);
 
                 // Canonical serialization should not interpret strings as floats
-                assert!(!canonical_str.contains("3.14159"), "Float values should not appear in canonical output");
-                assert!(!canonical_str.contains("1.23e-4"), "Scientific notation should be preserved as string");
+                assert!(
+                    !canonical_str.contains("3.14159"),
+                    "Float values should not appear in canonical output"
+                );
+                assert!(
+                    !canonical_str.contains("1.23e-4"),
+                    "Scientific notation should be preserved as string"
+                );
 
                 // Verify round-trip preserves string representation
-                let deserialized = serializer.deserialize(&canonical_bytes, trust_object.object_type)
-                                            .expect("should deserialize");
+                let deserialized = serializer
+                    .deserialize(&canonical_bytes, trust_object.object_type)
+                    .expect("should deserialize");
 
                 for (key, value) in &trust_object.metadata {
-                    assert_eq!(deserialized.metadata.get(key), Some(value),
-                             "String representation should be preserved in round-trip");
+                    assert_eq!(
+                        deserialized.metadata.get(key),
+                        Some(value),
+                        "String representation should be preserved in round-trip"
+                    );
                 }
             }
         }
@@ -4237,43 +4722,48 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         let serializer = CanonicalSerializer::new();
 
         // Attempt to bypass canonical serialization through various methods
-        let bypass_attempts = vec![
-            SerializableTrustObject {
-                object_type: TrustObjectType::RevocationAssertion,
-                version: u32::MAX,  // Extreme version number
-                metadata: {
-                    let mut meta = BTreeMap::new();
-                    meta.insert("__proto__".to_string(), "prototype_pollution".to_string());  // Prototype pollution
-                    meta.insert("constructor".to_string(), "bypass".to_string());  // Constructor manipulation
-                    meta.insert("".to_string(), "empty_key".to_string());  // Empty key
-                    meta.insert("key\0with\0nulls".to_string(), "value".to_string());  // Null bytes in key
-                    meta
-                },
-                payload: b"bypass_payload".to_vec(),
-                expires_at: Some(u64::MAX),  // Extreme timestamp
+        let bypass_attempts = vec![SerializableTrustObject {
+            object_type: TrustObjectType::RevocationAssertion,
+            version: u32::MAX, // Extreme version number
+            metadata: {
+                let mut meta = BTreeMap::new();
+                meta.insert("__proto__".to_string(), "prototype_pollution".to_string()); // Prototype pollution
+                meta.insert("constructor".to_string(), "bypass".to_string()); // Constructor manipulation
+                meta.insert("".to_string(), "empty_key".to_string()); // Empty key
+                meta.insert("key\0with\0nulls".to_string(), "value".to_string()); // Null bytes in key
+                meta
             },
-        ];
+            payload: b"bypass_payload".to_vec(),
+            expires_at: Some(u64::MAX), // Extreme timestamp
+        }];
 
         for bypass_object in bypass_attempts {
             let result = serializer.serialize(&bypass_object);
 
             if let Ok(canonical_bytes) = result {
                 // Verify bypass attempts don't affect determinism
-                let second_result = serializer.serialize(&bypass_object).expect("should serialize");
-                assert_eq!(canonical_bytes, second_result,
-                         "Bypass attempts should not affect deterministic output");
+                let second_result = serializer
+                    .serialize(&bypass_object)
+                    .expect("should serialize");
+                assert_eq!(
+                    canonical_bytes, second_result,
+                    "Bypass attempts should not affect deterministic output"
+                );
 
                 // Verify round-trip maintains security properties
-                let deserialized = serializer.deserialize(&canonical_bytes, bypass_object.object_type)
-                                            .expect("should deserialize");
+                let deserialized = serializer
+                    .deserialize(&canonical_bytes, bypass_object.object_type)
+                    .expect("should deserialize");
 
                 // Extreme values should be preserved exactly
                 assert_eq!(deserialized.version, bypass_object.version);
                 assert_eq!(deserialized.expires_at, bypass_object.expires_at);
 
                 // Special keys should not create security vulnerabilities
-                assert!(!deserialized.metadata.contains_key("__proto__") ||
-                       deserialized.metadata.get("__proto__").unwrap() == "prototype_pollution");
+                assert!(
+                    !deserialized.metadata.contains_key("__proto__")
+                        || deserialized.metadata.get("__proto__").unwrap() == "prototype_pollution"
+                );
             }
         }
     }
@@ -4289,15 +4779,18 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             let domain_tag = object_type.domain_tag();
 
             // Each domain tag should be unique
-            assert!(observed_domain_tags.insert(domain_tag),
-                   "Domain tag collision detected for type {:?}", object_type);
+            assert!(
+                observed_domain_tags.insert(domain_tag),
+                "Domain tag collision detected for type {:?}",
+                object_type
+            );
 
             // Domain tags should not be vulnerable to bit manipulation
             let modified_tags = vec![
-                [domain_tag[0] ^ 0x01, domain_tag[1]],  // Flip bit in first byte
-                [domain_tag[0], domain_tag[1] ^ 0x01],  // Flip bit in second byte
-                [domain_tag[0].wrapping_add(1), domain_tag[1]],  // Increment first byte
-                [domain_tag[0], domain_tag[1].wrapping_add(1)],  // Increment second byte
+                [domain_tag[0] ^ 0x01, domain_tag[1]], // Flip bit in first byte
+                [domain_tag[0], domain_tag[1] ^ 0x01], // Flip bit in second byte
+                [domain_tag[0].wrapping_add(1), domain_tag[1]], // Increment first byte
+                [domain_tag[0], domain_tag[1].wrapping_add(1)], // Increment second byte
             ];
 
             for modified_tag in modified_tags {
@@ -4310,8 +4803,10 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                             break;
                         }
                     }
-                    assert!(!is_legitimate || modified_tag == domain_tag,
-                           "Modified domain tag should not match legitimate tag");
+                    assert!(
+                        !is_legitimate || modified_tag == domain_tag,
+                        "Modified domain tag should not match legitimate tag"
+                    );
                 }
             }
 
@@ -4343,51 +4838,61 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             expires_at: Some(1234567890),
         };
 
-        let canonical_bytes = serializer.serialize(&original_object).expect("should serialize");
+        let canonical_bytes = serializer
+            .serialize(&original_object)
+            .expect("should serialize");
 
         // Attempt various tampering attacks on the serialized bytes
         let tampering_attempts = vec![
             {
                 let mut tampered = canonical_bytes.clone();
                 if !tampered.is_empty() {
-                    tampered[0] ^= 0x01;  // Flip bit in first byte
+                    tampered[0] ^= 0x01; // Flip bit in first byte
                 }
                 tampered
             },
             {
                 let mut tampered = canonical_bytes.clone();
-                tampered.push(0x00);  // Append null byte
+                tampered.push(0x00); // Append null byte
                 tampered
             },
             {
                 let mut tampered = canonical_bytes.clone();
                 if tampered.len() > 1 {
-                    tampered.truncate(tampered.len() - 1);  // Truncate last byte
+                    tampered.truncate(tampered.len() - 1); // Truncate last byte
                 }
                 tampered
             },
             {
                 let mut tampered = canonical_bytes.clone();
-                tampered.extend_from_slice(b"injection");  // Append data
+                tampered.extend_from_slice(b"injection"); // Append data
                 tampered
             },
         ];
 
         for tampered_bytes in tampering_attempts {
-            let deserialization_result = serializer.deserialize(&tampered_bytes, original_object.object_type);
+            let deserialization_result =
+                serializer.deserialize(&tampered_bytes, original_object.object_type);
 
             match deserialization_result {
                 Ok(deserialized) => {
                     // If deserialization succeeded, verify integrity
                     if tampered_bytes == canonical_bytes {
-                        assert_eq!(deserialized, original_object, "Identical bytes should produce identical object");
+                        assert_eq!(
+                            deserialized, original_object,
+                            "Identical bytes should produce identical object"
+                        );
                     } else {
                         // Tampering should be detectable through serialization mismatch
-                        let re_serialized = serializer.serialize(&deserialized).expect("should re-serialize");
-                        assert_ne!(re_serialized, tampered_bytes,
-                                 "Tampered input should not round-trip consistently");
+                        let re_serialized = serializer
+                            .serialize(&deserialized)
+                            .expect("should re-serialize");
+                        assert_ne!(
+                            re_serialized, tampered_bytes,
+                            "Tampered input should not round-trip consistently"
+                        );
                     }
-                },
+                }
                 Err(_) => {
                     // Graceful rejection of tampered data is expected
                 }
@@ -4401,11 +4906,17 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
 
         let injection_metadata = {
             let mut meta = BTreeMap::new();
-            meta.insert("description".to_string(), "\";alert('xss');//".to_string());  // JS injection
-            meta.insert("content".to_string(), "</script><script>alert('xss')</script>".to_string());  // HTML injection
-            meta.insert("command".to_string(), "$(rm -rf /)".to_string());  // Command injection
-            meta.insert("newline".to_string(), "line1\nline2\r\nline3".to_string());  // Newline injection
-            meta.insert("unicode".to_string(), "\u{2028}line\u{2029}break".to_string());  // Unicode line breaks
+            meta.insert("description".to_string(), "\";alert('xss');//".to_string()); // JS injection
+            meta.insert(
+                "content".to_string(),
+                "</script><script>alert('xss')</script>".to_string(),
+            ); // HTML injection
+            meta.insert("command".to_string(), "$(rm -rf /)".to_string()); // Command injection
+            meta.insert("newline".to_string(), "line1\nline2\r\nline3".to_string()); // Newline injection
+            meta.insert(
+                "unicode".to_string(),
+                "\u{2028}line\u{2029}break".to_string(),
+            ); // Unicode line breaks
             meta
         };
 
@@ -4417,23 +4928,38 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             expires_at: None,
         };
 
-        let canonical_bytes = serializer.serialize(&trust_object).expect("should serialize");
+        let canonical_bytes = serializer
+            .serialize(&trust_object)
+            .expect("should serialize");
         let canonical_str = String::from_utf8_lossy(&canonical_bytes);
 
         // Canonical serialization should escape injection attempts
-        assert!(!canonical_str.contains("alert('xss')"), "JavaScript injection should be escaped");
-        assert!(!canonical_str.contains("</script>"), "HTML injection should be escaped");
-        assert!(!canonical_str.contains("$(rm -rf"), "Command injection should be escaped");
+        assert!(
+            !canonical_str.contains("alert('xss')"),
+            "JavaScript injection should be escaped"
+        );
+        assert!(
+            !canonical_str.contains("</script>"),
+            "HTML injection should be escaped"
+        );
+        assert!(
+            !canonical_str.contains("$(rm -rf"),
+            "Command injection should be escaped"
+        );
 
         // Verify round-trip preserves content but maintains safety
-        let deserialized = serializer.deserialize(&canonical_bytes, trust_object.object_type)
-                                    .expect("should deserialize");
+        let deserialized = serializer
+            .deserialize(&canonical_bytes, trust_object.object_type)
+            .expect("should deserialize");
 
         // Content should be preserved but safe
         assert_eq!(deserialized.metadata.len(), trust_object.metadata.len());
         for (key, original_value) in &trust_object.metadata {
             let deserialized_value = deserialized.metadata.get(key).expect("key should exist");
-            assert_eq!(deserialized_value, original_value, "Values should be preserved exactly");
+            assert_eq!(
+                deserialized_value, original_value,
+                "Values should be preserved exactly"
+            );
         }
     }
 
@@ -4477,16 +5003,25 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
 
         // Verify all serializations completed successfully
         for (i, result) in results.iter().enumerate() {
-            assert!(result.is_ok(), "Concurrent serialization {} should succeed", i);
+            assert!(
+                result.is_ok(),
+                "Concurrent serialization {} should succeed",
+                i
+            );
 
             if let Ok(canonical_bytes) = result {
-                assert!(!canonical_bytes.is_empty(), "Serialization should produce output");
+                assert!(
+                    !canonical_bytes.is_empty(),
+                    "Serialization should produce output"
+                );
 
                 // Verify content contains thread-specific data
                 let canonical_str = String::from_utf8_lossy(canonical_bytes);
-                assert!(canonical_str.contains(&format!("thread_{}", i)) ||
-                       canonical_str.contains(&i.to_string()),
-                       "Serialization should contain thread-specific data");
+                assert!(
+                    canonical_str.contains(&format!("thread_{}", i))
+                        || canonical_str.contains(&i.to_string()),
+                    "Serialization should contain thread-specific data"
+                );
             }
         }
     }
@@ -4498,16 +5033,16 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         // Test with extreme values that could cause arithmetic overflow
         let overflow_object = SerializableTrustObject {
             object_type: TrustObjectType::OperatorReceipt,
-            version: u32::MAX,  // Maximum version
+            version: u32::MAX, // Maximum version
             metadata: {
                 let mut meta = BTreeMap::new();
-                meta.insert("counter".to_string(), u64::MAX.to_string());  // Max counter as string
-                meta.insert("length".to_string(), usize::MAX.to_string());  // Max length as string
-                meta.insert("size".to_string(), i64::MAX.to_string());  // Max i64 as string
+                meta.insert("counter".to_string(), u64::MAX.to_string()); // Max counter as string
+                meta.insert("length".to_string(), usize::MAX.to_string()); // Max length as string
+                meta.insert("size".to_string(), i64::MAX.to_string()); // Max i64 as string
                 meta
             },
-            payload: vec![0xFF; 65536],  // Large payload
-            expires_at: Some(u64::MAX),  // Maximum timestamp
+            payload: vec![0xFF; 65536], // Large payload
+            expires_at: Some(u64::MAX), // Maximum timestamp
         };
 
         let result = serializer.serialize(&overflow_object);
@@ -4515,20 +5050,30 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         match result {
             Ok(canonical_bytes) => {
                 // If serialization succeeded, verify no overflow occurred
-                assert!(!canonical_bytes.is_empty(), "Serialization should produce output");
+                assert!(
+                    !canonical_bytes.is_empty(),
+                    "Serialization should produce output"
+                );
 
                 // Verify round-trip maintains exact values
-                let deserialized = serializer.deserialize(&canonical_bytes, overflow_object.object_type)
-                                            .expect("should deserialize");
+                let deserialized = serializer
+                    .deserialize(&canonical_bytes, overflow_object.object_type)
+                    .expect("should deserialize");
 
                 assert_eq!(deserialized.version, u32::MAX);
                 assert_eq!(deserialized.expires_at, Some(u64::MAX));
                 assert_eq!(deserialized.payload.len(), overflow_object.payload.len());
 
                 // Extreme string values should be preserved
-                assert_eq!(deserialized.metadata.get("counter"), Some(&u64::MAX.to_string()));
-                assert_eq!(deserialized.metadata.get("length"), Some(&usize::MAX.to_string()));
-            },
+                assert_eq!(
+                    deserialized.metadata.get("counter"),
+                    Some(&u64::MAX.to_string())
+                );
+                assert_eq!(
+                    deserialized.metadata.get("length"),
+                    Some(&usize::MAX.to_string())
+                );
+            }
             Err(_) => {
                 // Graceful rejection of extreme values is acceptable
             }
@@ -4552,7 +5097,7 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                     meta2.insert("b".to_string(), "2".to_string());
                     meta2.insert("a".to_string(), "1".to_string());
                     meta2
-                }
+                },
             ),
             // Metadata vs payload boundary confusion
             (
@@ -4561,7 +5106,7 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                     meta1.insert("data".to_string(), "boundary_test".to_string());
                     meta1
                 },
-                BTreeMap::new()
+                BTreeMap::new(),
             ),
         ];
 
@@ -4578,7 +5123,11 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                 object_type: TrustObjectType::DelegationToken,
                 version: 1,
                 metadata: metadata2,
-                payload: if object1.metadata.is_empty() { b"boundary_test".to_vec() } else { b"same_payload".to_vec() },
+                payload: if object1.metadata.is_empty() {
+                    b"boundary_test".to_vec()
+                } else {
+                    b"same_payload".to_vec()
+                },
                 expires_at: None,
             };
 
@@ -4588,15 +5137,21 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
 
             if object1.metadata != object2.metadata || object1.payload != object2.payload {
                 // Different logical content should produce different canonical bytes
-                assert_ne!(bytes1, bytes2, "Different objects should have different canonical serialization");
+                assert_ne!(
+                    bytes1, bytes2,
+                    "Different objects should have different canonical serialization"
+                );
 
                 // Build signature preimages and verify they differ
                 let domain_tag = TrustObjectType::DelegationToken.domain_tag();
                 let preimage1 = SignaturePreimage::build(1, domain_tag, bytes1.clone());
                 let preimage2 = SignaturePreimage::build(1, domain_tag, bytes2.clone());
 
-                assert_ne!(preimage1.content_hash_prefix(), preimage2.content_hash_prefix(),
-                         "Different objects should have different signature preimage hashes");
+                assert_ne!(
+                    preimage1.content_hash_prefix(),
+                    preimage2.content_hash_prefix(),
+                    "Different objects should have different signature preimage hashes"
+                );
             }
         }
     }
@@ -4622,26 +5177,32 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         }
 
         // Events should be capped by push_bounded, not grow without limit
-        assert!(serializer.events().len() <= MAX_EVENTS,
-               "events should be bounded: {} <= {}", serializer.events().len(), MAX_EVENTS);
+        assert!(
+            serializer.events().len() <= MAX_EVENTS,
+            "events should be bounded: {} <= {}",
+            serializer.events().len(),
+            MAX_EVENTS
+        );
     }
 
     #[test]
     fn negative_length_cast_overflow_in_canonical_encoding() {
         // Test u32::try_from protection for .len() as u32 patterns
-        let boundary_cases = vec![
-            (0, true),
-            (u32::MAX as usize, true),
-        ];
+        let boundary_cases = vec![(0, true), (u32::MAX as usize, true)];
 
         for (length, should_succeed) in boundary_cases {
             let test_payload = vec![0x42u8; std::cmp::min(length, 1000)]; // Limit for test
             let result = canonical_encode(&test_payload);
 
             if should_succeed {
-                assert!(result.is_ok(), "should handle length {} with try_from", length);
+                assert!(
+                    result.is_ok(),
+                    "should handle length {} with try_from",
+                    length
+                );
                 if let Ok(encoded) = result {
-                    let prefix = u32::from_be_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
+                    let prefix =
+                        u32::from_be_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
                     assert_eq!(prefix as usize, test_payload.len());
                 }
             }
@@ -4649,7 +5210,10 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
 
         // Test direct overflow simulation
         let overflow_result = u32::try_from(u64::MAX as usize);
-        assert!(overflow_result.is_err(), "should fail for oversized lengths");
+        assert!(
+            overflow_result.is_err(),
+            "should fail for oversized lengths"
+        );
     }
 
     #[test]
@@ -4665,10 +5229,17 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         // Test saturating arithmetic properties
         let near_max = usize::MAX - 5;
         let safe_result = near_max.saturating_add(1);
-        assert!(safe_result >= near_max, "saturating_add should not underflow");
+        assert!(
+            safe_result >= near_max,
+            "saturating_add should not underflow"
+        );
 
         let max_result = usize::MAX.saturating_add(1);
-        assert_eq!(max_result, usize::MAX, "saturating_add at MAX should saturate");
+        assert_eq!(
+            max_result,
+            usize::MAX,
+            "saturating_add at MAX should saturate"
+        );
     }
 
     #[test]
@@ -4686,7 +5257,10 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         // Verify no collisions between domain-separated hashes
         for i in 0..hashes.len() {
             for j in (i + 1)..hashes.len() {
-                assert_ne!(hashes[i], hashes[j], "domain separation should prevent collisions");
+                assert_ne!(
+                    hashes[i], hashes[j],
+                    "domain separation should prevent collisions"
+                );
             }
         }
 
@@ -4696,7 +5270,9 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         hasher_without.update(b"test"); // No domain prefix
         let hash_without_domain = hex::encode(hasher_without.finalize())[..8].to_string();
 
-        assert_ne!(hash_with_domain, hash_without_domain,
-                  "domain prefix should change hash result");
+        assert_ne!(
+            hash_with_domain, hash_without_domain,
+            "domain prefix should change hash result"
+        );
     }
 }
