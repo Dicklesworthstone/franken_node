@@ -1172,11 +1172,14 @@ mod tests {
 
     #[test]
     fn command_lookup_rejects_blank_command_without_filesystem_probe() {
+        let probed = std::cell::Cell::new(false);
         let resolved = resolve_command_path_with(" \t\n", None, &|_| {
-            panic!("blank command must fail before probing the filesystem");
+            probed.set(true);
+            false
         });
 
         assert!(resolved.is_none());
+        assert!(!probed.get());
     }
 
     #[test]
