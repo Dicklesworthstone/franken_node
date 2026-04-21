@@ -8,6 +8,7 @@ use frankenengine_node::api::fleet_quarantine::{
     reset_shared_fleet_control_manager_for_tests,
 };
 use frankenengine_node::api::middleware::{AuthIdentity, AuthMethod, TraceContext};
+use frankenengine_node::api::operator_routes::assert_process_start_cleanup_lock_order_for_tests;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -32,6 +33,11 @@ fn lock_shared_fleet_state() -> MutexGuard<'static, ()> {
         .expect("fastapi fleet quarantine integration lock");
     reset_shared_fleet_control_manager_for_tests();
     guard
+}
+
+#[test]
+fn operator_process_start_cleanup_uses_init_lock_before_data_locks() {
+    assert_process_start_cleanup_lock_order_for_tests();
 }
 
 fn fleet_admin_identity() -> AuthIdentity {

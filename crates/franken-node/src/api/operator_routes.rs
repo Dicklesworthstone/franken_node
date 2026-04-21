@@ -9,7 +9,7 @@
 use crate::config::Config as RuntimeConfig;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::OnceLock;
 use std::sync::RwLock;
 #[cfg(test)]
@@ -24,7 +24,7 @@ use super::middleware::{
 };
 use super::trust_card_routes::ApiResponse;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone)]
 struct ProcessStartState {
     monotonic: Instant,
@@ -46,7 +46,7 @@ static OPERATOR_CONFIG_VIEW: std::sync::LazyLock<RwLock<ConfigView>> =
 static OPERATOR_CONFIG_INIT_LOCK: std::sync::LazyLock<Mutex<()>> =
     std::sync::LazyLock::new(|| Mutex::new(()));
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static PROCESS_START_OVERRIDE: Mutex<Option<ProcessStartState>> = Mutex::new(None);
 
 #[cfg(test)]
@@ -106,7 +106,7 @@ pub(crate) fn init_operator_config(config: &RuntimeConfig) {
 }
 
 fn process_uptime_seconds() -> u64 {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(override_state) = process_start_override_for_tests() {
         return override_state.monotonic.elapsed().as_secs();
     }
@@ -121,7 +121,7 @@ fn process_uptime_seconds() -> u64 {
 }
 
 fn process_started_at_rfc3339() -> String {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(override_state) = process_start_override_for_tests() {
         return override_state.wall_clock_rfc3339;
     }
@@ -147,7 +147,7 @@ fn operator_config_view() -> ConfigView {
         .clone()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn process_start_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -155,7 +155,7 @@ pub(crate) fn process_start_test_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poison| poison.into_inner())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn process_start_override_for_tests() -> Option<ProcessStartState> {
     PROCESS_START_OVERRIDE
         .lock()
@@ -163,8 +163,12 @@ fn process_start_override_for_tests() -> Option<ProcessStartState> {
         .clone()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn clear_process_start_override_for_tests() {
+    let _init_guard = PROCESS_START_INIT_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+
     let mut guard = PROCESS_START_OVERRIDE
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
@@ -224,6 +228,49 @@ pub(crate) fn seed_bootstrapped_process_start_for_tests(
 ) {
     let start_offset_nanos = now_epoch_nanos().saturating_sub(duration_to_nanos(elapsed));
     install_process_start(start_offset_nanos, wall_clock_rfc3339.to_string());
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn assert_process_start_cleanup_waits_for_init_lock() {
+    let _lock = process_start_test_lock();
+    clear_process_start_override_for_tests();
+
+    let init_guard = PROCESS_START_INIT_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+    let handle = std::thread::spawn(move || {
+        clear_process_start_override_for_tests();
+        done_tx.send(()).expect("report cleanup completion");
+    });
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert!(
+        matches!(
+            done_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ),
+        "cleanup must wait on PROCESS_START_INIT_LOCK before acquiring data locks"
+    );
+
+    {
+        let mut wall_clock = PROCESS_START_WALL_CLOCK
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner());
+        wall_clock.push_str("probe");
+    }
+
+    drop(init_guard);
+    done_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("cleanup should complete after init lock release");
+    handle.join().expect("cleanup thread should not panic");
+}
+
+#[cfg(feature = "test-support")]
+pub fn assert_process_start_cleanup_lock_order_for_tests() {
+    assert_process_start_cleanup_waits_for_init_lock();
 }
 
 // ── Response Types ─────────────────────────────────────────────────────────
@@ -559,6 +606,11 @@ mod tests {
             !installed_process_start_wall_clock_for_tests().is_empty(),
             "direct status read should seed a stable process-start baseline"
         );
+    }
+
+    #[test]
+    fn clear_process_start_override_waits_for_init_lock_before_data_locks() {
+        assert_process_start_cleanup_waits_for_init_lock();
     }
 
     #[test]
