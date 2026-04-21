@@ -9,7 +9,7 @@ pub mod middleware;
 pub mod operator_routes;
 #[cfg(feature = "extended-surfaces")]
 pub mod service;
-#[cfg(feature = "extended-surfaces")]
+#[cfg(any(feature = "extended-surfaces", feature = "test-support"))]
 pub mod session_auth;
 pub mod trust_card_routes;
 #[cfg(feature = "extended-surfaces")]
