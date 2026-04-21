@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use chrono::{DateTime, SecondsFormat, Utc};
+use ed25519_dalek::{Signer, Verifier};
 use flate2::{Compression, write::GzEncoder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -27,6 +28,7 @@ const MAX_PREPARED_EVENTS: usize = 50000; // Hardening: prevent unbounded prepar
 const DEFAULT_POLICY_VERSION: &str = "0.1.0";
 const DEFAULT_CREATED_AT: &str = "1970-01-01T00:00:00.000000Z";
 pub const INCIDENT_EVIDENCE_SCHEMA: &str = "franken-node/incident-evidence-source/v1";
+const REPLAY_BUNDLE_SIGNATURE_TRUST_SCOPE: &str = "incident_replay_bundle";
 
 /// RAII guard that orphans a temp file on drop (unless defused after rename).
 #[must_use]
@@ -127,6 +129,29 @@ pub enum ReplayBundleError {
     ChunkLayoutMismatch,
     #[error("bundle integrity mismatch")]
     IntegrityMismatch,
+    #[error("replay bundle signature is missing")]
+    SignatureMissing,
+    #[error("unsupported replay bundle signature algorithm `{algorithm}`")]
+    SignatureAlgorithmUnsupported { algorithm: String },
+    #[error("replay bundle signature trust scope `{actual}` does not match `{expected}`")]
+    SignatureTrustScopeMismatch {
+        actual: String,
+        expected: &'static str,
+    },
+    #[error("replay bundle signature key source `{key_source}` is not trusted")]
+    SignatureKeySourceUntrusted { key_source: String },
+    #[error("replay bundle signature key id `{actual}` is not trusted key id `{expected}`")]
+    SignatureKeyUntrusted { actual: String, expected: String },
+    #[error("replay bundle signature public key is malformed: {detail}")]
+    SignaturePublicKeyMalformed { detail: String },
+    #[error("replay bundle signature key id `{claimed}` does not match public key `{derived}`")]
+    SignatureKeyIdMismatch { claimed: String, derived: String },
+    #[error("replay bundle signed payload hash does not match integrity_hash")]
+    SignaturePayloadHashMismatch,
+    #[error("replay bundle signature bytes are malformed: {detail}")]
+    SignatureMalformed { detail: String },
+    #[error("replay bundle signature verification failed")]
+    SignatureInvalid,
     #[error("incident evidence schema mismatch: expected `{expected}`, found `{actual}`")]
     EvidenceSchemaMismatch {
         expected: &'static str,
@@ -296,6 +321,26 @@ pub struct ReplayBundle {
     pub manifest: BundleManifest,
     pub chunks: Vec<BundleChunk>,
     pub integrity_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<ReplayBundleSignature>,
+}
+
+pub struct ReplayBundleSigningMaterial<'a> {
+    pub signing_key: &'a ed25519_dalek::SigningKey,
+    pub key_source: &'a str,
+    pub signing_identity: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayBundleSignature {
+    pub algorithm: String,
+    pub public_key_hex: String,
+    pub key_id: String,
+    pub key_source: String,
+    pub signing_identity: String,
+    pub trust_scope: String,
+    pub signed_payload_sha256: String,
+    pub signature_hex: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -722,6 +767,7 @@ pub fn generate_replay_bundle(
         manifest,
         chunks,
         integrity_hash: String::new(),
+        signature: None,
     };
 
     bundle.integrity_hash = compute_integrity_hash(&bundle)?;
@@ -734,10 +780,117 @@ pub fn validate_bundle_integrity(bundle: &ReplayBundle) -> Result<bool, ReplayBu
     Ok(constant_time::ct_eq(&recomputed, &bundle.integrity_hash))
 }
 
+pub fn sign_replay_bundle(
+    bundle: &mut ReplayBundle,
+    signing_material: &ReplayBundleSigningMaterial<'_>,
+) -> Result<(), ReplayBundleError> {
+    if !validate_bundle_integrity(bundle)? {
+        return Err(ReplayBundleError::IntegrityMismatch);
+    }
+
+    let payload = replay_bundle_signature_payload(bundle);
+    let signature = signing_material.signing_key.sign(&payload);
+    let verifying_key = signing_material.signing_key.verifying_key();
+    bundle.signature = Some(ReplayBundleSignature {
+        algorithm: "ed25519".to_string(),
+        public_key_hex: hex::encode(verifying_key.to_bytes()),
+        key_id: crate::supply_chain::artifact_signing::KeyId::from_verifying_key(&verifying_key)
+            .to_string(),
+        key_source: signing_material.key_source.to_string(),
+        signing_identity: signing_material.signing_identity.to_string(),
+        trust_scope: REPLAY_BUNDLE_SIGNATURE_TRUST_SCOPE.to_string(),
+        signed_payload_sha256: hex::encode(Sha256::digest(&payload)),
+        signature_hex: hex::encode(signature.to_bytes()),
+    });
+    Ok(())
+}
+
+pub fn verify_replay_bundle_signature(
+    bundle: &ReplayBundle,
+    trusted_key_id: Option<&str>,
+) -> Result<(), ReplayBundleError> {
+    let signature = bundle
+        .signature
+        .as_ref()
+        .ok_or(ReplayBundleError::SignatureMissing)?;
+    if signature.algorithm != "ed25519" {
+        return Err(ReplayBundleError::SignatureAlgorithmUnsupported {
+            algorithm: signature.algorithm.clone(),
+        });
+    }
+    if signature.trust_scope != REPLAY_BUNDLE_SIGNATURE_TRUST_SCOPE {
+        return Err(ReplayBundleError::SignatureTrustScopeMismatch {
+            actual: signature.trust_scope.clone(),
+            expected: REPLAY_BUNDLE_SIGNATURE_TRUST_SCOPE,
+        });
+    }
+    if signature.key_source == "local" {
+        return Err(ReplayBundleError::SignatureKeySourceUntrusted {
+            key_source: signature.key_source.clone(),
+        });
+    }
+    if let Some(expected_key_id) = trusted_key_id
+        && signature.key_id != expected_key_id
+    {
+        return Err(ReplayBundleError::SignatureKeyUntrusted {
+            actual: signature.key_id.clone(),
+            expected: expected_key_id.to_string(),
+        });
+    }
+
+    let public_key_bytes = hex::decode(&signature.public_key_hex).map_err(|source| {
+        ReplayBundleError::SignaturePublicKeyMalformed {
+            detail: source.to_string(),
+        }
+    })?;
+    let public_key_bytes: [u8; 32] = public_key_bytes.try_into().map_err(|bytes: Vec<u8>| {
+        ReplayBundleError::SignaturePublicKeyMalformed {
+            detail: format!("expected 32 bytes, got {}", bytes.len()),
+        }
+    })?;
+    let verifying_key =
+        ed25519_dalek::VerifyingKey::from_bytes(&public_key_bytes).map_err(|source| {
+            ReplayBundleError::SignaturePublicKeyMalformed {
+                detail: source.to_string(),
+            }
+        })?;
+    let derived_key_id =
+        crate::supply_chain::artifact_signing::KeyId::from_verifying_key(&verifying_key)
+            .to_string();
+    if signature.key_id != derived_key_id {
+        return Err(ReplayBundleError::SignatureKeyIdMismatch {
+            claimed: signature.key_id.clone(),
+            derived: derived_key_id,
+        });
+    }
+
+    let payload = replay_bundle_signature_payload(bundle);
+    let payload_sha256 = hex::encode(Sha256::digest(&payload));
+    if signature.signed_payload_sha256 != payload_sha256 {
+        return Err(ReplayBundleError::SignaturePayloadHashMismatch);
+    }
+
+    let signature_bytes = hex::decode(&signature.signature_hex).map_err(|source| {
+        ReplayBundleError::SignatureMalformed {
+            detail: source.to_string(),
+        }
+    })?;
+    let signature_bytes: [u8; 64] = signature_bytes.try_into().map_err(|bytes: Vec<u8>| {
+        ReplayBundleError::SignatureMalformed {
+            detail: format!("expected 64 bytes, got {}", bytes.len()),
+        }
+    })?;
+    let signature = ed25519_dalek::Signature::from_bytes(&signature_bytes);
+    verifying_key
+        .verify(&payload, &signature)
+        .map_err(|_| ReplayBundleError::SignatureInvalid)
+}
+
 pub fn replay_bundle(bundle: &ReplayBundle) -> Result<ReplayOutcome, ReplayBundleError> {
     if !validate_bundle_integrity(bundle)? {
         return Err(ReplayBundleError::IntegrityMismatch);
     }
+    verify_replay_bundle_signature(bundle, None)?;
 
     let replayed_sequence_hash = compute_decision_sequence_hash(
         &bundle.timeline,
@@ -805,18 +958,27 @@ pub fn write_bundle_to_path(bundle: &ReplayBundle, path: &Path) -> Result<(), Re
     if !validate_bundle_integrity(bundle)? {
         return Err(ReplayBundleError::IntegrityMismatch);
     }
+    verify_replay_bundle_signature(bundle, None)?;
     let canonical_json = to_canonical_json(bundle)?;
     write_bytes_atomically(path, canonical_json.as_bytes())?;
     Ok(())
 }
 
 pub fn read_bundle_from_path(path: &Path) -> Result<ReplayBundle, ReplayBundleError> {
+    read_bundle_from_path_with_trusted_key(path, None)
+}
+
+pub fn read_bundle_from_path_with_trusted_key(
+    path: &Path,
+    trusted_key_id: Option<&str>,
+) -> Result<ReplayBundle, ReplayBundleError> {
     let file = std::fs::File::open(path)?;
     let reader = std::io::BufReader::new(file);
     let bundle: ReplayBundle = serde_json::from_reader(reader)?;
     if !validate_bundle_integrity(&bundle)? {
         return Err(ReplayBundleError::IntegrityMismatch);
     }
+    verify_replay_bundle_signature(&bundle, trusted_key_id)?;
     Ok(bundle)
 }
 
@@ -1129,6 +1291,10 @@ fn compute_integrity_hash(bundle: &ReplayBundle) -> Result<String, ReplayBundleE
     Ok(sha256_hex(&canonical_json_bytes(&canonical)?))
 }
 
+fn replay_bundle_signature_payload(bundle: &ReplayBundle) -> Vec<u8> {
+    bundle.integrity_hash.as_bytes().to_vec()
+}
+
 fn validate_bundle_structure(bundle: &ReplayBundle) -> Result<(), ReplayBundleError> {
     let expected_created_at = derive_created_at(&bundle.timeline);
     if bundle.created_at != expected_created_at {
@@ -1422,6 +1588,26 @@ mod tests {
         ]
     }
 
+    fn fixture_signing_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[42_u8; 32])
+    }
+
+    fn sign_fixture_bundle(bundle: &mut ReplayBundle) {
+        let signing_key = fixture_signing_key();
+        let signing_material = ReplayBundleSigningMaterial {
+            signing_key: &signing_key,
+            key_source: "env",
+            signing_identity: "incident-control-plane",
+        };
+        sign_replay_bundle(bundle, &signing_material).expect("sign replay bundle");
+    }
+
+    fn signed_fixture_bundle(incident_id: &str) -> ReplayBundle {
+        let mut bundle = generate_replay_bundle(incident_id, &fixture_events()).expect("bundle");
+        sign_fixture_bundle(&mut bundle);
+        bundle
+    }
+
     fn fixture_evidence_package(incident_id: &str) -> IncidentEvidencePackage {
         IncidentEvidencePackage {
             schema_version: INCIDENT_EVIDENCE_SCHEMA.to_string(),
@@ -1532,7 +1718,7 @@ mod tests {
 
     #[test]
     fn replay_matches_expected_hash() {
-        let bundle = generate_replay_bundle("INC-RPL-001", &fixture_events()).expect("bundle");
+        let bundle = signed_fixture_bundle("INC-RPL-001");
         let outcome = replay_bundle(&bundle).expect("replay");
         assert!(outcome.matched);
         assert_eq!(outcome.event_count, 3);
@@ -1545,9 +1731,58 @@ mod tests {
     #[test]
     fn replay_rejects_integrity_mismatch() {
         let mut bundle = generate_replay_bundle("INC-RPL-002", &fixture_events()).expect("bundle");
+        sign_fixture_bundle(&mut bundle);
         bundle.integrity_hash = "deadbeef".repeat(8);
         let err = replay_bundle(&bundle).expect_err("must fail");
         assert!(matches!(err, ReplayBundleError::IntegrityMismatch));
+    }
+
+    #[test]
+    fn replay_rejects_missing_signature() {
+        let bundle = generate_replay_bundle("INC-RPL-UNSIGNED", &fixture_events()).expect("bundle");
+        let err = replay_bundle(&bundle).expect_err("must fail closed");
+        assert!(matches!(err, ReplayBundleError::SignatureMissing));
+    }
+
+    #[test]
+    fn replay_rejects_invalid_signature() {
+        let mut bundle = signed_fixture_bundle("INC-RPL-BAD-SIG");
+        bundle.signature.as_mut().expect("signature").signature_hex = "00".repeat(64);
+
+        let err = replay_bundle(&bundle).expect_err("must reject invalid signature");
+        assert!(matches!(err, ReplayBundleError::SignatureInvalid));
+    }
+
+    #[test]
+    fn replay_bundle_signature_round_trips_with_trusted_key_id() {
+        let bundle = signed_fixture_bundle("INC-RPL-SIG-001");
+        let signing_key = fixture_signing_key();
+        let trusted_key_id = crate::supply_chain::artifact_signing::KeyId::from_verifying_key(
+            &signing_key.verifying_key(),
+        )
+        .to_string();
+
+        verify_replay_bundle_signature(&bundle, Some(&trusted_key_id)).expect("trusted signature");
+        let signature = bundle.signature.as_ref().expect("signature");
+        assert_eq!(signature.algorithm, "ed25519");
+        assert_eq!(signature.key_source, "env");
+        assert_eq!(signature.signing_identity, "incident-control-plane");
+        assert_eq!(signature.trust_scope, REPLAY_BUNDLE_SIGNATURE_TRUST_SCOPE);
+        assert_eq!(
+            signature.public_key_hex,
+            hex::encode(signing_key.verifying_key().to_bytes())
+        );
+    }
+
+    #[test]
+    fn replay_bundle_signature_rejects_untrusted_key_id() {
+        let bundle = signed_fixture_bundle("INC-RPL-SIG-002");
+        let err = verify_replay_bundle_signature(&bundle, Some("keyid:untrusted"))
+            .expect_err("must reject untrusted key");
+        assert!(matches!(
+            err,
+            ReplayBundleError::SignatureKeyUntrusted { .. }
+        ));
     }
 
     #[test]
@@ -1659,7 +1894,7 @@ mod tests {
 
     #[test]
     fn write_and_read_roundtrip() {
-        let bundle = generate_replay_bundle("INC-IO-001", &fixture_events()).expect("bundle");
+        let bundle = signed_fixture_bundle("INC-IO-001");
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("bundle.json");
         write_bundle_to_path(&bundle, &path).expect("write");
@@ -1673,6 +1908,10 @@ mod tests {
             generate_replay_bundle("INC-IO-ATOMIC-001", &fixture_events()).expect("first bundle");
         let second =
             generate_replay_bundle("INC-IO-ATOMIC-002", &fixture_events()).expect("second bundle");
+        let mut first = first;
+        let mut second = second;
+        sign_fixture_bundle(&mut first);
+        sign_fixture_bundle(&mut second);
         let dir = tempfile::tempdir().expect("tempdir");
         let dir_path = dir.path().join("nested");
         let path = dir_path.join("bundle.json");
@@ -1695,7 +1934,7 @@ mod tests {
 
     #[test]
     fn read_rejects_tampered_bundle_from_disk() {
-        let bundle = generate_replay_bundle("INC-IO-002", &fixture_events()).expect("bundle");
+        let bundle = signed_fixture_bundle("INC-IO-002");
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("bundle.json");
         write_bundle_to_path(&bundle, &path).expect("write");
@@ -1717,7 +1956,7 @@ mod tests {
     #[test]
     fn write_bundle_supports_relative_file_in_current_directory() {
         let _lock = cwd_test_lock().lock().expect("cwd test lock");
-        let bundle = generate_replay_bundle("INC-IO-REL-001", &fixture_events()).expect("bundle");
+        let bundle = signed_fixture_bundle("INC-IO-REL-001");
         let dir = tempfile::tempdir().expect("tempdir");
         let previous_cwd = std::env::current_dir().expect("current dir");
         std::env::set_current_dir(dir.path()).expect("set cwd");

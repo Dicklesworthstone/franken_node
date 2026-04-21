@@ -123,9 +123,10 @@ use frankenengine_node::{
             to_canonical_json as counterfactual_to_json,
         },
         replay_bundle::{
-            generate_replay_bundle_from_evidence, read_bundle_from_path,
+            ReplayBundleSigningMaterial, generate_replay_bundle_from_evidence,
+            read_bundle_from_path, read_bundle_from_path_with_trusted_key,
             read_incident_evidence_package, replay_bundle as replay_incident_bundle,
-            validate_bundle_integrity, write_bundle_to_path,
+            sign_replay_bundle, validate_bundle_integrity, write_bundle_to_path,
         },
     },
 };
@@ -4767,6 +4768,22 @@ fn missing_receipt_signing_key_error() -> ActionableError {
         "receipt export requested but no signing key was configured; pass --receipt-signing-key, set FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH, or configure security.decision_receipt_signing_key_path",
         receipt_signing_key_fix_command(),
     )
+}
+
+fn missing_replay_bundle_signing_key_error(action: &str) -> ActionableError {
+    ActionableError::new(
+        format!(
+            "incident replay bundle {action} requires a configured fleet-level signing key; pass --receipt-signing-key for export, set FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH, or configure security.decision_receipt_signing_key_path"
+        ),
+        receipt_signing_key_fix_command(),
+    )
+}
+
+fn signing_material_key_id(signing_material: &Ed25519SigningMaterial) -> String {
+    frankenengine_node::supply_chain::artifact_signing::KeyId::from_verifying_key(
+        &signing_material.signing_key.verifying_key(),
+    )
+    .to_string()
 }
 
 fn missing_trust_registry_message(path: &Path, policy_mode: Profile) -> String {
@@ -11322,7 +11339,7 @@ fn handle_incident_bundle_command(args: &cli::IncidentBundleArgs) -> Result<()> 
                 evidence_path.display()
             )
         })?;
-    let bundle = generate_replay_bundle_from_evidence(&evidence).with_context(|| {
+    let mut bundle = generate_replay_bundle_from_evidence(&evidence).with_context(|| {
         format!(
             "failed generating replay bundle from authoritative evidence {}",
             evidence_path.display()
@@ -11337,6 +11354,17 @@ fn handle_incident_bundle_command(args: &cli::IncidentBundleArgs) -> Result<()> 
         );
         anyhow::ensure!(valid, "generated replay bundle failed integrity validation");
     }
+
+    let replay_signing_material =
+        load_receipt_signing_material(args.receipt_signing_key.as_deref())?
+            .ok_or_else(|| missing_replay_bundle_signing_key_error("export"))?;
+    let replay_bundle_signing_material = ReplayBundleSigningMaterial {
+        signing_key: &replay_signing_material.signing_key,
+        key_source: replay_signing_material.source,
+        signing_identity: "incident-control-plane",
+    };
+    sign_replay_bundle(&mut bundle, &replay_bundle_signing_material)
+        .context("failed signing incident replay bundle")?;
 
     let output_path = incident_bundle_output_path(&args.id);
     write_bundle_to_path(&bundle, &output_path).with_context(|| {
@@ -11373,7 +11401,10 @@ struct IncidentReplayCliSummary {
 }
 
 fn incident_replay_cli_summary(bundle_path: &Path) -> Result<IncidentReplayCliSummary> {
-    let bundle = read_bundle_from_path(bundle_path)
+    let trusted_signing_material = load_receipt_signing_material(None)?
+        .ok_or_else(|| missing_replay_bundle_signing_key_error("replay"))?;
+    let trusted_key_id = signing_material_key_id(&trusted_signing_material);
+    let bundle = read_bundle_from_path_with_trusted_key(bundle_path, Some(&trusted_key_id))
         .with_context(|| format!("failed reading replay bundle {}", bundle_path.display()))?;
     let outcome = replay_incident_bundle(&bundle)
         .with_context(|| format!("failed replaying bundle {}", bundle_path.display()))?;

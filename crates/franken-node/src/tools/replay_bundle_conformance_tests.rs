@@ -12,6 +12,16 @@ use super::replay_bundle::*;
 use serde_json::{Map, Value};
 use std::path::Path;
 
+fn sign_test_bundle(bundle: &mut ReplayBundle) {
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[43_u8; 32]);
+    let signing_material = ReplayBundleSigningMaterial {
+        signing_key: &signing_key,
+        key_source: "env",
+        signing_identity: "incident-control-plane",
+    };
+    sign_replay_bundle(bundle, &signing_material).expect("sign replay bundle");
+}
+
 /// Test integer overflow scenarios in event sequence numbering
 #[test]
 fn test_event_sequence_overflow_protection() {
@@ -468,7 +478,7 @@ fn test_uuid_v7_determinism() {
 /// Test atomic file write operations
 #[test]
 fn test_atomic_file_operations() {
-    let bundle = generate_replay_bundle(
+    let mut bundle = generate_replay_bundle(
         "INC-ATOMIC-001",
         &[RawEvent::new(
             "2026-02-20T10:00:00Z",
@@ -477,6 +487,7 @@ fn test_atomic_file_operations() {
         )],
     )
     .unwrap();
+    sign_test_bundle(&mut bundle);
 
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("test-bundle.json");

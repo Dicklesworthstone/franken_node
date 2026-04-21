@@ -49,6 +49,22 @@ fn config_only_workspace() -> tempfile::TempDir {
     dir
 }
 
+fn write_receipt_signing_key(path: &Path) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create key dir");
+    }
+    fs::write(path, hex::encode([42_u8; 32])).expect("write receipt signing key");
+}
+
+fn configure_replay_bundle_signing_key(workspace: &Path) {
+    fs::write(
+        workspace.join("franken_node.toml"),
+        "profile = \"balanced\"\n\n[security]\ndecision_receipt_signing_key_path = \"keys/receipt-signing.key\"\n",
+    )
+    .expect("write config with signing key");
+    write_receipt_signing_key(&workspace.join("keys/receipt-signing.key"));
+}
+
 fn write_fixture_incident_evidence(path: &Path, incident_id: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create evidence dir");
@@ -251,6 +267,7 @@ fn corrupt_bundle_integrity_hash(path: &Path) -> (String, String) {
 #[test]
 fn incident_bundle_accepts_explicit_evidence_path_and_writes_bundle() {
     let workspace = config_only_workspace();
+    configure_replay_bundle_signing_key(workspace.path());
     let evidence_path = workspace
         .path()
         .join("fixtures/incidents/INC-E2E-001/evidence.v1.json");
@@ -290,6 +307,11 @@ fn incident_bundle_accepts_explicit_evidence_path_and_writes_bundle() {
     );
     assert_eq!(bundle.policy_version, "1.2.3");
     assert_eq!(bundle.timeline.len(), 3);
+    let signature = bundle.signature.expect("signed replay bundle");
+    assert_eq!(signature.algorithm, "ed25519");
+    assert_eq!(signature.key_source, "config");
+    assert_eq!(signature.signing_identity, "incident-control-plane");
+    assert_eq!(signature.trust_scope, "incident_replay_bundle");
 }
 
 #[test]
@@ -364,6 +386,7 @@ fn incident_bundle_receipt_export_fails_when_signing_key_missing() {
 #[test]
 fn incident_replay_counterfactual_pipeline_is_deterministic_and_fail_closed() {
     let workspace = config_only_workspace();
+    configure_replay_bundle_signing_key(workspace.path());
     let evidence_path = workspace
         .path()
         .join("fixtures/incidents/INC-E2E-PIPE-001/evidence.v1.json");
