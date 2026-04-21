@@ -98,3 +98,7 @@ path = "tests/engine_dispatcher_pipe_drain.rs"
 [[test]]
 name = "artifact_gate_goldens"
 path = "tests/artifact_gate_goldens.rs"
+
+[[test]]
+name = "supply_chain_golden_artifacts"
+path = "tests/supply_chain_golden_artifacts.rs"
