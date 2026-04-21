@@ -1933,7 +1933,7 @@ mod tests {
             generated_at_secs: now,
             content: None,
         };
-        pipeline
+        let err = pipeline
             .ingest_dimension(
                 ReportDimension::EconomicImpact,
                 "econ",
