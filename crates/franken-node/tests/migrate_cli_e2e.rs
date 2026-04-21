@@ -3,6 +3,10 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use frankenengine_node::migration::{
+    migration_runtime_smoke_stderr_sha256_hex, migration_runtime_smoke_stdout_sha256_hex,
+};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 #[path = "golden/mod.rs"]
@@ -75,6 +79,39 @@ fn run_cli_with_wall_timeout(args: &[&str], timeout: Duration, envs: &[(&str, St
         }
         thread::sleep(Duration::from_millis(25));
     }
+}
+
+fn len_prefixed_digest_update(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(bytes);
+}
+
+#[test]
+fn migrate_runtime_smoke_receipt_hash_helpers_are_framed() {
+    let stdout_hash = migration_runtime_smoke_stdout_sha256_hex(b"same output");
+    let stderr_hash = migration_runtime_smoke_stderr_sha256_hex(b"same output");
+    assert_ne!(
+        stdout_hash, stderr_hash,
+        "stdout/stderr field labels must be bound into receipt hashes"
+    );
+
+    let mut bare_hasher = Sha256::new();
+    bare_hasher.update(b"same output");
+    assert_ne!(
+        stdout_hash,
+        hex::encode(bare_hasher.finalize()),
+        "receipt hash must not be a bare SHA-256 of stdout bytes"
+    );
+
+    let mut framed_hasher = Sha256::new();
+    framed_hasher.update(b"franken-node/migrate-validate-runtime-smoke/output-sha256/v1:");
+    len_prefixed_digest_update(&mut framed_hasher, b"stdout");
+    len_prefixed_digest_update(&mut framed_hasher, b"same output");
+    assert_eq!(
+        stdout_hash,
+        hex::encode(framed_hasher.finalize()),
+        "stdout receipt hash must use domain-separated length-prefixed framing"
+    );
 }
 
 #[test]

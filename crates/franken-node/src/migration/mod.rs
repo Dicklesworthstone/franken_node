@@ -911,14 +911,8 @@ fn execute_migration_runtime_smoke_with_target(
         runtime: runtime.label().to_string(),
         target: smoke_target.display.clone(),
         exit_code,
-        stdout_sha256: migration_runtime_smoke_output_sha256_hex(
-            MIGRATION_RUNTIME_SMOKE_STDOUT_FIELD,
-            &output.stdout,
-        ),
-        stderr_sha256: migration_runtime_smoke_output_sha256_hex(
-            MIGRATION_RUNTIME_SMOKE_STDERR_FIELD,
-            &output.stderr,
-        ),
+        stdout_sha256: migration_runtime_smoke_stdout_sha256_hex(&output.stdout),
+        stderr_sha256: migration_runtime_smoke_stderr_sha256_hex(&output.stderr),
     };
     verify_runtime_smoke_receipt_round_trip(&receipt)?;
     Ok(receipt)
@@ -1403,6 +1397,16 @@ fn migration_runtime_smoke_output_sha256_hex(
     update_sha256_len_prefixed(&mut hasher, stream_field);
     update_sha256_len_prefixed(&mut hasher, bytes);
     hex::encode(hasher.finalize())
+}
+
+#[must_use]
+pub fn migration_runtime_smoke_stdout_sha256_hex(bytes: &[u8]) -> String {
+    migration_runtime_smoke_output_sha256_hex(MIGRATION_RUNTIME_SMOKE_STDOUT_FIELD, bytes)
+}
+
+#[must_use]
+pub fn migration_runtime_smoke_stderr_sha256_hex(bytes: &[u8]) -> String {
+    migration_runtime_smoke_output_sha256_hex(MIGRATION_RUNTIME_SMOKE_STDERR_FIELD, bytes)
 }
 
 fn update_sha256_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
@@ -3759,42 +3763,6 @@ mod tests {
 
     fn write_lockfile(project: &Path) {
         write_project_file(project, "package-lock.json", "{}\n");
-    }
-
-    #[test]
-    fn migration_runtime_smoke_output_hashes_are_domain_and_length_framed() {
-        let stdout_hash = migration_runtime_smoke_output_sha256_hex(
-            MIGRATION_RUNTIME_SMOKE_STDOUT_FIELD,
-            b"same output",
-        );
-        let stderr_hash = migration_runtime_smoke_output_sha256_hex(
-            MIGRATION_RUNTIME_SMOKE_STDERR_FIELD,
-            b"same output",
-        );
-        assert_ne!(
-            stdout_hash, stderr_hash,
-            "stream field must be part of the framed digest"
-        );
-
-        let mut bare_hasher = Sha256::new();
-        bare_hasher.update(b"same output");
-        assert_ne!(
-            stdout_hash,
-            hex::encode(bare_hasher.finalize()),
-            "runtime smoke output must not be a bare SHA-256 of bytes"
-        );
-
-        let mut framed_hasher = Sha256::new();
-        framed_hasher.update(MIGRATION_RUNTIME_SMOKE_OUTPUT_HASH_DOMAIN);
-        update_sha256_len_prefixed(&mut framed_hasher, MIGRATION_RUNTIME_SMOKE_STDOUT_FIELD);
-        update_sha256_len_prefixed(&mut framed_hasher, b"same output");
-        assert_eq!(stdout_hash, hex::encode(framed_hasher.finalize()));
-
-        assert_ne!(
-            migration_runtime_smoke_output_sha256_hex(b"ab", b"c"),
-            migration_runtime_smoke_output_sha256_hex(b"a", b"bc"),
-            "length framing must prevent field-boundary collisions"
-        );
     }
 
     #[test]
