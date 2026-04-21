@@ -19,7 +19,13 @@ asupersync-transport = ["dep:asupersync"]
 extended-surfaces = []
 test-support = []
 fuzz = ["arbitrary"]
-default = ["extended-surfaces"]
+# Heavy compilation dependencies - optional for fuzz builds
+parsing = ["dep:tree-sitter", "dep:tree-sitter-javascript"]
+http-client = ["dep:ureq", "dep:url"]
+external-commands = ["dep:which", "dep:ctrlc"]
+compression = ["dep:flate2"]
+cbor-serialization = ["dep:serde_cbor"]
+default = ["extended-surfaces", "parsing", "http-client", "external-commands", "compression", "cbor-serialization"]
 
 [dependencies]
 anyhow.workspace = true
@@ -37,8 +43,8 @@ zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
 hex = "0.4.3"
 base64 = "0.22.1"
 ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
-serde_cbor = "0.11.2"
-flate2 = "1.0.35"
+serde_cbor = { version = "0.11.2", optional = true }
+flate2 = { version = "1.0.35", optional = true }
 rand = "0.8.5"
 asupersync = { path = "/dp/asupersync", optional = true }
 frankentui.workspace = true
@@ -48,12 +54,13 @@ tracing = { workspace = true }
 subtle = "2.6.1"
 tempfile = "3.15"
 arbitrary = { version = "1.3", optional = true, features = ["derive"] }
-ureq = "2"
-url = "2.5"
-which = "8.0.2"
-ctrlc = "3"
-tree-sitter = "0.26.8"
-tree-sitter-javascript = "0.25.0"
+# Heavy compilation dependencies made optional for faster fuzz builds
+ureq = { version = "2", optional = true }
+url = { version = "2.5", optional = true }
+which = { version = "8.0.2", optional = true }
+ctrlc = { version = "3", optional = true }
+tree-sitter = { version = "0.26.8", optional = true }
+tree-sitter-javascript = { version = "0.25.0", optional = true }
 
 [dev-dependencies]
 assert_cmd = "2.0.16"
@@ -72,6 +79,10 @@ insta = { version = "1.40", features = ["json"] }
 [[test]]
 name = "migrate_cli_e2e"
 path = "tests/migrate_cli_e2e.rs"
+
+[[test]]
+name = "incident_cli_e2e"
+path = "tests/incident_cli_e2e.rs"
 
 [[test]]
 name = "asupersync_control_lane_integration"

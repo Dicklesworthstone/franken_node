@@ -13,6 +13,7 @@ use std::path::Path;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use ed25519_dalek::{Signer, Verifier};
+#[cfg(feature = "compression")]
 use flate2::{Compression, write::GzEncoder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};

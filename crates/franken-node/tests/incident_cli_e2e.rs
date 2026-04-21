@@ -10,6 +10,9 @@ use frankenengine_node::tools::replay_bundle::{
 };
 use serde_json::json;
 
+#[path = "golden/mod.rs"]
+mod golden;
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -235,6 +238,17 @@ fn parse_replay_result(stderr: &str) -> (bool, usize, String, String) {
     )
 }
 
+fn replay_result_contract_json(stderr: &str) -> serde_json::Value {
+    let (matched, event_count, expected, replayed) = parse_replay_result(stderr);
+    json!({
+        "schema_version": "franken-node/incident-replay-result-golden/v1",
+        "matched": matched,
+        "event_count": event_count,
+        "expected_sequence_hash": expected,
+        "replayed_sequence_hash": replayed,
+    })
+}
+
 fn parse_counterfactual_output(stderr: &str) -> serde_json::Value {
     let line = stderr
         .lines()
@@ -244,6 +258,56 @@ fn parse_counterfactual_output(stderr: &str) -> serde_json::Value {
         .strip_prefix("counterfactual output: ")
         .expect("counterfactual prefix");
     serde_json::from_str(canonical).expect("parse counterfactual output json")
+}
+
+fn incident_bundle_contract_json(bundle: &ReplayBundle) -> serde_json::Value {
+    let signature = bundle.signature.as_ref().expect("signed replay bundle");
+    json!({
+        "schema_version": "franken-node/incident-replay-bundle-golden/v1",
+        "bundle_id": bundle.bundle_id.to_string(),
+        "incident_id": &bundle.incident_id,
+        "created_at": &bundle.created_at,
+        "policy_version": &bundle.policy_version,
+        "initial_state_snapshot": &bundle.initial_state_snapshot,
+        "manifest": &bundle.manifest,
+        "integrity_hash": &bundle.integrity_hash,
+        "signature": {
+            "algorithm": &signature.algorithm,
+            "public_key_hex": &signature.public_key_hex,
+            "key_id": &signature.key_id,
+            "key_source": &signature.key_source,
+            "signing_identity": &signature.signing_identity,
+            "trust_scope": &signature.trust_scope,
+            "signed_payload_sha256": &signature.signed_payload_sha256,
+            "signature_hex": &signature.signature_hex,
+        },
+        "timeline": bundle.timeline.iter().map(|event| {
+            json!({
+                "sequence_number": event.sequence_number,
+                "timestamp": &event.timestamp,
+                "event_type": &event.event_type,
+                "payload": &event.payload,
+                "causal_parent": event.causal_parent,
+            })
+        }).collect::<Vec<_>>(),
+        "chunks": bundle.chunks.iter().map(|chunk| {
+            json!({
+                "bundle_id": chunk.bundle_id.to_string(),
+                "chunk_index": chunk.chunk_index,
+                "total_chunks": chunk.total_chunks,
+                "event_count": chunk.event_count,
+                "first_sequence_number": chunk.first_sequence_number,
+                "last_sequence_number": chunk.last_sequence_number,
+                "compressed_size_bytes": chunk.compressed_size_bytes,
+                "chunk_hash": &chunk.chunk_hash,
+                "event_sequence_numbers": chunk
+                    .events
+                    .iter()
+                    .map(|event| event.sequence_number)
+                    .collect::<Vec<_>>(),
+            })
+        }).collect::<Vec<_>>(),
+    })
 }
 
 fn corrupt_bundle_integrity_hash(path: &Path) -> (String, String) {
@@ -434,8 +498,13 @@ fn incident_replay_counterfactual_pipeline_is_deterministic_and_fail_closed() {
         bundle.initial_state_snapshot,
         json!({"epoch": 11_u64, "mode": "degraded"})
     );
+    golden::assert_json_golden(
+        "incident/replay_bundle_contract",
+        &incident_bundle_contract_json(&bundle),
+    );
 
     let mut replay_hashes = Vec::new();
+    let mut replay_contract = None;
     let replay_started = Instant::now();
     for _ in 0..3 {
         let replay_output = run_cli_in_workspace(
@@ -453,6 +522,9 @@ fn incident_replay_counterfactual_pipeline_is_deterministic_and_fail_closed() {
             String::from_utf8_lossy(&replay_output.stderr)
         );
         let replay_stderr = String::from_utf8_lossy(&replay_output.stderr);
+        if replay_contract.is_none() {
+            replay_contract = Some(replay_result_contract_json(&replay_stderr));
+        }
         let (matched, event_count, expected, replayed) = parse_replay_result(&replay_stderr);
         assert!(matched, "replay should match: {replay_stderr}");
         assert_eq!(event_count, 10);
@@ -466,6 +538,10 @@ fn incident_replay_counterfactual_pipeline_is_deterministic_and_fail_closed() {
     assert!(
         replay_hashes.windows(2).all(|pair| pair[0] == pair[1]),
         "replay hashes must be stable across repeated runs: {replay_hashes:?}"
+    );
+    golden::assert_json_golden(
+        "incident/replay_result_contract",
+        replay_contract.as_ref().expect("replay contract"),
     );
 
     let counterfactual_output = run_cli_in_workspace(
@@ -498,6 +574,10 @@ fn incident_replay_counterfactual_pipeline_is_deterministic_and_fail_closed() {
             .expect("changed decisions")
             > 0,
         "strict counterfactual should produce decision deltas: {counterfactual_json}"
+    );
+    golden::assert_json_golden(
+        "incident/counterfactual_strict_contract",
+        &counterfactual_json,
     );
 
     let corrupted_path = workspace.path().join("INC-E2E-PIPE-001-corrupt.fnbundle");

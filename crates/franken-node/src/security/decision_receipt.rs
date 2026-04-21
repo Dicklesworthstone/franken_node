@@ -96,8 +96,10 @@ pub enum ReceiptError {
     #[error("failed to encode receipts as JSON: {0}")]
     JsonEncode(serde_json::Error),
     #[error("failed to encode receipts as CBOR: {0}")]
+    #[cfg(feature = "cbor-serialization")]
     CborEncode(serde_cbor::Error),
     #[error("failed to decode receipts from CBOR: {0}")]
+    #[cfg(feature = "cbor-serialization")]
     CborDecode(serde_cbor::Error),
     #[error("failed to decode signature: {0}")]
     SignatureDecode(base64::DecodeError),
@@ -386,6 +388,7 @@ pub fn export_receipts_json(
 }
 
 /// Export filtered receipts as CBOR.
+#[cfg(feature = "cbor-serialization")]
 pub fn export_receipts_cbor(
     receipts: &[SignedReceipt],
     filter: &ReceiptQuery,
@@ -394,6 +397,7 @@ pub fn export_receipts_cbor(
 }
 
 /// Import receipts from CBOR.
+#[cfg(feature = "cbor-serialization")]
 pub fn import_receipts_cbor(bytes: &[u8]) -> Result<Vec<SignedReceipt>, ReceiptError> {
     serde_cbor::from_slice(bytes).map_err(ReceiptError::CborDecode)
 }
@@ -1014,6 +1018,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cbor-serialization")]
     fn import_receipts_cbor_rejects_invalid_bytes() {
         let err = import_receipts_cbor(b"not-cbor").expect_err("invalid CBOR must fail");
 
@@ -1021,6 +1026,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cbor-serialization")]
     fn import_receipts_cbor_rejects_partially_shaped_receipt_list() {
         let encoded = serde_cbor::to_vec(&vec![json!({
             "receipt_id": "receipt-1",
@@ -1120,6 +1126,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cbor-serialization")]
     fn import_receipts_cbor_rejects_non_receipt_shape() {
         let encoded = serde_cbor::to_vec(&json!({"not": "a receipt list"})).expect("encode");
 
