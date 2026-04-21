@@ -17,11 +17,13 @@
 //! | **TOTAL** | **50** | **6** | **56** | **56** | **100%** |
 
 use std::collections::{BTreeMap, BTreeSet};
+
+use ed25519_dalek::SigningKey;
 use serde_json::json;
 
-use frankenengine_verifier_sdk::*;
 use frankenengine_verifier_sdk::bundle::*;
 use frankenengine_verifier_sdk::capsule::*;
+use frankenengine_verifier_sdk::*;
 
 /// Conformance test case with requirement level and coverage tracking
 struct ConformanceCase {
@@ -84,7 +86,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "REPLAY_BUNDLE_SCHEMA_VERSION must be vsdk-replay-bundle-v1.0",
         test_fn: test_bundle_schema_version_constant,
     },
-
     // === Event Code Requirements (MUST) ===
     ConformanceCase {
         id: "VSDK-EVENT-2.1",
@@ -121,7 +122,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "SdkEvent must support all defined event codes",
         test_fn: test_sdk_event_supports_all_codes,
     },
-
     // === Error Code Requirements (MUST) ===
     ConformanceCase {
         id: "VSDK-ERROR-3.1",
@@ -141,7 +141,8 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         id: "VSDK-ERROR-3.3",
         section: "errors",
         level: RequirementLevel::Must,
-        description: "check_sdk_version must return ERR_SDK_VERSION_UNSUPPORTED for invalid versions",
+        description:
+            "check_sdk_version must return ERR_SDK_VERSION_UNSUPPORTED for invalid versions",
         test_fn: test_version_check_error_code,
     },
     ConformanceCase {
@@ -165,7 +166,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "BundleError must map to SDK error codes",
         test_fn: test_bundle_error_mapping,
     },
-
     // === Invariant Requirements (MUST) ===
     ConformanceCase {
         id: "VSDK-INVARIANT-4.1",
@@ -195,7 +195,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "INV-CAPSULE-VERDICT-REPRODUCIBLE: same input produces same verdict",
         test_fn: test_invariant_verdict_reproducible,
     },
-
     // === Capsule Format Requirements (MUST) ===
     ConformanceCase {
         id: "VSDK-CAPSULE-5.1",
@@ -253,7 +252,20 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Capsule replay must be deterministic",
         test_fn: test_capsule_replay_deterministic,
     },
-
+    ConformanceCase {
+        id: "VSDK-CAPSULE-5.9",
+        section: "capsule",
+        level: RequirementLevel::Should,
+        description: "Capsule metadata should be preserved during replay",
+        test_fn: test_capsule_metadata_preserved_during_replay,
+    },
+    ConformanceCase {
+        id: "VSDK-CAPSULE-5.10",
+        section: "capsule",
+        level: RequirementLevel::Should,
+        description: "Capsule inputs should validate against manifest",
+        test_fn: test_capsule_inputs_validate_against_manifest,
+    },
     // === Bundle Format Requirements (MUST) ===
     ConformanceCase {
         id: "VSDK-BUNDLE-6.1",
@@ -339,7 +351,27 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Bundle tampering detection must be reliable",
         test_fn: test_bundle_tamper_detection,
     },
-
+    ConformanceCase {
+        id: "VSDK-BUNDLE-6.13",
+        section: "bundle",
+        level: RequirementLevel::Should,
+        description: "Bundle compression should be supported",
+        test_fn: test_bundle_compression_metadata_supported,
+    },
+    ConformanceCase {
+        id: "VSDK-BUNDLE-6.14",
+        section: "bundle",
+        level: RequirementLevel::Should,
+        description: "Bundle chunking should handle large artifacts",
+        test_fn: test_bundle_chunking_handles_multiple_artifacts,
+    },
+    ConformanceCase {
+        id: "VSDK-BUNDLE-6.15",
+        section: "bundle",
+        level: RequirementLevel::Should,
+        description: "Bundle timeline should maintain causal ordering",
+        test_fn: test_bundle_timeline_causal_ordering,
+    },
     // === SDK Interface Requirements (MUST) ===
     ConformanceCase {
         id: "VSDK-INTERFACE-7.1",
@@ -411,6 +443,13 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "All interface methods must validate SDK version",
         test_fn: test_interface_version_validation,
     },
+    ConformanceCase {
+        id: "VSDK-INTERFACE-7.11",
+        section: "interface",
+        level: RequirementLevel::Should,
+        description: "Interface should provide structured error details",
+        test_fn: test_interface_structured_error_details,
+    },
 ];
 
 // ============================================================================
@@ -418,7 +457,7 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
 // ============================================================================
 
 #[test]
-fn vsdk_v1_0_full_conformance_matrix() {
+fn conformance_harness_vsdk_v1_0_full_conformance_matrix() {
     let mut total_pass = 0;
     let mut total_fail = 0;
     let mut total_xfail = 0;
@@ -612,7 +651,10 @@ fn test_event_codes_naming_convention() -> TestResult {
     for (expected, actual) in event_codes {
         if expected != actual {
             return TestResult::Fail {
-                reason: format!("Event code mismatch: expected '{}', got '{}'", expected, actual),
+                reason: format!(
+                    "Event code mismatch: expected '{}', got '{}'",
+                    expected, actual
+                ),
             };
         }
         if !actual.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
@@ -770,14 +812,13 @@ fn test_capsule_error_mapping() -> TestResult {
 }
 
 fn test_bundle_error_mapping() -> TestResult {
-    // Test BundleError variants exist and map correctly
     let test_error = BundleError::Json("test".to_string());
-    let debug = format!("{:?}", test_error);
-    if debug.contains("InvalidHeader") {
+    let display = test_error.to_string();
+    if display.contains("replay bundle JSON error") && display.contains("test") {
         TestResult::Pass
     } else {
         TestResult::Fail {
-            reason: "BundleError Debug implementation incorrect".to_string(),
+            reason: format!("BundleError Display implementation incorrect: {display}"),
         }
     }
 }
@@ -972,15 +1013,102 @@ fn test_capsule_error_coverage() -> TestResult {
 }
 
 fn test_capsule_signature_constant_time() -> TestResult {
-    // This would test that signature verification uses constant-time comparison
-    // For now, we verify the function exists by testing it doesn't panic
-    TestResult::Pass
+    let capsule = build_reference_capsule();
+    if let Err(err) = verify_signature(&capsule) {
+        return TestResult::Fail {
+            reason: format!("valid capsule signature rejected: {err}"),
+        };
+    }
+
+    let mut tampered = capsule;
+    tampered.signature.push('0');
+    match verify_signature(&tampered) {
+        Err(CapsuleError::SignatureInvalid(_)) => TestResult::Pass,
+        other => TestResult::Fail {
+            reason: format!("tampered capsule signature was not rejected correctly: {other:?}"),
+        },
+    }
 }
 
 fn test_capsule_replay_deterministic() -> TestResult {
-    // This would test that replay produces same results for same inputs
-    // For now, we verify the replay interface exists
-    TestResult::Pass
+    let capsule = build_reference_capsule();
+    let first = match replay(&capsule, "verifier://conformance") {
+        Ok(result) => result,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("first replay failed: {err}"),
+            };
+        }
+    };
+    let second = match replay(&capsule, "verifier://conformance") {
+        Ok(result) => result,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("second replay failed: {err}"),
+            };
+        }
+    };
+
+    if first == second && first.verdict == CapsuleVerdict::Pass {
+        TestResult::Pass
+    } else {
+        TestResult::Fail {
+            reason: format!("replay was not deterministic: first={first:?}, second={second:?}"),
+        }
+    }
+}
+
+fn test_capsule_metadata_preserved_during_replay() -> TestResult {
+    let mut capsule = build_reference_capsule();
+    capsule
+        .manifest
+        .metadata
+        .insert("source".to_string(), "conformance".to_string());
+    sign_capsule(&mut capsule);
+
+    match replay(&capsule, "verifier://metadata") {
+        Ok(result)
+            if result.verdict == CapsuleVerdict::Pass
+                && capsule.manifest.metadata.get("source").map(String::as_str)
+                    == Some("conformance") =>
+        {
+            TestResult::Pass
+        }
+        Ok(result) => TestResult::Fail {
+            reason: format!("metadata replay produced unexpected result: {result:?}"),
+        },
+        Err(err) => TestResult::Fail {
+            reason: format!("metadata-bearing capsule replay failed: {err}"),
+        },
+    }
+}
+
+fn test_capsule_inputs_validate_against_manifest() -> TestResult {
+    let mut missing_input = build_reference_capsule();
+    missing_input.inputs.remove("artifact_b");
+    sign_capsule(&mut missing_input);
+    match replay(&missing_input, "verifier://inputs") {
+        Err(CapsuleError::ManifestIncomplete(message)) if message.contains("input_refs") => {}
+        other => {
+            return TestResult::Fail {
+                reason: format!("missing declared input was not rejected correctly: {other:?}"),
+            };
+        }
+    }
+
+    let mut extra_input = build_reference_capsule();
+    extra_input
+        .inputs
+        .insert("artifact_c".to_string(), "content_of_c".to_string());
+    sign_capsule(&mut extra_input);
+    match replay(&extra_input, "verifier://inputs") {
+        Err(CapsuleError::ManifestIncomplete(message)) if message.contains("input_refs") => {
+            TestResult::Pass
+        }
+        other => TestResult::Fail {
+            reason: format!("extra undeclared input was not rejected correctly: {other:?}"),
+        },
+    }
 }
 
 // ============================================================================
@@ -1104,13 +1232,65 @@ fn test_bundle_signature_format() -> TestResult {
 }
 
 fn test_bundle_serialization_deterministic() -> TestResult {
-    // This would test that serialize() produces identical bytes for identical bundles
-    TestResult::Pass
+    let bundle = canonical_replay_bundle();
+    let first = match serialize(&bundle) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("first serialization failed: {err}"),
+            };
+        }
+    };
+    let second = match serialize(&bundle) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("second serialization failed: {err}"),
+            };
+        }
+    };
+
+    if first == second {
+        TestResult::Pass
+    } else {
+        TestResult::Fail {
+            reason: "bundle serialization produced different bytes for identical input".to_string(),
+        }
+    }
 }
 
 fn test_bundle_integrity_verification() -> TestResult {
-    // This would test that verify() validates integrity_hash field
-    TestResult::Pass
+    let bundle = canonical_replay_bundle();
+    let bytes = match serialize(&bundle) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("valid bundle serialization failed: {err}"),
+            };
+        }
+    };
+    if let Err(err) = verify(&bytes) {
+        return TestResult::Fail {
+            reason: format!("valid sealed bundle did not verify: {err}"),
+        };
+    }
+
+    let mut tampered = bundle;
+    tampered.integrity_hash = "0".repeat(64);
+    let tampered_bytes = match serialize(&tampered) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("tampered bundle serialization failed: {err}"),
+            };
+        }
+    };
+    match verify(&tampered_bytes) {
+        Err(BundleError::IntegrityMismatch { .. }) => TestResult::Pass,
+        other => TestResult::Fail {
+            reason: format!("integrity_hash tampering was not rejected correctly: {other:?}"),
+        },
+    }
 }
 
 fn test_bundle_hash_algorithm() -> TestResult {
@@ -1127,18 +1307,160 @@ fn test_bundle_hash_algorithm() -> TestResult {
 }
 
 fn test_bundle_ed25519_signatures() -> TestResult {
-    // This would test Ed25519 signature generation and verification
-    TestResult::Pass
+    let bundle = canonical_replay_bundle();
+    let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+    let signature = sign_bundle(&signing_key, &bundle);
+    match verify_signed_bundle(&signing_key.verifying_key(), &bundle, &signature.to_bytes()) {
+        Ok(()) => TestResult::Pass,
+        Err(err) => TestResult::Fail {
+            reason: format!("valid Ed25519 bundle signature rejected: {err}"),
+        },
+    }
 }
 
 fn test_bundle_roundtrip_fidelity() -> TestResult {
-    // This would test serialize -> deserialize preserves all data
-    TestResult::Pass
+    let bundle = canonical_replay_bundle();
+    let bytes = match serialize(&bundle) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("bundle serialization failed: {err}"),
+            };
+        }
+    };
+    match deserialize(&bytes) {
+        Ok(roundtrip) if roundtrip == bundle => TestResult::Pass,
+        Ok(roundtrip) => TestResult::Fail {
+            reason: format!("deserialize did not preserve bundle: {roundtrip:?}"),
+        },
+        Err(err) => TestResult::Fail {
+            reason: format!("bundle deserialize failed: {err}"),
+        },
+    }
 }
 
 fn test_bundle_tamper_detection() -> TestResult {
-    // This would test that tampering with serialized bytes causes verification failure
-    TestResult::Pass
+    let mut bundle = canonical_replay_bundle();
+    let first_artifact = bundle
+        .artifacts
+        .values_mut()
+        .next()
+        .expect("fixture should include an artifact");
+    first_artifact.bytes_hex = hex_encode(b"tampered");
+    seal(&mut bundle).expect("tampered fixture should still seal for artifact validation");
+
+    let bytes = match serialize(&bundle) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("tampered bundle serialization failed: {err}"),
+            };
+        }
+    };
+    match verify(&bytes) {
+        Err(BundleError::ArtifactDigestMismatch { .. }) => TestResult::Pass,
+        other => TestResult::Fail {
+            reason: format!("artifact tampering was not rejected correctly: {other:?}"),
+        },
+    }
+}
+
+fn test_bundle_compression_metadata_supported() -> TestResult {
+    let mut bundle = canonical_replay_bundle();
+    bundle
+        .metadata
+        .insert("compression".to_string(), "none".to_string());
+    if let Err(err) = seal(&mut bundle) {
+        return TestResult::Fail {
+            reason: format!("bundle with compression metadata failed to seal: {err}"),
+        };
+    }
+    let bytes = match serialize(&bundle) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("bundle with compression metadata failed to serialize: {err}"),
+            };
+        }
+    };
+    match verify(&bytes) {
+        Ok(verified)
+            if verified.metadata.get("compression").map(String::as_str) == Some("none") =>
+        {
+            TestResult::Pass
+        }
+        Ok(verified) => TestResult::Fail {
+            reason: format!(
+                "compression metadata was not preserved: {:?}",
+                verified.metadata
+            ),
+        },
+        Err(err) => TestResult::Fail {
+            reason: format!("bundle with compression metadata failed verification: {err}"),
+        },
+    }
+}
+
+fn test_bundle_chunking_handles_multiple_artifacts() -> TestResult {
+    let bundle = canonical_replay_bundle();
+    let bytes = match serialize(&bundle) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("multi-chunk bundle serialization failed: {err}"),
+            };
+        }
+    };
+    match verify(&bytes) {
+        Ok(verified)
+            if verified.chunks.len() == verified.artifacts.len()
+                && verified.header.chunk_count as usize == verified.chunks.len() =>
+        {
+            TestResult::Pass
+        }
+        Ok(verified) => TestResult::Fail {
+            reason: format!(
+                "chunk count did not match artifacts/header: chunks={}, artifacts={}, header={}",
+                verified.chunks.len(),
+                verified.artifacts.len(),
+                verified.header.chunk_count
+            ),
+        },
+        Err(err) => TestResult::Fail {
+            reason: format!("multi-chunk bundle failed verification: {err}"),
+        },
+    }
+}
+
+fn test_bundle_timeline_causal_ordering() -> TestResult {
+    let bundle = canonical_replay_bundle();
+    let bytes = match serialize(&bundle) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("causal bundle serialization failed: {err}"),
+            };
+        }
+    };
+    let verified = match verify(&bytes) {
+        Ok(bundle) => bundle,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("causal bundle failed verification: {err}"),
+            };
+        }
+    };
+    let causal_chain = verified
+        .timeline
+        .windows(2)
+        .all(|window| window[1].causal_parent == Some(window[0].sequence_number));
+    if causal_chain {
+        TestResult::Pass
+    } else {
+        TestResult::Fail {
+            reason: "timeline did not preserve causal parent ordering".to_string(),
+        }
+    }
 }
 
 // ============================================================================
@@ -1151,29 +1473,131 @@ fn test_create_verifier_sdk() -> TestResult {
         TestResult::Pass
     } else {
         TestResult::Fail {
-            reason: "create_verifier_sdk did not return properly configured VerifierSdk".to_string(),
+            reason: "create_verifier_sdk did not return properly configured VerifierSdk"
+                .to_string(),
         }
     }
 }
 
 fn test_verify_claim_interface() -> TestResult {
-    // This would test that verify_claim accepts ReplayCapsule and returns VerificationResult
-    TestResult::Pass
+    let sdk = create_verifier_sdk("verifier://claim");
+    let capsule = build_reference_capsule();
+    match sdk.verify_claim(&capsule) {
+        Ok(result)
+            if result.operation == VerificationOperation::Claim
+                && result.verdict == VerificationVerdict::Pass
+                && result
+                    .checked_assertions
+                    .iter()
+                    .any(|assertion| assertion.assertion == "capsule_replay_verified") =>
+        {
+            TestResult::Pass
+        }
+        Ok(result) => TestResult::Fail {
+            reason: format!("verify_claim returned unexpected result: {result:?}"),
+        },
+        Err(err) => TestResult::Fail {
+            reason: format!("verify_claim failed: {err}"),
+        },
+    }
 }
 
 fn test_verify_migration_artifact_interface() -> TestResult {
-    // This would test that verify_migration_artifact accepts bytes and returns VerificationResult
-    TestResult::Pass
+    let sdk = create_verifier_sdk("verifier://migration");
+    let bundle = canonical_replay_bundle();
+    let bytes = match serialize(&bundle) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("migration fixture serialization failed: {err}"),
+            };
+        }
+    };
+    match sdk.verify_migration_artifact(&bytes) {
+        Ok(result)
+            if result.operation == VerificationOperation::MigrationArtifact
+                && result.verdict == VerificationVerdict::Pass =>
+        {
+            TestResult::Pass
+        }
+        Ok(result) => TestResult::Fail {
+            reason: format!("verify_migration_artifact returned unexpected result: {result:?}"),
+        },
+        Err(err) => TestResult::Fail {
+            reason: format!("verify_migration_artifact failed: {err}"),
+        },
+    }
 }
 
 fn test_verify_trust_state_interface() -> TestResult {
-    // This would test that verify_trust_state checks anchor hash match
-    TestResult::Pass
+    let sdk = create_verifier_sdk("verifier://trust");
+    let bundle = canonical_replay_bundle();
+    let bytes = match serialize(&bundle) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("trust-state fixture serialization failed: {err}"),
+            };
+        }
+    };
+    let matching = match sdk.verify_trust_state(&bytes, &bundle.integrity_hash) {
+        Ok(result) => result,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("verify_trust_state matching anchor failed: {err}"),
+            };
+        }
+    };
+    let mismatching = match sdk.verify_trust_state(&bytes, &"0".repeat(64)) {
+        Ok(result) => result,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("verify_trust_state mismatching anchor returned error: {err}"),
+            };
+        }
+    };
+    if matching.verdict == VerificationVerdict::Pass
+        && mismatching.verdict == VerificationVerdict::Fail
+    {
+        TestResult::Pass
+    } else {
+        TestResult::Fail {
+            reason: format!(
+                "trust-state anchor verdicts incorrect: matching={:?}, mismatching={:?}",
+                matching.verdict, mismatching.verdict
+            ),
+        }
+    }
 }
 
 fn test_workflow_execution_interface() -> TestResult {
-    // This would test that execute_workflow appends workflow-specific assertions
-    TestResult::Pass
+    let sdk = create_verifier_sdk("verifier://workflow");
+    let bundle = canonical_replay_bundle();
+    let bytes = match serialize(&bundle) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("workflow fixture serialization failed: {err}"),
+            };
+        }
+    };
+    match sdk.execute_workflow(ValidationWorkflow::ReleaseValidation, &bytes) {
+        Ok(result)
+            if result.operation == VerificationOperation::Workflow
+                && result
+                    .checked_assertions
+                    .iter()
+                    .any(|assertion| assertion.assertion == "workflow_release_validation") =>
+        {
+            TestResult::Pass
+        }
+        Ok(result) => TestResult::Fail {
+            reason: format!("execute_workflow returned unexpected result: {result:?}"),
+        },
+        Err(err) => TestResult::Fail {
+            reason: format!("execute_workflow failed: {err}"),
+        },
+    }
 }
 
 fn test_session_interface() -> TestResult {
@@ -1190,28 +1614,253 @@ fn test_session_interface() -> TestResult {
 }
 
 fn test_transparency_log_interface() -> TestResult {
-    // This would test that append_transparency_log produces valid TransparencyLogEntry
-    TestResult::Pass
+    let sdk = create_verifier_sdk("verifier://log");
+    let capsule = build_reference_capsule();
+    let result = match sdk.verify_claim(&capsule) {
+        Ok(result) => result,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("claim verification for transparency log failed: {err}"),
+            };
+        }
+    };
+    let mut log = Vec::new();
+    match sdk.append_transparency_log(&mut log, &result) {
+        Ok(entry)
+            if entry.verifier_id == result.verifier_identity
+                && entry.merkle_proof.len() == 2
+                && log.len() == 1 =>
+        {
+            TestResult::Pass
+        }
+        Ok(entry) => TestResult::Fail {
+            reason: format!("append_transparency_log returned unexpected entry: {entry:?}"),
+        },
+        Err(err) => TestResult::Fail {
+            reason: format!("append_transparency_log failed: {err}"),
+        },
+    }
 }
 
 fn test_verification_result_confidence() -> TestResult {
-    // This would test that VerificationResult includes confidence_score field
-    TestResult::Pass
+    let sdk = create_verifier_sdk("verifier://confidence");
+    let capsule = build_reference_capsule();
+    match sdk.verify_claim(&capsule) {
+        Ok(result) if result.confidence_score == 1.0 => TestResult::Pass,
+        Ok(result) => TestResult::Fail {
+            reason: format!(
+                "pass verdict confidence_score was not 1.0: {}",
+                result.confidence_score
+            ),
+        },
+        Err(err) => TestResult::Fail {
+            reason: format!("confidence fixture verification failed: {err}"),
+        },
+    }
 }
 
 fn test_result_signature_verification() -> TestResult {
-    // This would test that verifier_signature field can be verified
-    TestResult::Pass
+    let sdk = create_verifier_sdk("verifier://signature");
+    let capsule = build_reference_capsule();
+    let mut result = match sdk.verify_claim(&capsule) {
+        Ok(result) => result,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("signature fixture verification failed: {err}"),
+            };
+        }
+    };
+    let mut log = Vec::new();
+    if let Err(err) = sdk.append_transparency_log(&mut log, &result) {
+        return TestResult::Fail {
+            reason: format!("valid result signature rejected: {err}"),
+        };
+    }
+    result.artifact_binding_hash = "0".repeat(64);
+    match sdk.append_transparency_log(&mut log, &result) {
+        Err(VerifierSdkError::ResultSignatureMismatch { .. }) => TestResult::Pass,
+        other => TestResult::Fail {
+            reason: format!("tampered result signature was not rejected correctly: {other:?}"),
+        },
+    }
 }
 
 fn test_interface_version_validation() -> TestResult {
-    let sdk = create_verifier_sdk("test-version");
-    // All interface methods should validate sdk_version matches supported version
-    if sdk.sdk_version == SDK_VERSION {
-        TestResult::Pass
-    } else {
-        TestResult::Fail {
-            reason: "SDK interface does not validate version correctly".to_string(),
+    let mut sdk = create_verifier_sdk("verifier://version");
+    sdk.sdk_version = "vsdk-v2.0".to_string();
+    let capsule = build_reference_capsule();
+    match sdk.verify_claim(&capsule) {
+        Err(VerifierSdkError::UnsupportedSdk(message))
+            if message.contains(ERR_SDK_VERSION_UNSUPPORTED) =>
+        {
+            TestResult::Pass
+        }
+        other => TestResult::Fail {
+            reason: format!("unsupported SDK version was not rejected first: {other:?}"),
+        },
+    }
+}
+
+fn test_interface_structured_error_details() -> TestResult {
+    let sdk = create_verifier_sdk("verifier://errors");
+    match sdk.verify_trust_state(&[], "") {
+        Err(VerifierSdkError::EmptyTrustAnchor) => {}
+        other => {
+            return TestResult::Fail {
+                reason: format!("empty trust anchor did not return structured error: {other:?}"),
+            };
         }
     }
+
+    let mut session = sdk.create_session("sealed-session");
+    if let Err(err) = sdk.seal_session(&mut session) {
+        return TestResult::Fail {
+            reason: format!("initial session seal failed: {err}"),
+        };
+    }
+    match sdk.record_session_step(
+        &mut session,
+        &VerificationResult {
+            operation: VerificationOperation::Claim,
+            verdict: VerificationVerdict::Pass,
+            confidence_score: 1.0,
+            checked_assertions: vec![],
+            execution_timestamp: "2026-04-20T00:00:00Z".to_string(),
+            verifier_identity: "verifier://errors".to_string(),
+            artifact_binding_hash: "0".repeat(64),
+            verifier_signature: "invalid".to_string(),
+            sdk_version: SDK_VERSION.to_string(),
+        },
+    ) {
+        Err(VerifierSdkError::SessionSealed(session_id)) if session_id == "sealed-session" => {
+            TestResult::Pass
+        }
+        other => TestResult::Fail {
+            reason: format!("sealed session did not return structured error: {other:?}"),
+        },
+    }
+}
+
+fn canonical_replay_bundle() -> ReplayBundle {
+    let mut artifacts = BTreeMap::new();
+    artifacts.insert(
+        "evidence/incident.json".to_string(),
+        artifact(
+            "application/json",
+            br#"{"incident_id":"inc-conformance","risk":"high"}"#,
+        ),
+    );
+    artifacts.insert(
+        "transcripts/replay.ndjson".to_string(),
+        artifact(
+            "application/x-ndjson",
+            br#"{"sequence":1,"event":"start"}
+{"sequence":2,"event":"policy_eval"}
+"#,
+        ),
+    );
+    let chunks = chunks_from_artifacts(&artifacts);
+    let mut metadata = BTreeMap::new();
+    metadata.insert("domain".to_string(), "verifier-sdk-conformance".to_string());
+
+    let mut bundle = ReplayBundle {
+        header: BundleHeader {
+            hash_algorithm: REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
+            payload_length_bytes: payload_length_bytes(&artifacts),
+            chunk_count: chunks
+                .len()
+                .try_into()
+                .expect("fixture chunk count should fit u32"),
+        },
+        schema_version: REPLAY_BUNDLE_SCHEMA_VERSION.to_string(),
+        sdk_version: SDK_VERSION.to_string(),
+        bundle_id: "bundle-conformance-001".to_string(),
+        incident_id: "inc-conformance".to_string(),
+        created_at: "2026-04-20T14:05:00.000000Z".to_string(),
+        policy_version: "strict@2026-04-20".to_string(),
+        verifier_identity: "verifier://bundle".to_string(),
+        timeline: vec![
+            TimelineEvent {
+                sequence_number: 1,
+                event_id: "evt-0001".to_string(),
+                timestamp: "2026-04-20T14:05:00.000001Z".to_string(),
+                event_type: "start".to_string(),
+                payload: json!({"incident_id": "inc-conformance"}),
+                state_snapshot: json!({"phase": "start"}),
+                causal_parent: None,
+                policy_version: "strict@2026-04-20".to_string(),
+            },
+            TimelineEvent {
+                sequence_number: 2,
+                event_id: "evt-0002".to_string(),
+                timestamp: "2026-04-20T14:05:00.000002Z".to_string(),
+                event_type: "policy_eval".to_string(),
+                payload: json!({"decision": "quarantine"}),
+                state_snapshot: json!({"phase": "policy_eval"}),
+                causal_parent: Some(1),
+                policy_version: "strict@2026-04-20".to_string(),
+            },
+        ],
+        initial_state_snapshot: json!({"baseline_epoch": 1_u64}),
+        evidence_refs: vec!["evidence/incident.json".to_string()],
+        artifacts,
+        chunks,
+        metadata,
+        integrity_hash: String::new(),
+        signature: BundleSignature {
+            algorithm: REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
+            signature_hex: String::new(),
+        },
+    };
+    seal(&mut bundle).expect("fixture should seal");
+    bundle
+}
+
+fn chunks_from_artifacts(artifacts: &BTreeMap<String, BundleArtifact>) -> Vec<BundleChunk> {
+    let total_chunks = artifacts
+        .len()
+        .try_into()
+        .expect("fixture chunk count should fit u32");
+    artifacts
+        .iter()
+        .enumerate()
+        .map(|(index, (path, artifact))| BundleChunk {
+            chunk_index: index
+                .try_into()
+                .expect("fixture chunk index should fit u32"),
+            total_chunks,
+            artifact_path: path.clone(),
+            payload_length_bytes: u64::try_from(artifact.bytes_hex.len() / 2)
+                .expect("fixture artifact length should fit u64"),
+            payload_digest: artifact.digest.clone(),
+        })
+        .collect()
+}
+
+fn payload_length_bytes(artifacts: &BTreeMap<String, BundleArtifact>) -> u64 {
+    artifacts
+        .values()
+        .map(|artifact| {
+            u64::try_from(artifact.bytes_hex.len() / 2)
+                .expect("fixture artifact length should fit u64")
+        })
+        .sum()
+}
+
+fn artifact(media_type: &str, bytes: &[u8]) -> BundleArtifact {
+    BundleArtifact {
+        media_type: media_type.to_string(),
+        digest: hash(bytes),
+        bytes_hex: hex_encode(bytes),
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
