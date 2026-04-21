@@ -601,11 +601,100 @@ mod tests {
             "fixture should collide under delimiter-only transcript"
         );
 
-        let signature_a =
-            controller.sign_evidence(principal_a, ControlAction::Throttle, 0.45, trace_a);
-        let signature_b = controller.sign_evidence(principal_b, ControlAction::Revoke, 0.91, trace_b);
+        let signature_a = controller
+            .decide_for_posterior_with_context(
+                principal_a,
+                0.45,
+                7,
+                "sha256:evidence-a",
+                "scope-a",
+                trace_a,
+            )
+            .expect("decision a")
+            .signed_evidence
+            .signature;
+        let signature_b = controller
+            .decide_for_posterior_with_context(
+                principal_b,
+                0.91,
+                7,
+                "sha256:evidence-a",
+                "scope-a",
+                trace_b,
+            )
+            .expect("decision b")
+            .signed_evidence
+            .signature;
 
         assert_ne!(signature_a, signature_b);
+    }
+
+    #[test]
+    fn verify_decision_rejects_top_level_threshold_tampering() {
+        let controller = QuarantineController::new(QuarantineThresholdPolicy::default(), "salt")
+            .expect("controller");
+        let mut decision = controller
+            .decide_for_posterior_with_context(
+                "ext:a",
+                0.91,
+                3,
+                "sha256:evidence",
+                "tenant-a/fleet-a",
+                "trace-a",
+            )
+            .expect("decision");
+
+        assert!(controller.verify_decision(&decision));
+
+        decision.threshold = 0.45;
+
+        assert!(!controller.verify_decision(&decision));
+    }
+
+    #[test]
+    fn verify_decision_rejects_evidence_field_tampering_inside_commitment() {
+        let controller = QuarantineController::new(QuarantineThresholdPolicy::default(), "salt")
+            .expect("controller");
+        let mut decision = controller
+            .decide_for_posterior_with_context(
+                "ext:a",
+                0.91,
+                3,
+                "sha256:evidence",
+                "tenant-a/fleet-a",
+                "trace-a",
+            )
+            .expect("decision");
+
+        assert!(controller.verify_decision(&decision));
+
+        decision.evidence_hash = "sha256:tampered".to_string();
+        decision.signed_evidence.evidence_hash = "sha256:tampered".to_string();
+
+        assert!(!controller.verify_decision(&decision));
+    }
+
+    #[test]
+    fn verify_decision_rejects_scope_tampering_inside_commitment() {
+        let controller = QuarantineController::new(QuarantineThresholdPolicy::default(), "salt")
+            .expect("controller");
+        let mut decision = controller
+            .decide_for_posterior_with_context(
+                "ext:a",
+                0.91,
+                3,
+                "sha256:evidence",
+                "tenant-a/fleet-a",
+                "trace-a",
+            )
+            .expect("decision");
+
+        assert!(controller.verify_decision(&decision));
+
+        decision.scope = "tenant-b/fleet-a".to_string();
+        decision.signed_evidence.scope = "tenant-b/fleet-a".to_string();
+
+        assert!(!controller.verify_decision(&decision));
     }
 
     #[test]
@@ -1103,7 +1192,7 @@ mod quarantine_controller_additional_negative_tests {
                 assert!(evidence.action != ControlAction::Revoke || malicious_posterior.posterior >= 0.90);
 
                 // Principal ID should not be normalized in a way that bypasses security
-                assert!(!constant_time::ct_eq(evidence.principal_id.as_bytes(), b"admin"),
+                assert!(!constant_time::ct_eq_bytes(evidence.principal_id.as_bytes(), b"admin"),
                        "Unicode injection should not create admin privileges");
 
                 // Trace ID should preserve injection detection
@@ -1223,7 +1312,7 @@ mod quarantine_controller_additional_negative_tests {
                        "Evidence modification should be detectable");
             } else {
                 // Signature was modified - should be detectable through verification
-                assert!(!constant_time::ct_eq(forged_evidence.signature.as_bytes(), original_signature.as_bytes()),
+                assert!(!constant_time::ct_eq_bytes(forged_evidence.signature.as_bytes(), original_signature.as_bytes()),
                        "Signature tampering should be detectable");
             }
         }
@@ -1351,17 +1440,17 @@ mod quarantine_controller_additional_negative_tests {
 
         // Test if evaluation time varies significantly based on input
         let test_cases = vec![
-            ("user001", 0.1),
-            ("user002", 0.5),
-            ("user003", 0.9),
-            ("admin", 0.9),
-            ("a".repeat(100).as_str(), 0.9),
+            ("user001".to_string(), 0.1),
+            ("user002".to_string(), 0.5),
+            ("user003".to_string(), 0.9),
+            ("admin".to_string(), 0.9),
+            ("a".repeat(100), 0.9),
         ];
 
         let mut timing_results = vec![];
 
         for (principal_id, posterior_val) in test_cases {
-            let test_posterior = posterior(principal_id, posterior_val, "trace001");
+            let test_posterior = posterior(&principal_id, posterior_val, "trace001");
 
             let start = Instant::now();
             let _result = controller.evaluate(&test_posterior);
@@ -1457,18 +1546,18 @@ mod quarantine_controller_additional_negative_tests {
     fn test_security_hmac_key_manipulation_resistance() {
         // Test controllers with different key qualities
         let key_tests = vec![
-            "",  // Empty key (should be rejected)
-            "\0\0\0\0",  // Null bytes
-            "\u{202E}key\u{202D}",  // BiDi override
+            "".to_string(),  // Empty key (should be rejected)
+            "\0\0\0\0".to_string(),  // Null bytes
+            "\u{202E}key\u{202D}".to_string(),  // BiDi override
             "a".repeat(1000),  // Very long key
-            "short",  // Short but valid key
-            "normal_signing_key_123",  // Normal key
+            "short".to_string(),  // Short but valid key
+            "normal_signing_key_123".to_string(),  // Normal key
         ];
 
         for test_key in key_tests {
             let controller_result = QuarantineController::new(
                 QuarantineThresholdPolicy::default(),
-                test_key
+                test_key.clone()
             );
 
             match controller_result {
