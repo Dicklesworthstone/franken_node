@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::process::{Child, Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use chrono::{TimeDelta, Utc};
@@ -89,6 +89,8 @@ fn spawn_cli_in_dir_with_fleet_state(
         .current_dir(current_dir)
         .args(args)
         .env("FRANKEN_NODE_FLEET_STATE_DIR", fleet_state_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap_or_else(|err| panic!("failed spawning `{}`: {err}", args.join(" ")))
 }
@@ -1715,7 +1717,7 @@ fn fleet_agent_handles_sigterm_gracefully() {
     )
     .expect("write config");
 
-    let child = spawn_cli_in_dir_with_fleet_state(
+    let mut child = spawn_cli_in_dir_with_fleet_state(
         project.path(),
         &[
             "fleet",
@@ -1729,7 +1731,32 @@ fn fleet_agent_handles_sigterm_gracefully() {
         ],
         &fleet_state_dir,
     );
-    std::thread::sleep(Duration::from_millis(250));
+    let readiness_deadline = Instant::now() + Duration::from_secs(5);
+    let agent_status = loop {
+        let mut readiness_transport = FileFleetTransport::new(&fleet_state_dir);
+        readiness_transport
+            .initialize()
+            .expect("initialize readiness transport");
+        if let Some(status) = readiness_transport
+            .list_node_statuses()
+            .expect("list readiness node statuses")
+            .into_iter()
+            .find(|status| status.node_id == "agent-signal-1" && status.zone_id == "zone-signal")
+        {
+            break status;
+        }
+        let early_exit = child.try_wait().expect("poll child status");
+        assert!(
+            early_exit.is_none(),
+            "fleet agent exited before readiness marker: {early_exit:?}"
+        );
+        assert!(
+            Instant::now() < readiness_deadline,
+            "fleet agent did not write readiness heartbeat before SIGTERM"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert_eq!(agent_status.health, NodeHealth::Healthy);
     let signal_status = Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
         .status()
