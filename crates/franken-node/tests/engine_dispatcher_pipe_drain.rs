@@ -50,3 +50,9 @@ fn engine_dispatcher_reaps_descendant_pipe_holders() {
 #[cfg(not(unix))]
 #[test]
 fn engine_dispatcher_reaps_descendant_pipe_holders() {}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn telemetry_join_timeout_does_not_detach_connection_worker() {
+    frankenengine_node::ops::telemetry_bridge::assert_timed_out_connection_join_does_not_detach_worker_for_tests();
+}

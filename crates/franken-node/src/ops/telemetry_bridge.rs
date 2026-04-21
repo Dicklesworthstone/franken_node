@@ -577,6 +577,7 @@ impl TelemetryRuntimeHandle {
         };
 
         let mut worker_panicked = false;
+        let mut worker_timed_out = false;
         let join_start = Instant::now();
 
         for handle in handles {
@@ -584,34 +585,36 @@ impl TelemetryRuntimeHandle {
             if join_start.elapsed() >= deadline {
                 // Signal shutdown to remaining workers by setting stop flag
                 self.stop_flag.store(true, Ordering::SeqCst);
-                break;
+                worker_timed_out = true;
+            } else {
+                // Wait for handle with remaining deadline
+                let remaining_time = deadline.saturating_sub(join_start.elapsed());
+                let timed_out = if handle.is_finished() {
+                    false
+                } else if remaining_time.is_zero() {
+                    true
+                } else {
+                    let park_start = Instant::now();
+                    loop {
+                        if handle.is_finished() {
+                            break false;
+                        }
+                        if park_start.elapsed() >= remaining_time {
+                            break true;
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                };
+
+                if timed_out {
+                    // Connection worker exceeded deadline; signal shutdown but
+                    // still join it so no background worker outlives join().
+                    self.stop_flag.store(true, Ordering::SeqCst);
+                    worker_timed_out = true;
+                }
             }
 
-            // Wait for handle with remaining deadline
-            let remaining_time = deadline.saturating_sub(join_start.elapsed());
-            let timed_out = if handle.is_finished() {
-                false
-            } else if remaining_time.is_zero() {
-                true
-            } else {
-                let park_start = Instant::now();
-                loop {
-                    if handle.is_finished() {
-                        break false;
-                    }
-                    if park_start.elapsed() >= remaining_time {
-                        break true;
-                    }
-                    thread::sleep(Duration::from_millis(10));
-                }
-            };
-
-            if timed_out {
-                // Connection worker exceeded deadline - signal shutdown and give up
-                self.stop_flag.store(true, Ordering::SeqCst);
-                worker_panicked = true; // Treat timeout as failure
-                break;
-            } else if handle.join().is_err() {
+            if handle.join().is_err() {
                 worker_panicked = true;
             }
         }
@@ -623,6 +626,11 @@ impl TelemetryRuntimeHandle {
         } else if worker_panicked {
             Err(TelemetryJoinError(
                 "telemetry connection worker panicked while joining runtime".to_string(),
+            ))
+        } else if worker_timed_out {
+            Err(TelemetryJoinError(
+                "telemetry connection worker exceeded drain deadline while joining runtime"
+                    .to_string(),
             ))
         } else {
             Ok(())
@@ -1041,7 +1049,10 @@ impl TelemetryBridge {
                                 Some(connection_id),
                                 None,
                                 Some(reason_codes::EVENT_TOO_LARGE),
-                                format!("partial line exceeded {} bytes (slowloris protection)", MAX_EVENT_BYTES),
+                                format!(
+                                    "partial line exceeded {} bytes (slowloris protection)",
+                                    MAX_EVENT_BYTES
+                                ),
                             );
                         });
                         event_bytes.clear();
@@ -1321,6 +1332,56 @@ impl TelemetryBridge {
     ) -> Option<R> {
         state.lock().ok().map(|mut metrics| op(&mut metrics))
     }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn assert_timed_out_connection_join_does_not_detach_worker_impl() {
+    let state = Arc::new(Mutex::new(TelemetryBridgeState::new(
+        PERSIST_QUEUE_CAPACITY,
+    )));
+    let lifecycle = Arc::new(AtomicU8::new(BridgeLifecycleState::Draining as u8));
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let persistence_abort = Arc::new(AtomicBool::new(false));
+
+    let state_for_connection = Arc::clone(&state);
+    let stop_for_connection = Arc::clone(&stop_flag);
+    let connection_worker = thread::spawn(move || {
+        while !stop_for_connection.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(1));
+        }
+        drop(state_for_connection);
+    });
+
+    let handle = TelemetryRuntimeHandle {
+        socket_path: PathBuf::from("/tmp/telemetry-timeout-connection-registry.sock"),
+        state: Arc::clone(&state),
+        lifecycle,
+        stop_flag,
+        persistence_abort,
+        connection_handles: Arc::new(Mutex::new(vec![connection_worker])),
+        connection_worker_panicked: Arc::new(AtomicBool::new(false)),
+        listener_handle: None,
+        persistence_handle: None,
+    };
+
+    let err = handle
+        .join(Duration::ZERO)
+        .expect_err("connection worker timeout should fail join");
+
+    assert!(
+        err.0.contains("exceeded drain deadline"),
+        "join error should report connection worker timeout"
+    );
+    assert_eq!(
+        Arc::strong_count(&state),
+        1,
+        "join() must not detach timed-out connection workers"
+    );
+}
+
+#[cfg(feature = "test-support")]
+pub fn assert_timed_out_connection_join_does_not_detach_worker_for_tests() {
+    assert_timed_out_connection_join_does_not_detach_worker_impl();
 }
 
 #[cfg(test)]
@@ -1684,7 +1745,7 @@ mod tests {
         let state_for_poison = Arc::clone(&state);
         let _ = thread::spawn(move || {
             let _guard = state_for_poison.lock().expect("state lock");
-            panic!("poison telemetry state lock");
+            std::panic::panic_any("poison telemetry state lock");
         })
         .join();
 
@@ -1901,7 +1962,7 @@ mod tests {
         let persistence_abort = Arc::new(AtomicBool::new(false));
 
         let listener = thread::spawn(|| {
-            panic!("listener panic during join test");
+            std::panic::panic_any("listener panic during join test");
         });
 
         let state_for_connection = Arc::clone(&state);
@@ -1953,7 +2014,7 @@ mod tests {
         let state_for_worker = Arc::clone(&state);
         let worker = thread::spawn(move || {
             drop(state_for_worker);
-            panic!("persistence panic during join test");
+            std::panic::panic_any("persistence panic during join test");
         });
 
         while !worker.is_finished() {
@@ -2006,14 +2067,14 @@ mod tests {
     #[test]
     fn reaping_panicked_connection_workers_reports_failure_after_joining_all_finished_workers() {
         let connection_worker_panicked = Arc::new(AtomicBool::new(false));
-        let joined_token = Arc::new(());
-        let joined_token_for_worker = Arc::clone(&joined_token);
+        let joined_marker = Arc::new(());
+        let joined_marker_for_worker = Arc::clone(&joined_marker);
 
         let panicking_worker = thread::spawn(|| {
-            panic!("connection worker panic during reap test");
+            std::panic::panic_any("connection worker panic during reap test");
         });
         let finishing_worker = thread::spawn(move || {
-            drop(joined_token_for_worker);
+            drop(joined_marker_for_worker);
         });
 
         let connection_handles = Arc::new(Mutex::new(vec![panicking_worker, finishing_worker]));
@@ -2041,7 +2102,7 @@ mod tests {
             "reap should surface the panic to the runtime"
         );
         assert_eq!(
-            Arc::strong_count(&joined_token),
+            Arc::strong_count(&joined_marker),
             1,
             "reap should still join every finished worker before reporting failure"
         );
@@ -2073,7 +2134,7 @@ mod tests {
             let _guard = handles_for_poison
                 .lock()
                 .expect("connection handle registry lock");
-            panic!("poison connection handle registry");
+            std::panic::panic_any("poison connection handle registry");
         })
         .join();
 
@@ -2102,6 +2163,11 @@ mod tests {
             1,
             "join() should still drain connection workers out of a poisoned registry before returning"
         );
+    }
+
+    #[test]
+    fn timed_out_connection_join_does_not_detach_worker() {
+        assert_timed_out_connection_join_does_not_detach_worker_impl();
     }
 
     // ---- bd-1now.4.5: Deterministic telemetry regression suite ----
@@ -3558,15 +3624,14 @@ mod tests {
             let json = serde_json::to_string(&shutdown_reason).unwrap();
             let parsed: ShutdownReason = serde_json::from_str(&json).unwrap();
 
-            match (shutdown_reason, parsed) {
-                (
-                    ShutdownReason::EngineExit { exit_code: orig },
-                    ShutdownReason::EngineExit { exit_code: parsed },
-                ) => {
-                    assert_eq!(orig, parsed, "exit code serialization must be exact");
-                }
-                _ => panic!("shutdown reason type should be preserved"),
-            }
+            assert!(
+                matches!(parsed, ShutdownReason::EngineExit { .. }),
+                "shutdown reason type should be preserved"
+            );
+            let ShutdownReason::EngineExit { exit_code: parsed } = parsed else {
+                continue;
+            };
+            assert_eq!(exit_code, parsed, "exit code serialization must be exact");
 
             // Verify debug display doesn't contain injection patterns
             let debug_str = format!("{:?}", shutdown_reason);
