@@ -6,11 +6,15 @@ use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -21,6 +25,7 @@ const MAX_SANITIZED_STRACE_LINES: usize = 65_536; // 64K syscall lines max
 const MAX_THREAD_HANDLES: usize = 64; // Maximum concurrent runtime threads
 const PIPE_DRAIN_JOIN_TIMEOUT_MS: u64 = 2_000;
 const PIPE_DRAIN_JOIN_POLL_MS: u64 = 10;
+const PIPE_READ_CHUNK_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct LockstepCorpusManifest {
@@ -72,6 +77,12 @@ fn extend_bounded(items: &mut Vec<u8>, new_data: &[u8], max_total_bytes: usize) 
 
 pub struct LockstepHarness {
     runtimes: Vec<String>,
+}
+
+#[derive(Debug)]
+struct PipeDrainResult {
+    bytes: Vec<u8>,
+    cap_reached: bool,
 }
 
 impl LockstepHarness {
@@ -699,28 +710,43 @@ impl LockstepHarness {
             anyhow::anyhow!("runtime {runtime} stderr pipe unavailable despite Stdio::piped()")
         })?;
 
+        let captured_output_bytes = Arc::new(AtomicUsize::new(0));
+        let output_cap_reached = Arc::new(AtomicBool::new(false));
+
+        let stdout_total = Arc::clone(&captured_output_bytes);
+        let stdout_cap_reached = Arc::clone(&output_cap_reached);
         let stdout_thread = thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Err(e) = stdout_handle.read_to_end(&mut buf) {
-                eprintln!("lockstep_harness: stdout read error (partial data retained): {e}");
-            }
-            buf
+            Self::drain_pipe_bounded(
+                &mut stdout_handle,
+                "stdout",
+                stdout_total,
+                stdout_cap_reached,
+            )
         });
 
+        let stderr_total = Arc::clone(&captured_output_bytes);
+        let stderr_cap_reached = Arc::clone(&output_cap_reached);
         let stderr_thread = thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Err(e) = stderr_handle.read_to_end(&mut buf) {
-                eprintln!("lockstep_harness: stderr read error (partial data retained): {e}");
-            }
-            buf
+            Self::drain_pipe_bounded(
+                &mut stderr_handle,
+                "stderr",
+                stderr_total,
+                stderr_cap_reached,
+            )
         });
 
         let timeout = Duration::from_secs(30);
         let start = Instant::now();
 
         let mut is_timeout = false;
+        let mut is_output_cap_reached = false;
         let mut exit_code = -1;
         loop {
+            if output_cap_reached.load(Ordering::Acquire) {
+                Self::terminate_runtime_tree(&mut child);
+                is_output_cap_reached = true;
+                break;
+            }
             if let Some(status) = child.try_wait()? {
                 exit_code = status.code().unwrap_or(-1);
                 break;
@@ -734,13 +760,23 @@ impl LockstepHarness {
         }
 
         let drain_timeout = Duration::from_millis(PIPE_DRAIN_JOIN_TIMEOUT_MS);
-        let stdout_bytes = Self::join_pipe_drain(stdout_thread, "stdout", drain_timeout);
-        let stderr_bytes = Self::join_pipe_drain(stderr_thread, "stderr", drain_timeout);
+        let stdout_result = Self::join_pipe_drain(stdout_thread, "stdout", drain_timeout);
+        let stderr_result = Self::join_pipe_drain(stderr_thread, "stderr", drain_timeout);
+
+        if is_output_cap_reached
+            || stdout_result.cap_reached
+            || stderr_result.cap_reached
+            || output_cap_reached.load(Ordering::Acquire)
+        {
+            anyhow::bail!(
+                "runtime output cap reached for {runtime}; captured at most {MAX_COMBINED_OUTPUT_BYTES} bytes"
+            );
+        }
 
         let mut combined_output = Vec::new();
         extend_bounded(
             &mut combined_output,
-            &stdout_bytes,
+            &stdout_result.bytes,
             MAX_COMBINED_OUTPUT_BYTES,
         );
         extend_bounded(
@@ -750,7 +786,7 @@ impl LockstepHarness {
         );
         extend_bounded(
             &mut combined_output,
-            &stderr_bytes,
+            &stderr_result.bytes,
             MAX_COMBINED_OUTPUT_BYTES,
         );
         extend_bounded(
@@ -823,20 +859,98 @@ impl LockstepHarness {
     }
 
     fn join_pipe_drain(
-        handle: thread::JoinHandle<Vec<u8>>,
+        handle: thread::JoinHandle<PipeDrainResult>,
         label: &str,
         timeout: Duration,
-    ) -> Vec<u8> {
+    ) -> PipeDrainResult {
         let start = Instant::now();
         while !handle.is_finished() {
             if Self::has_timed_out(start.elapsed(), timeout) {
-                return format!("__pipe_drain_timeout:{label}").into_bytes();
+                return PipeDrainResult {
+                    bytes: format!("__pipe_drain_timeout:{label}").into_bytes(),
+                    cap_reached: false,
+                };
             }
             thread::sleep(Duration::from_millis(PIPE_DRAIN_JOIN_POLL_MS));
         }
-        handle
-            .join()
-            .unwrap_or_else(|_| format!("__thread_panic:{label}").into_bytes())
+        handle.join().unwrap_or_else(|_| PipeDrainResult {
+            bytes: format!("__thread_panic:{label}").into_bytes(),
+            cap_reached: false,
+        })
+    }
+
+    fn drain_pipe_bounded<R: Read>(
+        reader: &mut R,
+        label: &str,
+        captured_output_bytes: Arc<AtomicUsize>,
+        output_cap_reached: Arc<AtomicBool>,
+    ) -> PipeDrainResult {
+        let mut captured = Vec::new();
+        let mut chunk = [0_u8; PIPE_READ_CHUNK_BYTES];
+        let mut cap_reached = false;
+
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read_len) => {
+                    let allowed = Self::reserve_output_bytes(
+                        &captured_output_bytes,
+                        read_len,
+                        MAX_COMBINED_OUTPUT_BYTES,
+                    );
+                    if allowed > 0 {
+                        extend_bounded(&mut captured, &chunk[..allowed], MAX_COMBINED_OUTPUT_BYTES);
+                    }
+                    if allowed < read_len
+                        || captured_output_bytes.load(Ordering::Acquire)
+                            >= MAX_COMBINED_OUTPUT_BYTES
+                    {
+                        output_cap_reached.store(true, Ordering::Release);
+                        cap_reached = true;
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    eprintln!("lockstep_harness: {label} read error (partial data retained): {e}");
+                    break;
+                }
+            }
+        }
+
+        PipeDrainResult {
+            bytes: captured,
+            cap_reached,
+        }
+    }
+
+    fn reserve_output_bytes(
+        captured_output_bytes: &AtomicUsize,
+        requested_bytes: usize,
+        max_total_bytes: usize,
+    ) -> usize {
+        if requested_bytes == 0 || max_total_bytes == 0 {
+            return 0;
+        }
+
+        let mut observed = captured_output_bytes.load(Ordering::Acquire);
+        loop {
+            if observed >= max_total_bytes {
+                return 0;
+            }
+            let remaining = max_total_bytes.saturating_sub(observed);
+            let allowed = requested_bytes.min(remaining);
+            let next = observed.saturating_add(allowed);
+            match captured_output_bytes.compare_exchange_weak(
+                observed,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return allowed,
+                Err(actual) => observed = actual,
+            }
+        }
     }
 
     fn read_strace_output(path: &Path, runtime: &str) -> Result<Vec<u8>> {
@@ -1034,9 +1148,13 @@ mod tests {
 
     #[test]
     fn pipe_drain_join_returns_finished_output() {
-        let handle = thread::spawn(|| b"drained".to_vec());
+        let handle = thread::spawn(|| PipeDrainResult {
+            bytes: b"drained".to_vec(),
+            cap_reached: false,
+        });
         let output = LockstepHarness::join_pipe_drain(handle, "stdout", Duration::from_secs(1));
-        assert_eq!(output, b"drained".to_vec());
+        assert_eq!(output.bytes, b"drained".to_vec());
+        assert!(!output.cap_reached);
     }
 
     #[test]
@@ -1044,15 +1162,90 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::channel::<()>();
         let handle = thread::spawn(move || {
             let _ = receiver.recv();
-            b"late-output".to_vec()
+            PipeDrainResult {
+                bytes: b"late-output".to_vec(),
+                cap_reached: false,
+            }
         });
 
         let start = Instant::now();
         let output = LockstepHarness::join_pipe_drain(handle, "stderr", Duration::from_millis(30));
 
-        assert_eq!(output, b"__pipe_drain_timeout:stderr".to_vec());
+        assert_eq!(output.bytes, b"__pipe_drain_timeout:stderr".to_vec());
+        assert!(!output.cap_reached);
         assert!(start.elapsed() < Duration::from_secs(1));
         drop(sender);
+    }
+
+    #[test]
+    fn pipe_drain_applies_output_cap_while_reading() {
+        let captured_output_bytes = Arc::new(AtomicUsize::new(0));
+        let output_cap_reached = Arc::new(AtomicBool::new(false));
+        let adversarial_len =
+            u64::try_from(MAX_COMBINED_OUTPUT_BYTES.saturating_add(1024)).unwrap_or(u64::MAX);
+        let mut reader = std::io::repeat(b'x').take(adversarial_len);
+
+        let output = LockstepHarness::drain_pipe_bounded(
+            &mut reader,
+            "stdout",
+            Arc::clone(&captured_output_bytes),
+            Arc::clone(&output_cap_reached),
+        );
+
+        assert!(output.cap_reached);
+        assert!(output_cap_reached.load(Ordering::Acquire));
+        assert_eq!(
+            captured_output_bytes.load(Ordering::Acquire),
+            MAX_COMBINED_OUTPUT_BYTES
+        );
+        assert_eq!(output.bytes.len(), MAX_COMBINED_OUTPUT_BYTES);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_runtime_errors_when_output_cap_is_reached() {
+        if Command::new("strace")
+            .arg("-V")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("skipping output cap test because strace is unavailable");
+            return;
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime_path = temp.path().join("spam-runtime.sh");
+        std::fs::write(
+            &runtime_path,
+            format!(
+                "#!/bin/sh\nhead -c {} /dev/zero\nsleep 5\n",
+                MAX_COMBINED_OUTPUT_BYTES.saturating_add(1024)
+            ),
+        )
+        .expect("write runtime");
+        let mut permissions = std::fs::metadata(&runtime_path)
+            .expect("metadata")
+            .permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        std::fs::set_permissions(&runtime_path, permissions).expect("chmod runtime");
+
+        let app_path = temp.path().join("app.js");
+        std::fs::write(&app_path, "console.log('unused');").expect("write app");
+
+        let start = Instant::now();
+        let err = LockstepHarness::execute_runtime(
+            runtime_path.to_str().expect("utf-8 runtime path"),
+            &app_path,
+        )
+        .expect_err("runtime output should hit cap");
+
+        assert!(
+            err.to_string().contains("runtime output cap reached"),
+            "unexpected error: {err:#}"
+        );
+        assert!(start.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
