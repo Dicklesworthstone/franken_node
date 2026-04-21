@@ -764,6 +764,15 @@ pub struct EvidenceInput {
     pub content: Option<String>,
 }
 
+/// Caller-provided dimension data for building a category-shift report.
+#[derive(Debug, Clone)]
+pub struct CategoryShiftDimensionInput {
+    pub dimension: ReportDimension,
+    pub source_name: String,
+    pub source_bead: String,
+    pub claims: Vec<ClaimInput>,
+}
+
 // ── Free functions ───────────────────────────────────────────────────────────
 
 /// Compute SHA-256 hex digest of bytes.
@@ -953,14 +962,40 @@ fn canonicalize_value(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
-/// Build a demo pipeline with sample data from all five dimensions.
+/// Build a report from caller-provided source artifacts and bet status.
+pub fn build_category_shift_report(
+    now_secs: u64,
+    trace_id: &str,
+    dimensions: &[CategoryShiftDimensionInput],
+    bet_status: &[MoonshotBetEntry],
+) -> Result<(ReportingPipeline, CategoryShiftReport), CategoryShiftError> {
+    let mut pipeline = ReportingPipeline::default();
+    pipeline.start(now_secs, trace_id);
+
+    for dimension in dimensions {
+        pipeline.ingest_dimension(
+            dimension.dimension,
+            &dimension.source_name,
+            &dimension.source_bead,
+            dimension.claims.clone(),
+            now_secs,
+            trace_id,
+        )?;
+    }
+
+    for bet in bet_status {
+        pipeline.register_bet(bet.clone());
+    }
+
+    let report = pipeline.generate_report(now_secs, trace_id)?;
+    Ok((pipeline, report))
+}
+
+#[cfg(any(test, feature = "test-support"))]
+/// Build a fixture pipeline with sample data from all five dimensions.
 pub fn demo_pipeline(
     now_secs: u64,
 ) -> Result<(ReportingPipeline, CategoryShiftReport), CategoryShiftError> {
-    let mut pipeline = ReportingPipeline::default();
-    let trace = "trace-demo";
-    pipeline.start(now_secs, trace);
-
     let benchmark_content = r#"{"throughput_ops_per_sec":150000,"latency_p99_ms":2.1}"#;
     let benchmark_hash = sha256_hex(benchmark_content.as_bytes());
 
@@ -976,134 +1011,117 @@ pub fn demo_pipeline(
     let economics_content = r#"{"cost_benefit_ratio":4.2,"attacker_roi_delta":-0.87}"#;
     let economics_hash = sha256_hex(economics_content.as_bytes());
 
-    // Dimension 1: Benchmark Comparisons
-    pipeline.ingest_dimension(
-        ReportDimension::BenchmarkComparisons,
-        "benchmark-infra",
-        "bd-f5d",
-        vec![ClaimInput {
-            summary: "franken_node achieves 96.2% Node.js API compatibility".to_string(),
-            value: 96.2,
-            unit: "percent".to_string(),
-            evidence: EvidenceInput {
-                artifact_path: "artifacts/benchmarks/compat_results.json".to_string(),
-                sha256_hash: benchmark_hash,
-                generated_at_secs: now_secs.saturating_sub(86400),
-                content: Some(benchmark_content.to_string()),
-            },
-        }],
-        now_secs,
-        trace,
-    )?;
+    let dimensions = vec![
+        CategoryShiftDimensionInput {
+            dimension: ReportDimension::BenchmarkComparisons,
+            source_name: "benchmark-infra".to_string(),
+            source_bead: "bd-f5d".to_string(),
+            claims: vec![ClaimInput {
+                summary: "franken_node achieves 96.2% Node.js API compatibility".to_string(),
+                value: 96.2,
+                unit: "percent".to_string(),
+                evidence: EvidenceInput {
+                    artifact_path: "artifacts/benchmarks/compat_results.json".to_string(),
+                    sha256_hash: benchmark_hash,
+                    generated_at_secs: now_secs.saturating_sub(86400),
+                    content: Some(benchmark_content.to_string()),
+                },
+            }],
+        },
+        CategoryShiftDimensionInput {
+            dimension: ReportDimension::SecurityPosture,
+            source_name: "adversarial-runner".to_string(),
+            source_bead: "bd-9is".to_string(),
+            claims: vec![ClaimInput {
+                summary: "franken_node achieves 12.5x compromise surface reduction".to_string(),
+                value: 12.5,
+                unit: "factor".to_string(),
+                evidence: EvidenceInput {
+                    artifact_path: "artifacts/security/adversarial_results.json".to_string(),
+                    sha256_hash: security_hash,
+                    generated_at_secs: now_secs.saturating_sub(172800),
+                    content: Some(security_content.to_string()),
+                },
+            }],
+        },
+        CategoryShiftDimensionInput {
+            dimension: ReportDimension::MigrationVelocity,
+            source_name: "migration-demo".to_string(),
+            source_bead: "bd-1e0".to_string(),
+            claims: vec![ClaimInput {
+                summary: "franken_node migration is 4.1x faster than manual migration".to_string(),
+                value: 4.1,
+                unit: "factor".to_string(),
+                evidence: EvidenceInput {
+                    artifact_path: "artifacts/migration/demo_results.json".to_string(),
+                    sha256_hash: migration_hash,
+                    generated_at_secs: now_secs.saturating_sub(259200),
+                    content: Some(migration_content.to_string()),
+                },
+            }],
+        },
+        CategoryShiftDimensionInput {
+            dimension: ReportDimension::AdoptionTrends,
+            source_name: "verifier-portal".to_string(),
+            source_bead: "bd-m8p".to_string(),
+            claims: vec![ClaimInput {
+                summary: "142 verifiers registered with 8934 attestations".to_string(),
+                value: 142.0,
+                unit: "count".to_string(),
+                evidence: EvidenceInput {
+                    artifact_path: "artifacts/adoption/verifier_stats.json".to_string(),
+                    sha256_hash: adoption_hash,
+                    generated_at_secs: now_secs.saturating_sub(43200),
+                    content: Some(adoption_content.to_string()),
+                },
+            }],
+        },
+        CategoryShiftDimensionInput {
+            dimension: ReportDimension::EconomicImpact,
+            source_name: "trust-economics".to_string(),
+            source_bead: "bd-10c".to_string(),
+            claims: vec![ClaimInput {
+                summary: "4.2x cost-benefit ratio with -87% attacker ROI".to_string(),
+                value: 4.2,
+                unit: "ratio".to_string(),
+                evidence: EvidenceInput {
+                    artifact_path: "artifacts/economics/trust_economics.json".to_string(),
+                    sha256_hash: economics_hash,
+                    generated_at_secs: now_secs.saturating_sub(86400),
+                    content: Some(economics_content.to_string()),
+                },
+            }],
+        },
+    ];
 
-    // Dimension 2: Security Posture
-    pipeline.ingest_dimension(
-        ReportDimension::SecurityPosture,
-        "adversarial-runner",
-        "bd-9is",
-        vec![ClaimInput {
-            summary: "franken_node achieves 12.5x compromise surface reduction".to_string(),
-            value: 12.5,
-            unit: "factor".to_string(),
-            evidence: EvidenceInput {
-                artifact_path: "artifacts/security/adversarial_results.json".to_string(),
-                sha256_hash: security_hash,
-                generated_at_secs: now_secs.saturating_sub(172800),
-                content: Some(security_content.to_string()),
-            },
-        }],
-        now_secs,
-        trace,
-    )?;
+    let bet_status = vec![
+        MoonshotBetEntry {
+            initiative_id: "moonshot-compat".to_string(),
+            title: "95% API Compatibility".to_string(),
+            status: BetStatus::OnTrack,
+            progress_percent: 96,
+            blockers: vec![],
+            projected_completion: "2026-Q2".to_string(),
+        },
+        MoonshotBetEntry {
+            initiative_id: "moonshot-migration".to_string(),
+            title: "3x Migration Velocity".to_string(),
+            status: BetStatus::Completed,
+            progress_percent: 100,
+            blockers: vec![],
+            projected_completion: "2026-Q1".to_string(),
+        },
+        MoonshotBetEntry {
+            initiative_id: "moonshot-security".to_string(),
+            title: "10x Compromise Reduction".to_string(),
+            status: BetStatus::OnTrack,
+            progress_percent: 85,
+            blockers: vec![],
+            projected_completion: "2026-Q2".to_string(),
+        },
+    ];
 
-    // Dimension 3: Migration Velocity
-    pipeline.ingest_dimension(
-        ReportDimension::MigrationVelocity,
-        "migration-demo",
-        "bd-1e0",
-        vec![ClaimInput {
-            summary: "franken_node migration is 4.1x faster than manual migration".to_string(),
-            value: 4.1,
-            unit: "factor".to_string(),
-            evidence: EvidenceInput {
-                artifact_path: "artifacts/migration/demo_results.json".to_string(),
-                sha256_hash: migration_hash,
-                generated_at_secs: now_secs.saturating_sub(259200),
-                content: Some(migration_content.to_string()),
-            },
-        }],
-        now_secs,
-        trace,
-    )?;
-
-    // Dimension 4: Adoption Trends
-    pipeline.ingest_dimension(
-        ReportDimension::AdoptionTrends,
-        "verifier-portal",
-        "bd-m8p",
-        vec![ClaimInput {
-            summary: "142 verifiers registered with 8934 attestations".to_string(),
-            value: 142.0,
-            unit: "count".to_string(),
-            evidence: EvidenceInput {
-                artifact_path: "artifacts/adoption/verifier_stats.json".to_string(),
-                sha256_hash: adoption_hash,
-                generated_at_secs: now_secs.saturating_sub(43200),
-                content: Some(adoption_content.to_string()),
-            },
-        }],
-        now_secs,
-        trace,
-    )?;
-
-    // Dimension 5: Economic Impact
-    pipeline.ingest_dimension(
-        ReportDimension::EconomicImpact,
-        "trust-economics",
-        "bd-10c",
-        vec![ClaimInput {
-            summary: "4.2x cost-benefit ratio with -87% attacker ROI".to_string(),
-            value: 4.2,
-            unit: "ratio".to_string(),
-            evidence: EvidenceInput {
-                artifact_path: "artifacts/economics/trust_economics.json".to_string(),
-                sha256_hash: economics_hash,
-                generated_at_secs: now_secs.saturating_sub(86400),
-                content: Some(economics_content.to_string()),
-            },
-        }],
-        now_secs,
-        trace,
-    )?;
-
-    // Register moonshot bets
-    pipeline.register_bet(MoonshotBetEntry {
-        initiative_id: "moonshot-compat".to_string(),
-        title: "95% API Compatibility".to_string(),
-        status: BetStatus::OnTrack,
-        progress_percent: 96,
-        blockers: vec![],
-        projected_completion: "2026-Q2".to_string(),
-    });
-    pipeline.register_bet(MoonshotBetEntry {
-        initiative_id: "moonshot-migration".to_string(),
-        title: "3x Migration Velocity".to_string(),
-        status: BetStatus::Completed,
-        progress_percent: 100,
-        blockers: vec![],
-        projected_completion: "2026-Q1".to_string(),
-    });
-    pipeline.register_bet(MoonshotBetEntry {
-        initiative_id: "moonshot-security".to_string(),
-        title: "10x Compromise Reduction".to_string(),
-        status: BetStatus::OnTrack,
-        progress_percent: 85,
-        blockers: vec![],
-        projected_completion: "2026-Q2".to_string(),
-    });
-
-    let report = pipeline.generate_report(now_secs, trace)?;
-    Ok((pipeline, report))
+    build_category_shift_report(now_secs, "trace-demo", &dimensions, &bet_status)
 }
 
 #[cfg(test)]
