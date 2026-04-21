@@ -15,7 +15,7 @@ use frankenengine_node::control_plane::fleet_transport::{
 use frankenengine_node::supply_chain::trust_card::{
     ReputationTrend, RiskAssessment, RiskLevel, TrustCardMutation, TrustCardRegistry,
 };
-use insta::assert_json_snapshot;
+use insta::{assert_json_snapshot, assert_snapshot};
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 
@@ -201,6 +201,8 @@ fn assert_convergence_receipt_signature_round_trips(
         .expect("canonical convergence receipt payload");
 
     let mut hasher = Sha256::new();
+    hasher.update(b"fleet_convergence_receipt_payload_v1:");
+    hasher.update((canonical_payload.len() as u64).to_le_bytes());
     hasher.update(&canonical_payload);
     assert_eq!(
         signature["signed_payload_sha256"]
@@ -266,8 +268,8 @@ fn canonicalize_fleet_reconcile_snapshot(
                         "elapsed_ms" => {
                             *nested = serde_json::Value::from(0);
                         }
-                        "timestamp" | "signed_at" | "emitted_at" | "recorded_at" | "issued_at"
-                        | "completed_at" => {
+                        "timestamp" | "signed_at" | "emitted_at" | "recorded_at"
+                        | "issued_at" | "completed_at" | "last_seen" | "as_of" => {
                             *nested = serde_json::Value::String(format!("[{key}]"));
                         }
                         "state_dir" => {
@@ -296,6 +298,54 @@ fn canonicalize_fleet_reconcile_snapshot(
 
     scrub(&mut payload, &fleet_state_prefix, &repo_root_prefix);
     payload
+}
+
+fn canonicalize_fleet_human_snapshot(stdout: &str) -> String {
+    stdout
+        .lines()
+        .map(|line| {
+            if line.starts_with("fleet action: type=release operation_id=fleet-op-release-") {
+                "fleet action: type=release operation_id=[operation-id]".to_string()
+            } else if line.starts_with("  receipt_id=rcpt-fleet-op-release-") {
+                let suffix = line
+                    .split_once(" issuer=")
+                    .map(|(_, suffix)| suffix)
+                    .unwrap_or("cli-fleet-operator zone=[zone]");
+                format!("  receipt_id=[receipt-id] issuer={suffix}")
+            } else if line.starts_with("  convergence_receipt_elapsed_ms=") {
+                let timed_out = line
+                    .split_once(" timed_out=")
+                    .map(|(_, suffix)| suffix)
+                    .unwrap_or("false");
+                format!("  convergence_receipt_elapsed_ms=[elapsed-ms] timed_out={timed_out}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn json_stdout(output: &Output, label: &str) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
+        panic!(
+            "{label} stdout must be JSON: {err}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })
+}
+
+fn jsonl_stdout(output: &Output, label: &str) -> serde_json::Value {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout
+        .lines()
+        .enumerate()
+        .map(|(index, line)| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|err| panic!("{label} line {index} must be JSON: {err}\n{line}"))
+        })
+        .collect::<Vec<serde_json::Value>>();
+    serde_json::Value::Array(lines)
 }
 
 #[test]
@@ -1902,6 +1952,11 @@ fn fleet_release_human_output_shape_is_stable() {
     );
     assert!(lines[5].starts_with("  convergence_receipt_elapsed_ms="));
     assert!(lines[5].ends_with(" timed_out=false"));
+
+    assert_snapshot!(
+        "fleet_release_human",
+        canonicalize_fleet_human_snapshot(&stdout)
+    );
 }
 
 #[test]
@@ -1974,6 +2029,177 @@ fn fleet_reconcile_json_matches_snapshot() {
         "fleet_reconcile_json",
         canonicalize_fleet_reconcile_snapshot(payload, &fleet_state_dir)
     );
+}
+
+#[test]
+fn fleet_cli_json_output_matrix_matches_snapshots() {
+    let status_state = tempdir().expect("status tempdir");
+    let status_state_dir = status_state.path().join("fleet-state");
+    let mut status_transport = seed_transport(&status_state_dir);
+    let now = Utc::now();
+    status_transport
+        .publish_action(&FleetActionRecord {
+            action_id: "fleet-op-quarantine-golden-status".to_string(),
+            emitted_at: now,
+            action: FleetAction::Quarantine {
+                zone_id: "zone-golden-status".to_string(),
+                incident_id: "inc-golden-status".to_string(),
+                target_id: "sha256:golden-status".to_string(),
+                target_kind: FleetTargetKind::Artifact,
+                reason: "golden status quarantine".to_string(),
+                quarantine_version: 3,
+            },
+        })
+        .expect("publish status quarantine");
+    status_transport
+        .upsert_node_status(&NodeStatus {
+            zone_id: "zone-golden-status".to_string(),
+            node_id: "node-golden-fresh".to_string(),
+            last_seen: now,
+            quarantine_version: 3,
+            health: NodeHealth::Healthy,
+        })
+        .expect("write fresh status node");
+    status_transport
+        .upsert_node_status(&NodeStatus {
+            zone_id: "zone-golden-status".to_string(),
+            node_id: "node-golden-stale".to_string(),
+            last_seen: now - TimeDelta::seconds(600),
+            quarantine_version: 1,
+            health: NodeHealth::Degraded,
+        })
+        .expect("write stale status node");
+
+    let status_zone_output = run_cli_with_fleet_state(
+        &["fleet", "status", "--zone", "zone-golden-status", "--json"],
+        &status_state_dir,
+    );
+    assert!(
+        status_zone_output.status.success(),
+        "fleet status zone failed: {}",
+        String::from_utf8_lossy(&status_zone_output.stderr)
+    );
+    let status_all_output =
+        run_cli_with_fleet_state(&["fleet", "status", "--json"], &status_state_dir);
+    assert!(
+        status_all_output.status.success(),
+        "fleet status all failed: {}",
+        String::from_utf8_lossy(&status_all_output.stderr)
+    );
+
+    let release_state = tempdir().expect("release tempdir");
+    let release_state_dir = release_state.path().join("fleet-state");
+    let (release_signing_key_path, release_signing_key) =
+        write_test_signing_key(release_state.path(), "keys/fleet.key", 41);
+    let release_signing_key_path = release_signing_key_path.display().to_string();
+    let mut release_transport = seed_transport(&release_state_dir);
+    seed_fleet_quarantine(
+        &mut release_transport,
+        "zone-golden-release",
+        "inc-golden-release",
+        5,
+    );
+    let release_output = run_cli_in_dir_with_fleet_state_and_env(
+        &repo_root(),
+        &["fleet", "release", "--incident", "inc-golden-release", "--json"],
+        &release_state_dir,
+        &[(
+            "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+            release_signing_key_path.as_str(),
+        )],
+    );
+    assert!(
+        release_output.status.success(),
+        "fleet release json failed: {}",
+        String::from_utf8_lossy(&release_output.stderr)
+    );
+    let release_json = json_stdout(&release_output, "fleet release");
+    assert_convergence_receipt_signature_round_trips(
+        &release_json["convergence_receipt"],
+        &release_signing_key,
+    );
+
+    let timeout_state = tempdir().expect("timeout tempdir");
+    let timeout_state_dir = timeout_state.path().join("fleet-state");
+    let (timeout_signing_key_path, timeout_signing_key) =
+        write_test_signing_key(timeout_state.path(), "keys/fleet.key", 42);
+    let timeout_signing_key_path = timeout_signing_key_path.display().to_string();
+    let mut timeout_transport = seed_transport(&timeout_state_dir);
+    seed_fleet_quarantine(
+        &mut timeout_transport,
+        "zone-golden-timeout",
+        "inc-golden-timeout",
+        6,
+    );
+    timeout_transport
+        .upsert_node_status(&NodeStatus {
+            zone_id: "zone-golden-timeout".to_string(),
+            node_id: "node-golden-timeout".to_string(),
+            last_seen: Utc::now() - TimeDelta::seconds(600),
+            quarantine_version: 1,
+            health: NodeHealth::Degraded,
+        })
+        .expect("write timeout node");
+    let timeout_output = run_cli_in_dir_with_fleet_state_and_env(
+        &repo_root(),
+        &["fleet", "reconcile", "--json"],
+        &timeout_state_dir,
+        &[
+            ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "1"),
+            (
+                "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+                timeout_signing_key_path.as_str(),
+            ),
+        ],
+    );
+    assert!(
+        timeout_output.status.success(),
+        "fleet reconcile timeout json failed: {}",
+        String::from_utf8_lossy(&timeout_output.stderr)
+    );
+    let timeout_json = json_stdout(&timeout_output, "fleet reconcile timeout");
+    assert_convergence_receipt_signature_round_trips(
+        &timeout_json["convergence_receipt"],
+        &timeout_signing_key,
+    );
+
+    let agent_state = tempdir().expect("agent tempdir");
+    let agent_state_dir = agent_state.path().join("fleet-state");
+    seed_transport(&agent_state_dir);
+    let agent_output = run_cli_with_fleet_state(
+        &[
+            "fleet",
+            "agent",
+            "--node-id",
+            "agent-golden-once",
+            "--zone",
+            "zone-golden-agent",
+            "--once",
+            "--json",
+        ],
+        &agent_state_dir,
+    );
+    assert!(
+        agent_output.status.success(),
+        "fleet agent once json failed: {}",
+        String::from_utf8_lossy(&agent_output.stderr)
+    );
+
+    let matrix = serde_json::json!({
+        "status_zone": canonicalize_fleet_reconcile_snapshot(
+            json_stdout(&status_zone_output, "fleet status zone"),
+            &status_state_dir,
+        ),
+        "status_all": canonicalize_fleet_reconcile_snapshot(
+            json_stdout(&status_all_output, "fleet status all"),
+            &status_state_dir,
+        ),
+        "release": canonicalize_fleet_reconcile_snapshot(release_json, &release_state_dir),
+        "reconcile_timeout": canonicalize_fleet_reconcile_snapshot(timeout_json, &timeout_state_dir),
+        "agent_once": jsonl_stdout(&agent_output, "fleet agent once"),
+    });
+
+    assert_json_snapshot!("fleet_cli_json_output_matrix", matrix);
 }
 
 #[test]

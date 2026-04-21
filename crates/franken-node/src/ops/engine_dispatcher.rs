@@ -236,6 +236,40 @@ fn default_engine_binary_candidates() -> Vec<PathBuf> {
     candidates
 }
 
+#[cfg(not(feature = "external-commands"))]
+fn search_in_path(command: &str, path_env: Option<&OsString>, _cwd: &Path) -> Option<PathBuf> {
+    use std::env;
+
+    let path_env = match path_env {
+        Some(path) => path.clone(),
+        None => env::var_os("PATH")?,
+    };
+
+    for dir in env::split_paths(&path_env) {
+        let candidate = dir.join(command);
+
+        // Check with common executable extensions on Windows
+        #[cfg(windows)]
+        for ext in ["", ".exe", ".bat", ".cmd"] {
+            let path_with_ext = if ext.is_empty() {
+                candidate.clone()
+            } else {
+                candidate.with_extension(&ext[1..])
+            };
+            if path_with_ext.is_file() {
+                return Some(path_with_ext);
+            }
+        }
+
+        #[cfg(not(windows))]
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
 fn has_path_separator(raw: &str) -> bool {
     raw.contains('/') || raw.contains('\\')
 }
@@ -266,9 +300,17 @@ fn resolve_command_path_with(
     let Ok(cwd) = std::env::current_dir() else {
         return None;
     };
-    match path_env {
-        Some(path_env) => which::which_in(trimmed, Some(path_env), &cwd).ok(),
-        None => which::which(trimmed).ok(),
+    #[cfg(feature = "external-commands")]
+    {
+        match path_env {
+            Some(path_env) => which::which_in(trimmed, Some(path_env), &cwd).ok(),
+            None => which::which(trimmed).ok(),
+        }
+    }
+    #[cfg(not(feature = "external-commands"))]
+    {
+        // When external-commands feature is disabled, fall back to basic PATH search
+        search_in_path(trimmed, path_env, &cwd)
     }
 }
 

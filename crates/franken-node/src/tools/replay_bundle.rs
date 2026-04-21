@@ -1513,11 +1513,18 @@ fn chunk_timeline(
     Ok(chunks)
 }
 
+#[cfg(feature = "compression")]
 fn gzip_size_bytes(bytes: &[u8]) -> Result<u64, ReplayBundleError> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     std::io::Write::write_all(&mut encoder, bytes)?;
     let compressed = encoder.finish()?;
     Ok(u64::try_from(compressed.len()).unwrap_or(u64::MAX))
+}
+
+#[cfg(not(feature = "compression"))]
+fn gzip_size_bytes(bytes: &[u8]) -> Result<u64, ReplayBundleError> {
+    // When compression is disabled, return original size
+    Ok(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
 }
 
 fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, ReplayBundleError> {

@@ -10,9 +10,6 @@ use frankenengine_node::tools::replay_bundle::{
 };
 use serde_json::json;
 
-#[path = "golden/mod.rs"]
-mod golden;
-
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -260,6 +257,34 @@ fn parse_counterfactual_output(stderr: &str) -> serde_json::Value {
     serde_json::from_str(canonical).expect("parse counterfactual output json")
 }
 
+fn assert_incident_json_golden(name: &str, value: &serde_json::Value) {
+    let golden_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden/incident")
+        .join(format!("{name}.golden"));
+    let actual = serde_json::to_string_pretty(value).expect("serialize incident golden");
+
+    if std::env::var_os("UPDATE_GOLDENS").is_some() {
+        if let Some(parent) = golden_path.parent() {
+            fs::create_dir_all(parent).expect("create incident golden dir");
+        }
+        fs::write(&golden_path, format!("{actual}\n")).expect("write incident golden");
+        eprintln!("[GOLDEN] Updated: {}", golden_path.display());
+        return;
+    }
+
+    let expected = fs::read_to_string(&golden_path)
+        .unwrap_or_else(|err| panic!("read golden {}: {err}", golden_path.display()));
+    if expected.trim_end() != actual {
+        let actual_path = golden_path.with_extension("actual");
+        fs::write(&actual_path, format!("{actual}\n")).expect("write actual incident golden");
+        panic!(
+            "golden mismatch for {}; wrote actual to {}",
+            golden_path.display(),
+            actual_path.display()
+        );
+    }
+}
+
 fn incident_bundle_contract_json(bundle: &ReplayBundle) -> serde_json::Value {
     let signature = bundle.signature.as_ref().expect("signed replay bundle");
     json!({
@@ -498,8 +523,8 @@ fn incident_replay_counterfactual_pipeline_is_deterministic_and_fail_closed() {
         bundle.initial_state_snapshot,
         json!({"epoch": 11_u64, "mode": "degraded"})
     );
-    golden::assert_json_golden(
-        "incident/replay_bundle_contract",
+    assert_incident_json_golden(
+        "replay_bundle_contract",
         &incident_bundle_contract_json(&bundle),
     );
 
@@ -539,8 +564,8 @@ fn incident_replay_counterfactual_pipeline_is_deterministic_and_fail_closed() {
         replay_hashes.windows(2).all(|pair| pair[0] == pair[1]),
         "replay hashes must be stable across repeated runs: {replay_hashes:?}"
     );
-    golden::assert_json_golden(
-        "incident/replay_result_contract",
+    assert_incident_json_golden(
+        "replay_result_contract",
         replay_contract.as_ref().expect("replay contract"),
     );
 
@@ -575,10 +600,7 @@ fn incident_replay_counterfactual_pipeline_is_deterministic_and_fail_closed() {
             > 0,
         "strict counterfactual should produce decision deltas: {counterfactual_json}"
     );
-    golden::assert_json_golden(
-        "incident/counterfactual_strict_contract",
-        &counterfactual_json,
-    );
+    assert_incident_json_golden("counterfactual_strict_contract", &counterfactual_json);
 
     let corrupted_path = workspace.path().join("INC-E2E-PIPE-001-corrupt.fnbundle");
     fs::copy(&bundle_path, &corrupted_path).expect("copy bundle for corruption");

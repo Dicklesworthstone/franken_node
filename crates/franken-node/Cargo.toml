@@ -25,7 +25,9 @@ http-client = ["dep:ureq", "dep:url"]
 external-commands = ["dep:which", "dep:ctrlc"]
 compression = ["dep:flate2"]
 cbor-serialization = ["dep:serde_cbor"]
-default = ["extended-surfaces", "parsing", "http-client", "external-commands", "compression", "cbor-serialization"]
+ui = ["dep:frankentui"]
+engine = ["dep:frankenengine-engine", "dep:frankenengine-extension-host"]
+default = ["extended-surfaces", "parsing", "http-client", "external-commands", "compression", "cbor-serialization", "ui", "engine"]
 
 [dependencies]
 anyhow.workspace = true
@@ -47,9 +49,9 @@ serde_cbor = { version = "0.11.2", optional = true }
 flate2 = { version = "1.0.35", optional = true }
 rand = "0.8.5"
 asupersync = { path = "/dp/asupersync", optional = true }
-frankentui.workspace = true
-frankenengine-engine = { path = "../../../franken_engine/crates/franken-engine" }
-frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-extension-host" }
+frankentui = { workspace = true, optional = true }
+frankenengine-engine = { path = "../../../franken_engine/crates/franken-engine", optional = true }
+frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-extension-host", optional = true }
 tracing = { workspace = true }
 subtle = "2.6.1"
 tempfile = "3.15"
@@ -83,6 +85,10 @@ path = "tests/migrate_cli_e2e.rs"
 [[test]]
 name = "incident_cli_e2e"
 path = "tests/incident_cli_e2e.rs"
+
+[[test]]
+name = "fleet_cli_e2e"
+path = "tests/fleet_cli_e2e.rs"
 
 [[test]]
 name = "asupersync_control_lane_integration"

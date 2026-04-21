@@ -412,11 +412,18 @@ pub fn export_receipts_to_path(
     validate_safe_path(path)?;
     ensure_parent_dir(path)?;
     if path.extension().and_then(std::ffi::OsStr::to_str) == Some("cbor") {
-        let bytes = export_receipts_cbor(receipts, filter)?;
-        std::fs::write(path, bytes).map_err(|source| ReceiptError::WriteFailed {
-            path: path.display().to_string(),
-            source,
-        })
+        #[cfg(feature = "cbor-serialization")]
+        {
+            let bytes = export_receipts_cbor(receipts, filter)?;
+            std::fs::write(path, bytes).map_err(|source| ReceiptError::WriteFailed {
+                path: path.display().to_string(),
+                source,
+            })
+        }
+        #[cfg(not(feature = "cbor-serialization"))]
+        {
+            Err(ReceiptError::UnsupportedFormat("CBOR export disabled (cbor-serialization feature not enabled)".to_string()))
+        }
     } else {
         let json = export_receipts_json(receipts, filter)?;
         std::fs::write(path, json).map_err(|source| ReceiptError::WriteFailed {
