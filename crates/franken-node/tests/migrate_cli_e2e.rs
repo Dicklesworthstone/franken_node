@@ -175,6 +175,46 @@ fn migrate_rewrite_apply_handles_commonjs_destructuring_export_and_nested_requir
 }
 
 #[test]
+fn migrate_rewrite_bails_on_computed_require_without_mutating_source() {
+    let temp = TempDir::new().expect("temp dir");
+    let project_path = temp.path().join("project");
+    std::fs::create_dir_all(&project_path).expect("project dir");
+
+    let original_source = "const target = './plugin';\nconst plugin = require(target);\n";
+    std::fs::write(project_path.join("index.js"), original_source).expect("write js");
+    std::fs::write(
+        project_path.join("package.json"),
+        r#"{
+  "name": "demo",
+  "version": "1.0.0",
+  "engines": {
+    "node": ">=20 <23"
+  }
+}
+"#,
+    )
+    .expect("write package manifest");
+
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = run_cli(&["migrate", "rewrite", &project_arg, "--apply"]);
+    assert!(
+        output.status.success(),
+        "migrate rewrite failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("rewrites_planned=0"));
+    assert!(stdout.contains("manual_review_items=1"));
+    assert!(stdout.contains("dynamic or non-literal require() usage detected"));
+
+    let unchanged_source =
+        std::fs::read_to_string(project_path.join("index.js")).expect("read unchanged source");
+    assert_eq!(unchanged_source, original_source);
+    assert!(!project_path.join(".migrate-backup/index.js").exists());
+}
+
+#[test]
 fn migrate_validate_fails_for_risky_project_and_returns_non_zero_exit() {
     let temp = TempDir::new().expect("temp dir");
     let project_path = temp.path().join("project");

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+use tree_sitter::{Language, Node, Parser as JsParser};
 
 #[cfg(any(test, feature = "extended-surfaces"))]
 #[allow(dead_code)]
@@ -1385,12 +1386,23 @@ struct CommonJsRewrite {
     manual_findings: Vec<String>,
 }
 
+#[derive(Debug, Default)]
+struct CommonJsParserAnalysis {
+    static_require_declarations: usize,
+    dynamic_require_calls: usize,
+    create_require_calls: usize,
+    dynamic_import_calls: usize,
+    commonjs_export_objects: usize,
+    risky_commonjs_exports: usize,
+}
+
 struct CommonJsLineRewrite {
     replacement_line: Option<String>,
     hoisted_import: Option<String>,
 }
 
 fn rewrite_commonjs_requires(source: &str) -> CommonJsRewrite {
+    let parser_analysis = analyze_commonjs_with_js_parser(source);
     let has_esm_syntax = source.lines().any(line_has_esm_module_syntax);
     let mut line_rewrites = Vec::new();
     let mut hoisted_imports = Vec::new();
@@ -1425,6 +1437,44 @@ fn rewrite_commonjs_requires(source: &str) -> CommonJsRewrite {
         manual_findings.insert(
             "ESM/CJS module mixing detected; automatic require() rewrite skipped".to_string(),
         );
+    }
+    if let Err(reason) = parser_analysis.as_ref() {
+        manual_findings.insert(reason.clone());
+    }
+    if let Ok(analysis) = parser_analysis.as_ref() {
+        if analysis.dynamic_require_calls > 0 {
+            manual_findings.insert(format!(
+                "dynamic or non-literal require() usage detected in {} place(s); manual migration required",
+                analysis.dynamic_require_calls
+            ));
+        }
+        if analysis.create_require_calls > 0 {
+            manual_findings.insert(format!(
+                "createRequire() usage detected in {} place(s); manual migration required",
+                analysis.create_require_calls
+            ));
+        }
+        if analysis.dynamic_import_calls > 0 {
+            manual_findings.insert(format!(
+                "dynamic import() usage detected in {} place(s); manual migration required",
+                analysis.dynamic_import_calls
+            ));
+        }
+        if analysis.risky_commonjs_exports > 0 {
+            manual_findings.insert(
+                "CommonJS export assignment detected; manual ESM export migration required"
+                    .to_string(),
+            );
+        }
+        let parser_rewrite_count = analysis
+            .static_require_declarations
+            .saturating_add(analysis.commonjs_export_objects);
+        if parser_rewrite_count != rewrite_count && parser_rewrite_count > 0 {
+            manual_findings.insert(
+                "parser-backed CommonJS rewrite coverage mismatch; manual migration required"
+                    .to_string(),
+            );
+        }
     }
     if risky_exports > 0 {
         manual_findings.insert(
@@ -1464,6 +1514,233 @@ fn rewrite_commonjs_requires(source: &str) -> CommonJsRewrite {
         rewrite_count,
         manual_findings: Vec::new(),
     }
+}
+
+fn analyze_commonjs_with_js_parser(source: &str) -> Result<CommonJsParserAnalysis, String> {
+    let mut parser = JsParser::new();
+    let language: Language = tree_sitter_javascript::LANGUAGE.into();
+    parser
+        .set_language(&language)
+        .map_err(|err| format!("JavaScript parser unavailable: {err}"))?;
+    let tree = parser
+        .parse(source, None)
+        .ok_or_else(|| "JavaScript parser produced no syntax tree".to_string())?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return Err("JavaScript parser rejected source; manual migration required".to_string());
+    }
+
+    let mut analysis = CommonJsParserAnalysis::default();
+    analyze_commonjs_js_node(root, source.as_bytes(), &mut analysis);
+    Ok(analysis)
+}
+
+fn analyze_commonjs_js_node(
+    node: Node<'_>,
+    source: &[u8],
+    analysis: &mut CommonJsParserAnalysis,
+) {
+    match node.kind() {
+        "variable_declarator" => analyze_commonjs_variable_declarator(node, source, analysis),
+        "call_expression" => analyze_commonjs_call_expression(node, source, analysis),
+        "assignment_expression" => analyze_commonjs_assignment(node, source, analysis),
+        _ => {}
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        analyze_commonjs_js_node(child, source, analysis);
+    }
+}
+
+fn analyze_commonjs_variable_declarator(
+    node: Node<'_>,
+    source: &[u8],
+    analysis: &mut CommonJsParserAnalysis,
+) {
+    let Some(name) = node.child_by_field_name("name") else {
+        return;
+    };
+    let Some(value) = node.child_by_field_name("value") else {
+        return;
+    };
+    if value.kind() == "call_expression"
+        && is_static_require_call(value, source)
+        && matches!(name.kind(), "identifier" | "object_pattern")
+    {
+        analysis.static_require_declarations =
+            analysis.static_require_declarations.saturating_add(1);
+    }
+}
+
+fn analyze_commonjs_call_expression(
+    node: Node<'_>,
+    source: &[u8],
+    analysis: &mut CommonJsParserAnalysis,
+) {
+    let Some(function_node) = node.child_by_field_name("function") else {
+        return;
+    };
+    if function_node.kind() == "import" {
+        analysis.dynamic_import_calls = analysis.dynamic_import_calls.saturating_add(1);
+        return;
+    }
+
+    let Some(function_text) = js_node_text(function_node, source) else {
+        return;
+    };
+    if function_text == "require" {
+        if !is_static_require_call(node, source) {
+            analysis.dynamic_require_calls = analysis.dynamic_require_calls.saturating_add(1);
+        }
+    } else if function_text == "createRequire" || function_text.ends_with(".createRequire") {
+        analysis.create_require_calls = analysis.create_require_calls.saturating_add(1);
+    }
+}
+
+fn analyze_commonjs_assignment(
+    node: Node<'_>,
+    source: &[u8],
+    analysis: &mut CommonJsParserAnalysis,
+) {
+    let Some(left) = node.child_by_field_name("left") else {
+        return;
+    };
+    if !is_commonjs_export_target(left, source) {
+        return;
+    }
+
+    let Some(right) = node.child_by_field_name("right") else {
+        analysis.risky_commonjs_exports = analysis.risky_commonjs_exports.saturating_add(1);
+        return;
+    };
+    if is_static_module_exports_member(left, source)
+        && is_simple_assignment_operator(left, right, source)
+        && right.kind() == "object"
+        && is_rewritable_commonjs_export_object(right, source)
+    {
+        analysis.commonjs_export_objects = analysis.commonjs_export_objects.saturating_add(1);
+    } else {
+        analysis.risky_commonjs_exports = analysis.risky_commonjs_exports.saturating_add(1);
+    }
+}
+
+fn is_static_require_call(node: Node<'_>, source: &[u8]) -> bool {
+    let Some(function_node) = node.child_by_field_name("function") else {
+        return false;
+    };
+    if !js_node_text_eq(function_node, source, "require") {
+        return false;
+    }
+    let Some(arguments) = node.child_by_field_name("arguments") else {
+        return false;
+    };
+    let mut cursor = arguments.walk();
+    let mut children = arguments.named_children(&mut cursor);
+    let Some(argument) = children.next() else {
+        return false;
+    };
+    if children.next().is_some() {
+        return false;
+    }
+    is_quoted_js_string_node(argument, source)
+}
+
+fn is_quoted_js_string_node(node: Node<'_>, source: &[u8]) -> bool {
+    if node.kind() != "string" {
+        return false;
+    }
+    js_node_text(node, source).is_some_and(|text| {
+        (text.starts_with('"') && text.ends_with('"'))
+            || (text.starts_with('\'') && text.ends_with('\''))
+    })
+}
+
+fn is_commonjs_export_target(node: Node<'_>, source: &[u8]) -> bool {
+    js_node_text(node, source).is_some_and(|text| {
+        text == "module.exports"
+            || text.starts_with("module.exports.")
+            || text.starts_with("module.exports[")
+            || text.starts_with("module[")
+            || text == "exports"
+            || text.starts_with("exports.")
+            || text.starts_with("exports[")
+    })
+}
+
+fn is_static_module_exports_member(node: Node<'_>, source: &[u8]) -> bool {
+    if node.kind() != "member_expression" {
+        return false;
+    }
+    let Some(object) = node.child_by_field_name("object") else {
+        return false;
+    };
+    let Some(property) = node.child_by_field_name("property") else {
+        return false;
+    };
+    js_node_text_eq(object, source, "module") && js_node_text_eq(property, source, "exports")
+}
+
+fn is_simple_assignment_operator(left: Node<'_>, right: Node<'_>, source: &[u8]) -> bool {
+    let Some(operator_source) = source.get(left.end_byte()..right.start_byte()) else {
+        return false;
+    };
+    std::str::from_utf8(operator_source)
+        .ok()
+        .is_some_and(|operator| operator.trim() == "=")
+}
+
+fn is_rewritable_commonjs_export_object(node: Node<'_>, source: &[u8]) -> bool {
+    let mut cursor = node.walk();
+    let mut has_export = false;
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "shorthand_property_identifier" => {
+                let Some(identifier) = js_node_text(child, source) else {
+                    return false;
+                };
+                if !is_simple_js_identifier(identifier) {
+                    return false;
+                }
+                has_export = true;
+            }
+            "pair" => {
+                if !is_rewritable_commonjs_export_pair(child, source) {
+                    return false;
+                }
+                has_export = true;
+            }
+            _ => return false,
+        }
+    }
+    has_export
+}
+
+fn is_rewritable_commonjs_export_pair(node: Node<'_>, source: &[u8]) -> bool {
+    let Some(key) = node.child_by_field_name("key") else {
+        return false;
+    };
+    let Some(value) = node.child_by_field_name("value") else {
+        return false;
+    };
+    if key.kind() != "property_identifier" || value.kind() != "identifier" {
+        return false;
+    }
+    let Some(key_text) = js_node_text(key, source) else {
+        return false;
+    };
+    let Some(value_text) = js_node_text(value, source) else {
+        return false;
+    };
+    is_simple_js_identifier(key_text) && is_simple_js_identifier(value_text)
+}
+
+fn js_node_text<'source>(node: Node<'_>, source: &'source [u8]) -> Option<&'source str> {
+    node.utf8_text(source).ok()
+}
+
+fn js_node_text_eq(node: Node<'_>, source: &[u8], expected: &str) -> bool {
+    js_node_text(node, source).is_some_and(|text| text == expected)
 }
 
 fn prepend_hoisted_imports(output: &mut String, body: &str, imports: &[String]) {
@@ -3557,6 +3834,47 @@ mod tests {
                 .rewritten_content
                 .contains("// const fake = require('path');")
         );
+    }
+
+    #[test]
+    fn rewrite_commonjs_requires_bails_on_computed_require() {
+        let source = "const target = './plugin';\nconst plugin = require(target);\n";
+
+        let rewrite = rewrite_commonjs_requires(source);
+
+        assert_eq!(rewrite.rewrite_count, 0);
+        assert_eq!(rewrite.rewritten_content, source);
+        assert!(rewrite.manual_findings.iter().any(|finding| {
+            finding.contains("dynamic or non-literal require() usage detected")
+        }));
+    }
+
+    #[test]
+    fn rewrite_commonjs_requires_bails_on_create_require() {
+        let source = "const { createRequire } = require('module');\nconst localRequire = createRequire(import.meta.url);\nconst manifest = localRequire('./package.json');\n";
+
+        let rewrite = rewrite_commonjs_requires(source);
+
+        assert_eq!(rewrite.rewrite_count, 0);
+        assert_eq!(rewrite.rewritten_content, source);
+        assert!(rewrite
+            .manual_findings
+            .iter()
+            .any(|finding| finding.contains("createRequire() usage detected")));
+    }
+
+    #[test]
+    fn rewrite_commonjs_requires_bails_on_multiline_parser_mismatch() {
+        let source = "const fs = require(\n  'fs'\n);\n";
+
+        let rewrite = rewrite_commonjs_requires(source);
+
+        assert_eq!(rewrite.rewrite_count, 0);
+        assert_eq!(rewrite.rewritten_content, source);
+        assert!(rewrite
+            .manual_findings
+            .iter()
+            .any(|finding| finding.contains("parser-backed CommonJS rewrite coverage mismatch")));
     }
 
     #[test]
