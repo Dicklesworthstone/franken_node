@@ -1289,7 +1289,97 @@ impl SessionManager {
     }
 }
 
+/// One message in a caller-supplied session lifecycle transcript.
+#[derive(Debug, Clone)]
+pub struct SessionLifecycleMessage {
+    pub direction: MessageDirection,
+    pub sequence: u64,
+    pub payload_hash: String,
+    pub timestamp: u64,
+}
+
+/// Caller-supplied inputs for deriving authenticated session lifecycle events.
+#[derive(Debug, Clone)]
+pub struct SessionLifecycleScenario {
+    pub config: SessionConfig,
+    pub root_secret: RootSecret,
+    pub epoch: ControlEpoch,
+    pub session_id: String,
+    pub client_identity: String,
+    pub server_identity: String,
+    pub encryption_key_id: String,
+    pub signing_key_id: String,
+    pub established_at: u64,
+    pub trace_id: String,
+    pub messages: Vec<SessionLifecycleMessage>,
+    pub terminate_at: Option<u64>,
+}
+
+/// Execute a real session lifecycle from caller-supplied inputs.
+///
+/// Unlike the deterministic fixture helpers, this public API does not synthesize
+/// keys, identifiers, or timestamps. All session-manager failures are returned
+/// as typed `SessionError` values.
+pub fn session_lifecycle_events(
+    scenario: SessionLifecycleScenario,
+) -> Result<Vec<SessionEvent>, SessionError> {
+    let mut manager = SessionManager::new(
+        scenario.config,
+        scenario.root_secret.clone(),
+        scenario.epoch,
+    );
+    let handshake_mac = sign_handshake(
+        &scenario.session_id,
+        &scenario.client_identity,
+        &scenario.server_identity,
+        &scenario.encryption_key_id,
+        &scenario.signing_key_id,
+        scenario.epoch,
+        scenario.established_at,
+        &scenario.root_secret,
+    );
+
+    manager.establish_session(
+        scenario.session_id.clone(),
+        scenario.client_identity,
+        scenario.server_identity,
+        scenario.encryption_key_id,
+        scenario.signing_key_id,
+        scenario.established_at,
+        scenario.trace_id.clone(),
+        handshake_mac,
+    )?;
+
+    for message in scenario.messages {
+        let message_mac = sign_session_message(
+            &scenario.session_id,
+            message.direction,
+            message.sequence,
+            &message.payload_hash,
+            scenario.epoch,
+            &handshake_mac,
+            &scenario.root_secret,
+        );
+        manager.process_message(
+            &scenario.session_id,
+            message.direction,
+            message.sequence,
+            &message.payload_hash,
+            &message_mac,
+            message.timestamp,
+            &scenario.trace_id,
+        )?;
+    }
+
+    if let Some(terminate_at) = scenario.terminate_at {
+        manager.terminate_session(&scenario.session_id, terminate_at, &scenario.trace_id)?;
+    }
+
+    Ok(manager.events().to_vec())
+}
+
 /// Demonstrate session lifecycle with strict monotonicity.
+#[cfg(any(test, feature = "test-support"))]
 pub fn demo_session_lifecycle() -> Vec<SessionEvent> {
     let config = SessionConfig {
         replay_window: 0,
@@ -1298,85 +1388,38 @@ pub fn demo_session_lifecycle() -> Vec<SessionEvent> {
     };
     let root_secret = RootSecret::from_bytes([0xAA; 32]);
     let epoch = ControlEpoch::from(1u64);
-    let mut mgr = SessionManager::new(config, root_secret.clone(), epoch);
+    let send_messages = (0..3).map(|seq| SessionLifecycleMessage {
+        direction: MessageDirection::Send,
+        sequence: seq,
+        payload_hash: format!("hash-{seq}"),
+        timestamp: 1_000_000u64.saturating_add(seq.saturating_mul(100)),
+    });
+    let receive_messages = (0..2).map(|seq| SessionLifecycleMessage {
+        direction: MessageDirection::Receive,
+        sequence: seq,
+        payload_hash: format!("recv-hash-{seq}"),
+        timestamp: 1_000_200u64.saturating_add(seq.saturating_mul(100)),
+    });
 
-    let handshake_mac = sign_handshake(
-        "sess-001",
-        "client-a",
-        "server-1",
-        "enc-key-001",
-        "sign-key-001",
+    session_lifecycle_events(SessionLifecycleScenario {
+        config,
+        root_secret,
         epoch,
-        1_000_000,
-        &root_secret,
-    );
-
-    // Establish session
-    let _ = mgr.establish_session(
-        "sess-001".into(),
-        "client-a".into(),
-        "server-1".into(),
-        "enc-key-001".into(),
-        "sign-key-001".into(),
-        1_000_000,
-        "trace-001".into(),
-        handshake_mac,
-    );
-
-    // Send 3 messages with strict monotonicity
-    let hmac_ref = handshake_mac;
-    for seq in 0..3 {
-        let ph = format!("hash-{seq}");
-        let mac = sign_session_message(
-            "sess-001",
-            MessageDirection::Send,
-            seq,
-            &ph,
-            epoch,
-            &hmac_ref,
-            &root_secret,
-        );
-        let _ = mgr.process_message(
-            "sess-001",
-            MessageDirection::Send,
-            seq,
-            &ph,
-            &mac,
-            1_000_000 + seq * 100,
-            "trace-001",
-        );
-    }
-
-    // Receive 2 messages
-    for seq in 0..2 {
-        let ph = format!("recv-hash-{seq}");
-        let mac = sign_session_message(
-            "sess-001",
-            MessageDirection::Receive,
-            seq,
-            &ph,
-            epoch,
-            &hmac_ref,
-            &root_secret,
-        );
-        let _ = mgr.process_message(
-            "sess-001",
-            MessageDirection::Receive,
-            seq,
-            &ph,
-            &mac,
-            1_000_200 + seq * 100,
-            "trace-001",
-        );
-    }
-
-    // Terminate
-    let _ = mgr.terminate_session("sess-001", 1_001_000, "trace-001");
-
-    mgr.events().to_vec()
+        session_id: "sess-001".to_string(),
+        client_identity: "client-a".to_string(),
+        server_identity: "server-1".to_string(),
+        encryption_key_id: "enc-key-001".to_string(),
+        signing_key_id: "sign-key-001".to_string(),
+        established_at: 1_000_000,
+        trace_id: "trace-001".to_string(),
+        messages: send_messages.chain(receive_messages).collect(),
+        terminate_at: Some(1_001_000),
+    })
+    .expect("deterministic session lifecycle fixture should be valid")
 }
 
 /// Demonstrate windowed replay detection.
+#[cfg(any(test, feature = "test-support"))]
 pub fn demo_windowed_replay() -> Vec<SessionEvent> {
     let config = SessionConfig {
         replay_window: 4,
@@ -1398,7 +1441,7 @@ pub fn demo_windowed_replay() -> Vec<SessionEvent> {
         &root_secret,
     );
 
-    let _ = mgr.establish_session(
+    mgr.establish_session(
         "sess-win".into(),
         "client-b".into(),
         "server-2".into(),
@@ -1407,7 +1450,8 @@ pub fn demo_windowed_replay() -> Vec<SessionEvent> {
         2_000_000,
         "trace-002".into(),
         handshake_mac,
-    );
+    )
+    .expect("deterministic windowed replay fixture should establish a session");
 
     let hmac_ref = handshake_mac;
 
@@ -1421,7 +1465,7 @@ pub fn demo_windowed_replay() -> Vec<SessionEvent> {
         &hmac_ref,
         &root_secret,
     );
-    let _ = mgr.process_message(
+    mgr.process_message(
         "sess-win",
         MessageDirection::Send,
         0,
@@ -1429,7 +1473,8 @@ pub fn demo_windowed_replay() -> Vec<SessionEvent> {
         &mac0,
         2_000_100,
         "trace-002",
-    );
+    )
+    .expect("windowed replay fixture should accept seq 0");
 
     let mac2 = sign_session_message(
         "sess-win",
@@ -1440,7 +1485,7 @@ pub fn demo_windowed_replay() -> Vec<SessionEvent> {
         &hmac_ref,
         &root_secret,
     );
-    let _ = mgr.process_message(
+    mgr.process_message(
         "sess-win",
         MessageDirection::Send,
         2,
@@ -1448,7 +1493,8 @@ pub fn demo_windowed_replay() -> Vec<SessionEvent> {
         &mac2,
         2_000_200,
         "trace-002",
-    );
+    )
+    .expect("windowed replay fixture should accept seq 2");
 
     let mac1 = sign_session_message(
         "sess-win",
@@ -1459,7 +1505,7 @@ pub fn demo_windowed_replay() -> Vec<SessionEvent> {
         &hmac_ref,
         &root_secret,
     );
-    let _ = mgr.process_message(
+    mgr.process_message(
         "sess-win",
         MessageDirection::Send,
         1,
@@ -1467,7 +1513,8 @@ pub fn demo_windowed_replay() -> Vec<SessionEvent> {
         &mac1,
         2_000_300,
         "trace-002",
-    );
+    )
+    .expect("windowed replay fixture should accept seq 1");
 
     // Attempt replay of seq 2 — should be rejected (same MAC, different payload)
     let mac2_dup = sign_session_message(
@@ -1479,7 +1526,7 @@ pub fn demo_windowed_replay() -> Vec<SessionEvent> {
         &hmac_ref,
         &root_secret,
     );
-    let _ = mgr.process_message(
+    let replay_result = mgr.process_message(
         "sess-win",
         MessageDirection::Send,
         2,
@@ -1488,8 +1535,13 @@ pub fn demo_windowed_replay() -> Vec<SessionEvent> {
         2_000_400,
         "trace-002",
     );
+    assert!(matches!(
+        replay_result,
+        Err(SessionError::ReplayDetected { .. } | SessionError::SequenceViolation { .. })
+    ));
 
-    let _ = mgr.terminate_session("sess-win", 2_001_000, "trace-002");
+    mgr.terminate_session("sess-win", 2_001_000, "trace-002")
+        .expect("deterministic windowed replay fixture should terminate");
 
     mgr.events().to_vec()
 }

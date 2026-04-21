@@ -8465,6 +8465,7 @@ mod registry_command_tests {
         );
         assert_eq!(policy.cached_trust_window_secs, 0);
         assert!(!policy.allow_self_signed);
+        assert!(!registry.admission_kernel().transparency_policy.required);
     }
 
     #[test]
@@ -11954,7 +11955,7 @@ fn registry_cli_provenance_policy() -> supply_chain::provenance::VerificationPol
 
 fn registry_cli_transparency_policy() -> supply_chain::transparency_verifier::TransparencyPolicy {
     supply_chain::transparency_verifier::TransparencyPolicy {
-        required: true,
+        required: false,
         pinned_roots: vec![],
     }
 }

@@ -52,10 +52,14 @@ impl ProofBackend for BlockingBackend {
 }
 
 fn receipt(sequence_number: u64) -> ExecutionReceipt {
+    let mut capability_context = BTreeMap::new();
+    capability_context.insert("domain".to_string(), "vef".to_string());
+    capability_context.insert("capability".to_string(), "proof-generation".to_string());
+
     ExecutionReceipt {
         schema_version: RECEIPT_SCHEMA_VERSION.to_string(),
         action_type: ExecutionActionType::NetworkAccess,
-        capability_context: BTreeMap::new(),
+        capability_context,
         actor_identity: format!("actor-{sequence_number}"),
         artifact_identity: format!("artifact-{sequence_number}"),
         policy_snapshot_hash: format!("sha256:{sequence_number:064x}"),

@@ -33,9 +33,35 @@ fn run_cli_in_workspace(workspace: &Path, args: &[&str]) -> Output {
         .unwrap_or_else(|err| panic!("failed running `{}`: {err}", args.join(" ")))
 }
 
+fn run_git_in_workspace(workspace: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .current_dir(workspace)
+        .args(args)
+        .status()
+        .unwrap_or_else(|err| panic!("failed running `git {}`: {err}", args.join(" ")));
+    assert!(status.success(), "git command failed: {}", args.join(" "));
+}
+
 fn registry_workspace() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     fs::write(dir.path().join("plugin.fnext"), b"dummy extension payload").expect("write package");
+    run_git_in_workspace(dir.path(), &["init", "-b", "main"]);
+    run_git_in_workspace(
+        dir.path(),
+        &["config", "user.email", "registry@example.com"],
+    );
+    run_git_in_workspace(dir.path(), &["config", "user.name", "Registry Test"]);
+    run_git_in_workspace(
+        dir.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.com/acme/plugin.git",
+        ],
+    );
+    run_git_in_workspace(dir.path(), &["add", "plugin.fnext"]);
+    run_git_in_workspace(dir.path(), &["commit", "-m", "initial"]);
     dir
 }
 

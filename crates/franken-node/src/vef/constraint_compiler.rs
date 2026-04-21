@@ -775,9 +775,9 @@ impl PolicyRule {
     }
 }
 
-/// Build a full-coverage demo policy covering all six action classes.
-pub fn demo_full_coverage_policy() -> PolicyDefinition {
-    PolicyDefinition::new("demo-vef-policy", "Demo VEF Policy", "1.0.0")
+#[cfg(test)]
+fn test_full_coverage_policy() -> PolicyDefinition {
+    PolicyDefinition::new("test-vef-policy", "Test VEF Policy", "1.0.0")
         .with_rule(
             PolicyRule::new(
                 "net-egress-allow-internal",
@@ -1126,7 +1126,7 @@ mod tests {
     #[test]
     fn test_deterministic_compilation() {
         let compiler = test_compiler();
-        let policy = demo_full_coverage_policy();
+        let policy = test_full_coverage_policy();
         let r1 = compiler.compile(&policy);
         let r2 = compiler.compile(&policy);
         assert_eq!(r1, r2, "identical inputs must produce identical outputs");
@@ -1137,7 +1137,7 @@ mod tests {
     #[test]
     fn test_round_trip_idempotent() {
         let compiler = test_compiler();
-        let policy = demo_full_coverage_policy();
+        let policy = test_full_coverage_policy();
         assert!(
             compiler.round_trip_validate(&policy),
             "round-trip must be idempotent"
@@ -1149,7 +1149,7 @@ mod tests {
     #[test]
     fn test_full_coverage_all_action_classes() {
         let compiler = test_compiler();
-        let policy = demo_full_coverage_policy();
+        let policy = test_full_coverage_policy();
         let result = compiler.compile(&policy);
         assert!(result.success);
         let ps = result.predicate_set.unwrap();
@@ -1442,7 +1442,7 @@ mod tests {
     #[test]
     fn test_predicates_sorted_by_id() {
         let compiler = test_compiler();
-        let policy = demo_full_coverage_policy();
+        let policy = test_full_coverage_policy();
         let result = compiler.compile(&policy);
         let ps = result.predicate_set.unwrap();
         let keys: Vec<&String> = ps.predicates.keys().collect();
@@ -1456,7 +1456,7 @@ mod tests {
     #[test]
     fn test_predicate_set_serialization_roundtrip() {
         let compiler = test_compiler();
-        let policy = demo_full_coverage_policy();
+        let policy = test_full_coverage_policy();
         let result = compiler.compile(&policy);
         let ps = result.predicate_set.unwrap();
         let json = serde_json::to_string(&ps).unwrap();
@@ -1525,8 +1525,8 @@ mod tests {
     // ── 29. Demo policy has expected rule count ──
 
     #[test]
-    fn test_demo_policy_rule_count() {
-        let policy = demo_full_coverage_policy();
+    fn test_full_coverage_policy_rule_count() {
+        let policy = test_full_coverage_policy();
         assert!(
             policy.rules.len() >= 8,
             "Demo policy should have at least 8 rules"

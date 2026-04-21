@@ -59,6 +59,7 @@ pub const ERR_INVALID_TRANSITION: &str = "ERR_INVALID_TRANSITION";
 pub const ERR_CHALLENGE_ACTIVE: &str = "ERR_CHALLENGE_ACTIVE";
 pub const ERR_NO_ACTIVE_CHALLENGE: &str = "ERR_NO_ACTIVE_CHALLENGE";
 pub const ERR_INVALID_ARTIFACT_ID: &str = "ERR_INVALID_ARTIFACT_ID";
+pub const ERR_PROOF_INVALID: &str = "ERR_PROOF_INVALID";
 
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 
@@ -285,22 +286,54 @@ impl ChallengeAuditEntry {
     pub fn hash(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(b"challenge_flow_hash_v1:");
-        hasher.update(u64::try_from(self.challenge_id.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(self.challenge_id.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(self.challenge_id.as_bytes());
-        hasher.update(u64::try_from(self.artifact_id.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(self.artifact_id.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(self.artifact_id.as_bytes());
-        hasher.update(u64::try_from(self.from_state.label().len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(self.from_state.label().len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(self.from_state.label().as_bytes());
-        hasher.update(u64::try_from(self.to_state.label().len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(self.to_state.label().len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(self.to_state.label().as_bytes());
-        hasher.update(u64::try_from(self.event_code.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(self.event_code.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(self.event_code.as_bytes());
-        hasher.update(u64::try_from(self.actor_id.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(self.actor_id.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(self.actor_id.as_bytes());
         hasher.update(self.timestamp_ms.to_le_bytes());
-        hasher.update(u64::try_from(self.detail.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(self.detail.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(self.detail.as_bytes());
-        hasher.update(u64::try_from(self.prev_hash.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(self.prev_hash.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(self.prev_hash.as_bytes());
         format!("{:x}", hasher.finalize())
     }
@@ -486,9 +519,94 @@ impl ChallengeFlowController {
             ));
         }
 
+        // SECURITY: Validate that the proof type is actually required for this challenge
+        if !challenge
+            .required_proofs
+            .iter()
+            .any(|required| match (required, &proof.proof_type) {
+                (
+                    RequiredProofType::ProvenanceAttestation,
+                    RequiredProofType::ProvenanceAttestation,
+                ) => true,
+                (RequiredProofType::IntegrityProof, RequiredProofType::IntegrityProof) => true,
+                (RequiredProofType::EpochBoundaryProof, RequiredProofType::EpochBoundaryProof) => {
+                    true
+                }
+                (RequiredProofType::OriginSignature, RequiredProofType::OriginSignature) => true,
+                (RequiredProofType::Custom(a), RequiredProofType::Custom(b)) => a == b,
+                _ => false,
+            })
+        {
+            return Err(ChallengeError::new(
+                ERR_PROOF_INVALID,
+                &format!(
+                    "Proof type {:?} not required for this challenge",
+                    proof.proof_type.label()
+                ),
+            ));
+        }
+
+        // SECURITY: Validate data_hash format (must be valid hex)
+        if proof.data_hash.is_empty() {
+            return Err(ChallengeError::new(
+                ERR_PROOF_INVALID,
+                "Proof data_hash cannot be empty",
+            ));
+        }
+        if !proof.data_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ChallengeError::new(
+                ERR_PROOF_INVALID,
+                "Proof data_hash must be valid hexadecimal",
+            ));
+        }
+        if proof.data_hash.len() < 32 || proof.data_hash.len() > 128 {
+            return Err(ChallengeError::new(
+                ERR_PROOF_INVALID,
+                "Proof data_hash length must be between 32 and 128 characters",
+            ));
+        }
+
+        // SECURITY: Validate submitter_id format
+        if proof.submitter_id.trim().is_empty() {
+            return Err(ChallengeError::new(
+                ERR_PROOF_INVALID,
+                "Submitter ID cannot be empty",
+            ));
+        }
+
+        // SECURITY: Check for duplicate proof submissions of the same type
+        let duplicate_exists = challenge.received_proofs.iter().any(|existing| {
+            match (&existing.proof_type, &proof.proof_type) {
+                (
+                    RequiredProofType::ProvenanceAttestation,
+                    RequiredProofType::ProvenanceAttestation,
+                ) => true,
+                (RequiredProofType::IntegrityProof, RequiredProofType::IntegrityProof) => true,
+                (RequiredProofType::EpochBoundaryProof, RequiredProofType::EpochBoundaryProof) => {
+                    true
+                }
+                (RequiredProofType::OriginSignature, RequiredProofType::OriginSignature) => true,
+                (RequiredProofType::Custom(a), RequiredProofType::Custom(b)) => a == b,
+                _ => false,
+            }
+        });
+        if duplicate_exists {
+            return Err(ChallengeError::new(
+                ERR_PROOF_INVALID,
+                &format!(
+                    "Proof of type {} already submitted for this challenge",
+                    proof.proof_type.label()
+                ),
+            ));
+        }
+
         let artifact_id = challenge.artifact_id.clone();
         let old_state = challenge.state;
-        push_bounded(&mut challenge.received_proofs, proof, MAX_RECEIVED_PROOFS_PER_CHALLENGE);
+        push_bounded(
+            &mut challenge.received_proofs,
+            proof,
+            MAX_RECEIVED_PROOFS_PER_CHALLENGE,
+        );
         challenge.state = ChallengeState::ProofReceived;
 
         self.log_transition(
@@ -499,36 +617,114 @@ impl ChallengeFlowController {
             CHALLENGE_PROOF_RECEIVED,
             actor_id,
             timestamp_ms,
-            "Proof artifact received",
+            "Proof artifact received and validated",
         );
 
         Ok(())
     }
 
-    /// Mark proof as verified for a challenge.
+    /// Verify submitted proofs for a challenge and mark as verified if valid.
     pub fn verify_proof(
         &mut self,
         challenge_id: &ChallengeId,
         actor_id: &str,
         timestamp_ms: u64,
     ) -> Result<(), ChallengeError> {
+        let (artifact_id, old_state) = {
+            let challenge = self.challenges.get(challenge_id).ok_or_else(|| {
+                ChallengeError::new(ERR_NO_ACTIVE_CHALLENGE, "Challenge not found")
+            })?;
+
+            if !challenge
+                .state
+                .can_transition_to(ChallengeState::ProofVerified)
+            {
+                return Err(ChallengeError::invalid_transition(
+                    challenge.state,
+                    ChallengeState::ProofVerified,
+                ));
+            }
+
+            // SECURITY: Verify we have received at least one proof
+            if challenge.received_proofs.is_empty() {
+                return Err(ChallengeError::new(
+                    ERR_PROOF_INVALID,
+                    "Cannot verify challenge: no proofs have been submitted",
+                ));
+            }
+
+            // SECURITY: Verify that all required proof types have been submitted
+            for required_type in &challenge.required_proofs {
+                let type_submitted = challenge.received_proofs.iter().any(|proof| {
+                    match (required_type, &proof.proof_type) {
+                        (
+                            RequiredProofType::ProvenanceAttestation,
+                            RequiredProofType::ProvenanceAttestation,
+                        ) => true,
+                        (RequiredProofType::IntegrityProof, RequiredProofType::IntegrityProof) => {
+                            true
+                        }
+                        (
+                            RequiredProofType::EpochBoundaryProof,
+                            RequiredProofType::EpochBoundaryProof,
+                        ) => true,
+                        (
+                            RequiredProofType::OriginSignature,
+                            RequiredProofType::OriginSignature,
+                        ) => true,
+                        (RequiredProofType::Custom(a), RequiredProofType::Custom(b)) => a == b,
+                        _ => false,
+                    }
+                });
+
+                if !type_submitted {
+                    return Err(ChallengeError::new(
+                        ERR_PROOF_INVALID,
+                        &format!(
+                            "Required proof type {} has not been submitted",
+                            required_type.label()
+                        ),
+                    ));
+                }
+            }
+
+            // SECURITY: Verify each submitted proof's cryptographic integrity
+            for proof in &challenge.received_proofs {
+                // Verify the proof data hash is consistent with the artifact being challenged
+                let expected_hash =
+                    self.compute_expected_proof_hash(&challenge.artifact_id, &proof.proof_type)?;
+
+                if !crate::security::constant_time::ct_eq(&proof.data_hash, &expected_hash) {
+                    return Err(ChallengeError::new(
+                        ERR_PROOF_INVALID,
+                        &format!(
+                            "Proof data hash verification failed for type {}",
+                            proof.proof_type.label()
+                        ),
+                    ));
+                }
+
+                // Verify proof timestamp is within acceptable bounds
+                let proof_age_ms = timestamp_ms.saturating_sub(proof.submitted_at_ms);
+                if proof_age_ms > 3600_000 {
+                    // 1 hour max age
+                    return Err(ChallengeError::new(
+                        ERR_PROOF_INVALID,
+                        &format!(
+                            "Proof for type {} is too old (age: {}ms)",
+                            proof.proof_type.label(),
+                            proof_age_ms
+                        ),
+                    ));
+                }
+            }
+
+            (challenge.artifact_id.clone(), challenge.state)
+        };
         let challenge = self
             .challenges
             .get_mut(challenge_id)
             .ok_or_else(|| ChallengeError::new(ERR_NO_ACTIVE_CHALLENGE, "Challenge not found"))?;
-
-        if !challenge
-            .state
-            .can_transition_to(ChallengeState::ProofVerified)
-        {
-            return Err(ChallengeError::invalid_transition(
-                challenge.state,
-                ChallengeState::ProofVerified,
-            ));
-        }
-
-        let artifact_id = challenge.artifact_id.clone();
-        let old_state = challenge.state;
         challenge.state = ChallengeState::ProofVerified;
 
         self.log_transition(
@@ -539,7 +735,7 @@ impl ChallengeFlowController {
             CHALLENGE_VERIFIED,
             actor_id,
             timestamp_ms,
-            "Proof verified successfully",
+            "Proof cryptographically verified successfully",
         );
 
         Ok(())
@@ -711,6 +907,44 @@ impl ChallengeFlowController {
     }
 
     // -- Internal -----------------------------------------------------------
+
+    /// Compute the expected proof hash for cryptographic verification.
+    ///
+    /// SECURITY: This provides domain separation between different proof types
+    /// and artifacts to prevent cross-proof attacks.
+    fn compute_expected_proof_hash(
+        &self,
+        artifact_id: &ArtifactId,
+        proof_type: &RequiredProofType,
+    ) -> Result<String, ChallengeError> {
+        let domain = format!("challenge_proof_v1:{}:", proof_type.label());
+        let mut hasher = Sha256::new();
+        hasher.update(domain.as_bytes());
+        hasher.update(artifact_id.as_str().as_bytes());
+
+        // Add proof-type-specific context for additional security
+        match proof_type {
+            RequiredProofType::ProvenanceAttestation => {
+                hasher.update(b":provenance_attestation");
+            }
+            RequiredProofType::IntegrityProof => {
+                hasher.update(b":integrity_verification");
+            }
+            RequiredProofType::EpochBoundaryProof => {
+                hasher.update(b":epoch_boundary_validation");
+            }
+            RequiredProofType::OriginSignature => {
+                hasher.update(b":origin_signature_verification");
+            }
+            RequiredProofType::Custom(custom_type) => {
+                hasher.update(b":custom:");
+                hasher.update(custom_type.as_bytes());
+            }
+        }
+
+        let result = hasher.finalize();
+        Ok(hex::encode(result))
+    }
 
     /// Evict oldest terminal-state challenges when the map exceeds capacity.
     fn evict_terminal_challenges(&mut self) {
@@ -2005,7 +2239,11 @@ mod tests {
         for i in 1..audit_log.len() {
             let expected_prev = audit_log[i - 1].hash();
             let actual_prev = &audit_log[i].prev_hash;
-            assert_eq!(*actual_prev, expected_prev, "Hash chain broken at index {}", i);
+            assert_eq!(
+                *actual_prev, expected_prev,
+                "Hash chain broken at index {}",
+                i
+            );
         }
 
         // Test hash collision resistance with crafted entries
@@ -2084,29 +2322,33 @@ mod tests {
             (ChallengeState::Pending, ChallengeState::ProofReceived),
             (ChallengeState::Pending, ChallengeState::ProofVerified),
             (ChallengeState::Pending, ChallengeState::Promoted),
-
             // From ChallengeIssued (should only allow ProofReceived, Denied)
             (ChallengeState::ChallengeIssued, ChallengeState::Pending),
-            (ChallengeState::ChallengeIssued, ChallengeState::ProofVerified),
+            (
+                ChallengeState::ChallengeIssued,
+                ChallengeState::ProofVerified,
+            ),
             (ChallengeState::ChallengeIssued, ChallengeState::Promoted),
-
             // From ProofReceived (should only allow ProofVerified, Denied)
             (ChallengeState::ProofReceived, ChallengeState::Pending),
-            (ChallengeState::ProofReceived, ChallengeState::ChallengeIssued),
+            (
+                ChallengeState::ProofReceived,
+                ChallengeState::ChallengeIssued,
+            ),
             (ChallengeState::ProofReceived, ChallengeState::Promoted),
-
             // From ProofVerified (should only allow Promoted, Denied)
             (ChallengeState::ProofVerified, ChallengeState::Pending),
-            (ChallengeState::ProofVerified, ChallengeState::ChallengeIssued),
+            (
+                ChallengeState::ProofVerified,
+                ChallengeState::ChallengeIssued,
+            ),
             (ChallengeState::ProofVerified, ChallengeState::ProofReceived),
-
             // From terminal states (should allow nothing)
             (ChallengeState::Denied, ChallengeState::Pending),
             (ChallengeState::Denied, ChallengeState::ChallengeIssued),
             (ChallengeState::Denied, ChallengeState::ProofReceived),
             (ChallengeState::Denied, ChallengeState::ProofVerified),
             (ChallengeState::Denied, ChallengeState::Promoted),
-
             (ChallengeState::Promoted, ChallengeState::Pending),
             (ChallengeState::Promoted, ChallengeState::ChallengeIssued),
             (ChallengeState::Promoted, ChallengeState::ProofReceived),
@@ -2115,8 +2357,12 @@ mod tests {
         ];
 
         for (from_state, to_state) in invalid_transitions {
-            assert!(!from_state.can_transition_to(to_state),
-                "Invalid transition should be rejected: {} -> {}", from_state, to_state);
+            assert!(
+                !from_state.can_transition_to(to_state),
+                "Invalid transition should be rejected: {} -> {}",
+                from_state,
+                to_state
+            );
         }
 
         // Test concurrent state modification attempts
@@ -2156,7 +2402,10 @@ mod tests {
         ctrl.promote(&cid2, "promoter", 6000).unwrap();
 
         // Verify final state
-        assert_eq!(ctrl.get_challenge(&cid2).unwrap().state, ChallengeState::Promoted);
+        assert_eq!(
+            ctrl.get_challenge(&cid2).unwrap().state,
+            ChallengeState::Promoted
+        );
 
         // Test invalid operations on terminal state
         let terminal_operations = vec![
@@ -2208,10 +2457,12 @@ mod tests {
 
             if i == 0 {
                 // First submission should succeed (transition to ProofReceived)
-                ctrl.submit_proof(&cid, proof, &format!("actor_{}", i), 2000 + i as u64).unwrap();
+                ctrl.submit_proof(&cid, proof, &format!("actor_{}", i), 2000 + i as u64)
+                    .unwrap();
             } else {
                 // Subsequent submissions should fail (invalid transition)
-                let result = ctrl.submit_proof(&cid, proof, &format!("actor_{}", i), 2000 + i as u64);
+                let result =
+                    ctrl.submit_proof(&cid, proof, &format!("actor_{}", i), 2000 + i as u64);
                 assert!(result.is_err());
                 assert_eq!(result.unwrap_err().code, ERR_INVALID_TRANSITION);
             }
@@ -2242,14 +2493,36 @@ mod tests {
                 submitted_at_ms: 11_000 + i as u64,
             };
 
-            ctrl.submit_proof(&stress_cid, stress_proof, &format!("stress_prover_{}", i), 11_000 + i as u64).unwrap();
-            ctrl.verify_proof(&stress_cid, &format!("stress_verifier_{}", i), 12_000 + i as u64).unwrap();
+            ctrl.submit_proof(
+                &stress_cid,
+                stress_proof,
+                &format!("stress_prover_{}", i),
+                11_000 + i as u64,
+            )
+            .unwrap();
+            ctrl.verify_proof(
+                &stress_cid,
+                &format!("stress_verifier_{}", i),
+                12_000 + i as u64,
+            )
+            .unwrap();
 
             // Alternate between promote and deny to test both paths
             if i % 2 == 0 {
-                ctrl.promote(&stress_cid, &format!("stress_promoter_{}", i), 13_000 + i as u64).unwrap();
+                ctrl.promote(
+                    &stress_cid,
+                    &format!("stress_promoter_{}", i),
+                    13_000 + i as u64,
+                )
+                .unwrap();
             } else {
-                ctrl.deny(&stress_cid, &format!("stress_denier_{}", i), 13_000 + i as u64, &format!("stress_reason_{}", i)).unwrap();
+                ctrl.deny(
+                    &stress_cid,
+                    &format!("stress_denier_{}", i),
+                    13_000 + i as u64,
+                    &format!("stress_reason_{}", i),
+                )
+                .unwrap();
             }
         }
 
@@ -2263,16 +2536,15 @@ mod tests {
 
         // Test massive detail strings in audit entries
         let detail_bomb = "X".repeat(10_000_000); // 10MB detail string
-        ctrl.deny(
-            &cid,
-            "bomb_operator",
-            20_000,
-            &detail_bomb,
-        ).unwrap();
+        ctrl.deny(&cid, "bomb_operator", 20_000, &detail_bomb)
+            .unwrap();
 
         // Should handle large detail strings gracefully
         let final_audit = ctrl.challenge_audit(&cid);
-        let deny_entry = final_audit.iter().find(|e| e.event_code == CHALLENGE_DENIED).unwrap();
+        let deny_entry = final_audit
+            .iter()
+            .find(|e| e.event_code == CHALLENGE_DENIED)
+            .unwrap();
         assert_eq!(deny_entry.detail.len(), 10_000_000);
     }
 
@@ -2312,7 +2584,8 @@ mod tests {
                 submitted_at_ms: timestamp,
             };
 
-            ctrl.submit_proof(&cid, proof, &format!("actor_{}", test_name), timestamp).unwrap();
+            ctrl.submit_proof(&cid, proof, &format!("actor_{}", test_name), timestamp)
+                .unwrap();
         }
 
         // Test clock regression attack
@@ -2336,7 +2609,8 @@ mod tests {
         };
 
         // Should still succeed - no timestamp validation enforced
-        ctrl.submit_proof(&regression_cid, regression_proof, "regression_actor", 5_000).unwrap();
+        ctrl.submit_proof(&regression_cid, regression_proof, "regression_actor", 5_000)
+            .unwrap();
 
         // Test timeout calculation with overflow protection
         let overflow_challenge = Challenge {
@@ -2353,9 +2627,9 @@ mod tests {
 
         // Test is_timed_out with potential overflow scenarios
         assert!(!overflow_challenge.is_timed_out(u64::MAX - 1000)); // Same time
-        assert!(!overflow_challenge.is_timed_out(u64::MAX - 500));  // Still within timeout
-        assert!(!overflow_challenge.is_timed_out(0));               // Clock regression
-        assert!(overflow_challenge.is_timed_out(u64::MAX));        // At max value
+        assert!(!overflow_challenge.is_timed_out(u64::MAX - 500)); // Still within timeout
+        assert!(!overflow_challenge.is_timed_out(0)); // Clock regression
+        assert!(overflow_challenge.is_timed_out(u64::MAX)); // At max value
 
         // Test enforce_timeouts with extreme timestamps
         let timeout_artifact = ArtifactId::new("timeout_overflow");
@@ -2413,14 +2687,23 @@ mod tests {
                     submitted_at_ms: 2000 + i as u64,
                 };
 
-                ctrl.submit_proof(&cid, proof, &format!("actor_{}", i), 2000 + i as u64).unwrap();
-                ctrl.verify_proof(&cid, &format!("verifier_{}", i), 3000 + i as u64).unwrap();
+                ctrl.submit_proof(&cid, proof, &format!("actor_{}", i), 2000 + i as u64)
+                    .unwrap();
+                ctrl.verify_proof(&cid, &format!("verifier_{}", i), 3000 + i as u64)
+                    .unwrap();
 
                 // Alternate promote/deny to test both counter paths
                 if i % 2 == 0 {
-                    ctrl.promote(&cid, &format!("promoter_{}", i), 4000 + i as u64).unwrap();
+                    ctrl.promote(&cid, &format!("promoter_{}", i), 4000 + i as u64)
+                        .unwrap();
                 } else {
-                    ctrl.deny(&cid, &format!("denier_{}", i), 4000 + i as u64, &format!("reason_{}", i)).unwrap();
+                    ctrl.deny(
+                        &cid,
+                        &format!("denier_{}", i),
+                        4000 + i as u64,
+                        &format!("reason_{}", i),
+                    )
+                    .unwrap();
                 }
             } else {
                 // Should fail when next_id would overflow
@@ -2489,12 +2772,16 @@ mod tests {
                     let mut controller = ctrl_clone.lock().unwrap();
 
                     // Issue challenge
-                    let artifact_id = ArtifactId::new(&format!("thread_{}_artifact_{}", thread_id, op_id));
+                    let artifact_id =
+                        ArtifactId::new(&format!("thread_{}_artifact_{}", thread_id, op_id));
                     let suspicion = match thread_id % 4 {
                         0 => SuspicionReason::UnexpectedProvenance,
                         1 => SuspicionReason::AgeAnomaly,
                         2 => SuspicionReason::FormatDeviation,
-                        _ => SuspicionReason::PolicyRule(format!("thread_{}_rule_{}", thread_id, op_id)),
+                        _ => SuspicionReason::PolicyRule(format!(
+                            "thread_{}_rule_{}",
+                            thread_id, op_id
+                        )),
                     };
 
                     let proof_types = vec![
@@ -2557,7 +2844,8 @@ mod tests {
                     }
 
                     // Test timeout enforcement concurrently
-                    let _timed_out = controller.enforce_timeouts(10_000 + thread_id as u64 * 1000 + op_id as u64);
+                    let _timed_out = controller
+                        .enforce_timeouts(10_000 + thread_id as u64 * 1000 + op_id as u64);
                 }
 
                 thread_results
@@ -2574,7 +2862,10 @@ mod tests {
 
         // Verify concurrent operations completed successfully
         let successful_operations = all_results.iter().filter(|(_, success)| *success).count();
-        assert!(successful_operations > 0, "Some concurrent operations should succeed");
+        assert!(
+            successful_operations > 0,
+            "Some concurrent operations should succeed"
+        );
 
         // Verify final state consistency
         let final_ctrl = ctrl.lock().unwrap();
@@ -2584,7 +2875,9 @@ mod tests {
         assert!(metrics.challenges_issued_total > 0);
         assert_eq!(
             metrics.challenges_resolved_total,
-            metrics.challenges_promoted_total + metrics.challenges_denied_total + metrics.challenges_timed_out_total
+            metrics.challenges_promoted_total
+                + metrics.challenges_denied_total
+                + metrics.challenges_timed_out_total
         );
 
         // Audit log should be consistent
@@ -2596,14 +2889,21 @@ mod tests {
             for i in 1..audit_log.len() {
                 let expected_prev = audit_log[i - 1].hash();
                 let actual_prev = &audit_log[i].prev_hash;
-                assert_eq!(*actual_prev, expected_prev, "Concurrent access broke hash chain at index {}", i);
+                assert_eq!(
+                    *actual_prev, expected_prev,
+                    "Concurrent access broke hash chain at index {}",
+                    i
+                );
             }
         }
 
         // No active challenges should be in inconsistent state
         let active = final_ctrl.active_challenges();
         for challenge in active {
-            assert!(!challenge.state.is_terminal(), "Active challenge should not be in terminal state");
+            assert!(
+                !challenge.state.is_terminal(),
+                "Active challenge should not be in terminal state"
+            );
         }
     }
 
@@ -2626,7 +2926,13 @@ mod tests {
 
             // Immediately deny to make terminal (for eviction testing)
             if i % 2 == 0 {
-                ctrl.deny(&cid, &format!("denier_{}", i), 2000 + i as u64, &format!("reason_{}", i)).unwrap();
+                ctrl.deny(
+                    &cid,
+                    &format!("denier_{}", i),
+                    2000 + i as u64,
+                    &format!("reason_{}", i),
+                )
+                .unwrap();
             }
         }
 
@@ -2640,12 +2946,20 @@ mod tests {
         // Verify eviction doesn't break challenge ID sequencing
         let challenge_ids: Vec<String> = ctrl.challenges.keys().map(|k| k.0.clone()).collect();
         for (i, id) in challenge_ids.iter().enumerate() {
-            assert!(id.starts_with("ch-"), "Challenge ID should have proper format: {}", id);
+            assert!(
+                id.starts_with("ch-"),
+                "Challenge ID should have proper format: {}",
+                id
+            );
 
             // Parse challenge number
             let number_part = id.strip_prefix("ch-").unwrap();
             let number: u64 = number_part.parse().unwrap();
-            assert!(number > 0, "Challenge number should be positive: {}", number);
+            assert!(
+                number > 0,
+                "Challenge number should be positive: {}",
+                number
+            );
         }
 
         // Test eviction preference for terminal over active
@@ -2666,7 +2980,13 @@ mod tests {
                 // Keep active for eviction test
                 continue;
             } else {
-                ctrl.deny(&cid, &format!("evict_denier_{}", i), 11_000 + i as u64, "immediate_denial").unwrap();
+                ctrl.deny(
+                    &cid,
+                    &format!("evict_denier_{}", i),
+                    11_000 + i as u64,
+                    "immediate_denial",
+                )
+                .unwrap();
             }
         }
 
@@ -2675,7 +2995,10 @@ mod tests {
 
         // Verify active challenges weren't evicted first
         let final_active_count = ctrl.active_challenges().len();
-        assert!(final_active_count >= 25, "Active challenges should be preserved during eviction");
+        assert!(
+            final_active_count >= 25,
+            "Active challenges should be preserved during eviction"
+        );
 
         // Test memory exhaustion attack via massive challenge creation
         for i in 0..1000 {
@@ -2696,7 +3019,12 @@ mod tests {
             if i % 10 == 0 {
                 let recent_cid = ChallengeId::new(&format!("ch-{}", ctrl.next_id - 1));
                 if ctrl.challenges.contains_key(&recent_cid) {
-                    let _ = ctrl.deny(&recent_cid, "attack_denier", 21_000 + i as u64, "attack_cleanup");
+                    let _ = ctrl.deny(
+                        &recent_cid,
+                        "attack_denier",
+                        21_000 + i as u64,
+                        "attack_cleanup",
+                    );
                 }
             }
         }

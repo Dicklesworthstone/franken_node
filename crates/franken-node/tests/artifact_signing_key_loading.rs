@@ -4,6 +4,10 @@ use frankenengine_node::supply_chain::artifact_signing::{
     ArtifactSigningError, generate_artifact_signing_key, sign_bytes, signing_key_from_seed_bytes,
     signing_key_from_seed_hex, verify_signature,
 };
+use frankenengine_node::security::decision_receipt::{
+    Decision, Receipt, sign_receipt, verify_receipt,
+};
+use serde_json::json;
 
 #[test]
 fn generated_artifact_signing_key_signs_and_verifies() -> Result<(), Box<dyn Error>> {
@@ -48,4 +52,28 @@ fn configured_key_loader_rejects_malformed_material() {
         signing_key_from_seed_hex(&hex::encode([1_u8; 31])),
         Err(ArtifactSigningError::SigningKeyInvalid { .. })
     ));
+}
+
+#[test]
+fn decision_receipts_sign_with_configured_key_material() -> Result<(), Box<dyn Error>> {
+    let signing_key = generate_artifact_signing_key();
+    let receipt = Receipt::new(
+        "quarantine",
+        "control-plane@prod",
+        &json!({"target":"node-a","policy":"strict"}),
+        &json!({"status":"accepted"}),
+        Decision::Approved,
+        "policy gate evaluated",
+        vec!["ledger-001".to_string()],
+        vec!["rule-A".to_string()],
+        0.91,
+        "franken-node trust release --incident INC-001",
+    )?;
+
+    let signed = sign_receipt(&receipt, &signing_key)?;
+    let verified = verify_receipt(&signed, &signing_key.verifying_key())?;
+
+    assert!(verified);
+
+    Ok(())
 }

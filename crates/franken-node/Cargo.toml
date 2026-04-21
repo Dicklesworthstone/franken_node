@@ -104,6 +104,11 @@ name = "artifact_signing_key_loading"
 path = "tests/artifact_signing_key_loading.rs"
 
 [[test]]
+name = "session_auth_real_lifecycle"
+path = "tests/session_auth_real_lifecycle.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "proof_generator_timeout_race"
 path = "tests/proof_generator_timeout_race.rs"
 
