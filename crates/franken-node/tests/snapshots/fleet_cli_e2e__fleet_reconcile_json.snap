@@ -1,0 +1,61 @@
+---
+source: crates/franken-node/tests/fleet_cli_e2e.rs
+expression: "canonicalize_fleet_reconcile_snapshot(payload, &fleet_state_dir)"
+---
+{
+  "action": {
+    "operation_id": "[operation-id]",
+    "action_type": "reconcile",
+    "success": true,
+    "receipt": {
+      "receipt_id": "[receipt-id]",
+      "issuer": "cli-fleet-operator",
+      "issued_at": "[issued_at]",
+      "zone_id": "all",
+      "payload_hash": "[payload-hash]"
+    },
+    "convergence": null,
+    "trace_id": "trace-cli-fleet-reconcile",
+    "event_code": "FLEET-005"
+  },
+  "convergence_receipt": {
+    "schema_version": "franken-node/fleet-convergence-receipt/v1",
+    "operation_id": "[operation-id]",
+    "event_code": "FLEET-005",
+    "completed_at": "[completed_at]",
+    "verdict": "converged",
+    "elapsed_ms": 0,
+    "poll_interval_ms": 100,
+    "timeout_ms": 120000,
+    "timed_out": false,
+    "convergence": null,
+    "signature": {
+      "algorithm": "ed25519",
+      "public_key_hex": "43046bfe4092b3e94994eada15dcc20d8aaa07b658fd3954eb8e0efb8bdca5de",
+      "key_id": "7cbd2d2384ba48a2",
+      "key_source": "env",
+      "signing_identity": "fleet-control-plane",
+      "trust_scope": "fleet_convergence",
+      "signed_payload_sha256": "[signed-payload-sha256]",
+      "signature_hex": "[signature-hex]"
+    }
+  },
+  "status": {
+    "zone_id": "all",
+    "active_quarantines": 0,
+    "active_revocations": 0,
+    "healthy_nodes": 0,
+    "total_nodes": 0,
+    "activated": true,
+    "pending_convergences": []
+  },
+  "state_dir": "[fleet-state]",
+  "convergence_timeout_seconds": 120,
+  "stale_nodes": [],
+  "active_incidents": [],
+  "state": {
+    "schema_version": "franken-node/fleet-transport-state/v1",
+    "actions": [],
+    "nodes": []
+  }
+}

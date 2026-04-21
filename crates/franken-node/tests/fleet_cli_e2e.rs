@@ -3,6 +3,7 @@ use std::process::{Child, Command, Output};
 use std::time::{Duration, Instant};
 
 use chrono::{TimeDelta, Utc};
+use insta::assert_json_snapshot;
 #[cfg(feature = "asupersync-transport")]
 use frankenengine_node::control_plane::fleet_transport::{
     AsupersyncFleetNetwork, AsupersyncFleetTransport, wait_until_fleet_converged_or_timeout,
@@ -227,6 +228,82 @@ fn assert_convergence_receipt_signature_round_trips(
         &signature_bytes,
     )
     .expect("verifier SDK should accept convergence receipt signature");
+}
+
+fn canonicalize_fleet_reconcile_snapshot(
+    mut payload: serde_json::Value,
+    fleet_state_dir: &std::path::Path,
+) -> serde_json::Value {
+    let fleet_state_prefix = format!("{}/", fleet_state_dir.display());
+    let repo_root_prefix = format!("{}/", repo_root().display());
+
+    fn scrub(
+        value: &mut serde_json::Value,
+        fleet_state_prefix: &str,
+        repo_root_prefix: &str,
+    ) {
+        match value {
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    scrub(item, fleet_state_prefix, repo_root_prefix);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for (key, nested) in map {
+                    match key.as_str() {
+                        "operation_id" => {
+                            *nested = serde_json::Value::String("[operation-id]".to_string());
+                        }
+                        "receipt_id" => {
+                            *nested = serde_json::Value::String("[receipt-id]".to_string());
+                        }
+                        "signature_hex" => {
+                            *nested = serde_json::Value::String("[signature-hex]".to_string());
+                        }
+                        "signed_payload_sha256" => {
+                            *nested =
+                                serde_json::Value::String("[signed-payload-sha256]".to_string());
+                        }
+                        "payload_hash" => {
+                            *nested = serde_json::Value::String("[payload-hash]".to_string());
+                        }
+                        "elapsed_ms" => {
+                            *nested = serde_json::Value::from(0);
+                        }
+                        "timestamp"
+                        | "signed_at"
+                        | "emitted_at"
+                        | "recorded_at"
+                        | "issued_at"
+                        | "completed_at" => {
+                            *nested = serde_json::Value::String(format!("[{key}]"));
+                        }
+                        "state_dir" => {
+                            if let Some(path) = nested.as_str() {
+                                *nested = serde_json::Value::String(
+                                    path.strip_prefix(fleet_state_prefix)
+                                        .map(|suffix| format!("[fleet-state]/{suffix}"))
+                                        .unwrap_or_else(|| "[fleet-state]".to_string()),
+                                );
+                            }
+                        }
+                        _ => scrub(nested, fleet_state_prefix, repo_root_prefix),
+                    }
+                }
+            }
+            serde_json::Value::String(text) => {
+                if let Some(path) = text.strip_prefix(fleet_state_prefix) {
+                    *value = serde_json::Value::String(format!("[fleet-state]/{path}"));
+                } else if let Some(path) = text.strip_prefix(repo_root_prefix) {
+                    *value = serde_json::Value::String(format!("[repo-root]/{path}"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    scrub(&mut payload, &fleet_state_prefix, &repo_root_prefix);
+    payload
 }
 
 #[test]
@@ -1782,6 +1859,38 @@ fn fleet_reconcile_json_output_shape_is_stable() {
     assert_convergence_receipt_signature_round_trips(&payload["convergence_receipt"], &signing_key);
     assert_eq!(payload["status"]["zone_id"], "all");
     assert!(payload["state"]["actions"].is_array());
+}
+
+#[test]
+fn fleet_reconcile_json_matches_snapshot() {
+    let fleet_state = tempdir().expect("tempdir");
+    let fleet_state_dir = fleet_state.path().join("fleet-state");
+    let (signing_key_path, signing_key) =
+        write_test_signing_key(fleet_state.path(), "keys/fleet.key", 31);
+    let signing_key_path = signing_key_path.display().to_string();
+
+    let output = run_cli_in_dir_with_fleet_state_and_env(
+        &repo_root(),
+        &["fleet", "reconcile", "--json"],
+        &fleet_state_dir,
+        &[(
+            "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+            signing_key_path.as_str(),
+        )],
+    );
+    assert!(
+        output.status.success(),
+        "fleet reconcile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("fleet reconcile json");
+    assert_convergence_receipt_signature_round_trips(&payload["convergence_receipt"], &signing_key);
+    assert_json_snapshot!(
+        "fleet_reconcile_json",
+        canonicalize_fleet_reconcile_snapshot(payload, &fleet_state_dir)
+    );
 }
 
 #[test]
