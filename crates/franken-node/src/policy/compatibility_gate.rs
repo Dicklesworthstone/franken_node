@@ -802,7 +802,7 @@ impl GateEngine {
         );
         self.emit_audit(event_code, &req.scope, &explanation, &trace_id);
 
-        Ok(GateCheckResult {
+        return Ok(GateCheckResult {
             decision,
             rationale: GateRationale {
                 matched_predicates: matched,
@@ -822,7 +822,7 @@ impl GateEngine {
             trace_id,
             receipt_id: None,
             event_code: event_code.to_string(),
-        })
+        });
 
         // Inline negative-path tests for gate_check method
         #[cfg(test)]

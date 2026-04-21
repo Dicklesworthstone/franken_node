@@ -283,7 +283,7 @@ impl ComputationRegistry {
             Some(name),
             "registered computation".to_string(),
         );
-        Ok(())
+        return Ok(());
 
         // Inline negative-path tests for register_computation method
         #[cfg(test)]

@@ -38,7 +38,9 @@
 //! - `INV-GOVERNOR-ENGINE-BOUNDARY`
 
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use sha2::{Sha256, Digest};
+#[cfg(test)]
 use std::collections::{BTreeSet, BTreeMap};
 
 use crate::capacity_defaults::aliases::MAX_AUDIT_TRAIL_ENTRIES;
@@ -85,55 +87,7 @@ impl GovernorGate {
             audit_trail: Vec::new(),
         };
 
-        return gate;
-
-        // Inline negative-path tests
-        #[cfg(test)]
-        #[allow(unreachable_code)]
-        {
-            // Test: new gate has empty audit trail regardless of governor state
-            let default_gov = OptimizationGovernor::with_defaults();
-            let gate = Self::new(default_gov);
-            assert!(gate.audit_trail().is_empty(), "new gate should have empty audit trail");
-
-            // Test: gate properly wraps governor with existing state
-            let mut pre_configured_gov = OptimizationGovernor::with_defaults();
-            // Assume we can configure the governor somehow (lock knobs, etc)
-            pre_configured_gov.lock_knob(RuntimeKnob::ConcurrencyLimit);
-            let gate_with_locked = Self::new(pre_configured_gov);
-            assert!(gate_with_locked.audit_trail().is_empty(), "gate with pre-configured governor should still have empty audit trail");
-
-            // Test: gate preserves inner governor accessibility
-            let test_gov = OptimizationGovernor::with_defaults();
-            let gate = Self::new(test_gov);
-            assert!(gate.inner().schema_version() == SCHEMA_VERSION, "inner governor should be accessible");
-
-            // Test: multiple gates can be created independently
-            let gov1 = OptimizationGovernor::with_defaults();
-            let gov2 = OptimizationGovernor::with_defaults();
-            let gate1 = Self::new(gov1);
-            let gate2 = Self::new(gov2);
-            assert!(gate1.audit_trail().is_empty(), "first gate should have empty audit trail");
-            assert!(gate2.audit_trail().is_empty(), "second gate should have empty audit trail");
-
-            // Test: gate initialization doesn't trigger any events
-            let clean_gov = OptimizationGovernor::with_defaults();
-            let gate = Self::new(clean_gov);
-            assert_eq!(gate.audit_trail().len(), 0, "gate creation should not generate audit events");
-
-            // Test: gate wraps governor state without modification
-            let original_gov = OptimizationGovernor::with_defaults();
-            let original_applied_count = original_gov.applied_count();
-            let gate = Self::new(original_gov);
-            assert_eq!(gate.inner().applied_count(), original_applied_count,
-                      "gate should preserve original governor applied count");
-
-            // Test: audit trail Vec starts with correct capacity
-            let capacity_test_gov = OptimizationGovernor::with_defaults();
-            let gate = Self::new(capacity_test_gov);
-            // audit_trail starts as empty Vec, so capacity should be 0
-            assert_eq!(gate.audit_trail.capacity(), 0, "empty Vec should have 0 capacity initially");
-        }
+        gate
     }
 
     /// Create a gate with default settings.
@@ -258,7 +212,6 @@ impl GovernorGate {
         #[cfg(test)]
         #[allow(unreachable_code)]
         {
-            // Test: submit with invalid proposal ID (empty string)
             let mut gate = Self::with_defaults();
             let empty_id_proposal = OptimizationProposal {
                 proposal_id: "".to_string(),
@@ -799,7 +752,7 @@ pub struct KnobEnumeration {
 impl KnobEnumeration {
     /// How many knobs are enumerated.
     pub fn count(&self) -> usize {
-        self.knobs.len()
+        return self.knobs.len();
 
         // Inline negative-path tests
         #[cfg(test)]
@@ -914,7 +867,7 @@ impl KnobEnumeration {
 
     /// Look up a knob by its variant.
     pub fn get(&self, knob: &RuntimeKnob) -> Option<&KnobDescriptor> {
-        self.knobs.iter().find(|d| &d.knob == knob)
+        return self.knobs.iter().find(|d| &d.knob == knob);
 
         // Inline negative-path tests
         #[cfg(test)]
@@ -1001,7 +954,7 @@ impl KnobEnumeration {
 
     /// All unlocked knobs (available for optimization).
     pub fn unlocked(&self) -> Vec<&KnobDescriptor> {
-        self.knobs.iter().filter(|d| !d.locked).collect()
+        return self.knobs.iter().filter(|d| !d.locked).collect();
 
         // Inline negative-path tests
         #[cfg(test)]
@@ -1107,7 +1060,7 @@ impl KnobEnumeration {
 
     /// All locked knobs.
     pub fn locked(&self) -> Vec<&KnobDescriptor> {
-        self.knobs.iter().filter(|d| d.locked).collect()
+        return self.knobs.iter().filter(|d| d.locked).collect();
 
         // Inline negative-path tests
         #[cfg(test)]
@@ -1228,13 +1181,13 @@ impl KnobEnumeration {
 
 /// Advisory ranges for each knob (used during enumeration).
 fn knob_range(knob: &RuntimeKnob) -> (u64, u64) {
-    match knob {
+    return match knob {
         RuntimeKnob::ConcurrencyLimit => (1, 4096),
         RuntimeKnob::BatchSize => (1, 8192),
         RuntimeKnob::CacheCapacity => (64, 65536),
         RuntimeKnob::DrainTimeoutMs => (1000, 300_000),
         RuntimeKnob::RetryBudget => (0, 20),
-    }
+    };
 
     // Inline negative-path tests
     #[cfg(test)]
@@ -1495,7 +1448,7 @@ pub struct DispatchHookPayload {
 impl DispatchHookPayload {
     /// Convert knob state to an env var name.
     fn env_key(knob: &RuntimeKnob) -> String {
-        format!("FRANKEN_GOV_{}", knob.as_str().to_uppercase())
+        return format!("FRANKEN_GOV_{}", knob.as_str().to_uppercase());
 
         // Inline negative-path tests
         #[cfg(test)]

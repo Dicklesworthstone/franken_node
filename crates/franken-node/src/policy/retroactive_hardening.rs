@@ -433,8 +433,8 @@ impl RetroactiveHardeningPipeline {
 ///
 /// [EVD-RETROHARDEN-003] on verification pass.
 pub fn verify_identity_stable(before: &CanonicalObject, after: &CanonicalObject) -> bool {
-    let stable = constant_time::constant_time::ct_eq(before.object_id.as_str(), after.object_id.as_str())
-        && constant_time::constant_time::ct_eq_bytes(&before.content_hash, &after.content_hash);
+    let stable = constant_time::ct_eq(before.object_id.as_str(), after.object_id.as_str())
+        && constant_time::ct_eq_bytes(&before.content_hash, &after.content_hash);
 
     if stable {
         let _event = EVD_RETROHARDEN_003;
@@ -462,7 +462,7 @@ pub fn measure_repairability(
     let mut count: usize = 0;
 
     for artifact in artifacts {
-        if !constant_time::constant_time::ct_eq(artifact.covers_object.as_str(), object.object_id.as_str()) {
+        if !constant_time::ct_eq(artifact.covers_object.as_str(), object.object_id.as_str()) {
             continue;
         }
         if seen.insert(artifact.artifact_type.label()) {
