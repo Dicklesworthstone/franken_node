@@ -6,8 +6,8 @@
 #![cfg(feature = "test-support")]
 
 use frankenengine_node::replay::time_travel_engine::{
-    build_demo_trace, identity_replay, DivergenceKind, EnvironmentSnapshot, ReplayEngine,
-    ReplayVerdict, SideEffect, TraceBuilder, TraceStep, WorkflowTrace,
+    DivergenceKind, EnvironmentSnapshot, ReplayEngine, ReplayVerdict, SideEffect, TraceBuilder,
+    TraceStep, WorkflowTrace, build_demo_trace, identity_replay,
 };
 use std::collections::BTreeMap;
 
@@ -65,10 +65,7 @@ fn divergent_replay_function_detected() {
         .register_trace(build_demo_trace("div-test", "wf", 3))
         .unwrap();
 
-    fn bad_replay(
-        step: &TraceStep,
-        _env: &EnvironmentSnapshot,
-    ) -> (Vec<u8>, Vec<SideEffect>) {
+    fn bad_replay(step: &TraceStep, _env: &EnvironmentSnapshot) -> (Vec<u8>, Vec<SideEffect>) {
         let mut output = step.output.clone();
         output.push(0xFF);
         (output, step.side_effects.clone())
@@ -89,10 +86,7 @@ fn side_effect_divergence_detected() {
         .register_trace(build_demo_trace("se-div", "wf", 1))
         .unwrap();
 
-    fn bad_effects(
-        step: &TraceStep,
-        _env: &EnvironmentSnapshot,
-    ) -> (Vec<u8>, Vec<SideEffect>) {
+    fn bad_effects(step: &TraceStep, _env: &EnvironmentSnapshot) -> (Vec<u8>, Vec<SideEffect>) {
         (
             step.output.clone(),
             vec![SideEffect::new("altered", vec![99])],

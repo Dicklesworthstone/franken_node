@@ -888,8 +888,10 @@ impl ReplayEngine {
                 hex::encode(hasher.finalize())
             };
 
-            let output_match = constant_time::ct_eq(&original_output_digest, &replayed_output_digest);
-            let effects_match = constant_time::ct_eq(&original_effects_digest, &replayed_effects_digest);
+            let output_match =
+                constant_time::ct_eq(&original_output_digest, &replayed_output_digest);
+            let effects_match =
+                constant_time::ct_eq(&original_effects_digest, &replayed_effects_digest);
 
             if output_match && effects_match {
                 // TTR-005: step identical
@@ -1022,7 +1024,11 @@ pub fn build_demo_trace(trace_id: &str, workflow_name: &str, step_count: usize) 
         let effects = vec![SideEffect::new("log", format!("effect-{i}").into_bytes())];
         let seq = u64::try_from(i).unwrap_or(u64::MAX);
         let timestamp = seq.saturating_add(1).saturating_mul(1000);
-        push_bounded(&mut steps, TraceStep::new(seq, input, output, effects, timestamp), MAX_TRACE_STEPS);
+        push_bounded(
+            &mut steps,
+            TraceStep::new(seq, input, output, effects, timestamp),
+            MAX_TRACE_STEPS,
+        );
     }
 
     let trace_digest = WorkflowTrace::compute_digest(&steps);
@@ -1648,7 +1654,10 @@ mod tests {
 
         assert_eq!(divergent.verdict, ReplayVerdict::Diverged(2));
         assert_eq!(identity.verdict, ReplayVerdict::Identical);
-        assert!(constant_time::ct_eq(&stored_trace.trace_digest, &original_digest));
+        assert!(constant_time::ct_eq(
+            &stored_trace.trace_digest,
+            &original_digest
+        ));
     }
 
     #[test]
@@ -1962,7 +1971,9 @@ mod tests {
         let env = demo_env();
 
         // Start trace capture
-        engine.start_capture(massive_trace_id, "massive-workflow", env).expect("start capture");
+        engine
+            .start_capture(massive_trace_id, "massive-workflow", env)
+            .expect("start capture");
 
         let massive_step_count = MAX_TRACE_STEPS.saturating_add(1000);
         let mut successful_steps = 0;
@@ -1976,14 +1987,20 @@ mod tests {
                 SideEffect::new("metric", format!("metric-{:08}", i).into_bytes()),
             ];
 
-            match engine.record_step(massive_trace_id, input, output, side_effects, 1000000 + i as u64) {
+            match engine.record_step(
+                massive_trace_id,
+                input,
+                output,
+                side_effects,
+                1000000 + i as u64,
+            ) {
                 Ok(()) => {
                     successful_steps = successful_steps.saturating_add(1);
-                },
+                }
                 Err(ReplayEngineError::TraceNotFound { .. }) => {
                     // Expected if trace gets dropped due to memory pressure
                     break;
-                },
+                }
                 Err(_) => {
                     // Other capacity-related errors are acceptable
                     break;
@@ -2012,7 +2029,7 @@ mod tests {
                 // Should handle large traces without corruption
                 assert!(!trace.trace_id.is_empty());
                 assert!(!trace.workflow_name.is_empty());
-            },
+            }
             Err(_) => {
                 // Acceptable to reject massive traces for memory protection
             }
@@ -2033,28 +2050,22 @@ mod tests {
             ("trace🚀rocket", "workflow🔥fire"),
             ("трейс-кириллица", "рабочий-процесс"),
             ("轨迹-中文", "工作流程-测试"),
-
             // Control characters
             ("trace\0null", "workflow\0null"),
             ("trace\r\ncarriage", "workflow\x01control"),
             ("trace\x1B[Hescape", "workflow\x1B[2Jclear"),
-
             // Path traversal attempts
             ("../../../etc/passwd", "workflow"),
             ("trace", "../../../proc/version"),
-
             // Script injection
             ("trace<script>", "workflow"),
             ("trace", "workflow'; DROP TABLE traces; --"),
-
             // Unicode normalization attacks
             ("café", "café-workflow"), // NFC vs NFD forms
             ("cafe\u{0301}", "workflow-cafe\u{0301}"),
-
             // Zero-width and invisible characters
             ("trace\u{200B}invisible", "workflow\u{FEFF}bom"),
             ("trace\u{202E}rtl\u{202D}normal", "workflow"),
-
             // Extremely long identifiers
             (&"x".repeat(10000), "workflow"),
             ("trace", &"y".repeat(10000)),
@@ -2071,13 +2082,25 @@ mod tests {
                     // Successfully started - test record step with Unicode
                     let input = format!("unicode-input-{}", i).into_bytes();
                     let output = format!("unicode-output-{}", i).into_bytes();
-                    let side_effects = vec![SideEffect::new("unicode-effect", format!("effect-{}", i).into_bytes())];
+                    let side_effects = vec![SideEffect::new(
+                        "unicode-effect",
+                        format!("effect-{}", i).into_bytes(),
+                    )];
 
-                    let record_result = engine.record_step(trace_id, input, output, side_effects, 1000_u64.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)));
+                    let record_result = engine.record_step(
+                        trace_id,
+                        input,
+                        output,
+                        side_effects,
+                        1000_u64.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)),
+                    );
 
                     if record_result.is_ok() {
                         // Complete trace
-                        let complete_result = engine.complete_capture(trace_id, 2000_u64.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)));
+                        let complete_result = engine.complete_capture(
+                            trace_id,
+                            2000_u64.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)),
+                        );
 
                         match complete_result {
                             Ok((trace, audit)) => {
@@ -2091,13 +2114,13 @@ mod tests {
                                     assert!(!entry.event_code.is_empty());
                                     // Fields should not be corrupted
                                 }
-                            },
+                            }
                             Err(_) => {
                                 // Acceptable to reject malformed identifiers
                             }
                         }
                     }
-                },
+                }
                 Err(_) => {
                     // Expected for malformed identifiers
                 }
@@ -2119,27 +2142,33 @@ mod tests {
         let extreme_trace_id = "extreme-timestamp-trace";
         let env = demo_env();
 
-        engine.start_capture(extreme_trace_id, "extreme-workflow", env).expect("start capture");
+        engine
+            .start_capture(extreme_trace_id, "extreme-workflow", env)
+            .expect("start capture");
 
         let extreme_timestamps = vec![
-            0,                              // Minimum timestamp
-            1,                              // Just above minimum
-            u64::MAX.saturating_sub(1000),  // Near maximum
-            u64::MAX.saturating_sub(1),     // One below maximum
-            u64::MAX,                       // Maximum timestamp
+            0,                             // Minimum timestamp
+            1,                             // Just above minimum
+            u64::MAX.saturating_sub(1000), // Near maximum
+            u64::MAX.saturating_sub(1),    // One below maximum
+            u64::MAX,                      // Maximum timestamp
         ];
 
         for (i, timestamp) in extreme_timestamps.iter().enumerate() {
             let input = format!("extreme-input-{}", i).into_bytes();
             let output = format!("extreme-output-{}", i).into_bytes();
-            let side_effects = vec![SideEffect::new("extreme-log", format!("timestamp-{}", timestamp).into_bytes())];
+            let side_effects = vec![SideEffect::new(
+                "extreme-log",
+                format!("timestamp-{}", timestamp).into_bytes(),
+            )];
 
-            let record_result = engine.record_step(extreme_trace_id, input, output, side_effects, *timestamp);
+            let record_result =
+                engine.record_step(extreme_trace_id, input, output, side_effects, *timestamp);
 
             match record_result {
                 Ok(()) => {
                     // Successfully recorded extreme timestamp
-                },
+                }
                 Err(_) => {
                     // May reject extreme timestamps for safety
                 }
@@ -2171,13 +2200,13 @@ mod tests {
                         Ok(result) => {
                             // Should handle extreme timestamps without overflow
                             assert_eq!(result.verdict, ReplayVerdict::Success);
-                        },
+                        }
                         Err(_) => {
                             // May fail due to extreme timestamp values
                         }
                     }
                 }
-            },
+            }
             Err(_) => {
                 // Acceptable to reject extreme timestamp configurations
             }
@@ -2190,36 +2219,31 @@ mod tests {
         let mut engine = ReplayEngine::new();
         let malicious_trace_id = "malicious-side-effects";
 
-        engine.start_capture(malicious_trace_id, "injection-test", demo_env()).expect("start capture");
+        engine
+            .start_capture(malicious_trace_id, "injection-test", demo_env())
+            .expect("start capture");
 
         let malicious_side_effect_data = vec![
             // Binary data injection
             b"\x00\x01\x02\x03\x04\xFF\xFE".to_vec(),
-
             // Null byte injection
             b"normal_data\x00injected_content".to_vec(),
-
             // Extremely large payloads
             vec![0xAA; 10 * 1024 * 1024], // 10MB payload
-
             // Unicode in binary data
-            "🔥 Unicode payload with 中文 and кириллица".as_bytes().to_vec(),
-
+            "🔥 Unicode payload with 中文 and кириллица"
+                .as_bytes()
+                .to_vec(),
             // Control characters
             b"\x1B[H\x1B[2J\r\n\x01\x02\x03".to_vec(),
-
             // JSON injection attempt
             b"{\"injected\": true, \"payload\": \"malicious\"}".to_vec(),
-
             // SQL injection attempt
             b"'; DROP TABLE side_effects; --".to_vec(),
-
             // Shell command injection
             b"normal_data; rm -rf /; echo pwned".to_vec(),
-
             // Path traversal in data
             b"../../../etc/passwd".to_vec(),
-
             // Format string injection
             b"%s%s%s%s%s%s%s%s%s%s%n".to_vec(),
         ];
@@ -2245,7 +2269,7 @@ mod tests {
             match record_result {
                 Ok(()) => {
                     // Successfully recorded malicious side effect
-                },
+                }
                 Err(_) => {
                     // May reject malicious payloads
                 }
@@ -2273,12 +2297,12 @@ mod tests {
                 match replay_result {
                     Ok(result) => {
                         assert_eq!(result.verdict, ReplayVerdict::Success);
-                    },
+                    }
                     Err(_) => {
                         // May fail due to malicious data validation
                     }
                 }
-            },
+            }
             Err(_) => {
                 // Acceptable to reject traces with malicious side effects
             }
@@ -2292,13 +2316,15 @@ mod tests {
         let divergent_trace_id = "massive-divergence-test";
 
         // Create trace with various output sizes
-        engine.start_capture(divergent_trace_id, "divergence-workflow", demo_env()).expect("start capture");
+        engine
+            .start_capture(divergent_trace_id, "divergence-workflow", demo_env())
+            .expect("start capture");
 
         let original_outputs = vec![
-            vec![0x00; 1],                      // 1 byte
-            vec![0x11; 1024],                   // 1KB
-            vec![0x22; 1024 * 1024],           // 1MB
-            vec![0x33; 10 * 1024 * 1024],      // 10MB (if accepted)
+            vec![0x00; 1],                // 1 byte
+            vec![0x11; 1024],             // 1KB
+            vec![0x22; 1024 * 1024],      // 1MB
+            vec![0x33; 10 * 1024 * 1024], // 10MB (if accepted)
             b"normal small output".to_vec(),
         ];
 
@@ -2320,15 +2346,17 @@ mod tests {
             }
         }
 
-        let (trace, _) = engine.complete_capture(divergent_trace_id, 5000).expect("complete capture");
+        let (trace, _) = engine
+            .complete_capture(divergent_trace_id, 5000)
+            .expect("complete capture");
 
         // Replay with intentionally different outputs to trigger divergence detection
         let replay_result = engine.replay(divergent_trace_id, |step, _env| {
             // Create outputs that differ massively from originals
             let divergent_outputs = match step.output.len() {
-                1 => vec![0xFF; 1000],                    // Expand small to large
-                len if len > 1000 => vec![0xDD; 10],      // Shrink large to small
-                _ => vec![0xBB; step.output.len() * 2],   // Double the size
+                1 => vec![0xFF; 1000],                  // Expand small to large
+                len if len > 1000 => vec![0xDD; 10],    // Shrink large to small
+                _ => vec![0xBB; step.output.len() * 2], // Double the size
             };
 
             Ok((divergent_outputs, step.side_effects.clone()))
@@ -2344,7 +2372,10 @@ mod tests {
 
                         // Verify divergence details handle size differences safely
                         for divergence in &result.divergences {
-                            assert!(divergence.step_seq < u64::try_from(trace.steps.len()).unwrap_or(u64::MAX));
+                            assert!(
+                                divergence.step_seq
+                                    < u64::try_from(trace.steps.len()).unwrap_or(u64::MAX)
+                            );
                             assert!(!divergence.expected_hash.is_empty());
                             assert!(!divergence.actual_hash.is_empty());
 
@@ -2354,12 +2385,12 @@ mod tests {
                                 divergence.actual_hash.as_bytes()
                             ));
                         }
-                    },
+                    }
                     ReplayVerdict::Success => {
                         panic!("Should have detected divergences with different outputs");
                     }
                 }
-            },
+            }
             Err(_) => {
                 // May fail due to massive output handling
             }
@@ -2372,7 +2403,6 @@ mod tests {
         let corrupted_environments = vec![
             // Empty/minimal environment
             EnvironmentSnapshot::new(0, BTreeMap::new(), "", ""),
-
             // Extreme values
             EnvironmentSnapshot::new(
                 u64::MAX,
@@ -2380,7 +2410,6 @@ mod tests {
                 &"x".repeat(10000), // Extremely long platform
                 &"v".repeat(10000), // Extremely long version
             ),
-
             // Unicode in environment fields
             EnvironmentSnapshot::new(
                 1000,
@@ -2392,7 +2421,6 @@ mod tests {
                 "platform-🚀-unicode",
                 "version-🎯-test",
             ),
-
             // Control characters in environment
             EnvironmentSnapshot::new(
                 1000,
@@ -2403,7 +2431,6 @@ mod tests {
                 "platform\x01control",
                 "version\x02test",
             ),
-
             // Massive environment variables
             EnvironmentSnapshot::new(
                 1000,
@@ -2456,18 +2483,18 @@ mod tests {
                                 match replay_result {
                                     Ok(result) => {
                                         assert_eq!(result.verdict, ReplayVerdict::Success);
-                                    },
+                                    }
                                     Err(_) => {
                                         // May fail due to environment corruption
                                     }
                                 }
-                            },
+                            }
                             Err(_) => {
                                 // Acceptable to reject corrupted environments
                             }
                         }
                     }
-                },
+                }
                 Err(_) => {
                     // Expected for severely corrupted environments
                 }
@@ -2482,7 +2509,9 @@ mod tests {
         let concurrent_trace_id = "concurrent-test";
 
         // Start trace capture
-        engine.start_capture(concurrent_trace_id, "concurrent-workflow", demo_env()).expect("start capture");
+        engine
+            .start_capture(concurrent_trace_id, "concurrent-workflow", demo_env())
+            .expect("start capture");
 
         // Simulate concurrent step recording (in reality this would need proper threading)
         let concurrent_operations = vec![
@@ -2500,15 +2529,24 @@ mod tests {
                 "complete_capture" => {
                     let result = engine.complete_capture(concurrent_trace_id, timestamp);
                     operation_results.push((operation, result.is_ok()));
-                },
+                }
                 op if op.starts_with("record_step") => {
                     let input = format!("{}-input", operation).into_bytes();
                     let output = format!("{}-output", operation).into_bytes();
-                    let side_effects = vec![SideEffect::new("concurrent", format!("{}-effect", operation).into_bytes())];
+                    let side_effects = vec![SideEffect::new(
+                        "concurrent",
+                        format!("{}-effect", operation).into_bytes(),
+                    )];
 
-                    let result = engine.record_step(concurrent_trace_id, input, output, side_effects, timestamp);
+                    let result = engine.record_step(
+                        concurrent_trace_id,
+                        input,
+                        output,
+                        side_effects,
+                        timestamp,
+                    );
                     operation_results.push((operation, result.is_ok()));
-                },
+                }
                 _ => {}
             }
         }
@@ -2523,7 +2561,10 @@ mod tests {
         assert!(operation_results[3].1, "Complete capture should succeed");
 
         // Step after complete should fail
-        assert!(!operation_results[4].1, "Record step after complete should fail");
+        assert!(
+            !operation_results[4].1,
+            "Record step after complete should fail"
+        );
 
         // Test conflicting trace operations
         let conflicting_results = vec![
@@ -2543,7 +2584,8 @@ mod tests {
         // Engine state should remain consistent
         let traces = engine.list_traces();
         // Should contain at most one trace with concurrent_trace_id
-        let matching_traces: Vec<_> = traces.iter()
+        let matching_traces: Vec<_> = traces
+            .iter()
             .filter(|t| t.trace_id == concurrent_trace_id)
             .collect();
         assert!(matching_traces.len() <= 1);
@@ -2556,19 +2598,25 @@ mod tests {
         let exception_trace_id = "exception-test";
 
         // Create a simple trace
-        engine.start_capture(exception_trace_id, "exception-workflow", demo_env()).expect("start capture");
+        engine
+            .start_capture(exception_trace_id, "exception-workflow", demo_env())
+            .expect("start capture");
 
         for i in 0..5 {
-            engine.record_step(
-                exception_trace_id,
-                format!("input-{}", i).into_bytes(),
-                format!("output-{}", i).into_bytes(),
-                vec![SideEffect::new("log", format!("step-{}", i).into_bytes())],
-                1000 + i,
-            ).expect("record step");
+            engine
+                .record_step(
+                    exception_trace_id,
+                    format!("input-{}", i).into_bytes(),
+                    format!("output-{}", i).into_bytes(),
+                    vec![SideEffect::new("log", format!("step-{}", i).into_bytes())],
+                    1000 + i,
+                )
+                .expect("record step");
         }
 
-        let (_trace, _) = engine.complete_capture(exception_trace_id, 2000).expect("complete capture");
+        let (_trace, _) = engine
+            .complete_capture(exception_trace_id, 2000)
+            .expect("complete capture");
 
         // Test various failure modes in replay function
         let failure_modes = vec![
@@ -2592,11 +2640,11 @@ mod tests {
             match replay_result {
                 Ok(_) => {
                     panic!("Replay should have failed at step {}", fail_step);
-                },
+                }
                 Err(ReplayEngineError::ReplayFunctionFailed { step_seq, error }) => {
                     assert_eq!(step_seq, fail_step);
                     assert!(error.contains(error_type));
-                },
+                }
                 Err(_) => {
                     // Other error types acceptable
                 }
@@ -2615,12 +2663,12 @@ mod tests {
                 match result.verdict {
                     ReplayVerdict::Diverged(_) => {
                         // Expected - corrupted output should cause divergence
-                    },
+                    }
                     ReplayVerdict::Success => {
                         panic!("Should have detected divergence from corrupted output");
                     }
                 }
-            },
+            }
             Err(_) => {
                 // May reject due to output size validation
             }
@@ -2634,28 +2682,37 @@ mod tests {
         let trace_id = "audit-dos-test".to_string();
 
         // Start a capture to initialize audit logging
-        engine.start_capture(&trace_id, "audit-test-workflow", demo_env())
+        engine
+            .start_capture(&trace_id, "audit-test-workflow", demo_env())
             .expect("capture start should succeed");
 
         // Simulate many audit events to test bounding
         for i in 0..10000 {
             let input = format!("input-{}", i).into_bytes();
             let output = format!("output-{}", i).into_bytes();
-            let effects = vec![SideEffect::new("test", format!("effect-{}", i).into_bytes())];
+            let effects = vec![SideEffect::new(
+                "test",
+                format!("effect-{}", i).into_bytes(),
+            )];
 
             let _result = engine.record_step(&trace_id, input, output, effects, i);
         }
 
         // Complete capture
-        engine.complete_capture(&trace_id, 10000).expect("capture complete should succeed");
+        engine
+            .complete_capture(&trace_id, 10000)
+            .expect("capture complete should succeed");
 
         // Get audit logs and verify they're bounded
         let audit_logs = engine.audit_logs();
 
         // Should be bounded by MAX_AUDIT_LOG_ENTRIES
-        assert!(audit_logs.len() <= MAX_AUDIT_LOG_ENTRIES,
+        assert!(
+            audit_logs.len() <= MAX_AUDIT_LOG_ENTRIES,
             "Audit log should be bounded to {} entries, got {}",
-            MAX_AUDIT_LOG_ENTRIES, audit_logs.len());
+            MAX_AUDIT_LOG_ENTRIES,
+            audit_logs.len()
+        );
     }
 
     #[test]
@@ -2664,7 +2721,8 @@ mod tests {
         let mut engine = ReplayEngine::new();
         let trace_id = "effects-dos-test".to_string();
 
-        engine.start_capture(&trace_id, "effects-test", demo_env())
+        engine
+            .start_capture(&trace_id, "effects-test", demo_env())
             .expect("capture start should succeed");
 
         // Test with excessive side effects in a single step
@@ -2684,15 +2742,21 @@ mod tests {
             Ok(_) => {
                 // If it succeeds, verify the trace doesn't contain all effects
                 let traces = engine.list_traces();
-                let trace = traces.iter().find(|t| t.trace_id == trace_id).expect("trace should exist");
+                let trace = traces
+                    .iter()
+                    .find(|t| t.trace_id == trace_id)
+                    .expect("trace should exist");
 
                 if !trace.steps.is_empty() {
                     let step = &trace.steps[0];
                     // Side effects should be bounded, not all 100k
-                    assert!(step.side_effects.len() < 50000,
-                        "Side effects should be bounded, got {}", step.side_effects.len());
+                    assert!(
+                        step.side_effects.len() < 50000,
+                        "Side effects should be bounded, got {}",
+                        step.side_effects.len()
+                    );
                 }
-            },
+            }
             Err(_) => {
                 // Failure due to size validation is also acceptable
             }
@@ -2706,21 +2770,38 @@ mod tests {
         let trace_id = "timing-test".to_string();
 
         // Create a valid trace
-        engine.start_capture(&trace_id, "timing-workflow", demo_env())
+        engine
+            .start_capture(&trace_id, "timing-workflow", demo_env())
             .expect("capture start should succeed");
-        engine.record_step(&trace_id, b"input".to_vec(), b"output".to_vec(), vec![], 1000)
+        engine
+            .record_step(
+                &trace_id,
+                b"input".to_vec(),
+                b"output".to_vec(),
+                vec![],
+                1000,
+            )
             .expect("record step should succeed");
-        engine.complete_capture(&trace_id, 2000).expect("capture complete should succeed");
+        engine
+            .complete_capture(&trace_id, 2000)
+            .expect("capture complete should succeed");
 
         // Get the trace and its digest
         let traces = engine.list_traces();
-        let trace = traces.iter().find(|t| t.trace_id == trace_id).expect("trace should exist");
+        let trace = traces
+            .iter()
+            .find(|t| t.trace_id == trace_id)
+            .expect("trace should exist");
         let correct_digest = &trace.trace_digest;
 
         // Create digests that differ by single bits to test timing consistency
         let mut almost_correct = correct_digest.clone();
         if !almost_correct.is_empty() {
-            almost_correct = almost_correct.chars().take(correct_digest.len() - 1).collect::<String>() + "x";
+            almost_correct = almost_correct
+                .chars()
+                .take(correct_digest.len() - 1)
+                .collect::<String>()
+                + "x";
         }
 
         let completely_different = "0".repeat(correct_digest.len().max(1));
@@ -2756,21 +2837,20 @@ mod tests {
         let mut engine = ReplayEngine::new();
         let trace_id = "sequence-overflow-test".to_string();
 
-        engine.start_capture(&trace_id, "sequence-test", demo_env())
+        engine
+            .start_capture(&trace_id, "sequence-test", demo_env())
             .expect("capture start should succeed");
 
         // Test sequence number boundary conditions
-        let boundary_sequences = vec![
-            0u64,
-            1u64,
-            u64::MAX - 1,
-            u64::MAX,
-        ];
+        let boundary_sequences = vec![0u64, 1u64, u64::MAX - 1, u64::MAX];
 
         for seq in boundary_sequences {
             let input = format!("input-{}", seq).into_bytes();
             let output = format!("output-{}", seq).into_bytes();
-            let effects = vec![SideEffect::new("test", format!("effect-{}", seq).into_bytes())];
+            let effects = vec![SideEffect::new(
+                "test",
+                format!("effect-{}", seq).into_bytes(),
+            )];
 
             // Record step with explicit sequence (simulated via timestamp)
             let result = engine.record_step(&trace_id, input, output, effects, seq);
@@ -2786,7 +2866,7 @@ mod tests {
                             assert!(last_step.seq <= u64::MAX);
                         }
                     }
-                },
+                }
                 Err(_) => {
                     // Validation errors for extreme sequences are acceptable
                 }
@@ -2802,9 +2882,17 @@ mod tests {
             ("normal_key".to_string(), "normal_value".to_string()),
             ("empty_key".to_string(), "".to_string()),
             ("huge_key".to_string(), huge_env_value.clone()),
-            ("null_byte_key".to_string(), "value\0with\0nulls".to_string()),
-            ("unicode_key".to_string(), "\u{202E}malicious\u{202D}".to_string()),
-        ].into_iter().collect();
+            (
+                "null_byte_key".to_string(),
+                "value\0with\0nulls".to_string(),
+            ),
+            (
+                "unicode_key".to_string(),
+                "\u{202E}malicious\u{202D}".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect();
 
         let malicious_env_snapshot = EnvironmentSnapshot {
             variables: malicious_env,
@@ -2827,11 +2915,17 @@ mod tests {
                     // Environment variables should be bounded or validated
                     for (key, value) in &trace.environment.variables {
                         assert!(key.len() < 100_000, "Environment key should be bounded");
-                        assert!(value.len() <= 1_000_000, "Environment value should be handled safely");
-                        assert!(!key.contains('\0'), "Environment key should not contain null bytes");
+                        assert!(
+                            value.len() <= 1_000_000,
+                            "Environment value should be handled safely"
+                        );
+                        assert!(
+                            !key.contains('\0'),
+                            "Environment key should not contain null bytes"
+                        );
                     }
                 }
-            },
+            }
             Err(_) => {
                 // Validation failure is also acceptable for malicious input
             }
@@ -2843,7 +2937,9 @@ mod tests {
     fn negative_vec_push_divergences_unbounded_memory_exhaustion() {
         // Test unbounded divergences.push() calls - potential DoS via memory exhaustion
         let mut engine = ReplayEngine::new();
-        engine.register_trace(one_step_trace("dos-divergences")).expect("register should succeed");
+        engine
+            .register_trace(one_step_trace("dos-divergences"))
+            .expect("register should succeed");
 
         // Replay function that creates side effect divergences
         fn divergent_replay(
@@ -2876,8 +2972,12 @@ mod tests {
         // Test with multiple traces to demonstrate accumulation
         for i in 0..10 {
             let trace_id = format!("dos-{:02}", i);
-            engine.register_trace(one_step_trace(&trace_id)).expect("register should succeed");
-            let result = engine.replay(&trace_id, divergent_replay).expect("replay should succeed");
+            engine
+                .register_trace(one_step_trace(&trace_id))
+                .expect("register should succeed");
+            let result = engine
+                .replay(&trace_id, divergent_replay)
+                .expect("replay should succeed");
             assert!(matches!(result.verdict, ReplayVerdict::Diverged(_)));
         }
     }
@@ -2930,11 +3030,19 @@ mod tests {
 
         let seq1 = builder.record_step(vec![1], vec![2], vec![], 1000);
         assert_eq!(seq1, u64::MAX - 1, "Should allocate near-max sequence");
-        assert_eq!(builder.next_seq, u64::MAX, "Should advance to max via saturating_add");
+        assert_eq!(
+            builder.next_seq,
+            u64::MAX,
+            "Should advance to max via saturating_add"
+        );
 
         let seq2 = builder.record_step(vec![3], vec![4], vec![], 2000);
         assert_eq!(seq2, u64::MAX, "Should allocate max sequence");
-        assert_eq!(builder.next_seq, u64::MAX, "Should saturate at max, not wrap to 0");
+        assert_eq!(
+            builder.next_seq,
+            u64::MAX,
+            "Should saturate at max, not wrap to 0"
+        );
 
         // Verify step count matches successful recordings
         assert_eq!(builder.step_count(), 2);
@@ -2946,11 +3054,18 @@ mod tests {
         // Test saturating operations in build_demo_trace
         let test_seq = u64::MAX;
         let timestamp = test_seq.saturating_add(1).saturating_mul(1000);
-        assert_eq!(timestamp, u64::MAX, "Should saturate multiplication, not overflow");
+        assert_eq!(
+            timestamp,
+            u64::MAX,
+            "Should saturate multiplication, not overflow"
+        );
 
         // Raw arithmetic would wrap: (u64::MAX + 1) * 1000 = 0 * 1000 = 0
         let would_wrap = test_seq.wrapping_add(1).wrapping_mul(1000);
-        assert_eq!(would_wrap, 0, "Demonstrates why saturating arithmetic is critical");
+        assert_eq!(
+            would_wrap, 0,
+            "Demonstrates why saturating arithmetic is critical"
+        );
     }
 
     #[test]
@@ -2970,7 +3085,10 @@ mod tests {
             let safe_len_u64 = u64::try_from(test_len).unwrap_or(u64::MAX);
 
             if test_len <= u32::MAX as usize {
-                assert_eq!(safe_len_u64, test_len as u64, "Should convert safely within bounds");
+                assert_eq!(
+                    safe_len_u64, test_len as u64,
+                    "Should convert safely within bounds"
+                );
             } else {
                 assert_eq!(safe_len_u64, u64::MAX, "Should clamp oversized lengths");
             }
@@ -3005,25 +3123,29 @@ mod tests {
         let effects_digest = step.side_effects_digest();
 
         // Domain separators should prevent collision even with similar input patterns
-        assert_ne!(output_digest, effects_digest,
-                  "Domain separators must prevent collision between output and effects");
+        assert_ne!(
+            output_digest, effects_digest,
+            "Domain separators must prevent collision between output and effects"
+        );
 
         // Test trace-level vs step-level domain separation
         let trace_digest = WorkflowTrace::compute_digest(&[step.clone()]);
-        assert_ne!(trace_digest, output_digest,
-                  "Trace digest domain should prevent collision with step output");
-        assert_ne!(trace_digest, effects_digest,
-                  "Trace digest domain should prevent collision with step effects");
+        assert_ne!(
+            trace_digest, output_digest,
+            "Trace digest domain should prevent collision with step output"
+        );
+        assert_ne!(
+            trace_digest, effects_digest,
+            "Trace digest domain should prevent collision with step effects"
+        );
 
         // Verify domain prefixes are distinct
         assert_ne!(
-            b"replay_step_output_v1:",
-            b"replay_step_effects_v1:",
+            b"replay_step_output_v1:", b"replay_step_effects_v1:",
             "Step domain prefixes must be distinct"
         );
         assert_ne!(
-            b"replay_trace_digest_v1:",
-            b"replay_step_output_v1:",
+            b"replay_trace_digest_v1:", b"replay_step_output_v1:",
             "Trace domain must be distinct from step domains"
         );
 
@@ -3034,8 +3156,11 @@ mod tests {
         let step2 = TraceStep::new(0, vec![], vec![], vec![effect2], 1000);
 
         // Length prefixing should prevent "ab"|[1,2,3] from colliding with "a"|[98,1,2,3]
-        assert_ne!(step1.side_effects_digest(), step2.side_effects_digest(),
-                  "Length prefixing must prevent field boundary attacks");
+        assert_ne!(
+            step1.side_effects_digest(),
+            step2.side_effects_digest(),
+            "Length prefixing must prevent field boundary attacks"
+        );
 
         // Positive verification: consistent domain separation throughout ✓
         // Lines 399, 407, 441: Proper domain prefixes for all hash operations

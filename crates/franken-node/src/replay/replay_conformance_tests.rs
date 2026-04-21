@@ -11,6 +11,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::time_travel_engine::*;
+    use crate::security::constant_time;
     use crate::{
         capacity_defaults::aliases::{
             MAX_AUDIT_LOG_ENTRIES, MAX_REGISTERED_TRACES, MAX_TRACE_STEPS,
@@ -18,7 +19,6 @@ mod tests {
         security::constant_time::ct_eq,
     };
     use std::collections::BTreeMap;
-    use crate::security::constant_time;
 
     // ── Test Utilities ───────────────────────────────────────────────────────────
 
