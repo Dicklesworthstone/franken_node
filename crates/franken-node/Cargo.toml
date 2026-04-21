@@ -19,6 +19,7 @@ asupersync-transport = ["dep:asupersync"]
 extended-surfaces = []
 test-support = []
 fuzz = ["arbitrary"]
+default = ["extended-surfaces"]
 
 [dependencies]
 anyhow.workspace = true
@@ -126,6 +127,10 @@ path = "tests/trust_card_authoritative_state_real_inputs.rs"
 [[test]]
 name = "canonical_serializer_real_inputs"
 path = "tests/canonical_serializer_real_inputs.rs"
+
+[[test]]
+name = "category_shift_real_inputs"
+path = "tests/category_shift_real_inputs.rs"
 
 [[test]]
 name = "capability_artifact_real_inputs"
