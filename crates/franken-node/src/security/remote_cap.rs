@@ -62,6 +62,7 @@ impl ReplayTokenSet {
         self.ids.contains(token_id)
     }
 
+    #[cfg(test)]
     #[must_use]
     fn is_empty(&self) -> bool {
         self.ids.is_empty()
