@@ -91,6 +91,10 @@ name = "fleet_cli_e2e"
 path = "tests/fleet_cli_e2e.rs"
 
 [[test]]
+name = "frankentui_surface_migration"
+path = "tests/frankentui_surface_migration.rs"
+
+[[test]]
 name = "asupersync_control_lane_integration"
 path = "tests/asupersync_control_lane_integration.rs"
 required-features = ["asupersync-transport"]

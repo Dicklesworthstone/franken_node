@@ -388,6 +388,8 @@ fn canonical_surfaces() -> Vec<SurfaceEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
 
     // -- Component enum tests --
 
@@ -750,6 +752,199 @@ mod tests {
         let r1 = serde_json::to_string(&g1.to_report()).unwrap();
         let r2 = serde_json::to_string(&g2.to_report()).unwrap();
         assert_eq!(r1, r2);
+    }
+
+    struct RenderedSurfaceFixture {
+        name: &'static str,
+        component: FrankentuiComponent,
+        width: u16,
+        height: u16,
+        lines: &'static [&'static str],
+    }
+
+    fn frankentui_golden_path(file_name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/goldens/frankentui")
+            .join(file_name)
+    }
+
+    fn assert_frankentui_golden(file_name: &str, actual: &str) {
+        let actual = normalize_golden_text(actual);
+        let golden_path = frankentui_golden_path(file_name);
+
+        if std::env::var_os("UPDATE_GOLDENS").is_some() {
+            fs::create_dir_all(golden_path.parent().expect("golden path has parent"))
+                .expect("create frankentui golden dir");
+            fs::write(&golden_path, &actual).expect("write frankentui golden");
+            eprintln!("[GOLDEN] Updated: {}", golden_path.display());
+            return;
+        }
+
+        let expected = fs::read_to_string(&golden_path).expect("read frankentui golden");
+        if actual != expected {
+            let actual_path = golden_path.with_extension("actual");
+            fs::write(&actual_path, actual).expect("write frankentui actual");
+            assert_eq!(
+                fs::read_to_string(&actual_path).expect("read frankentui actual"),
+                expected,
+                "frankentui golden mismatch for {file_name}: expected {}, actual {}",
+                golden_path.display(),
+                actual_path.display()
+            );
+        }
+    }
+
+    fn normalize_golden_text(text: &str) -> String {
+        let mut normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        if !normalized.ends_with('\n') {
+            normalized.push('\n');
+        }
+        normalized
+    }
+
+    fn render_fixture_with_frankentui(fixture: &RenderedSurfaceFixture) -> String {
+        let mut buffer = frankentui::Buffer::new(fixture.width, fixture.height);
+
+        for (y, line) in fixture
+            .lines
+            .iter()
+            .take(usize::from(fixture.height))
+            .enumerate()
+        {
+            for (x, ch) in line.chars().take(usize::from(fixture.width)).enumerate() {
+                buffer.set(
+                    u16::try_from(x).expect("x fits surface width"),
+                    u16::try_from(y).expect("y fits surface height"),
+                    frankentui::Cell::from_char(ch),
+                );
+            }
+        }
+
+        let mut rendered_lines = Vec::new();
+        for y in 0..fixture.height {
+            let mut line = String::with_capacity(usize::from(fixture.width));
+            for x in 0..fixture.width {
+                let ch = buffer
+                    .get(x, y)
+                    .and_then(|cell| cell.content.as_char())
+                    .unwrap_or(' ');
+                line.push(ch);
+            }
+            while line.ends_with(' ') {
+                line.pop();
+            }
+            rendered_lines.push(line);
+        }
+
+        while rendered_lines.last().is_some_and(String::is_empty) {
+            rendered_lines.pop();
+        }
+
+        format!(
+            "surface={}\ncomponent={}\nwidth={}\nheight={}\n--- rendered ---\n{}\n",
+            fixture.name,
+            fixture.component.label(),
+            fixture.width,
+            fixture.height,
+            rendered_lines.join("\n")
+        )
+    }
+
+    fn rendered_surface_fixtures() -> Vec<RenderedSurfaceFixture> {
+        vec![
+            RenderedSurfaceFixture {
+                name: "command_surface_80x24",
+                component: FrankentuiComponent::CommandSurface,
+                width: 80,
+                height: 24,
+                lines: &[
+                    "franken-node doctor",
+                    "status: degraded",
+                    "trace: trace-golden-frankentui",
+                    "next: run franken-node doctor --json for machine output",
+                ],
+            },
+            RenderedSurfaceFixture {
+                name: "panel_80x24",
+                component: FrankentuiComponent::Panel,
+                width: 80,
+                height: 24,
+                lines: &[
+                    "+ Migration Surface --------------------------------------+",
+                    "| project: fixture-app                                    |",
+                    "| mode: strict                                            |",
+                    "| rewrites: 3 automated, 1 requires review                |",
+                    "+---------------------------------------------------------+",
+                ],
+            },
+            RenderedSurfaceFixture {
+                name: "table_100x30",
+                component: FrankentuiComponent::Table,
+                width: 100,
+                height: 30,
+                lines: &[
+                    "EXTENSION                  VERSION  TRUST       RISK      STATUS",
+                    "npm:@acme/auth-guard       1.4.2    certified   low       allowed",
+                    "npm:@beta/telemetry        0.9.1    observed    medium    review",
+                    "npm:@legacy/postinstall    2.0.0    unknown     high      blocked",
+                ],
+            },
+            RenderedSurfaceFixture {
+                name: "alert_banner",
+                component: FrankentuiComponent::AlertBanner,
+                width: 80,
+                height: 8,
+                lines: &[
+                    "ALERT high: policy boundary violation",
+                    "scope: fleet/quarantine/release",
+                    "action: blocked until signed convergence receipt is present",
+                ],
+            },
+            RenderedSurfaceFixture {
+                name: "diff_panel",
+                component: FrankentuiComponent::DiffPanel,
+                width: 80,
+                height: 16,
+                lines: &[
+                    "--- expected policy",
+                    "+++ actual policy",
+                    "- runtime = legacy-risky",
+                    "+ runtime = strict",
+                    "- quarantine = disabled",
+                    "+ quarantine = enforced",
+                ],
+            },
+            RenderedSurfaceFixture {
+                name: "log_stream_panel",
+                component: FrankentuiComponent::LogStreamPanel,
+                width: 80,
+                height: 12,
+                lines: &[
+                    "[INFO] trust-card snapshot loaded",
+                    "[INFO] decision receipt signed",
+                    "[WARN] quarantine convergence pending",
+                    "[INFO] operator surface rendered through frankentui",
+                ],
+            },
+        ]
+    }
+
+    #[test]
+    fn rendered_frankentui_surfaces_match_goldens() {
+        for fixture in rendered_surface_fixtures() {
+            let rendered = render_fixture_with_frankentui(&fixture);
+            assert_frankentui_golden(&format!("{}.txt", fixture.name), &rendered);
+        }
+    }
+
+    #[test]
+    fn migration_report_json_matches_golden() {
+        let mut gate = FrankentuiMigrationGate::new();
+        for entry in canonical_surfaces() {
+            gate.register_surface(entry);
+        }
+        let report = serde_json::to_string_pretty(&gate.to_report()).expect("report json");
+        assert_frankentui_golden("migration_report.json", &report);
     }
 
     // -- Surface entry serde tests --

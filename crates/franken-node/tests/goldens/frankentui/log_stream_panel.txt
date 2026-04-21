@@ -1,0 +1,9 @@
+surface=log_stream_panel
+component=LogStreamPanel
+width=80
+height=12
+--- rendered ---
+[INFO] trust-card snapshot loaded
+[INFO] decision receipt signed
+[WARN] quarantine convergence pending
+[INFO] operator surface rendered through frankentui

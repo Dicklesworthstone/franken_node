@@ -1,0 +1,8 @@
+surface=alert_banner
+component=AlertBanner
+width=80
+height=8
+--- rendered ---
+ALERT high: policy boundary violation
+scope: fleet/quarantine/release
+action: blocked until signed convergence receipt is present

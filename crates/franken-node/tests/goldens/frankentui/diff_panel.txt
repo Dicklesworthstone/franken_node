@@ -1,0 +1,11 @@
+surface=diff_panel
+component=DiffPanel
+width=80
+height=16
+--- rendered ---
+--- expected policy
++++ actual policy
+- runtime = legacy-risky
++ runtime = strict
+- quarantine = disabled
++ quarantine = enforced

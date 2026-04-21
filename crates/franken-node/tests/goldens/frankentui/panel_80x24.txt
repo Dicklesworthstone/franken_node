@@ -1,0 +1,10 @@
+surface=panel_80x24
+component=Panel
+width=80
+height=24
+--- rendered ---
++ Migration Surface --------------------------------------+
+| project: fixture-app                                    |
+| mode: strict                                            |
+| rewrites: 3 automated, 1 requires review                |
++---------------------------------------------------------+

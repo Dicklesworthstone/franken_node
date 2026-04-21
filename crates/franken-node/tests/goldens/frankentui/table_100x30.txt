@@ -1,0 +1,9 @@
+surface=table_100x30
+component=Table
+width=100
+height=30
+--- rendered ---
+EXTENSION                  VERSION  TRUST       RISK      STATUS
+npm:@acme/auth-guard       1.4.2    certified   low       allowed
+npm:@beta/telemetry        0.9.1    observed    medium    review
+npm:@legacy/postinstall    2.0.0    unknown     high      blocked
