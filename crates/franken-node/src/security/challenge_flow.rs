@@ -40,6 +40,11 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
 }
 
+fn update_length_prefixed(hasher: &mut Sha256, field: &[u8]) {
+    hasher.update((field.len() as u64).to_le_bytes());
+    hasher.update(field);
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -916,28 +921,27 @@ impl ChallengeFlowController {
         artifact_id: &ArtifactId,
         proof_type: &RequiredProofType,
     ) -> Result<String, ChallengeError> {
-        let domain = format!("challenge_proof_v1:{}:", proof_type.label());
         let mut hasher = Sha256::new();
-        hasher.update(domain.as_bytes());
-        hasher.update(artifact_id.as_str().as_bytes());
+        hasher.update(b"challenge_proof_v1:");
+        update_length_prefixed(&mut hasher, artifact_id.as_str().as_bytes());
 
         // Add proof-type-specific context for additional security
         match proof_type {
             RequiredProofType::ProvenanceAttestation => {
-                hasher.update(b":provenance_attestation");
+                update_length_prefixed(&mut hasher, b"provenance_attestation");
             }
             RequiredProofType::IntegrityProof => {
-                hasher.update(b":integrity_verification");
+                update_length_prefixed(&mut hasher, b"integrity_verification");
             }
             RequiredProofType::EpochBoundaryProof => {
-                hasher.update(b":epoch_boundary_validation");
+                update_length_prefixed(&mut hasher, b"epoch_boundary_validation");
             }
             RequiredProofType::OriginSignature => {
-                hasher.update(b":origin_signature_verification");
+                update_length_prefixed(&mut hasher, b"origin_signature_verification");
             }
             RequiredProofType::Custom(custom_type) => {
-                hasher.update(b":custom:");
-                hasher.update(custom_type.as_bytes());
+                update_length_prefixed(&mut hasher, b"custom");
+                update_length_prefixed(&mut hasher, custom_type.as_bytes());
             }
         }
 
@@ -1472,6 +1476,22 @@ mod tests {
             "origin_signature"
         );
         assert_eq!(RequiredProofType::Custom("x".into()).label(), "custom");
+    }
+
+    #[test]
+    fn test_expected_proof_hash_length_prefixes_custom_boundaries() {
+        let first = ChallengeFlowController::compute_expected_proof_hash(
+            &ArtifactId::new("a"),
+            &RequiredProofType::Custom("b:custom:c".to_string()),
+        )
+        .unwrap();
+        let second = ChallengeFlowController::compute_expected_proof_hash(
+            &ArtifactId::new("a:custom:b"),
+            &RequiredProofType::Custom("c".to_string()),
+        )
+        .unwrap();
+
+        assert_ne!(first, second);
     }
 
     // -- Event codes --
