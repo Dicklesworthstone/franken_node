@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 
 const DEFAULT_MAX_INCIDENTS: usize = 4096;
+const MAX_CRASH_TIMESTAMPS_PER_CONNECTOR: usize = 128;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
@@ -208,10 +209,10 @@ impl CrashLoopDetector {
             .crash_times_by_connector
             .entry(connector_id.clone())
             .or_default();
-        times.push(epoch_secs);
         // Prune timestamps outside the sliding window to bound memory.
         let cutoff = epoch_secs.saturating_sub(self.config.window_secs);
         times.retain(|&t| t >= cutoff);
+        push_bounded(times, epoch_secs, MAX_CRASH_TIMESTAMPS_PER_CONNECTOR);
         self.crashes_in_window_for(&connector_id, epoch_secs)
     }
 
@@ -644,6 +645,33 @@ mod tests {
         assert_eq!(det.record_crash(&ev, 100), 1);
         assert_eq!(det.record_crash(&ev, 101), 2);
         assert_eq!(det.record_crash(&ev, 102), 3);
+    }
+
+    #[test]
+    fn record_crash_bounds_per_connector_timestamps_fifo() {
+        let mut det = CrashLoopDetector::new(CrashLoopConfig {
+            max_crashes: 3,
+            window_secs: u64::MAX,
+            cooldown_secs: 30,
+        });
+        let event = crash("conn-bounded", "t", "oom");
+
+        for epoch_secs in 0..200 {
+            det.record_crash(&event, epoch_secs);
+        }
+
+        let times = det
+            .crash_times_by_connector
+            .get("conn-bounded")
+            .expect("connector crash timestamps should exist");
+        assert_eq!(times.len(), MAX_CRASH_TIMESTAMPS_PER_CONNECTOR);
+        assert_eq!(times.first(), Some(&72));
+        assert_eq!(times.last(), Some(&199));
+        assert!(times.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(
+            det.crashes_in_window_for("conn-bounded", 199),
+            u32::try_from(MAX_CRASH_TIMESTAMPS_PER_CONNECTOR).unwrap()
+        );
     }
 
     #[test]
