@@ -6,13 +6,14 @@ use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{ErrorKind, Read};
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Read, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{
-    Arc,
+    Arc, Mutex, OnceLock,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::thread;
@@ -26,6 +27,7 @@ const MAX_THREAD_HANDLES: usize = 64; // Maximum concurrent runtime threads
 const PIPE_DRAIN_JOIN_TIMEOUT_MS: u64 = 2_000;
 const PIPE_DRAIN_JOIN_POLL_MS: u64 = 10;
 const PIPE_READ_CHUNK_BYTES: usize = 64 * 1024;
+const DIVERGENCE_FIXTURE_LOCK_FILE: &str = ".lockstep-fixtures.lock";
 
 #[derive(Debug, Deserialize)]
 struct LockstepCorpusManifest {
@@ -72,6 +74,29 @@ fn extend_bounded(items: &mut Vec<u8>, new_data: &[u8], max_total_bytes: usize) 
         }
     } else {
         items.extend_from_slice(new_data);
+    }
+}
+
+fn persist_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[must_use]
+struct DivergenceFixturePersistLockGuard {
+    file: File,
+    path: PathBuf,
+}
+
+impl Drop for DivergenceFixturePersistLockGuard {
+    fn drop(&mut self) {
+        if let Err(source) = self.file.unlock() {
+            tracing::warn!(
+                path = %self.path.display(),
+                error = %source,
+                "failed to release lockstep divergence fixture lock"
+            );
+        }
     }
 }
 
@@ -546,6 +571,11 @@ impl LockstepHarness {
             )
         })?;
 
+        let _persist_guard = persist_lock()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lockstep divergence fixture persist lock poisoned"))?;
+        let _fixture_lock = Self::acquire_divergence_fixture_persist_lock(&output_dir)?;
+
         let mut written = Vec::new();
         for divergence in &report.divergences {
             let path = output_dir.join(format!(
@@ -555,16 +585,96 @@ impl LockstepHarness {
             let fixture = Self::divergence_fixture_value(app_path, report, divergence);
             let payload = serde_json::to_string_pretty(&fixture)
                 .context("failed serializing generated lockstep divergence fixture")?;
-            std::fs::write(&path, format!("{payload}\n")).with_context(|| {
-                format!(
-                    "failed writing lockstep divergence fixture {}",
-                    path.display()
-                )
-            })?;
+            Self::write_divergence_fixture_atomic(&path, &format!("{payload}\n"))?;
             push_bounded(&mut written, path, 1024); // Reasonable limit for divergence fixtures
         }
 
         Ok(written)
+    }
+
+    fn acquire_divergence_fixture_persist_lock(
+        output_dir: &Path,
+    ) -> Result<DivergenceFixturePersistLockGuard> {
+        let path = output_dir.join(DIVERGENCE_FIXTURE_LOCK_FILE);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| {
+                format!(
+                    "failed opening lockstep divergence fixture lock {}",
+                    path.display()
+                )
+            })?;
+        file.lock().with_context(|| {
+            format!(
+                "failed locking lockstep divergence fixture lock {}",
+                path.display()
+            )
+        })?;
+        Ok(DivergenceFixturePersistLockGuard { file, path })
+    }
+
+    fn write_divergence_fixture_atomic(path: &Path, payload: &str) -> Result<()> {
+        let file_name = path.file_name().with_context(|| {
+            format!(
+                "failed deriving lockstep divergence fixture file name for {}",
+                path.display()
+            )
+        })?;
+        let temp_path = path.with_file_name(format!(
+            ".{}.{}.tmp",
+            file_name.to_string_lossy(),
+            uuid::Uuid::now_v7()
+        ));
+        let mut temp_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .with_context(|| {
+                format!(
+                    "failed creating lockstep divergence fixture temp file {}",
+                    temp_path.display()
+                )
+            })?;
+        temp_file.write_all(payload.as_bytes()).with_context(|| {
+            format!(
+                "failed writing lockstep divergence fixture temp file {}",
+                temp_path.display()
+            )
+        })?;
+        temp_file.sync_all().with_context(|| {
+            format!(
+                "failed syncing lockstep divergence fixture temp file {}",
+                temp_path.display()
+            )
+        })?;
+        drop(temp_file);
+
+        std::fs::rename(&temp_path, path).with_context(|| {
+            format!(
+                "failed atomically publishing lockstep divergence fixture {}",
+                path.display()
+            )
+        })?;
+
+        let parent = path.parent().with_context(|| {
+            format!(
+                "failed deriving parent directory for lockstep divergence fixture {}",
+                path.display()
+            )
+        })?;
+        File::open(parent)
+            .and_then(|dir| dir.sync_all())
+            .with_context(|| {
+                format!(
+                    "failed syncing lockstep divergence fixture directory {}",
+                    parent.display()
+                )
+            })?;
+        Ok(())
     }
 
     fn fixture_output_dir(app_path: &Path) -> PathBuf {
@@ -2078,6 +2188,44 @@ mod tests {
         assert_eq!(
             fixture["expected_output"]["runtime_outputs"]["node"]["encoding"],
             serde_json::Value::String("base64".to_string())
+        );
+    }
+
+    #[test]
+    fn emit_divergence_fixtures_concurrent_writers_leave_valid_fixture() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app_path = temp.path().join("demo-app").join("index.js");
+        let report = Arc::new(sample_divergence_report(OracleVerdict::BlockRelease {
+            blocking_divergence_ids: vec!["div-1".to_string()],
+        }));
+
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let app_path = app_path.clone();
+            let report = Arc::clone(&report);
+            handles.push(thread::spawn(move || {
+                LockstepHarness::emit_divergence_fixtures(&app_path, &report)
+            }));
+        }
+
+        for handle in handles {
+            let written = handle.join().expect("fixture writer thread must not panic");
+            assert_eq!(written.expect("fixture emission must succeed").len(), 1);
+        }
+
+        let fixture_path = temp
+            .path()
+            .join("demo-app")
+            .join("fixtures")
+            .join("lockstep")
+            .join("div-1_min.json");
+        let fixture: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&fixture_path).expect("read fixture"))
+                .expect("concurrent fixture writes must leave valid json");
+        assert_eq!(fixture["id"], "fixture:lockstep:oracle:div-1");
+        assert_eq!(
+            fixture["expected_output"]["oracle_verdict"],
+            serde_json::Value::String("block_release".to_string())
         );
     }
 
