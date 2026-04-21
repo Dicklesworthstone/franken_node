@@ -936,28 +936,14 @@ struct FleetDecisionSigningMaterial {
     signing_identity: &'static str,
 }
 
-impl FleetDecisionSigningMaterial {
-    fn new(
-        signing_key: ed25519_dalek::SigningKey,
-        key_source: &'static str,
-        signing_identity: &'static str,
-    ) -> Self {
-        Self {
-            signing_key,
-            key_source,
-            signing_identity,
-        }
-    }
-}
-
 fn default_decision_signing_material() -> Option<FleetDecisionSigningMaterial> {
     #[cfg(test)]
     {
-        Some(FleetDecisionSigningMaterial::new(
-            ed25519_dalek::SigningKey::from_bytes(&[24_u8; 32]),
-            "test",
-            "fleet-control-plane",
-        ))
+        Some(FleetDecisionSigningMaterial {
+            signing_key: ed25519_dalek::SigningKey::from_bytes(&[24_u8; 32]),
+            key_source: "test",
+            signing_identity: "fleet-control-plane",
+        })
     }
     #[cfg(not(test))]
     {
@@ -3355,6 +3341,7 @@ mod tests {
             issued_at: "2026-02-21T00:00:00Z".to_string(),
             zone_id: "zone-1".to_string(),
             payload_hash: "abcdef".to_string(),
+            signature: None,
         };
         let json = serde_json::to_string(&receipt).expect("serialize");
         let decoded: DecisionReceipt = serde_json::from_str(&json).expect("deserialize");
@@ -3506,16 +3493,25 @@ mod tests {
     #[test]
     fn receipt_hash_is_deterministic() {
         let mgr = FleetControlManager::new();
-        let r1 = mgr.build_receipt("op-1", "admin", "zone-1", "2026-01-01T00:00:00Z");
-        let r2 = mgr.build_receipt("op-1", "admin", "zone-1", "2026-01-01T00:00:00Z");
+        let r1 = mgr
+            .build_receipt("op-1", "admin", "zone-1", "2026-01-01T00:00:00Z")
+            .expect("receipt");
+        let r2 = mgr
+            .build_receipt("op-1", "admin", "zone-1", "2026-01-01T00:00:00Z")
+            .expect("receipt");
         assert_eq!(r1.payload_hash, r2.payload_hash);
+        assert!(verify_decision_receipt_signature(&r1));
     }
 
     #[test]
     fn receipt_hash_changes_with_input() {
         let mgr = FleetControlManager::new();
-        let r1 = mgr.build_receipt("op-1", "admin", "zone-1", "2026-01-01T00:00:00Z");
-        let r2 = mgr.build_receipt("op-2", "admin", "zone-1", "2026-01-01T00:00:00Z");
+        let r1 = mgr
+            .build_receipt("op-1", "admin", "zone-1", "2026-01-01T00:00:00Z")
+            .expect("receipt");
+        let r2 = mgr
+            .build_receipt("op-2", "admin", "zone-1", "2026-01-01T00:00:00Z")
+            .expect("receipt");
         assert_ne!(r1.payload_hash, r2.payload_hash);
     }
 
@@ -3523,12 +3519,40 @@ mod tests {
     fn receipt_hash_no_delimiter_collision() {
         let mgr = FleetControlManager::new();
         // Without length-prefixing, "a:b" + "c" and "a" + "b:c" could collide.
-        let r1 = mgr.build_receipt("op", "admin:x", "zone", "ts");
-        let r2 = mgr.build_receipt("op", "admin", "x:zone", "ts");
+        let r1 = mgr
+            .build_receipt("op", "admin:x", "zone", "ts")
+            .expect("receipt");
+        let r2 = mgr
+            .build_receipt("op", "admin", "x:zone", "ts")
+            .expect("receipt");
         assert_ne!(
             r1.payload_hash, r2.payload_hash,
             "length-prefixed encoding must prevent delimiter collision"
         );
+    }
+
+    #[test]
+    fn unsigned_decision_receipt_is_rejected() {
+        let mgr = FleetControlManager::new();
+        let mut receipt = mgr
+            .build_receipt("op-unsigned", "admin", "zone-1", "2026-01-01T00:00:00Z")
+            .expect("receipt");
+        receipt.signature = None;
+
+        assert!(!verify_decision_receipt_signature(&receipt));
+    }
+
+    #[test]
+    fn tampered_decision_receipt_is_rejected() {
+        let mgr = FleetControlManager::new();
+        let mut receipt = mgr
+            .build_receipt("op-tampered", "admin", "zone-1", "2026-01-01T00:00:00Z")
+            .expect("receipt");
+        assert!(verify_decision_receipt_signature(&receipt));
+
+        receipt.zone_id = "zone-2".to_string();
+
+        assert!(!verify_decision_receipt_signature(&receipt));
     }
 
     #[derive(Debug)]

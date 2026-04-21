@@ -455,6 +455,9 @@ fn fleet_status_uses_transport_shared_state_counts() {
 fn fleet_release_publishes_release_action_to_transport() {
     let fleet_state = tempdir().expect("tempdir");
     let fleet_state_dir = fleet_state.path().join("fleet-state");
+    let (signing_key_path, signing_key) =
+        write_test_signing_key(fleet_state.path(), "keys/fleet.key", 23);
+    let signing_key_path = signing_key_path.display().to_string();
     let mut transport = seed_transport(&fleet_state_dir);
     let now = Utc::now();
 
@@ -473,9 +476,14 @@ fn fleet_release_publishes_release_action_to_transport() {
         })
         .expect("publish quarantine");
 
-    let output = run_cli_with_fleet_state(
+    let output = run_cli_in_dir_with_fleet_state_and_env(
+        &repo_root(),
         &["fleet", "release", "--incident", "inc-release-1", "--json"],
         &fleet_state_dir,
+        &[(
+            "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+            signing_key_path.as_str(),
+        )],
     );
     assert!(
         output.status.success(),
@@ -487,6 +495,9 @@ fn fleet_release_publishes_release_action_to_transport() {
         serde_json::from_slice(&output.stdout).expect("fleet release json");
     assert_eq!(payload["action"]["action_type"], "release");
     assert_eq!(payload["action"]["event_code"], "FLEET-004");
+    assert_eq!(payload["action"]["convergence"]["phase"], "Converged");
+    assert_eq!(payload["convergence_receipt"]["event_code"], "FLEET-004");
+    assert_convergence_receipt_signature_round_trips(&payload["convergence_receipt"], &signing_key);
 
     let actions = transport.list_actions().expect("list actions");
     assert!(matches!(
@@ -499,6 +510,67 @@ fn fleet_release_publishes_release_action_to_transport() {
             && incident_id == "inc-release-1"
             && reason == "manual release via fleet CLI"
     ));
+}
+
+#[test]
+fn fleet_release_fails_on_convergence_timeout() {
+    let fleet_state = tempdir().expect("tempdir");
+    let fleet_state_dir = fleet_state.path().join("fleet-state");
+    let (signing_key_path, _) = write_test_signing_key(fleet_state.path(), "keys/fleet.key", 24);
+    let signing_key_path = signing_key_path.display().to_string();
+    let mut transport = seed_transport(&fleet_state_dir);
+    let now = Utc::now();
+
+    transport
+        .publish_action(&FleetActionRecord {
+            action_id: "fleet-op-quarantine-release-timeout".to_string(),
+            emitted_at: now,
+            action: FleetAction::Quarantine {
+                zone_id: "zone-release-timeout".to_string(),
+                incident_id: "inc-release-timeout".to_string(),
+                target_id: "sha256:release-timeout".to_string(),
+                target_kind: FleetTargetKind::Artifact,
+                reason: "release timeout verification".to_string(),
+                quarantine_version: 8,
+            },
+        })
+        .expect("publish quarantine");
+    transport
+        .upsert_node_status(&NodeStatus {
+            zone_id: "zone-release-timeout".to_string(),
+            node_id: "node-before-release".to_string(),
+            last_seen: now - TimeDelta::seconds(60),
+            quarantine_version: 8,
+            health: NodeHealth::Healthy,
+        })
+        .expect("write pre-release node heartbeat");
+
+    let output = run_cli_in_dir_with_fleet_state_and_env(
+        &repo_root(),
+        &["fleet", "release", "--incident", "inc-release-timeout", "--json"],
+        &fleet_state_dir,
+        &[
+            ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "1"),
+            (
+                "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+                signing_key_path.as_str(),
+            ),
+        ],
+    );
+
+    assert!(
+        !output.status.success(),
+        "fleet release should fail closed on convergence timeout"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("fleet release convergence timed out"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "timeout path must not emit a success receipt"
+    );
 }
 
 #[test]
@@ -1799,12 +1871,19 @@ fn fleet_status_human_output_shape_is_stable() {
 fn fleet_release_human_output_shape_is_stable() {
     let fleet_state = tempdir().expect("tempdir");
     let fleet_state_dir = fleet_state.path().join("fleet-state");
+    let (signing_key_path, _) = write_test_signing_key(fleet_state.path(), "keys/fleet.key", 32);
+    let signing_key_path = signing_key_path.display().to_string();
     let mut transport = seed_transport(&fleet_state_dir);
     seed_fleet_quarantine(&mut transport, "zone-release-human", "inc-release-human", 4);
 
-    let output = run_cli_with_fleet_state(
+    let output = run_cli_in_dir_with_fleet_state_and_env(
+        &repo_root(),
         &["fleet", "release", "--incident", "inc-release-human"],
         &fleet_state_dir,
+        &[(
+            "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+            signing_key_path.as_str(),
+        )],
     );
     assert!(
         output.status.success(),
@@ -1819,6 +1898,12 @@ fn fleet_release_human_output_shape_is_stable() {
     assert_eq!(lines[2], "  event_code=FLEET-004");
     assert!(lines[3].starts_with("  receipt_id=rcpt-fleet-op-release-"));
     assert!(lines[3].contains(" issuer=cli-fleet-operator zone=zone-release-human"));
+    assert_eq!(
+        lines[4],
+        "  convergence=0/0 (100%) phase=Converged eta_seconds=Some(0)"
+    );
+    assert!(lines[5].starts_with("  convergence_receipt_elapsed_ms="));
+    assert!(lines[5].ends_with(" timed_out=false"));
 }
 
 #[test]

@@ -45,7 +45,7 @@ mod policy {
 use crate::api::{
     fleet_quarantine::{
         ConvergencePhase, ConvergenceState, DecisionReceipt, FLEET_RECONCILE_COMPLETED,
-        FLEET_RELEASED, FleetActionResult, FleetStatus,
+        FLEET_RELEASED, FleetActionResult, FleetStatus, sign_decision_receipt,
     },
     middleware::{AuthIdentity, AuthMethod, TraceContext},
     trust_card_routes::{
@@ -9142,6 +9142,7 @@ mod fleet_command_tests {
                 issued_at: "2026-02-25T00:00:00Z".to_string(),
                 zone_id: "all".to_string(),
                 payload_hash: "hash".to_string(),
+                signature: None,
             },
             convergence: Some(ConvergenceState {
                 converged_nodes: 4,
@@ -13760,20 +13761,29 @@ fn build_fleet_decision_receipt(
     principal: &str,
     zone_id: &str,
     issued_at: &str,
+    signing_material: &Ed25519SigningMaterial,
 ) -> DecisionReceipt {
     let mut hasher = sha2::Sha256::new();
     hasher.update(b"fleet_receipt_v1:");
     for field in [operation_id, principal, zone_id, issued_at] {
-        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(field.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(field.as_bytes());
     }
-    DecisionReceipt {
+    let mut receipt = DecisionReceipt {
         receipt_id: format!("rcpt-{operation_id}"),
         issuer: principal.to_string(),
         issued_at: issued_at.to_string(),
         zone_id: zone_id.to_string(),
         payload_hash: hex::encode(hasher.finalize()),
-    }
+        signature: None,
+    };
+    receipt.signature = Some(sign_decision_receipt(
+        &receipt,
+        &signing_material.signing_key,
+        signing_material.source,
+        "fleet-control-plane",
+    ));
+    receipt
 }
 
 fn zone_matches_filter(action_zone: &str, requested_zone: &str) -> bool {
@@ -14052,6 +14062,107 @@ fn wait_for_fleet_cli_convergence(project_root: &Path) -> Result<(LoadedFleetSta
     ))
 }
 
+fn fleet_release_convergence_state(
+    loaded: &LoadedFleetState,
+    zone_id: &str,
+    release_emitted_at: DateTime<Utc>,
+) -> ConvergenceState {
+    let stale_ids: BTreeSet<&str> = loaded
+        .stale_nodes
+        .iter()
+        .map(|node| node.node_id.as_str())
+        .collect();
+    let relevant_nodes = loaded
+        .state
+        .nodes
+        .iter()
+        .filter(|node| node_matches_filter(node, zone_id))
+        .collect::<Vec<_>>();
+    let total_nodes = u32::try_from(relevant_nodes.len()).unwrap_or(u32::MAX);
+    let converged_nodes = u32::try_from(
+        relevant_nodes
+            .iter()
+            .filter(|node| {
+                node.health == PersistedNodeHealth::Healthy
+                    && !stale_ids.contains(node.node_id.as_str())
+                    && node.last_seen >= release_emitted_at
+            })
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+    let phase = if converged_nodes == total_nodes {
+        ConvergencePhase::Converged
+    } else if relevant_nodes
+        .iter()
+        .any(|node| stale_ids.contains(node.node_id.as_str()))
+    {
+        ConvergencePhase::TimedOut
+    } else {
+        ConvergencePhase::Propagating
+    };
+    let eta_seconds = match phase {
+        ConvergencePhase::Converged => Some(0),
+        ConvergencePhase::Pending => None,
+        ConvergencePhase::Propagating => Some(total_nodes.saturating_sub(converged_nodes)),
+        ConvergencePhase::TimedOut => None,
+    };
+    let progress_pct = if total_nodes == 0 {
+        100
+    } else {
+        convergence_progress(converged_nodes, total_nodes)
+    };
+
+    ConvergenceState {
+        converged_nodes,
+        total_nodes,
+        progress_pct,
+        eta_seconds,
+        phase,
+    }
+}
+
+fn fleet_release_converged(
+    loaded: &LoadedFleetState,
+    zone_id: &str,
+    incident_id: &str,
+    release_emitted_at: DateTime<Utc>,
+) -> bool {
+    let incident_cleared = loaded
+        .active_incidents
+        .iter()
+        .all(|incident| incident.incident_id != incident_id);
+    incident_cleared
+        && fleet_release_convergence_state(loaded, zone_id, release_emitted_at).phase
+            == ConvergencePhase::Converged
+}
+
+fn wait_for_fleet_cli_release_convergence(
+    project_root: &Path,
+    zone_id: &str,
+    incident_id: &str,
+    release_emitted_at: DateTime<Utc>,
+) -> Result<(LoadedFleetState, bool, u64)> {
+    let mut loaded = load_fleet_state(project_root)?;
+    let timeout = Duration::from_secs(loaded.convergence_timeout_seconds);
+    let outcome = wait_until_fleet_converged_or_timeout(timeout, || {
+        loaded = load_fleet_state(project_root)
+            .map_err(|err| FleetTransportError::stale_state(err.to_string()))?;
+        Ok(fleet_release_converged(
+            &loaded,
+            zone_id,
+            incident_id,
+            release_emitted_at,
+        ))
+    })
+    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+
+    Ok((
+        loaded,
+        outcome.timed_out,
+        duration_millis_u64(outcome.elapsed),
+    ))
+}
+
 fn fleet_convergence_verdict(
     timed_out: bool,
     elapsed_ms: u64,
@@ -14069,6 +14180,7 @@ fn fleet_convergence_verdict(
 
 fn build_fleet_convergence_receipt(
     operation_id: &str,
+    event_code: &str,
     timed_out: bool,
     elapsed_ms: u64,
     timeout_seconds: u64,
@@ -14078,7 +14190,7 @@ fn build_fleet_convergence_receipt(
     let payload = FleetCliConvergenceReceiptPayload {
         schema_version: "franken-node/fleet-convergence-receipt/v1".to_string(),
         operation_id: operation_id.to_string(),
-        event_code: FLEET_RECONCILE_COMPLETED.to_string(),
+        event_code: event_code.to_string(),
         completed_at: Utc::now().to_rfc3339(),
         verdict: fleet_convergence_verdict(timed_out, elapsed_ms, timeout_seconds, &convergence)
             .to_string(),
@@ -18122,13 +18234,15 @@ fn main() -> Result<()> {
                     .find(|incident| incident.incident_id == args.incident)
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("incident `{}` not found", args.incident))?;
+                let fleet_signing_material = load_fleet_signing_material()?;
                 let (_, state_dir, mut transport) = open_fleet_transport(Path::new("."))?;
                 let operation_id = fleet_operation_id("release");
-                let issued_at = Utc::now().to_rfc3339();
+                let release_emitted_at = Utc::now();
+                let issued_at = release_emitted_at.to_rfc3339();
                 transport
                     .publish_action(&PersistedFleetActionRecord {
                         action_id: operation_id.clone(),
-                        emitted_at: Utc::now(),
+                        emitted_at: release_emitted_at,
                         action: PersistedFleetAction::Release {
                             zone_id: incident.zone_id.clone(),
                             incident_id: incident.incident_id.clone(),
@@ -18136,6 +18250,25 @@ fn main() -> Result<()> {
                         },
                     })
                     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                let (converged_state, timed_out, elapsed_ms) =
+                    wait_for_fleet_cli_release_convergence(
+                        Path::new("."),
+                        &incident.zone_id,
+                        &incident.incident_id,
+                        release_emitted_at,
+                    )?;
+                let convergence = fleet_release_convergence_state(
+                    &converged_state,
+                    &incident.zone_id,
+                    release_emitted_at,
+                );
+                if timed_out {
+                    anyhow::bail!(
+                        "fleet release convergence timed out after {}s for incident `{}`",
+                        converged_state.convergence_timeout_seconds,
+                        incident.incident_id
+                    );
+                }
                 let report = fleet_action_report(
                     Path::new("."),
                     &incident.zone_id,
@@ -18148,12 +18281,21 @@ fn main() -> Result<()> {
                             &identity.principal,
                             &incident.zone_id,
                             &issued_at,
+                            &fleet_signing_material,
                         ),
-                        convergence: None,
+                        convergence: Some(convergence.clone()),
                         trace_id: trace.trace_id.clone(),
                         event_code: FLEET_RELEASED.to_string(),
                     },
-                    None,
+                    Some(build_fleet_convergence_receipt(
+                        &operation_id,
+                        FLEET_RELEASED,
+                        timed_out,
+                        elapsed_ms,
+                        converged_state.convergence_timeout_seconds,
+                        Some(convergence),
+                        &fleet_signing_material,
+                    )?),
                 )?;
                 debug_assert_eq!(report.state_dir, state_dir);
                 emit_fleet_action_report(&report, args.json)?;
@@ -18201,6 +18343,7 @@ fn main() -> Result<()> {
                             &identity.principal,
                             "all",
                             &issued_at,
+                            &fleet_signing_material,
                         ),
                         convergence: convergence.clone(),
                         trace_id: trace.trace_id.clone(),
@@ -18208,6 +18351,7 @@ fn main() -> Result<()> {
                     },
                     Some(build_fleet_convergence_receipt(
                         &operation_id,
+                        FLEET_RECONCILE_COMPLETED,
                         timed_out,
                         elapsed_ms,
                         converged_state.convergence_timeout_seconds,
