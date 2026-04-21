@@ -629,6 +629,89 @@ fn verify_release_fails_when_unlisted_artifact_exists() {
 }
 
 #[test]
+fn release_manifest_inserted_invalid_line_fails_closed() {
+    let temp = TempDir::new().expect("temp dir");
+    let release_dir = temp.path().join("release");
+    let key_dir = temp.path().join("keys");
+    std::fs::create_dir_all(&release_dir).expect("release dir");
+
+    let artifacts = [(
+        "franken-node-linux-x64.tar.xz",
+        b"artifact-linux-x64" as &[u8],
+    )];
+    write_signed_release_fixture(&release_dir, &artifacts);
+    write_release_key_dir(&key_dir);
+
+    let manifest_path = release_dir.join("SHA256SUMS");
+    let mut manifest = std::fs::read_to_string(&manifest_path).expect("manifest");
+    manifest.push_str("not covered by the manifest signature\n");
+    std::fs::write(&manifest_path, manifest).expect("tamper manifest");
+
+    let release_arg = release_dir.to_string_lossy().to_string();
+    let key_dir_arg = key_dir.to_string_lossy().to_string();
+    let output = run_cli(&[
+        "verify",
+        "release",
+        &release_arg,
+        "--key-dir",
+        &key_dir_arg,
+        "--json",
+    ]);
+
+    assert!(
+        !output.status.success(),
+        "expected inserted manifest line to fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("manifest"));
+    assert!(stderr.contains("not canonical"));
+}
+
+#[test]
+fn release_manifest_modified_field_invalidates_signature() {
+    let temp = TempDir::new().expect("temp dir");
+    let release_dir = temp.path().join("release");
+    let key_dir = temp.path().join("keys");
+    std::fs::create_dir_all(&release_dir).expect("release dir");
+
+    let artifacts = [(
+        "franken-node-linux-x64.tar.xz",
+        b"artifact-linux-x64" as &[u8],
+    )];
+    write_signed_release_fixture(&release_dir, &artifacts);
+    write_release_key_dir(&key_dir);
+
+    let manifest_path = release_dir.join("SHA256SUMS");
+    let manifest = std::fs::read_to_string(&manifest_path).expect("manifest");
+    let mut fields = manifest.trim_end().split("  ").collect::<Vec<_>>();
+    assert_eq!(fields.len(), 3);
+    fields[2] = "999";
+    std::fs::write(&manifest_path, format!("{}\n", fields.join("  "))).expect("tamper manifest");
+
+    let release_arg = release_dir.to_string_lossy().to_string();
+    let key_dir_arg = key_dir.to_string_lossy().to_string();
+    let output = run_cli(&[
+        "verify",
+        "release",
+        &release_arg,
+        "--key-dir",
+        &key_dir_arg,
+        "--json",
+    ]);
+
+    assert!(
+        !output.status.success(),
+        "expected modified manifest field to invalidate signature"
+    );
+    let payload = parse_json_stdout(&output);
+    assert_eq!(
+        payload["manifest_signature_ok"],
+        serde_json::Value::Bool(false)
+    );
+    assert_eq!(payload["overall_pass"], serde_json::Value::Bool(false));
+}
+
+#[test]
 fn verify_release_fails_without_key_dir() {
     let temp = TempDir::new().expect("temp dir");
     let release_dir = temp.path().join("release");

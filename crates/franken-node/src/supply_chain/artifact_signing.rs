@@ -4,7 +4,7 @@
 // structured verification, key rotation with signed transition records, and
 // threshold (M-of-N) signing support.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::security::constant_time;
 
 const MAX_TRANSITIONS: usize = 4096;
+const RELEASE_MANIFEST_SIGNATURE_DOMAIN: &[u8] = b"release_manifest_v1:";
 
 /// Maximum artifact name length to prevent memory exhaustion DoS attacks.
 const MAX_ARTIFACT_NAME_LEN: usize = 512;
@@ -54,6 +55,8 @@ pub const ASV_004_KEY_ROTATED: &str = "ASV-004";
 pub enum ArtifactSigningError {
     /// The manifest signature is invalid.
     ManifestSignatureInvalid,
+    /// The manifest text is not the signed canonical format.
+    ManifestLineInvalid { line_number: usize, reason: String },
     /// A file's SHA-256 checksum does not match the manifest entry.
     ChecksumMismatch {
         artifact_name: String,
@@ -80,6 +83,10 @@ impl fmt::Display for ArtifactSigningError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ManifestSignatureInvalid => write!(f, "manifest signature invalid"),
+            Self::ManifestLineInvalid {
+                line_number,
+                reason,
+            } => write!(f, "manifest line {line_number} is invalid: {reason}"),
             Self::ChecksumMismatch {
                 artifact_name,
                 expected,
@@ -173,42 +180,104 @@ impl ChecksumManifest {
         buf.into_bytes()
     }
 
-    /// Parse a canonical manifest text back into entries (no signature).
+    /// Return the domain-separated, length-prefixed payload covered by the
+    /// detached manifest signature.
+    pub fn canonical_signature_payload(&self) -> Vec<u8> {
+        Self::signature_payload_from_canonical(&self.canonical_bytes())
+    }
+
+    pub fn signature_payload_from_canonical(canonical_bytes: &[u8]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend(RELEASE_MANIFEST_SIGNATURE_DOMAIN);
+        payload.extend(len_to_u64(canonical_bytes.len()).to_le_bytes());
+        payload.extend(canonical_bytes);
+        payload
+    }
+
+    /// Parse canonical manifest text back into entries (no signature).
     ///
     /// SECURITY: rejects entries whose name contains path traversal
     /// sequences (`..`, leading `/`, or backslashes) to prevent
-    /// arbitrary file reads when the manifest is attacker-controlled.
-    pub fn parse_canonical(text: &str) -> Vec<ManifestEntry> {
-        let mut entries = Vec::new();
-        for line in text.lines() {
-            let parts: Vec<&str> = line.splitn(3, "  ").collect();
-            if parts.len() == 3 {
-                if !is_valid_sha256_hex(parts[0]) {
-                    continue;
-                }
-                let name = parts[1];
-                if !is_valid_artifact_name(name) {
-                    continue;
-                }
-                if !parts[2].bytes().all(|byte| byte.is_ascii_digit()) {
-                    continue;
-                }
-                let Ok(size_bytes) = parts[2].parse::<u64>() else {
-                    continue;
-                };
-                entries.push(ManifestEntry {
-                    sha256: parts[0].to_string(),
-                    name: name.to_string(),
-                    size_bytes,
-                });
-            }
+    /// arbitrary file reads when the manifest is attacker-controlled. This
+    /// parser is fail-closed: any malformed, duplicate, or non-canonical line
+    /// rejects the whole manifest rather than dropping attacker-inserted rows.
+    pub fn parse_canonical(text: &str) -> Result<Vec<ManifestEntry>, ArtifactSigningError> {
+        if !text.is_empty() && !text.ends_with('\n') {
+            return Err(manifest_line_error(
+                text.lines().count().max(1),
+                "manifest must end with a canonical newline",
+            ));
         }
-        entries
+
+        let mut entries = Vec::new();
+        let mut seen_names = BTreeSet::new();
+        let mut previous_name: Option<String> = None;
+        for (line_index, line) in text.lines().enumerate() {
+            let line_number = line_index.saturating_add(1);
+            let parts: Vec<&str> = line.splitn(3, "  ").collect();
+            if parts.len() != 3 {
+                return Err(manifest_line_error(
+                    line_number,
+                    "expected `<sha256>  <name>  <size>`",
+                ));
+            }
+
+            if !is_valid_sha256_hex(parts[0]) {
+                return Err(manifest_line_error(
+                    line_number,
+                    "sha256 must be 64 lowercase hex characters",
+                ));
+            }
+
+            let name = parts[1];
+            if !is_valid_artifact_name(name) {
+                return Err(manifest_line_error(
+                    line_number,
+                    "artifact name is empty, non-normalized, absolute, or traversing",
+                ));
+            }
+            if !seen_names.insert(name.to_string()) {
+                return Err(manifest_line_error(line_number, "duplicate artifact name"));
+            }
+            if previous_name
+                .as_deref()
+                .is_some_and(|previous| previous >= name)
+            {
+                return Err(manifest_line_error(
+                    line_number,
+                    "artifact names must be sorted in canonical order",
+                ));
+            }
+            previous_name = Some(name.to_string());
+
+            let Ok(size_bytes) = parts[2].parse::<u64>() else {
+                return Err(manifest_line_error(
+                    line_number,
+                    "size must be an unsigned decimal integer",
+                ));
+            };
+            if size_bytes.to_string() != parts[2] {
+                return Err(manifest_line_error(
+                    line_number,
+                    "size must be canonical decimal digits",
+                ));
+            }
+
+            entries.push(ManifestEntry {
+                sha256: parts[0].to_string(),
+                name: name.to_string(),
+                size_bytes,
+            });
+        }
+        Ok(entries)
     }
 }
 
 fn is_valid_sha256_hex(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn is_valid_artifact_name(name: &str) -> bool {
@@ -224,6 +293,13 @@ fn is_valid_artifact_name(name: &str) -> bool {
 
 fn len_to_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+fn manifest_line_error(line_number: usize, reason: &str) -> ArtifactSigningError {
+    ArtifactSigningError::ManifestLineInvalid {
+        line_number,
+        reason: reason.to_string(),
+    }
 }
 
 /// Per-artifact verification result emitted as structured JSON.
@@ -390,8 +466,7 @@ pub fn build_and_sign_manifest(
         signature: Vec::new(),
     };
 
-    let canonical = manifest.canonical_bytes();
-    let sig = sign_bytes(signing_key, &canonical);
+    let sig = sign_bytes(signing_key, &manifest.canonical_signature_payload());
 
     ChecksumManifest {
         signature: sig,
@@ -420,7 +495,12 @@ pub fn verify_release(
 ) -> VerificationReport {
     // 1. Verify manifest signature.
     let manifest_ok = match key_ring.get_key(&manifest.key_id) {
-        Some(vk) => verify_signature(vk, &manifest.canonical_bytes(), &manifest.signature).is_ok(),
+        Some(vk) => verify_signature(
+            vk,
+            &manifest.canonical_signature_payload(),
+            &manifest.signature,
+        )
+        .is_ok(),
         None => false,
     };
 
@@ -451,7 +531,10 @@ pub fn verify_release(
                             entry.size_bytes, actual_size
                         )),
                     });
-                } else if !constant_time::ct_eq_bytes(actual_hash.as_bytes(), entry.sha256.as_bytes()) {
+                } else if !constant_time::ct_eq_bytes(
+                    actual_hash.as_bytes(),
+                    entry.sha256.as_bytes(),
+                ) {
                     results.push(ArtifactVerificationResult {
                         artifact_name: name.clone(),
                         passed: false,
@@ -768,9 +851,75 @@ mod tests {
         let artifacts = vec![("file.bin", b"data" as &[u8])];
         let manifest = build_and_sign_manifest(&artifacts, &sk);
         let text = String::from_utf8(manifest.canonical_bytes()).unwrap();
-        let parsed = ChecksumManifest::parse_canonical(&text);
+        let parsed = ChecksumManifest::parse_canonical(&text).expect("canonical manifest");
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].name, "file.bin");
+    }
+
+    #[test]
+    fn release_manifest_parser_rejects_inserted_invalid_line() {
+        let sk = demo_signing_key();
+        let manifest = build_and_sign_manifest(&[("file.bin", b"data" as &[u8])], &sk);
+        let clean = String::from_utf8(manifest.canonical_bytes()).unwrap();
+        let tampered = format!("{clean}not signed by manifest\n");
+
+        let err = ChecksumManifest::parse_canonical(&tampered).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ArtifactSigningError::ManifestLineInvalid { .. }
+        ));
+    }
+
+    #[test]
+    fn release_manifest_signature_rejects_inserted_valid_line() {
+        let (sk, _vk, ring) = setup_keys();
+        let name = "franken-node.tar.xz";
+        let content = b"release binary";
+        let mut manifest = build_and_sign_manifest(&[(name, content as &[u8])], &sk);
+        manifest.entries.insert(
+            "inserted.bin".to_string(),
+            ManifestEntry {
+                name: "inserted.bin".to_string(),
+                sha256: sha256_hex(b"inserted"),
+                size_bytes: len_to_u64(b"inserted".len()),
+            },
+        );
+
+        let mut artifacts = BTreeMap::new();
+        artifacts.insert(name.to_string(), content.to_vec());
+        artifacts.insert("inserted.bin".to_string(), b"inserted".to_vec());
+        let mut sigs = BTreeMap::new();
+        sigs.insert(name.to_string(), sign_artifact(&sk, content));
+        sigs.insert("inserted.bin".to_string(), sign_artifact(&sk, b"inserted"));
+
+        let report = verify_release(&manifest, &artifacts, &sigs, &ring);
+
+        assert!(!report.manifest_signature_ok);
+        assert!(!report.overall_pass);
+    }
+
+    #[test]
+    fn release_manifest_signature_rejects_modified_field() {
+        let (sk, _vk, ring) = setup_keys();
+        let name = "franken-node.tar.xz";
+        let content = b"release binary";
+        let mut manifest = build_and_sign_manifest(&[(name, content as &[u8])], &sk);
+        manifest
+            .entries
+            .get_mut(name)
+            .expect("manifest entry")
+            .size_bytes = len_to_u64(content.len()).saturating_add(1);
+
+        let mut artifacts = BTreeMap::new();
+        artifacts.insert(name.to_string(), content.to_vec());
+        let mut sigs = BTreeMap::new();
+        sigs.insert(name.to_string(), sign_artifact(&sk, content));
+
+        let report = verify_release(&manifest, &artifacts, &sigs, &ring);
+
+        assert!(!report.manifest_signature_ok);
+        assert!(!report.overall_pass);
     }
 
     #[test]
@@ -1132,7 +1281,7 @@ mod tests {
         let hash = "a".repeat(64);
         let malicious = format!("{hash}  ../../../etc/passwd  1024\n");
         let parsed = ChecksumManifest::parse_canonical(&malicious);
-        assert!(parsed.is_empty(), "should reject .. traversal");
+        assert!(parsed.is_err(), "should reject .. traversal");
     }
 
     #[test]
@@ -1140,7 +1289,7 @@ mod tests {
         let hash = "a".repeat(64);
         let malicious = format!("{hash}  /etc/passwd  1024\n");
         let parsed = ChecksumManifest::parse_canonical(&malicious);
-        assert!(parsed.is_empty(), "should reject absolute paths");
+        assert!(parsed.is_err(), "should reject absolute paths");
     }
 
     #[test]
@@ -1148,7 +1297,7 @@ mod tests {
         let hash = "a".repeat(64);
         let malicious = format!("{hash}  ..\\..\\windows\\system32  1024\n");
         let parsed = ChecksumManifest::parse_canonical(&malicious);
-        assert!(parsed.is_empty(), "should reject backslash paths");
+        assert!(parsed.is_err(), "should reject backslash paths");
     }
 
     #[test]
@@ -1156,12 +1305,12 @@ mod tests {
         let first_hash = "a".repeat(64);
         let second_hash = "b".repeat(64);
         let valid = format!(
-            "{first_hash}  release/artifact.tar.gz  1024\n{second_hash}  checksums.txt  512\n"
+            "{second_hash}  checksums.txt  512\n{first_hash}  release/artifact.tar.gz  1024\n"
         );
-        let parsed = ChecksumManifest::parse_canonical(&valid);
+        let parsed = ChecksumManifest::parse_canonical(&valid).expect("valid manifest");
         assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].name, "release/artifact.tar.gz");
-        assert_eq!(parsed[1].name, "checksums.txt");
+        assert_eq!(parsed[0].name, "checksums.txt");
+        assert_eq!(parsed[1].name, "release/artifact.tar.gz");
     }
 
     #[test]
@@ -1170,7 +1319,7 @@ mod tests {
         let malicious = format!("{hash}  legit.bin  not_a_number\n");
         let parsed = ChecksumManifest::parse_canonical(&malicious);
         assert!(
-            parsed.is_empty(),
+            parsed.is_err(),
             "should reject entries with unparseable size"
         );
     }
@@ -1180,38 +1329,34 @@ mod tests {
         let hash = "a".repeat(64);
         let malicious = format!("{hash}  legit.bin  -42\n");
         let parsed = ChecksumManifest::parse_canonical(&malicious);
-        assert!(
-            parsed.is_empty(),
-            "should reject entries with negative size"
-        );
+        assert!(parsed.is_err(), "should reject entries with negative size");
     }
 
     #[test]
     fn parse_canonical_rejects_short_sha256() {
         let parsed = ChecksumManifest::parse_canonical("e3b0c44  artifact.bin  1024\n");
-        assert!(parsed.is_empty(), "sha256 must be the full 64 hex chars");
+        assert!(parsed.is_err(), "sha256 must be the full 64 hex chars");
     }
 
     #[test]
     fn parse_canonical_rejects_non_hex_sha256() {
         let hash = "g".repeat(64);
         let parsed = ChecksumManifest::parse_canonical(&format!("{hash}  artifact.bin  1024\n"));
-        assert!(parsed.is_empty(), "sha256 must contain only hex characters");
+        assert!(parsed.is_err(), "sha256 must contain only hex characters");
     }
 
     #[test]
-    fn parse_canonical_accepts_uppercase_sha256_hex() {
+    fn parse_canonical_rejects_uppercase_sha256_hex() {
         let hash = "A".repeat(64);
         let parsed = ChecksumManifest::parse_canonical(&format!("{hash}  artifact.bin  1024\n"));
-        assert_eq!(parsed.len(), 1);
-        assert!(constant_time::ct_eq_bytes(parsed[0].sha256.as_bytes(), hash.as_bytes()));
+        assert!(parsed.is_err(), "sha256 must be lowercase canonical hex");
     }
 
     #[test]
     fn parse_canonical_rejects_empty_artifact_name() {
         let hash = "a".repeat(64);
         let parsed = ChecksumManifest::parse_canonical(&format!("{hash}    1024\n"));
-        assert!(parsed.is_empty(), "artifact name must not be empty");
+        assert!(parsed.is_err(), "artifact name must not be empty");
     }
 
     #[test]
@@ -1223,10 +1368,7 @@ mod tests {
             "release//artifact.bin",
         ] {
             let parsed = ChecksumManifest::parse_canonical(&format!("{hash}  {name}  1024\n"));
-            assert!(
-                parsed.is_empty(),
-                "artifact name `{name}` must be normalized"
-            );
+            assert!(parsed.is_err(), "artifact name `{name}` must be normalized");
         }
     }
 
@@ -1237,10 +1379,26 @@ mod tests {
             let parsed =
                 ChecksumManifest::parse_canonical(&format!("{hash}  artifact.bin  {size}\n"));
             assert!(
-                parsed.is_empty(),
+                parsed.is_err(),
                 "size `{size}` must be canonical digits only"
             );
         }
+    }
+
+    #[test]
+    fn parse_canonical_rejects_leading_zero_size() {
+        let hash = "a".repeat(64);
+        let parsed = ChecksumManifest::parse_canonical(&format!("{hash}  artifact.bin  001\n"));
+        assert!(parsed.is_err(), "size must not be lossy-normalized");
+    }
+
+    #[test]
+    fn parse_canonical_rejects_duplicate_artifact_names() {
+        let hash = "a".repeat(64);
+        let parsed = ChecksumManifest::parse_canonical(&format!(
+            "{hash}  artifact.bin  1\n{hash}  artifact.bin  1\n"
+        ));
+        assert!(parsed.is_err(), "duplicate rows must not be dropped");
     }
 
     #[test]
@@ -1447,7 +1605,7 @@ mod tests {
     }
 
     #[test]
-    fn mr_parse_canonical_is_invariant_to_invalid_line_insertions() {
+    fn mr_parse_canonical_rejects_invalid_line_insertions() {
         let sk = demo_signing_key();
         let manifest = build_and_sign_manifest(
             &[
@@ -1464,10 +1622,11 @@ mod tests {
             "not even close\n{bad_hash}  ignored.bin  10\n{traversal_hash}  ../escape.bin  10\n{clean}{traversal_hash}  signed.bin  -1\n"
         );
 
-        let clean_entries = ChecksumManifest::parse_canonical(&clean);
+        let clean_entries = ChecksumManifest::parse_canonical(&clean).expect("clean manifest");
         let noisy_entries = ChecksumManifest::parse_canonical(&noisy);
 
-        assert_eq!(clean_entries, noisy_entries);
+        assert_eq!(clean_entries.len(), 2);
+        assert!(noisy_entries.is_err());
     }
 
     #[test]
@@ -1737,9 +1896,15 @@ mod artifact_signing_boundary_negative_tests {
         let kid2 = KeyId::from_verifying_key(&vk2);
 
         // Same key should produce identical IDs (deterministic)
-        assert!(constant_time::ct_eq_bytes(kid1_a.0.as_bytes(), kid1_b.0.as_bytes()));
+        assert!(constant_time::ct_eq_bytes(
+            kid1_a.0.as_bytes(),
+            kid1_b.0.as_bytes()
+        ));
         // Different keys should produce different IDs (but timing-safe comparison)
-        assert!(!constant_time::ct_eq_bytes(kid1_a.0.as_bytes(), kid2.0.as_bytes()));
+        assert!(!constant_time::ct_eq_bytes(
+            kid1_a.0.as_bytes(),
+            kid2.0.as_bytes()
+        ));
     }
 
     #[test]
@@ -1757,8 +1922,14 @@ mod artifact_signing_boundary_negative_tests {
         let plain_keyid = hex::encode(&Sha256::digest(keyid_vk.as_bytes())[..8]);
 
         // Domain-separated hashes must differ from plain hashes
-        assert!(!constant_time::ct_eq_bytes(artifact_hash.as_bytes(), plain_hash.as_bytes()));
-        assert!(!constant_time::ct_eq_bytes(keyid_hash.as_bytes(), plain_keyid.as_bytes()));
+        assert!(!constant_time::ct_eq_bytes(
+            artifact_hash.as_bytes(),
+            plain_hash.as_bytes()
+        ));
+        assert!(!constant_time::ct_eq_bytes(
+            keyid_hash.as_bytes(),
+            plain_keyid.as_bytes()
+        ));
     }
 
     #[test]
@@ -1777,9 +1948,11 @@ mod artifact_signing_boundary_negative_tests {
         // Should contain length prefixes (8-byte LE lengths before variable fields)
         let old_id_bytes = record.old_key_id.0.as_bytes();
         let old_len = len_to_u64(old_id_bytes.len());
-        assert!(canonical.windows(8).any(|window| {
-            window == old_len.to_le_bytes()
-        }));
+        assert!(
+            canonical
+                .windows(8)
+                .any(|window| { window == old_len.to_le_bytes() })
+        );
     }
 
     #[test]
@@ -1874,5 +2047,4 @@ mod artifact_signing_boundary_negative_tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 2);
     }
-
 }

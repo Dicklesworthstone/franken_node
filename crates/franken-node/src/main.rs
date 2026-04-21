@@ -16071,7 +16071,8 @@ fn load_release_verification_context(
     }
     let manifest_raw = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("failed reading {}", manifest_path.display()))?;
-    let parsed_entries = ChecksumManifest::parse_canonical(&manifest_raw);
+    let parsed_entries = ChecksumManifest::parse_canonical(&manifest_raw)
+        .with_context(|| format!("manifest {} is not canonical", manifest_path.display()))?;
     if parsed_entries.is_empty() {
         anyhow::bail!("manifest {} contains no entries", manifest_path.display());
     }
@@ -16117,11 +16118,19 @@ fn load_release_verification_context(
         signature: manifest_signature,
     };
     let canonical_manifest = manifest.canonical_bytes();
+    if !security::constant_time::ct_eq_bytes(&canonical_manifest, manifest_raw.as_bytes()) {
+        anyhow::bail!(
+            "manifest {} contains unsigned or non-canonical lines",
+            manifest_path.display()
+        );
+    }
+    let canonical_manifest_payload =
+        ChecksumManifest::signature_payload_from_canonical(&canonical_manifest);
     if let Some(matched_key_id) = key_ids
         .iter()
         .find(|key_id| {
             key_ring.get_key(key_id).is_some_and(|key| {
-                verify_signature(key, &canonical_manifest, &manifest.signature).is_ok()
+                verify_signature(key, &canonical_manifest_payload, &manifest.signature).is_ok()
             })
         })
         .cloned()
