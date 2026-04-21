@@ -523,8 +523,9 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
                             id: String::new(),
                             path: Some(relative_path.clone()),
                             action: MigrationRewriteAction::PinNodeEngine,
-                            detail: "set engines.node to >=20 <23 to reduce migration runtime drift"
-                                .to_string(),
+                            detail:
+                                "set engines.node to >=20 <23 to reduce migration runtime drift"
+                                    .to_string(),
                             applied: apply,
                         },
                         MAX_TOTAL_FINDINGS,
@@ -1872,7 +1873,8 @@ fn build_module_graph_entry(
     script_rewrite: &PackageScriptRewrite,
 ) -> Option<MigrationRewriteEntry> {
     let manifest_dir = manifest_path.parent().unwrap_or(project_path);
-    let entry_path = resolve_script_entry_path(project_path, manifest_dir, &script_rewrite.entry_path)?;
+    let entry_path =
+        resolve_script_entry_path(project_path, manifest_dir, &script_rewrite.entry_path)?;
     let graph_files = collect_module_graph_files(project_path, &entry_path);
     if graph_files.is_empty() {
         return None;
@@ -2554,7 +2556,7 @@ mod tests {
           "name":"demo",
           "version":"1.0.0",
           "engines":{"node":"22.x"},
-          "scripts":{"test":"node test.js"}
+          "scripts":{"test":"franken-node test.js"}
         }"#;
 
         write_project_file(project, "package.json", original);
@@ -2682,6 +2684,106 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some(">=20 <23")
         );
+        assert_eq!(
+            parsed
+                .get("scripts")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|scripts| scripts.get("test"))
+                .and_then(serde_json::Value::as_str),
+            Some("franken-node test.js")
+        );
+    }
+
+    #[test]
+    fn run_rewrite_rewrites_node_and_bun_package_scripts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = temp.path();
+
+        write_project_file(project, "src/index.js", "import './dep.mjs';\n");
+        write_project_file(project, "src/dep.mjs", "export const dep = 1;\n");
+        write_project_file(project, "tools/build.mjs", "console.log('build');\n");
+        write_project_file(
+            project,
+            "package.json",
+            r#"{
+              "name":"demo",
+              "version":"1.0.0",
+              "engines":{"node":">=20 <23"},
+              "scripts":{
+                "start":"node src/index.js --watch",
+                "build":"bun tools/build.mjs",
+                "already":"franken-node src/index.js",
+                "lint":"eslint ."
+              }
+            }"#,
+        );
+
+        let report = run_rewrite(project, true).expect("package script rewrite");
+        let rewritten =
+            std::fs::read_to_string(project.join("package.json")).expect("read package");
+        let parsed: serde_json::Value = serde_json::from_str(&rewritten).expect("valid manifest");
+
+        assert_eq!(report.rewrites_planned, 1);
+        assert_eq!(report.rewrites_applied, 1);
+        assert_eq!(report.rollback_entries.len(), 1);
+        assert_eq!(
+            parsed["scripts"]["start"],
+            "franken-node src/index.js --watch"
+        );
+        assert_eq!(parsed["scripts"]["build"], "franken-node tools/build.mjs");
+        assert_eq!(parsed["scripts"]["already"], "franken-node src/index.js");
+        assert_eq!(parsed["scripts"]["lint"], "eslint .");
+        assert_eq!(
+            report
+                .entries
+                .iter()
+                .filter(|entry| entry.action == MigrationRewriteAction::RewritePackageScript)
+                .count(),
+            2
+        );
+        assert!(report.entries.iter().any(|entry| {
+            entry.action == MigrationRewriteAction::ModuleGraphDiscovery
+                && entry.detail.contains("script `already`")
+                && entry.detail.contains("src/dep.mjs")
+        }));
+    }
+
+    #[test]
+    fn run_rewrite_discovers_transitive_js_mjs_module_graph() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = temp.path();
+
+        write_project_file(
+            project,
+            "src/index.js",
+            "import util from './util.js';\nconst nested = require('./nested');\nconsole.log(util, nested);\n",
+        );
+        write_project_file(project, "src/util.js", "export default 42;\n");
+        write_project_file(project, "src/nested.mjs", "export const nested = true;\n");
+        write_project_file(
+            project,
+            "package.json",
+            r#"{
+              "name":"demo",
+              "version":"1.0.0",
+              "engines":{"node":">=20 <23"},
+              "scripts":{"start":"franken-node src/index.js"}
+            }"#,
+        );
+
+        let report = run_rewrite(project, false).expect("module graph discovery");
+
+        assert_eq!(report.rewrites_planned, 0);
+        assert_eq!(report.rewrites_applied, 0);
+        assert!(report.rollback_entries.is_empty());
+        let graph_entry = report
+            .entries
+            .iter()
+            .find(|entry| entry.action == MigrationRewriteAction::ModuleGraphDiscovery)
+            .expect("module graph entry");
+        assert!(graph_entry.detail.contains("src/index.js"));
+        assert!(graph_entry.detail.contains("src/util.js"));
+        assert!(graph_entry.detail.contains("src/nested.mjs"));
     }
 
     #[test]
