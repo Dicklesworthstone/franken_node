@@ -1035,9 +1035,16 @@ fn fleet_agent_runs_poll_cycles_and_exits_on_max_cycles() {
 
 #[test]
 fn fleet_agent_processes_quarantine_actions_and_updates_heartbeat() {
-    let fleet_state = tempdir().expect("tempdir");
-    let fleet_state_dir = fleet_state.path().join("fleet-state");
+    let project = tempdir().expect("tempdir");
+    let fleet_state_dir = project.path().join("fleet-state");
     let mut transport = seed_transport(&fleet_state_dir);
+    std::fs::write(
+        project.path().join("franken_node.toml"),
+        "profile = \"balanced\"\n",
+    )
+    .expect("write config");
+    std::fs::create_dir_all(project.path().join(".franken-node/state")).expect("state dir");
+    write_fixture_registry_to(project.path());
     let now = Utc::now();
 
     transport
@@ -1047,15 +1054,16 @@ fn fleet_agent_processes_quarantine_actions_and_updates_heartbeat() {
             action: FleetAction::Quarantine {
                 zone_id: "zone-agent".to_string(),
                 incident_id: "inc-agent-1".to_string(),
-                target_id: "sha256:agent-test".to_string(),
-                target_kind: FleetTargetKind::Artifact,
+                target_id: "npm:@acme/auth-guard".to_string(),
+                target_kind: FleetTargetKind::Extension,
                 reason: "agent test quarantine".to_string(),
                 quarantine_version: 10,
             },
         })
         .expect("publish quarantine");
 
-    let output = run_cli_with_fleet_state(
+    let output = run_cli_in_dir_with_fleet_state(
+        project.path(),
         &[
             "fleet",
             "agent",

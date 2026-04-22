@@ -8,11 +8,30 @@ expression: "canonicalize_fleet_reconcile_snapshot(payload, &fleet_state_dir)"
     "action_type": "reconcile",
     "success": true,
     "receipt": {
+      "operation_id": "[operation-id]",
       "receipt_id": "[receipt-id]",
       "issuer": "cli-fleet-operator",
       "issued_at": "[issued_at]",
       "zone_id": "all",
-      "payload_hash": "[payload-hash]"
+      "payload_hash": "[payload-hash]",
+      "decision_payload": {
+        "action_type": "reconcile",
+        "scope": {
+          "zone_id": "all"
+        },
+        "reason": "fleet reconcile",
+        "event_code": "FLEET-005"
+      },
+      "signature": {
+        "algorithm": "ed25519",
+        "public_key_hex": "43046bfe4092b3e94994eada15dcc20d8aaa07b658fd3954eb8e0efb8bdca5de",
+        "key_id": "7cbd2d2384ba48a2",
+        "key_source": "env",
+        "signing_identity": "fleet-control-plane",
+        "trust_scope": "fleet_decision",
+        "signed_payload_sha256": "[signed-payload-sha256]",
+        "signature_hex": "[signature-hex]"
+      }
     },
     "convergence": null,
     "trace_id": "trace-cli-fleet-reconcile",
