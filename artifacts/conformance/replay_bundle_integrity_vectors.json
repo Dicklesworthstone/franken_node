@@ -122,7 +122,8 @@
             "causal_parent": 2
           }
         ]
-      }
+      },
+      "expected_wire_artifact": "artifacts/conformance/replay_bundle_wire/three_event_incident_with_state_and_policy.canonical.json"
     }
   ]
 }

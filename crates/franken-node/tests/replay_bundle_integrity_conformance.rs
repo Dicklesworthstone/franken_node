@@ -1,8 +1,9 @@
 use frankenengine_node::tools::replay_bundle::{
-    RawEvent, ReplayBundle, generate_replay_bundle, validate_bundle_integrity,
+    RawEvent, ReplayBundle, generate_replay_bundle, to_canonical_json, validate_bundle_integrity,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::Path;
 
 const REPLAY_BUNDLE_INTEGRITY_VECTORS_JSON: &str =
     include_str!("../../../artifacts/conformance/replay_bundle_integrity_vectors.json");
@@ -29,6 +30,8 @@ struct ReplayBundleVector {
     incident_id: String,
     events: Vec<RawEvent>,
     expected: Option<ExpectedReplayBundle>,
+    #[serde(default)]
+    expected_wire_artifact: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +128,29 @@ fn generated_bundle(vector: &ReplayBundleVector) -> Result<ReplayBundle, String>
         .map_err(|err| format!("{} must generate replay bundle: {err}", vector.name))
 }
 
+fn workspace_artifact(path: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(path)
+}
+
+fn load_expected_wire_json(vector: &ReplayBundleVector) -> Result<String, String> {
+    let artifact = vector
+        .expected_wire_artifact
+        .as_ref()
+        .ok_or_else(|| format!("{} must declare expected_wire_artifact", vector.name))?;
+    let path = workspace_artifact(artifact);
+    std::fs::read_to_string(&path)
+        .map(|contents| contents.trim_end_matches('\n').to_string())
+        .map_err(|err| {
+            format!(
+                "{} expected wire artifact {} must be readable: {err}",
+                vector.name,
+                path.display()
+            )
+        })
+}
+
 fn assert_fail_closed(result: Result<bool, impl std::fmt::Display>, context: &str) -> TestResult {
     match result {
         Ok(false) | Err(_) => Ok(()),
@@ -156,6 +182,56 @@ fn replay_bundle_integrity_vectors_cover_required_contract() -> TestResult {
                 .any(|row| row.spec_section == required && row.level == "MUST" && row.tested),
             "{required} must be covered by the conformance matrix"
         );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn replay_bundle_canonical_wire_format_matches_artifact() -> TestResult {
+    let vectors = conformance_vectors()?;
+    let mut generated = Vec::new();
+    let print_generated = std::env::var_os("REPLAY_BUNDLE_WIRE_CONFORMANCE_PRINT").is_some();
+
+    for vector in &vectors.vectors {
+        let bundle = generated_bundle(vector)?;
+        let actual = to_canonical_json(&bundle)
+            .map_err(|err| format!("{} canonical wire json failed: {err}", vector.name))?;
+
+        if print_generated {
+            generated.push(serde_json::json!({
+                "name": vector.name,
+                "expected_wire_json": actual,
+            }));
+            continue;
+        }
+
+        let expected = load_expected_wire_json(vector)?;
+        assert_eq!(
+            actual, expected,
+            "{} canonical replay bundle wire format drifted from checked-in artifact",
+            vector.name
+        );
+
+        let parsed: ReplayBundle = serde_json::from_str(&actual)
+            .map_err(|err| format!("{} canonical wire json must parse: {err}", vector.name))?;
+        let reparsed = to_canonical_json(&parsed).map_err(|err| {
+            format!(
+                "{} canonical wire json must be stable after parse: {err}",
+                vector.name
+            )
+        })?;
+        assert_eq!(
+            reparsed, actual,
+            "{} canonical wire json must round-trip byte-for-byte",
+            vector.name
+        );
+    }
+
+    if print_generated {
+        let rendered = serde_json::to_string_pretty(&generated)
+            .map_err(|err| format!("generated wire vector json must serialize: {err}"))?;
+        println!("REPLAY_BUNDLE_WIRE_CONFORMANCE_GENERATED={rendered}");
     }
 
     Ok(())
