@@ -38,9 +38,10 @@ fn arbitrary_raw_event(rng: &mut impl Rng, sequence_base: u64) -> RawEvent {
             })
         },
         EventType::PolicyEval => {
+            let decisions = ["allow", "deny", "defer"];
             json!({
                 "policy_id": format!("policy_{}", Alphanumeric.sample_string(rng, 8)),
-                "decision": ["allow", "deny", "defer"][rng.gen_range(0..3)],
+                "decision": decisions[rng.gen_range(0..3)],
                 "confidence": rng.gen_range(0.0..1.0)
             })
         },
