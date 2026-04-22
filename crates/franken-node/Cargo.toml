@@ -250,3 +250,7 @@ path = "tests/canonical_serializer_metamorphic.rs"
 [[test]]
 name = "control_epoch_metamorphic"
 path = "tests/control_epoch_metamorphic.rs"
+
+[[test]]
+name = "replay_window_metamorphic"
+path = "tests/replay_window_metamorphic.rs"
