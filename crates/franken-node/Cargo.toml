@@ -10,6 +10,11 @@ name = "franken-node"
 path = "src/main.rs"
 test = false
 
+[[bin]]
+name = "test-engine"
+path = "src/bin/test_engine.rs"
+test = false
+
 [lib]
 path = "src/lib.rs"
 test = false
@@ -207,3 +212,7 @@ required-features = ["test-support"]
 name = "cli_error_goldens"
 path = "tests/cli_error_goldens.rs"
 required-features = ["test-support"]
+
+[[test]]
+name = "vef_receipt_schema_conformance"
+path = "tests/vef_receipt_schema_conformance.rs"
