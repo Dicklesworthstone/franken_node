@@ -4,7 +4,7 @@ use frankenengine_node::security::epoch_scoped_keys::{
 };
 
 #[test]
-fn epoch_domain_shift_preserves_determinism_and_cross_pair_rejection() {
+fn epoch_domain_shift_preserves_determinism_and_cross_pair_rejection() -> Result<(), String> {
     let root = RootSecret::from_bytes([0x42; 32]);
     let payloads: [&[u8]; 3] = [
         b"runtime-manifest".as_slice(),
@@ -22,61 +22,72 @@ fn epoch_domain_shift_preserves_determinism_and_cross_pair_rejection() {
             let base_key = derive_epoch_key(&root, base_epoch, domain);
             let shifted_key = derive_epoch_key(&root, shifted_epoch, &shifted_domain);
             let repeated_base_key = derive_epoch_key(&root, base_epoch, domain);
-            assert_eq!(
-                base_key, repeated_base_key,
-                "same root/epoch/domain must deterministically derive the same key material"
-            );
-            assert_ne!(
-                base_key, shifted_key,
-                "metamorphic epoch/domain shift must change derived key material"
-            );
+            if base_key != repeated_base_key {
+                return Err(
+                    "same root/epoch/domain must deterministically derive the same key material"
+                        .to_string(),
+                );
+            }
+            if base_key == shifted_key {
+                return Err(
+                    "metamorphic epoch/domain shift must change derived key material".to_string(),
+                );
+            }
 
             for payload in payloads {
                 let base_signature = sign_epoch_artifact(payload, base_epoch, domain, &root)
-                    .unwrap_or_else(|err| {
-                        panic!("base signature should be generated for {domain}: {err}")
-                    });
+                    .map_err(|err| {
+                        format!("base signature should be generated for {domain}: {err}")
+                    })?;
                 let shifted_signature =
-                    sign_epoch_artifact(payload, shifted_epoch, &shifted_domain, &root)
-                        .unwrap_or_else(|err| {
-                            panic!(
+                    sign_epoch_artifact(payload, shifted_epoch, &shifted_domain, &root).map_err(
+                        |err| {
+                            format!(
                                 "shifted signature should be generated for {shifted_domain}: {err}"
                             )
-                        });
+                        },
+                    )?;
 
-                assert!(
-                    verify_epoch_signature(payload, &base_signature, base_epoch, domain, &root)
-                        .is_ok(),
-                    "base signature should verify for its own epoch/domain"
-                );
-                assert!(
-                    verify_epoch_signature(
-                        payload,
-                        &shifted_signature,
-                        shifted_epoch,
-                        &shifted_domain,
-                        &root,
-                    )
-                    .is_ok(),
-                    "shifted signature should verify for its own epoch/domain"
-                );
-                assert!(
-                    verify_epoch_signature(
-                        payload,
-                        &base_signature,
-                        shifted_epoch,
-                        &shifted_domain,
-                        &root,
-                    )
-                    .is_err(),
-                    "base signature must not verify under shifted epoch/domain"
-                );
-                assert!(
-                    verify_epoch_signature(payload, &shifted_signature, base_epoch, domain, &root)
-                        .is_err(),
-                    "shifted signature must not verify under base epoch/domain"
-                );
+                if verify_epoch_signature(payload, &base_signature, base_epoch, domain, &root)
+                    .is_err()
+                {
+                    return Err("base signature should verify for its own epoch/domain".to_string());
+                }
+                if verify_epoch_signature(
+                    payload,
+                    &shifted_signature,
+                    shifted_epoch,
+                    &shifted_domain,
+                    &root,
+                )
+                .is_err()
+                {
+                    return Err(
+                        "shifted signature should verify for its own epoch/domain".to_string()
+                    );
+                }
+                if verify_epoch_signature(
+                    payload,
+                    &base_signature,
+                    shifted_epoch,
+                    &shifted_domain,
+                    &root,
+                )
+                .is_ok()
+                {
+                    return Err(
+                        "base signature must not verify under shifted epoch/domain".to_string()
+                    );
+                }
+                if verify_epoch_signature(payload, &shifted_signature, base_epoch, domain, &root)
+                    .is_ok()
+                {
+                    return Err(
+                        "shifted signature must not verify under base epoch/domain".to_string()
+                    );
+                }
             }
         }
     }
+    Ok(())
 }
