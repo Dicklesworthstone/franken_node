@@ -53,8 +53,15 @@ fn engine_dispatcher_reaps_descendant_pipe_holders() {}
 
 #[cfg(all(unix, feature = "test-support"))]
 #[test]
-fn engine_dispatcher_no_external_commands_rejects_non_executable_path_entry() {
-    frankenengine_node::ops::engine_dispatcher::assert_no_external_command_lookup_rejects_non_executable_path_entry_for_tests();
+fn non_executable_path_runtime_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    use frankenengine_node::ops::engine_dispatcher::non_executable_path_lookup_rejected_for_tests;
+
+    let rejected = non_executable_path_lookup_rejected_for_tests()?;
+    assert!(
+        rejected,
+        "no-external-commands PATH fallback must not resolve non-executable runtime files"
+    );
+    Ok(())
 }
 
 #[cfg(feature = "test-support")]

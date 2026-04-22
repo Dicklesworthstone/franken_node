@@ -410,24 +410,19 @@ pub(crate) fn resolve_engine_binary_path(configured_hint: &str) -> String {
 }
 
 #[cfg(all(unix, feature = "test-support"))]
-pub fn assert_no_external_command_lookup_rejects_non_executable_path_entry_for_tests() {
-    let temp_dir = tempfile::TempDir::new().expect("tempdir");
+pub fn non_executable_path_lookup_rejected_for_tests() -> std::io::Result<bool> {
+    let temp_dir = tempfile::TempDir::new()?;
     let fake_runtime = temp_dir.path().join("node");
-    std::fs::write(&fake_runtime, "#!/bin/sh\n").expect("write fake runtime");
+    std::fs::write(&fake_runtime, "#!/bin/sh\n")?;
 
     use std::os::unix::fs::PermissionsExt;
-    let mut permissions = std::fs::metadata(&fake_runtime)
-        .expect("fake runtime metadata")
-        .permissions();
+    let mut permissions = std::fs::metadata(&fake_runtime)?.permissions();
     permissions.set_mode(0o600);
-    std::fs::set_permissions(&fake_runtime, permissions).expect("remove executable bit");
+    std::fs::set_permissions(&fake_runtime, permissions)?;
 
     let path_env = Some(temp_dir.path().as_os_str().to_os_string());
     let resolved = search_in_path("node", path_env.as_ref(), temp_dir.path());
-    assert!(
-        resolved.is_none(),
-        "no-external-commands PATH fallback must not resolve non-executable runtime files"
-    );
+    Ok(resolved.is_none())
 }
 
 fn project_root_for_path(app_path: &Path) -> &Path {
