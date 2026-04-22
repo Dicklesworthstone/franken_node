@@ -46,7 +46,13 @@ use crate::capacity_defaults::aliases::{
     MAX_AUDIT_LOG_ENTRIES, MAX_DIVERGENCES, MAX_REGISTERED_TRACES, MAX_TRACE_STEPS,
 };
 
+const MAX_SIDE_EFFECTS_PER_STEP: usize = crate::capacity_defaults::base::TRACE;
+
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
         let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
@@ -392,9 +398,10 @@ impl TraceStep {
         seq: u64,
         input: Vec<u8>,
         output: Vec<u8>,
-        side_effects: Vec<SideEffect>,
+        mut side_effects: Vec<SideEffect>,
         timestamp_ns: u64,
     ) -> Self {
+        side_effects.truncate(MAX_SIDE_EFFECTS_PER_STEP);
         Self {
             seq,
             input,
@@ -1222,6 +1229,26 @@ mod tests {
         let s1 = TraceStep::new(0, vec![], vec![], vec![SideEffect::new("a", vec![1])], 0);
         let s2 = TraceStep::new(0, vec![], vec![], vec![SideEffect::new("a", vec![2])], 0);
         assert_ne!(s1.side_effects_digest(), s2.side_effects_digest());
+    }
+
+    #[test]
+    fn trace_step_bounds_side_effects() {
+        let side_effects = (0..MAX_SIDE_EFFECTS_PER_STEP.saturating_add(32))
+            .map(|idx| SideEffect::new("effect", idx.to_le_bytes().to_vec()))
+            .collect();
+
+        let step = TraceStep::new(0, vec![], vec![], side_effects, 0);
+
+        assert_eq!(step.side_effects.len(), MAX_SIDE_EFFECTS_PER_STEP);
+    }
+
+    #[test]
+    fn replay_push_bounded_zero_capacity_clears_without_panic() {
+        let mut values = vec![1_u8, 2, 3];
+
+        push_bounded(&mut values, 4, 0);
+
+        assert!(values.is_empty());
     }
 
     // --- WorkflowTrace validation ---
