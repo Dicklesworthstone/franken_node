@@ -32,35 +32,48 @@ fn arbitrary_raw_event(rng: &mut impl Rng, sequence_base: u64) -> RawEvent {
 
     // Generate realistic but random payload based on event type
     let payload = match event_type {
-        "network_access" => json!({
-            "url": format!("https://api.example.com/v{}", rng.gen_range(1..5)),
-            "method": ["GET", "POST", "PUT"][rng.gen_range(0..3)],
-            "status_code": rng.gen_range(200..599)
-        }),
-        "filesystem_operation" => json!({
-            "path": format!("/tmp/test_{}.dat", rng.gen_range(1000..9999)),
-            "operation": ["read", "write", "delete"][rng.gen_range(0..3)],
-            "size_bytes": rng.gen_range(0..1_000_000)
-        }),
+        "network_access" => {
+            let methods = ["GET", "POST", "PUT"];
+            json!({
+                "url": format!("https://api.example.com/v{}", rng.gen_range(1..5)),
+                "method": methods[rng.gen_range(0..3)],
+                "status_code": rng.gen_range(200..599)
+            })
+        },
+        "filesystem_operation" => {
+            let operations = ["read", "write", "delete"];
+            json!({
+                "path": format!("/tmp/test_{}.dat", rng.gen_range(1000..9999)),
+                "operation": operations[rng.gen_range(0..3)],
+                "size_bytes": rng.gen_range(0..1_000_000)
+            })
+        },
         "process_spawn" => json!({
             "command": format!("test-process-{}", rng.gen_range(1..100)),
             "args": vec![format!("--flag-{}", rng.gen_range(1..10))],
             "exit_code": rng.gen_range(0..128)
         }),
-        "secret_access" => json!({
-            "secret_id": format!("secret_{}", Alphanumeric.sample_string(rng, 16)),
-            "operation": ["read", "rotate"][rng.gen_range(0..2)]
-        }),
+        "secret_access" => {
+            let operations = ["read", "rotate"];
+            json!({
+                "secret_id": format!("secret_{}", Alphanumeric.sample_string(rng, 16)),
+                "operation": operations[rng.gen_range(0..2)]
+            })
+        },
         "policy_transition" => json!({
             "from_policy": format!("policy_v{}", rng.gen_range(1..10)),
             "to_policy": format!("policy_v{}", rng.gen_range(1..10)),
             "reason": "automated_transition"
         }),
-        "artifact_promotion" => json!({
-            "artifact_id": format!("artifact_{}", Alphanumeric.sample_string(rng, 32)),
-            "from_stage": ["dev", "staging"][rng.gen_range(0..2)],
-            "to_stage": ["staging", "production"][rng.gen_range(0..2)]
-        }),
+        "artifact_promotion" => {
+            let from_stages = ["dev", "staging"];
+            let to_stages = ["staging", "production"];
+            json!({
+                "artifact_id": format!("artifact_{}", Alphanumeric.sample_string(rng, 32)),
+                "from_stage": from_stages[rng.gen_range(0..2)],
+                "to_stage": to_stages[rng.gen_range(0..2)]
+            })
+        },
         _ => json!({"unknown": true})
     };
 
@@ -239,7 +252,7 @@ fn metamorphic_replay_bundle_stress_test() {
             payload: json!({
                 "stress_data": "x".repeat(rng.gen_range(10..1000)),
                 "index": i,
-                "random": rng.gen::<u64>()
+                "random": rng.next_u64()
             }),
             causal_parent: if i > 0 && rng.gen_bool(0.5) {
                 Some(rng.gen_range(0..i) as u64)
