@@ -210,6 +210,134 @@ pub struct MigrationRollbackPlan {
     pub entries: Vec<MigrationRollbackEntry>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationRollbackValidationPolicy {
+    pub max_entries: usize,
+    pub max_content_bytes_per_entry: usize,
+    pub allow_absolute_paths: bool,
+}
+
+impl Default for MigrationRollbackValidationPolicy {
+    fn default() -> Self {
+        Self {
+            max_entries: MAX_TOTAL_FINDINGS,
+            max_content_bytes_per_entry: 1024 * 1024,
+            allow_absolute_paths: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+pub enum MigrationRollbackValidationError {
+    #[error("unsupported migration rollback schema version `{found}`")]
+    UnsupportedSchemaVersion { found: String },
+    #[error("migration rollback entry_count mismatch: declared={declared} actual={actual}")]
+    EntryCountMismatch { declared: usize, actual: usize },
+    #[error("migration rollback entry count {actual} exceeds policy limit {max}")]
+    TooManyEntries { actual: usize, max: usize },
+    #[error("migration rollback entry {index} has an empty path")]
+    EmptyPath { index: usize },
+    #[error("migration rollback entry {index} uses an absolute path: {path}")]
+    AbsolutePath { index: usize, path: String },
+    #[error("migration rollback entry {index} contains parent traversal: {path}")]
+    ParentTraversal { index: usize, path: String },
+    #[error(
+        "migration rollback entry {index} content bytes {content_bytes} exceed policy limit {max}"
+    )]
+    EntryContentTooLarge {
+        index: usize,
+        content_bytes: usize,
+        max: usize,
+    },
+}
+
+#[must_use]
+pub fn default_rollback_validation_policy() -> MigrationRollbackValidationPolicy {
+    MigrationRollbackValidationPolicy::default()
+}
+
+pub fn validate_rollback_plan(
+    plan: &MigrationRollbackPlan,
+    policy: &MigrationRollbackValidationPolicy,
+) -> Result<(), MigrationRollbackValidationError> {
+    if plan.schema_version != "1.0.0" {
+        return Err(MigrationRollbackValidationError::UnsupportedSchemaVersion {
+            found: plan.schema_version.clone(),
+        });
+    }
+
+    if plan.entry_count != plan.entries.len() {
+        return Err(MigrationRollbackValidationError::EntryCountMismatch {
+            declared: plan.entry_count,
+            actual: plan.entries.len(),
+        });
+    }
+
+    if plan.entries.len() > policy.max_entries {
+        return Err(MigrationRollbackValidationError::TooManyEntries {
+            actual: plan.entries.len(),
+            max: policy.max_entries,
+        });
+    }
+
+    for (index, entry) in plan.entries.iter().enumerate() {
+        validate_rollback_entry(index, entry, policy)?;
+    }
+
+    Ok(())
+}
+
+fn validate_rollback_entry(
+    index: usize,
+    entry: &MigrationRollbackEntry,
+    policy: &MigrationRollbackValidationPolicy,
+) -> Result<(), MigrationRollbackValidationError> {
+    if entry.path.trim().is_empty() {
+        return Err(MigrationRollbackValidationError::EmptyPath { index });
+    }
+
+    if !policy.allow_absolute_paths && rollback_path_is_absolute(&entry.path) {
+        return Err(MigrationRollbackValidationError::AbsolutePath {
+            index,
+            path: entry.path.clone(),
+        });
+    }
+
+    if rollback_path_has_parent_traversal(&entry.path) {
+        return Err(MigrationRollbackValidationError::ParentTraversal {
+            index,
+            path: entry.path.clone(),
+        });
+    }
+
+    let content_bytes = entry
+        .original_content
+        .len()
+        .saturating_add(entry.rewritten_content.len());
+    if content_bytes > policy.max_content_bytes_per_entry {
+        return Err(MigrationRollbackValidationError::EntryContentTooLarge {
+            index,
+            content_bytes,
+            max: policy.max_content_bytes_per_entry,
+        });
+    }
+
+    Ok(())
+}
+
+fn rollback_path_is_absolute(path: &str) -> bool {
+    Path::new(path).is_absolute()
+        || path.starts_with('\\')
+        || path
+            .as_bytes()
+            .get(1)
+            .is_some_and(|separator| *separator == b':')
+}
+
+fn rollback_path_has_parent_traversal(path: &str) -> bool {
+    path.split(['/', '\\']).any(|segment| segment == "..")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MigrationValidateStatus {
