@@ -255,8 +255,8 @@ fn compute_report_content_hash(report: &TransparentReport) -> Result<String, ser
     };
     let payload = serde_json::to_vec(&view)?;
     let mut hasher = Sha256::new();
-    hasher.update(b"transparent_reports_hash_v1:");
-    hasher.update(&payload);
+    hasher.update(b"transparent_reports_report_content_hash_v1:");
+    update_hash_len_prefixed(&mut hasher, &payload);
     Ok(hex::encode(hasher.finalize()))
 }
 
@@ -268,24 +268,27 @@ fn compute_catalog_content_hash(
     open_actions: usize,
 ) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"transparent_reports_hash_v1:");
-    hasher.update((report_version.len() as u64).to_le_bytes());
-    hasher.update(report_version.as_bytes());
+    hasher.update(b"transparent_reports_catalog_hash_v1:");
+    update_hash_len_prefixed(&mut hasher, report_version.as_bytes());
     hasher.update((total_reports as u64).to_le_bytes());
     hasher.update((open_actions as u64).to_le_bytes());
     hasher.update((by_category.len() as u64).to_le_bytes());
     for (category, count) in by_category {
-        hasher.update((category.len() as u64).to_le_bytes());
-        hasher.update(category.as_bytes());
+        update_hash_len_prefixed(&mut hasher, category.as_bytes());
         hasher.update((*count as u64).to_le_bytes());
     }
     hasher.update((by_severity.len() as u64).to_le_bytes());
     for (severity, count) in by_severity {
-        hasher.update((severity.len() as u64).to_le_bytes());
-        hasher.update(severity.as_bytes());
+        update_hash_len_prefixed(&mut hasher, severity.as_bytes());
         hasher.update((*count as u64).to_le_bytes());
     }
     hex::encode(hasher.finalize())
+}
+
+fn update_hash_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+    let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    hasher.update(len.to_le_bytes());
+    hasher.update(bytes);
 }
 
 // ---------------------------------------------------------------------------
@@ -688,6 +691,13 @@ impl TransparentReports {
 mod tests {
     use super::*;
 
+    fn legacy_unframed_transparent_hash(domain: &[u8], payload: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(domain);
+        hasher.update(payload);
+        hex::encode(hasher.finalize())
+    }
+
     fn trace() -> String {
         Uuid::now_v7().to_string()
     }
@@ -1017,6 +1027,31 @@ mod tests {
             compute_report_content_hash(&base).unwrap(),
             compute_report_content_hash(&changed).unwrap()
         );
+    }
+
+    #[test]
+    fn report_hash_uses_length_prefixed_payload() {
+        let mut report = sample_report("r-framed", ReportCategory::SecurityIncident);
+        report.report_version = REPORT_VERSION.to_string();
+        report.created_at = "2026-02-01T10:00:00Z".to_string();
+
+        let view = ReportContentHashView {
+            report_id: &report.report_id,
+            title: &report.title,
+            category: report.category.label(),
+            severity: report.severity.label(),
+            sections: &report.sections,
+            timeline: &report.timeline,
+            root_causes: &report.root_causes,
+            corrective_actions: &report.corrective_actions,
+            lessons_learned: &report.lessons_learned,
+            report_version: &report.report_version,
+            created_at: &report.created_at,
+        };
+        let payload = serde_json::to_vec(&view).expect("report hash view must serialize");
+        let legacy = legacy_unframed_transparent_hash(b"transparent_reports_hash_v1:", &payload);
+
+        assert_ne!(compute_report_content_hash(&report).unwrap(), legacy);
     }
 
     #[test]
