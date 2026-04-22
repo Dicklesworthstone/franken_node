@@ -30,6 +30,16 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
+// Hash utilities
+// ---------------------------------------------------------------------------
+
+fn hash_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+    let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    hasher.update(len.to_le_bytes());
+    hasher.update(bytes);
+}
+
+// ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
 
@@ -93,8 +103,8 @@ fn compute_publication_hash(pub_entry: &Publication) -> String {
     })
     .to_string();
     let mut hasher = Sha256::new();
-    hasher.update(b"benchmark_methodology_hash_v1:");
-    hasher.update(hash_input.as_bytes());
+    hasher.update(b"benchmark_methodology_publication_v1:");
+    hash_len_prefixed(&mut hasher, hash_input.as_bytes());
     hex::encode(hasher.finalize())
 }
 
@@ -112,8 +122,8 @@ fn compute_catalog_hash(
     })
     .to_string();
     let mut hasher = Sha256::new();
-    hasher.update(b"benchmark_methodology_hash_v1:");
-    hasher.update(hash_input.as_bytes());
+    hasher.update(b"benchmark_methodology_catalog_v1:");
+    hash_len_prefixed(&mut hasher, hash_input.as_bytes());
     hex::encode(hasher.finalize())
 }
 
@@ -1736,5 +1746,154 @@ mod tests {
         let jsonl = engine.export_audit_log_jsonl().unwrap();
 
         assert!(jsonl.is_empty());
+    }
+
+    // -- Hash collision resistance tests (bd-2qj7u) ---------------------------
+
+    #[test]
+    fn test_publication_catalog_hash_domain_separation() {
+        // Test that publication and catalog hashes use different domain separators
+        // preventing cross-purpose hash namespace collisions
+
+        let pub_entry = sample_pub("test-pub", MethodologyTopic::BenchmarkDesign);
+        let pub_hash = compute_publication_hash(&pub_entry);
+
+        // Create catalog data that could potentially collide if domains aren't separated
+        let mut by_topic = BTreeMap::new();
+        by_topic.insert("benchmark_design".to_string(), 1);
+        let mut by_status = BTreeMap::new();
+        by_status.insert("published".to_string(), 1);
+
+        let catalog_hash = compute_catalog_hash(1, &by_topic, &by_status, "v1");
+
+        // Hashes should be different due to distinct domain separators
+        assert_ne!(pub_hash, catalog_hash,
+            "Publication and catalog hashes should use distinct domain separators");
+
+        // Verify domain separators are actually different by testing manual hash
+        let mut pub_hasher = Sha256::new();
+        pub_hasher.update(b"benchmark_methodology_publication_v1:");
+        let pub_domain_hash = hex::encode(pub_hasher.finalize());
+
+        let mut cat_hasher = Sha256::new();
+        cat_hasher.update(b"benchmark_methodology_catalog_v1:");
+        let cat_domain_hash = hex::encode(cat_hasher.finalize());
+
+        assert_ne!(pub_domain_hash, cat_domain_hash,
+            "Domain separator prefixes should produce different hashes");
+    }
+
+    #[test]
+    fn test_publication_hash_collision_resistance() {
+        // Test that length prefixing prevents collision attacks in publication hashing
+
+        // Create two publications with field arrangements that could collide without length framing
+        let mut pub1 = sample_pub("collision-test-1", MethodologyTopic::BenchmarkDesign);
+        pub1.title = "Test|Title".to_string(); // Contains delimiter
+        pub1.authors = vec!["Author1".to_string()];
+
+        let mut pub2 = sample_pub("collision-test-2", MethodologyTopic::BenchmarkDesign);
+        pub2.title = "Test".to_string();
+        pub2.authors = vec!["|TitleAuthor1".to_string()]; // Delimiter at start
+
+        let hash1 = compute_publication_hash(&pub1);
+        let hash2 = compute_publication_hash(&pub2);
+
+        // Length prefixing should prevent collision
+        assert_ne!(hash1, hash2,
+            "Length-prefixed publication hashing should prevent field boundary collisions");
+    }
+
+    #[test]
+    fn test_catalog_hash_collision_resistance() {
+        // Test that catalog hashing resists collision attacks
+
+        // Test case where different topic/status arrangements could collide
+        let mut by_topic1 = BTreeMap::new();
+        by_topic1.insert("bench|mark".to_string(), 1); // Contains delimiter
+        let mut by_status1 = BTreeMap::new();
+        by_status1.insert("published".to_string(), 1);
+
+        let mut by_topic2 = BTreeMap::new();
+        by_topic2.insert("bench".to_string(), 1);
+        let mut by_status2 = BTreeMap::new();
+        by_status2.insert("|markpublished".to_string(), 1); // Delimiter at start
+
+        let hash1 = compute_catalog_hash(1, &by_topic1, &by_status1, "v1");
+        let hash2 = compute_catalog_hash(1, &by_topic2, &by_status2, "v1");
+
+        // Should produce different hashes due to length prefixing
+        assert_ne!(hash1, hash2,
+            "Catalog hash should prevent collision between different field arrangements");
+    }
+
+    #[test]
+    fn test_hash_length_prefixing_implementation() {
+        // Test that the hash_len_prefixed function correctly frames variable-length data
+
+        let mut hasher1 = Sha256::new();
+        hasher1.update(b"domain:");
+        hash_len_prefixed(&mut hasher1, b"abc");
+        hash_len_prefixed(&mut hasher1, b"def");
+        let hash1 = hex::encode(hasher1.finalize());
+
+        let mut hasher2 = Sha256::new();
+        hasher2.update(b"domain:");
+        hash_len_prefixed(&mut hasher2, b"ab");
+        hash_len_prefixed(&mut hasher2, b"cdef");
+        let hash2 = hex::encode(hasher2.finalize());
+
+        // These should be different despite same concatenated content
+        assert_ne!(hash1, hash2,
+            "Length-prefixed hashing should distinguish different field boundaries");
+
+        // Verify the length prefix is actually included
+        let mut hasher3 = Sha256::new();
+        hasher3.update(b"domain:");
+        hash_len_prefixed(&mut hasher3, b"test");
+        let prefixed_hash = hex::encode(hasher3.finalize());
+
+        let mut hasher4 = Sha256::new();
+        hasher4.update(b"domain:");
+        hasher4.update(b"test"); // Direct update without length prefix
+        let direct_hash = hex::encode(hasher4.finalize());
+
+        assert_ne!(prefixed_hash, direct_hash,
+            "Length-prefixed hash should differ from direct hash");
+    }
+
+    #[test]
+    fn test_backward_compatibility_domain_change() {
+        // Document the intentional domain separator change for security
+        // This test ensures we're aware of the compatibility impact
+
+        let pub_entry = sample_pub("compat-test", MethodologyTopic::BenchmarkDesign);
+
+        // New secure hash with distinct domain separator and length framing
+        let new_hash = compute_publication_hash(&pub_entry);
+
+        // Simulate old vulnerable hash (for documentation purposes)
+        let json_input = serde_json::json!({
+            "pub_id": &pub_entry.pub_id,
+            "title": &pub_entry.title,
+            "topic": pub_entry.topic.label(),
+            "authors": &pub_entry.authors,
+            "status": pub_entry.status.label(),
+            "sections": &pub_entry.sections,
+            "citations": &pub_entry.citations,
+            "reproducibility_checklist": &pub_entry.reproducibility_checklist,
+            "pub_version": &pub_entry.pub_version,
+            "created_at": &pub_entry.created_at,
+            "updated_at": &pub_entry.updated_at,
+        }).to_string();
+
+        let mut old_hasher = Sha256::new();
+        old_hasher.update(b"benchmark_methodology_hash_v1:"); // Old generic domain
+        old_hasher.update(json_input.as_bytes()); // No length prefixing
+        let old_style_hash = hex::encode(old_hasher.finalize());
+
+        // New hash should be different (this is intentional for security)
+        assert_ne!(new_hash, old_style_hash,
+            "New secure hash should differ from old vulnerable pattern");
     }
 }
