@@ -81,7 +81,7 @@ sqlmodel-core = { path = "/dp/sqlmodel_rust/crates/sqlmodel-core" }
 sqlmodel-schema = { path = "/dp/sqlmodel_rust/crates/sqlmodel-schema" }
 syn = { version = "2.0", features = ["full"] }
 tracing-subscriber = { workspace = true }
-insta = { version = "1.40", features = ["json"] }
+insta = { version = "1.40", features = ["json", "filters"] }
 arbitrary = { version = "1.3", features = ["derive"] }
 
 [[test]]
