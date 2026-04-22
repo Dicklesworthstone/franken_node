@@ -1,0 +1,35 @@
+---
+source: crates/franken-node/tests/cli_subcommand_goldens.rs
+---
+{
+  "suite_version": "1.0.0",
+  "scoring_formula_version": "sf-v1",
+  "timestamp_utc": "2026-02-21T00:00:00Z",
+  "hardware_profile": {
+    "cpu": "deterministic-golden-cpu",
+    "memory_mb": 32768,
+    "os": "linux"
+  },
+  "runtime_versions": {
+    "franken_node": "0.1.0",
+    "node": null,
+    "bun": null
+  },
+  "scenarios": [
+    {
+      "dimension": "performance_under_hardening",
+      "name": "secure-extension-heavy",
+      "raw_value": 393.582628263279,
+      "unit": "ms",
+      "confidence_interval": {
+        "lower": 385.3127899356244,
+        "upper": 401.8524665909336
+      },
+      "score": 81,
+      "iterations": 5,
+      "variance_pct": 1.6924920531402654
+    }
+  ],
+  "aggregate_score": 81,
+  "provenance_hash": "sha256:4d8177e45f25e30c31ceba969dd919277cfebe2819b938694000076b5add34cb"
+}
