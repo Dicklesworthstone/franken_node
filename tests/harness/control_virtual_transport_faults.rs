@@ -135,7 +135,7 @@ impl FaultSchedule {
 
     fn content_hash(&self) -> String {
         let json = serde_json::to_string(&self.faults).unwrap_or_default();
-        format!("{:x}", Sha256::digest(json.as_bytes()))
+        hex::encode(Sha256::digest(json.as_bytes()))
     }
 }
 

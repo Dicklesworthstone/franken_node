@@ -255,8 +255,8 @@ fn registry_publish_persists_artifact_and_search_reports_integrity() {
     let expected_hash = {
         use sha2::Digest;
         format!(
-            "sha256:{:x}",
-            sha2::Sha256::digest(fs::read(&artifact_path).expect("read stored artifact"))
+            "sha256:{}",
+            hex::encode(sha2::Sha256::digest(fs::read(&artifact_path).expect("read stored artifact")))
         )
     };
     assert_eq!(

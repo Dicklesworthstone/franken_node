@@ -68,7 +68,7 @@ fn sha256_json<T: Serialize>(value: &T) -> Result<String, ProofServiceError> {
     hasher.update(&bytes);
     let digest = hasher.finalize();
 
-    Ok(format!("sha256:{digest:x}"))
+    Ok(format!("sha256:{}", hex::encode(digest)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash)]

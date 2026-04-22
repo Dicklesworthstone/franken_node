@@ -25,7 +25,7 @@ fn hash_pair(left: &str, right: &str) -> String {
     h.update(len_to_u64(right.len()).to_le_bytes());
     h.update(right.as_bytes());
     let digest = h.finalize();
-    format!("{:x}", digest)
+    hex::encode(digest)
 }
 
 /// Compute the leaf hash for a piece of data.
@@ -35,7 +35,7 @@ pub fn leaf_hash(data: &str) -> String {
     h.update(len_to_u64(data.len()).to_le_bytes());
     h.update(data.as_bytes());
     let digest = h.finalize();
-    format!("{:x}", digest)
+    hex::encode(digest)
 }
 
 fn len_to_u64(len: usize) -> u64 {

@@ -5882,8 +5882,8 @@ fn compute_run_execution_receipt_hash(core: &RunExecutionReceiptCore) -> Result<
     let payload =
         serde_json::to_vec(core).context("failed serializing run execution receipt for hashing")?;
     Ok(format!(
-        "sha256:{:x}",
-        sha2::Sha256::digest([b"run_execution_receipt_v1:" as &[u8], payload.as_slice()].concat())
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest([b"run_execution_receipt_v1:" as &[u8], payload.as_slice()].concat()))
     ))
 }
 
@@ -5891,14 +5891,14 @@ fn compute_run_execution_receipt_seed_hash(core: &RunExecutionReceiptCore) -> Re
     let payload = serde_json::to_vec(core)
         .context("failed serializing run execution receipt identity seed for hashing")?;
     Ok(format!(
-        "sha256:{:x}",
-        sha2::Sha256::digest(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(
             [
                 b"run_execution_receipt_identity_v1:" as &[u8],
                 payload.as_slice()
             ]
             .concat()
-        )
+        ))
     ))
 }
 
@@ -12554,7 +12554,7 @@ fn ensure_registry_storage_root(project_root: &Path) -> Result<PathBuf> {
 }
 
 fn compute_registry_artifact_sha256(bytes: &[u8]) -> String {
-    format!("sha256:{:x}", sha2::Sha256::digest(bytes))
+    format!("sha256:{}", hex::encode(sha2::Sha256::digest(bytes)))
 }
 
 fn registry_entry_directory_name(stored_at_utc: &str, extension_id: &str) -> String {
@@ -12579,7 +12579,7 @@ fn registry_entry_directory_name(stored_at_utc: &str, extension_id: &str) -> Str
     if slug.len() > 64 {
         slug.truncate(64);
     }
-    let digest = format!("{:x}", sha2::Sha256::digest(extension_id.as_bytes()));
+    let digest = hex::encode(sha2::Sha256::digest(extension_id.as_bytes()));
     let suffix = digest.get(..12).unwrap_or(digest.as_str());
     format!("{prefix}-{slug}-{suffix}")
 }

@@ -172,7 +172,7 @@ fn compute_entry_hash(entry: &PolicyChangeAuditEntry) -> String {
     hasher.update(from_str.as_bytes());
     hasher.update(len_to_u64(to_str.len()).to_le_bytes());
     hasher.update(to_str.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 // ── Proposal record ──────────────────────────────────────────────────────────
@@ -623,7 +623,7 @@ impl PolicyChangeEngine {
 
     /// Verify audit chain integrity.
     pub fn verify_audit_chain(&self) -> Result<bool, PolicyChangeError> {
-        let genesis_hash = format!("{:x}", Sha256::digest(b"approval_workflow_genesis_v1:"));
+        let genesis_hash = hex::encode(Sha256::digest(b"approval_workflow_genesis_v1:"));
 
         // After push_bounded eviction the first retained entry's prev_hash
         // points to the evicted entry — not to genesis.  Use the saved
@@ -704,7 +704,7 @@ impl PolicyChangeEngine {
         timestamp: &str,
         details: &str,
     ) {
-        let genesis_hash = format!("{:x}", Sha256::digest(b"approval_workflow_genesis_v1:"));
+        let genesis_hash = hex::encode(Sha256::digest(b"approval_workflow_genesis_v1:"));
         let prev_hash = self
             .audit_ledger
             .last()
@@ -1578,8 +1578,8 @@ mod tests {
             hasher2.update(field.as_bytes());
         }
 
-        let hash1 = format!("{:x}", hasher1.finalize());
-        let hash2 = format!("{:x}", hasher2.finalize());
+        let hash1 = hex::encode(hasher1.finalize());
+        let hash2 = hex::encode(hasher2.finalize());
 
         // Length prefixing prevents collision between different field boundaries
         assert_ne!(

@@ -6,7 +6,7 @@
 
 use std::cmp::Ordering;
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 #[allow(unused_imports)]
 use sha2::{Digest, Sha256};
@@ -570,8 +570,8 @@ mod tests {
             .decide_for_posterior("ext:a", 0.91, "trace-a")
             .expect("decision");
         let plain_digest = format!(
-            "sha256:{:x}",
-            Sha256::digest(b"ext:a|revoke|0.910000000000|trace-a")
+            "sha256:{}",
+            hex::encode(Sha256::digest(b"ext:a|revoke|0.910000000000|trace-a"))
         );
 
         assert_ne!(decision.signed_evidence.signature, plain_digest);

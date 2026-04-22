@@ -346,7 +346,7 @@ fn payload_hash(payload: &[u8]) -> String {
             .to_le_bytes(),
     );
     hasher.update(payload);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 impl VirtualTransportFaultHarness {
@@ -606,7 +606,7 @@ impl VirtualTransportFaultHarness {
                 .to_le_bytes(),
         );
         hasher.update(delivered_json.as_bytes());
-        let content_hash = format!("{:x}", hasher.finalize());
+        let content_hash = hex::encode(hasher.finalize());
 
         self.log_audit(
             event_codes::FAULT_CAMPAIGN_COMPLETE,
@@ -845,12 +845,11 @@ mod tests {
         );
         expected.update(payload);
 
-        let legacy_unframed = format!(
-            "{:x}",
+        let legacy_unframed = hex::encode(
             Sha256::digest([b"virtual_transport_faults_payload_v1:" as &[u8], payload].concat())
         );
 
-        assert_eq!(payload_hash(payload), format!("{:x}", expected.finalize()));
+        assert_eq!(payload_hash(payload), hex::encode(expected.finalize()));
         assert_ne!(payload_hash(payload), legacy_unframed);
     }
 

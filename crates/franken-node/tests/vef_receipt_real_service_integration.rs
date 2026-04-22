@@ -94,7 +94,7 @@ impl VefReceiptTestHarness {
     }
 
     fn sha256_hash(&self, input: &str) -> String {
-        format!("sha256:{:x}", Sha256::digest(input.as_bytes()))
+        format!("sha256:{}", hex::encode(Sha256::digest(input.as_bytes())))
     }
 
     async fn generate_and_verify_proof(

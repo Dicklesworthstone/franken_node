@@ -186,7 +186,7 @@ impl DporExplorer {
             }
             hasher.update(b"\n");
         }
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     /// Check safety invariants for a given schedule.

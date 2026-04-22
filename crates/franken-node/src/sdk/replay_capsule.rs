@@ -3769,7 +3769,7 @@ mod tests {
                 assert_eq!(hash_output.data, data.as_bytes());
 
                 // Test actual SHA256 computation matches expected
-                let computed_hash = format!("{:x}", Sha256::digest(&hash_output.data));
+                let computed_hash = hex::encode(Sha256::digest(&hash_output.data));
                 assert_eq!(computed_hash, *expected_hash, "Computed hash should match expected for '{}'", data);
             }
 
@@ -3826,7 +3826,7 @@ mod tests {
                 let seq_output = CapsuleOutput {
                     seq,
                     data: data.clone(),
-                    output_hash: format!("{:x}", Sha256::digest(&data)),
+                    output_hash: hex::encode(Sha256::digest(&data)),
                 };
 
                 assert_eq!(seq_output.seq, seq);
@@ -4436,7 +4436,7 @@ mod tests {
                 expected_outputs: vec![CapsuleOutput {
                     seq: 1,
                     data: vec![1, 2, 3],
-                    output_hash: format!("{:x}", Sha256::digest(&[1, 2, 3])),
+                    output_hash: hex::encode(Sha256::digest(&[1, 2, 3])),
                 }],
                 environment: EnvironmentSnapshot {
                     runtime_version: "v1.0.0".to_string(),
@@ -4532,7 +4532,7 @@ mod tests {
                 expected_outputs: vec![CapsuleOutput {
                     seq: 1,
                     data: b"test_data_for_validation".to_vec(),
-                    output_hash: format!("{:x}", Sha256::digest(b"test_data_for_validation")),
+                    output_hash: hex::encode(Sha256::digest(b"test_data_for_validation")),
                 }],
                 environment: EnvironmentSnapshot {
                     runtime_version: "v1.0.0".to_string(),

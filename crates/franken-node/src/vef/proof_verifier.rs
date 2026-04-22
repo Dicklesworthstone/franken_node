@@ -810,7 +810,7 @@ fn compute_report_digest(
     hasher.update((bytes.len() as u64).to_le_bytes());
     hasher.update(&bytes);
     let digest = hasher.finalize();
-    Ok(format!("sha256:{digest:x}"))
+    Ok(format!("sha256:{}", hex::encode(digest)))
 }
 
 // ════════════════════════════════════════════════════════════════════════════

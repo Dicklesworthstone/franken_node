@@ -313,7 +313,7 @@ fn compute_entry_hash(entry: &QuarantineAuditEntry) -> String {
     hasher.update(entry.details.as_bytes());
     hasher.update((entry.prev_hash.len() as u64).to_le_bytes());
     hasher.update(entry.prev_hash.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 // ── Quarantine record (per-extension state) ──────────────────────────────────
@@ -1023,7 +1023,7 @@ impl QuarantineRegistry {
 
     /// Verify audit trail integrity (hash chain).
     pub fn verify_audit_integrity(&self) -> Result<bool, QuarantineError> {
-        let genesis_hash = format!("{:x}", Sha256::digest(b"quarantine_genesis_v1:"));
+        let genesis_hash = hex::encode(Sha256::digest(b"quarantine_genesis_v1:"));
         let first_expected = self.chain_anchor_hash.as_deref().unwrap_or(&genesis_hash);
 
         for (i, entry) in self.audit_trail.iter().enumerate() {
@@ -1170,7 +1170,7 @@ impl QuarantineRegistry {
         timestamp: &str,
         details: &str,
     ) {
-        let genesis_hash = format!("{:x}", Sha256::digest(b"quarantine_genesis_v1:"));
+        let genesis_hash = hex::encode(Sha256::digest(b"quarantine_genesis_v1:"));
         let prev_hash = self
             .audit_trail
             .last()

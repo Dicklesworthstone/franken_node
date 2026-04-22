@@ -390,7 +390,7 @@ impl SafeExtensionOnboarding {
                 h.update((bp.len() as u64).to_le_bytes());
                 h.update(bp.as_bytes());
             }
-            format!("{:x}", h.finalize())
+            hex::encode(h.finalize())
         };
 
         self.log(

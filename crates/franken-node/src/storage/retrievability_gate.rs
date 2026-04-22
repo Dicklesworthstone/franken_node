@@ -760,7 +760,7 @@ pub fn content_hash(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(CONTENT_HASH_DOMAIN);
     hasher.update(data);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 // ---------------------------------------------------------------------------
@@ -1714,8 +1714,8 @@ mod tests {
         let mut hasher = Sha256::new();
         hasher.update(CONTENT_HASH_DOMAIN);
         hasher.update(payload);
-        let expected = format!("{:x}", hasher.finalize());
-        let plain_sha256 = format!("{:x}", Sha256::digest(payload));
+        let expected = hex::encode(hasher.finalize());
+        let plain_sha256 = hex::encode(Sha256::digest(payload));
 
         assert_hash_eq(&content_hash(payload), &expected);
         assert_hash_ne(&content_hash(payload), &plain_sha256);
@@ -2110,7 +2110,7 @@ mod tests {
         let mut gate = make_gate();
         let payload = b"domain gate payload";
         let archive_hash = content_hash(payload);
-        let plain_hash = format!("{:x}", Sha256::digest(payload));
+        let plain_hash = hex::encode(Sha256::digest(payload));
         gate.register_target(
             &aid("a1"),
             &sid("s1"),

@@ -103,7 +103,7 @@ fn execution_receipt_hash_rejects_legacy_unframed_preimage() {
     let mut legacy_hasher = Sha256::new();
     legacy_hasher.update(b"vef_execution_receipt_v1:");
     legacy_hasher.update(canonical_bytes.as_slice());
-    let legacy_hash = format!("sha256:{:x}", legacy_hasher.finalize());
+    let legacy_hash = format!("sha256:{}", hex::encode(legacy_hasher.finalize()));
 
     assert_ne!(
         receipt_hash_sha256(&receipt).expect("receipt hash should compute"),

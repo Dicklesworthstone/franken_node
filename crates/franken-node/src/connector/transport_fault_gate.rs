@@ -716,7 +716,7 @@ impl TransportFaultGate {
             for &s in &seeds {
                 h.update(s.to_le_bytes());
             }
-            format!("{:x}", h.finalize())
+            hex::encode(h.finalize())
         };
 
         let verdict = GateVerdict {
@@ -1335,7 +1335,7 @@ mod tests {
         for seed in &verdict.seeds_used {
             h.update(seed.to_le_bytes());
         }
-        let expected = format!("{:x}", h.finalize());
+        let expected = hex::encode(h.finalize());
 
         assert!(constant_time::ct_eq(&verdict.content_hash, &expected));
     }

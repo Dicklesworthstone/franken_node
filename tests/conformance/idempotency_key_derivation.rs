@@ -125,14 +125,13 @@ fn payload_hash_and_fingerprint_use_length_prefixed_hash_inputs() {
             .to_le_bytes(),
     );
     expected_payload.update(payload);
-    let legacy_payload = format!(
-        "{:x}",
+    let legacy_payload = hex::encode(
         Sha256::digest([b"idempotency_payload_v1:" as &[u8], payload].concat())
     );
 
     assert_eq!(
         hash_payload(payload),
-        format!("{:x}", expected_payload.finalize())
+        hex::encode(expected_payload.finalize())
     );
     assert_ne!(hash_payload(payload), legacy_payload);
 

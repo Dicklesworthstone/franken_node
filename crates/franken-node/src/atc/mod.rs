@@ -5446,7 +5446,7 @@ mod atc_extreme_adversarial_negative_tests {
                 for module in modified_surface {
                     update_len_prefixed(&mut hasher, module.as_bytes());
                 }
-                let modified_fingerprint = format!("{:x}", hasher.finalize());
+                let modified_fingerprint = hex::encode(hasher.finalize());
 
                 if modified_surface.len() == ATC_MODULE_SURFACE.len() &&
                    modified_surface.iter().zip(ATC_MODULE_SURFACE.iter()).all(|(a, b)| a == b) {
@@ -5477,7 +5477,7 @@ mod atc_extreme_adversarial_negative_tests {
                     update_len_prefixed(&mut collision_hasher, module.as_bytes());
                 }
                 collision_hasher.update(suffix.as_bytes());
-                let collision_fingerprint = format!("{:x}", collision_hasher.finalize());
+                let collision_fingerprint = hex::encode(collision_hasher.finalize());
 
                 assert_ne!(collision_fingerprint, original_fingerprint,
                           "Collision attempt with prefix '{}' and suffix '{}' should fail", prefix, suffix);
@@ -5499,7 +5499,7 @@ mod atc_extreme_adversarial_negative_tests {
                     update_len_prefixed(&mut extension_hasher, module.as_bytes());
                 }
                 extension_hasher.update(padding);
-                let extension_fingerprint = format!("{:x}", extension_hasher.finalize());
+                let extension_fingerprint = hex::encode(extension_hasher.finalize());
 
                 assert_ne!(extension_fingerprint, original_fingerprint,
                           "Length extension attempt {} should not produce valid fingerprint", i);
@@ -5523,7 +5523,7 @@ mod atc_extreme_adversarial_negative_tests {
                 for module in ATC_MODULE_SURFACE {
                     update_len_prefixed(&mut bypass_hasher, module.as_bytes());
                 }
-                let bypass_fingerprint = format!("{:x}", bypass_hasher.finalize());
+                let bypass_fingerprint = hex::encode(bypass_hasher.finalize());
 
                 assert_ne!(bypass_fingerprint, original_fingerprint,
                           "Domain separator bypass attempt {} should fail: {}", i, separator);

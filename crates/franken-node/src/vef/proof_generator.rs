@@ -260,7 +260,7 @@ impl TestProofBackend {
 
     fn hash_bytes(data: &[u8]) -> String {
         let digest = Sha256::digest([b"proof_generator_hash_v1:" as &[u8], data].concat());
-        format!("sha256:{digest:x}")
+        format!("sha256:{}", hex::encode(digest))
     }
 }
 

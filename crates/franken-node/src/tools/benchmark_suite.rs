@@ -212,7 +212,7 @@ impl HardwareProfile {
         sha2::Digest::update(&mut hasher, self.memory_mb.to_le_bytes());
         sha2::Digest::update(&mut hasher, (self.os.len() as u64).to_le_bytes());
         sha2::Digest::update(&mut hasher, self.os.as_bytes());
-        format!("{:x}", sha2::Digest::finalize(hasher))
+        hex::encode(sha2::Digest::finalize(hasher))
     }
 }
 
@@ -306,7 +306,7 @@ impl BenchmarkReport {
         sha2::Digest::update(&mut hasher, b"benchmark_suite_json_v1:" as &[u8]);
         sha2::Digest::update(&mut hasher, (json.len() as u64).to_le_bytes());
         sha2::Digest::update(&mut hasher, json.as_bytes());
-        format!("sha256:{:x}", sha2::Digest::finalize(hasher))
+        format!("sha256:{}", hex::encode(sha2::Digest::finalize(hasher)))
     }
 
     /// Check dimension coverage: returns the set of covered dimensions.

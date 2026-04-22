@@ -92,7 +92,7 @@ fn compute_canonical_hash(receipt: &ExecutionReceipt) -> String {
     hasher.update(canonical_json.as_bytes());
     let hash = hasher.finalize();
 
-    format!("sha256:{:x}", hash)
+    format!("sha256:{}", hex::encode(hash))
 }
 
 /// Load and parse conformance vectors from embedded artifact.

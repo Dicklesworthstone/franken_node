@@ -686,7 +686,7 @@ mod hash_collision_prevention_tests {
 
         // Should be different from raw SHA-256
         use sha2::{Digest, Sha256};
-        let raw_hash = format!("{:x}", Sha256::digest(b"test_data"));
+        let raw_hash = hex::encode(Sha256::digest(b"test_data"));
         assert_ne!(hash1, raw_hash);
 
         // Should include domain separator effect
@@ -694,7 +694,7 @@ mod hash_collision_prevention_tests {
             let mut hasher = Sha256::new();
             hasher.update(b"retrievability_gate_hash_v1:");
             hasher.update(b"test_data");
-            format!("{:x}", hasher.finalize())
+            hex::encode(hasher.finalize())
         };
         assert_eq!(hash1, manual_hash);
     }

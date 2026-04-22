@@ -367,7 +367,7 @@ impl SecurityOpsCaseStudyRegistry {
             let unmet_str = format!("{unmet_criteria:?}");
             h.update((unmet_str.len() as u64).to_le_bytes());
             h.update(unmet_str.as_bytes());
-            format!("{:x}", h.finalize())
+            hex::encode(h.finalize())
         };
 
         self.log(
@@ -569,8 +569,7 @@ fn percent_delta_bps(pre: u32, post: u32, lower_is_better: bool) -> i64 {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    format!(
-        "{:x}",
+    hex::encode(
         Sha256::digest([b"security_ops_hash_v1:" as &[u8], bytes].concat())
     )
 }

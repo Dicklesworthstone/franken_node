@@ -123,7 +123,7 @@ impl Marker {
         sha2::Digest::update(&mut hasher, timestamp.to_le_bytes());
         sha2::Digest::update(&mut hasher, len_to_u64(trace_id.len()).to_le_bytes());
         sha2::Digest::update(&mut hasher, trace_id.as_bytes());
-        format!("{:x}", sha2::Digest::finalize(hasher))
+        hex::encode(sha2::Digest::finalize(hasher))
     }
 }
 
@@ -759,7 +759,7 @@ mod tests {
         sha2::Digest::update(&mut hasher, timestamp.to_le_bytes());
         sha2::Digest::update(&mut hasher, len_to_u64(trace_id.len()).to_le_bytes());
         sha2::Digest::update(&mut hasher, trace_id.as_bytes());
-        format!("{:x}", sha2::Digest::finalize(hasher))
+        hex::encode(sha2::Digest::finalize(hasher))
     }
 
     #[test]

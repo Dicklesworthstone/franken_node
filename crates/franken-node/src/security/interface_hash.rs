@@ -28,7 +28,7 @@ pub fn compute_hash(domain: &str, data: &[u8]) -> InterfaceHash {
     let data_len = u64::try_from(data.len()).unwrap_or(u64::MAX);
     sha2::Digest::update(&mut hasher, data_len.to_le_bytes());
     sha2::Digest::update(&mut hasher, data);
-    let hash_hex = format!("{:x}", sha2::Digest::finalize(hasher));
+    let hash_hex = hex::encode(sha2::Digest::finalize(hasher));
 
     InterfaceHash {
         domain: domain.to_string(),
@@ -317,7 +317,7 @@ mod tests {
             u64::try_from(data.len()).unwrap_or(u64::MAX).to_le_bytes(),
         );
         sha2::Digest::update(&mut expected, data);
-        let expected_hash_hex = format!("{:x}", sha2::Digest::finalize(expected));
+        let expected_hash_hex = hex::encode(sha2::Digest::finalize(expected));
 
         let mut legacy_without_data_len = sha2::Sha256::new();
         sha2::Digest::update(&mut legacy_without_data_len, b"interface_hash_v1:");
@@ -329,7 +329,7 @@ mod tests {
         );
         sha2::Digest::update(&mut legacy_without_data_len, domain.as_bytes());
         sha2::Digest::update(&mut legacy_without_data_len, data);
-        let legacy_hash_hex = format!("{:x}", sha2::Digest::finalize(legacy_without_data_len));
+        let legacy_hash_hex = hex::encode(sha2::Digest::finalize(legacy_without_data_len));
 
         assert_eq!(h.hash_hex, expected_hash_hex);
         assert_ne!(h.hash_hex, legacy_hash_hex);

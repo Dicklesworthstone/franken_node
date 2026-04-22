@@ -340,7 +340,7 @@ impl ChallengeAuditEntry {
                 .to_le_bytes(),
         );
         hasher.update(self.prev_hash.as_bytes());
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 }
 

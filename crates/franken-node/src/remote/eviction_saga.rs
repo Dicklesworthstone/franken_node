@@ -872,7 +872,7 @@ impl EvictionSagaManager {
         let content_len = u64::try_from(content.len()).unwrap_or(u64::MAX);
         hasher.update(content_len.to_le_bytes());
         hasher.update(content.as_bytes());
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     /// Saga count.
@@ -1272,12 +1272,12 @@ mod tests {
         let content_len = u64::try_from(content.len()).unwrap_or(u64::MAX);
         expected_hasher.update(content_len.to_le_bytes());
         expected_hasher.update(content.as_bytes());
-        let expected = format!("{:x}", expected_hasher.finalize());
+        let expected = hex::encode(expected_hasher.finalize());
 
         let mut unprefixed_hasher = Sha256::new();
         unprefixed_hasher.update(b"eviction_saga_content_v1:");
         unprefixed_hasher.update(content.as_bytes());
-        let unprefixed = format!("{:x}", unprefixed_hasher.finalize());
+        let unprefixed = hex::encode(unprefixed_hasher.finalize());
 
         let actual = mgr.content_hash();
         assert_eq!(actual, expected);

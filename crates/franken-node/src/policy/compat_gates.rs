@@ -18,7 +18,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;

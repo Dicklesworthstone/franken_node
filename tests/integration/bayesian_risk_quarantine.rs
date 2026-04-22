@@ -105,7 +105,7 @@ fn action_for_posterior(posterior: f64, thresholds: &Thresholds) -> Option<&'sta
 fn signed_evidence(principal_id: &str, decision: &str, posterior: f64, trace_id: &str) -> String {
     let payload = format!("{principal_id}|{decision}|{posterior:.12}|{trace_id}");
     let digest = Sha256::digest(payload.as_bytes());
-    format!("sha256:{digest:x}")
+    format!("sha256:{}", hex::encode(digest))
 }
 
 #[test]

@@ -105,7 +105,7 @@ impl CapturedEvidence {
             hasher.update((u64::try_from(v.len()).unwrap_or(u64::MAX)).to_le_bytes());
             hasher.update(v.as_bytes());
         }
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     fn decision_type_str(&self) -> &str {
@@ -316,8 +316,7 @@ impl EvidenceReplayGate {
                 "original={}, replayed={}",
                 evidence.chosen_action, replayed_action
             );
-            let diff_hash = format!(
-                "{:x}",
+            let diff_hash = hex::encode(
                 Sha256::digest([b"evidence_replay_diff_v1:" as &[u8], diff.as_bytes()].concat())
             );
             let diff_size = diff.len();

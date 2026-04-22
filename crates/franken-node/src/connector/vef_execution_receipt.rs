@@ -308,7 +308,7 @@ pub fn receipt_hash_sha256(receipt: &ExecutionReceipt) -> Result<String, Executi
     hasher.update(VEF_EXECUTION_RECEIPT_HASH_DOMAIN);
     hasher.update(byte_len.to_le_bytes());
     hasher.update(bytes.as_slice());
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
 /// Constant-time string comparison (inline to avoid cross-crate path issues in test harnesses).
@@ -630,8 +630,8 @@ mod tests {
         raw_hasher.update(bytes.as_slice());
 
         let actual = receipt_hash_sha256(&receipt).unwrap();
-        let expected = format!("sha256:{:x}", expected_hasher.finalize());
-        let raw = format!("sha256:{:x}", raw_hasher.finalize());
+        let expected = format!("sha256:{}", hex::encode(expected_hasher.finalize()));
+        let raw = format!("sha256:{}", hex::encode(raw_hasher.finalize()));
 
         assert_eq!(actual, expected);
         assert_ne!(actual, raw);
@@ -644,7 +644,7 @@ mod tests {
         let mut legacy_hasher = Sha256::new();
         legacy_hasher.update(VEF_EXECUTION_RECEIPT_HASH_DOMAIN);
         legacy_hasher.update(bytes.as_slice());
-        let legacy_hash = format!("sha256:{:x}", legacy_hasher.finalize());
+        let legacy_hash = format!("sha256:{}", hex::encode(legacy_hasher.finalize()));
 
         let err = verify_hash(&receipt, &legacy_hash).unwrap_err();
 

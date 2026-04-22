@@ -119,7 +119,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"rollback_bundle_hash_v1:");
     hasher.update(data);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn encode_canonical_json<T: Serialize>(

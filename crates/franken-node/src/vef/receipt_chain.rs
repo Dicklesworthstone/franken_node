@@ -589,7 +589,7 @@ fn compute_chain_hash(
     hasher.update(b"receipt_chain_hash_v1:");
     hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(&bytes);
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
 fn compute_checkpoint_commitment(
@@ -636,7 +636,7 @@ fn compute_checkpoint_commitment(
     hasher.update(b"receipt_chain_hash_v1:");
     hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(&bytes);
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
 #[cfg(test)]
@@ -1453,8 +1453,8 @@ mod tests {
             material.receipt_hash,
         )
         .unwrap();
-        let expected = format!("sha256:{:x}", expected_hasher.finalize());
-        let unprefixed = format!("sha256:{:x}", unprefixed_hasher.finalize());
+        let expected = format!("sha256:{}", hex::encode(expected_hasher.finalize()));
+        let unprefixed = format!("sha256:{}", hex::encode(unprefixed_hasher.finalize()));
 
         assert_eq!(actual, expected);
         assert_ne!(actual, unprefixed);
@@ -1511,8 +1511,8 @@ mod tests {
         unprefixed_hasher.update(&bytes);
 
         let actual = compute_checkpoint_commitment(0, 1, chain_head_hash, chain.entries()).unwrap();
-        let expected = format!("sha256:{:x}", expected_hasher.finalize());
-        let unprefixed = format!("sha256:{:x}", unprefixed_hasher.finalize());
+        let expected = format!("sha256:{}", hex::encode(expected_hasher.finalize()));
+        let unprefixed = format!("sha256:{}", hex::encode(unprefixed_hasher.finalize()));
 
         assert_eq!(actual, expected);
         assert_ne!(actual, unprefixed);

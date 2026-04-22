@@ -629,7 +629,7 @@ impl EvictionSaga {
         hasher.update((phase.len() as u64).to_le_bytes());
         hasher.update(phase.as_bytes());
         hasher.update((self.transitions.len() as u64).to_le_bytes());
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 }
 

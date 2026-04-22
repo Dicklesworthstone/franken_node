@@ -111,7 +111,7 @@ impl HardwareFingerprint {
         let mut hasher = Sha256::new();
         hasher.update(b"profile_tuning_fingerprint_v1:" as &[u8]);
         hasher.update(info.as_bytes());
-        HardwareFingerprint(format!("{:x}", hasher.finalize()))
+        HardwareFingerprint(hex::encode(hasher.finalize()))
     }
 }
 
@@ -149,7 +149,7 @@ impl SignedPolicyBundle {
         let mut hasher = Sha256::new();
         hasher.update(b"profile_tuning_json_v1:" as &[u8]);
         hasher.update(json.as_bytes());
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 }
 
@@ -217,7 +217,7 @@ pub fn hmac_sign(payload: &str, key: &str) -> String {
     hasher.update(key.as_bytes());
     hasher.update((payload.len() as u64).to_le_bytes());
     hasher.update(payload.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 /// Verify an HMAC signature (constant-time comparison).

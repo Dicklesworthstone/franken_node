@@ -186,7 +186,7 @@ impl AudienceBoundToken {
         }
         update_len_prefixed(&mut hasher, &self.signature);
         hasher.update([self.max_delegation_depth]);
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     /// Check whether this token is expired at `now_ms`.

@@ -6,6 +6,7 @@
 //!
 //! **Bead:** bd-2ms — Section 10.10 (FCP-Inspired Hardening)
 
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -274,7 +275,7 @@ impl OperatorAuthorization {
             reason
         );
         hasher.update(canonical.as_bytes());
-        let authorization_hash = format!("{:x}", hasher.finalize());
+        let authorization_hash = hex::encode(hasher.finalize());
 
         use hmac::{Hmac, Mac};
         let signature = match Hmac::<Sha256>::new_from_slice(signing_key) {
@@ -310,7 +311,7 @@ impl OperatorAuthorization {
             self.reason
         );
         hasher.update(canonical.as_bytes());
-        let expected = format!("{:x}", hasher.finalize());
+        let expected = hex::encode(hasher.finalize());
         if !constant_time_eq(&self.authorization_hash, &expected) {
             return false;
         }

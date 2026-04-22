@@ -24,7 +24,7 @@ use frankenengine_node::security::{
     constant_time,
     epoch_scoped_keys::{RootSecret, derive_epoch_key},
 };
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde_json::json;
 use sha2::Sha256;
 use std::collections::{BTreeMap, HashMap};

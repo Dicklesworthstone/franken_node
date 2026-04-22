@@ -201,7 +201,7 @@ impl CapabilityToken {
         hasher.update(self.expires_at_ms.to_le_bytes());
         hasher.update(u64::try_from(self.justification.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(self.justification.as_bytes());
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 }
 
@@ -362,7 +362,7 @@ impl EnforcementAuditEntry {
         }
         hasher.update(u64::try_from(self.prev_hash.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(self.prev_hash.as_bytes());
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 }
 

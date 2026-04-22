@@ -27,7 +27,7 @@
 //! - **INV-PIPE-RECEIPT-SIGNED**: Every migration receipt carries a non-empty signature.
 //! - **INV-PIPE-STAGE-MONOTONIC**: Stage transitions are strictly forward (except rollback).
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};

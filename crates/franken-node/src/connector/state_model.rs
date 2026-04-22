@@ -225,7 +225,7 @@ fn compute_hash(value: &serde_json::Value) -> String {
     hasher.update(b"state_model_hash_v1:");
     hasher.update((canonical.len() as u64).to_le_bytes());
     hasher.update(canonical.as_bytes());
-    format!("{:064x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn now_iso8601() -> String {

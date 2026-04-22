@@ -21,7 +21,7 @@
 //!   via HMAC — callers must prove possession of the root secret.
 //! - INV-SCC-MSG-VERIFY: Message signatures are verified, not recorded.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::{BTreeMap, BTreeSet};

@@ -152,7 +152,7 @@ fn compute_cx_id(epoch: u64, seq: u64) -> String {
     hasher.update(epoch.to_le_bytes());
     hasher.update(b":");
     hasher.update(seq.to_le_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 // ---------------------------------------------------------------------------

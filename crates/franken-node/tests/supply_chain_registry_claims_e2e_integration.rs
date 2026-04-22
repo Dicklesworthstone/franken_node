@@ -572,9 +572,9 @@ impl SupplyChainE2EHarness {
                 builder_version: "1.0.0".to_string(),
                 vcs_commit_sha: "abc123def456789".to_string(),
                 build_timestamp_epoch: chrono::Utc::now().timestamp_millis() as u64,
-                reproducibility_hash: format!("{:x}", sha2::Sha256::digest(&manifest_bytes)),
-                input_hash: format!("{:x}", sha2::Sha256::digest("test-input".as_bytes())),
-                output_hash: format!("{:x}", sha2::Sha256::digest(&manifest_bytes)),
+                reproducibility_hash: hex::encode(sha2::Sha256::digest(&manifest_bytes)),
+                input_hash: hex::encode(sha2::Sha256::digest("test-input".as_bytes())),
+                output_hash: hex::encode(sha2::Sha256::digest(&manifest_bytes)),
                 slsa_level_claim: 1,
                 envelope_format: prov::AttestationEnvelopeFormat::FrankenNodeEnvelopeV1,
                 links: vec![], // Empty for this test
@@ -583,7 +583,7 @@ impl SupplyChainE2EHarness {
             initial_version: VersionEntry {
                 version: "1.0.0".to_string(),
                 parent_version: None,
-                content_hash: format!("{:x}", sha2::Sha256::digest(&manifest_bytes)),
+                content_hash: hex::encode(sha2::Sha256::digest(&manifest_bytes)),
                 registered_at: chrono::Utc::now().to_rfc3339(),
                 compatible_with: vec!["test".to_string()],
             },

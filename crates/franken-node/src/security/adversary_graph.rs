@@ -203,7 +203,7 @@ impl AdversaryGraph {
         }
 
         let digest = hasher.finalize();
-        format!("sha256:{digest:x}")
+        format!("sha256:{}", hex::encode(digest))
     }
 
     /// Get risk posterior for a principal (defaults to prior if no observations)
@@ -279,7 +279,7 @@ fn chain_evidence_hash(
     hasher.update(likelihood.to_le_bytes());
     hasher.update(evidence_weight.to_le_bytes());
     let digest = hasher.finalize();
-    format!("sha256:{digest:x}")
+    format!("sha256:{}", hex::encode(digest))
 }
 
 fn project_posterior(principal_id: &str, node: &AdversaryNode) -> AdversaryPosterior {

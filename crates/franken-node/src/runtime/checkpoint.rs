@@ -808,7 +808,7 @@ fn derive_checkpoint_id(
         ),
         None => update_hash_field(&mut hasher, b"previous_checkpoint_hash:none", &[]),
     }
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn update_hash_field(hasher: &mut Sha256, label: &[u8], value: &[u8]) {
@@ -824,7 +824,7 @@ fn hash_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"checkpoint_hash_v1:");
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn now_unix_ms() -> u64 {

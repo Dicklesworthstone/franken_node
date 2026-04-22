@@ -593,7 +593,7 @@ fn predicate_hash_id(fields: &[&str]) -> String {
         hasher.update(field.as_bytes());
     }
     let digest = hasher.finalize();
-    format!("pred-{digest:x}")
+    format!("pred-{}", hex::encode(digest))
 }
 
 fn snapshot_hash(normalized: &NormalizedPolicy) -> Result<String, ConstraintCompileError> {
@@ -610,7 +610,7 @@ fn snapshot_hash(normalized: &NormalizedPolicy) -> Result<String, ConstraintComp
     hasher.update((canonical.len() as u64).to_le_bytes());
     hasher.update(&canonical);
     let digest = hasher.finalize();
-    Ok(format!("sha256:{digest:x}"))
+    Ok(format!("sha256:{}", hex::encode(digest)))
 }
 
 /// Compile a runtime policy into deterministic proof-checkable predicates.

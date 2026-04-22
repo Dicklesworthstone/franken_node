@@ -635,7 +635,7 @@ fn manifest_hash_for_transition(
         hasher.update(field.as_bytes());
     }
     hasher.update(target_epoch.to_le_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {

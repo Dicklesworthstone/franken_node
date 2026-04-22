@@ -284,7 +284,7 @@ fn sha256_hex(data: &[u8]) -> String {
     hasher.update((data.len() as u64).to_le_bytes());
     hasher.update(data);
     let digest = hasher.finalize();
-    format!("sha256:{digest:x}")
+    format!("sha256:{}", hex::encode(digest))
 }
 
 /// Compute the binding hash that ties a proof_ref to a capsule payload.

@@ -254,12 +254,12 @@ pub fn resolve_conflict(
         let mut ha = sha2::Sha256::new();
         sha2::Digest::update(&mut ha, b"lease_conflict_v1:");
         sha2::Digest::update(&mut ha, a.lease_id.as_bytes());
-        let score_a = format!("{:x}", sha2::Digest::finalize(ha));
+        let score_a = hex::encode(sha2::Digest::finalize(ha));
 
         let mut hb = sha2::Sha256::new();
         sha2::Digest::update(&mut hb, b"lease_conflict_v1:");
         sha2::Digest::update(&mut hb, b.lease_id.as_bytes());
-        let score_b = format!("{:x}", sha2::Digest::finalize(hb));
+        let score_b = hex::encode(sha2::Digest::finalize(hb));
 
         if score_a >= score_b {
             (&a.lease_id, &b.lease_id, "hash_tiebreak")
@@ -325,7 +325,7 @@ pub fn fork_log_entry(
     sha2::Digest::update(&mut hasher, trace_id.as_bytes());
     sha2::Digest::update(&mut hasher, (action_id.len() as u64).to_le_bytes());
     sha2::Digest::update(&mut hasher, action_id.as_bytes());
-    let hash_hex = format!("{:x}", sha2::Digest::finalize(hasher));
+    let hash_hex = hex::encode(sha2::Digest::finalize(hasher));
     let entry_id = format!("fork-{}", &hash_hex[..16]);
 
     let (winner, rule, halted) = match resolution {

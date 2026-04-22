@@ -148,7 +148,7 @@ fn fail(
 fn sha256_json<T: Serialize>(value: &T) -> String {
     let bytes = serde_json::to_vec(value).expect("serialization must succeed in test fixtures");
     let digest = Sha256::digest(bytes);
-    format!("sha256:{digest:x}")
+    format!("sha256:{}", hex::encode(digest))
 }
 
 fn receipt_hash(receipt: &Receipt) -> String {

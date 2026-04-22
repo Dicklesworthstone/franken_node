@@ -196,7 +196,7 @@ pub fn hash_payload(payload: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"idempotency_payload_v1:");
     hash_len_prefixed_bytes(&mut hasher, payload);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 // ── Dedupe store ─────────────────────────────────────────────────────────
@@ -597,7 +597,7 @@ impl IdempotencyDedupeStore {
                 None => hasher.update([0]),
             }
         }
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     /// Return `(total_new, total_duplicate, total_conflict, total_expired)`.

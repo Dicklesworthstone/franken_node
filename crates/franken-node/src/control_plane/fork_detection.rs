@@ -160,7 +160,7 @@ impl StateVector {
                 .to_le_bytes(),
         );
         sha2::Digest::update(&mut hasher, payload.as_bytes());
-        format!("{:x}", sha2::Digest::finalize(hasher))
+        hex::encode(sha2::Digest::finalize(hasher))
     }
 }
 
@@ -804,7 +804,7 @@ mod tests {
                 .to_le_bytes(),
         );
         sha2::Digest::update(&mut hasher, payload.as_bytes());
-        let expected = format!("{:x}", sha2::Digest::finalize(hasher));
+        let expected = hex::encode(sha2::Digest::finalize(hasher));
 
         assert_eq!(StateVector::compute_state_hash(payload), expected);
     }

@@ -50,7 +50,7 @@ fn verifier_digest(computation_id: &str, metric_root: &str, proof_root: &str) ->
     hasher.update(metric_root.as_bytes());
     hasher.update(b"|");
     hasher.update(proof_root.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 #[test]

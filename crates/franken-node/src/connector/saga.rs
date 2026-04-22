@@ -596,8 +596,7 @@ impl SagaExecutor {
     pub fn content_hash(&self) -> String {
         let content =
             serde_json::to_string(&self.sagas).unwrap_or_else(|e| format!("__serde_err:{e}"));
-        format!(
-            "{:x}",
+        hex::encode(
             Sha256::digest([b"saga_content_hash_v1:" as &[u8], content.as_bytes()].concat())
         )
     }

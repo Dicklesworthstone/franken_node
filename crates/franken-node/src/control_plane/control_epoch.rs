@@ -174,7 +174,7 @@ impl EpochTransition {
             sha2::Digest::update(&mut hasher, field_len.to_le_bytes());
             sha2::Digest::update(&mut hasher, field.as_bytes());
         }
-        format!("mac:{:x}", sha2::Digest::finalize(hasher))
+        format!("mac:{}", hex::encode(sha2::Digest::finalize(hasher)))
     }
 
     /// Verify the MAC on this transition event.
@@ -1618,7 +1618,7 @@ mod tests {
         sha2::Digest::update(&mut hasher_without_domain, timestamp.to_le_bytes());
         sha2::Digest::update(&mut hasher_without_domain, b"test-hash");
         sha2::Digest::update(&mut hasher_without_domain, b"test-trace");
-        let mac_without_domain = format!("mac:{:x}", sha2::Digest::finalize(hasher_without_domain));
+        let mac_without_domain = format!("mac:{}", hex::encode(sha2::Digest::finalize(hasher_without_domain)));
 
         // Domain separator should make hashes different
         assert_ne!(
@@ -1655,7 +1655,7 @@ mod tests {
         let length_prefixed_hash = sha2::Digest::finalize(length_prefixed_hasher);
 
         assert_ne!(
-            format!("{:x}", length_prefixed_hash),
+            hex::encode(length_prefixed_hash),
             mac_with_domain.trim_start_matches("mac:"),
             "Length-prefixed domain should differ from simple prefix"
         );
