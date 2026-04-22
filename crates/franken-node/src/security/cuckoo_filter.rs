@@ -5,7 +5,7 @@
 //! BTreeSet-based revocation checking with 10x latency improvement and 20x
 //! memory efficiency.
 
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::collections::hash_map::RandomState;
 
 /// Maximum number of cuckoo evictions before declaring filter full
@@ -161,14 +161,15 @@ impl CuckooFilter {
 
     /// Generate pseudo-random slot index for cuckoo eviction.
     ///
-    /// Uses simple LCG for speed - cryptographic quality not required.
+    /// Uses simple hash-based selection for speed - cryptographic quality not required.
     fn random_slot(&self) -> usize {
-        // Simple linear congruential generator for slot selection
-        static mut SEED: u32 = 1;
-        unsafe {
-            SEED = SEED.wrapping_mul(1103515245).wrapping_add(12345);
-            (SEED as usize) % BUCKET_SIZE
-        }
+        use std::ptr;
+
+        // Use memory address as entropy source (changes per allocation)
+        let addr = ptr::addr_of!(self.buckets) as usize;
+        // Mix with current item count for variation over time
+        let entropy = addr.wrapping_add(self.num_items).wrapping_mul(0x9e3779b9);
+        entropy % BUCKET_SIZE
     }
 
     /// Remove a token ID from the filter.
