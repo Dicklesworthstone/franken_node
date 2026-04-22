@@ -21,6 +21,14 @@ pub const RPL_003_DIVERGED: &str = "RPL-003";
 pub const RPL_004_ERROR: &str = "RPL-004";
 pub const RPL_005_GATE_DECISION: &str = "RPL-005";
 
+fn compute_diff_hash(diff: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"evidence_replay_diff_v1:");
+    hasher.update((u64::try_from(diff.len()).unwrap_or(u64::MAX)).to_le_bytes());
+    hasher.update(diff.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
 // ── Decision types covered ───────────────────────────────────────────────────
 
 /// Decision types that are subject to evidence replay verification.
@@ -316,9 +324,7 @@ impl EvidenceReplayGate {
                 "original={}, replayed={}",
                 evidence.chosen_action, replayed_action
             );
-            let diff_hash = hex::encode(
-                Sha256::digest([b"evidence_replay_diff_v1:" as &[u8], diff.as_bytes()].concat())
-            );
+            let diff_hash = compute_diff_hash(&diff);
             let diff_size = diff.len();
 
             push_bounded(
@@ -779,7 +785,13 @@ mod tests {
             } => {
                 assert_eq!(original_action, "proceed");
                 assert_eq!(replayed_action, "");
+                let diff = "original=proceed, replayed=";
+                let legacy = hex::encode(Sha256::digest(
+                    [b"evidence_replay_diff_v1:" as &[u8], diff.as_bytes()].concat(),
+                ));
                 assert!(!diff_hash.is_empty());
+                assert_eq!(diff_hash, compute_diff_hash(diff));
+                assert_ne!(diff_hash, legacy);
                 assert!(diff_size_bytes > 0);
             }
             other => panic!("expected divergence, got {other:?}"),
@@ -817,9 +829,10 @@ mod tests {
         assert_eq!(log.len(), 2);
         assert_eq!(log[0].event_code, RPL_001_REPLAY_INITIATED);
         assert_eq!(log[1].event_code, RPL_004_ERROR);
-        assert!(!log
-            .iter()
-            .any(|entry| entry.event_code == RPL_002_REPRODUCED));
+        assert!(
+            !log.iter()
+                .any(|entry| entry.event_code == RPL_002_REPRODUCED)
+        );
     }
 
     #[test]
