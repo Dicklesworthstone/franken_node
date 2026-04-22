@@ -110,21 +110,37 @@ impl ArbitraryTrustCardData {
                 publisher_name: self.publisher_name,
                 publisher_url: self.publisher_url,
             },
+            certification_level: CertificationLevel::Bronze,
+            capability_declarations: vec![CapabilityDeclaration {
+                capability_risk: CapabilityRisk {
+                    risk_level: risk_levels[self.risk_level as usize % risk_levels.len()],
+                    mitigation_summary: "Automated testing and code review".to_string(),
+                },
+            }],
             behavioral_profile: BehavioralProfile {
                 description: self.description,
                 repository_url: self.repository_url,
                 homepage_url: self.homepage_url,
             },
-            capability_declaration: CapabilityDeclaration {
-                capability_risk: CapabilityRisk {
-                    risk_level: risk_levels[self.risk_level as usize % risk_levels.len()],
-                    mitigation_summary: "Automated testing and code review".to_string(),
-                },
-            },
+            revocation_status: RevocationStatus::Active,
             provenance_summary: ProvenanceSummary {
-                build_provenance_available: true,
-                source_repository_verified: true,
-                supply_chain_verified: true,
+                attestation_level: "verified".to_string(),
+                source_uri: format!("https://github.com/{}", self.extension_id),
+                artifact_hashes: vec![format!("sha256:{:064x}", self.trust_card_version)],
+                verified_at: "2026-04-21T16:00:00Z".to_string(),
+            },
+            reputation_score_basis_points: self.reputation_score_basis_points,
+            reputation_trend: ReputationTrend::Stable,
+            active_quarantine: false,
+            dependency_trust_summary: vec![DependencyTrustStatus {
+                dependency_id: "test-dependency".to_string(),
+                trust_level: "trusted".to_string(),
+            }],
+            last_verified_timestamp: "2026-04-21T16:00:00Z".to_string(),
+            user_facing_risk_assessment: RiskAssessment {
+                overall_risk_score: 2.5,
+                risk_factors: vec!["Third-party dependencies".to_string()],
+                mitigation_strategies: vec!["Regular security updates".to_string()],
             },
             evidence_refs,
         }
@@ -132,11 +148,11 @@ impl ArbitraryTrustCardData {
 
     fn to_trust_card(self) -> TrustCard {
         let certification_levels = [
+            CertificationLevel::Unknown,
             CertificationLevel::Bronze,
             CertificationLevel::Silver,
             CertificationLevel::Gold,
             CertificationLevel::Platinum,
-            CertificationLevel::Diamond,
         ];
 
         let input = self.to_trust_card_input();
@@ -147,14 +163,17 @@ impl ArbitraryTrustCardData {
             extension: input.extension,
             publisher: input.publisher,
             certification_level: certification_levels[self.certification_level as usize % certification_levels.len()],
-            capability_declarations: vec![input.capability_declaration],
+            capability_declarations: input.capability_declarations,
             behavioral_profile: input.behavioral_profile,
             revocation_status: input.revocation_status,
             provenance_summary: input.provenance_summary,
             reputation_score_basis_points: self.reputation_score_basis_points,
             reputation_trend: input.reputation_trend,
             active_quarantine: input.active_quarantine,
-            dependency_trust_summary: vec![DependencyTrustStatus::Trusted],
+            dependency_trust_summary: vec![DependencyTrustStatus {
+                dependency_id: "test-dependency".to_string(),
+                trust_level: "trusted".to_string(),
+            }],
             last_verified_timestamp: input.last_verified_timestamp,
             user_facing_risk_assessment: input.user_facing_risk_assessment,
             audit_history: Vec::new(),
