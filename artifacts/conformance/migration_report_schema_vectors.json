@@ -1,0 +1,231 @@
+{
+  "schema_version": "franken-node/migration-report-schema-conformance/v1",
+  "coverage": [
+    {
+      "spec_section": "MIGRATION-REPORT-COMMON",
+      "level": "MUST",
+      "tested": true
+    },
+    {
+      "spec_section": "MIGRATION-AUDIT-REPORT",
+      "level": "MUST",
+      "tested": true
+    },
+    {
+      "spec_section": "MIGRATION-VALIDATE-REPORT",
+      "level": "MUST",
+      "tested": true
+    },
+    {
+      "spec_section": "MIGRATION-REWRITE-REPORT",
+      "level": "MUST",
+      "tested": true
+    },
+    {
+      "spec_section": "MIGRATION-ROLLBACK-PLAN",
+      "level": "MUST",
+      "tested": true
+    }
+  ],
+  "vectors": [
+    {
+      "name": "audit_risky_fixture",
+      "report_kind": "audit",
+      "report": {
+        "schema_version": "1.0.0",
+        "project_path": "tests/fixtures/migrate/risky",
+        "generated_at_utc": "2026-02-20T12:00:00Z",
+        "summary": {
+          "files_scanned": 1,
+          "js_files": 0,
+          "ts_files": 0,
+          "package_manifests": 1,
+          "risky_scripts": 1,
+          "lockfiles": []
+        },
+        "findings": [
+          {
+            "id": "mig-audit-001",
+            "category": "scripts",
+            "severity": "high",
+            "message": "detected 1 potentially risky install/build script(s)",
+            "path": null,
+            "recommendation": "Review and harden install/build scripts before enabling strict trust policy."
+          },
+          {
+            "id": "mig-audit-002",
+            "category": "scripts",
+            "severity": "high",
+            "message": "risky install/build script pattern detected in package.json",
+            "path": "package.json",
+            "recommendation": "Replace dynamic install hooks with deterministic build steps before migration."
+          },
+          {
+            "id": "mig-audit-003",
+            "category": "dependencies",
+            "severity": "medium",
+            "message": "no JavaScript lockfile detected",
+            "path": null,
+            "recommendation": "Generate and commit a lockfile (package-lock.json, pnpm-lock.yaml, yarn.lock, or bun.lockb) before migration."
+          }
+        ]
+      }
+    },
+    {
+      "name": "audit_hardened_fixture",
+      "report_kind": "audit",
+      "report": {
+        "schema_version": "1.0.0",
+        "project_path": "tests/fixtures/migrate/hardened",
+        "generated_at_utc": "2026-02-20T12:00:01Z",
+        "summary": {
+          "files_scanned": 2,
+          "js_files": 0,
+          "ts_files": 0,
+          "package_manifests": 1,
+          "risky_scripts": 0,
+          "lockfiles": [
+            "package-lock.json"
+          ]
+        },
+        "findings": [
+          {
+            "id": "mig-audit-001",
+            "category": "runtime",
+            "severity": "low",
+            "message": "no JavaScript/TypeScript source files found",
+            "path": null,
+            "recommendation": "Confirm the migration target path points to the intended JS/TS project."
+          },
+          {
+            "id": "mig-audit-002",
+            "category": "project",
+            "severity": "info",
+            "message": "detected 1 package manifest(s)",
+            "path": null,
+            "recommendation": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "validate_risky_fixture",
+      "report_kind": "validate",
+      "report": {
+        "schema_version": "1.0.0",
+        "project_path": "tests/fixtures/migrate/risky",
+        "generated_at_utc": "2026-02-20T12:00:02Z",
+        "status": "fail",
+        "checks": [
+          {
+            "id": "mig-validate-001",
+            "passed": true,
+            "message": "package manifests detected: 1",
+            "remediation": "Ensure at least one package.json is present before validation."
+          },
+          {
+            "id": "mig-validate-002",
+            "passed": false,
+            "message": "lockfiles detected: 0",
+            "remediation": "Commit a lockfile (package-lock.json, pnpm-lock.yaml, yarn.lock, or bun.lockb)."
+          },
+          {
+            "id": "mig-validate-003",
+            "passed": false,
+            "message": "risky install/build scripts: 1",
+            "remediation": "Remove or harden risky install/build hooks before migration rollout."
+          },
+          {
+            "id": "mig-validate-004",
+            "passed": false,
+            "message": "high-severity audit findings: 2",
+            "remediation": "Resolve all high-severity migrate audit findings before validation can pass."
+          }
+        ],
+        "blocking_findings": [
+          {
+            "id": "mig-audit-001",
+            "category": "scripts",
+            "severity": "high",
+            "message": "detected 1 potentially risky install/build script(s)",
+            "path": null,
+            "recommendation": "Review and harden install/build scripts before enabling strict trust policy."
+          },
+          {
+            "id": "mig-audit-002",
+            "category": "scripts",
+            "severity": "high",
+            "message": "risky install/build script pattern detected in package.json",
+            "path": "package.json",
+            "recommendation": "Replace dynamic install hooks with deterministic build steps before migration."
+          }
+        ],
+        "warning_findings": [
+          {
+            "id": "mig-audit-003",
+            "category": "dependencies",
+            "severity": "medium",
+            "message": "no JavaScript lockfile detected",
+            "path": null,
+            "recommendation": "Generate and commit a lockfile (package-lock.json, pnpm-lock.yaml, yarn.lock, or bun.lockb) before migration."
+          }
+        ]
+      }
+    },
+    {
+      "name": "rewrite_dry_run_fixture",
+      "report_kind": "rewrite",
+      "report": {
+        "schema_version": "1.0.0",
+        "project_path": "tests/fixtures/migrate/risky",
+        "generated_at_utc": "2026-02-20T12:00:03Z",
+        "apply_mode": false,
+        "package_manifests_scanned": 1,
+        "rewrites_planned": 2,
+        "rewrites_applied": 0,
+        "manual_review_items": 1,
+        "entries": [
+          {
+            "id": "mig-rewrite-001",
+            "path": "package.json",
+            "action": "pin_node_engine",
+            "detail": "package.json would be updated with engines.node >=20 <23",
+            "applied": false
+          },
+          {
+            "id": "mig-rewrite-002",
+            "path": "package.json",
+            "action": "manual_script_review",
+            "detail": "script `postinstall` requires manual review before automated migration",
+            "applied": false
+          }
+        ],
+        "rollback_entries": [
+          {
+            "path": "package.json",
+            "original_content": "{\n  \"name\": \"migrate-risky-fixture\",\n  \"version\": \"1.0.0\"\n}\n",
+            "rewritten_content": "{\n  \"name\": \"migrate-risky-fixture\",\n  \"version\": \"1.0.0\",\n  \"engines\": {\n    \"node\": \">=20 <23\"\n  }\n}\n"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rollback_plan_fixture",
+      "report_kind": "rollback_plan",
+      "report": {
+        "schema_version": "1.0.0",
+        "project_path": "tests/fixtures/migrate/risky",
+        "generated_at_utc": "2026-02-20T12:00:04Z",
+        "apply_mode": false,
+        "entry_count": 1,
+        "entries": [
+          {
+            "path": "package.json",
+            "original_content": "{\n  \"name\": \"migrate-risky-fixture\",\n  \"version\": \"1.0.0\"\n}\n",
+            "rewritten_content": "{\n  \"name\": \"migrate-risky-fixture\",\n  \"version\": \"1.0.0\",\n  \"engines\": {\n    \"node\": \">=20 <23\"\n  }\n}\n"
+          }
+        ]
+      }
+    }
+  ]
+}
