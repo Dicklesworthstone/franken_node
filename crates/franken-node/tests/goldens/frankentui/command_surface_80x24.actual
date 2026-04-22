@@ -1,0 +1,9 @@
+surface=command_surface_80x24
+component=CommandSurface
+width=80
+height=24
+--- rendered ---
+franken-node doctor
+status: degraded
+trace: trace-golden-frankentui
+next: run franken-node doctor --json for machine output

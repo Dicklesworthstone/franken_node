@@ -1,0 +1,107 @@
+{
+  "gate_verdict": "PASS",
+  "summary": {
+    "total_surfaces": 12,
+    "complete": 12,
+    "incomplete": 0,
+    "raw_violations": 0
+  },
+  "surfaces": [
+    {
+      "module_path": "src/cli.rs",
+      "surface_name": "cli_command_output",
+      "frankentui_component": "CommandSurface",
+      "boundary_type": "surface_definition",
+      "migration_status": "complete",
+      "notes": "Command schema and output mode selection"
+    },
+    {
+      "module_path": "src/main.rs",
+      "surface_name": "main_panel_render",
+      "frankentui_component": "Panel",
+      "boundary_type": "renderer",
+      "migration_status": "complete",
+      "notes": "Primary Panel rendering"
+    },
+    {
+      "module_path": "src/main.rs",
+      "surface_name": "main_table_render",
+      "frankentui_component": "Table",
+      "boundary_type": "renderer",
+      "migration_status": "complete",
+      "notes": "Table output for structured data"
+    },
+    {
+      "module_path": "src/main.rs",
+      "surface_name": "main_status_bar",
+      "frankentui_component": "StatusBar",
+      "boundary_type": "renderer",
+      "migration_status": "complete",
+      "notes": "StatusBar for ongoing operations"
+    },
+    {
+      "module_path": "src/policy/correctness_envelope.rs",
+      "surface_name": "correctness_alert",
+      "frankentui_component": "AlertBanner",
+      "boundary_type": "diagnostic_renderer",
+      "migration_status": "complete",
+      "notes": "Policy/correctness diagnostics"
+    },
+    {
+      "module_path": "src/policy/controller_boundary_checks.rs",
+      "surface_name": "boundary_alert",
+      "frankentui_component": "AlertBanner",
+      "boundary_type": "diagnostic_renderer",
+      "migration_status": "complete",
+      "notes": "Boundary-check alert output"
+    },
+    {
+      "module_path": "src/policy/controller_boundary_checks.rs",
+      "surface_name": "boundary_table",
+      "frankentui_component": "Table",
+      "boundary_type": "diagnostic_renderer",
+      "migration_status": "complete",
+      "notes": "Boundary-check summary table"
+    },
+    {
+      "module_path": "src/policy/evidence_emission.rs",
+      "surface_name": "evidence_status_bar",
+      "frankentui_component": "StatusBar",
+      "boundary_type": "diagnostic_renderer",
+      "migration_status": "complete",
+      "notes": "Evidence emission progress"
+    },
+    {
+      "module_path": "src/policy/evidence_emission.rs",
+      "surface_name": "evidence_table",
+      "frankentui_component": "Table",
+      "boundary_type": "diagnostic_renderer",
+      "migration_status": "complete",
+      "notes": "Evidence anomaly table"
+    },
+    {
+      "module_path": "src/observability/evidence_ledger.rs",
+      "surface_name": "ledger_log_stream",
+      "frankentui_component": "LogStreamPanel",
+      "boundary_type": "diagnostic_renderer",
+      "migration_status": "complete",
+      "notes": "Audit/evidence stream visualization"
+    },
+    {
+      "module_path": "src/tools/evidence_replay_validator.rs",
+      "surface_name": "replay_diff_panel",
+      "frankentui_component": "DiffPanel",
+      "boundary_type": "diagnostic_renderer",
+      "migration_status": "complete",
+      "notes": "Replay mismatch diff rendering"
+    },
+    {
+      "module_path": "src/tools/evidence_replay_validator.rs",
+      "surface_name": "replay_alert",
+      "frankentui_component": "AlertBanner",
+      "boundary_type": "diagnostic_renderer",
+      "migration_status": "complete",
+      "notes": "Replay mismatch/match alert banner"
+    }
+  ]
+}
