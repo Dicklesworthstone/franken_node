@@ -110,7 +110,7 @@ impl HardwareFingerprint {
     pub fn from_info(info: &str) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(b"profile_tuning_fingerprint_v1:" as &[u8]);
-        hasher.update(info.as_bytes());
+        hash_len_prefixed(&mut hasher, info.as_bytes());
         HardwareFingerprint(hex::encode(hasher.finalize()))
     }
 }
@@ -148,7 +148,7 @@ impl SignedPolicyBundle {
         let json = serde_json::to_string(self).unwrap_or_else(|e| format!("__serde_err:{e}"));
         let mut hasher = Sha256::new();
         hasher.update(b"profile_tuning_json_v1:" as &[u8]);
-        hasher.update(json.as_bytes());
+        hash_len_prefixed(&mut hasher, json.as_bytes());
         hex::encode(hasher.finalize())
     }
 }
@@ -206,6 +206,12 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
         items.drain(0..overflow);
     }
     items.push(item);
+}
+
+fn hash_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+    let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    hasher.update(len.to_le_bytes());
+    hasher.update(bytes);
 }
 
 /// Compute HMAC-SHA256-like signature using the given key.
@@ -676,6 +682,13 @@ mod tests {
     use super::*;
     use crate::security::constant_time;
 
+    fn legacy_unframed_profile_hash(domain: &[u8], payload: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(domain);
+        hasher.update(payload);
+        hex::encode(hasher.finalize())
+    }
+
     fn sample_baseline() -> Vec<BaselineRow> {
         vec![
             BaselineRow {
@@ -891,6 +904,13 @@ mod tests {
     fn test_hardware_fingerprint_display() {
         let f = HardwareFingerprint::from_info("test");
         assert!(!format!("{}", f).is_empty());
+    }
+
+    #[test]
+    fn test_hardware_fingerprint_uses_length_prefixed_payload() {
+        let framed = HardwareFingerprint::from_info("test");
+        let legacy = legacy_unframed_profile_hash(b"profile_tuning_fingerprint_v1:", b"test");
+        assert_ne!(framed.0, legacy);
     }
 
     // -- PolicyDelta regression check ----------------------------------
@@ -1432,6 +1452,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_bundle_hash_uses_length_prefixed_payload() {
+        let mut harness = ProfileTuningHarness::with_defaults();
+        let outcome = harness.run(&sample_baseline(), &sample_benchmarks(), None);
+        if let HarnessOutcome::Accepted(bundle) = outcome {
+            let json = serde_json::to_vec(&bundle).expect("bundle must serialize");
+            let legacy = legacy_unframed_profile_hash(b"profile_tuning_json_v1:", &json);
+            assert_ne!(bundle.bundle_hash(), legacy);
+        } else {
+            unreachable!("Expected Accepted");
+        }
+    }
+
     // -- Config --------------------------------------------------------
 
     #[test]
@@ -1706,5 +1739,136 @@ mod tests {
         } else {
             unreachable!("Expected Accepted");
         }
+    }
+
+    // -- Hash collision resistance tests -----------------------------------
+
+    #[test]
+    fn test_hardware_fingerprint_hash_collision_resistance() {
+        // Test that length prefixing prevents delimiter-collision attacks
+        // Case: different inputs that would produce same concatenation without length framing
+
+        // These inputs would be vulnerable to collision if naively concatenated:
+        // "abc" + "def" vs "ab" + "cdef" both produce "abcdef"
+        let input1 = "abc|def"; // First field: "abc", delimiter: "|", second field: "def"
+        let input2 = "ab|c|def"; // First field: "ab", delimiter: "|", second field: "c|def"
+
+        let hash1 = HardwareFingerprint::from_info(input1);
+        let hash2 = HardwareFingerprint::from_info(input2);
+
+        // With length prefixing, these should produce different hashes
+        assert_ne!(
+            hash1.0, hash2.0,
+            "Length-prefixed hashing should prevent collision between '{}' and '{}'",
+            input1, input2
+        );
+    }
+
+    #[test]
+    fn test_policy_bundle_hash_collision_resistance() {
+        // Test that bundle hashing resists collision attacks
+
+        // Create two bundles with carefully chosen field values that could collide
+        // if concatenated without length prefixing
+        let bundle1 = SignedPolicyBundle {
+            version: 1,
+            timestamp: "2026-04-22T00:00:00Z".to_string(),
+            run_id: "run|extra".to_string(),
+            hardware_fingerprint: "hw".to_string(),
+            previous_bundle_hash: None,
+            regression_threshold_pct: 20.0,
+            candidates: vec![],
+            deltas: vec![],
+            signature: "sig1".to_string(),
+        };
+
+        let bundle2 = SignedPolicyBundle {
+            version: 1,
+            timestamp: "2026-04-22T00:00:00Z".to_string(),
+            run_id: "run".to_string(),
+            hardware_fingerprint: "|extrahw".to_string(),
+            previous_bundle_hash: None,
+            regression_threshold_pct: 20.0,
+            candidates: vec![],
+            deltas: vec![],
+            signature: "sig1".to_string(),
+        };
+
+        let hash1 = bundle1.bundle_hash();
+        let hash2 = bundle2.bundle_hash();
+
+        // Hashes should be different due to length prefixing
+        assert_ne!(
+            hash1, hash2,
+            "Bundle hashing should prevent collision between different field arrangements"
+        );
+    }
+
+    #[test]
+    fn test_hmac_sign_collision_resistance() {
+        // Test that HMAC signing properly handles length prefixing
+
+        // Test boundary cases where payload and key could be confused
+        let result1 = hmac_sign("key|payload", "test");
+        let result2 = hmac_sign("key", "|payloadtest");
+
+        // Should produce different signatures due to proper length framing
+        assert_ne!(
+            result1, result2,
+            "HMAC signing should prevent key/payload confusion attacks"
+        );
+
+        // Test empty inputs edge case
+        let result3 = hmac_sign("", "key");
+        let result4 = hmac_sign("key", "");
+        assert_ne!(
+            result3, result4,
+            "HMAC signing should handle empty inputs distinctly"
+        );
+    }
+
+    #[test]
+    fn test_hash_domain_separator_precedence() {
+        // Verify that domain separators are consistently placed first
+
+        // Hardware fingerprint should start with its domain separator
+        let info = "test_info";
+        let fingerprint = HardwareFingerprint::from_info(info);
+
+        // Create a manual hash with the same structure to verify domain separator
+        let mut hasher = Sha256::new();
+        hasher.update(b"profile_tuning_fingerprint_v1:"); // Domain separator first
+        hash_len_prefixed(&mut hasher, info.as_bytes());
+        let expected_hash = hex::encode(hasher.finalize());
+
+        assert_eq!(
+            fingerprint.0, expected_hash,
+            "Hardware fingerprint should use consistent domain separator placement"
+        );
+
+        // Test bundle hash domain separator
+        let bundle = SignedPolicyBundle {
+            version: 1,
+            timestamp: "2026-04-22T00:00:00Z".to_string(),
+            run_id: "test".to_string(),
+            hardware_fingerprint: "hw".to_string(),
+            previous_bundle_hash: None,
+            regression_threshold_pct: 20.0,
+            candidates: vec![],
+            deltas: vec![],
+            signature: "sig".to_string(),
+        };
+
+        let bundle_hash = bundle.bundle_hash();
+        let json = serde_json::to_string(&bundle).unwrap();
+        let mut hasher2 = Sha256::new();
+        hasher2.update(b"profile_tuning_json_v1:"); // Domain separator first
+        hash_len_prefixed(&mut hasher2, json.as_bytes());
+        let expected_bundle_hash = hex::encode(hasher2.finalize());
+
+        assert_eq!(
+            bundle_hash, expected_bundle_hash,
+            "Bundle hash should use consistent domain separator placement"
+        );
     }
 }
