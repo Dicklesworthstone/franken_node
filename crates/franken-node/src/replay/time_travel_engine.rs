@@ -448,11 +448,7 @@ impl WorkflowTrace {
         hasher.update((u64::try_from(steps.len()).unwrap_or(u64::MAX)).to_le_bytes());
         for step in steps {
             hasher.update(step.seq.to_le_bytes());
-            let timestamp_bytes = step.timestamp_ns.to_le_bytes();
-            hasher.update(
-                (u64::try_from(timestamp_bytes.len()).unwrap_or(u64::MAX)).to_le_bytes(),
-            );
-            hasher.update(timestamp_bytes);
+            hasher.update(step.timestamp_ns.to_le_bytes());
             hasher.update((u64::try_from(step.input.len()).unwrap_or(u64::MAX)).to_le_bytes());
             hasher.update(&step.input);
             hasher.update((u64::try_from(step.output.len()).unwrap_or(u64::MAX)).to_le_bytes());

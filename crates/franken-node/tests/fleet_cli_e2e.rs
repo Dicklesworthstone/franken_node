@@ -74,6 +74,26 @@ fn run_cli_in_dir_with_fleet_state_and_env(
         .unwrap_or_else(|err| panic!("failed running `{}`: {err}", args.join(" ")))
 }
 
+fn run_cli_in_dir_with_env(
+    current_dir: &std::path::Path,
+    args: &[&str],
+    extra_env: &[(&str, &str)],
+) -> Output {
+    let binary_path = resolve_binary_path();
+    assert!(
+        binary_path.is_file(),
+        "franken-node binary not found at {}",
+        binary_path.display()
+    );
+    Command::new(&binary_path)
+        .current_dir(current_dir)
+        .args(args)
+        .env_remove("FRANKEN_NODE_PROFILE")
+        .envs(extra_env.iter().copied())
+        .output()
+        .unwrap_or_else(|err| panic!("failed running `{}`: {err}", args.join(" ")))
+}
+
 fn spawn_cli_in_dir_with_fleet_state(
     current_dir: &std::path::Path,
     args: &[&str],
@@ -267,7 +287,18 @@ fn canonicalize_fleet_reconcile_snapshot(
                         "payload_hash" => {
                             *nested = serde_json::Value::String("[payload-hash]".to_string());
                         }
+                        "token_id" => {
+                            *nested = serde_json::Value::String("[token-id]".to_string());
+                        }
+                        "signature" if nested.is_string() => {
+                            *nested = serde_json::Value::String("[signature]".to_string());
+                        }
                         "elapsed_ms" => {
+                            *nested = serde_json::Value::from(0);
+                        }
+                        "issued_at_epoch_secs"
+                        | "expires_at_epoch_secs"
+                        | "timestamp_epoch_secs" => {
                             *nested = serde_json::Value::from(0);
                         }
                         "action_id" => {
@@ -2234,6 +2265,80 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
         String::from_utf8_lossy(&agent_output.stderr)
     );
 
+    let trust_card_workspace = tempdir().expect("trust-card tempdir");
+    std::fs::write(
+        trust_card_workspace.path().join("franken_node.toml"),
+        "profile = \"balanced\"\n",
+    )
+    .expect("write trust-card fixture config");
+    write_fixture_registry_to(trust_card_workspace.path());
+    let trust_card_output = run_cli_in_dir_with_env(
+        trust_card_workspace.path(),
+        &["trust-card", "export", "npm:@acme/auth-guard", "--json"],
+        &[],
+    );
+    assert!(
+        trust_card_output.status.success(),
+        "trust-card export json failed: {}",
+        String::from_utf8_lossy(&trust_card_output.stderr)
+    );
+
+    let remotecap_workspace = tempdir().expect("remotecap tempdir");
+    let remotecap_issue_output = run_cli_in_dir_with_env(
+        remotecap_workspace.path(),
+        &[
+            "remotecap",
+            "issue",
+            "--scope",
+            "network_egress",
+            "--endpoint",
+            "https://api.example.com",
+            "--ttl",
+            "1h",
+            "--operator-approved",
+            "--trace-id",
+            "trace-golden-remotecap-issue",
+            "--json",
+        ],
+        &[("FRANKEN_NODE_REMOTECAP_KEY", "remotecap-cli-golden-key")],
+    );
+    assert!(
+        remotecap_issue_output.status.success(),
+        "remotecap issue json failed: {}",
+        String::from_utf8_lossy(&remotecap_issue_output.stderr)
+    );
+    let remotecap_issue_json = json_stdout(&remotecap_issue_output, "remotecap issue");
+    let remotecap_token_path = remotecap_workspace.path().join("capability.json");
+    std::fs::write(
+        &remotecap_token_path,
+        serde_json::to_vec_pretty(&remotecap_issue_json["token"])
+            .expect("serialize remotecap token"),
+    )
+    .expect("write remotecap token");
+    let remotecap_token_arg = remotecap_token_path.display().to_string();
+    let remotecap_verify_output = run_cli_in_dir_with_env(
+        remotecap_workspace.path(),
+        &[
+            "remotecap",
+            "verify",
+            "--token-file",
+            remotecap_token_arg.as_str(),
+            "--operation",
+            "network_egress",
+            "--endpoint",
+            "https://api.example.com/v1/status",
+            "--trace-id",
+            "trace-golden-remotecap-verify",
+            "--json",
+        ],
+        &[("FRANKEN_NODE_REMOTECAP_KEY", "remotecap-cli-golden-key")],
+    );
+    assert!(
+        remotecap_verify_output.status.success(),
+        "remotecap verify json failed: {}",
+        String::from_utf8_lossy(&remotecap_verify_output.stderr)
+    );
+
     let matrix = serde_json::json!({
         "status_zone": canonicalize_fleet_reconcile_snapshot(
             json_stdout(&status_zone_output, "fleet status zone"),
@@ -2248,6 +2353,11 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
         "agent_once": canonicalize_fleet_reconcile_snapshot(
             jsonl_stdout(&agent_output, "fleet agent once"),
             &agent_state_dir,
+        ),
+        "trust_card_export": json_stdout(&trust_card_output, "trust-card export"),
+        "remotecap_verify": canonicalize_fleet_reconcile_snapshot(
+            json_stdout(&remotecap_verify_output, "remotecap verify"),
+            remotecap_workspace.path(),
         ),
     });
 

@@ -448,5 +448,109 @@ expression: matrix
       "quarantine_version": 0,
       "poll_timestamp": "[poll_timestamp]"
     }
-  ]
+  ],
+  "trust_card_export": {
+    "active_quarantine": false,
+    "audit_history": [
+      {
+        "detail": "trust card created",
+        "event_code": "TRUST_CARD_CREATED",
+        "timestamp": "1970-01-01T00:16:40Z",
+        "trace_id": "trace-fixture-registry"
+      }
+    ],
+    "behavioral_profile": {
+      "filesystem_access": false,
+      "network_access": true,
+      "profile_summary": "Network-only auth checks with bounded side effects",
+      "subprocess_access": false
+    },
+    "capability_declarations": [
+      {
+        "description": "Invalidate compromised sessions",
+        "name": "auth.revoke-session",
+        "risk": "high"
+      },
+      {
+        "description": "Validate JWT and attach identity context",
+        "name": "auth.validate-token",
+        "risk": "medium"
+      }
+    ],
+    "card_hash": "78e4f8d8be41fc3f620cc0e3b4eb05968bf811e77a3448de17bb44db322255da",
+    "certification_level": "gold",
+    "dependency_trust_summary": [
+      {
+        "dependency_id": "npm:jsonwebtoken@9",
+        "trust_level": "verified"
+      }
+    ],
+    "derivation_evidence": {
+      "derivation_chain_hash": "sha256:8fe30e7b1b53d1b7c21c4f23b8eee4830532588b286841cc75cabac3cc0a43ac",
+      "derived_at_epoch": 1000,
+      "evidence_refs": [
+        {
+          "evidence_id": "ev-fixture-prov-001",
+          "evidence_type": "provenance_chain",
+          "verification_receipt_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "verified_at_epoch": 1000
+        },
+        {
+          "evidence_id": "ev-fixture-rep-001",
+          "evidence_type": "reputation_signal",
+          "verification_receipt_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "verified_at_epoch": 1000
+        }
+      ]
+    },
+    "extension": {
+      "extension_id": "npm:@acme/auth-guard",
+      "version": "1.4.2"
+    },
+    "last_verified_timestamp": "2026-02-20T12:00:00Z",
+    "previous_version_hash": null,
+    "provenance_summary": {
+      "artifact_hashes": [
+        "sha256:deadbeefaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "attestation_level": "slsa-l3",
+      "source_uri": "fixture://trust-card/acme/auth-guard",
+      "verified_at": "2026-02-20T12:00:00Z"
+    },
+    "publisher": {
+      "display_name": "Acme Security",
+      "publisher_id": "pub-acme"
+    },
+    "registry_signature": "7bd249b809d2fee0dcdf33844a69945576e5bc04bf41a6fd8dd001f3ea26c37d",
+    "reputation_score_basis_points": 920,
+    "reputation_trend": "improving",
+    "revocation_status": {
+      "status": "active"
+    },
+    "schema_version": "1.0.0",
+    "trust_card_version": 1,
+    "user_facing_risk_assessment": {
+      "level": "low",
+      "summary": "Token validation extension with strong provenance and no local disk access"
+    }
+  },
+  "remotecap_verify": {
+    "valid": true,
+    "authorized": true,
+    "token_id": "[token-id]",
+    "operation": "network_egress",
+    "endpoint": "https://api.example.com/v1/status",
+    "audit_event": {
+      "event_code": "REMOTECAP_RECHECK_PASSED",
+      "legacy_event_code": "RC_RECHECK_PASSED",
+      "token_id": "[token-id]",
+      "issuer_identity": "operator-cli",
+      "operation": "network_egress",
+      "endpoint": "https://api.example.com/v1/status",
+      "trace_id": "trace-golden-remotecap-verify",
+      "timestamp_epoch_secs": 0,
+      "allowed": true,
+      "denial_code": null
+    }
+  }
 }

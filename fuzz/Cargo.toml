@@ -113,6 +113,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_remote_cap_token_parse"
+path = "fuzz_targets/fuzz_remote_cap_token_parse.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_trust_card_compare_cbor"
 path = "fuzz_targets/fuzz_trust_card_compare_cbor.rs"
 test = false

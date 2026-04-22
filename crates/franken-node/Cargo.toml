@@ -173,6 +173,10 @@ name = "trust_card_authoritative_state_real_inputs"
 path = "tests/trust_card_authoritative_state_real_inputs.rs"
 
 [[test]]
+name = "trust_card_wire_conformance"
+path = "tests/trust_card_wire_conformance.rs"
+
+[[test]]
 name = "canonical_serializer_real_inputs"
 path = "tests/canonical_serializer_real_inputs.rs"
 
@@ -238,6 +242,10 @@ required-features = ["test-support"]
 [[test]]
 name = "fleet_quarantine_metamorphic"
 path = "tests/fleet_quarantine_metamorphic.rs"
+
+[[test]]
+name = "fleet_quarantine_e2e_full"
+path = "tests/fleet_quarantine_e2e_full.rs"
 
 [[test]]
 name = "replay_bundle_metamorphic"
