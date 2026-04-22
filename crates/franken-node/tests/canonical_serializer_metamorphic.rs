@@ -6,15 +6,14 @@
 //! canonical form, which would break deterministic serialization requirements.
 
 use arbitrary::Arbitrary;
+use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
 use frankenengine_node::supply_chain::trust_card::{
-    to_canonical_json, TrustCard, TrustCardInput, ExtensionIdentity, PublisherIdentity,
-    BehavioralProfile, CapabilityDeclaration, CapabilityRisk, RiskLevel, ProvenanceSummary,
-    ReputationTrend, RevocationStatus, RiskAssessment, CertificationLevel,
-    DependencyTrustStatus, AuditRecord,
+    BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
+    DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
+    ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCard, TrustCardInput,
+    to_canonical_json,
 };
-use frankenengine_node::supply_chain::certification::{VerifiedEvidenceRef, EvidenceType};
-use serde_json::{Value, Map};
-use std::collections::BTreeMap;
+use serde_json::{Map, Value};
 
 /// Arbitrary implementation for generating diverse JSON structures to test canonicalization
 #[derive(Debug, Clone, Arbitrary)]
@@ -35,7 +34,9 @@ impl ArbitraryJsonValue {
             ArbitraryJsonValue::Number(n) => {
                 // Ensure finite numbers for valid JSON
                 if n.is_finite() {
-                    serde_json::Number::from_f64(n).map(Value::Number).unwrap_or(Value::Null)
+                    serde_json::Number::from_f64(n)
+                        .map(Value::Number)
+                        .unwrap_or(Value::Null)
                 } else {
                     Value::Null
                 }
@@ -65,7 +66,7 @@ struct ArbitraryTrustCardData {
     description: String,
     repository_url: String,
     homepage_url: String,
-    risk_level: u8, // 0-4 for RiskLevel variants
+    risk_level: u8,          // 0-4 for RiskLevel variants
     certification_level: u8, // 0-4 for CertificationLevel variants
     trust_card_version: u64,
     reputation_score_basis_points: u16,
@@ -75,27 +76,33 @@ struct ArbitraryTrustCardData {
 }
 
 impl ArbitraryTrustCardData {
-    fn to_trust_card_input(self) -> TrustCardInput {
+    fn to_trust_card_input(&self) -> TrustCardInput {
         let risk_levels = [
-            RiskLevel::VeryLow,
             RiskLevel::Low,
             RiskLevel::Medium,
             RiskLevel::High,
             RiskLevel::Critical,
         ];
+        let capability_risks = [
+            CapabilityRisk::Low,
+            CapabilityRisk::Medium,
+            CapabilityRisk::High,
+            CapabilityRisk::Critical,
+        ];
 
         let evidence_types = [
             EvidenceType::ProvenanceChain,
             EvidenceType::ReputationSignal,
-            EvidenceType::SecurityAudit,
-            EvidenceType::ComplianceAttestation,
-            EvidenceType::IntegrationTest,
+            EvidenceType::TestCoverageReport,
+            EvidenceType::AuditReport,
+            EvidenceType::ManifestAdmission,
+            EvidenceType::RevocationCheck,
         ];
 
         let evidence_refs: Vec<VerifiedEvidenceRef> = (0..self.evidence_count.min(5))
             .map(|i| VerifiedEvidenceRef {
                 evidence_id: format!("evidence-{}-{}", self.extension_id, i),
-                evidence_type: evidence_types[i as usize % evidence_types.len()],
+                evidence_type: evidence_types[i as usize % evidence_types.len()].clone(),
                 verified_at_epoch: 1000 + i as u64,
                 verification_receipt_hash: format!("{:064x}", i as u64),
             })
@@ -103,24 +110,27 @@ impl ArbitraryTrustCardData {
 
         TrustCardInput {
             extension: ExtensionIdentity {
-                extension_id: self.extension_id,
-                version: self.version,
+                extension_id: self.extension_id.clone(),
+                version: self.version.clone(),
             },
             publisher: PublisherIdentity {
-                publisher_name: self.publisher_name,
-                publisher_url: self.publisher_url,
+                publisher_id: self.publisher_url.clone(),
+                display_name: self.publisher_name.clone(),
             },
             certification_level: CertificationLevel::Bronze,
             capability_declarations: vec![CapabilityDeclaration {
-                capability_risk: CapabilityRisk {
-                    risk_level: risk_levels[self.risk_level as usize % risk_levels.len()],
-                    mitigation_summary: "Automated testing and code review".to_string(),
-                },
+                name: "network".to_string(),
+                description: "Generated canonical serializer fixture capability".to_string(),
+                risk: capability_risks[self.risk_level as usize % capability_risks.len()],
             }],
             behavioral_profile: BehavioralProfile {
-                description: self.description,
-                repository_url: self.repository_url,
-                homepage_url: self.homepage_url,
+                network_access: true,
+                filesystem_access: false,
+                subprocess_access: false,
+                profile_summary: format!(
+                    "{} repository={} homepage={}",
+                    self.description, self.repository_url, self.homepage_url
+                ),
             },
             revocation_status: RevocationStatus::Active,
             provenance_summary: ProvenanceSummary {
@@ -138,15 +148,15 @@ impl ArbitraryTrustCardData {
             }],
             last_verified_timestamp: "2026-04-21T16:00:00Z".to_string(),
             user_facing_risk_assessment: RiskAssessment {
-                overall_risk_score: 2.5,
-                risk_factors: vec!["Third-party dependencies".to_string()],
-                mitigation_strategies: vec!["Regular security updates".to_string()],
+                level: risk_levels[self.risk_level as usize % risk_levels.len()],
+                summary: "Third-party dependencies mitigated by regular security updates"
+                    .to_string(),
             },
             evidence_refs,
         }
     }
 
-    fn to_trust_card(self) -> TrustCard {
+    fn to_trust_card(&self) -> TrustCard {
         let certification_levels = [
             CertificationLevel::Unknown,
             CertificationLevel::Bronze,
@@ -162,7 +172,8 @@ impl ArbitraryTrustCardData {
             previous_version_hash: None,
             extension: input.extension,
             publisher: input.publisher,
-            certification_level: certification_levels[self.certification_level as usize % certification_levels.len()],
+            certification_level: certification_levels
+                [self.certification_level as usize % certification_levels.len()],
             capability_declarations: input.capability_declarations,
             behavioral_profile: input.behavioral_profile,
             revocation_status: input.revocation_status,
@@ -178,8 +189,8 @@ impl ArbitraryTrustCardData {
             user_facing_risk_assessment: input.user_facing_risk_assessment,
             audit_history: Vec::new(),
             derivation_evidence: None,
-            card_hash: self.card_hash,
-            registry_signature: self.registry_signature,
+            card_hash: self.card_hash.clone(),
+            registry_signature: self.registry_signature.clone(),
         }
     }
 }
@@ -203,19 +214,15 @@ fn canonical_serializer_idempotence_property() {
                 to_canonical_json(&json_value).and_then(|s| {
                     let parsed: Value = serde_json::from_str(&s).unwrap();
                     to_canonical_json(&parsed)
-                })
+                }),
             ) {
                 assert_eq!(
-                    first_canonical,
-                    second_canonical,
+                    first_canonical, second_canonical,
                     "Canonical serialization idempotence violated for JSON value at seed {}:
                      Original: {:?}
                      First canonicalization: {}
                      Second canonicalization: {}",
-                    seed,
-                    json_value,
-                    first_canonical,
-                    second_canonical
+                    seed, json_value, first_canonical, second_canonical
                 );
             }
         }
@@ -230,17 +237,14 @@ fn canonical_serializer_idempotence_property() {
                 to_canonical_json(&trust_card).and_then(|s| {
                     let parsed_card: TrustCard = serde_json::from_str(&s).unwrap();
                     to_canonical_json(&parsed_card)
-                })
+                }),
             ) {
                 assert_eq!(
-                    first_canonical,
-                    second_canonical,
+                    first_canonical, second_canonical,
                     "Trust card canonical serialization idempotence violated at seed {}:
                      First canonicalization: {}
                      Second canonicalization: {}",
-                    seed,
-                    first_canonical,
-                    second_canonical
+                    seed, first_canonical, second_canonical
                 );
             }
         }
@@ -262,17 +266,31 @@ fn canonical_serialization_preserves_semantics() {
                 // Parse the canonical JSON back to a TrustCard
                 if let Ok(recovered_card) = serde_json::from_str::<TrustCard>(&canonical_json) {
                     // The recovered card should be semantically equivalent to the original
-                    assert_eq!(original_card.extension.extension_id, recovered_card.extension.extension_id);
-                    assert_eq!(original_card.trust_card_version, recovered_card.trust_card_version);
-                    assert_eq!(original_card.certification_level, recovered_card.certification_level);
-                    assert_eq!(original_card.reputation_score_basis_points, recovered_card.reputation_score_basis_points);
-                    assert_eq!(original_card.capability_declarations.len(), recovered_card.capability_declarations.len());
+                    assert_eq!(
+                        original_card.extension.extension_id,
+                        recovered_card.extension.extension_id
+                    );
+                    assert_eq!(
+                        original_card.trust_card_version,
+                        recovered_card.trust_card_version
+                    );
+                    assert_eq!(
+                        original_card.certification_level,
+                        recovered_card.certification_level
+                    );
+                    assert_eq!(
+                        original_card.reputation_score_basis_points,
+                        recovered_card.reputation_score_basis_points
+                    );
+                    assert_eq!(
+                        original_card.capability_declarations.len(),
+                        recovered_card.capability_declarations.len()
+                    );
 
                     // Re-canonicalizing the recovered card should produce identical JSON
                     if let Ok(re_canonical) = to_canonical_json(&recovered_card) {
                         assert_eq!(
-                            canonical_json,
-                            re_canonical,
+                            canonical_json, re_canonical,
                             "Semantic equivalence after round-trip failed at seed {}",
                             seed
                         );
@@ -290,7 +308,6 @@ fn canonical_serialization_handles_edge_cases() {
         // Empty structures
         serde_json::json!({}),
         serde_json::json!([]),
-
         // Nested structures with key ordering challenges
         serde_json::json!({
             "z": "last",
@@ -298,7 +315,6 @@ fn canonical_serialization_handles_edge_cases() {
             "m": {"nested_z": 1, "nested_a": 2},
             "b": [{"array_z": 3, "array_a": 4}]
         }),
-
         // Mixed data types
         serde_json::json!({
             "string": "value",
@@ -308,7 +324,6 @@ fn canonical_serialization_handles_edge_cases() {
             "array": [1, "two", false, null],
             "object": {"nested": "value"}
         }),
-
         // Large numbers and edge values
         serde_json::json!({
             "large_int": 9007199254740991i64, // Max safe integer in JSON
@@ -316,7 +331,6 @@ fn canonical_serialization_handles_edge_cases() {
             "negative": -123,
             "decimal": 3.14159
         }),
-
         // Unicode and special characters
         serde_json::json!({
             "unicode": "🔒 secure",
@@ -333,14 +347,12 @@ fn canonical_serialization_handles_edge_cases() {
             to_canonical_json(edge_case).and_then(|s| {
                 let parsed: Value = serde_json::from_str(&s).unwrap();
                 to_canonical_json(&parsed)
-            })
+            }),
         ) {
             assert_eq!(
-                first_canonical,
-                second_canonical,
+                first_canonical, second_canonical,
                 "Edge case {} failed idempotence test: {:?}",
-                i,
-                edge_case
+                i, edge_case
             );
         }
     }
@@ -369,8 +381,7 @@ fn canonical_serialization_key_ordering_stability() {
     // All serializations should be identical
     for (i, serialization) in serializations.iter().enumerate() {
         assert_eq!(
-            serializations[0],
-            *serialization,
+            serializations[0], *serialization,
             "Key ordering not stable across serializations, iteration {} differs",
             i
         );
@@ -383,5 +394,7 @@ fn canonical_serialization_key_ordering_stability() {
     assert!(canonical.find("\"omega\"").unwrap() < canonical.find("\"zebra\"").unwrap());
 
     // Nested keys should also be ordered
-    assert!(canonical.find("\"alpha_nested\"").unwrap() < canonical.find("\"zebra_nested\"").unwrap());
+    assert!(
+        canonical.find("\"alpha_nested\"").unwrap() < canonical.find("\"zebra_nested\"").unwrap()
+    );
 }
