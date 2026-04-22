@@ -1,47 +1,61 @@
 //! Full fleet quarantine E2E coverage with real in-process state.
 
+use std::collections::BTreeSet;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::PathBuf;
+
+use chrono::Utc;
 use frankenengine_node::api::fleet_quarantine::{
-    FLEET_QUARANTINE_INITIATED, FLEET_RECONCILE_COMPLETED, FLEET_RELEASED, FleetControlManager,
-    QuarantineScope,
+    FLEET_QUARANTINE_INITIATED, FLEET_RECONCILE_COMPLETED, FLEET_RELEASED, FleetActionResult,
+    FleetControlManager, QuarantineScope,
 };
 use frankenengine_node::api::middleware::{AuthIdentity, AuthMethod, TraceContext};
+use frankenengine_node::control_plane::fleet_transport::{
+    FileFleetTransport, FleetAction as PersistedFleetAction, FleetActionRecord, FleetTargetKind,
+    FleetTransport, NodeHealth, NodeStatus,
+};
 use serde_json::{Value, json};
+use tempfile::tempdir;
 
 const SUITE: &str = "fleet_quarantine_e2e_full";
-const ZONE_ID: &str = "zone-e2e-full";
-const EXTENSION_ID: &str = "ext-e2e-quarantine";
 
-struct JsonlTestLog {
+struct JsonLineLog {
+    path: PathBuf,
     test_name: &'static str,
-    lines: Vec<String>,
 }
 
-impl JsonlTestLog {
-    fn new(test_name: &'static str) -> Self {
-        Self {
-            test_name,
-            lines: Vec::new(),
-        }
+impl JsonLineLog {
+    fn new(path: PathBuf, test_name: &'static str) -> Self {
+        Self { path, test_name }
     }
 
-    fn emit(&mut self, phase: &str, event: &str, data: Value) {
-        let record = json!({
-            "ts": chrono::Utc::now().to_rfc3339(),
+    fn emit(&self, phase: &str, event: &str, data: Value) {
+        let entry = json!({
+            "ts": Utc::now().to_rfc3339(),
             "suite": SUITE,
             "test": self.test_name,
             "phase": phase,
             "event": event,
             "data": data,
         });
-        let line = serde_json::to_string(&record).expect("jsonl record should serialize");
-        eprintln!("{line}");
-        self.lines.push(line);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .expect("open structured E2E log");
+        let payload = serde_json::to_vec(&entry).expect("serialize structured E2E log entry");
+        file.write_all(&payload)
+            .expect("write structured E2E log entry");
+        file.write_all(b"\n")
+            .expect("write structured E2E log delimiter");
+        file.sync_all().expect("sync structured E2E log entry");
     }
 
-    fn assert_json_eq(&mut self, field: &str, expected: Value, actual: Value) {
+    fn assert_json_eq(&self, phase: &str, field: &str, expected: Value, actual: Value) {
         let matched = expected == actual;
         self.emit(
-            "assert",
+            phase,
             "assertion",
             json!({
                 "field": field,
@@ -53,44 +67,20 @@ impl JsonlTestLog {
         assert!(matched, "{field} mismatch");
     }
 
-    fn assert_jsonl_is_well_formed(&self) {
-        assert!(!self.lines.is_empty(), "expected JSONL assertions");
-        let parsed: Vec<Value> = self
-            .lines
-            .iter()
-            .map(|line| serde_json::from_str(line).expect("log line must be JSON"))
-            .collect();
+    fn entries(&self) -> Vec<Value> {
+        let contents = fs::read_to_string(&self.path).expect("read structured E2E log");
         assert!(
-            parsed.iter().any(|entry| entry["event"] == "assertion"),
-            "expected at least one assertion log"
+            contents.ends_with('\n'),
+            "structured E2E log must be newline-delimited"
         );
-        assert!(
-            parsed
-                .iter()
-                .any(|entry| entry["event"] == "state_snapshot"),
-            "expected at least one state snapshot log"
-        );
-        assert!(
-            parsed
-                .iter()
-                .filter(|entry| entry["event"] == "assertion")
-                .all(|entry| entry["data"]["match"] == true),
-            "every logged assertion should match"
-        );
+        contents
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("parse structured E2E log line"))
+            .collect()
     }
 }
 
-fn activated_manager() -> FleetControlManager {
-    let mut manager = FleetControlManager::with_decision_signing_key(
-        ed25519_dalek::SigningKey::from_bytes(&[42_u8; 32]),
-        "fleet-quarantine-e2e-full",
-        "fleet-quarantine-e2e",
-    );
-    manager.activate();
-    manager
-}
-
-fn admin_identity() -> AuthIdentity {
+fn e2e_identity() -> AuthIdentity {
     AuthIdentity {
         principal: "fleet-e2e-admin".to_string(),
         method: AuthMethod::MtlsClientCert,
@@ -98,211 +88,378 @@ fn admin_identity() -> AuthIdentity {
     }
 }
 
-fn trace(operation: &str) -> TraceContext {
+fn e2e_trace(phase: &str) -> TraceContext {
     TraceContext {
-        trace_id: format!("fleet-e2e-{operation}-{}", uuid::Uuid::now_v7()),
-        span_id: "000000000000e2e0".to_string(),
+        trace_id: format!("fleet-e2e-{phase}-{}", uuid::Uuid::now_v7()),
+        span_id: "0000000000000001".to_string(),
         trace_flags: 1,
     }
 }
 
-fn fixture_scope() -> QuarantineScope {
-    QuarantineScope {
-        zone_id: ZONE_ID.to_string(),
-        tenant_id: Some("tenant-e2e".to_string()),
-        affected_nodes: 7,
-        reason: "full e2e quarantine-release-reconcile fixture".to_string(),
+fn activated_manager() -> FleetControlManager {
+    let mut manager = FleetControlManager::with_decision_signing_key(
+        ed25519_dalek::SigningKey::from_bytes(&[83_u8; 32]),
+        "fleet-quarantine-e2e-full",
+        "fleet-quarantine-e2e",
+    );
+    manager.activate();
+    manager
+}
+
+fn seed_transport_nodes(transport: &mut FileFleetTransport, zone_id: &str) {
+    for (node_id, health) in [
+        ("node-e2e-primary", NodeHealth::Healthy),
+        ("node-e2e-secondary", NodeHealth::Healthy),
+    ] {
+        transport
+            .upsert_node_status(&NodeStatus {
+                zone_id: zone_id.to_string(),
+                node_id: node_id.to_string(),
+                last_seen: Utc::now(),
+                quarantine_version: 0,
+                health,
+            })
+            .expect("upsert real fleet node status");
     }
 }
 
-fn log_state_snapshot(
-    log: &mut JsonlTestLog,
+fn active_incidents_from_actions(actions: &[FleetActionRecord]) -> BTreeSet<String> {
+    let mut active_incidents = BTreeSet::new();
+    for record in actions {
+        match &record.action {
+            PersistedFleetAction::Quarantine { incident_id, .. } => {
+                active_incidents.insert(incident_id.clone());
+            }
+            PersistedFleetAction::Release { incident_id, .. } => {
+                active_incidents.remove(incident_id);
+            }
+            PersistedFleetAction::PolicyUpdate { .. } => {}
+        }
+    }
+    active_incidents
+}
+
+fn action_log_line_count(transport: &FileFleetTransport) -> usize {
+    fs::read_to_string(transport.layout().actions_path())
+        .expect("read real fleet action JSONL log")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
+}
+
+fn log_current_state(
+    logger: &JsonLineLog,
+    phase: &str,
     manager: &FleetControlManager,
-    label: &str,
-    zones: &[&str],
+    transport: &FileFleetTransport,
+    zone_id: &str,
+    result: Option<&FleetActionResult>,
 ) {
-    let zone_statuses: Vec<Value> = zones
-        .iter()
-        .map(|zone_id| {
-            let status = manager.status(zone_id).expect("zone status should load");
-            json!({
-                "zone_id": status.zone_id,
-                "active_quarantines": status.active_quarantines,
-                "active_revocations": status.active_revocations,
-                "healthy_nodes": status.healthy_nodes,
-                "total_nodes": status.total_nodes,
-                "activated": status.activated,
-                "pending_convergences": status.pending_convergences.len(),
-            })
-        })
-        .collect();
-    let active_incidents: Vec<Value> = manager
-        .active_incidents()
-        .into_iter()
-        .map(|incident| {
-            json!({
-                "incident_id": &incident.incident_id,
-                "extension_id": &incident.extension_id,
-                "zone_id": &incident.zone_id,
-                "action_type": &incident.action_type,
-                "status": incident.status,
-            })
-        })
-        .collect();
-    let events: Vec<Value> = manager
+    let zone_status = manager.status(zone_id).expect("read manager zone status");
+    let shared_state = transport
+        .read_shared_state()
+        .expect("read real file-backed fleet state");
+    let active_transport_incidents = active_incidents_from_actions(&shared_state.actions);
+    let event_codes = manager
         .events()
         .iter()
-        .map(|event| {
-            json!({
-                "event_code": &event.event_code,
-                "event_name": &event.event_name,
-                "trace_id": &event.trace_id,
-                "zone_id": &event.zone_id,
-                "extension_id": &event.extension_id,
-                "metadata": &event.metadata,
-            })
-        })
-        .collect();
+        .map(|event| event.event_code.as_str())
+        .collect::<Vec<_>>();
 
-    log.emit(
-        "assert",
+    logger.emit(
+        phase,
         "state_snapshot",
         json!({
-            "label": label,
-            "incident_count": manager.incident_count(),
-            "active_incidents": active_incidents,
-            "zones": zone_statuses,
-            "events": events,
+            "zone_id": zone_id,
+            "manager": {
+                "incident_count": manager.incident_count(),
+                "active_incidents": manager.active_incidents().len(),
+                "active_quarantines": zone_status.active_quarantines,
+                "active_revocations": zone_status.active_revocations,
+                "pending_convergences": zone_status.pending_convergences.len(),
+            },
+            "transport": {
+                "actions": shared_state.actions.len(),
+                "nodes": shared_state.nodes.len(),
+                "active_incidents": active_transport_incidents.len(),
+                "raw_action_log_lines": action_log_line_count(transport),
+            },
+            "result": result.map(|result| json!({
+                "operation_id": result.operation_id,
+                "action_type": result.action_type,
+                "event_code": result.event_code,
+                "receipt_verified": manager.verify_decision_receipt_signature(&result.receipt),
+            })),
+            "events": event_codes,
         }),
     );
 }
 
+fn persist_quarantine(
+    transport: &mut FileFleetTransport,
+    result: &FleetActionResult,
+    extension_id: &str,
+    scope: &QuarantineScope,
+    quarantine_version: u64,
+) -> String {
+    let incident_id = format!("inc-{}", result.operation_id);
+    transport
+        .publish_action(&FleetActionRecord {
+            action_id: result.operation_id.clone(),
+            emitted_at: Utc::now(),
+            action: PersistedFleetAction::Quarantine {
+                zone_id: scope.zone_id.clone(),
+                incident_id: incident_id.clone(),
+                target_id: extension_id.to_string(),
+                target_kind: FleetTargetKind::Extension,
+                reason: scope.reason.clone(),
+                quarantine_version,
+            },
+        })
+        .expect("persist real quarantine action");
+    incident_id
+}
+
+fn persist_release(
+    transport: &mut FileFleetTransport,
+    result: &FleetActionResult,
+    zone_id: &str,
+    incident_id: &str,
+) {
+    transport
+        .publish_action(&FleetActionRecord {
+            action_id: result.operation_id.clone(),
+            emitted_at: Utc::now(),
+            action: PersistedFleetAction::Release {
+                zone_id: zone_id.to_string(),
+                incident_id: incident_id.to_string(),
+                reason: Some("E2E release after quarantine verification".to_string()),
+            },
+        })
+        .expect("persist real release action");
+}
+
+fn assert_logged_state(
+    logger: &JsonLineLog,
+    entry: &Value,
+    phase: &str,
+    action_count: usize,
+    manager_incident_count: usize,
+    active_transport_incidents: usize,
+    active_quarantines: u64,
+) {
+    logger.assert_json_eq(phase, "phase", json!(phase), entry["phase"].clone());
+    logger.assert_json_eq(
+        phase,
+        "transport action count",
+        json!(action_count),
+        entry["data"]["transport"]["actions"].clone(),
+    );
+    logger.assert_json_eq(
+        phase,
+        "raw action log lines",
+        json!(action_count),
+        entry["data"]["transport"]["raw_action_log_lines"].clone(),
+    );
+    logger.assert_json_eq(
+        phase,
+        "transport node count",
+        json!(2),
+        entry["data"]["transport"]["nodes"].clone(),
+    );
+    logger.assert_json_eq(
+        phase,
+        "transport active incidents",
+        json!(active_transport_incidents),
+        entry["data"]["transport"]["active_incidents"].clone(),
+    );
+    logger.assert_json_eq(
+        phase,
+        "manager incident count",
+        json!(manager_incident_count),
+        entry["data"]["manager"]["incident_count"].clone(),
+    );
+    logger.assert_json_eq(
+        phase,
+        "manager active quarantines",
+        json!(active_quarantines),
+        entry["data"]["manager"]["active_quarantines"].clone(),
+    );
+}
+
 #[test]
-fn quarantine_release_reconcile_sequence_preserves_real_state_with_jsonl_assertions() {
-    let mut log = JsonlTestLog::new(
-        "quarantine_release_reconcile_sequence_preserves_real_state_with_jsonl_assertions",
+fn quarantine_release_reconcile_e2e_persists_real_state_and_jsonl_evidence() {
+    let tempdir = tempdir().expect("create isolated fleet E2E tempdir");
+    let state_root = tempdir.path().join("fleet-state");
+    let log_path = tempdir.path().join("fleet-e2e.jsonl");
+    let logger = JsonLineLog::new(
+        log_path,
+        "quarantine_release_reconcile_e2e_persists_real_state_and_jsonl_evidence",
     );
+    let mut transport = FileFleetTransport::new(&state_root);
+    transport.initialize().expect("initialize real fleet state");
+
+    let zone_id = "zone-e2e-full";
+    let extension_id = "extension-e2e-full";
+    let scope = QuarantineScope {
+        zone_id: zone_id.to_string(),
+        tenant_id: Some("tenant-e2e".to_string()),
+        affected_nodes: 2,
+        reason: "real E2E quarantine path".to_string(),
+    };
+    let identity = e2e_identity();
     let mut manager = activated_manager();
-    let identity = admin_identity();
-    let scope = fixture_scope();
-    let zones = [ZONE_ID];
+    seed_transport_nodes(&mut transport, zone_id);
 
-    log.emit("setup", "test_start", json!({ "zone_id": ZONE_ID }));
-    log_state_snapshot(&mut log, &manager, "initial", &zones);
-    log.assert_json_eq(
-        "initial incident count",
-        json!(0),
-        json!(manager.incident_count()),
-    );
+    log_current_state(&logger, "setup", &manager, &transport, zone_id, None);
 
-    log.emit(
-        "act",
-        "quarantine_start",
-        json!({ "extension_id": EXTENSION_ID }),
-    );
-    let quarantine = manager
-        .quarantine(EXTENSION_ID, &scope, &identity, &trace("quarantine"))
-        .expect("quarantine should succeed against real manager state");
-    let incident_id = format!("inc-{}", quarantine.operation_id);
-    log_state_snapshot(&mut log, &manager, "after_quarantine", &zones);
-    let quarantined_status = manager.status(ZONE_ID).expect("quarantined status");
-    log.assert_json_eq("quarantine success", json!(true), json!(quarantine.success));
-    log.assert_json_eq(
+    let quarantine_result = manager
+        .quarantine(extension_id, &scope, &identity, &e2e_trace("quarantine"))
+        .expect("quarantine should succeed through real manager state");
+    logger.assert_json_eq(
+        "quarantine",
         "quarantine event code",
         json!(FLEET_QUARANTINE_INITIATED),
-        json!(&quarantine.event_code),
+        json!(&quarantine_result.event_code),
     );
-    log.assert_json_eq(
-        "quarantine receipt signature verifies",
+    logger.assert_json_eq(
+        "quarantine",
+        "quarantine receipt signature",
         json!(true),
-        json!(manager.verify_decision_receipt_signature(&quarantine.receipt)),
+        json!(manager.verify_decision_receipt_signature(&quarantine_result.receipt)),
     );
-    log.assert_json_eq(
-        "active quarantine count after quarantine",
-        json!(1),
-        json!(quarantined_status.active_quarantines),
-    );
-    log.assert_json_eq(
-        "incident count after quarantine",
-        json!(1),
-        json!(manager.incident_count()),
+    let incident_id =
+        persist_quarantine(&mut transport, &quarantine_result, extension_id, &scope, 1);
+    log_current_state(
+        &logger,
+        "quarantine",
+        &manager,
+        &transport,
+        zone_id,
+        Some(&quarantine_result),
     );
 
-    log.emit(
-        "act",
-        "release_start",
-        json!({ "incident_id": incident_id }),
-    );
-    let release = manager
-        .release(&incident_id, &identity, &trace("release"))
-        .expect("release should succeed against real manager state");
-    log_state_snapshot(&mut log, &manager, "after_release", &zones);
-    let released_status = manager.status(ZONE_ID).expect("released status");
-    log.assert_json_eq("release success", json!(true), json!(release.success));
-    log.assert_json_eq(
+    let release_result = manager
+        .release(&incident_id, &identity, &e2e_trace("release"))
+        .expect("release should succeed through real manager state");
+    logger.assert_json_eq(
+        "release",
         "release event code",
         json!(FLEET_RELEASED),
-        json!(&release.event_code),
+        json!(&release_result.event_code),
     );
-    log.assert_json_eq(
-        "release receipt signature verifies",
+    logger.assert_json_eq(
+        "release",
+        "release receipt signature",
         json!(true),
-        json!(manager.verify_decision_receipt_signature(&release.receipt)),
+        json!(manager.verify_decision_receipt_signature(&release_result.receipt)),
     );
-    log.assert_json_eq(
-        "active quarantine count after release",
-        json!(0),
-        json!(released_status.active_quarantines),
-    );
-    log.assert_json_eq(
-        "incident count after release",
-        json!(0),
-        json!(manager.incident_count()),
+    persist_release(&mut transport, &release_result, zone_id, &incident_id);
+    log_current_state(
+        &logger,
+        "release",
+        &manager,
+        &transport,
+        zone_id,
+        Some(&release_result),
     );
 
-    log.emit("act", "reconcile_start", json!({ "zone_id": ZONE_ID }));
-    let reconcile = manager
-        .reconcile(&identity, &trace("reconcile"))
-        .expect("reconcile should succeed against real manager state");
-    log_state_snapshot(&mut log, &manager, "after_reconcile", &zones);
-    let reconciled_status = manager.status(ZONE_ID).expect("reconciled status");
-    log.assert_json_eq("reconcile success", json!(true), json!(reconcile.success));
-    log.assert_json_eq(
+    let reconcile_result = manager
+        .reconcile(&identity, &e2e_trace("reconcile"))
+        .expect("reconcile should succeed through real manager state");
+    logger.assert_json_eq(
+        "reconcile",
         "reconcile event code",
         json!(FLEET_RECONCILE_COMPLETED),
-        json!(&reconcile.event_code),
+        json!(&reconcile_result.event_code),
     );
-    log.assert_json_eq(
-        "reconcile receipt signature verifies",
+    logger.assert_json_eq(
+        "reconcile",
+        "reconcile receipt signature",
         json!(true),
-        json!(manager.verify_decision_receipt_signature(&reconcile.receipt)),
+        json!(manager.verify_decision_receipt_signature(&reconcile_result.receipt)),
     );
-    log.assert_json_eq(
-        "active quarantine count after reconcile",
+    log_current_state(
+        &logger,
+        "reconcile",
+        &manager,
+        &transport,
+        zone_id,
+        Some(&reconcile_result),
+    );
+
+    let shared_state = transport
+        .read_shared_state()
+        .expect("read real fleet state after full E2E sequence");
+    logger.assert_json_eq(
+        "assert",
+        "persisted action count",
+        json!(2),
+        json!(shared_state.actions.len()),
+    );
+    logger.assert_json_eq(
+        "assert",
+        "persisted node count",
+        json!(2),
+        json!(shared_state.nodes.len()),
+    );
+    logger.assert_json_eq(
+        "assert",
+        "transport active incidents after release",
         json!(0),
-        json!(reconciled_status.active_quarantines),
+        json!(active_incidents_from_actions(&shared_state.actions).len()),
     );
-    log.assert_json_eq(
-        "incident count after reconcile",
+    logger.assert_json_eq(
+        "assert",
+        "manager incident count after reconcile",
         json!(0),
         json!(manager.incident_count()),
     );
-    log.assert_json_eq(
-        "fleet event sequence",
-        json!([
-            FLEET_QUARANTINE_INITIATED,
-            FLEET_RELEASED,
-            FLEET_RECONCILE_COMPLETED
-        ]),
+    logger.assert_json_eq(
+        "assert",
+        "manager active incident count after reconcile",
+        json!(0),
+        json!(manager.active_incidents().len()),
+    );
+    logger.assert_json_eq(
+        "assert",
+        "manager active quarantines after reconcile",
+        json!(0),
         json!(
             manager
-                .events()
-                .iter()
-                .map(|event| event.event_code.as_str())
-                .collect::<Vec<_>>()
+                .status(zone_id)
+                .expect("read final zone status")
+                .active_quarantines
         ),
     );
 
-    log.emit("assert", "test_end", json!({ "result": "pass" }));
-    log.assert_jsonl_is_well_formed();
+    let entries = logger.entries();
+    let state_entries = entries
+        .iter()
+        .filter(|entry| entry["event"] == "state_snapshot")
+        .collect::<Vec<_>>();
+    let phases = state_entries
+        .iter()
+        .map(|entry| entry["phase"].as_str().expect("phase is string"))
+        .collect::<Vec<_>>();
+    assert_eq!(phases, ["setup", "quarantine", "release", "reconcile"]);
+    assert_logged_state(&logger, state_entries[0], "setup", 0, 0, 0, 0);
+    assert_logged_state(&logger, state_entries[1], "quarantine", 1, 1, 1, 1);
+    assert_logged_state(&logger, state_entries[2], "release", 2, 0, 0, 0);
+    assert_logged_state(&logger, state_entries[3], "reconcile", 2, 0, 0, 0);
+
+    let final_entries = logger.entries();
+    assert!(
+        final_entries
+            .iter()
+            .any(|entry| entry["event"] == "assertion"),
+        "structured E2E log must include assertion records"
+    );
+    assert!(
+        final_entries
+            .iter()
+            .filter(|entry| entry["event"] == "assertion")
+            .all(|entry| entry["data"]["match"] == true),
+        "every structured assertion record must pass"
+    );
 }
