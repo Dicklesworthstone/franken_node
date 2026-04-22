@@ -338,10 +338,15 @@ fn campaign_message_payload(message_id: u64) -> Vec<u8> {
 }
 
 fn payload_hash(payload: &[u8]) -> String {
-    format!(
-        "{:x}",
-        Sha256::digest([b"virtual_transport_faults_payload_v1:" as &[u8], payload].concat())
-    )
+    let mut hasher = Sha256::new();
+    hasher.update(b"virtual_transport_faults_payload_v1:");
+    hasher.update(
+        u64::try_from(payload.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    hasher.update(payload);
+    format!("{:x}", hasher.finalize())
 }
 
 impl VirtualTransportFaultHarness {
@@ -826,6 +831,27 @@ mod tests {
         let r2 = h2.run_campaign("chaos", &config, 100, "t1");
         assert_eq!(r1.content_hash, r2.content_hash);
         assert_eq!(r1.total_faults, r2.total_faults);
+    }
+
+    #[test]
+    fn test_payload_hash_uses_domain_and_length_prefix() {
+        let payload = b"data";
+        let mut expected = Sha256::new();
+        expected.update(b"virtual_transport_faults_payload_v1:");
+        expected.update(
+            u64::try_from(payload.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        expected.update(payload);
+
+        let legacy_unframed = format!(
+            "{:x}",
+            Sha256::digest([b"virtual_transport_faults_payload_v1:" as &[u8], payload].concat())
+        );
+
+        assert_eq!(payload_hash(payload), format!("{:x}", expected.finalize()));
+        assert_ne!(payload_hash(payload), legacy_unframed);
     }
 
     #[test]

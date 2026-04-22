@@ -336,14 +336,32 @@ pub fn verify_hash_chain(receipts: &[SignedReceipt]) -> Result<(), ReceiptError>
 /// Filter receipts by action and time window.
 #[must_use]
 pub fn export_receipts(receipts: &[SignedReceipt], filter: &ReceiptQuery) -> Vec<SignedReceipt> {
-    let from = filter
+    let from = match filter
         .from_timestamp
-        .as_ref()
-        .and_then(|ts| parse_timestamp(ts).ok());
-    let to = filter
+        .as_deref()
+        .map(parse_timestamp)
+        .transpose()
+    {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let to = match filter
         .to_timestamp
+        .as_deref()
+        .map(parse_timestamp)
+        .transpose()
+    {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+
+    if from
         .as_ref()
-        .and_then(|ts| parse_timestamp(ts).ok());
+        .zip(to.as_ref())
+        .is_some_and(|(from_ts, to_ts)| from_ts > to_ts)
+    {
+        return Vec::new();
+    }
 
     let mut selected: Vec<SignedReceipt> = receipts
         .iter()
@@ -359,13 +377,13 @@ pub fn export_receipts(receipts: &[SignedReceipt], filter: &ReceiptQuery) -> Vec
                 Err(_) => return false,
             };
 
-            if let Some(from_ts) = from
-                && timestamp < from_ts
+            if let Some(from_ts) = from.as_ref()
+                && &timestamp < from_ts
             {
                 return false;
             }
-            if let Some(to_ts) = to
-                && timestamp > to_ts
+            if let Some(to_ts) = to.as_ref()
+                && &timestamp > to_ts
             {
                 return false;
             }
@@ -1111,6 +1129,38 @@ mod tests {
         let filter = ReceiptQuery {
             from_timestamp: Some("2026-02-20T11:00:00Z".to_string()),
             to_timestamp: Some("2026-02-20T09:00:00Z".to_string()),
+            ..ReceiptQuery::default()
+        };
+
+        let exported = export_receipts(&[signed], &filter);
+
+        assert!(exported.is_empty());
+    }
+
+    #[test]
+    fn export_filter_invalid_from_timestamp_fails_closed() {
+        let key = demo_signing_key();
+        let mut receipt = make_receipt("quarantine", Decision::Approved);
+        receipt.timestamp = "2026-02-20T10:00:00Z".to_string();
+        let signed = sign_receipt(&receipt, &key).expect("sign");
+        let filter = ReceiptQuery {
+            from_timestamp: Some("not-a-timestamp".to_string()),
+            ..ReceiptQuery::default()
+        };
+
+        let exported = export_receipts(&[signed], &filter);
+
+        assert!(exported.is_empty());
+    }
+
+    #[test]
+    fn export_filter_invalid_to_timestamp_fails_closed() {
+        let key = demo_signing_key();
+        let mut receipt = make_receipt("quarantine", Decision::Approved);
+        receipt.timestamp = "2026-02-20T10:00:00Z".to_string();
+        let signed = sign_receipt(&receipt, &key).expect("sign");
+        let filter = ReceiptQuery {
+            to_timestamp: Some("not-a-timestamp".to_string()),
             ..ReceiptQuery::default()
         };
 

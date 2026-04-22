@@ -1913,7 +1913,7 @@ fn validate_snapshot_high_water(
     }
 
     if snapshot.snapshot_epoch == high_water.snapshot_epoch {
-        if snapshot.snapshot_hash != high_water.snapshot_hash {
+        if !constant_time::ct_eq(&snapshot.snapshot_hash, &high_water.snapshot_hash) {
             return Err(TrustCardError::InvalidSnapshot(format!(
                 "snapshot rollback rejected for {}: epoch {} hash differs from high-water",
                 path.display(),
@@ -1923,7 +1923,11 @@ fn validate_snapshot_high_water(
         return Ok(());
     }
 
-    if snapshot.previous_snapshot_hash.as_deref() != Some(high_water.snapshot_hash.as_str()) {
+    let extends_high_water = snapshot
+        .previous_snapshot_hash
+        .as_deref()
+        .is_some_and(|previous| constant_time::ct_eq(previous, &high_water.snapshot_hash));
+    if !extends_high_water {
         return Err(TrustCardError::InvalidSnapshot(format!(
             "snapshot chain rejected for {}: epoch {} does not extend high-water epoch {}",
             path.display(),
@@ -1983,7 +1987,7 @@ fn persist_snapshot_high_water_if_newer(
         Some(current) => {
             snapshot.snapshot_epoch > current.snapshot_epoch
                 || (snapshot.snapshot_epoch == current.snapshot_epoch
-                    && snapshot.snapshot_hash != current.snapshot_hash)
+                    && !constant_time::ct_eq(&snapshot.snapshot_hash, &current.snapshot_hash))
         }
     };
     if !should_write {
