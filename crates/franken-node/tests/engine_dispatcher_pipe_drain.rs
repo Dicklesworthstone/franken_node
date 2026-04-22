@@ -1,5 +1,6 @@
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 
 #[cfg(unix)]
 #[test]
@@ -14,17 +15,23 @@ fn engine_dispatcher_reaps_descendant_pipe_holders() {
     let app_path = temp_dir.path().join("app.js");
     std::fs::write(&app_path, "console.log('app');\n").expect("write app");
 
-    let engine_path = temp_dir.path().join("franken-engine");
-    std::fs::write(
-        &engine_path,
-        "#!/bin/sh\n(sleep 5) &\nprintf 'parent-exited\\n'\nexit 0\n",
-    )
-    .expect("write fake engine");
-    let mut permissions = std::fs::metadata(&engine_path)
-        .expect("fake engine metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&engine_path, permissions).expect("chmod fake engine");
+    // Use real test-engine binary instead of fake shell script
+    let engine_path = if let Some(exe) = std::env::var_os("CARGO_BIN_EXE_test-engine") {
+        PathBuf::from(exe)
+    } else {
+        // Fallback to built binary in target dir
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|path| path.parent())
+            .expect("workspace root")
+            .join("target/debug/test-engine")
+    };
+
+    assert!(
+        engine_path.is_file(),
+        "test-engine binary not found at {}. Run: cargo build --bin test-engine",
+        engine_path.display()
+    );
 
     let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
     let config = Config::for_profile(Profile::Strict);
