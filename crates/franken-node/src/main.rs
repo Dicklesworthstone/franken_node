@@ -5304,6 +5304,21 @@ fn remotecap_cli_state_path() -> PathBuf {
         .join("state.json")
 }
 
+fn remotecap_cli_replay_store_path() -> PathBuf {
+    PathBuf::from(".franken-node")
+        .join("remotecap")
+        .join("replay")
+}
+
+fn remotecap_cli_capability_gate(signing_key: &str, cap: &RemoteCap) -> Result<CapabilityGate> {
+    if cap.is_single_use() {
+        CapabilityGate::with_durable_replay_store(signing_key, remotecap_cli_replay_store_path())
+            .map_err(|err| anyhow::anyhow!(err.to_string()))
+    } else {
+        Ok(CapabilityGate::new(signing_key))
+    }
+}
+
 fn load_remotecap_cli_state() -> Result<RemoteCapCliState> {
     let path = remotecap_cli_state_path();
     match std::fs::read(&path) {
@@ -10460,7 +10475,7 @@ fn handle_remotecap_use(args: &RemoteCapUseArgs) -> Result<()> {
     let operation = parse_remote_operation(&args.operation)?;
     let now_epoch_secs = now_unix_secs();
     let signing_key = resolve_remotecap_signing_key()?;
-    let mut gate = CapabilityGate::new(&signing_key);
+    let mut gate = remotecap_cli_capability_gate(&signing_key, &cap)?;
     gate.authorize_network(
         Some(&cap),
         operation,
@@ -10512,7 +10527,7 @@ fn handle_remotecap_verify(args: &RemoteCapVerifyArgs) -> Result<()> {
     let operation = parse_remote_operation(&args.operation)?;
     let now_epoch_secs = now_unix_secs();
     let signing_key = resolve_remotecap_signing_key()?;
-    let mut gate = CapabilityGate::new(&signing_key);
+    let mut gate = remotecap_cli_capability_gate(&signing_key, &cap)?;
     gate.recheck_network(
         Some(&cap),
         operation,

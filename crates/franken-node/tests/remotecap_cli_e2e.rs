@@ -258,6 +258,26 @@ fn remotecap_verify_authorizes_without_consuming_single_use_token() {
         use_json["audit_event"]["event_code"].as_str(),
         Some("REMOTECAP_CONSUMED")
     );
+
+    let mut replay_cmd = remotecap_cmd();
+    replay_cmd
+        .arg("use")
+        .arg("--token-file")
+        .arg(&token_path)
+        .arg("--operation")
+        .arg("network_egress")
+        .arg("--endpoint")
+        .arg("https://api.example.com/v1/status")
+        .arg("--json")
+        .current_dir(workspace_path)
+        .env("FRANKEN_NODE_REMOTECAP_KEY", "remotecap-cli-e2e-key");
+
+    let replay_output = replay_cmd.assert().failure().get_output().stderr.clone();
+    let replay_stderr = std::str::from_utf8(&replay_output).expect("replay stderr should be utf8");
+    assert!(
+        replay_stderr.contains("REMOTECAP_REPLAY"),
+        "expected replay denial after prior use, got {replay_stderr}"
+    );
 }
 
 #[test]
