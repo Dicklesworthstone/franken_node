@@ -59,6 +59,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_epoch_validity"
+path = "fuzz_targets/fuzz_epoch_validity.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_intent_firewall"
 path = "fuzz_targets/fuzz_intent_firewall.rs"
 test = false
@@ -133,6 +139,12 @@ doc = false
 [[bin]]
 name = "fuzz_replay_bundle_chunking_export"
 path = "fuzz_targets/fuzz_replay_bundle_chunking_export.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_incident_bundle_parse"
+path = "fuzz_targets/fuzz_incident_bundle_parse.rs"
 test = false
 doc = false
 

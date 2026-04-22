@@ -10,7 +10,7 @@ use frankenengine_node::supply_chain::trust_card::{
     to_canonical_json, TrustCard, TrustCardInput, ExtensionIdentity, PublisherIdentity,
     BehavioralProfile, CapabilityDeclaration, CapabilityRisk, RiskLevel, ProvenanceSummary,
     ReputationTrend, RevocationStatus, RiskAssessment, CertificationLevel,
-    DependencyTrustStatus,
+    DependencyTrustStatus, AuditRecord,
 };
 use frankenengine_node::supply_chain::certification::{VerifiedEvidenceRef, EvidenceType};
 use serde_json::{Value, Map};
@@ -69,7 +69,6 @@ struct ArbitraryTrustCardData {
     certification_level: u8, // 0-4 for CertificationLevel variants
     trust_card_version: u64,
     reputation_score_basis_points: u16,
-    signature_verification_key_id: String,
     card_hash: String,
     registry_signature: String,
     evidence_count: u8, // 0-5 for number of evidence refs
@@ -147,23 +146,19 @@ impl ArbitraryTrustCardData {
             previous_version_hash: None,
             extension: input.extension,
             publisher: input.publisher,
-            behavioral_profile: input.behavioral_profile,
-            capability_declaration: input.capability_declaration,
-            provenance_summary: input.provenance_summary,
             certification_level: certification_levels[self.certification_level as usize % certification_levels.len()],
-            revocation_status: RevocationStatus::Active,
-            active_quarantine: false,
+            capability_declarations: vec![input.capability_declaration],
+            behavioral_profile: input.behavioral_profile,
+            revocation_status: input.revocation_status,
+            provenance_summary: input.provenance_summary,
             reputation_score_basis_points: self.reputation_score_basis_points,
-            reputation_trend: ReputationTrend::Stable,
-            user_facing_risk_assessment: RiskAssessment {
-                overall_risk_score: 2.5,
-                risk_factors: vec!["Third-party dependencies".to_string()],
-                mitigation_strategies: vec!["Regular security updates".to_string()],
-            },
-            dependency_trust_status: DependencyTrustStatus::Trusted,
-            last_verified_timestamp: "2026-04-21T16:00:00Z".to_string(),
-            evidence_refs: input.evidence_refs,
-            signature_verification_key_id: self.signature_verification_key_id,
+            reputation_trend: input.reputation_trend,
+            active_quarantine: input.active_quarantine,
+            dependency_trust_summary: vec![DependencyTrustStatus::Trusted],
+            last_verified_timestamp: input.last_verified_timestamp,
+            user_facing_risk_assessment: input.user_facing_risk_assessment,
+            audit_history: Vec::new(),
+            derivation_evidence: None,
             card_hash: self.card_hash,
             registry_signature: self.registry_signature,
         }
@@ -176,7 +171,8 @@ fn canonical_serializer_idempotence_property() {
     // Use proptest-style testing with a reasonable number of cases
     for i in 0..100 {
         let seed = i as u64;
-        let mut unstructured = arbitrary::Unstructured::new(&seed.to_le_bytes().repeat(100));
+        let seed_bytes = seed.to_le_bytes().repeat(100);
+        let mut unstructured = arbitrary::Unstructured::new(&seed_bytes);
 
         // Generate arbitrary JSON value
         if let Ok(arbitrary_json) = ArbitraryJsonValue::arbitrary(&mut unstructured) {
@@ -237,7 +233,8 @@ fn canonical_serializer_idempotence_property() {
 fn canonical_serialization_preserves_semantics() {
     for i in 0..50 {
         let seed = i as u64;
-        let mut unstructured = arbitrary::Unstructured::new(&seed.to_le_bytes().repeat(100));
+        let seed_bytes = seed.to_le_bytes().repeat(100);
+        let mut unstructured = arbitrary::Unstructured::new(&seed_bytes);
 
         if let Ok(arbitrary_card_data) = ArbitraryTrustCardData::arbitrary(&mut unstructured) {
             let original_card = arbitrary_card_data.to_trust_card();
@@ -250,7 +247,7 @@ fn canonical_serialization_preserves_semantics() {
                     assert_eq!(original_card.trust_card_version, recovered_card.trust_card_version);
                     assert_eq!(original_card.certification_level, recovered_card.certification_level);
                     assert_eq!(original_card.reputation_score_basis_points, recovered_card.reputation_score_basis_points);
-                    assert_eq!(original_card.evidence_refs.len(), recovered_card.evidence_refs.len());
+                    assert_eq!(original_card.capability_declarations.len(), recovered_card.capability_declarations.len());
 
                     // Re-canonicalizing the recovered card should produce identical JSON
                     if let Ok(re_canonical) = to_canonical_json(&recovered_card) {
