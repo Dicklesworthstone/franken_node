@@ -167,6 +167,82 @@ expression: matrix
       ]
     }
   },
+  "reconcile": {
+    "action": {
+      "operation_id": "[operation-id]",
+      "action_type": "reconcile",
+      "success": true,
+      "receipt": {
+        "operation_id": "[operation-id]",
+        "receipt_id": "[receipt-id]",
+        "issuer": "cli-fleet-operator",
+        "issued_at": "[issued_at]",
+        "zone_id": "all",
+        "payload_hash": "[payload-hash]",
+        "decision_payload": {
+          "action_type": "reconcile",
+          "scope": {
+            "zone_id": "all"
+          },
+          "reason": "fleet reconcile",
+          "event_code": "FLEET-005"
+        },
+        "signature": {
+          "algorithm": "ed25519",
+          "public_key_hex": "4508a07aa941707f3eb2db94c8897a80b2c1197476b6de213ac273df7d86c4ff",
+          "key_id": "b66f46fbc05065e4",
+          "key_source": "env",
+          "signing_identity": "fleet-control-plane",
+          "trust_scope": "fleet_decision",
+          "signed_payload_sha256": "[signed-payload-sha256]",
+          "signature_hex": "[signature-hex]"
+        }
+      },
+      "convergence": null,
+      "trace_id": "trace-cli-fleet-reconcile",
+      "event_code": "FLEET-005"
+    },
+    "convergence_receipt": {
+      "schema_version": "franken-node/fleet-convergence-receipt/v1",
+      "operation_id": "[operation-id]",
+      "event_code": "FLEET-005",
+      "completed_at": "[completed_at]",
+      "verdict": "converged",
+      "elapsed_ms": 0,
+      "poll_interval_ms": 100,
+      "timeout_ms": 120000,
+      "timed_out": false,
+      "convergence": null,
+      "signature": {
+        "algorithm": "ed25519",
+        "public_key_hex": "4508a07aa941707f3eb2db94c8897a80b2c1197476b6de213ac273df7d86c4ff",
+        "key_id": "b66f46fbc05065e4",
+        "key_source": "env",
+        "signing_identity": "fleet-control-plane",
+        "trust_scope": "fleet_convergence",
+        "signed_payload_sha256": "[signed-payload-sha256]",
+        "signature_hex": "[signature-hex]"
+      }
+    },
+    "status": {
+      "zone_id": "all",
+      "active_quarantines": 0,
+      "active_revocations": 0,
+      "healthy_nodes": 0,
+      "total_nodes": 0,
+      "activated": true,
+      "pending_convergences": []
+    },
+    "state_dir": "[fleet-state]",
+    "convergence_timeout_seconds": 120,
+    "stale_nodes": [],
+    "active_incidents": [],
+    "state": {
+      "schema_version": "franken-node/fleet-transport-state/v1",
+      "actions": [],
+      "nodes": []
+    }
+  },
   "release": {
     "action": {
       "operation_id": "[operation-id]",
@@ -450,6 +526,91 @@ expression: matrix
     }
   ],
   "trust_card_export": {
+    "active_quarantine": false,
+    "audit_history": [
+      {
+        "detail": "trust card created",
+        "event_code": "TRUST_CARD_CREATED",
+        "timestamp": "1970-01-01T00:16:40Z",
+        "trace_id": "trace-fixture-registry"
+      }
+    ],
+    "behavioral_profile": {
+      "filesystem_access": false,
+      "network_access": true,
+      "profile_summary": "Network-only auth checks with bounded side effects",
+      "subprocess_access": false
+    },
+    "capability_declarations": [
+      {
+        "description": "Invalidate compromised sessions",
+        "name": "auth.revoke-session",
+        "risk": "high"
+      },
+      {
+        "description": "Validate JWT and attach identity context",
+        "name": "auth.validate-token",
+        "risk": "medium"
+      }
+    ],
+    "card_hash": "78e4f8d8be41fc3f620cc0e3b4eb05968bf811e77a3448de17bb44db322255da",
+    "certification_level": "gold",
+    "dependency_trust_summary": [
+      {
+        "dependency_id": "npm:jsonwebtoken@9",
+        "trust_level": "verified"
+      }
+    ],
+    "derivation_evidence": {
+      "derivation_chain_hash": "sha256:8fe30e7b1b53d1b7c21c4f23b8eee4830532588b286841cc75cabac3cc0a43ac",
+      "derived_at_epoch": 1000,
+      "evidence_refs": [
+        {
+          "evidence_id": "ev-fixture-prov-001",
+          "evidence_type": "provenance_chain",
+          "verification_receipt_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "verified_at_epoch": 1000
+        },
+        {
+          "evidence_id": "ev-fixture-rep-001",
+          "evidence_type": "reputation_signal",
+          "verification_receipt_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "verified_at_epoch": 1000
+        }
+      ]
+    },
+    "extension": {
+      "extension_id": "npm:@acme/auth-guard",
+      "version": "1.4.2"
+    },
+    "last_verified_timestamp": "2026-02-20T12:00:00Z",
+    "previous_version_hash": null,
+    "provenance_summary": {
+      "artifact_hashes": [
+        "sha256:deadbeefaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "attestation_level": "slsa-l3",
+      "source_uri": "fixture://trust-card/acme/auth-guard",
+      "verified_at": "2026-02-20T12:00:00Z"
+    },
+    "publisher": {
+      "display_name": "Acme Security",
+      "publisher_id": "pub-acme"
+    },
+    "registry_signature": "7bd249b809d2fee0dcdf33844a69945576e5bc04bf41a6fd8dd001f3ea26c37d",
+    "reputation_score_basis_points": 920,
+    "reputation_trend": "improving",
+    "revocation_status": {
+      "status": "active"
+    },
+    "schema_version": "1.0.0",
+    "trust_card_version": 1,
+    "user_facing_risk_assessment": {
+      "level": "low",
+      "summary": "Token validation extension with strong provenance and no local disk access"
+    }
+  },
+  "trust_card_show_verified": {
     "active_quarantine": false,
     "audit_history": [
       {

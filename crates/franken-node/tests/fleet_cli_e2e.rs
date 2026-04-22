@@ -2169,6 +2169,31 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
         String::from_utf8_lossy(&status_all_output.stderr)
     );
 
+    let reconcile_state = tempdir().expect("reconcile tempdir");
+    let reconcile_state_dir = reconcile_state.path().join("fleet-state");
+    let (reconcile_signing_key_path, reconcile_signing_key) =
+        write_test_signing_key(reconcile_state.path(), "keys/fleet.key", 43);
+    let reconcile_signing_key_path = reconcile_signing_key_path.display().to_string();
+    let reconcile_output = run_cli_in_dir_with_fleet_state_and_env(
+        &repo_root(),
+        &["fleet", "reconcile", "--json"],
+        &reconcile_state_dir,
+        &[(
+            "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+            reconcile_signing_key_path.as_str(),
+        )],
+    );
+    assert!(
+        reconcile_output.status.success(),
+        "fleet reconcile json failed: {}",
+        String::from_utf8_lossy(&reconcile_output.stderr)
+    );
+    let reconcile_json = json_stdout(&reconcile_output, "fleet reconcile");
+    assert_convergence_receipt_signature_round_trips(
+        &reconcile_json["convergence_receipt"],
+        &reconcile_signing_key,
+    );
+
     let release_state = tempdir().expect("release tempdir");
     let release_state_dir = release_state.path().join("fleet-state");
     let (release_signing_key_path, release_signing_key) =
@@ -2290,6 +2315,16 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
         "trust-card export json failed: {}",
         String::from_utf8_lossy(&trust_card_output.stderr)
     );
+    let trust_card_verify_output = run_cli_in_dir_with_env(
+        trust_card_workspace.path(),
+        &["trust-card", "show", "npm:@acme/auth-guard", "--json"],
+        &[],
+    );
+    assert!(
+        trust_card_verify_output.status.success(),
+        "trust-card show json failed: {}",
+        String::from_utf8_lossy(&trust_card_verify_output.stderr)
+    );
 
     let remotecap_workspace = tempdir().expect("remotecap tempdir");
     let remotecap_issue_output = run_cli_in_dir_with_env(
@@ -2356,6 +2391,7 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
             json_stdout(&status_all_output, "fleet status all"),
             &status_state_dir,
         ),
+        "reconcile": canonicalize_fleet_reconcile_snapshot(reconcile_json, &reconcile_state_dir),
         "release": canonicalize_fleet_reconcile_snapshot(release_json, &release_state_dir),
         "reconcile_timeout": canonicalize_fleet_reconcile_snapshot(timeout_json, &timeout_state_dir),
         "agent_once": canonicalize_fleet_reconcile_snapshot(
@@ -2363,6 +2399,10 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
             &agent_state_dir,
         ),
         "trust_card_export": json_stdout(&trust_card_output, "trust-card export"),
+        "trust_card_show_verified": json_stdout(
+            &trust_card_verify_output,
+            "trust-card show verified",
+        ),
         "remotecap_verify": canonicalize_fleet_reconcile_snapshot(
             json_stdout(&remotecap_verify_output, "remotecap verify"),
             remotecap_workspace.path(),
