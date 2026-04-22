@@ -40,7 +40,7 @@ struct VefReceiptVector {
     expected_canonical_witnesses: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct RawExecutionReceipt {
     schema_version: String,
     action_type: String,
