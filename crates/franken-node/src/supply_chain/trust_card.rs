@@ -43,6 +43,17 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
 }
 
+fn next_trust_card_version(
+    previous_version: u64,
+    extension_id: &str,
+) -> Result<u64, TrustCardError> {
+    previous_version
+        .checked_add(1)
+        .ok_or_else(|| TrustCardError::InvalidInput {
+            reason: format!("trust_card_version exhausted for extension `{extension_id}`"),
+        })
+}
+
 fn ensure_evidence_refs_present(refs: &[VerifiedEvidenceRef]) -> Result<(), TrustCardError> {
     if refs.is_empty() {
         return Err(TrustCardError::EvidenceMissing);
@@ -611,7 +622,7 @@ impl TrustCardRegistry {
         let (previous_hash, next_version) = match self.latest_verified_card(&extension_id)? {
             Some(previous) => (
                 Some(previous.card_hash.clone()),
-                previous.trust_card_version.saturating_add(1),
+                next_trust_card_version(previous.trust_card_version, &extension_id)?,
             ),
             None => (None, 1),
         };
@@ -703,7 +714,8 @@ impl TrustCardRegistry {
         }
 
         let mut next = latest.clone();
-        next.trust_card_version = latest.trust_card_version.saturating_add(1);
+        next.trust_card_version =
+            next_trust_card_version(latest.trust_card_version, extension_id)?;
         next.previous_version_hash = Some(latest.card_hash.clone());
         if let Some(level) = mutation.certification_level {
             next.certification_level = level;

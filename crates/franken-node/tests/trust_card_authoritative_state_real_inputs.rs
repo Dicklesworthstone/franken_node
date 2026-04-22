@@ -1,10 +1,19 @@
+use std::collections::BTreeMap;
+
 use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
 use frankenengine_node::supply_chain::trust_card::{
     BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
+    compute_card_hash,
     DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
-    ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCardInput,
-    TrustCardMutation, TrustCardRegistry,
+    ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCard, TrustCardInput,
+    TrustCardMutation, TrustCardRegistry, TrustCardRegistrySnapshot,
 };
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+const DEFAULT_REGISTRY_KEY: &[u8] = b"franken-node-trust-card-registry-key-v1";
+
+type HmacSha256 = Hmac<Sha256>;
 
 fn real_trust_card_input() -> TrustCardInput {
     TrustCardInput {
@@ -58,6 +67,35 @@ fn real_trust_card_input() -> TrustCardInput {
                 "4ef6f8d5e8e0f0b778e7ca4a68697c139e91fbf18d8d1f8af5fcb5e628dd5c6a".to_string(),
         }],
     }
+}
+
+fn sign_trust_card_for_real_input_test(card: &mut TrustCard) {
+    card.card_hash = compute_card_hash(card).expect("compute card hash");
+    let mut mac = HmacSha256::new_from_slice(DEFAULT_REGISTRY_KEY).expect("hmac key");
+    mac.update(b"trust_card_registry_sig_v1:");
+    mac.update(card.card_hash.as_bytes());
+    card.registry_signature = hex::encode(mac.finalize().into_bytes());
+}
+
+fn registry_with_exhausted_trust_card_version() -> TrustCardRegistry {
+    let mut source = TrustCardRegistry::default();
+    let mut card = source
+        .create(
+            real_trust_card_input(),
+            1_776_792_600,
+            "trace-exhausted-version-seed",
+        )
+        .expect("create seed card");
+    card.trust_card_version = u64::MAX;
+    sign_trust_card_for_real_input_test(&mut card);
+
+    let mut cards_by_extension = BTreeMap::new();
+    cards_by_extension.insert(card.extension.extension_id.clone(), vec![card]);
+    let snapshot =
+        TrustCardRegistrySnapshot::signed(60, cards_by_extension, DEFAULT_REGISTRY_KEY)
+            .expect("signed snapshot");
+    TrustCardRegistry::from_snapshot(snapshot, DEFAULT_REGISTRY_KEY, 1_776_792_601)
+        .expect("load exhausted-version registry")
 }
 
 #[test]
@@ -189,4 +227,44 @@ fn authoritative_registry_rejects_stale_writer_after_high_water_advances() {
         .expect("read authoritative card")
         .expect("card exists");
     assert_eq!(card.certification_level, CertificationLevel::Platinum);
+}
+
+#[test]
+fn trust_card_create_rejects_exhausted_trust_card_version() {
+    let mut registry = registry_with_exhausted_trust_card_version();
+
+    let err = registry
+        .create(
+            real_trust_card_input(),
+            1_776_792_610,
+            "trace-exhausted-version-create",
+        )
+        .expect_err("u64::MAX trust_card_version must fail closed");
+
+    assert!(err.to_string().contains("trust_card_version exhausted"));
+}
+
+#[test]
+fn trust_card_update_rejects_exhausted_trust_card_version() {
+    let mut registry = registry_with_exhausted_trust_card_version();
+
+    let err = registry
+        .update(
+            "npm:@operator/auth-guard",
+            TrustCardMutation {
+                certification_level: Some(CertificationLevel::Platinum),
+                revocation_status: None,
+                active_quarantine: None,
+                reputation_score_basis_points: None,
+                reputation_trend: None,
+                user_facing_risk_assessment: None,
+                last_verified_timestamp: None,
+                evidence_refs: Some(real_trust_card_input().evidence_refs),
+            },
+            1_776_792_620,
+            "trace-exhausted-version-update",
+        )
+        .expect_err("u64::MAX trust_card_version must fail closed");
+
+    assert!(err.to_string().contains("trust_card_version exhausted"));
 }
