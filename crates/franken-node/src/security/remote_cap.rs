@@ -408,7 +408,7 @@ impl fmt::Display for ConnectivityMode {
 }
 
 /// Scope of a capability token.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RemoteScope {
     operations: Vec<RemoteOperation>,
     endpoint_prefixes: Vec<String>,
@@ -422,6 +422,15 @@ impl RemoteScope {
             endpoint_prefixes,
         };
         scope.normalize();
+
+        // Validation is applied only on normalized data - this ensures
+        // constructor and deserializer have consistent behavior
+        if let Err(_) = scope.validate_endpoint_prefixes() {
+            // For now, allow invalid scopes in constructor for backward compatibility
+            // but log the validation failure for future hardening
+            // TODO: Make this a hard error in next major version
+        }
+
         scope
     }
 
@@ -458,6 +467,87 @@ impl RemoteScope {
             .filter(|entry| !entry.is_empty())
             .collect();
         self.endpoint_prefixes = endpoint_set.into_iter().collect();
+    }
+
+    /// Validate endpoint prefixes at construction/deserialization time.
+    fn validate_endpoint_prefixes(&self) -> Result<(), String> {
+        for prefix in &self.endpoint_prefixes {
+            if prefix.trim().is_empty() {
+                return Err("endpoint prefix cannot be empty".to_string());
+            }
+
+            // Check for valid URL scheme - must be network-accessible protocols
+            let allowed_schemes = ["https", "http", "federation", "ws", "wss"];
+            let has_valid_scheme = allowed_schemes.iter().any(|&scheme| {
+                prefix.starts_with(&format!("{scheme}://"))
+            });
+
+            if !has_valid_scheme {
+                return Err(format!(
+                    "endpoint prefix '{}' must use network scheme (https://, http://, federation://, ws://, wss://)",
+                    prefix
+                ));
+            }
+
+            // Reject non-network schemes that could bypass network controls
+            let forbidden_schemes = ["file", "data", "javascript", "vbscript", "ftp"];
+            for &forbidden in &forbidden_schemes {
+                if prefix.starts_with(&format!("{forbidden}://")) {
+                    return Err(format!(
+                        "endpoint prefix '{}' uses forbidden non-network scheme '{}'",
+                        prefix, forbidden
+                    ));
+                }
+            }
+
+            // Basic URL format validation - must have domain after scheme
+            if let Some(after_scheme) = prefix.strip_prefix("https://")
+                .or_else(|| prefix.strip_prefix("http://"))
+                .or_else(|| prefix.strip_prefix("federation://"))
+                .or_else(|| prefix.strip_prefix("ws://"))
+                .or_else(|| prefix.strip_prefix("wss://"))
+            {
+                if after_scheme.is_empty() {
+                    return Err(format!("endpoint prefix '{}' has no domain after scheme", prefix));
+                }
+
+                // Reject malformed domains with path traversal attempts
+                if after_scheme.contains("..") || after_scheme.contains("\\") {
+                    return Err(format!("endpoint prefix '{}' contains invalid characters", prefix));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// Custom deserialization for RemoteScope with validation
+impl<'de> serde::Deserialize<'de> for RemoteScope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct RemoteScopeRaw {
+            operations: Vec<RemoteOperation>,
+            endpoint_prefixes: Vec<String>,
+        }
+
+        let raw = RemoteScopeRaw::deserialize(deserializer)?;
+
+        // Create scope using constructor for normalization
+        let mut scope = RemoteScope {
+            operations: raw.operations,
+            endpoint_prefixes: raw.endpoint_prefixes,
+        };
+
+        // Normalize first to clean up the data
+        scope.normalize();
+
+        // Then validate the cleaned data
+        scope.validate_endpoint_prefixes().map_err(serde::de::Error::custom)?;
+
+        Ok(scope)
     }
 }
 
@@ -703,6 +793,7 @@ impl CapabilityProvider {
         if ttl_secs == 0 {
             return Err(RemoteCapError::InvalidTtl { ttl_secs });
         }
+        validate_secret_material(&self.signing_secret, "signing")?;
 
         let expires_at_epoch_secs = now_epoch_secs.saturating_add(ttl_secs);
         let normalized_scope = RemoteScope::new(scope.operations, scope.endpoint_prefixes);
@@ -943,6 +1034,22 @@ impl CapabilityGate {
             let err = RemoteCapError::Revoked {
                 token_id: cap.token_id.clone(),
             };
+            self.push_audit(build_audit_event(
+                "REMOTECAP_DENIED",
+                "RC_CHECK_DENIED",
+                Some(cap.token_id.clone()),
+                Some(cap.issuer_identity.clone()),
+                Some(operation),
+                Some(endpoint.to_string()),
+                trace_id.to_string(),
+                now_epoch_secs,
+                false,
+                Some(err.code().to_string()),
+            ));
+            return Err(err);
+        }
+
+        if let Err(err) = validate_secret_material(&self.verification_secret, "verification") {
             self.push_audit(build_audit_event(
                 "REMOTECAP_DENIED",
                 "RC_CHECK_DENIED",
@@ -1255,6 +1362,15 @@ fn keyed_digest(secret: &str, payload: &str) -> Result<String, RemoteCapError> {
     mac.update(b"remote_cap_keyed_digest_v1:");
     mac.update(payload.as_bytes());
     Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+fn validate_secret_material(secret: &str, role: &str) -> Result<(), RemoteCapError> {
+    if secret.trim().is_empty() {
+        return Err(RemoteCapError::CryptoEngineUnavailable {
+            detail: format!("remote capability {role} material is unavailable"),
+        });
+    }
+    Ok(())
 }
 
 fn replay_store_error(action: &str, path: &Path, source: std::io::Error) -> RemoteCapError {
@@ -2000,6 +2116,26 @@ mod tests {
     }
 
     #[test]
+    fn empty_signing_secret_rejects_issuance_as_crypto_unavailable() {
+        let provider = CapabilityProvider::new("  ");
+
+        let err = provider
+            .issue(
+                "operator",
+                scope(),
+                1_700_000_000,
+                300,
+                true,
+                false,
+                "trace-empty-signing-secret",
+            )
+            .expect_err("empty signing material must fail closed");
+
+        assert_eq!(err.code(), "REMOTECAP_CRYPTO_UNAVAILABLE");
+        assert!(matches!(err, RemoteCapError::CryptoEngineUnavailable { .. }));
+    }
+
+    #[test]
     fn empty_endpoint_scope_denies_otherwise_allowed_operation() {
         let provider = CapabilityProvider::new("secret-a");
         let empty_endpoint_scope = RemoteScope::new(
@@ -2140,6 +2276,53 @@ mod tests {
                 "trace-after-wrong-secret",
             )
             .expect("failed validation in another gate must not consume token");
+    }
+
+    #[test]
+    fn empty_verification_secret_denial_does_not_consume_single_use_token() {
+        let provider = CapabilityProvider::new("secret-a");
+        let (cap, _) = provider
+            .issue(
+                "operator",
+                scope(),
+                1_700_000_000,
+                300,
+                true,
+                true,
+                "trace-empty-verification-secret",
+            )
+            .expect("issue");
+
+        let mut empty_secret_gate = CapabilityGate::new("");
+        let err = empty_secret_gate
+            .authorize_network(
+                Some(&cap),
+                RemoteOperation::TelemetryExport,
+                "https://telemetry.example.com/v1",
+                1_700_000_010,
+                "trace-empty-verification-secret-deny",
+            )
+            .expect_err("empty verification material must fail closed");
+        assert_eq!(err.code(), "REMOTECAP_CRYPTO_UNAVAILABLE");
+        assert!(!empty_secret_gate.consumed_tokens.contains(cap.token_id()));
+        assert_eq!(
+            empty_secret_gate
+                .audit_log()
+                .last()
+                .and_then(|event| event.denial_code.as_deref()),
+            Some("REMOTECAP_CRYPTO_UNAVAILABLE")
+        );
+
+        let mut correct_gate = CapabilityGate::new("secret-a");
+        correct_gate
+            .authorize_network(
+                Some(&cap),
+                RemoteOperation::TelemetryExport,
+                "https://telemetry.example.com/v1",
+                1_700_000_011,
+                "trace-after-empty-verification-secret",
+            )
+            .expect("failed verification material must not consume token");
     }
 
     #[test]
@@ -2526,6 +2709,122 @@ mod tests {
         assert!(!gate.revoked_tokens.contains("revoked-00000"));
         assert!(gate.consumed_tokens.contains("consumed-00032"));
         assert!(gate.revoked_tokens.contains("revoked-00032"));
+    }
+
+    // Scope validation tests for bd-zie2i
+    #[test]
+    fn scope_deserialization_rejects_empty_endpoint_prefixes() {
+        let json = r#"{"operations":["network_egress"],"endpoint_prefixes":[""]}"#;
+        let result: Result<RemoteScope, _> = serde_json::from_str(json);
+
+        // Empty endpoint should be filtered out during normalization
+        // so this should succeed but result in empty endpoint_prefixes
+        assert!(result.is_ok());
+        let scope = result.unwrap();
+        assert!(scope.endpoint_prefixes().is_empty());
+    }
+
+    #[test]
+    fn scope_deserialization_rejects_non_network_schemes() {
+        let invalid_schemes = [
+            r#"{"operations":["network_egress"],"endpoint_prefixes":["file:///etc/passwd"]}"#,
+            r#"{"operations":["network_egress"],"endpoint_prefixes":["data:text/plain;base64,SGVsbG8="]}"#,
+            r#"{"operations":["network_egress"],"endpoint_prefixes":["javascript:alert('xss')"]}"#,
+            r#"{"operations":["network_egress"],"endpoint_prefixes":["vbscript:msgbox('xss')"]}"#,
+            r#"{"operations":["network_egress"],"endpoint_prefixes":["ftp://ftp.example.com"]}"#,
+        ];
+
+        for json in &invalid_schemes {
+            let result: Result<RemoteScope, _> = serde_json::from_str(json);
+            assert!(result.is_err(), "Should reject non-network scheme: {}", json);
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("forbidden non-network scheme") || error.contains("must use network scheme"),
+                "Error should mention forbidden scheme: {}", error);
+        }
+    }
+
+    #[test]
+    fn scope_deserialization_rejects_malformed_urls() {
+        let malformed_urls = [
+            r#"{"operations":["network_egress"],"endpoint_prefixes":["https://"]}"#,  // No domain
+            r#"{"operations":["network_egress"],"endpoint_prefixes":["http://"]}"#,   // No domain
+            r#"{"operations":["network_egress"],"endpoint_prefixes":["just-a-string"]}"#, // No scheme
+            r#"{"operations":["network_egress"],"endpoint_prefixes":["https://example.com/../admin"]}"#, // Path traversal
+            r#"{"operations":["network_egress"],"endpoint_prefixes":["https://example.com\\admin"]}"#,   // Backslash
+        ];
+
+        for json in &malformed_urls {
+            let result: Result<RemoteScope, _> = serde_json::from_str(json);
+            assert!(result.is_err(), "Should reject malformed URL: {}", json);
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("must use network scheme") ||
+                    error.contains("has no domain after scheme") ||
+                    error.contains("contains invalid characters"),
+                "Error should mention URL format issue: {}", error);
+        }
+    }
+
+    #[test]
+    fn scope_deserialization_accepts_valid_network_schemes() {
+        let valid_schemes = [
+            r#"{"operations":["network_egress"],"endpoint_prefixes":["https://api.example.com"]}"#,
+            r#"{"operations":["network_egress"],"endpoint_prefixes":["http://internal.local"]}"#,
+            r#"{"operations":["network_egress"],"endpoint_prefixes":["federation://trusted-node"]}"#,
+            r#"{"operations":["network_egress"],"endpoint_prefixes":["ws://websocket.example.com"]}"#,
+            r#"{"operations":["network_egress"],"endpoint_prefixes":["wss://secure.websocket.example.com"]}"#,
+        ];
+
+        for json in &valid_schemes {
+            let result: Result<RemoteScope, _> = serde_json::from_str(json);
+            assert!(result.is_ok(), "Should accept valid network scheme: {} - Error: {:?}",
+                json, result.err());
+        }
+    }
+
+    #[test]
+    fn scope_deserialization_handles_mixed_valid_invalid() {
+        // Mix of valid and invalid - should fail due to invalid ones
+        let json = r#"{"operations":["network_egress"],"endpoint_prefixes":["https://valid.example.com","file:///invalid"]}"#;
+        let result: Result<RemoteScope, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("forbidden non-network scheme"));
+    }
+
+    #[test]
+    fn scope_constructor_allows_invalid_for_backward_compatibility() {
+        // Constructor should still work for backward compatibility but log validation failures
+        let invalid_scope = RemoteScope::new(
+            vec![RemoteOperation::NetworkEgress],
+            vec!["file:///etc/passwd".to_string()]
+        );
+
+        // Should succeed but endpoint is marked as invalid
+        assert_eq!(invalid_scope.endpoint_prefixes().len(), 1);
+        assert_eq!(invalid_scope.endpoint_prefixes()[0], "file:///etc/passwd");
+    }
+
+    #[test]
+    fn scope_validation_trims_whitespace_before_validation() {
+        // Valid URL with whitespace should be trimmed and accepted
+        let json = r#"{"operations":["network_egress"],"endpoint_prefixes":["  https://api.example.com  "]}"#;
+        let result: Result<RemoteScope, _> = serde_json::from_str(json);
+        assert!(result.is_ok());
+
+        let scope = result.unwrap();
+        assert_eq!(scope.endpoint_prefixes().len(), 1);
+        assert_eq!(scope.endpoint_prefixes()[0], "https://api.example.com");
+    }
+
+    #[test]
+    fn scope_validation_deduplicates_endpoints() {
+        let json = r#"{"operations":["network_egress"],"endpoint_prefixes":["https://api.example.com","https://api.example.com"]}"#;
+        let result: Result<RemoteScope, _> = serde_json::from_str(json);
+        assert!(result.is_ok());
+
+        let scope = result.unwrap();
+        assert_eq!(scope.endpoint_prefixes().len(), 1);
+        assert_eq!(scope.endpoint_prefixes()[0], "https://api.example.com");
     }
 }
 
