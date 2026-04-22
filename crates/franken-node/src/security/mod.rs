@@ -1,5 +1,6 @@
 pub mod adversarial_runner;
 pub mod adversary_graph;
+pub mod blake3_adapter;
 pub mod bpet;
 pub mod challenge_flow;
 pub mod constant_time;

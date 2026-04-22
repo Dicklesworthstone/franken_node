@@ -32,6 +32,7 @@ compression = ["dep:flate2"]
 cbor-serialization = ["dep:serde_cbor"]
 ui = ["dep:frankentui"]
 engine = ["dep:frankenengine-engine", "dep:frankenengine-extension-host"]
+blake3 = ["dep:blake3"]
 default = ["extended-surfaces", "parsing", "http-client", "external-commands", "compression", "cbor-serialization", "ui", "engine"]
 
 [dependencies]
@@ -68,6 +69,7 @@ which = { version = "8.0.2", optional = true }
 ctrlc = { version = "3", optional = true, features = ["termination"] }
 tree-sitter = { version = "0.26.8", optional = true }
 tree-sitter-javascript = { version = "0.25.0", optional = true }
+blake3 = { version = "1.5", optional = true }
 
 [dev-dependencies]
 assert_cmd = "2.0.16"
@@ -265,6 +267,10 @@ name = "control_epoch_metamorphic"
 path = "tests/control_epoch_metamorphic.rs"
 
 [[test]]
+name = "control_plane_epoch_key_conformance"
+path = "tests/control_plane_epoch_key_conformance.rs"
+
+[[test]]
 name = "replay_window_metamorphic"
 path = "tests/replay_window_metamorphic.rs"
 
@@ -280,8 +286,16 @@ path = "tests/trust_cli_e2e_real_runtime.rs"
 name = "session_auth_real_lifecycle_structured"
 path = "tests/session_auth_real_lifecycle_structured.rs"
 
+[[test]]
+name = "trust_cli_e2e_real_node_runtime"
+path = "tests/trust_cli_e2e_real_node_runtime.rs"
+
 [[bench]]
 name = "cuckoo_revocation_bench"
+harness = false
+
+[[bench]]
+name = "blake3_performance_bench"
 harness = false
 
 [[bench]]
