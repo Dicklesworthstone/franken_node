@@ -362,6 +362,7 @@ impl VerifierSdk {
     ) -> Result<VerificationResult, VerifierSdkError> {
         check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
         let verified = bundle::verify(artifact)?;
+        self.verify_bundle_belongs_to_current_verifier(&verified)?;
         let assertions = vec![
             AssertionResult {
                 assertion: "replay_bundle_integrity_verified".to_string(),
@@ -394,6 +395,7 @@ impl VerifierSdk {
         }
 
         let verified = bundle::verify(state)?;
+        self.verify_bundle_belongs_to_current_verifier(&verified)?;
         let anchor_matches = verified.integrity_hash == anchor_integrity_hash;
         let assertions = vec![
             AssertionResult {
@@ -585,6 +587,19 @@ impl VerifierSdk {
         Ok(())
     }
 
+    fn verify_bundle_belongs_to_current_verifier(
+        &self,
+        bundle: &bundle::ReplayBundle,
+    ) -> Result<(), VerifierSdkError> {
+        if bundle.verifier_identity != self.verifier_identity {
+            return Err(VerifierSdkError::SessionVerifierMismatch {
+                expected: self.verifier_identity.clone(),
+                actual: bundle.verifier_identity.clone(),
+            });
+        }
+        Ok(())
+    }
+
     fn build_result(
         &self,
         operation: VerificationOperation,
@@ -647,6 +662,66 @@ fn facade_result_signature(result: &VerificationResult) -> Result<String, Verifi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    fn make_replay_bundle_bytes(verifier_identity: &str) -> Vec<u8> {
+        let artifact_bytes = b"replay-bundle-artifact";
+        let artifact_path = "artifacts/replay.json".to_string();
+        let mut artifacts = BTreeMap::new();
+        artifacts.insert(
+            artifact_path.clone(),
+            bundle::BundleArtifact {
+                media_type: "application/json".to_string(),
+                digest: bundle::hash(artifact_bytes),
+                bytes_hex: hex::encode(artifact_bytes),
+            },
+        );
+        let mut replay_bundle = bundle::ReplayBundle {
+            header: bundle::BundleHeader {
+                hash_algorithm: bundle::REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
+                payload_length_bytes: u64::try_from(artifact_bytes.len())
+                    .expect("artifact length should fit in u64"),
+                chunk_count: 1,
+            },
+            schema_version: bundle::REPLAY_BUNDLE_SCHEMA_VERSION.to_string(),
+            sdk_version: SDK_VERSION.to_string(),
+            bundle_id: "bundle-alpha".to_string(),
+            incident_id: "incident-alpha".to_string(),
+            created_at: "2026-02-21T00:00:00Z".to_string(),
+            policy_version: "policy.v1".to_string(),
+            verifier_identity: verifier_identity.to_string(),
+            timeline: vec![bundle::TimelineEvent {
+                sequence_number: 1,
+                event_id: "evt-1".to_string(),
+                timestamp: "2026-02-21T00:00:01Z".to_string(),
+                event_type: "verification.started".to_string(),
+                payload: json!({"phase": "replay"}),
+                state_snapshot: json!({"step": 1}),
+                causal_parent: None,
+                policy_version: "policy.v1".to_string(),
+            }],
+            initial_state_snapshot: json!({"baseline": true}),
+            evidence_refs: vec!["evidence://capsule/alpha".to_string()],
+            artifacts,
+            chunks: vec![bundle::BundleChunk {
+                chunk_index: 0,
+                total_chunks: 1,
+                artifact_path,
+                payload_length_bytes: u64::try_from(artifact_bytes.len())
+                    .expect("artifact length should fit in u64"),
+                payload_digest: bundle::hash(artifact_bytes),
+            }],
+            metadata: BTreeMap::new(),
+            integrity_hash: String::new(),
+            signature: bundle::BundleSignature {
+                algorithm: bundle::REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
+                signature_hex: String::new(),
+            },
+        };
+        bundle::seal(&mut replay_bundle).expect("test replay bundle should seal");
+        bundle::serialize(&replay_bundle).expect("test replay bundle should serialize")
+    }
 
     #[test]
     fn test_sdk_version_constant() {
@@ -799,6 +874,66 @@ mod tests {
             VerifierSdkError::SessionVerifierMismatch { .. }
         ));
         assert!(log.is_empty());
+    }
+
+    #[test]
+    fn verify_migration_artifact_accepts_same_verifier_bundle() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let artifact = make_replay_bundle_bytes("verifier://alpha");
+
+        let result = sdk
+            .verify_migration_artifact(&artifact)
+            .expect("same-verifier bundle should verify");
+
+        assert_eq!(result.verifier_identity, "verifier://alpha");
+        assert_eq!(result.operation, VerificationOperation::MigrationArtifact);
+        assert_eq!(result.verdict, VerificationVerdict::Pass);
+    }
+
+    #[test]
+    fn verify_migration_artifact_rejects_foreign_verifier_bundle() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let foreign_artifact = make_replay_bundle_bytes("verifier://beta");
+
+        let err = sdk
+            .verify_migration_artifact(&foreign_artifact)
+            .expect_err("foreign-verifier bundle must be rejected");
+
+        assert!(matches!(
+            err,
+            VerifierSdkError::SessionVerifierMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn verify_trust_state_accepts_same_verifier_bundle() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let state = make_replay_bundle_bytes("verifier://alpha");
+        let verified = bundle::verify(&state).expect("test bundle should verify");
+
+        let result = sdk
+            .verify_trust_state(&state, &verified.integrity_hash)
+            .expect("same-verifier trust-state bundle should verify");
+
+        assert_eq!(result.verifier_identity, "verifier://alpha");
+        assert_eq!(result.operation, VerificationOperation::TrustState);
+        assert_eq!(result.verdict, VerificationVerdict::Pass);
+    }
+
+    #[test]
+    fn verify_trust_state_rejects_foreign_verifier_bundle() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let foreign_state = make_replay_bundle_bytes("verifier://beta");
+        let verified = bundle::verify(&foreign_state).expect("test bundle should verify");
+
+        let err = sdk
+            .verify_trust_state(&foreign_state, &verified.integrity_hash)
+            .expect_err("foreign-verifier trust-state bundle must be rejected");
+
+        assert!(matches!(
+            err,
+            VerifierSdkError::SessionVerifierMismatch { .. }
+        ));
     }
 
     #[test]
