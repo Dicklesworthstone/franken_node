@@ -322,6 +322,7 @@ fn seed_partial_release_scenario(transport: &mut FileFleetTransport, base_time: 
                 action: FleetAction::Release {
                     zone_id: "us-east-1-production".to_string(),
                     incident_id: incident_id.to_string(),
+                    reason: Some("automated release from realistic fleet seed".to_string()),
                 },
             }).expect("publish incident release");
         }
@@ -2653,6 +2654,7 @@ impl TestLogger {
                 "latest_action_type": actions.last().map(|a| match &a.action {
                     FleetAction::Quarantine { .. } => "quarantine",
                     FleetAction::Release { .. } => "release",
+                    FleetAction::PolicyUpdate { .. } => "policy_update",
                 }),
                 "node_ids": node_statuses.iter().map(|n| &n.node_id).collect::<Vec<_>>()
             }
