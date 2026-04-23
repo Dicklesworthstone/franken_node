@@ -1,7 +1,7 @@
 {
   "api_contract_version": "1.0.0",
   "sdk_version": "vsdk-v1.0",
-  "frozen_at": "2026-04-21T12:00:00Z",
+  "frozen_at": "2026-04-23T12:00:00Z",
   "public_constants": [
     {
       "name": "SDK_VERSION",
@@ -10,69 +10,133 @@
       "requirement_level": "must"
     },
     {
-      "name": "EVENT_CODE_CLAIM",
-      "value": "EVT001",
+      "name": "SDK_VERSION_MIN",
+      "value": "vsdk-v1.0",
       "type": "string",
       "requirement_level": "must"
     },
     {
-      "name": "EVENT_CODE_WORKFLOW",
-      "value": "EVT002",
+      "name": "CAPSULE_CREATED",
+      "value": "CAPSULE_CREATED",
       "type": "string",
       "requirement_level": "must"
     },
     {
-      "name": "ERROR_CODE_VERIFICATION_FAILED",
-      "value": "ERR001",
+      "name": "CAPSULE_SIGNED",
+      "value": "CAPSULE_SIGNED",
       "type": "string",
       "requirement_level": "must"
     },
     {
-      "name": "ERROR_CODE_BUNDLE_INVALID",
-      "value": "ERR002",
+      "name": "CAPSULE_REPLAY_START",
+      "value": "CAPSULE_REPLAY_START",
       "type": "string",
       "requirement_level": "must"
     },
     {
-      "name": "ERROR_CODE_SESSION_SEALED",
-      "value": "ERR003",
+      "name": "CAPSULE_VERDICT_REPRODUCED",
+      "value": "CAPSULE_VERDICT_REPRODUCED",
       "type": "string",
       "requirement_level": "must"
     },
     {
-      "name": "MAX_SESSION_RESULTS",
-      "value": 1000,
-      "type": "u32",
-      "requirement_level": "should"
+      "name": "SDK_VERSION_CHECK",
+      "value": "SDK_VERSION_CHECK",
+      "type": "string",
+      "requirement_level": "must"
     },
     {
-      "name": "MAX_VERIFICATION_STEPS",
-      "value": 100,
-      "type": "u32",
-      "requirement_level": "should"
+      "name": "ERR_CAPSULE_SIGNATURE_INVALID",
+      "value": "ERR_CAPSULE_SIGNATURE_INVALID",
+      "type": "string",
+      "requirement_level": "must"
+    },
+    {
+      "name": "ERR_CAPSULE_SCHEMA_MISMATCH",
+      "value": "ERR_CAPSULE_SCHEMA_MISMATCH",
+      "type": "string",
+      "requirement_level": "must"
+    },
+    {
+      "name": "ERR_CAPSULE_REPLAY_DIVERGED",
+      "value": "ERR_CAPSULE_REPLAY_DIVERGED",
+      "type": "string",
+      "requirement_level": "must"
+    },
+    {
+      "name": "ERR_CAPSULE_VERDICT_MISMATCH",
+      "value": "ERR_CAPSULE_VERDICT_MISMATCH",
+      "type": "string",
+      "requirement_level": "must"
+    },
+    {
+      "name": "ERR_SDK_VERSION_UNSUPPORTED",
+      "value": "ERR_SDK_VERSION_UNSUPPORTED",
+      "type": "string",
+      "requirement_level": "must"
+    },
+    {
+      "name": "ERR_CAPSULE_ACCESS_DENIED",
+      "value": "ERR_CAPSULE_ACCESS_DENIED",
+      "type": "string",
+      "requirement_level": "must"
+    },
+    {
+      "name": "INV_CAPSULE_STABLE_SCHEMA",
+      "value": "INV-CAPSULE-STABLE-SCHEMA",
+      "type": "string",
+      "requirement_level": "must"
+    },
+    {
+      "name": "INV_CAPSULE_VERSIONED_API",
+      "value": "INV-CAPSULE-VERSIONED-API",
+      "type": "string",
+      "requirement_level": "must"
+    },
+    {
+      "name": "INV_CAPSULE_NO_PRIVILEGED_ACCESS",
+      "value": "INV-CAPSULE-NO-PRIVILEGED-ACCESS",
+      "type": "string",
+      "requirement_level": "must"
+    },
+    {
+      "name": "INV_CAPSULE_VERDICT_REPRODUCIBLE",
+      "value": "INV-CAPSULE-VERDICT-REPRODUCIBLE",
+      "type": "string",
+      "requirement_level": "must"
     }
   ],
   "public_enums": [
     {
       "name": "VerificationVerdict",
       "variants": ["pass", "fail", "inconclusive"],
-      "serde_representation": "lowercase",
+      "serde_representation": "snake_case",
       "requirement_level": "must"
     },
     {
       "name": "VerificationOperation",
-      "variants": ["claim", "workflow"],
-      "serde_representation": "lowercase",
+      "variants": ["claim", "migration_artifact", "trust_state", "workflow"],
+      "serde_representation": "snake_case",
       "requirement_level": "must"
     },
     {
       "name": "ValidationWorkflow",
-      "variants": ["migration_audit", "compliance_audit"],
+      "variants": ["release_validation", "incident_validation", "compliance_audit"],
       "serde_representation": "snake_case",
-      "requirement_level": "should"
+      "requirement_level": "must"
     }
   ],
   "public_structures": [
+    {
+      "name": "AssertionResult",
+      "required_fields": ["assertion", "passed", "detail"],
+      "field_types": {
+        "assertion": "String",
+        "passed": "bool",
+        "detail": "String"
+      },
+      "requirement_level": "must"
+    },
     {
       "name": "VerificationResult",
       "required_fields": ["operation", "verdict", "confidence_score", "checked_assertions", "execution_timestamp", "verifier_identity", "artifact_binding_hash", "verifier_signature", "sdk_version"],
@@ -93,7 +157,7 @@
       "name": "SessionStep",
       "required_fields": ["step_index", "operation", "verdict", "artifact_binding_hash", "timestamp", "step_signature"],
       "field_types": {
-        "step_index": "u32",
+        "step_index": "usize",
         "operation": "VerificationOperation",
         "verdict": "VerificationVerdict",
         "artifact_binding_hash": "String",
@@ -111,14 +175,14 @@
         "verifier_id": "String",
         "merkle_proof": "Vec<String>"
       },
-      "requirement_level": "should"
+      "requirement_level": "must"
     }
   ],
   "public_functions": [
     {
       "name": "check_sdk_version",
       "signature": "fn check_sdk_version(version: &str) -> Result<(), String>",
-      "behavior": "Returns Ok(()) for supported versions, Err with descriptive message for unsupported",
+      "behavior": "Returns Ok(()) for supported versions and ERR_SDK_VERSION_UNSUPPORTED details for unsupported versions",
       "requirement_level": "must"
     },
     {

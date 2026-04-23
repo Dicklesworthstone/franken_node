@@ -121,6 +121,11 @@ fn load_error_matrix_fixture() -> Result<ErrorMatrixFixture, String> {
         .map_err(|err| format!("failed to parse error_matrix fixture: {err}"))
 }
 
+fn load_api_manifest_fixture() -> Result<Value, String> {
+    serde_json::from_str(include_str!("fixtures/public_api/api_manifest.json"))
+        .map_err(|err| format!("failed to parse api_manifest fixture: {err}"))
+}
+
 fn fixture_string<'a>(value: &'a Value, context: &str) -> Result<&'a str, String> {
     value
         .as_str()
@@ -671,6 +676,216 @@ fn test_error_matrix_fixture_matches_live_error_displays() -> Result<(), String>
     Ok(())
 }
 
+fn test_api_manifest_fixture_matches_live_public_surface() -> Result<(), String> {
+    let fixture = load_api_manifest_fixture()?;
+    let expected = json!({
+        "api_contract_version": "1.0.0",
+        "sdk_version": SDK_VERSION,
+        "frozen_at": "2026-04-23T12:00:00Z",
+        "public_constants": [
+            {
+                "name": "SDK_VERSION",
+                "value": SDK_VERSION,
+                "type": "string",
+                "requirement_level": "must"
+            },
+            {
+                "name": "SDK_VERSION_MIN",
+                "value": SDK_VERSION_MIN,
+                "type": "string",
+                "requirement_level": "must"
+            },
+            {
+                "name": "CAPSULE_CREATED",
+                "value": CAPSULE_CREATED,
+                "type": "string",
+                "requirement_level": "must"
+            },
+            {
+                "name": "CAPSULE_SIGNED",
+                "value": CAPSULE_SIGNED,
+                "type": "string",
+                "requirement_level": "must"
+            },
+            {
+                "name": "CAPSULE_REPLAY_START",
+                "value": CAPSULE_REPLAY_START,
+                "type": "string",
+                "requirement_level": "must"
+            },
+            {
+                "name": "CAPSULE_VERDICT_REPRODUCED",
+                "value": CAPSULE_VERDICT_REPRODUCED,
+                "type": "string",
+                "requirement_level": "must"
+            },
+            {
+                "name": "SDK_VERSION_CHECK",
+                "value": SDK_VERSION_CHECK,
+                "type": "string",
+                "requirement_level": "must"
+            },
+            {
+                "name": "ERR_CAPSULE_SIGNATURE_INVALID",
+                "value": ERR_CAPSULE_SIGNATURE_INVALID,
+                "type": "string",
+                "requirement_level": "must"
+            },
+            {
+                "name": "ERR_CAPSULE_SCHEMA_MISMATCH",
+                "value": ERR_CAPSULE_SCHEMA_MISMATCH,
+                "type": "string",
+                "requirement_level": "must"
+            },
+            {
+                "name": "ERR_CAPSULE_REPLAY_DIVERGED",
+                "value": ERR_CAPSULE_REPLAY_DIVERGED,
+                "type": "string",
+                "requirement_level": "must"
+            },
+            {
+                "name": "ERR_CAPSULE_VERDICT_MISMATCH",
+                "value": ERR_CAPSULE_VERDICT_MISMATCH,
+                "type": "string",
+                "requirement_level": "must"
+            },
+            {
+                "name": "ERR_SDK_VERSION_UNSUPPORTED",
+                "value": ERR_SDK_VERSION_UNSUPPORTED,
+                "type": "string",
+                "requirement_level": "must"
+            },
+            {
+                "name": "ERR_CAPSULE_ACCESS_DENIED",
+                "value": ERR_CAPSULE_ACCESS_DENIED,
+                "type": "string",
+                "requirement_level": "must"
+            },
+            {
+                "name": "INV_CAPSULE_STABLE_SCHEMA",
+                "value": INV_CAPSULE_STABLE_SCHEMA,
+                "type": "string",
+                "requirement_level": "must"
+            },
+            {
+                "name": "INV_CAPSULE_VERSIONED_API",
+                "value": INV_CAPSULE_VERSIONED_API,
+                "type": "string",
+                "requirement_level": "must"
+            },
+            {
+                "name": "INV_CAPSULE_NO_PRIVILEGED_ACCESS",
+                "value": INV_CAPSULE_NO_PRIVILEGED_ACCESS,
+                "type": "string",
+                "requirement_level": "must"
+            },
+            {
+                "name": "INV_CAPSULE_VERDICT_REPRODUCIBLE",
+                "value": INV_CAPSULE_VERDICT_REPRODUCIBLE,
+                "type": "string",
+                "requirement_level": "must"
+            }
+        ],
+        "public_enums": [
+            {
+                "name": "VerificationVerdict",
+                "variants": ["pass", "fail", "inconclusive"],
+                "serde_representation": "snake_case",
+                "requirement_level": "must"
+            },
+            {
+                "name": "VerificationOperation",
+                "variants": ["claim", "migration_artifact", "trust_state", "workflow"],
+                "serde_representation": "snake_case",
+                "requirement_level": "must"
+            },
+            {
+                "name": "ValidationWorkflow",
+                "variants": ["release_validation", "incident_validation", "compliance_audit"],
+                "serde_representation": "snake_case",
+                "requirement_level": "must"
+            }
+        ],
+        "public_structures": [
+            {
+                "name": "AssertionResult",
+                "required_fields": ["assertion", "passed", "detail"],
+                "field_types": {
+                    "assertion": "String",
+                    "passed": "bool",
+                    "detail": "String"
+                },
+                "requirement_level": "must"
+            },
+            {
+                "name": "VerificationResult",
+                "required_fields": ["operation", "verdict", "confidence_score", "checked_assertions", "execution_timestamp", "verifier_identity", "artifact_binding_hash", "verifier_signature", "sdk_version"],
+                "field_types": {
+                    "operation": "VerificationOperation",
+                    "verdict": "VerificationVerdict",
+                    "confidence_score": "f64",
+                    "checked_assertions": "Vec<AssertionResult>",
+                    "execution_timestamp": "String",
+                    "verifier_identity": "String",
+                    "artifact_binding_hash": "String",
+                    "verifier_signature": "String",
+                    "sdk_version": "String"
+                },
+                "requirement_level": "must"
+            },
+            {
+                "name": "SessionStep",
+                "required_fields": ["step_index", "operation", "verdict", "artifact_binding_hash", "timestamp", "step_signature"],
+                "field_types": {
+                    "step_index": "usize",
+                    "operation": "VerificationOperation",
+                    "verdict": "VerificationVerdict",
+                    "artifact_binding_hash": "String",
+                    "timestamp": "String",
+                    "step_signature": "String"
+                },
+                "requirement_level": "must"
+            },
+            {
+                "name": "TransparencyLogEntry",
+                "required_fields": ["result_hash", "timestamp", "verifier_id", "merkle_proof"],
+                "field_types": {
+                    "result_hash": "String",
+                    "timestamp": "String",
+                    "verifier_id": "String",
+                    "merkle_proof": "Vec<String>"
+                },
+                "requirement_level": "must"
+            }
+        ],
+        "public_functions": [
+            {
+                "name": "check_sdk_version",
+                "signature": "fn check_sdk_version(version: &str) -> Result<(), String>",
+                "behavior": "Returns Ok(()) for supported versions and ERR_SDK_VERSION_UNSUPPORTED details for unsupported versions",
+                "requirement_level": "must"
+            },
+            {
+                "name": "VerifierSdk::new",
+                "signature": "fn new(verifier_identity: impl Into<String>) -> Self",
+                "behavior": "Creates new SDK instance, seeds stable config keys, and defers verifier-identity validation to operational methods",
+                "requirement_level": "must"
+            }
+        ],
+        "breaking_change_policy": {
+            "constants": "never",
+            "enum_variants": "major_version_only",
+            "struct_required_fields": "never",
+            "struct_optional_fields": "minor_version_ok",
+            "function_signatures": "major_version_only",
+            "error_display_format": "minor_version_ok"
+        }
+    });
+
+    assert_eq!(fixture, expected);
+    Ok(())
+}
+
 // =============================================================================
 // Function Behavior Tests
 // =============================================================================
@@ -931,6 +1146,13 @@ const API_CONTRACT_TESTS: &[ApiContractTest] = &[
         level: RequirementLevel::Must,
         description: "Invariant constants must remain stable",
         test_fn: test_invariant_constants,
+    },
+    ApiContractTest {
+        id: "API-CONST-006",
+        category: TestCategory::Constants,
+        level: RequirementLevel::Must,
+        description: "Frozen API manifest fixture must match the live verifier public surface",
+        test_fn: test_api_manifest_fixture_matches_live_public_surface,
     },
     // Enums - MUST level (serde names cannot change)
     ApiContractTest {
