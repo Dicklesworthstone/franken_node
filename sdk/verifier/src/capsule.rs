@@ -36,6 +36,8 @@ pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str = "structural_only_not_replacem
 /// Stable rule id for guardrails that must fence the workspace replay capsule surface.
 pub const STRUCTURAL_ONLY_RULE_ID: &str = "VERIFIER_SHORTCUT_GUARD::WORKSPACE_REPLAY_CAPSULE";
 
+const MAX_VERIFIER_IDENTITY_NAME_LEN: usize = 255;
+
 // ---------------------------------------------------------------------------
 // Capsule types
 // ---------------------------------------------------------------------------
@@ -336,6 +338,11 @@ fn validate_verifier_identity(verifier_identity: &str) -> Result<(), CapsuleErro
         return Err(CapsuleError::AccessDenied(
             "verifier_identity must include a non-empty verifier name".into(),
         ));
+    }
+    if remainder.len() > MAX_VERIFIER_IDENTITY_NAME_LEN {
+        return Err(CapsuleError::AccessDenied(format!(
+            "verifier_identity must be at most {MAX_VERIFIER_IDENTITY_NAME_LEN} ASCII bytes after verifier://"
+        )));
     }
     if !remainder
         .bytes()
@@ -825,6 +832,30 @@ mod tests {
         match replay(&capsule, "creator://test@example.com") {
             Err(CapsuleError::AccessDenied(msg)) => {
                 assert!(msg.contains("verifier://"));
+            }
+            other => panic!("expected AccessDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_replay_accepts_255_byte_verifier_identity_name() {
+        let capsule = build_reference_capsule();
+        let verifier_identity = format!("verifier://{}", "a".repeat(255));
+
+        let result = replay(&capsule, &verifier_identity)
+            .expect("255-byte verifier identity should remain valid");
+
+        assert_eq!(result.verdict, CapsuleVerdict::Pass);
+    }
+
+    #[test]
+    fn test_replay_rejects_256_byte_verifier_identity_name() {
+        let capsule = build_reference_capsule();
+        let verifier_identity = format!("verifier://{}", "a".repeat(256));
+
+        match replay(&capsule, &verifier_identity) {
+            Err(CapsuleError::AccessDenied(msg)) => {
+                assert!(msg.contains("at most 255 ASCII bytes"));
             }
             other => panic!("expected AccessDenied, got {other:?}"),
         }
