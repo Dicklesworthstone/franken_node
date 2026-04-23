@@ -33,12 +33,12 @@ extended-surfaces = [
 ]
 
 # Granular feature split
-control-plane = []      # API middleware, fleet operations, control plane functionality
+control-plane = ["policy-engine"]      # API middleware, fleet operations, control plane functionality
 policy-engine = []      # Security policies, guardrail monitors, hardening state machines
 remote-ops = []         # Remote operations, distributed coordination, eviction sagas
 admin-tools = []        # Enterprise governance, migration tools, administrative functionality
-verifier-tools = []     # Verifier-specific tooling, economy, SDK
-advanced-features = []  # Claims, conformance, encoding, extensions, federation, perf, repair
+verifier-tools = ["control-plane"]     # Verifier-specific tooling, economy, SDK
+advanced-features = ["verifier-tools"]  # Claims, conformance, encoding, extensions, federation, perf, repair
 
 test-support = []
 dev-keys = []
