@@ -443,6 +443,10 @@ path = "tests/artifact_signing_metamorphic.rs"
 name = "activation_pipeline_metamorphic"
 path = "tests/activation_pipeline_metamorphic.rs"
 
+[[test]]
+name = "native_engine_compat"
+path = "tests/native_engine_compat.rs"
+
 [[bench]]
 name = "cuckoo_revocation_bench"
 harness = false
