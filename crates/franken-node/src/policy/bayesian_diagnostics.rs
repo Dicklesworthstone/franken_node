@@ -290,9 +290,15 @@ impl BayesianDiagnostics {
                 let (posterior, prior, count, ci) = if let Some(state) = self.states.get(c) {
                     let candidate_count_f64 =
                         u32::try_from(candidates.len()).unwrap_or(u32::MAX) as f64;
+                    // Guard against division by zero and extremely small priors
+                    let safe_prior = if candidate_count_f64 > 0.0 {
+                        1.0 / candidate_count_f64
+                    } else {
+                        1.0 // Fallback to uniform if count is somehow zero
+                    };
                     (
                         state.mean(),
-                        1.0 / candidate_count_f64,
+                        safe_prior,
                         state.observation_count,
                         state.confidence_interval_95(),
                     )
@@ -300,7 +306,12 @@ impl BayesianDiagnostics {
                     // No observations — uniform prior
                     let candidate_count_f64 =
                         u32::try_from(candidates.len()).unwrap_or(u32::MAX) as f64;
-                    let prior = 1.0 / candidate_count_f64;
+                    // Guard against division by zero and extremely small priors
+                    let prior = if candidate_count_f64 > 0.0 {
+                        1.0 / candidate_count_f64
+                    } else {
+                        1.0 // Fallback to uniform if count is somehow zero
+                    };
                     (0.5, prior, 0, (0.0, 1.0))
                 };
                 (c.clone(), posterior, prior, count, ci)
