@@ -54,7 +54,9 @@ fn fuzz_structured_manifest(entries: Vec<FuzzManifestEntry>) {
 
     assert_manifest_line_invalid(&drop_trailing_newline(&canonical));
     assert_manifest_line_invalid(&duplicate_first_row(&canonical));
-    assert_manifest_line_invalid(&reverse_rows(&canonical));
+    if entries.len() > 1 {
+        assert_manifest_line_invalid(&reverse_rows(&canonical));
+    }
     assert_manifest_line_invalid(&replace_first_name(&canonical, "../evil"));
     assert_manifest_line_invalid(&uppercase_first_hash_nibble(&canonical));
     assert_manifest_line_invalid(&add_leading_zero_to_first_size(&canonical));
