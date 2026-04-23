@@ -24,6 +24,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
+// Security epoch constants to prevent hardcoded value drift across the module
+// These values must stay synchronized with franken-engine SecurityEpoch evolution
+const LEGACY_SECURITY_EPOCH: u64 = 1;    // Legacy security epoch for compatibility (LegacyRisky profile)
+const STANDARD_SECURITY_EPOCH: u64 = 2;  // Standard security epoch (Balanced profile)
+const CURRENT_SECURITY_EPOCH: u64 = 3;   // Latest security epoch (Strict profile)
+
 pub struct EngineDispatcher {
     engine_bin_path: String,
     configured_path: Option<PathBuf>,
@@ -1633,12 +1639,6 @@ impl EngineDispatcher {
         use frankenengine_engine::parser::ParserOptions;
         use frankenengine_engine::security_epoch::SecurityEpoch;
         use frankenengine_engine::ast::ParseGoal;
-
-        // Security epoch constants to prevent hardcoded value drift
-        // These values must stay synchronized with franken-engine SecurityEpoch evolution
-        const LEGACY_SECURITY_EPOCH: u64 = 1;    // Legacy security epoch for compatibility
-        const STANDARD_SECURITY_EPOCH: u64 = 2;  // Standard security epoch
-        const CURRENT_SECURITY_EPOCH: u64 = 3;   // Latest security epoch
 
         // Map profile to loss matrix preset (risk management strategy)
         let loss_matrix_preset = match config.profile {
@@ -5330,10 +5330,10 @@ mod tests {
         // Test that SecurityEpoch Display/Debug implementations use opaque labels
         use frankenengine_engine::security_epoch::SecurityEpoch;
 
-        // Create SecurityEpoch values for each profile mapping
-        let legacy_epoch = SecurityEpoch::from_raw(1);    // LegacyRisky profile
-        let standard_epoch = SecurityEpoch::from_raw(2);  // Balanced profile
-        let current_epoch = SecurityEpoch::from_raw(3);   // Strict profile
+        // Create SecurityEpoch values for each profile mapping using module constants
+        let legacy_epoch = SecurityEpoch::from_raw(LEGACY_SECURITY_EPOCH);    // LegacyRisky profile
+        let standard_epoch = SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH);  // Balanced profile
+        let current_epoch = SecurityEpoch::from_raw(CURRENT_SECURITY_EPOCH);   // Strict profile
 
         // Test Display implementation uses opaque labels
         let legacy_display = format!("{}", legacy_epoch);
