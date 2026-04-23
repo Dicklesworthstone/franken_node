@@ -16,6 +16,13 @@ use std::collections::BTreeMap;
 
 use crate::security::constant_time;
 
+#[cfg(not(any(
+    target_pointer_width = "16",
+    target_pointer_width = "32",
+    target_pointer_width = "64"
+)))]
+compile_error!("mitigation synthesis length framing requires usize values that fit in u64");
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -82,7 +89,7 @@ impl IncidentTrace {
         hasher.update(b"mitigation_synthesis_hash_v1:");
         for d in &self.decisions {
             hasher.update(d.sequence_number.to_le_bytes());
-            hasher.update((u32::try_from(d.action.len()).unwrap_or(u32::MAX) as u64).to_le_bytes());
+            hasher.update(length_frame(d.action.len()));
             hasher.update(d.action.as_bytes());
             hasher.update(d.expected_loss.to_le_bytes());
         }
@@ -574,13 +581,26 @@ impl IncidentLab {
 fn sign_structured(secret: &str, domain: &[u8], fields: &[&[u8]]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(domain);
-    hasher.update((u32::try_from(secret.len()).unwrap_or(u32::MAX) as u64).to_le_bytes());
+    hasher.update(length_frame(secret.len()));
     hasher.update(secret.as_bytes());
     for field in fields {
-        hasher.update((u32::try_from(field.len()).unwrap_or(u32::MAX) as u64).to_le_bytes());
+        hasher.update(length_frame(field.len()));
         hasher.update(field);
     }
     hex::encode(hasher.finalize())
+}
+
+fn length_frame(len: usize) -> [u8; 8] {
+    let len_bytes = len.to_le_bytes();
+    let mut frame = [0u8; 8];
+    frame[..len_bytes.len()].copy_from_slice(&len_bytes);
+    frame
+}
+
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn mitigation_synthesis_length_frame_for_tests(len: usize) -> [u8; 8] {
+    length_frame(len)
 }
 
 /// Build a trace with a valid integrity hash.
@@ -813,6 +833,24 @@ mod tests {
         let single = sign_structured("s", b"test:", &[b"a|b"]);
         let split = sign_structured("s", b"test:", &[b"a", b"b"]);
         assert_ne!(single, split);
+    }
+
+    #[test]
+    fn length_frame_preserves_u32_boundary_without_saturation() {
+        assert_eq!(length_frame(0), 0u64.to_le_bytes());
+        assert_eq!(length_frame(1), 1u64.to_le_bytes());
+
+        if usize::BITS > u32::BITS {
+            let u32_max = usize::try_from(u32::MAX).expect("u32 max fits usize on this target");
+            let just_over_u32 = u32_max + 1;
+
+            assert_eq!(length_frame(u32_max), u64::from(u32::MAX).to_le_bytes());
+            assert_eq!(
+                length_frame(just_over_u32),
+                (u64::from(u32::MAX) + 1).to_le_bytes()
+            );
+            assert_ne!(length_frame(just_over_u32), length_frame(u32_max));
+        }
     }
 
     #[test]
@@ -1537,7 +1575,7 @@ mod tests {
 
         // Create lab with different secret
         let mut evil_config = LabConfig::default();
-        evil_config.signing_secret = "evil-secret".to_string();
+        evil_config.signing_secret.push_str("-alternate");
         let mut evil_lab = IncidentLab::new(evil_config);
 
         let evil_candidate = evil_lab.synthesize_mitigation(&trace, "mit-evil", BTreeMap::new());

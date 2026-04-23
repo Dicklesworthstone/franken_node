@@ -271,6 +271,11 @@ path = "tests/doctor_close_condition_e2e.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "mitigation_synthesis_length_framing"
+path = "tests/mitigation_synthesis_length_framing.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "cli_error_goldens"
 path = "tests/cli_error_goldens.rs"
 required-features = ["test-support"]
