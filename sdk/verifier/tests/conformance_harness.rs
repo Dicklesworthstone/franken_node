@@ -141,8 +141,7 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         id: "VSDK-ERROR-3.3",
         section: "errors",
         level: RequirementLevel::Must,
-        description:
-            "check_sdk_version must return ERR_SDK_VERSION_UNSUPPORTED for invalid versions",
+        description: "check_sdk_version must return ERR_SDK_VERSION_UNSUPPORTED for invalid versions",
         test_fn: test_version_check_error_code,
     },
     ConformanceCase {
@@ -1569,7 +1568,7 @@ fn test_verify_trust_state_interface() -> TestResult {
             reason: format!(
                 "verify_trust_state did not fail closed on structural-only bundle: {other:?}"
             ),
-        }
+        },
     }
 }
 
@@ -1623,7 +1622,10 @@ fn test_session_id_validation_interface() -> TestResult {
     let sdk = create_verifier_sdk("verifier://test-session");
     let invalid_cases = [
         ("", "session id must be non-empty"),
-        (" session-alpha ", "session id must not contain leading or trailing whitespace"),
+        (
+            " session-alpha ",
+            "session id must not contain leading or trailing whitespace",
+        ),
         (
             "session-\u{0000}-alpha",
             "session id must include only ASCII letters, digits, '.', '-', and '_'",
@@ -1662,7 +1664,10 @@ fn test_transparency_log_interface() -> TestResult {
     match sdk.append_transparency_log(&mut log, &result) {
         Ok(entry)
             if entry.verifier_id == result.verifier_identity
-                && entry.merkle_proof.len() == 2
+                && entry.merkle_proof.len() >= 3
+                && entry.merkle_proof[0].starts_with("root:")
+                && entry.merkle_proof[1] == "leaf_index:0"
+                && entry.merkle_proof[2] == "tree_size:1"
                 && log.len() == 1 =>
         {
             TestResult::Pass
