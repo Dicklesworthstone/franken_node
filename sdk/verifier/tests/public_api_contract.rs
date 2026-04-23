@@ -13,7 +13,8 @@
 use std::collections::BTreeMap;
 
 use frankenengine_verifier_sdk::*;
-use serde_json::json;
+use serde::Deserialize;
+use serde_json::{json, Value};
 
 /// API contract requirement levels for test prioritization
 #[derive(Debug, Clone, Copy)]
@@ -40,6 +41,19 @@ struct ApiContractTest {
     level: RequirementLevel,
     description: &'static str,
     test_fn: fn() -> Result<(), String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ErrorMatrixFixture {
+    bundle_errors: Vec<ErrorMatrixEntry>,
+    sdk_errors: Vec<ErrorMatrixEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ErrorMatrixEntry {
+    error_type: String,
+    error_data: Value,
+    expected_display: String,
 }
 
 fn make_structural_bundle_bytes(verifier_identity: &str) -> Result<Vec<u8>, String> {
@@ -100,6 +114,234 @@ fn make_structural_bundle_bytes(verifier_identity: &str) -> Result<Vec<u8>, Stri
 
     bundle::seal(&mut replay_bundle).map_err(|err| err.to_string())?;
     bundle::serialize(&replay_bundle).map_err(|err| err.to_string())
+}
+
+fn load_error_matrix_fixture() -> Result<ErrorMatrixFixture, String> {
+    serde_json::from_str(include_str!("fixtures/public_api/error_matrix.json"))
+        .map_err(|err| format!("failed to parse error_matrix fixture: {err}"))
+}
+
+fn fixture_string<'a>(value: &'a Value, context: &str) -> Result<&'a str, String> {
+    value
+        .as_str()
+        .ok_or_else(|| format!("{context} must be a string"))
+}
+
+fn fixture_object<'a>(
+    value: &'a Value,
+    context: &str,
+) -> Result<&'a serde_json::Map<String, Value>, String> {
+    value
+        .as_object()
+        .ok_or_else(|| format!("{context} must be an object"))
+}
+
+fn fixture_object_string<'a>(
+    value: &'a Value,
+    key: &str,
+    context: &str,
+) -> Result<&'a str, String> {
+    fixture_object(value, context)?
+        .get(key)
+        .ok_or_else(|| format!("{context}.{key} is missing"))?
+        .as_str()
+        .ok_or_else(|| format!("{context}.{key} must be a string"))
+}
+
+fn bundle_error_display_from_fixture(entry: &ErrorMatrixEntry) -> Result<String, String> {
+    let display = match entry.error_type.as_str() {
+        "Json" => format!(
+            "{}",
+            bundle::BundleError::Json(fixture_string(&entry.error_data, "bundle Json.error_data")?.to_string())
+        ),
+        "UnsupportedSchema" => format!(
+            "{}",
+            bundle::BundleError::UnsupportedSchema {
+                expected: fixture_object_string(
+                    &entry.error_data,
+                    "expected",
+                    "bundle UnsupportedSchema.error_data",
+                )?
+                .to_string(),
+                actual: fixture_object_string(
+                    &entry.error_data,
+                    "actual",
+                    "bundle UnsupportedSchema.error_data",
+                )?
+                .to_string(),
+            }
+        ),
+        "UnsupportedSdk" => format!(
+            "{}",
+            bundle::BundleError::UnsupportedSdk {
+                expected: fixture_object_string(
+                    &entry.error_data,
+                    "expected",
+                    "bundle UnsupportedSdk.error_data",
+                )?
+                .to_string(),
+                actual: fixture_object_string(
+                    &entry.error_data,
+                    "actual",
+                    "bundle UnsupportedSdk.error_data",
+                )?
+                .to_string(),
+            }
+        ),
+        "UnsupportedHashAlgorithm" => format!(
+            "{}",
+            bundle::BundleError::UnsupportedHashAlgorithm {
+                expected: fixture_object_string(
+                    &entry.error_data,
+                    "expected",
+                    "bundle UnsupportedHashAlgorithm.error_data",
+                )?
+                .to_string(),
+                actual: fixture_object_string(
+                    &entry.error_data,
+                    "actual",
+                    "bundle UnsupportedHashAlgorithm.error_data",
+                )?
+                .to_string(),
+            }
+        ),
+        "MissingField" => {
+            let field = fixture_object_string(
+                &entry.error_data,
+                "field",
+                "bundle MissingField.error_data",
+            )?;
+            let field = match field {
+                "bundle_id" => "bundle_id",
+                other => return Err(format!("unsupported bundle MissingField fixture field {other}")),
+            };
+            format!("{}", bundle::BundleError::MissingField { field })
+        }
+        "EmptyTimeline" => format!("{}", bundle::BundleError::EmptyTimeline),
+        "EmptyArtifacts" => format!("{}", bundle::BundleError::EmptyArtifacts),
+        other => return Err(format!("unsupported bundle error fixture type {other}")),
+    };
+    Ok(display)
+}
+
+fn sdk_error_display_from_fixture(entry: &ErrorMatrixEntry) -> Result<String, String> {
+    let display = match entry.error_type.as_str() {
+        "UnsupportedSdk" => format!(
+            "{}",
+            VerifierSdkError::UnsupportedSdk(
+                fixture_string(&entry.error_data, "sdk UnsupportedSdk.error_data")?.to_string(),
+            )
+        ),
+        "EmptyTrustAnchor" => format!("{}", VerifierSdkError::EmptyTrustAnchor),
+        "MalformedTrustAnchor" => format!(
+            "{}",
+            VerifierSdkError::MalformedTrustAnchor {
+                actual: fixture_object_string(
+                    &entry.error_data,
+                    "actual",
+                    "sdk MalformedTrustAnchor.error_data",
+                )?
+                .to_string(),
+            }
+        ),
+        "SessionSealed" => format!(
+            "{}",
+            VerifierSdkError::SessionSealed(
+                fixture_string(&entry.error_data, "sdk SessionSealed.error_data")?.to_string(),
+            )
+        ),
+        "InvalidVerifierIdentity" => format!(
+            "{}",
+            VerifierSdkError::InvalidVerifierIdentity {
+                actual: fixture_object_string(
+                    &entry.error_data,
+                    "actual",
+                    "sdk InvalidVerifierIdentity.error_data",
+                )?
+                .to_string(),
+                reason: fixture_object_string(
+                    &entry.error_data,
+                    "reason",
+                    "sdk InvalidVerifierIdentity.error_data",
+                )?
+                .to_string(),
+            }
+        ),
+        "InvalidSessionId" => format!(
+            "{}",
+            VerifierSdkError::InvalidSessionId {
+                actual: fixture_object_string(
+                    &entry.error_data,
+                    "actual",
+                    "sdk InvalidSessionId.error_data",
+                )?
+                .to_string(),
+                reason: fixture_object_string(
+                    &entry.error_data,
+                    "reason",
+                    "sdk InvalidSessionId.error_data",
+                )?
+                .to_string(),
+            }
+        ),
+        "SessionVerifierMismatch" => format!(
+            "{}",
+            VerifierSdkError::SessionVerifierMismatch {
+                expected: fixture_object_string(
+                    &entry.error_data,
+                    "expected",
+                    "sdk SessionVerifierMismatch.error_data",
+                )?
+                .to_string(),
+                actual: fixture_object_string(
+                    &entry.error_data,
+                    "actual",
+                    "sdk SessionVerifierMismatch.error_data",
+                )?
+                .to_string(),
+            }
+        ),
+        "ResultSignatureMismatch" => format!(
+            "{}",
+            VerifierSdkError::ResultSignatureMismatch {
+                expected: fixture_object_string(
+                    &entry.error_data,
+                    "expected",
+                    "sdk ResultSignatureMismatch.error_data",
+                )?
+                .to_string(),
+                actual: fixture_object_string(
+                    &entry.error_data,
+                    "actual",
+                    "sdk ResultSignatureMismatch.error_data",
+                )?
+                .to_string(),
+            }
+        ),
+        "ResultOriginMismatch" => format!(
+            "{}",
+            VerifierSdkError::ResultOriginMismatch {
+                expected: fixture_object_string(
+                    &entry.error_data,
+                    "expected",
+                    "sdk ResultOriginMismatch.error_data",
+                )?
+                .to_string(),
+                actual: fixture_object_string(
+                    &entry.error_data,
+                    "actual",
+                    "sdk ResultOriginMismatch.error_data",
+                )?
+                .to_string(),
+            }
+        ),
+        "Json" => format!(
+            "{}",
+            VerifierSdkError::Json(fixture_string(&entry.error_data, "sdk Json.error_data")?.to_string())
+        ),
+        other => return Err(format!("unsupported sdk error fixture type {other}")),
+    };
+    Ok(display)
 }
 
 // =============================================================================
@@ -401,6 +643,30 @@ fn test_verifier_sdk_error_display() -> Result<(), String> {
         format!("{}", json_error),
         "verifier SDK JSON error: json parse error"
     );
+
+    Ok(())
+}
+
+fn test_error_matrix_fixture_matches_live_error_displays() -> Result<(), String> {
+    let fixture = load_error_matrix_fixture()?;
+
+    for entry in &fixture.bundle_errors {
+        let actual_display = bundle_error_display_from_fixture(entry)?;
+        assert_eq!(
+            actual_display, entry.expected_display,
+            "bundle fixture drift for {}",
+            entry.error_type
+        );
+    }
+
+    for entry in &fixture.sdk_errors {
+        let actual_display = sdk_error_display_from_fixture(entry)?;
+        assert_eq!(
+            actual_display, entry.expected_display,
+            "sdk fixture drift for {}",
+            entry.error_type
+        );
+    }
 
     Ok(())
 }
@@ -717,6 +983,13 @@ const API_CONTRACT_TESTS: &[ApiContractTest] = &[
         level: RequirementLevel::Should,
         description: "VerifierSdkError display formats should remain stable",
         test_fn: test_verifier_sdk_error_display,
+    },
+    ApiContractTest {
+        id: "API-ERROR-002",
+        category: TestCategory::ErrorHandling,
+        level: RequirementLevel::Should,
+        description: "Frozen error-matrix fixture must match live bundle and SDK error displays",
+        test_fn: test_error_matrix_fixture_matches_live_error_displays,
     },
     // Functions - MUST level (signature and behavior cannot change)
     ApiContractTest {

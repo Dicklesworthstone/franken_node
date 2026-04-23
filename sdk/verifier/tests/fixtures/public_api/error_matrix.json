@@ -50,8 +50,8 @@
   "sdk_errors": [
     {
       "error_type": "UnsupportedSdk",
-      "error_data": "vsdk-v0.9",
-      "expected_display": "unsupported SDK version: vsdk-v0.9"
+      "error_data": "ERR_SDK_VERSION_UNSUPPORTED: requested=vsdk-v0.9, supported=vsdk-v1.0",
+      "expected_display": "ERR_SDK_VERSION_UNSUPPORTED: requested=vsdk-v0.9, supported=vsdk-v1.0"
     },
     {
       "error_type": "EmptyTrustAnchor",
@@ -59,9 +59,40 @@
       "expected_display": "trust anchor is empty"
     },
     {
+      "error_type": "MalformedTrustAnchor",
+      "error_data": {
+        "actual": "not-a-sha256-digest"
+      },
+      "expected_display": "trust anchor must be a canonical lowercase 64-nybble sha256 digest: got not-a-sha256-digest"
+    },
+    {
       "error_type": "SessionSealed",
       "error_data": "session-123",
       "expected_display": "verification session session-123 is sealed"
+    },
+    {
+      "error_type": "InvalidVerifierIdentity",
+      "error_data": {
+        "actual": " verifier://alpha ",
+        "reason": "identity must not contain leading or trailing whitespace"
+      },
+      "expected_display": "verifier identity is invalid: identity must not contain leading or trailing whitespace: got  verifier://alpha "
+    },
+    {
+      "error_type": "InvalidSessionId",
+      "error_data": {
+        "actual": " session-alpha ",
+        "reason": "session id must not contain leading or trailing whitespace"
+      },
+      "expected_display": "verification session id is invalid: session id must not contain leading or trailing whitespace: got  session-alpha "
+    },
+    {
+      "error_type": "SessionVerifierMismatch",
+      "error_data": {
+        "expected": "verifier://alpha",
+        "actual": "verifier://beta"
+      },
+      "expected_display": "verification session verifier mismatch: expected=verifier://alpha, actual=verifier://beta"
     },
     {
       "error_type": "ResultSignatureMismatch",
@@ -69,7 +100,20 @@
         "expected": "expected_sig_hash",
         "actual": "actual_sig_hash"
       },
-      "expected_display": "verification result signature mismatch: expected expected_sig_hash, actual actual_sig_hash"
+      "expected_display": "verifier SDK result signature mismatch: expected=expected_sig_hash, actual=actual_sig_hash"
+    },
+    {
+      "error_type": "ResultOriginMismatch",
+      "error_data": {
+        "expected": "origin-a",
+        "actual": "origin-b"
+      },
+      "expected_display": "verifier SDK result origin mismatch: expected=origin-a, actual=origin-b"
+    },
+    {
+      "error_type": "Json",
+      "error_data": "json parse error",
+      "expected_display": "verifier SDK JSON error: json parse error"
     }
   ]
 }
