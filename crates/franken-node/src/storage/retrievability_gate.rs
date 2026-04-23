@@ -1733,6 +1733,33 @@ mod tests {
     }
 
     #[test]
+    fn test_content_digest_matches_ct_eq_regression_cases() {
+        let expected = content_hash(b"ct-eq retrievability payload");
+        let mut first_byte_diff = expected.clone().into_bytes();
+        first_byte_diff[0] = if first_byte_diff[0] == b'0' {
+            b'1'
+        } else {
+            b'0'
+        };
+        let first_byte_diff = String::from_utf8(first_byte_diff).expect("hex digest is utf8");
+
+        let mut last_byte_diff = expected.clone().into_bytes();
+        let last_index = last_byte_diff.len().saturating_sub(1);
+        last_byte_diff[last_index] = if last_byte_diff[last_index] == b'0' {
+            b'1'
+        } else {
+            b'0'
+        };
+        let last_byte_diff = String::from_utf8(last_byte_diff).expect("hex digest is utf8");
+        let completely_different = content_hash(b"ct-eq completely different payload");
+
+        assert!(content_digest_matches(&expected, &expected));
+        assert!(!content_digest_matches(&first_byte_diff, &expected));
+        assert!(!content_digest_matches(&last_byte_diff, &expected));
+        assert!(!content_digest_matches(&completely_different, &expected));
+    }
+
+    #[test]
     fn test_content_digest_matches_rejects_hex_length_mismatch() {
         let expected = content_hash(b"hex length payload");
         let truncated = &expected[..expected.len() - 2];
@@ -3085,13 +3112,23 @@ mod storage_migration_integration_tests {
             match proof_result {
                 Ok(receipt) => {
                     // If somehow accepted, verify security properties
-                    if malicious_hash == legitimate_hash.to_uppercase() ||
-                       malicious_hash.trim() == legitimate_hash {
+                    let uppercase_hash = legitimate_hash.to_uppercase();
+                    let matches_uppercase = constant_time::ct_eq_bytes(
+                        malicious_hash.as_bytes(),
+                        uppercase_hash.as_bytes(),
+                    );
+                    let matches_trimmed = constant_time::ct_eq_bytes(
+                        malicious_hash.trim().as_bytes(),
+                        legitimate_hash.as_bytes(),
+                    );
+                    if matches_uppercase || matches_trimmed {
                         // Case or whitespace changes should be rejected
-                        assert!(!receipt.proof_passed,
-                               "Case/whitespace manipulation should fail proof");
+                        assert!(
+                            !receipt.proof_passed,
+                            "Case/whitespace manipulation should fail proof"
+                        );
                     }
-                },
+                }
                 Err(err) => {
                     // Expected rejection of malformed hashes
                     assert!(err.contains("ERR_HASH_MISMATCH") ||
@@ -3153,14 +3190,17 @@ mod storage_migration_integration_tests {
             // Proof should detect hash mismatch
             let proof_result = gate.proof_eviction_safety(&artifact_id, &segment_id);
 
-            if hash1 != hash2 {
+            let hashes_match = constant_time::ct_eq_bytes(hash1.as_bytes(), hash2.as_bytes());
+            if !hashes_match {
                 // Different hashes should either be rejected or fail proof verification
                 match proof_result {
                     Ok(receipt) => {
                         // If proof completed, it should fail verification for mismatched hash
-                        assert!(!receipt.proof_passed || hash1 == hash2,
-                               "Proof should fail for hash mismatch");
-                    },
+                        assert!(
+                            !receipt.proof_passed || hashes_match,
+                            "Proof should fail for hash mismatch"
+                        );
+                    }
                     Err(err) => {
                         // Expected rejection of hash mismatch
                         assert!(err.contains("ERR_HASH_MISMATCH"),
