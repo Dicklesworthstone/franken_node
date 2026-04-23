@@ -150,6 +150,24 @@ fn verifier_sdk_facade_validates_bundles_workflows_and_transparency_log() {
     assert_eq!(log.len(), 2);
 }
 
+#[test]
+fn bundle_canonical_fixture_matches_live_schema_and_verifies() {
+    let fixture_bundle: ReplayBundle =
+        serde_json::from_str(include_str!("fixtures/public_api/bundle_canonical.json"))
+            .expect("bundle fixture should parse");
+    let expected_bundle = canonical_replay_bundle();
+
+    assert_eq!(
+        fixture_bundle, expected_bundle,
+        "checked-in bundle golden drifted from the live canonical replay-bundle contract"
+    );
+
+    let fixture_bytes = serialize(&fixture_bundle).expect("fixture bundle should serialize");
+    let verified_bundle = frankenengine_verifier_sdk::bundle::verify(&fixture_bytes)
+        .expect("bundle fixture should verify under the live schema");
+    assert_eq!(verified_bundle, expected_bundle);
+}
+
 fn canonical_replay_bundle() -> ReplayBundle {
     let evidence_json =
         br#"{"schema_version":"facade-test-v1","decision":"trust-state-anchor","epoch":7}"#;
