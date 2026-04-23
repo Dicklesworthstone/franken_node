@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
@@ -788,12 +789,14 @@ pub struct RemoteCapAuditEvent {
 #[derive(Clone)]
 pub struct CapabilityProvider {
     signing_secret: String,
+    audit_log: Arc<Mutex<Vec<RemoteCapAuditEvent>>>,
 }
 
 impl fmt::Debug for CapabilityProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CapabilityProvider")
             .field("signing_secret", &"<redacted>")
+            .field("audit_log_len", &self.audit_log_len())
             .finish()
     }
 }
@@ -805,6 +808,7 @@ impl CapabilityProvider {
         validate_secret_material(signing_secret, "signing")?;
         Ok(Self {
             signing_secret: signing_secret.to_string(),
+            audit_log: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -825,10 +829,14 @@ impl CapabilityProvider {
         trace_id: &str,
     ) -> Result<(RemoteCap, RemoteCapAuditEvent), RemoteCapError> {
         if !operator_authorized {
-            return Err(RemoteCapError::OperatorAuthorizationRequired);
+            let error = RemoteCapError::OperatorAuthorizationRequired;
+            self.record_issue_denial(issuer_identity, now_epoch_secs, trace_id, error.code());
+            return Err(error);
         }
         if ttl_secs == 0 {
-            return Err(RemoteCapError::InvalidTtl { ttl_secs });
+            let error = RemoteCapError::InvalidTtl { ttl_secs };
+            self.record_issue_denial(issuer_identity, now_epoch_secs, trace_id, error.code());
+            return Err(error);
         }
         validate_secret_material(&self.signing_secret, "signing")?;
 
@@ -866,21 +874,65 @@ impl CapabilityProvider {
             single_use,
         };
 
-        Ok((
-            cap,
-            build_audit_event(
-                "REMOTECAP_ISSUED",
-                "RC_CAP_GRANTED",
-                Some(token_id),
-                Some(issuer_identity.to_string()),
-                None,
-                None,
-                trace_id.to_string(),
-                now_epoch_secs,
-                true,
-                None,
-            ),
-        ))
+        let audit_event = build_audit_event(
+            "REMOTECAP_ISSUED",
+            "RC_CAP_GRANTED",
+            Some(token_id),
+            Some(issuer_identity.to_string()),
+            None,
+            None,
+            trace_id.to_string(),
+            now_epoch_secs,
+            true,
+            None,
+        );
+        self.push_audit(audit_event.clone());
+
+        Ok((cap, audit_event))
+    }
+
+    #[must_use]
+    pub fn audit_log(&self) -> Vec<RemoteCapAuditEvent> {
+        self.with_audit_log(|audit_log| audit_log.clone())
+    }
+
+    fn record_issue_denial(
+        &self,
+        issuer_identity: &str,
+        now_epoch_secs: u64,
+        trace_id: &str,
+        denial_code: &str,
+    ) {
+        self.push_audit(build_audit_event(
+            "REMOTECAP_DENIED",
+            "RC_CAP_DENIED",
+            None,
+            Some(issuer_identity.to_string()),
+            None,
+            None,
+            trace_id.to_string(),
+            now_epoch_secs,
+            false,
+            Some(denial_code.to_string()),
+        ));
+    }
+
+    fn push_audit(&self, event: RemoteCapAuditEvent) {
+        self.with_audit_log(|audit_log| {
+            push_bounded(audit_log, event, MAX_AUDIT_LOG_ENTRIES);
+        });
+    }
+
+    fn audit_log_len(&self) -> usize {
+        self.with_audit_log(|audit_log| audit_log.len())
+    }
+
+    fn with_audit_log<R>(&self, action: impl FnOnce(&mut Vec<RemoteCapAuditEvent>) -> R) -> R {
+        let mut audit_log = match self.audit_log.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        action(&mut audit_log)
     }
 }
 
@@ -1573,6 +1625,20 @@ mod tests {
             )
             .expect_err("must require operator approval");
         assert_eq!(err.code(), "REMOTECAP_OPERATOR_AUTH_REQUIRED");
+
+        let audit_log = provider.audit_log();
+        assert_eq!(audit_log.len(), 1);
+        let event = audit_log.last().expect("denial audit event");
+        assert_eq!(event.event_code, "REMOTECAP_DENIED");
+        assert_eq!(event.legacy_event_code, "RC_CAP_DENIED");
+        assert_eq!(event.issuer_identity.as_deref(), Some("operator"));
+        assert_eq!(event.trace_id, "trace-1");
+        assert_eq!(event.timestamp_epoch_secs, 1_700_000_000);
+        assert!(!event.allowed);
+        assert_eq!(
+            event.denial_code.as_deref(),
+            Some("REMOTECAP_OPERATOR_AUTH_REQUIRED")
+        );
     }
 
     #[test]
@@ -2175,7 +2241,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_ttl_issue_is_rejected_without_issuance_audit() {
+    fn zero_ttl_issue_is_rejected_with_denial_audit() {
         let provider = CapabilityProvider::new("secret-a").expect("valid provider");
 
         let err = provider
@@ -2192,6 +2258,18 @@ mod tests {
 
         assert_eq!(err, RemoteCapError::InvalidTtl { ttl_secs: 0 });
         assert_eq!(err.code(), "REMOTECAP_TTL_INVALID");
+
+        let audit_log = provider.audit_log();
+        assert_eq!(audit_log.len(), 1);
+        let event = audit_log.last().expect("denial audit event");
+        assert_eq!(event.event_code, "REMOTECAP_DENIED");
+        assert_eq!(event.legacy_event_code, "RC_CAP_DENIED");
+        assert_eq!(event.token_id, None);
+        assert_eq!(event.issuer_identity.as_deref(), Some("operator"));
+        assert_eq!(event.trace_id, "trace-zero-ttl");
+        assert_eq!(event.timestamp_epoch_secs, 1_700_000_000);
+        assert!(!event.allowed);
+        assert_eq!(event.denial_code.as_deref(), Some("REMOTECAP_TTL_INVALID"));
     }
 
     #[test]
