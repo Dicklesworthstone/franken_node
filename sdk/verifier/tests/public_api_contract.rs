@@ -126,6 +126,32 @@ fn load_api_manifest_fixture() -> Result<Value, String> {
         .map_err(|err| format!("failed to parse api_manifest fixture: {err}"))
 }
 
+fn parse_public_api_fixture(raw: &str, fixture_name: &str) -> Result<Value, String> {
+    serde_json::from_str(raw)
+        .map_err(|err| format!("failed to parse {fixture_name} fixture: {err}"))
+}
+
+fn load_facade_result_fixture() -> Result<Value, String> {
+    parse_public_api_fixture(
+        include_str!("fixtures/public_api/facade_result.json"),
+        "facade_result",
+    )
+}
+
+fn load_session_step_fixture() -> Result<Value, String> {
+    parse_public_api_fixture(
+        include_str!("fixtures/public_api/session_step.json"),
+        "session_step",
+    )
+}
+
+fn load_transparency_entry_fixture() -> Result<Value, String> {
+    parse_public_api_fixture(
+        include_str!("fixtures/public_api/transparency_entry.json"),
+        "transparency_entry",
+    )
+}
+
 fn fixture_string<'a>(value: &'a Value, context: &str) -> Result<&'a str, String> {
     value
         .as_str()
@@ -552,6 +578,29 @@ fn test_verification_result_json_shape() -> Result<(), String> {
     Ok(())
 }
 
+fn test_verification_result_fixture_matches_live_json_contract() -> Result<(), String> {
+    let fixture_value = load_facade_result_fixture()?;
+    let fixture: VerificationResult = serde_json::from_value(fixture_value.clone())
+        .map_err(|err| format!("failed to deserialize facade_result fixture: {err}"))?;
+
+    let roundtrip_value = serde_json::to_value(&fixture)
+        .map_err(|err| format!("failed to serialize facade_result fixture: {err}"))?;
+    assert_eq!(
+        roundtrip_value, fixture_value,
+        "facade_result fixture drifted from the live VerificationResult serde contract"
+    );
+
+    assert_eq!(fixture.operation, VerificationOperation::Claim);
+    assert_eq!(fixture.verdict, VerificationVerdict::Pass);
+    assert!(fixture.confidence_score.is_finite());
+    assert!((0.0..=1.0).contains(&fixture.confidence_score));
+    assert!(!fixture.checked_assertions.is_empty());
+    assert_eq!(fixture.verifier_identity, "verifier://facade-test");
+    assert_eq!(fixture.sdk_version, SDK_VERSION);
+
+    Ok(())
+}
+
 fn test_session_step_json_shape() -> Result<(), String> {
     // SessionStep must have stable JSON schema
     let step = SessionStep {
@@ -586,6 +635,27 @@ fn test_session_step_json_shape() -> Result<(), String> {
     Ok(())
 }
 
+fn test_session_step_fixture_matches_live_json_contract() -> Result<(), String> {
+    let fixture_value = load_session_step_fixture()?;
+    let fixture: SessionStep = serde_json::from_value(fixture_value.clone())
+        .map_err(|err| format!("failed to deserialize session_step fixture: {err}"))?;
+
+    let roundtrip_value = serde_json::to_value(&fixture)
+        .map_err(|err| format!("failed to serialize session_step fixture: {err}"))?;
+    assert_eq!(
+        roundtrip_value, fixture_value,
+        "session_step fixture drifted from the live SessionStep serde contract"
+    );
+
+    assert_eq!(fixture.step_index, 1);
+    assert_eq!(fixture.operation, VerificationOperation::Claim);
+    assert_eq!(fixture.verdict, VerificationVerdict::Pass);
+    assert!(!fixture.artifact_binding_hash.is_empty());
+    assert!(!fixture.step_signature.is_empty());
+
+    Ok(())
+}
+
 fn test_transparency_log_entry_json_shape() -> Result<(), String> {
     // TransparencyLogEntry must have stable JSON schema
     let entry = TransparencyLogEntry {
@@ -607,6 +677,27 @@ fn test_transparency_log_entry_json_shape() -> Result<(), String> {
     // Test round-trip
     let roundtrip: TransparencyLogEntry = serde_json::from_str(&json_str).unwrap();
     assert_eq!(entry, roundtrip);
+
+    Ok(())
+}
+
+fn test_transparency_entry_fixture_matches_live_json_contract() -> Result<(), String> {
+    let fixture_value = load_transparency_entry_fixture()?;
+    let fixture: TransparencyLogEntry = serde_json::from_value(fixture_value.clone())
+        .map_err(|err| format!("failed to deserialize transparency_entry fixture: {err}"))?;
+
+    let roundtrip_value = serde_json::to_value(&fixture)
+        .map_err(|err| format!("failed to serialize transparency_entry fixture: {err}"))?;
+    assert_eq!(
+        roundtrip_value, fixture_value,
+        "transparency_entry fixture drifted from the live TransparencyLogEntry serde contract"
+    );
+
+    assert_eq!(fixture.verifier_id, "verifier://facade-test");
+    assert!(fixture.merkle_proof.len() >= 3);
+    assert!(fixture.merkle_proof[0].starts_with("root:"));
+    assert!(fixture.merkle_proof[1].starts_with("leaf_index:"));
+    assert!(fixture.merkle_proof[2].starts_with("tree_size:"));
 
     Ok(())
 }
@@ -1197,6 +1288,27 @@ const API_CONTRACT_TESTS: &[ApiContractTest] = &[
         level: RequirementLevel::Must,
         description: "TransparencyLogEntry JSON shape must remain stable",
         test_fn: test_transparency_log_entry_json_shape,
+    },
+    ApiContractTest {
+        id: "API-STRUCT-004",
+        category: TestCategory::Structures,
+        level: RequirementLevel::Must,
+        description: "facade_result golden JSON fixture must round-trip under the live VerificationResult contract",
+        test_fn: test_verification_result_fixture_matches_live_json_contract,
+    },
+    ApiContractTest {
+        id: "API-STRUCT-005",
+        category: TestCategory::Structures,
+        level: RequirementLevel::Must,
+        description: "session_step golden JSON fixture must round-trip under the live SessionStep contract",
+        test_fn: test_session_step_fixture_matches_live_json_contract,
+    },
+    ApiContractTest {
+        id: "API-STRUCT-006",
+        category: TestCategory::Structures,
+        level: RequirementLevel::Must,
+        description: "transparency_entry golden JSON fixture must round-trip under the live TransparencyLogEntry contract",
+        test_fn: test_transparency_entry_fixture_matches_live_json_contract,
     },
     // Error handling - SHOULD level (display can improve, semantics cannot)
     ApiContractTest {
