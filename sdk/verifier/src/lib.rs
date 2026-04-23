@@ -215,7 +215,7 @@ pub struct AssertionResult {
 /// This is a structural-only external result: `verifier_signature` is a
 /// deterministic SDK hash over the result payload, not a replacement-critical
 /// detached verifier attestation.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VerificationResult {
     pub operation: VerificationOperation,
     pub verdict: VerificationVerdict,
@@ -1611,6 +1611,32 @@ mod tests {
             serde_json::from_str(&serialized).expect("serialized result should remain valid JSON");
 
         assert!(value.get("result_origin_nonce").is_none());
+    }
+
+    #[test]
+    fn serialized_verification_result_round_trips_without_private_origin_nonce() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let result = sdk
+            .build_result(
+                VerificationOperation::Claim,
+                VerificationVerdict::Pass,
+                vec![AssertionResult {
+                    assertion: "capsule_replay_verified".to_string(),
+                    passed: true,
+                    detail: "same verifier".to_string(),
+                }],
+                "artifact-hash-alpha".to_string(),
+            )
+            .expect("same verifier result should be built");
+        let serialized =
+            serde_json::to_value(&result).expect("verification result serialization should work");
+        let roundtrip: VerificationResult = serde_json::from_value(serialized)
+            .expect("public JSON verification result should deserialize");
+
+        assert_eq!(roundtrip.operation, VerificationOperation::Claim);
+        assert_eq!(roundtrip.verdict, VerificationVerdict::Pass);
+        assert_eq!(roundtrip.verifier_identity, "verifier://alpha");
+        assert!(roundtrip.result_origin_nonce.is_empty());
     }
 
     #[test]
