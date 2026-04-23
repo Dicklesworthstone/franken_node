@@ -260,49 +260,81 @@ fn test_native_engine_error_handling_propagation() {
 }
 
 #[test]
-#[cfg(feature = "engine")]
 fn test_engine_timeout_handling() {
-    // This test would require a way to trigger engine timeout
-    // For now, we test that the timeout mechanism exists by checking
-    // that long-running operations don't hang indefinitely
-
+    // Test that engine execution properly handles timeouts by using a slow external engine binary
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let app_path = create_test_app(
         temp_dir.path(),
-        "quick_test.js",
-        r#"console.log("Quick test");"#,
+        "timeout_test.js",
+        r#"console.log("This should timeout before completion");"#,
     );
 
-    let mut config = Config::default();
-    config.profile = Profile::Balanced;
+    // Create a slow mock engine that takes 10 seconds to complete
+    let slow_engine_path = create_slow_mock_engine_binary(temp_dir.path(), 10);
 
-    let dispatcher = EngineDispatcher::new(None, PreferredRuntime::FrankenEngine);
+    let mut config = Config::default();
+    config.profile = Profile::Balanced; // Use balanced to allow external process fallback
+
+    // Force external process execution by providing explicit engine binary path
+    // This bypasses native engine execution to test external process timeout
+    let dispatcher = EngineDispatcher::new(
+        Some(slow_engine_path.clone()),
+        PreferredRuntime::FrankenEngine,
+    );
     let telemetry_bridge = TelemetryBridge::null();
 
+    // Execute and measure timing
     let start = std::time::Instant::now();
     let result = dispatcher.dispatch_run(&app_path, &config, &telemetry_bridge);
     let duration = start.elapsed();
 
-    // Execution should complete within reasonable time (not hang indefinitely)
+    // The execution should fail due to timeout, not complete successfully
     assert!(
-        duration < Duration::from_secs(30),
-        "Engine execution should not hang indefinitely, took: {:?}",
-        duration
+        result.is_err(),
+        "Slow engine execution should fail due to timeout, but got success"
     );
 
-    // Result should be success or a proper error, not a timeout (for simple code)
-    match result {
-        Ok(_) => {}, // Success is good
-        Err(error) => {
-            let error_str = error.to_string();
-            // Should not timeout on simple code
-            assert!(
-                !error_str.contains("timed out") || !error_str.contains("timeout"),
-                "Simple code should not timeout, got: {}",
-                error_str
-            );
-        }
+    let error = result.unwrap_err().to_string();
+
+    // Verify this is actually a timeout error, not some other error
+    let is_timeout_error = error.contains("timed out") ||
+                          error.contains("timeout") ||
+                          error.contains("Timeout") ||
+                          error.contains("deadline exceeded");
+
+    // If it's not a timeout error, it might be because the process was killed
+    // or failed for another reason, which is also acceptable timeout behavior
+    if !is_timeout_error {
+        // At minimum, verify the execution was interrupted quickly, not after 10 seconds
+        assert!(
+            duration < Duration::from_secs(8),
+            "Execution should be interrupted quickly (~1-5s), not wait for full 10s completion. Got: {:?}",
+            duration
+        );
+
+        // And verify the error indicates process failure/interruption
+        let is_process_failure = error.contains("failed") ||
+                                error.contains("killed") ||
+                                error.contains("terminated") ||
+                                error.contains("exit");
+        assert!(
+            is_process_failure,
+            "If not a timeout error, should be a process failure error. Got: {}",
+            error
+        );
+    } else {
+        // For explicit timeout errors, verify timing was reasonable (~1-5s for timeout detection)
+        assert!(
+            duration < Duration::from_secs(8),
+            "Timeout should be detected quickly, not after full delay. Took: {:?}",
+            duration
+        );
     }
+
+    println!(
+        "Timeout test completed in {:?} with error: {}",
+        duration, error
+    );
 }
 
 #[test]
