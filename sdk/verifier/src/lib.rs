@@ -439,7 +439,7 @@ impl VerifierSdk {
         log: &mut Vec<TransparencyLogEntry>,
         result: &VerificationResult,
     ) -> Result<TransparencyLogEntry, VerifierSdkError> {
-        self.verify_result_signature(result)?;
+        self.verify_result_belongs_to_current_verifier(result)?;
         let result_bytes = serde_json::to_vec(result)
             .map_err(|source| VerifierSdkError::Json(source.to_string()))?;
         let result_hash = bundle::hash(&result_bytes);
@@ -498,7 +498,7 @@ impl VerifierSdk {
         if session.sealed {
             return Err(VerifierSdkError::SessionSealed(session.session_id.clone()));
         }
-        self.verify_result_signature(result)?;
+        self.verify_result_belongs_to_current_verifier(result)?;
         if session.verifier_identity != self.verifier_identity {
             return Err(VerifierSdkError::SessionVerifierMismatch {
                 expected: session.verifier_identity.clone(),
@@ -529,6 +529,12 @@ impl VerifierSdk {
     ) -> Result<VerificationVerdict, VerifierSdkError> {
         if session.sealed {
             return Err(VerifierSdkError::SessionSealed(session.session_id.clone()));
+        }
+        if session.verifier_identity != self.verifier_identity {
+            return Err(VerifierSdkError::SessionVerifierMismatch {
+                expected: self.verifier_identity.clone(),
+                actual: session.verifier_identity.clone(),
+            });
         }
         let verdict = if session.steps.is_empty() {
             VerificationVerdict::Inconclusive
@@ -563,6 +569,20 @@ impl VerifierSdk {
                 actual: result.verifier_signature.clone(),
             })
         }
+    }
+
+    fn verify_result_belongs_to_current_verifier(
+        &self,
+        result: &VerificationResult,
+    ) -> Result<(), VerifierSdkError> {
+        self.verify_result_signature(result)?;
+        if result.verifier_identity != self.verifier_identity {
+            return Err(VerifierSdkError::SessionVerifierMismatch {
+                expected: self.verifier_identity.clone(),
+                actual: result.verifier_identity.clone(),
+            });
+        }
+        Ok(())
     }
 
     fn build_result(
@@ -692,6 +712,93 @@ mod tests {
             VerifierSdkError::SessionVerifierMismatch { .. }
         ));
         assert!(session.steps.is_empty());
+    }
+
+    #[test]
+    fn transparency_log_accepts_signed_result_from_same_verifier() {
+        let sdk = create_verifier_sdk("verifier-alpha");
+        let result = sdk
+            .build_result(
+                VerificationOperation::Claim,
+                VerificationVerdict::Pass,
+                vec![AssertionResult {
+                    assertion: "capsule_replay_verified".to_string(),
+                    passed: true,
+                    detail: "same verifier".to_string(),
+                }],
+                "artifact-hash-alpha".to_string(),
+            )
+            .expect("same verifier result should be built");
+        let mut log = Vec::new();
+
+        let entry = sdk
+            .append_transparency_log(&mut log, &result)
+            .expect("same verifier result should append");
+
+        assert_eq!(entry.verifier_id, "verifier-alpha");
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0], entry);
+    }
+
+    #[test]
+    fn seal_session_accepts_same_verifier_session() {
+        let sdk = create_verifier_sdk("verifier-alpha");
+        let mut session = sdk.create_session("session-alpha");
+
+        let verdict = sdk
+            .seal_session(&mut session)
+            .expect("same verifier session should seal");
+
+        assert_eq!(verdict, VerificationVerdict::Inconclusive);
+        assert!(session.sealed);
+        assert_eq!(session.final_verdict, Some(VerificationVerdict::Inconclusive));
+    }
+
+    #[test]
+    fn seal_session_rejects_foreign_verifier_session() {
+        let foreign_sdk = create_verifier_sdk("verifier-beta");
+        let mut foreign_session = foreign_sdk.create_session("session-beta");
+        let sdk = create_verifier_sdk("verifier-alpha");
+
+        let err = sdk
+            .seal_session(&mut foreign_session)
+            .expect_err("foreign verifier session must be rejected");
+
+        assert!(matches!(
+            err,
+            VerifierSdkError::SessionVerifierMismatch { .. }
+        ));
+        assert!(!foreign_session.sealed);
+        assert!(foreign_session.final_verdict.is_none());
+    }
+
+    #[test]
+    fn transparency_log_rejects_result_from_different_verifier() {
+        let sdk = create_verifier_sdk("verifier-alpha");
+        let other_sdk = create_verifier_sdk("verifier-beta");
+        let foreign_result = other_sdk
+            .build_result(
+                VerificationOperation::Claim,
+                VerificationVerdict::Pass,
+                vec![AssertionResult {
+                    assertion: "capsule_replay_verified".to_string(),
+                    passed: true,
+                    detail: "foreign verifier".to_string(),
+                }],
+                "artifact-hash-beta".to_string(),
+            )
+            .expect("foreign verifier result should be built");
+        let mut log = Vec::new();
+
+        let err = sdk
+            .append_transparency_log(&mut log, &foreign_result)
+            .expect_err("foreign verifier result must be rejected");
+
+        assert!(matches!(
+            err,
+            VerifierSdkError::SessionVerifierMismatch { .. }
+        ));
+        assert!(log.is_empty());
     }
 
     #[test]
