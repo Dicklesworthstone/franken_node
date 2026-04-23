@@ -312,6 +312,33 @@ mod tests {
     }
 
     #[test]
+    fn verify_counterfactual_receipt_rejects_whitespace_padded_baseline_integrity_hash() {
+        let baseline_bundle = json!({
+            "integrity_hash": format!(" {TEST_BUNDLE_HASH} ")
+        });
+        let counterfactual_output = json!({
+            "metadata": {"bundle_hash": TEST_BUNDLE_HASH}
+        });
+        let signing_key = SigningKey::from_bytes(&[15_u8; 32]);
+        let signature_bytes = sign_counterfactual_value(&counterfactual_output, &signing_key);
+
+        let err = verify_counterfactual_receipt(
+            &baseline_bundle,
+            &counterfactual_output,
+            &signing_key.verifying_key(),
+            &signature_bytes,
+        )
+        .expect_err("whitespace-padded baseline integrity_hash must fail closed");
+
+        assert_eq!(
+            err,
+            CounterfactualReceiptError::BaselineIntegrityHashMalformed {
+                actual: format!(" {TEST_BUNDLE_HASH} "),
+            }
+        );
+    }
+
+    #[test]
     fn verify_counterfactual_receipt_rejects_malformed_counterfactual_bundle_hash() {
         let baseline_bundle = json!({ "integrity_hash": TEST_BUNDLE_HASH });
         let counterfactual_output = json!({
@@ -332,6 +359,31 @@ mod tests {
             err,
             CounterfactualReceiptError::CounterfactualBundleHashMalformed {
                 actual: "bad-hash".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn verify_counterfactual_receipt_rejects_whitespace_padded_counterfactual_bundle_hash() {
+        let baseline_bundle = json!({ "integrity_hash": TEST_BUNDLE_HASH });
+        let counterfactual_output = json!({
+            "metadata": {"bundle_hash": format!(" {TEST_BUNDLE_HASH} ")}
+        });
+        let signing_key = SigningKey::from_bytes(&[16_u8; 32]);
+        let signature_bytes = sign_counterfactual_value(&counterfactual_output, &signing_key);
+
+        let err = verify_counterfactual_receipt(
+            &baseline_bundle,
+            &counterfactual_output,
+            &signing_key.verifying_key(),
+            &signature_bytes,
+        )
+        .expect_err("whitespace-padded signed counterfactual bundle_hash must fail closed");
+
+        assert_eq!(
+            err,
+            CounterfactualReceiptError::CounterfactualBundleHashMalformed {
+                actual: format!(" {TEST_BUNDLE_HASH} "),
             }
         );
     }
@@ -364,6 +416,35 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn verify_counterfactual_receipt_rejects_whitespace_padded_sweep_result_bundle_hash() {
+        let baseline_bundle = json!({ "integrity_hash": TEST_BUNDLE_HASH });
+        let counterfactual_output = json!({
+            "results": [
+                {"metadata": {"bundle_hash": TEST_BUNDLE_HASH}},
+                {"metadata": {"bundle_hash": format!(" {TEST_BUNDLE_HASH} ")}}
+            ]
+        });
+        let signing_key = SigningKey::from_bytes(&[17_u8; 32]);
+        let signature_bytes = sign_counterfactual_value(&counterfactual_output, &signing_key);
+
+        let err = verify_counterfactual_receipt(
+            &baseline_bundle,
+            &counterfactual_output,
+            &signing_key.verifying_key(),
+            &signature_bytes,
+        )
+        .expect_err("whitespace-padded sweep result bundle_hash must fail closed");
+
+        assert_eq!(
+            err,
+            CounterfactualReceiptError::SweepResultBundleHashMalformed {
+                index: 1,
+                actual: format!(" {TEST_BUNDLE_HASH} "),
+            }
+        );
+    }
 }
 
 fn extract_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
@@ -376,11 +457,10 @@ fn extract_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
 
 fn extract_nonempty_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
     let value = extract_string(value, path)?;
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
+    if value.trim().is_empty() {
         None
     } else {
-        Some(trimmed)
+        Some(value)
     }
 }
 
