@@ -257,11 +257,7 @@ pub fn validate_manifest(manifest: &CapsuleManifest) -> Result<(), CapsuleError>
             manifest.schema_version, SDK_VERSION
         )));
     }
-    if manifest.capsule_id.trim().is_empty() || manifest.capsule_id != manifest.capsule_id.trim() {
-        return Err(CapsuleError::ManifestIncomplete(
-            "capsule_id is empty".into(),
-        ));
-    }
+    validate_capsule_id(&manifest.capsule_id)?;
     if manifest.claim_type.trim().is_empty() || manifest.claim_type != manifest.claim_type.trim() {
         return Err(CapsuleError::ManifestIncomplete(
             "claim_type is empty".into(),
@@ -296,6 +292,23 @@ pub fn validate_manifest(manifest: &CapsuleManifest) -> Result<(), CapsuleError>
         ));
     }
     validate_creator_identity(&manifest.creator_identity)?;
+    Ok(())
+}
+
+fn validate_capsule_id(capsule_id: &str) -> Result<(), CapsuleError> {
+    if capsule_id.trim().is_empty() || capsule_id != capsule_id.trim() {
+        return Err(CapsuleError::ManifestIncomplete(
+            "capsule_id is empty".into(),
+        ));
+    }
+    if !capsule_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return Err(CapsuleError::ManifestIncomplete(
+            "capsule_id must include only ASCII letters, digits, '.', '-', and '_'".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -653,7 +666,8 @@ mod tests {
     #[test]
     fn test_replay_rejects_uppercase_expected_hash() {
         let mut capsule = build_reference_capsule();
-        capsule.manifest.expected_output_hash = capsule.manifest.expected_output_hash.to_uppercase();
+        capsule.manifest.expected_output_hash =
+            capsule.manifest.expected_output_hash.to_uppercase();
         sign_capsule(&mut capsule);
         match replay(&capsule, "verifier://v1") {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
@@ -1045,12 +1059,19 @@ mod tests {
         capsule.manifest.capsule_id = "capsule\0with\x01control\x1fchars".to_string();
         sign_capsule(&mut capsule);
 
-        // Should pass manifest validation (we don't sanitize control chars)
-        // but demonstrates potential injection vector
-        assert!(validate_manifest(&capsule.manifest).is_ok());
+        match validate_manifest(&capsule.manifest) {
+            Err(CapsuleError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("capsule_id"));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
+        }
 
-        // However, such IDs are suspicious and could be filtered by calling code
-        assert!(capsule.manifest.capsule_id.contains('\0'));
+        match replay(&capsule, "verifier://v1") {
+            Err(CapsuleError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("capsule_id"));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1077,7 +1098,7 @@ mod tests {
 
         match validate_manifest(&capsule.manifest) {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
-                assert!(msg.contains("creator_identity"));
+                assert!(msg.contains("capsule_id") || msg.contains("creator_identity"));
             }
             other => panic!("expected ManifestIncomplete, got {other:?}"),
         }
@@ -1136,7 +1157,9 @@ mod tests {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("capsule_id"));
             }
-            other => panic!("expected ManifestIncomplete for whitespace-only capsule_id, got {other:?}"),
+            other => {
+                panic!("expected ManifestIncomplete for whitespace-only capsule_id, got {other:?}")
+            }
         }
 
         let mut capsule2 = build_reference_capsule();
@@ -1145,7 +1168,9 @@ mod tests {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("claim_type"));
             }
-            other => panic!("expected ManifestIncomplete for whitespace-only claim_type, got {other:?}"),
+            other => {
+                panic!("expected ManifestIncomplete for whitespace-only claim_type, got {other:?}")
+            }
         }
 
         let mut capsule3 = build_reference_capsule();
@@ -1154,7 +1179,9 @@ mod tests {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("created_at"));
             }
-            other => panic!("expected ManifestIncomplete for whitespace-only created_at, got {other:?}"),
+            other => {
+                panic!("expected ManifestIncomplete for whitespace-only created_at, got {other:?}")
+            }
         }
     }
 
@@ -1201,6 +1228,20 @@ mod tests {
     fn test_replay_rejects_whitespace_padded_capsule_id() {
         let mut capsule = build_reference_capsule();
         capsule.manifest.capsule_id = " capsule-ref-001 ".to_string();
+        sign_capsule(&mut capsule);
+
+        match replay(&capsule, "verifier://v1") {
+            Err(CapsuleError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("capsule_id"));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_replay_rejects_path_traversal_capsule_id() {
+        let mut capsule = build_reference_capsule();
+        capsule.manifest.capsule_id = "../../../etc/passwd".to_string();
         sign_capsule(&mut capsule);
 
         match replay(&capsule, "verifier://v1") {
