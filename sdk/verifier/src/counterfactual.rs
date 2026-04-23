@@ -10,6 +10,7 @@ use std::fmt;
 use ed25519_dalek::VerifyingKey;
 use serde::Serialize;
 use serde_json::Value;
+use subtle::ConstantTimeEq;
 
 use crate::bundle::{BundleError, verify_ed25519_signature};
 
@@ -145,7 +146,7 @@ fn ensure_counterfactual_references_bundle(
             validate_bundle_hash(actual).map_err(|actual| {
                 CounterfactualReceiptError::CounterfactualBundleHashMalformed { actual }
             })?;
-            if actual != expected_bundle_hash {
+            if !constant_time_eq(actual, expected_bundle_hash) {
                 return Err(
                     CounterfactualReceiptError::CounterfactualBundleHashMismatch {
                         expected: expected_bundle_hash.to_string(),
@@ -160,7 +161,7 @@ fn ensure_counterfactual_references_bundle(
             validate_bundle_hash(actual).map_err(|actual| {
                 CounterfactualReceiptError::SweepResultBundleHashMalformed { index, actual }
             })?;
-            if actual != expected_bundle_hash {
+            if !constant_time_eq(actual, expected_bundle_hash) {
                 return Err(
                     CounterfactualReceiptError::CounterfactualBundleHashMismatch {
                         expected: expected_bundle_hash.to_string(),
@@ -177,7 +178,7 @@ fn ensure_counterfactual_references_bundle(
     validate_bundle_hash(actual).map_err(|actual| {
         CounterfactualReceiptError::CounterfactualBundleHashMalformed { actual }
     })?;
-    if actual != expected_bundle_hash {
+    if !constant_time_eq(actual, expected_bundle_hash) {
         return Err(
             CounterfactualReceiptError::CounterfactualBundleHashMismatch {
                 expected: expected_bundle_hash.to_string(),
@@ -809,6 +810,10 @@ fn extract_nonempty_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a st
     } else {
         Some(value)
     }
+}
+
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    bool::from(left.as_bytes().ct_eq(right.as_bytes()))
 }
 
 fn validate_bundle_hash(value: &str) -> Result<(), String> {
