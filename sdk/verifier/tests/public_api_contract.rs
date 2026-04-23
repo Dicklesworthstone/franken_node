@@ -276,24 +276,11 @@ fn test_validation_workflow_serde() -> Result<(), String> {
 
 fn test_verification_result_json_shape() -> Result<(), String> {
     // VerificationResult must have stable JSON schema for API consumers
-    let result: VerificationResult = serde_json::from_value(serde_json::json!({
-        "operation": "claim",
-        "verdict": "pass",
-        "confidence_score": 0.95,
-        "checked_assertions": [
-            {
-                "assertion": "test_assertion",
-                "passed": true,
-                "detail": "test detail"
-            }
-        ],
-        "execution_timestamp": "2026-04-21T12:00:00Z",
-        "verifier_identity": "test-verifier",
-        "artifact_binding_hash": "abc123",
-        "verifier_signature": "def456",
-        "sdk_version": "vsdk-v1.0"
-    }))
-    .unwrap();
+    let sdk = create_verifier_sdk("verifier://shape-test");
+    let capsule = capsule::build_reference_capsule();
+    let result = sdk
+        .verify_claim(&capsule)
+        .map_err(|err| format!("expected reference claim verification, got {err:?}"))?;
 
     let json_str = serde_json::to_string_pretty(&result).unwrap();
     let parsed_value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -313,10 +300,7 @@ fn test_verification_result_json_shape() -> Result<(), String> {
     );
     assert!(parsed_value.get("verifier_signature").unwrap().is_string());
     assert!(parsed_value.get("sdk_version").unwrap().is_string());
-
-    // Test round-trip deserialization
-    let roundtrip: VerificationResult = serde_json::from_str(&json_str).unwrap();
-    assert_eq!(result, roundtrip);
+    assert!(parsed_value.get("result_origin_nonce").is_none());
 
     Ok(())
 }

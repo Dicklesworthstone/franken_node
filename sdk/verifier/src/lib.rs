@@ -225,7 +225,7 @@ pub struct AssertionResult {
 /// This is a structural-only external result: `verifier_signature` is a
 /// deterministic SDK hash over the result payload, not a replacement-critical
 /// detached verifier attestation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct VerificationResult {
     pub operation: VerificationOperation,
     pub verdict: VerificationVerdict,
@@ -1586,7 +1586,7 @@ mod tests {
     }
 
     #[test]
-    fn transparency_log_rejects_deserialized_same_verifier_result() {
+    fn serialized_verification_result_omits_private_origin_nonce() {
         let sdk = create_verifier_sdk("verifier://alpha");
         let result = sdk
             .build_result(
@@ -1602,16 +1602,10 @@ mod tests {
             .expect("same verifier result should be built");
         let serialized =
             serde_json::to_string(&result).expect("verification result serialization should work");
-        let detached: VerificationResult = serde_json::from_str(&serialized)
-            .expect("verification result deserialization should work");
-        let mut log = Vec::new();
+        let value: serde_json::Value =
+            serde_json::from_str(&serialized).expect("serialized result should remain valid JSON");
 
-        let err = sdk
-            .append_transparency_log(&mut log, &detached)
-            .expect_err("detached same-verifier result must be rejected");
-
-        assert!(matches!(err, VerifierSdkError::ResultOriginMismatch { .. }));
-        assert!(log.is_empty());
+        assert!(value.get("result_origin_nonce").is_none());
     }
 
     #[test]
