@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use super::trust_object_id::DomainPrefix;
 
 use crate::capacity_defaults::aliases::MAX_EVENTS;
+use crate::security::constant_time::ct_eq_bytes;
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -488,7 +489,7 @@ impl CanonicalSerializer {
         let deserialized = self.deserialize(object_type, &serialized)?;
         let re_serialized = canonical_encode(&deserialized)?;
 
-        if serialized != re_serialized {
+        if !ct_eq_bytes(&serialized, &re_serialized) {
             return Err(SerializerError::RoundTripDivergence {
                 object_type: object_type.label().to_string(),
                 original_len: serialized.len(),
