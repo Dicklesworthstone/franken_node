@@ -10,7 +10,7 @@
 //! the Perfect E2E testing patterns rather than concurrent/timing behavior.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -29,6 +29,25 @@ use frankenengine_node::supply_chain::trust_card::TrustCardRegistry;
 
 static LOGGER_INIT: Once = Once::new();
 static TEST_COUNT: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+static NODE_ENV_OVERRIDE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn node_env_override() -> &'static Mutex<Option<String>> {
+    NODE_ENV_OVERRIDE.get_or_init(|| Mutex::new(None))
+}
+
+fn set_node_env_override_for_tests(value: Option<&str>) {
+    if let Ok(mut override_state) = node_env_override().lock() {
+        *override_state = value.map(str::to_string);
+    }
+}
+
+fn effective_node_env_for_tests() -> Option<String> {
+    node_env_override()
+        .lock()
+        .ok()
+        .and_then(|value| value.clone())
+        .or_else(|| std::env::var("NODE_ENV").ok())
+}
 
 /// Structured test logger following Perfect E2E methodology.
 struct TestLogger {
@@ -128,7 +147,7 @@ impl RealEnforcementHarness {
 
     /// Production safety guard - validates we're not in production environment.
     fn validate_test_environment() -> Result<(), Box<dyn std::error::Error>> {
-        if let Ok(env) = std::env::var("NODE_ENV") {
+        if let Some(env) = effective_node_env_for_tests() {
             if env == "production" {
                 return Err("Cannot run real enforcement tests in production environment".into());
             }
@@ -568,8 +587,17 @@ fn test_production_safety_guard() {
 
     logger.phase("setup");
 
-    // Temporarily set production environment
-    std::env::set_var("NODE_ENV", "production");
+    struct NodeEnvOverrideCleanup;
+
+    impl Drop for NodeEnvOverrideCleanup {
+        fn drop(&mut self) {
+            set_node_env_override_for_tests(None);
+        }
+    }
+
+    // Temporarily force production mode without mutating process-global environment.
+    set_node_env_override_for_tests(Some("production"));
+    let _cleanup = NodeEnvOverrideCleanup;
 
     logger.phase("act");
     let harness_result = RealEnforcementHarness::new();
@@ -590,8 +618,6 @@ fn test_production_safety_guard() {
         );
     }
 
-    // Restore environment
-    std::env::remove_var("NODE_ENV");
     logger.test_end("pass");
 }
 

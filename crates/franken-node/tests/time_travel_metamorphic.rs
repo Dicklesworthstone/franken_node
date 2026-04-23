@@ -4,10 +4,12 @@
 //! sequence number and this order is preserved through all builder operations.
 
 use proptest::prelude::*;
+use proptest::test_runner::TestRunner;
 use std::collections::BTreeMap;
 
+use frankenengine_node::capacity_defaults::aliases::MAX_TRACE_STEPS;
 use frankenengine_node::replay::time_travel_engine::{
-    EnvironmentSnapshot, TraceBuilder, MAX_TRACE_STEPS,
+    EnvironmentSnapshot, TraceBuilder,
 };
 
 /// Create a demo environment for testing.
@@ -47,18 +49,12 @@ impl Arbitrary for StepData {
     }
 }
 
-proptest! {
-    /// Metamorphic test: TraceBuilder preserves step order regardless of input data.
-    ///
-    /// Property: Given N steps added in order 0..N-1, the resulting trace
-    /// must have sequence numbers 0, 1, 2, ..., N-1 in that exact order.
-    ///
-    /// This tests the INV-TTR-STEP-ORDER invariant: "Trace steps are strictly
-    /// ordered by sequence number; replays respect that order."
-    #[test]
-    fn trace_builder_preserves_step_order(
-        steps_data in prop::collection::vec(any::<StepData>(), 1..=20)
-    ) {
+#[test]
+fn trace_builder_preserves_step_order() {
+    let mut runner = TestRunner::default();
+    let strategy = prop::collection::vec(any::<StepData>(), 1..=20);
+
+    runner.run(&strategy, |steps_data| {
         let trace_id = "metamorphic-order-test";
         let workflow_name = "step-order-preservation";
 
@@ -123,13 +119,16 @@ proptest! {
             "Sequence numbers have gaps: range {first_seq}..={last_seq} vs {} steps",
             trace.steps.len()
         );
-    }
+        Ok(())
+    })
+    .expect("step order property should hold");
+}
 
-    /// Metamorphic test: Empty builder handling.
-    ///
-    /// Property: A builder with zero steps should fail to build (empty trace error).
-    #[test]
-    fn empty_trace_builder_fails_correctly() {
+#[test]
+fn empty_trace_builder_fails_correctly() {
+    let mut runner = TestRunner::default();
+
+    runner.run(&Just(()), |_| {
         let builder = TraceBuilder::new("empty-test", "empty-workflow", demo_env());
 
         // Empty builder should fail to build
@@ -148,16 +147,16 @@ proptest! {
             }
             Ok(_) => prop_assert!(false, "Empty trace should not build successfully"),
         }
-    }
+        Ok(())
+    })
+    .expect("empty builder property should hold");
+}
 
-    /// Metamorphic test: Maximum capacity handling.
-    ///
-    /// Property: When adding more than MAX_TRACE_STEPS, the builder should
-    /// silently cap at MAX_TRACE_STEPS while preserving order of the recorded steps.
-    #[test]
-    fn trace_builder_respects_max_capacity(
-        extra_steps in 1..=10_usize
-    ) {
+#[test]
+fn trace_builder_respects_max_capacity() {
+    let mut runner = TestRunner::default();
+
+    runner.run(&(1..=10_usize), |extra_steps| {
         // Skip this test if MAX_TRACE_STEPS is too large for reasonable testing
         prop_assume!(MAX_TRACE_STEPS <= 100);
 
@@ -209,7 +208,9 @@ proptest! {
         // Sequence numbers should still be consecutive from 0
         prop_assert_eq!(trace.steps[0].seq, 0);
         prop_assert_eq!(trace.steps[MAX_TRACE_STEPS - 1].seq, (MAX_TRACE_STEPS - 1) as u64);
-    }
+        Ok(())
+    })
+    .expect("max capacity property should hold");
 }
 
 #[cfg(test)]
