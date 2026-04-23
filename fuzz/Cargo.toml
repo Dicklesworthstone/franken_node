@@ -196,3 +196,9 @@ name = "fuzz_parse_signed_registration_manifest"
 path = "fuzz_targets/fuzz_parse_signed_registration_manifest.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_vef_proof_input_envelope"
+path = "fuzz_targets/fuzz_vef_proof_input_envelope.rs"
+test = false
+doc = false
