@@ -1601,8 +1601,15 @@ fn test_workflow_execution_interface() -> TestResult {
 }
 
 fn test_session_interface() -> TestResult {
-    let sdk = create_verifier_sdk("test-session");
-    let session = sdk.create_session("test-session-001");
+    let sdk = create_verifier_sdk("verifier://test-session");
+    let session = match sdk.create_session("test-session-001") {
+        Ok(session) => session,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("create_session failed: {err}"),
+            };
+        }
+    };
 
     if session.session_id == "test-session-001" && !session.sealed {
         TestResult::Pass
@@ -1712,7 +1719,14 @@ fn test_interface_structured_error_details() -> TestResult {
         }
     }
 
-    let mut session = sdk.create_session("sealed-session");
+    let mut session = match sdk.create_session("sealed-session") {
+        Ok(session) => session,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("session fixture creation failed: {err}"),
+            };
+        }
+    };
     if let Err(err) = sdk.seal_session(&mut session) {
         return TestResult::Fail {
             reason: format!("initial session seal failed: {err}"),

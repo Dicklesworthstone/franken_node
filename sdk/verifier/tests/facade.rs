@@ -40,7 +40,9 @@ fn verifier_sdk_facade_verifies_claim_artifact_trust_state_and_session() {
         .expect("valid trust bundle with mismatched anchor should produce fail verdict");
     assert_eq!(mismatched_trust_result.verdict, VerificationVerdict::Fail);
 
-    let mut session = sdk.create_session("session-facade-001");
+    let mut session = sdk
+        .create_session("session-facade-001")
+        .expect("session should be created");
     let first_step = sdk
         .record_session_step(&mut session, &claim_result)
         .expect("first session step should append");

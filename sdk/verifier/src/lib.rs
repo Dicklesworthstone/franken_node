@@ -263,6 +263,7 @@ pub enum VerifierSdkError {
     UnsupportedSdk(String),
     Capsule(capsule::CapsuleError),
     Bundle(bundle::BundleError),
+    InvalidVerifierIdentity { actual: String, reason: String },
     EmptyTrustAnchor,
     MalformedTrustAnchor { actual: String },
     SessionSealed(String),
@@ -283,6 +284,10 @@ impl fmt::Display for VerifierSdkError {
             Self::UnsupportedSdk(message) => write!(formatter, "{message}"),
             Self::Capsule(source) => write!(formatter, "capsule verification failed: {source}"),
             Self::Bundle(source) => write!(formatter, "bundle verification failed: {source}"),
+            Self::InvalidVerifierIdentity { actual, reason } => write!(
+                formatter,
+                "verifier identity is invalid: {reason}: got {actual}"
+            ),
             Self::EmptyTrustAnchor => write!(formatter, "trust anchor is empty"),
             Self::MalformedTrustAnchor { actual } => write!(
                 formatter,
@@ -333,6 +338,7 @@ impl From<bundle::BundleError> for VerifierSdkError {
 const FACADE_TIMESTAMP: &str = "2026-02-21T00:00:00Z";
 const SESSION_STEP_SIGNATURE_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:session-step:v1:";
 const SESSION_NONCE_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:session-nonce:v1:";
+const MAX_VERIFIER_IDENTITY_NAME_LEN: usize = 255;
 static SESSION_NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Top-level facade for external verifier integrations.
@@ -365,6 +371,7 @@ impl VerifierSdk {
         claim: &capsule::ReplayCapsule,
     ) -> Result<VerificationResult, VerifierSdkError> {
         check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        self.validate_current_verifier_identity()?;
         let replay = capsule::replay(claim, &self.verifier_identity)?;
         let verdict = VerificationVerdict::from(replay.verdict);
         let assertions = vec![
@@ -393,6 +400,7 @@ impl VerifierSdk {
         artifact: &[u8],
     ) -> Result<VerificationResult, VerifierSdkError> {
         check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        self.validate_current_verifier_identity()?;
         let verified = bundle::verify(artifact)?;
         self.verify_bundle_belongs_to_current_verifier(&verified)?;
         let assertions = vec![
@@ -422,6 +430,7 @@ impl VerifierSdk {
         anchor_integrity_hash: &str,
     ) -> Result<VerificationResult, VerifierSdkError> {
         check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        self.validate_current_verifier_identity()?;
         if anchor_integrity_hash.trim().is_empty() {
             return Err(VerifierSdkError::EmptyTrustAnchor);
         }
@@ -468,6 +477,7 @@ impl VerifierSdk {
     /// Validate canonical replay bundle bytes without producing a facade result.
     pub fn validate_bundle(&self, bundle: &[u8]) -> Result<(), VerifierSdkError> {
         check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        self.validate_current_verifier_identity()?;
         let verified = bundle::verify(bundle)?;
         self.verify_bundle_belongs_to_current_verifier(&verified)?;
         Ok(())
@@ -479,6 +489,7 @@ impl VerifierSdk {
         log: &mut Vec<TransparencyLogEntry>,
         result: &VerificationResult,
     ) -> Result<TransparencyLogEntry, VerifierSdkError> {
+        self.validate_current_verifier_identity()?;
         self.verify_result_belongs_to_current_verifier(result)?;
         let result_bytes = serde_json::to_vec(result)
             .map_err(|source| VerifierSdkError::Json(source.to_string()))?;
@@ -502,6 +513,7 @@ impl VerifierSdk {
         workflow: ValidationWorkflow,
         bundle: &[u8],
     ) -> Result<VerificationResult, VerifierSdkError> {
+        self.validate_current_verifier_identity()?;
         let verified = self.verify_migration_artifact(bundle)?;
         let mut assertions = verified.checked_assertions;
         assertions.push(AssertionResult {
@@ -518,10 +530,14 @@ impl VerifierSdk {
     }
 
     /// Create a new unsealed verification session.
-    pub fn create_session(&self, session_id: impl Into<String>) -> VerificationSession {
+    pub fn create_session(
+        &self,
+        session_id: impl Into<String>,
+    ) -> Result<VerificationSession, VerifierSdkError> {
+        self.validate_current_verifier_identity()?;
         let session_id = session_id.into();
         let created_at = FACADE_TIMESTAMP.to_string();
-        VerificationSession {
+        Ok(VerificationSession {
             session_id: session_id.clone(),
             verifier_identity: self.verifier_identity.clone(),
             created_at: created_at.clone(),
@@ -534,7 +550,7 @@ impl VerifierSdk {
                 &created_at,
                 SESSION_NONCE_COUNTER.fetch_add(1, Ordering::Relaxed),
             ),
-        }
+        })
     }
 
     /// Append a verification result as the next session step.
@@ -543,6 +559,7 @@ impl VerifierSdk {
         session: &mut VerificationSession,
         result: &VerificationResult,
     ) -> Result<SessionStep, VerifierSdkError> {
+        self.validate_current_verifier_identity()?;
         if session.sealed {
             return Err(VerifierSdkError::SessionSealed(session.session_id.clone()));
         }
@@ -580,6 +597,7 @@ impl VerifierSdk {
         &self,
         session: &mut VerificationSession,
     ) -> Result<VerificationVerdict, VerifierSdkError> {
+        self.validate_current_verifier_identity()?;
         if session.sealed {
             return Err(VerifierSdkError::SessionSealed(session.session_id.clone()));
         }
@@ -644,6 +662,7 @@ impl VerifierSdk {
         &self,
         result: &VerificationResult,
     ) -> Result<(), VerifierSdkError> {
+        self.validate_current_verifier_identity()?;
         self.verify_result_signature(result)?;
         if result.verifier_identity != self.verifier_identity {
             return Err(VerifierSdkError::SessionVerifierMismatch {
@@ -658,6 +677,7 @@ impl VerifierSdk {
         &self,
         bundle: &bundle::ReplayBundle,
     ) -> Result<(), VerifierSdkError> {
+        self.validate_current_verifier_identity()?;
         if bundle.verifier_identity != self.verifier_identity {
             return Err(VerifierSdkError::SessionVerifierMismatch {
                 expected: self.verifier_identity.clone(),
@@ -674,6 +694,7 @@ impl VerifierSdk {
         checked_assertions: Vec<AssertionResult>,
         artifact_binding_hash: String,
     ) -> Result<VerificationResult, VerifierSdkError> {
+        self.validate_current_verifier_identity()?;
         let confidence_score = match verdict {
             VerificationVerdict::Pass => 1.0,
             VerificationVerdict::Fail | VerificationVerdict::Inconclusive => 0.0,
@@ -691,6 +712,10 @@ impl VerifierSdk {
         };
         result.verifier_signature = facade_result_signature(&result)?;
         Ok(result)
+    }
+
+    fn validate_current_verifier_identity(&self) -> Result<(), VerifierSdkError> {
+        validate_verifier_identity(&self.verifier_identity)
     }
 }
 
@@ -792,6 +817,46 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
     bool::from(left.as_bytes().ct_eq(right.as_bytes()))
 }
 
+fn validate_verifier_identity(verifier_identity: &str) -> Result<(), VerifierSdkError> {
+    if verifier_identity != verifier_identity.trim() {
+        return Err(VerifierSdkError::InvalidVerifierIdentity {
+            actual: verifier_identity.to_string(),
+            reason: "identity must not contain leading or trailing whitespace".to_string(),
+        });
+    }
+    let Some(remainder) = verifier_identity.strip_prefix("verifier://") else {
+        return Err(VerifierSdkError::InvalidVerifierIdentity {
+            actual: verifier_identity.to_string(),
+            reason: "identity must use the external verifier:// scheme".to_string(),
+        });
+    };
+    if remainder.trim().is_empty() || remainder != remainder.trim() {
+        return Err(VerifierSdkError::InvalidVerifierIdentity {
+            actual: verifier_identity.to_string(),
+            reason: "identity must include a non-empty verifier name".to_string(),
+        });
+    }
+    if remainder.len() > MAX_VERIFIER_IDENTITY_NAME_LEN {
+        return Err(VerifierSdkError::InvalidVerifierIdentity {
+            actual: verifier_identity.to_string(),
+            reason: format!(
+                "identity must be at most {MAX_VERIFIER_IDENTITY_NAME_LEN} ASCII bytes after verifier://"
+            ),
+        });
+    }
+    if !remainder
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return Err(VerifierSdkError::InvalidVerifierIdentity {
+            actual: verifier_identity.to_string(),
+            reason:
+                "identity must include only ASCII letters, digits, '.', '-', and '_'".to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn is_canonical_sha256_hex(value: &str) -> bool {
     value.len() == 64
         && value
@@ -875,8 +940,10 @@ mod tests {
 
     #[test]
     fn session_step_accepts_signed_result_from_same_verifier() {
-        let sdk = create_verifier_sdk("verifier-alpha");
-        let mut session = sdk.create_session("session-alpha");
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let mut session = sdk
+            .create_session("session-alpha")
+            .expect("same verifier session should be created");
         let result = sdk
             .build_result(
                 VerificationOperation::Claim,
@@ -903,9 +970,11 @@ mod tests {
 
     #[test]
     fn session_step_rejects_result_from_different_verifier() {
-        let sdk = create_verifier_sdk("verifier-alpha");
-        let other_sdk = create_verifier_sdk("verifier-beta");
-        let mut session = sdk.create_session("session-alpha");
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let other_sdk = create_verifier_sdk("verifier://beta");
+        let mut session = sdk
+            .create_session("session-alpha")
+            .expect("same verifier session should be created");
         let foreign_result = other_sdk
             .build_result(
                 VerificationOperation::Claim,
@@ -932,7 +1001,7 @@ mod tests {
 
     #[test]
     fn transparency_log_accepts_signed_result_from_same_verifier() {
-        let sdk = create_verifier_sdk("verifier-alpha");
+        let sdk = create_verifier_sdk("verifier://alpha");
         let result = sdk
             .build_result(
                 VerificationOperation::Claim,
@@ -951,15 +1020,17 @@ mod tests {
             .append_transparency_log(&mut log, &result)
             .expect("same verifier result should append");
 
-        assert_eq!(entry.verifier_id, "verifier-alpha");
+        assert_eq!(entry.verifier_id, "verifier://alpha");
         assert_eq!(log.len(), 1);
         assert_eq!(log[0], entry);
     }
 
     #[test]
     fn seal_session_accepts_same_verifier_session() {
-        let sdk = create_verifier_sdk("verifier-alpha");
-        let mut session = sdk.create_session("session-alpha");
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let mut session = sdk
+            .create_session("session-alpha")
+            .expect("same verifier session should be created");
 
         let verdict = sdk
             .seal_session(&mut session)
@@ -972,9 +1043,11 @@ mod tests {
 
     #[test]
     fn seal_session_rejects_foreign_verifier_session() {
-        let foreign_sdk = create_verifier_sdk("verifier-beta");
-        let mut foreign_session = foreign_sdk.create_session("session-beta");
-        let sdk = create_verifier_sdk("verifier-alpha");
+        let foreign_sdk = create_verifier_sdk("verifier://beta");
+        let mut foreign_session = foreign_sdk
+            .create_session("session-beta")
+            .expect("foreign verifier session should be created");
+        let sdk = create_verifier_sdk("verifier://alpha");
 
         let err = sdk
             .seal_session(&mut foreign_session)
@@ -990,7 +1063,7 @@ mod tests {
 
     #[test]
     fn seal_session_rejects_tampered_or_forged_steps() {
-        let sdk = create_verifier_sdk("verifier-alpha");
+        let sdk = create_verifier_sdk("verifier://alpha");
         let result = sdk
             .build_result(
                 VerificationOperation::Claim,
@@ -1003,7 +1076,9 @@ mod tests {
                 "artifact-hash-alpha".to_string(),
             )
             .expect("result should build");
-        let mut session = sdk.create_session("session-alpha");
+        let mut session = sdk
+            .create_session("session-alpha")
+            .expect("same verifier session should be created");
         sdk.record_session_step(&mut session, &result)
             .expect("valid recorded step should succeed");
         session.steps.push(SessionStep {
@@ -1029,8 +1104,8 @@ mod tests {
 
     #[test]
     fn transparency_log_rejects_result_from_different_verifier() {
-        let sdk = create_verifier_sdk("verifier-alpha");
-        let other_sdk = create_verifier_sdk("verifier-beta");
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let other_sdk = create_verifier_sdk("verifier://beta");
         let foreign_result = other_sdk
             .build_result(
                 VerificationOperation::Claim,
@@ -1174,6 +1249,53 @@ mod tests {
         assert!(matches!(
             err,
             VerifierSdkError::SessionVerifierMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn verify_claim_rejects_whitespace_only_verifier_identity() {
+        let sdk = create_verifier_sdk("   ");
+        let capsule = capsule::build_reference_capsule();
+
+        let err = sdk
+            .verify_claim(&capsule)
+            .expect_err("whitespace-only verifier identity must be rejected");
+
+        assert!(matches!(
+            err,
+            VerifierSdkError::InvalidVerifierIdentity { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_bundle_rejects_control_character_verifier_identity() {
+        let sdk = create_verifier_sdk("verifier://alpha\u{0000}");
+        let bundle = make_replay_bundle_bytes("verifier://alpha");
+
+        let err = sdk
+            .validate_bundle(&bundle)
+            .expect_err("control-character verifier identity must be rejected");
+
+        assert!(matches!(
+            err,
+            VerifierSdkError::InvalidVerifierIdentity { .. }
+        ));
+    }
+
+    #[test]
+    fn create_session_rejects_excessively_long_verifier_identity() {
+        let sdk = create_verifier_sdk(format!(
+            "verifier://{}",
+            "a".repeat(MAX_VERIFIER_IDENTITY_NAME_LEN + 1)
+        ));
+
+        let err = sdk
+            .create_session("session-too-long")
+            .expect_err("excessively long verifier identity must be rejected");
+
+        assert!(matches!(
+            err,
+            VerifierSdkError::InvalidVerifierIdentity { .. }
         ));
     }
 
