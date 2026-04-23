@@ -653,9 +653,21 @@ fn update_hash_string_list(hasher: &mut Sha256, domain: &'static [u8], values: &
 
 /// Generate a violation bundle deterministically from context.
 pub fn generate_bundle(context: &ViolationContext) -> ViolationBundle {
-    // Ensure vectors are bounded to prevent memory exhaustion attacks
-    let mut bounded_context = context.clone();
-    bounded_context.ensure_bounded();
+    // PERF: Use bounded slices instead of cloning entire context with large vectors
+    // Avoids expensive Vec<CausalEvent> and Vec<FailedArtifact> allocations in hot path
+    let bounded_events = if context.events.len() > MAX_CAUSAL_EVENTS {
+        let start_idx = context.events.len().saturating_sub(MAX_CAUSAL_EVENTS);
+        &context.events[start_idx..]
+    } else {
+        &context.events[..]
+    };
+
+    let bounded_artifacts = if context.artifacts.len() > MAX_FAILED_ARTIFACTS {
+        let start_idx = context.artifacts.len().saturating_sub(MAX_FAILED_ARTIFACTS);
+        &context.artifacts[start_idx..]
+    } else {
+        &context.artifacts[..]
+    };
 
     // Derive bundle_id deterministically from content.
     // Length-prefix variable-length strings and domain-separate fields to
@@ -665,21 +677,21 @@ pub fn generate_bundle(context: &ViolationContext) -> ViolationBundle {
     update_hash_u64(
         &mut hasher,
         b"durability_violation_bundle_v1:epoch_id",
-        bounded_context.epoch_id,
+        context.epoch_id,
     );
     update_hash_u64(
         &mut hasher,
         b"durability_violation_bundle_v1:timestamp_ms",
-        bounded_context.timestamp_ms,
+        context.timestamp_ms,
     );
     update_hash_bytes(
         &mut hasher,
         b"durability_violation_bundle_v1:hardening_level",
-        bounded_context.hardening_level.as_bytes(),
+        context.hardening_level.as_bytes(),
     );
     hasher.update(b"durability_violation_bundle_v1:events");
-    hasher.update(hash_len(bounded_context.events.len()));
-    for event in &bounded_context.events {
+    hasher.update(hash_len(bounded_events.len()));
+    for event in bounded_events {
         let label = event.event_type.label();
         hasher.update(b"durability_violation_bundle_v1:event");
         update_hash_bytes(
@@ -707,8 +719,8 @@ pub fn generate_bundle(context: &ViolationContext) -> ViolationBundle {
         }
     }
     hasher.update(b"durability_violation_bundle_v1:artifacts");
-    hasher.update(hash_len(bounded_context.artifacts.len()));
-    for artifact in &bounded_context.artifacts {
+    hasher.update(hash_len(bounded_artifacts.len()));
+    for artifact in bounded_artifacts {
         hasher.update(b"durability_violation_bundle_v1:artifact");
         update_hash_bytes(
             &mut hasher,
@@ -734,17 +746,17 @@ pub fn generate_bundle(context: &ViolationContext) -> ViolationBundle {
     update_hash_string_list(
         &mut hasher,
         b"durability_violation_bundle_v1:proofs_failed",
-        &bounded_context.proofs.failed_proofs,
+        &context.proofs.failed_proofs,
     );
     update_hash_string_list(
         &mut hasher,
         b"durability_violation_bundle_v1:proofs_missing",
-        &bounded_context.proofs.missing_proofs,
+        &context.proofs.missing_proofs,
     );
     update_hash_string_list(
         &mut hasher,
         b"durability_violation_bundle_v1:proofs_passed",
-        &bounded_context.proofs.passed_proofs,
+        &context.proofs.passed_proofs,
     );
     let digest = hasher.finalize();
     let hash = u64::from_le_bytes(digest[..8].try_into().unwrap_or([0u8; 8]));
@@ -752,12 +764,12 @@ pub fn generate_bundle(context: &ViolationContext) -> ViolationBundle {
 
     ViolationBundle {
         bundle_id,
-        causal_event_sequence: bounded_context.events,
-        failed_artifacts: bounded_context.artifacts,
-        proof_context: bounded_context.proofs,
-        hardening_level: bounded_context.hardening_level,
-        timestamp_ms: bounded_context.timestamp_ms,
-        epoch_id: bounded_context.epoch_id,
+        causal_event_sequence: bounded_events.to_vec(),
+        failed_artifacts: bounded_artifacts.to_vec(),
+        proof_context: context.proofs.clone(),
+        hardening_level: context.hardening_level.clone(),
+        timestamp_ms: context.timestamp_ms,
+        epoch_id: context.epoch_id,
     }
 }
 
