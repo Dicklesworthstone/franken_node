@@ -196,41 +196,34 @@ fn canonical_entry_bytes(entry: &EvidenceEntry) -> Vec<u8> {
     hasher.update(b"evidence_ledger_entry_v1:");
 
     // Hash all fields except signature in deterministic order
-    hasher.update(entry.schema_version.as_bytes());
-    hasher.update(b"\x00"); // field separator
-
-    if let Some(ref entry_id) = entry.entry_id {
-        hasher.update(entry_id.as_bytes());
+    update_hash_len_prefixed(&mut hasher, entry.schema_version.as_bytes());
+    match &entry.entry_id {
+        Some(entry_id) => {
+            hasher.update([1_u8]);
+            update_hash_len_prefixed(&mut hasher, entry_id.as_bytes());
+        }
+        None => hasher.update([0_u8]),
     }
-    hasher.update(b"\x00");
-
-    hasher.update(entry.decision_id.as_bytes());
-    hasher.update(b"\x00");
-
-    hasher.update(entry.decision_kind.label().as_bytes());
-    hasher.update(b"\x00");
-
-    hasher.update(entry.decision_time.as_bytes());
-    hasher.update(b"\x00");
-
+    update_hash_len_prefixed(&mut hasher, entry.decision_id.as_bytes());
+    update_hash_len_prefixed(&mut hasher, entry.decision_kind.label().as_bytes());
+    update_hash_len_prefixed(&mut hasher, entry.decision_time.as_bytes());
     hasher.update(entry.timestamp_ms.to_le_bytes());
-    hasher.update(b"\x00");
-
-    hasher.update(entry.trace_id.as_bytes());
-    hasher.update(b"\x00");
-
+    update_hash_len_prefixed(&mut hasher, entry.trace_id.as_bytes());
     hasher.update(entry.epoch_id.to_le_bytes());
-    hasher.update(b"\x00");
 
     // Serialize payload deterministically
     if let Ok(payload_str) = serde_json::to_string(&entry.payload) {
-        hasher.update(payload_str.as_bytes());
+        update_hash_len_prefixed(&mut hasher, payload_str.as_bytes());
     }
-    hasher.update(b"\x00");
-
     hasher.update(entry.size_bytes.to_le_bytes());
 
     hasher.finalize().to_vec()
+}
+
+fn update_hash_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+    let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    hasher.update(len.to_le_bytes());
+    hasher.update(bytes);
 }
 
 /// Sign an evidence entry using an Ed25519 signing key.
@@ -4542,6 +4535,40 @@ mod tests {
         assert_eq!(
             canonical1, canonical2,
             "Canonical bytes should exclude signature field"
+        );
+    }
+
+    #[test]
+    fn test_canonical_entry_bytes_resists_entry_id_decision_id_boundary_collision() {
+        let mut entry_a = test_entry("TEST-COLLISION-A", 1);
+        entry_a.entry_id = Some("foo".to_string());
+        entry_a.decision_id = "bar\0baz".to_string();
+
+        let mut entry_b = entry_a.clone();
+        entry_b.entry_id = Some("foo\0bar".to_string());
+        entry_b.decision_id = "baz".to_string();
+
+        let canonical_a = canonical_entry_bytes(&entry_a);
+        let canonical_b = canonical_entry_bytes(&entry_b);
+
+        assert_ne!(
+            canonical_a, canonical_b,
+            "length-prefixed framing must prevent entry_id/decision_id boundary collisions"
+        );
+    }
+
+    #[test]
+    fn test_canonical_entry_bytes_distinguishes_missing_and_empty_entry_id() {
+        let mut missing_entry_id = test_entry("TEST-OPTION-FRAMING", 1);
+        missing_entry_id.entry_id = None;
+
+        let mut empty_entry_id = missing_entry_id.clone();
+        empty_entry_id.entry_id = Some(String::new());
+
+        assert_ne!(
+            canonical_entry_bytes(&missing_entry_id),
+            canonical_entry_bytes(&empty_entry_id),
+            "canonical bytes must distinguish absent entry_id from present empty entry_id"
         );
     }
 
