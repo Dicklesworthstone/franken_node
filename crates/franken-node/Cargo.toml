@@ -23,6 +23,7 @@ test = false
 asupersync-transport = ["dep:asupersync"]
 extended-surfaces = []
 test-support = []
+dev-keys = []
 fuzz = ["arbitrary"]
 # Heavy compilation dependencies - optional for fuzz builds
 parsing = ["dep:tree-sitter", "dep:tree-sitter-javascript"]
