@@ -7,8 +7,7 @@ use frankenengine_verifier_sdk::bundle::{
 };
 use frankenengine_verifier_sdk::capsule;
 use frankenengine_verifier_sdk::{
-    ValidationWorkflow, VerificationOperation, VerificationVerdict, VerifierSdkError,
-    create_verifier_sdk,
+    ValidationWorkflow, VerificationVerdict, VerifierSdkError, create_verifier_sdk,
 };
 use serde_json::json;
 
@@ -25,20 +24,37 @@ fn verifier_sdk_facade_verifies_claim_artifact_trust_state_and_session() {
 
     let trust_bundle = canonical_replay_bundle();
     let trust_bundle_bytes = serialize(&trust_bundle).expect("bundle should serialize");
-    let migration_result = sdk
+    let migration_error = sdk
         .verify_migration_artifact(&trust_bundle_bytes)
-        .expect("canonical replay bundle should verify as migration artifact");
-    assert_eq!(migration_result.verdict, VerificationVerdict::Pass);
+        .expect_err("structural-only replay bundles must fail closed as migration artifacts");
+    assert!(matches!(
+        migration_error,
+        VerifierSdkError::UnauthenticatedStructuralBundle {
+            ref bundle_id,
+            ref verifier_identity,
+        } if bundle_id == "facade-bundle-001" && verifier_identity == "verifier://facade-test"
+    ));
 
-    let trust_result = sdk
+    let trust_error = sdk
         .verify_trust_state(&trust_bundle_bytes, &trust_bundle.integrity_hash)
-        .expect("trust state should verify against matching anchor");
-    assert_eq!(trust_result.verdict, VerificationVerdict::Pass);
+        .expect_err("trust-state verification must fail closed on structural-only bundles");
+    assert!(matches!(
+        trust_error,
+        VerifierSdkError::UnauthenticatedStructuralBundle {
+            ref bundle_id,
+            ref verifier_identity,
+        } if bundle_id == "facade-bundle-001" && verifier_identity == "verifier://facade-test"
+    ));
 
-    let mismatched_trust_result = sdk
-        .verify_trust_state(&trust_bundle_bytes, &"0".repeat(64))
-        .expect("valid trust bundle with mismatched anchor should produce fail verdict");
-    assert_eq!(mismatched_trust_result.verdict, VerificationVerdict::Fail);
+    let malformed_anchor_error = sdk
+        .verify_trust_state(&trust_bundle_bytes, "not-a-sha256-digest")
+        .expect_err("malformed trust anchors must be rejected before bundle handling");
+    assert_eq!(
+        malformed_anchor_error,
+        VerifierSdkError::MalformedTrustAnchor {
+            actual: "not-a-sha256-digest".to_string(),
+        }
+    );
 
     let mut session = sdk
         .create_session("session-facade-001")
@@ -47,10 +63,6 @@ fn verifier_sdk_facade_verifies_claim_artifact_trust_state_and_session() {
         .record_session_step(&mut session, &claim_result)
         .expect("first session step should append");
     assert_eq!(first_step.step_index, 0);
-    let second_step = sdk
-        .record_session_step(&mut session, &migration_result)
-        .expect("second session step should append");
-    assert_eq!(second_step.step_index, 1);
 
     let final_verdict = sdk
         .seal_session(&mut session)
@@ -60,7 +72,7 @@ fn verifier_sdk_facade_verifies_claim_artifact_trust_state_and_session() {
     assert_eq!(session.final_verdict, Some(VerificationVerdict::Pass));
 
     let sealed_error = sdk
-        .record_session_step(&mut session, &trust_result)
+        .record_session_step(&mut session, &claim_result)
         .expect_err("sealed session should reject later steps");
     assert!(matches!(sealed_error, VerifierSdkError::SessionSealed(_)));
 }
@@ -86,39 +98,50 @@ fn verifier_sdk_facade_validates_bundles_workflows_and_transparency_log() {
         ValidationWorkflow::IncidentValidation,
         ValidationWorkflow::ComplianceAudit,
     ] {
-        let workflow_result = sdk
+        let workflow_error = sdk
             .execute_workflow(workflow, &bundle_bytes)
-            .expect("workflow should execute against verified bundle");
-        assert_eq!(workflow_result.operation, VerificationOperation::Workflow);
-        assert_eq!(workflow_result.verdict, VerificationVerdict::Pass);
-        assert!(
-            workflow_result
-                .checked_assertions
-                .iter()
-                .any(|assertion| assertion.assertion.starts_with("workflow_"))
-        );
+            .expect_err("workflow execution must preserve structural-bundle guardrails");
+        assert!(matches!(
+            workflow_error,
+            VerifierSdkError::UnauthenticatedStructuralBundle {
+                ref bundle_id,
+                ref verifier_identity,
+            } if bundle_id == "facade-bundle-001" && verifier_identity == "verifier://facade-test"
+        ));
     }
 
-    let workflow_result = sdk
-        .execute_workflow(ValidationWorkflow::ReleaseValidation, &bundle_bytes)
-        .expect("workflow should produce transparency-loggable result");
-    let migration_result = sdk
-        .verify_migration_artifact(&bundle_bytes)
-        .expect("migration result should be loggable");
+    let claim = capsule::build_reference_capsule();
+    let first_result = sdk
+        .verify_claim(&claim)
+        .expect("claim result should be transparency-loggable");
+    let second_result = sdk
+        .verify_claim(&claim)
+        .expect("repeat claim result should remain transparency-loggable");
     let mut log = Vec::new();
     let first_entry = sdk
-        .append_transparency_log(&mut log, &workflow_result)
+        .append_transparency_log(&mut log, &first_result)
         .expect("first transparency log append should succeed");
-    assert_eq!(first_entry.merkle_proof[0], "0".repeat(64));
+    assert_eq!(
+        first_entry.merkle_proof[0],
+        format!("root:{}", first_entry.result_hash)
+    );
+    assert_eq!(first_entry.merkle_proof[1], "leaf_index:0");
+    assert_eq!(first_entry.merkle_proof[2], "tree_size:1");
     assert_eq!(first_entry.verifier_id, "verifier://facade-test");
 
     let second_entry = sdk
-        .append_transparency_log(&mut log, &migration_result)
+        .append_transparency_log(&mut log, &second_result)
         .expect("second transparency log append should succeed");
-    assert_eq!(second_entry.merkle_proof[0], first_entry.result_hash);
+    assert!(second_entry.merkle_proof[0].starts_with("root:"));
+    assert_eq!(second_entry.merkle_proof[1], "leaf_index:1");
+    assert_eq!(second_entry.merkle_proof[2], "tree_size:2");
+    assert_eq!(
+        second_entry.merkle_proof[3],
+        format!("left:{}", first_entry.result_hash)
+    );
     assert_eq!(log.len(), 2);
 
-    let mut forged_result = workflow_result;
+    let mut forged_result = first_result;
     forged_result.verifier_signature = "not-the-facade-signature".to_string();
     assert!(
         sdk.append_transparency_log(&mut log, &forged_result)
@@ -153,7 +176,7 @@ fn canonical_replay_bundle() -> ReplayBundle {
         incident_id: "facade-incident-001".to_string(),
         created_at: "2026-04-21T00:00:00.000000Z".to_string(),
         policy_version: "strict@2026-04-21".to_string(),
-        verifier_identity: "sdk-facade-test".to_string(),
+        verifier_identity: "verifier://facade-test".to_string(),
         timeline: vec![TimelineEvent {
             sequence_number: 1,
             event_id: "evt-facade-001".to_string(),
