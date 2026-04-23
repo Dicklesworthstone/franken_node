@@ -289,6 +289,10 @@ name = "fleet_quarantine_e2e_full"
 path = "tests/fleet_quarantine_e2e_full.rs"
 
 [[test]]
+name = "fleet_quarantine_rollback_receipt"
+path = "tests/fleet_quarantine_rollback_receipt.rs"
+
+[[test]]
 name = "replay_bundle_metamorphic"
 path = "tests/replay_bundle_metamorphic.rs"
 

@@ -2068,6 +2068,23 @@ impl FleetControlManager {
     /// Enforces INV-FLEET-ROLLBACK gate: release must NOT succeed if rollback receipt
     /// is absent, stale, or fails verification.
     fn verify_convergence_rollback_receipt(&self, incident_id: &str) -> Result<(), FleetControlError> {
+        self.verify_convergence_rollback_receipt_at(incident_id, chrono::Utc::now())
+    }
+
+    #[cfg(any(test, feature = "extended-surfaces", feature = "test-support"))]
+    pub fn verify_convergence_rollback_receipt_at_for_tests(
+        &self,
+        incident_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), FleetControlError> {
+        self.verify_convergence_rollback_receipt_at(incident_id, now)
+    }
+
+    fn verify_convergence_rollback_receipt_at(
+        &self,
+        incident_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), FleetControlError> {
         let receipt = self.rollback_receipts.get(incident_id).ok_or_else(|| {
             FleetControlError::rollback_unverified(
                 incident_id,
@@ -2084,7 +2101,6 @@ impl FleetControlManager {
         }
 
         // Check receipt is not stale (issued within last 24 hours)
-        let now = chrono::Utc::now();
         let receipt_time = chrono::DateTime::parse_from_rfc3339(&receipt.issued_at)
             .map_err(|_| FleetControlError::rollback_unverified(
                 incident_id,
@@ -2092,10 +2108,10 @@ impl FleetControlManager {
             ))?;
 
         let age = now.signed_duration_since(receipt_time.with_timezone(&chrono::Utc));
-        if age > chrono::Duration::hours(24) {
+        if age >= chrono::Duration::hours(24) {
             return Err(FleetControlError::rollback_unverified(
                 incident_id,
-                "convergence rollback receipt is stale (older than 24 hours)"
+                "convergence rollback receipt is stale (at least 24 hours old)"
             ));
         }
 
