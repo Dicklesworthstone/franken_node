@@ -1,6 +1,12 @@
 use assert_cmd::Command;
 use frankenengine_node::runtime::nversion_oracle::{RuntimeEntry, RuntimeOracle};
+use insta::assert_snapshot;
 use serde_json::Value;
+
+#[path = "cli_golden_helpers.rs"]
+mod cli_golden_helpers;
+
+use cli_golden_helpers::with_scrubbed_snapshot_settings;
 
 const BINARY_UNDER_TEST: &str = env!("CARGO_BIN_EXE_franken-node");
 
@@ -17,10 +23,14 @@ fn oracle_runtime(id: &str) -> RuntimeEntry {
     }
 }
 
-fn stdout_json(mut command: Command) -> Value {
+fn stdout_text(mut command: Command) -> String {
     let output = command.assert().success().get_output().stdout.clone();
-    let stdout = std::str::from_utf8(&output).expect("stdout should be utf8");
-    serde_json::from_str(stdout).expect("stdout should be json")
+    String::from_utf8(output).expect("stdout should be utf8")
+}
+
+fn stdout_json(command: Command) -> Value {
+    let stdout = stdout_text(command);
+    serde_json::from_str(&stdout).expect("stdout should be json")
 }
 
 #[test]
@@ -77,12 +87,17 @@ fn runtime_epoch_reports_mismatch_delta() {
         "--json",
     ]);
 
-    let payload = stdout_json(command);
+    let stdout = stdout_text(command);
+    let payload: Value = serde_json::from_str(&stdout).expect("stdout should be json");
 
     assert_eq!(payload["schema_version"], "runtime-epoch-v1");
     assert_eq!(payload["command"], "runtime.epoch");
     assert_eq!(payload["verdict"], "mismatch");
     assert_eq!(payload["epoch_delta"], 2);
+
+    with_scrubbed_snapshot_settings("runtime_cli", || {
+        assert_snapshot!("runtime_epoch_mismatch_json", stdout.trim_end());
+    });
 }
 
 #[test]

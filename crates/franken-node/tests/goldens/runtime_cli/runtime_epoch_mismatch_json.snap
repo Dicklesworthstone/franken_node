@@ -1,0 +1,11 @@
+---
+source: crates/franken-node/tests/runtime_cli_e2e.rs
+---
+{
+  "schema_version": "runtime-epoch-v1",
+  "command": "runtime.epoch",
+  "local_epoch": 7,
+  "peer_epoch": 9,
+  "verdict": "mismatch",
+  "epoch_delta": 2
+}
