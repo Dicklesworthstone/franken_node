@@ -528,13 +528,17 @@ fn validate_hash_algorithm(actual: &str) -> Result<(), BundleError> {
 }
 
 fn validate_verifier_identity(verifier_identity: &str) -> Result<(), BundleError> {
-    let normalized = verifier_identity.trim();
-    let Some(remainder) = normalized.strip_prefix("verifier://") else {
+    if verifier_identity != verifier_identity.trim() {
+        return Err(BundleError::InvalidVerifierIdentity {
+            actual: verifier_identity.to_string(),
+        });
+    }
+    let Some(remainder) = verifier_identity.strip_prefix("verifier://") else {
         return Err(BundleError::InvalidVerifierIdentity {
             actual: verifier_identity.to_string(),
         });
     };
-    if remainder.is_empty() {
+    if remainder.trim().is_empty() || remainder != remainder.trim() {
         return Err(BundleError::InvalidVerifierIdentity {
             actual: verifier_identity.to_string(),
         });
@@ -845,6 +849,38 @@ mod tests {
         let bytes = serialize(&bundle).expect("test bundle should serialize");
 
         let err = verify(&bytes).expect_err("empty verifier name must fail closed");
+
+        assert!(matches!(err, BundleError::InvalidVerifierIdentity { .. }));
+    }
+
+    #[test]
+    fn verify_rejects_whitespace_only_verifier_identity_after_scheme() {
+        let bundle = make_test_bundle("verifier://   ");
+        let bytes = serialize(&bundle).expect("test bundle should serialize");
+
+        let err = verify(&bytes).expect_err("whitespace-only verifier name must fail closed");
+
+        assert!(matches!(err, BundleError::InvalidVerifierIdentity { .. }));
+    }
+
+    #[test]
+    fn verify_rejects_leading_whitespace_padded_verifier_identity() {
+        let bundle = make_test_bundle(" verifier://alpha");
+        let bytes = serialize(&bundle).expect("test bundle should serialize");
+
+        let err = verify(&bytes)
+            .expect_err("leading-whitespace-padded verifier identity must fail closed");
+
+        assert!(matches!(err, BundleError::InvalidVerifierIdentity { .. }));
+    }
+
+    #[test]
+    fn verify_rejects_trailing_whitespace_padded_verifier_identity() {
+        let bundle = make_test_bundle("verifier://alpha ");
+        let bytes = serialize(&bundle).expect("test bundle should serialize");
+
+        let err = verify(&bytes)
+            .expect_err("trailing-whitespace-padded verifier identity must fail closed");
 
         assert!(matches!(err, BundleError::InvalidVerifierIdentity { .. }));
     }
