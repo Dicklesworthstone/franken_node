@@ -3,15 +3,12 @@
 //! Tests conformance with bd-jjm specification for CanonicalSerializer.
 //! Validates all INV-CAN-* invariants against golden fixtures and spec requirements.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 // Import the canonical serializer module
-use frankenengine_node::connector::canonical_serializer::{
-    TrustObjectType, CanonicalSerializer, SignaturePreimage, SerializerError,
-    error_codes, event_codes
-};
+use frankenengine_node::connector::canonical_serializer::TrustObjectType;
 
 /// Golden schema definition from the spec
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,7 +112,6 @@ fn test_canonical_serializer_conformance() {
 
     // Validate each trust object type has correct schema
     for trust_type in all_types {
-        let type_label = trust_type.label();
         let type_name = match trust_type {
             TrustObjectType::PolicyCheckpoint => "PolicyCheckpoint",
             TrustObjectType::DelegationToken => "DelegationToken",
@@ -129,8 +125,8 @@ fn test_canonical_serializer_conformance() {
         let golden_schema = golden_schemas.get(type_name);
         let schema_exists = golden_schema.is_some();
         test_results.push((
-            &format!("BD_JJM_SCHEMA_{}_EXISTS", type_name.to_uppercase()),
-            &format!("{} schema exists in golden fixtures", type_name),
+            format!("BD_JJM_SCHEMA_{}_EXISTS", type_name.to_uppercase()),
+            format!("{} schema exists in golden fixtures", type_name),
             schema_exists,
             if schema_exists { "found" } else { "missing" }.to_string()
         ));
@@ -143,8 +139,8 @@ fn test_canonical_serializer_conformance() {
             let tag_matches = domain_tag == expected_tag;
 
             test_results.push((
-                &format!("BD_JJM_DOMAIN_TAG_{}", type_name.to_uppercase()),
-                &format!("{} domain tag is correct", type_name),
+                format!("BD_JJM_DOMAIN_TAG_{}", type_name.to_uppercase()),
+                format!("{} domain tag is correct", type_name),
                 tag_non_zero && tag_matches,
                 format!("expected: {:?}, actual: {:?}", expected_tag, domain_tag)
             ));
@@ -166,8 +162,8 @@ fn test_canonical_serializer_conformance() {
         }
 
         test_results.push((
-            &format!("BD_JJM_DETERMINISM_{}", type_name.to_uppercase()),
-            &format!("{} canonical bytes are valid JSON", type_name),
+            format!("BD_JJM_DETERMINISM_{}", type_name.to_uppercase()),
+            format!("{} canonical bytes are valid JSON", type_name),
             bytes_non_empty && bytes_valid_json,
             format!("bytes_len: {}, valid_json: {}", canonical_bytes.len(), bytes_valid_json)
         ));
@@ -186,8 +182,8 @@ fn test_canonical_serializer_conformance() {
                         // Note: This is a simplified check. Real implementation would use CanonicalSerializer
                         let round_trip_identical = canonical_bytes == &re_serialized;
                         test_results.push((
-                            &format!("BD_JJM_ROUND_TRIP_{}", type_name.to_uppercase()),
-                            &format!("{} round-trip serialization is identical", type_name),
+                            format!("BD_JJM_ROUND_TRIP_{}", type_name.to_uppercase()),
+                            format!("{} round-trip serialization is identical", type_name),
                             round_trip_identical,
                             format!("original_len: {}, re_serialized_len: {}", canonical_bytes.len(), re_serialized.len())
                         ));
@@ -199,8 +195,8 @@ fn test_canonical_serializer_conformance() {
                     Err(_) => {
                         round_trip_pass = false;
                         test_results.push((
-                            &format!("BD_JJM_ROUND_TRIP_{}", type_name.to_uppercase()),
-                            &format!("{} re-serialization failed", type_name),
+                            format!("BD_JJM_ROUND_TRIP_{}", type_name.to_uppercase()),
+                            format!("{} re-serialization failed", type_name),
                             false,
                             "serialization error".to_string()
                         ));
@@ -210,8 +206,8 @@ fn test_canonical_serializer_conformance() {
             Err(_) => {
                 round_trip_pass = false;
                 test_results.push((
-                    &format!("BD_JJM_ROUND_TRIP_{}", type_name.to_uppercase()),
-                    &format!("{} canonical bytes parsing failed", type_name),
+                    format!("BD_JJM_ROUND_TRIP_{}", type_name.to_uppercase()),
+                    format!("{} canonical bytes parsing failed", type_name),
                     false,
                     "parse error".to_string()
                 ));
@@ -244,8 +240,8 @@ fn test_canonical_serializer_conformance() {
         let preimage_valid = has_minimum_length && version_valid && domain_tag_valid && payload_matches;
 
         test_results.push((
-            &format!("BD_JJM_PREIMAGE_{}", type_name.to_uppercase()),
-            &format!("{} signature preimage format is correct", type_name),
+            format!("BD_JJM_PREIMAGE_{}", type_name.to_uppercase()),
+            format!("{} signature preimage format is correct", type_name),
             preimage_valid,
             format!("len: {}, version: {}, domain_tag_valid: {}, payload_matches: {}",
                 preimage_bytes.len(), version_valid, domain_tag_valid, payload_matches)
