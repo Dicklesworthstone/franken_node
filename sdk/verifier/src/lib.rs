@@ -268,6 +268,10 @@ pub enum VerifierSdkError {
     UnsupportedSdk(String),
     Capsule(capsule::CapsuleError),
     Bundle(bundle::BundleError),
+    UnauthenticatedStructuralBundle {
+        bundle_id: String,
+        verifier_identity: String,
+    },
     InvalidVerifierIdentity {
         actual: String,
         reason: String,
@@ -316,6 +320,13 @@ impl fmt::Display for VerifierSdkError {
             Self::UnsupportedSdk(message) => write!(formatter, "{message}"),
             Self::Capsule(source) => write!(formatter, "capsule verification failed: {source}"),
             Self::Bundle(source) => write!(formatter, "bundle verification failed: {source}"),
+            Self::UnauthenticatedStructuralBundle {
+                bundle_id,
+                verifier_identity,
+            } => write!(
+                formatter,
+                "replay bundle {bundle_id} for {verifier_identity} is structural-only and cannot satisfy authenticated verifier provenance"
+            ),
             Self::InvalidVerifierIdentity { actual, reason } => write!(
                 formatter,
                 "verifier identity is invalid: {reason}: got {actual}"
@@ -456,24 +467,10 @@ impl VerifierSdk {
         self.validate_current_verifier_identity()?;
         let verified = bundle::verify(artifact)?;
         self.verify_bundle_belongs_to_current_verifier(&verified)?;
-        let assertions = vec![
-            AssertionResult {
-                assertion: "replay_bundle_integrity_verified".to_string(),
-                passed: true,
-                detail: format!("bundle_id={}", verified.bundle_id),
-            },
-            AssertionResult {
-                assertion: "replay_bundle_canonical".to_string(),
-                passed: true,
-                detail: "canonical bundle bytes verified".to_string(),
-            },
-        ];
-        self.build_result(
-            VerificationOperation::MigrationArtifact,
-            VerificationVerdict::Pass,
-            assertions,
-            verified.integrity_hash,
-        )
+        Err(VerifierSdkError::UnauthenticatedStructuralBundle {
+            bundle_id: verified.bundle_id,
+            verifier_identity: verified.verifier_identity,
+        })
     }
 
     /// Verify trust-state bundle bytes against an expected trust anchor hash.
@@ -495,36 +492,11 @@ impl VerifierSdk {
 
         let verified = bundle::verify(state)?;
         self.verify_bundle_belongs_to_current_verifier(&verified)?;
-        let anchor_matches = constant_time_eq(&verified.integrity_hash, anchor_integrity_hash);
-        let assertions = vec![
-            AssertionResult {
-                assertion: "trust_state_bundle_integrity_verified".to_string(),
-                passed: true,
-                detail: format!("bundle_id={}", verified.bundle_id),
-            },
-            AssertionResult {
-                assertion: "trust_anchor_matches_integrity_hash".to_string(),
-                passed: anchor_matches,
-                detail: if anchor_matches {
-                    "trust anchor matched verified bundle integrity".to_string()
-                } else {
-                    format!(
-                        "expected={}, actual={}",
-                        anchor_integrity_hash, verified.integrity_hash
-                    )
-                },
-            },
-        ];
-        self.build_result(
-            VerificationOperation::TrustState,
-            if anchor_matches {
-                VerificationVerdict::Pass
-            } else {
-                VerificationVerdict::Fail
-            },
-            assertions,
-            verified.integrity_hash,
-        )
+        let _ = anchor_integrity_hash;
+        Err(VerifierSdkError::UnauthenticatedStructuralBundle {
+            bundle_id: verified.bundle_id,
+            verifier_identity: verified.verifier_identity,
+        })
     }
 
     /// Validate canonical replay bundle bytes without producing a facade result.
@@ -1397,17 +1369,18 @@ mod tests {
     }
 
     #[test]
-    fn verify_migration_artifact_accepts_same_verifier_bundle() {
+    fn verify_migration_artifact_rejects_structural_same_verifier_bundle() {
         let sdk = create_verifier_sdk("verifier://alpha");
         let artifact = make_replay_bundle_bytes("verifier://alpha");
 
-        let result = sdk
+        let err = sdk
             .verify_migration_artifact(&artifact)
-            .expect("same-verifier bundle should verify");
+            .expect_err("structural same-verifier bundle must fail closed");
 
-        assert_eq!(result.verifier_identity, "verifier://alpha");
-        assert_eq!(result.operation, VerificationOperation::MigrationArtifact);
-        assert_eq!(result.verdict, VerificationVerdict::Pass);
+        assert!(matches!(
+            err,
+            VerifierSdkError::UnauthenticatedStructuralBundle { .. }
+        ));
     }
 
     #[test]
@@ -1426,18 +1399,19 @@ mod tests {
     }
 
     #[test]
-    fn verify_trust_state_accepts_same_verifier_bundle() {
+    fn verify_trust_state_rejects_structural_same_verifier_bundle() {
         let sdk = create_verifier_sdk("verifier://alpha");
         let state = make_replay_bundle_bytes("verifier://alpha");
         let verified = bundle::verify(&state).expect("test bundle should verify");
 
-        let result = sdk
+        let err = sdk
             .verify_trust_state(&state, &verified.integrity_hash)
-            .expect("same-verifier trust-state bundle should verify");
+            .expect_err("structural same-verifier trust-state bundle must fail closed");
 
-        assert_eq!(result.verifier_identity, "verifier://alpha");
-        assert_eq!(result.operation, VerificationOperation::TrustState);
-        assert_eq!(result.verdict, VerificationVerdict::Pass);
+        assert!(matches!(
+            err,
+            VerifierSdkError::UnauthenticatedStructuralBundle { .. }
+        ));
     }
 
     #[test]

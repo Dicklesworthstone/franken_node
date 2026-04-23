@@ -1732,20 +1732,25 @@ fn test_interface_structured_error_details() -> TestResult {
             reason: format!("initial session seal failed: {err}"),
         };
     }
-    match sdk.record_session_step(
-        &mut session,
-        &VerificationResult {
-            operation: VerificationOperation::Claim,
-            verdict: VerificationVerdict::Pass,
-            confidence_score: 1.0,
-            checked_assertions: vec![],
-            execution_timestamp: "2026-04-20T00:00:00Z".to_string(),
-            verifier_identity: "verifier://errors".to_string(),
-            artifact_binding_hash: "0".repeat(64),
-            verifier_signature: "invalid".to_string(),
-            sdk_version: SDK_VERSION.to_string(),
-        },
-    ) {
+    let invalid_result: VerificationResult = match serde_json::from_value(serde_json::json!({
+        "operation": "claim",
+        "verdict": "pass",
+        "confidence_score": 1.0,
+        "checked_assertions": [],
+        "execution_timestamp": "2026-04-20T00:00:00Z",
+        "verifier_identity": "verifier://errors",
+        "artifact_binding_hash": "0".repeat(64),
+        "verifier_signature": "invalid",
+        "sdk_version": SDK_VERSION,
+    })) {
+        Ok(result) => result,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("invalid result fixture construction failed: {err}"),
+            };
+        }
+    };
+    match sdk.record_session_step(&mut session, &invalid_result) {
         Err(VerifierSdkError::SessionSealed(session_id)) if session_id == "sealed-session" => {
             TestResult::Pass
         }

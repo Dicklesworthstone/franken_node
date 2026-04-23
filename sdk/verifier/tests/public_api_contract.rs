@@ -158,23 +158,24 @@ fn test_validation_workflow_serde() -> Result<(), String> {
 
 fn test_verification_result_json_shape() -> Result<(), String> {
     // VerificationResult must have stable JSON schema for API consumers
-    let result = VerificationResult {
-        operation: VerificationOperation::Claim,
-        verdict: VerificationVerdict::Pass,
-        confidence_score: 0.95,
-        checked_assertions: vec![
-            AssertionResult {
-                assertion: "test_assertion".to_string(),
-                passed: true,
-                detail: "test detail".to_string(),
+    let result: VerificationResult = serde_json::from_value(serde_json::json!({
+        "operation": "claim",
+        "verdict": "pass",
+        "confidence_score": 0.95,
+        "checked_assertions": [
+            {
+                "assertion": "test_assertion",
+                "passed": true,
+                "detail": "test detail"
             }
         ],
-        execution_timestamp: "2026-04-21T12:00:00Z".to_string(),
-        verifier_identity: "test-verifier".to_string(),
-        artifact_binding_hash: "abc123".to_string(),
-        verifier_signature: "def456".to_string(),
-        sdk_version: "vsdk-v1.0".to_string(),
-    };
+        "execution_timestamp": "2026-04-21T12:00:00Z",
+        "verifier_identity": "test-verifier",
+        "artifact_binding_hash": "abc123",
+        "verifier_signature": "def456",
+        "sdk_version": "vsdk-v1.0"
+    }))
+    .unwrap();
 
     let json_str = serde_json::to_string_pretty(&result).unwrap();
     let parsed_value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
