@@ -30,7 +30,7 @@ enum TestExpectation {
 }
 
 /// Create the conformance test matrix at runtime to avoid const limitations
-fn bench_conformance_matrix() -> Vec<BenchTestConfig> {
+fn bench_conformance_cases() -> Vec<BenchTestConfig> {
     vec![
         // Valid scenarios
         BenchTestConfig {
@@ -104,11 +104,10 @@ fn bench_conformance_matrix() -> Vec<BenchTestConfig> {
 
 /// Parse JSON stdout from bench command, handling both valid and error cases
 fn parse_bench_json_stdout(stdout: &[u8]) -> Result<Value, String> {
-    let stdout_str = std::str::from_utf8(stdout)
-        .map_err(|e| format!("stdout is not valid UTF-8: {}", e))?;
+    let stdout_str =
+        std::str::from_utf8(stdout).map_err(|e| format!("stdout is not valid UTF-8: {}", e))?;
 
-    serde_json::from_str(stdout_str)
-        .map_err(|e| format!("stdout is not valid JSON: {}", e))
+    serde_json::from_str(stdout_str).map_err(|e| format!("stdout is not valid JSON: {}", e))
 }
 
 /// Execute a single bench conformance test
@@ -144,10 +143,8 @@ fn execute_bench_test(config: &BenchTestConfig) -> Result<Value, Box<dyn Error>>
         Ok(json) => Ok(json),
         Err(_) => {
             // For failed tests, structure the error information
-            let stderr_str = std::str::from_utf8(&output.stderr)
-                .unwrap_or("<invalid_utf8>");
-            let stdout_str = std::str::from_utf8(&output.stdout)
-                .unwrap_or("<invalid_utf8>");
+            let stderr_str = std::str::from_utf8(&output.stderr).unwrap_or("<invalid_utf8>");
+            let stdout_str = std::str::from_utf8(&output.stdout).unwrap_or("<invalid_utf8>");
 
             Ok(serde_json::json!({
                 "status": "error",
@@ -167,43 +164,56 @@ fn execute_bench_test(config: &BenchTestConfig) -> Result<Value, Box<dyn Error>>
 fn bench_conformance_matrix() -> Result<(), Box<dyn Error>> {
     let mut results = BTreeMap::new();
 
-    let matrix = bench_conformance_matrix();
+    let matrix = bench_conformance_cases();
     for (idx, config) in matrix.iter().enumerate() {
-        let test_name = format!("test_{:02}_{}", idx + 1,
-            config.scenario.as_deref().unwrap_or("default")
-                .replace('-', "_"));
+        let test_name = format!(
+            "test_{:02}_{}",
+            idx + 1,
+            config
+                .scenario
+                .as_deref()
+                .unwrap_or("default")
+                .replace('-', "_")
+        );
 
         println!("Running bench conformance test: {}", config.description);
 
         match execute_bench_test(config) {
             Ok(result) => {
-                results.insert(test_name.clone(), serde_json::json!({
-                    "status": "completed",
-                    "config": {
-                        "scenario": config.scenario,
-                        "expected_status": format!("{:?}", config.expected_status),
-                        "description": config.description
-                    },
-                    "result": result
-                }));
+                results.insert(
+                    test_name.clone(),
+                    serde_json::json!({
+                        "status": "completed",
+                        "config": {
+                            "scenario": config.scenario,
+                            "expected_status": format!("{:?}", config.expected_status),
+                            "description": config.description
+                        },
+                        "result": result
+                    }),
+                );
             }
             Err(error) => {
-                results.insert(test_name.clone(), serde_json::json!({
-                    "status": "test_error",
-                    "config": {
-                        "scenario": config.scenario,
-                        "expected_status": format!("{:?}", config.expected_status),
-                        "description": config.description
-                    },
-                    "error": error.to_string()
-                }));
+                results.insert(
+                    test_name.clone(),
+                    serde_json::json!({
+                        "status": "test_error",
+                        "config": {
+                            "scenario": config.scenario,
+                            "expected_status": format!("{:?}", config.expected_status),
+                            "description": config.description
+                        },
+                        "error": error.to_string()
+                    }),
+                );
             }
         }
     }
 
     // Generate conformance report
     let total_tests = matrix.len();
-    let successful_tests = results.values()
+    let successful_tests = results
+        .values()
         .filter(|r| r.get("status").and_then(|s| s.as_str()) == Some("completed"))
         .count();
 
@@ -254,15 +264,17 @@ fn bench_run_help_output_format() -> Result<(), Box<dyn Error>> {
 #[test]
 fn bench_deterministic_output_stability() -> Result<(), Box<dyn Error>> {
     // Run the same bench scenario twice to ensure deterministic output
-    let matrix = bench_conformance_matrix();
+    let matrix = bench_conformance_cases();
     let config = &matrix[0]; // secure-extension-heavy scenario
 
     let result1 = execute_bench_test(config)?;
     let result2 = execute_bench_test(config)?;
 
     // Results should be identical for deterministic scenarios
-    assert_eq!(result1, result2,
-        "Deterministic bench scenarios should produce identical output");
+    assert_eq!(
+        result1, result2,
+        "Deterministic bench scenarios should produce identical output"
+    );
 
     Ok(())
 }
@@ -270,8 +282,9 @@ fn bench_deterministic_output_stability() -> Result<(), Box<dyn Error>> {
 #[test]
 fn bench_scenario_coverage() {
     // Verify that our conformance matrix covers expected scenarios
-    let matrix = bench_conformance_matrix();
-    let tested_scenarios: Vec<_> = matrix.iter()
+    let matrix = bench_conformance_cases();
+    let tested_scenarios: Vec<_> = matrix
+        .iter()
         .filter_map(|config| config.scenario.as_deref())
         .collect();
 
@@ -284,8 +297,11 @@ fn bench_scenario_coverage() {
     ];
 
     for expected in &expected_scenarios {
-        assert!(tested_scenarios.contains(expected),
-            "Conformance matrix must test scenario: {}", expected);
+        assert!(
+            tested_scenarios.contains(expected),
+            "Conformance matrix must test scenario: {}",
+            expected
+        );
     }
 }
 
