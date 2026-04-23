@@ -205,6 +205,9 @@ pub struct TransparencyLogEntry {
     pub result_hash: String,
     pub timestamp: String,
     pub verifier_id: String,
+    /// Encoded Merkle audit path at append time:
+    /// `root:<hex>`, `leaf_index:<n>`, `tree_size:<n>`, then `left:<hex>` / `right:<hex>`
+    /// sibling hashes from the leaf level toward the root.
     pub merkle_proof: Vec<String>,
 }
 
@@ -259,6 +262,7 @@ pub struct VerificationSession {
     origin_session_id: String,
     origin_verifier_identity: String,
     origin_created_at: String,
+    origin_session_nonce: String,
     session_nonce: String,
 }
 
@@ -398,6 +402,8 @@ const FACADE_TIMESTAMP: &str = "2026-02-21T00:00:00Z";
 const RESULT_ORIGIN_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:result-origin:v1:";
 const SESSION_STEP_SIGNATURE_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:session-step:v1:";
 const SESSION_NONCE_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:session-nonce:v1:";
+const TRANSPARENCY_MERKLE_PARENT_DOMAIN: &[u8] =
+    b"frankenengine-verifier-sdk:transparency-merkle-parent:v1:";
 const MAX_VERIFIER_IDENTITY_NAME_LEN: usize = 255;
 const MAX_SESSION_ID_LEN: usize = 255;
 static SESSION_NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -519,14 +525,14 @@ impl VerifierSdk {
         let result_bytes = serde_json::to_vec(result)
             .map_err(|source| VerifierSdkError::Json(source.to_string()))?;
         let result_hash = bundle::hash(&result_bytes);
-        let previous_hash = log
-            .last()
-            .map_or_else(|| "0".repeat(64), |entry| entry.result_hash.clone());
+        let mut leaf_hashes: Vec<String> =
+            log.iter().map(|entry| entry.result_hash.clone()).collect();
+        leaf_hashes.push(result_hash.clone());
         let entry = TransparencyLogEntry {
             result_hash: result_hash.clone(),
             timestamp: FACADE_TIMESTAMP.to_string(),
             verifier_id: result.verifier_identity.clone(),
-            merkle_proof: vec![previous_hash, result_hash],
+            merkle_proof: transparency_merkle_proof(&leaf_hashes, leaf_hashes.len() - 1),
         };
         log.push(entry.clone());
         Ok(entry)
@@ -563,6 +569,12 @@ impl VerifierSdk {
         let session_id = session_id.into();
         validate_session_id(&session_id)?;
         let created_at = FACADE_TIMESTAMP.to_string();
+        let session_nonce = derive_session_nonce(
+            &session_id,
+            &self.verifier_identity,
+            &created_at,
+            SESSION_NONCE_COUNTER.fetch_add(1, Ordering::Relaxed),
+        );
         Ok(VerificationSession {
             session_id: session_id.clone(),
             verifier_identity: self.verifier_identity.clone(),
@@ -573,12 +585,8 @@ impl VerifierSdk {
             origin_session_id: session_id.clone(),
             origin_verifier_identity: self.verifier_identity.clone(),
             origin_created_at: created_at.clone(),
-            session_nonce: derive_session_nonce(
-                &session_id,
-                &self.verifier_identity,
-                &created_at,
-                SESSION_NONCE_COUNTER.fetch_add(1, Ordering::Relaxed),
-            ),
+            origin_session_nonce: session_nonce.clone(),
+            session_nonce,
         })
     }
 
@@ -824,6 +832,54 @@ fn derive_session_nonce(
     bundle::hash(&payload)
 }
 
+fn transparency_merkle_proof(leaf_hashes: &[String], target_index: usize) -> Vec<String> {
+    if leaf_hashes.is_empty() || target_index >= leaf_hashes.len() {
+        return Vec::new();
+    }
+
+    let mut level = leaf_hashes.to_vec();
+    let mut index = target_index;
+    let mut proof = Vec::new();
+
+    while level.len() > 1 {
+        let sibling_index = if index % 2 == 0 {
+            if index + 1 < level.len() {
+                index + 1
+            } else {
+                index
+            }
+        } else {
+            index - 1
+        };
+        let sibling_direction = if index % 2 == 0 { "right" } else { "left" };
+        proof.push(format!("{sibling_direction}:{}", level[sibling_index]));
+
+        let mut next_level = Vec::with_capacity((level.len() + 1) / 2);
+        for pair_start in (0..level.len()).step_by(2) {
+            let left = &level[pair_start];
+            let right = level.get(pair_start + 1).unwrap_or(left);
+            next_level.push(transparency_merkle_parent_hash(left, right));
+        }
+        level = next_level;
+        index /= 2;
+    }
+
+    let mut encoded = Vec::with_capacity(proof.len() + 3);
+    encoded.push(format!("root:{}", level[0]));
+    encoded.push(format!("leaf_index:{target_index}"));
+    encoded.push(format!("tree_size:{}", leaf_hashes.len()));
+    encoded.extend(proof);
+    encoded
+}
+
+fn transparency_merkle_parent_hash(left: &str, right: &str) -> String {
+    let mut payload = Vec::new();
+    push_length_prefixed(&mut payload, TRANSPARENCY_MERKLE_PARENT_DOMAIN);
+    push_length_prefixed(&mut payload, left.as_bytes());
+    push_length_prefixed(&mut payload, right.as_bytes());
+    bundle::hash(&payload)
+}
+
 fn session_step_signature(
     session: &VerificationSession,
     step: &SessionStep,
@@ -963,6 +1019,13 @@ fn validate_session_provenance(session: &VerificationSession) -> Result<(), Veri
             field: "created_at",
             expected: session.origin_created_at.clone(),
             actual: session.created_at.clone(),
+        });
+    }
+    if session.session_nonce != session.origin_session_nonce {
+        return Err(VerifierSdkError::SessionProvenanceMismatch {
+            field: "session_nonce",
+            expected: session.origin_session_nonce.clone(),
+            actual: session.session_nonce.clone(),
         });
     }
     Ok(())
@@ -1195,8 +1258,96 @@ mod tests {
             .expect("same verifier result should append");
 
         assert_eq!(entry.verifier_id, "verifier://alpha");
+        assert_eq!(entry.merkle_proof[0], format!("root:{}", entry.result_hash));
+        assert_eq!(entry.merkle_proof[1], "leaf_index:0");
+        assert_eq!(entry.merkle_proof[2], "tree_size:1");
         assert_eq!(log.len(), 1);
         assert_eq!(log[0], entry);
+    }
+
+    #[test]
+    fn transparency_log_emits_verifiable_merkle_audit_path() {
+        fn proof_root(proof: &[String]) -> &str {
+            proof[0]
+                .strip_prefix("root:")
+                .expect("proof must begin with encoded root")
+        }
+
+        fn verify_merkle_proof(leaf_hash: &str, proof: &[String]) -> String {
+            let leaf_index = proof[1]
+                .strip_prefix("leaf_index:")
+                .expect("proof must encode leaf index")
+                .parse::<usize>()
+                .expect("leaf index should parse");
+            let tree_size = proof[2]
+                .strip_prefix("tree_size:")
+                .expect("proof must encode tree size")
+                .parse::<usize>()
+                .expect("tree size should parse");
+
+            assert!(leaf_index < tree_size);
+
+            let mut computed = leaf_hash.to_string();
+            for step in &proof[3..] {
+                if let Some(left) = step.strip_prefix("left:") {
+                    computed = transparency_merkle_parent_hash(left, &computed);
+                } else if let Some(right) = step.strip_prefix("right:") {
+                    computed = transparency_merkle_parent_hash(&computed, right);
+                } else {
+                    panic!("unexpected proof step: {step}");
+                }
+            }
+            computed
+        }
+
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let first = sdk
+            .build_result(
+                VerificationOperation::Claim,
+                VerificationVerdict::Pass,
+                vec![AssertionResult {
+                    assertion: "capsule_replay_verified".to_string(),
+                    passed: true,
+                    detail: "first".to_string(),
+                }],
+                "artifact-hash-alpha".to_string(),
+            )
+            .expect("first result should build");
+        let second = sdk
+            .build_result(
+                VerificationOperation::Claim,
+                VerificationVerdict::Pass,
+                vec![AssertionResult {
+                    assertion: "capsule_replay_verified".to_string(),
+                    passed: true,
+                    detail: "second".to_string(),
+                }],
+                "artifact-hash-beta".to_string(),
+            )
+            .expect("second result should build");
+
+        let mut log = Vec::new();
+        let first_entry = sdk
+            .append_transparency_log(&mut log, &first)
+            .expect("first result should append");
+        let second_entry = sdk
+            .append_transparency_log(&mut log, &second)
+            .expect("second result should append");
+
+        assert_eq!(
+            verify_merkle_proof(&first_entry.result_hash, &first_entry.merkle_proof),
+            proof_root(&first_entry.merkle_proof)
+        );
+        assert_eq!(
+            verify_merkle_proof(&second_entry.result_hash, &second_entry.merkle_proof),
+            proof_root(&second_entry.merkle_proof)
+        );
+        assert_eq!(second_entry.merkle_proof[1], "leaf_index:1");
+        assert_eq!(second_entry.merkle_proof[2], "tree_size:2");
+        assert_eq!(
+            second_entry.merkle_proof[3],
+            format!("left:{}", first_entry.result_hash)
+        );
     }
 
     #[test]
@@ -1665,6 +1816,63 @@ mod tests {
             .expect_err("mutated invalid session id must be rejected");
 
         assert!(matches!(err, VerifierSdkError::InvalidSessionId { .. }));
+    }
+
+    #[test]
+    fn record_session_step_rejects_tampered_session_nonce() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let mut session = sdk
+            .create_session("session-alpha")
+            .expect("valid session should be created");
+        session.session_nonce = "forged-session-nonce".to_string();
+        let result = sdk
+            .build_result(
+                VerificationOperation::Claim,
+                VerificationVerdict::Pass,
+                vec![AssertionResult {
+                    assertion: "capsule_replay_verified".to_string(),
+                    passed: true,
+                    detail: "same verifier".to_string(),
+                }],
+                "artifact-hash-alpha".to_string(),
+            )
+            .expect("result should build");
+
+        let err = sdk
+            .record_session_step(&mut session, &result)
+            .expect_err("tampered session nonce must be rejected");
+
+        assert!(matches!(
+            err,
+            VerifierSdkError::SessionProvenanceMismatch {
+                field: "session_nonce",
+                ..
+            }
+        ));
+        assert!(session.steps().is_empty());
+    }
+
+    #[test]
+    fn seal_session_rejects_tampered_session_nonce() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let mut session = sdk
+            .create_session("session-alpha")
+            .expect("valid session should be created");
+        session.session_nonce = "forged-session-nonce".to_string();
+
+        let err = sdk
+            .seal_session(&mut session)
+            .expect_err("tampered session nonce must be rejected");
+
+        assert!(matches!(
+            err,
+            VerifierSdkError::SessionProvenanceMismatch {
+                field: "session_nonce",
+                ..
+            }
+        ));
+        assert!(!session.sealed);
+        assert!(session.final_verdict.is_none());
     }
 
     #[test]
