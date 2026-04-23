@@ -37,6 +37,34 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
 }
 
+/// Push to audit trail with capacity bounding and chain anchor preservation
+fn push_bounded_audit_trail(
+    items: &mut Vec<QuarantineAuditEntry>,
+    item: QuarantineAuditEntry,
+    cap: usize,
+    chain_anchor_hash: &mut Option<String>,
+) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        let drain_len = overflow.min(items.len());
+        if drain_len > 0 {
+            // Preserve chain anchor hash from the last evicted entry
+            *chain_anchor_hash = Some(
+                items[drain_len.saturating_sub(1)]
+                    .entry_hash
+                    .clone(),
+            );
+            items.drain(0..drain_len);
+        }
+    }
+    items.push(item);
+}
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -1195,23 +1223,12 @@ impl QuarantineRegistry {
         };
 
         entry.entry_hash = compute_entry_hash(&entry);
-        if self.audit_trail.len() >= MAX_AUDIT_TRAIL {
-            let overflow = self
-                .audit_trail
-                .len()
-                .saturating_sub(MAX_AUDIT_TRAIL)
-                .saturating_add(1);
-            let drain_len = overflow.min(self.audit_trail.len());
-            if drain_len > 0 {
-                self.chain_anchor_hash = Some(
-                    self.audit_trail[drain_len.saturating_sub(1)]
-                        .entry_hash
-                        .clone(),
-                );
-                self.audit_trail.drain(0..drain_len);
-            }
-        }
-        self.audit_trail.push(entry);
+        push_bounded_audit_trail(
+            &mut self.audit_trail,
+            entry,
+            MAX_AUDIT_TRAIL,
+            &mut self.chain_anchor_hash,
+        );
     }
 }
 
