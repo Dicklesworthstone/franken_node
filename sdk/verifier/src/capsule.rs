@@ -37,6 +37,7 @@ pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str = "structural_only_not_replacem
 pub const STRUCTURAL_ONLY_RULE_ID: &str = "VERIFIER_SHORTCUT_GUARD::WORKSPACE_REPLAY_CAPSULE";
 
 const MAX_VERIFIER_IDENTITY_NAME_LEN: usize = 255;
+const MAX_CREATOR_IDENTITY_NAME_LEN: usize = 255;
 
 // ---------------------------------------------------------------------------
 // Capsule types
@@ -296,25 +297,13 @@ pub fn validate_manifest(manifest: &CapsuleManifest) -> Result<(), CapsuleError>
 }
 
 fn validate_capsule_id(capsule_id: &str) -> Result<(), CapsuleError> {
-    if capsule_id.trim().is_empty() || capsule_id != capsule_id.trim() {
-        return Err(CapsuleError::ManifestIncomplete(
-            "capsule_id is empty".into(),
-        ));
-    }
-    if !capsule_id
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-    {
-        return Err(CapsuleError::ManifestIncomplete(
-            "capsule_id must include only ASCII letters, digits, '.', '-', and '_'".into(),
-        ));
-    }
-    Ok(())
+    validate_reference_identifier("capsule_id", capsule_id)
 }
 
 fn validate_declared_input_refs(capsule: &ReplayCapsule) -> Result<(), CapsuleError> {
     let mut declared = BTreeSet::new();
     for input_ref in &capsule.manifest.input_refs {
+        validate_reference_identifier("input_refs", input_ref)?;
         if !declared.insert(input_ref.as_str()) {
             return Err(CapsuleError::ManifestIncomplete(
                 "input_refs contains duplicate entries".into(),
@@ -322,7 +311,11 @@ fn validate_declared_input_refs(capsule: &ReplayCapsule) -> Result<(), CapsuleEr
         }
     }
 
-    let actual: BTreeSet<&str> = capsule.inputs.keys().map(String::as_str).collect();
+    let mut actual = BTreeSet::new();
+    for input_key in capsule.inputs.keys() {
+        validate_reference_identifier("inputs", input_key)?;
+        actual.insert(input_key.as_str());
+    }
     if declared != actual {
         let missing: Vec<&str> = declared.difference(&actual).copied().collect();
         let extra: Vec<&str> = actual.difference(&declared).copied().collect();
@@ -333,6 +326,23 @@ fn validate_declared_input_refs(capsule: &ReplayCapsule) -> Result<(), CapsuleEr
         )));
     }
 
+    Ok(())
+}
+
+fn validate_reference_identifier(field: &str, value: &str) -> Result<(), CapsuleError> {
+    if value.trim().is_empty() || value != value.trim() {
+        return Err(CapsuleError::ManifestIncomplete(format!(
+            "{field} identifier must be non-empty and must not contain leading or trailing whitespace"
+        )));
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return Err(CapsuleError::ManifestIncomplete(format!(
+            "{field} identifier must include only ASCII letters, digits, '.', '-', and '_'"
+        )));
+    }
     Ok(())
 }
 
@@ -383,6 +393,11 @@ fn validate_creator_identity(creator_identity: &str) -> Result<(), CapsuleError>
         return Err(CapsuleError::ManifestIncomplete(
             "creator_identity must include a non-empty creator name".into(),
         ));
+    }
+    if remainder.len() > MAX_CREATOR_IDENTITY_NAME_LEN {
+        return Err(CapsuleError::ManifestIncomplete(format!(
+            "creator_identity must be at most {MAX_CREATOR_IDENTITY_NAME_LEN} ASCII bytes after creator://"
+        )));
     }
     if !remainder
         .bytes()
@@ -771,6 +786,40 @@ mod tests {
     }
 
     #[test]
+    fn test_replay_rejects_whitespace_padded_declared_input_ref_even_when_inputs_match() {
+        let mut capsule = build_reference_capsule();
+        capsule.manifest.input_refs = vec![" artifact_a".to_string()];
+        capsule.inputs = BTreeMap::from([(" artifact_a".to_string(), "content_of_a".to_string())]);
+        capsule.manifest.expected_output_hash = compute_replay_hash(&capsule.payload, &capsule.inputs);
+        sign_capsule(&mut capsule);
+        match replay(&capsule, "verifier://v1") {
+            Err(CapsuleError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("input_refs"));
+                assert!(msg.contains("leading or trailing whitespace"));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_replay_rejects_control_byte_input_key_even_when_manifest_matches() {
+        let mut capsule = build_reference_capsule();
+        capsule.manifest.input_refs = vec!["artifact_a\0shadow".to_string()];
+        capsule.inputs = BTreeMap::from([(
+            "artifact_a\0shadow".to_string(),
+            "content_of_a".to_string(),
+        )]);
+        capsule.manifest.expected_output_hash = compute_replay_hash(&capsule.payload, &capsule.inputs);
+        sign_capsule(&mut capsule);
+        match replay(&capsule, "verifier://v1") {
+            Err(CapsuleError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("identifier must include only ASCII letters"));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_error_display_signature_invalid() {
         let err = CapsuleError::SignatureInvalid("bad".into());
         assert!(format!("{err}").contains(ERR_CAPSULE_SIGNATURE_INVALID));
@@ -884,6 +933,28 @@ mod tests {
         match replay(&capsule, "verifier://v1") {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("creator_identity"));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_manifest_accepts_255_byte_creator_identity_name() {
+        let mut capsule = build_reference_capsule();
+        capsule.manifest.creator_identity = format!("creator://{}", "a".repeat(255));
+
+        validate_manifest(&capsule.manifest)
+            .expect("255-byte creator identity should remain valid");
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_256_byte_creator_identity_name() {
+        let mut capsule = build_reference_capsule();
+        capsule.manifest.creator_identity = format!("creator://{}", "a".repeat(256));
+
+        match validate_manifest(&capsule.manifest) {
+            Err(CapsuleError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("at most 255 ASCII bytes"));
             }
             other => panic!("expected ManifestIncomplete, got {other:?}"),
         }
@@ -1554,7 +1625,7 @@ mod tests {
 
         assert!(validate_declared_input_refs(&stress_capsule).is_ok());
 
-        // Test with input refs containing Unicode edge cases
+        // Test malformed input refs with Unicode/control identifiers
         let mut unicode_capsule = build_reference_capsule();
         unicode_capsule.manifest.input_refs.clear();
         unicode_capsule.inputs.clear();
@@ -1576,7 +1647,12 @@ mod tests {
                 .insert(unicode_ref, "unicode_content".to_string());
         }
 
-        assert!(validate_declared_input_refs(&unicode_capsule).is_ok());
+        match validate_declared_input_refs(&unicode_capsule) {
+            Err(CapsuleError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("identifier must include only ASCII letters"));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
+        }
     }
 
     #[test]
