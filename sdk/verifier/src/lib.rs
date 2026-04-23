@@ -259,6 +259,7 @@ pub enum VerifierSdkError {
     Bundle(bundle::BundleError),
     EmptyTrustAnchor,
     SessionSealed(String),
+    SessionVerifierMismatch { expected: String, actual: String },
     ResultSignatureMismatch { expected: String, actual: String },
     Json(String),
 }
@@ -273,6 +274,10 @@ impl fmt::Display for VerifierSdkError {
             Self::SessionSealed(session_id) => {
                 write!(formatter, "verification session {session_id} is sealed")
             }
+            Self::SessionVerifierMismatch { expected, actual } => write!(
+                formatter,
+                "verification session verifier mismatch: expected={expected}, actual={actual}"
+            ),
             Self::ResultSignatureMismatch { expected, actual } => write!(
                 formatter,
                 "verifier SDK result signature mismatch: expected={expected}, actual={actual}"
@@ -493,6 +498,19 @@ impl VerifierSdk {
         if session.sealed {
             return Err(VerifierSdkError::SessionSealed(session.session_id.clone()));
         }
+        self.verify_result_signature(result)?;
+        if session.verifier_identity != self.verifier_identity {
+            return Err(VerifierSdkError::SessionVerifierMismatch {
+                expected: session.verifier_identity.clone(),
+                actual: self.verifier_identity.clone(),
+            });
+        }
+        if result.verifier_identity != session.verifier_identity {
+            return Err(VerifierSdkError::SessionVerifierMismatch {
+                expected: session.verifier_identity.clone(),
+                actual: result.verifier_identity.clone(),
+            });
+        }
         let step = SessionStep {
             step_index: session.steps.len(),
             operation: result.operation.clone(),
@@ -618,6 +636,62 @@ mod tests {
     #[test]
     fn test_sdk_version_min_constant() {
         assert_eq!(SDK_VERSION_MIN, "vsdk-v1.0");
+    }
+
+    #[test]
+    fn session_step_accepts_signed_result_from_same_verifier() {
+        let sdk = create_verifier_sdk("verifier-alpha");
+        let mut session = sdk.create_session("session-alpha");
+        let result = sdk
+            .build_result(
+                VerificationOperation::Claim,
+                VerificationVerdict::Pass,
+                vec![AssertionResult {
+                    assertion: "capsule_replay_verified".to_string(),
+                    passed: true,
+                    detail: "same verifier".to_string(),
+                }],
+                "artifact-hash-alpha".to_string(),
+            )
+            .expect("same verifier result should be built");
+
+        let step = sdk
+            .record_session_step(&mut session, &result)
+            .expect("same verifier result should record");
+
+        assert_eq!(step.step_index, 0);
+        assert_eq!(step.verdict, VerificationVerdict::Pass);
+        assert_eq!(session.steps.len(), 1);
+        assert_eq!(session.steps[0].artifact_binding_hash, "artifact-hash-alpha");
+    }
+
+    #[test]
+    fn session_step_rejects_result_from_different_verifier() {
+        let sdk = create_verifier_sdk("verifier-alpha");
+        let other_sdk = create_verifier_sdk("verifier-beta");
+        let mut session = sdk.create_session("session-alpha");
+        let foreign_result = other_sdk
+            .build_result(
+                VerificationOperation::Claim,
+                VerificationVerdict::Pass,
+                vec![AssertionResult {
+                    assertion: "capsule_replay_verified".to_string(),
+                    passed: true,
+                    detail: "foreign verifier".to_string(),
+                }],
+                "artifact-hash-beta".to_string(),
+            )
+            .expect("foreign verifier result should be built");
+
+        let err = sdk
+            .record_session_step(&mut session, &foreign_result)
+            .expect_err("foreign verifier result must be rejected");
+
+        assert!(matches!(
+            err,
+            VerifierSdkError::SessionVerifierMismatch { .. }
+        ));
+        assert!(session.steps.is_empty());
     }
 
     #[test]
