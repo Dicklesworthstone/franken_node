@@ -1581,6 +1581,7 @@ impl EngineDispatcher {
         };
 
         // Map profile to security epoch (versioning for security policies)
+        // NOTE: Higher epoch numbers = newer/more secure policies (monotonic counter)
         let epoch = match config.profile {
             Profile::Strict => SecurityEpoch::from_raw(3),      // Latest security epoch
             Profile::Balanced => SecurityEpoch::from_raw(2),    // Standard security epoch
@@ -1688,7 +1689,8 @@ impl EngineDispatcher {
         };
 
         // Configure orchestrator with policy settings
-        let orchestrator_config = Self::map_config_to_orchestrator_config(config); // bd-wlkks: Map from franken-node config
+        let mut orchestrator_config = Self::map_config_to_orchestrator_config(config); // bd-wlkks: Map from franken-node config
+        orchestrator_config.policy_id = format!("franken-node-{}-{}", config.profile, policy_mode); // bd-3rlp8: Include policy_mode in native execution path
         let runtime_config = Self::map_config_to_runtime_config(config); // bd-1nkf8: Map from franken-node config
 
         let mut orchestrator = ExecutionOrchestrator::new_with_runtime_config(
