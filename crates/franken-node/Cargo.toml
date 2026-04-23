@@ -181,6 +181,10 @@ name = "runtime_lane_router_security"
 path = "tests/runtime_lane_router_security.rs"
 
 [[test]]
+name = "runtime_lane_router_priority"
+path = "tests/runtime_lane_router_priority.rs"
+
+[[test]]
 name = "runtime_lane_scheduler_queue_identity"
 path = "tests/runtime_lane_scheduler_queue_identity.rs"
 
