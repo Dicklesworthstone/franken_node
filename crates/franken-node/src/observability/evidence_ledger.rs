@@ -404,7 +404,7 @@ pub struct EvidenceLedger {
     /// Verifying key for signature verification of evidence entries
     verifying_key: Option<VerifyingKey>,
     /// Track seen timestamp+signature combinations to prevent replay attacks
-    seen_signatures: HashSet<(u64, String)>,
+    seen_signatures: HashSet<(u64, Box<str>)>,
 }
 
 impl EvidenceLedger {
@@ -486,7 +486,7 @@ impl EvidenceLedger {
 
         if self.verifying_key.is_some() {
             // Track this timestamp+signature combination to prevent replay attacks.
-            let replay_key = (entry.timestamp_ms, entry.signature.clone());
+            let replay_key = (entry.timestamp_ms, Box::from(entry.signature.as_str()));
             self.seen_signatures.insert(replay_key);
         }
 
@@ -586,7 +586,7 @@ impl EvidenceLedger {
             if self.verifying_key.is_some() {
                 // Remove the evicted entry's timestamp+signature from replay attack prevention.
                 let evicted_replay_key =
-                    (evicted_entry.timestamp_ms, evicted_entry.signature.clone());
+                    (evicted_entry.timestamp_ms, Box::from(evicted_entry.signature.as_str()));
                 self.seen_signatures.remove(&evicted_replay_key);
             }
 
@@ -4785,7 +4785,7 @@ mod tests {
         let ct_result = ledger.is_replay_attack_ct(1000, &known_entry.signature);
 
         // Simulate what the old vulnerable method would do (for comparison)
-        let replay_key = (1000u64, known_entry.signature.clone());
+        let replay_key = (1000u64, Box::from(known_entry.signature.as_str()));
         let vulnerable_result = std::collections::HashSet::new().contains(&replay_key); // Always false for empty set
 
         // Both should give consistent results for identical inputs
