@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use frankenengine_node::control_plane::control_lane_mapping::{
     ControlLane, ControlLanePolicyError, ControlLaneScheduler, default_control_lane_policy,
     error_codes, task_classes,
@@ -44,4 +46,53 @@ fn validate_rejects_lease_renewal_ready_deadline_downgrade() {
     let scheduler_error = ControlLaneScheduler::new(policy)
         .expect_err("scheduler construction must reject wrong-lane lease renewal");
     assert_canonical_lane_error(scheduler_error, "lease_renewal");
+}
+
+#[test]
+fn assignment_without_run_triggers_starvation_instead_of_masking_it() {
+    let mut scheduler =
+        ControlLaneScheduler::new(default_control_lane_policy()).expect("scheduler");
+
+    let assigned = scheduler
+        .assign_task(&task_classes::cancellation_handler(), 1000, "trace-assign")
+        .expect("assignment should classify cancel task");
+    assert_eq!(assigned, ControlLane::Cancel);
+
+    let cancel_after_assignment = scheduler
+        .counters()
+        .get("cancel")
+        .expect("cancel counters after assignment");
+    assert_eq!(cancel_after_assignment.tasks_assigned, 1);
+    assert_eq!(cancel_after_assignment.tasks_run, 0);
+    assert_eq!(cancel_after_assignment.consecutive_empty_ticks, 0);
+
+    let alerts = scheduler.advance_tick(&BTreeMap::new(), 1001, "trace-empty");
+    assert_eq!(
+        alerts,
+        vec![ControlLanePolicyError::Starvation {
+            lane: ControlLane::Cancel,
+            consecutive_ticks: 1,
+        }]
+    );
+
+    let cancel_after_empty_tick = scheduler
+        .counters()
+        .get("cancel")
+        .expect("cancel counters after empty tick");
+    assert_eq!(cancel_after_empty_tick.tasks_assigned, 1);
+    assert_eq!(cancel_after_empty_tick.tasks_run, 0);
+    assert_eq!(cancel_after_empty_tick.consecutive_empty_ticks, 1);
+
+    let mut ran = BTreeMap::new();
+    ran.insert("cancel".to_string(), 1);
+    let alerts = scheduler.advance_tick(&ran, 1002, "trace-run");
+    assert!(alerts.is_empty());
+
+    let cancel_after_run = scheduler
+        .counters()
+        .get("cancel")
+        .expect("cancel counters after actual run");
+    assert_eq!(cancel_after_run.tasks_assigned, 1);
+    assert_eq!(cancel_after_run.tasks_run, 1);
+    assert_eq!(cancel_after_run.consecutive_empty_ticks, 0);
 }

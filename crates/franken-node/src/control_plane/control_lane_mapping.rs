@@ -364,6 +364,7 @@ pub fn default_control_lane_policy() -> ControlLanePolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneTickCounters {
     pub lane: ControlLane,
+    pub tasks_assigned: u64,
     pub tasks_run: u64,
     pub tasks_queued: u64,
     pub consecutive_empty_ticks: u32,
@@ -374,6 +375,7 @@ impl LaneTickCounters {
     pub fn new(lane: ControlLane) -> Self {
         Self {
             lane,
+            tasks_assigned: 0,
             tasks_run: 0,
             tasks_queued: 0,
             consecutive_empty_ticks: 0,
@@ -536,8 +538,7 @@ impl ControlLaneScheduler {
                 .ok_or(ControlLanePolicyError::IncompleteMap {
                     detail: format!("counters missing for lane {}", lane.as_str()),
                 })?;
-        counters.tasks_run = counters.tasks_run.saturating_add(1);
-        counters.consecutive_empty_ticks = 0;
+        counters.tasks_assigned = counters.tasks_assigned.saturating_add(1);
 
         self.record_audit(ControlLaneAuditRecord {
             event_code: event_codes::CLM_TASK_ASSIGNED.to_string(),
@@ -574,7 +575,10 @@ impl ControlLaneScheduler {
                     continue;
                 };
 
-                if tasks_run == 0 && counters.tasks_queued > 0 {
+                let admitted_backlog = counters.tasks_assigned > counters.tasks_run;
+                let explicit_backlog = counters.tasks_queued > 0;
+
+                if tasks_run == 0 && (admitted_backlog || explicit_backlog) {
                     counters.consecutive_empty_ticks =
                         counters.consecutive_empty_ticks.saturating_add(1);
                 } else {
