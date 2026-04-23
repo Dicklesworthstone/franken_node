@@ -218,6 +218,10 @@ path = "tests/session_auth_real_lifecycle.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "session_auth_key_roles"
+path = "tests/session_auth_key_roles.rs"
+
+[[test]]
 name = "proof_generator_timeout_race"
 path = "tests/proof_generator_timeout_race.rs"
 
