@@ -425,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "admin-tools")]
+    #[cfg(all(feature = "admin-tools", feature = "advanced-features"))]
     fn representative_tool_versions_match_authoritative_sources() {
         assert_eq!(
             BENCHMARK_SUITE_SCORING,
