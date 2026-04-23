@@ -1333,7 +1333,8 @@ fn with_authoritative_snapshot_persist_lock<T>(
     path: &Path,
     write_snapshot: impl FnOnce() -> Result<T, TrustCardError>,
 ) -> Result<T, TrustCardError> {
-    let _process_guard = lock_authoritative_snapshot_persist_process(path)?;
+    // DEADLOCK FIX: Establish canonical lock order - file flock FIRST, then process Mutex
+    // This prevents AB-BA deadlock where Thread A (Mutex→flock) races Thread B (flock→Mutex)
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|err| TrustCardError::SnapshotWrite {
         path: path.to_path_buf(),
@@ -1350,7 +1351,11 @@ fn with_authoritative_snapshot_persist_lock<T>(
             path: path.to_path_buf(),
             detail: format!("failed opening flock file {}: {err}", lock_path.display()),
         })?;
+    // Step 1: Acquire file flock FIRST (cross-process synchronization)
     lock_authoritative_snapshot_file(&lock_file, &lock_path, path)?;
+
+    // Step 2: Acquire process Mutex SECOND (in-process synchronization)
+    let _process_guard = lock_authoritative_snapshot_persist_process(path)?;
 
     let write_result = write_snapshot();
     let unlock_result = unlock_authoritative_snapshot_file(&lock_file, &lock_path, path);
