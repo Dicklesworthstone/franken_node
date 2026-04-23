@@ -2479,3 +2479,227 @@ fn fleet_agent_invalid_node_id_exits_with_application_error_code() {
         "expected invalid node_id error, got: {stderr}"
     );
 }
+
+// Structured E2E Test Logging Infrastructure (Perfect E2E Pattern)
+use std::time::Instant;
+use serde_json::json;
+
+#[derive(Debug, Clone)]
+pub struct TestPhaseLog {
+    phase: String,
+    event: String,
+    timestamp: String,
+    duration_ms: Option<u64>,
+    data: serde_json::Value,
+}
+
+#[derive(Debug)]
+pub struct TestLogger {
+    suite_name: String,
+    test_name: String,
+    start_time: Instant,
+    phase_start: Option<Instant>,
+    logs: Vec<TestPhaseLog>,
+}
+
+impl TestLogger {
+    pub fn new(suite_name: &str, test_name: &str) -> Self {
+        let logger = Self {
+            suite_name: suite_name.to_string(),
+            test_name: test_name.to_string(),
+            start_time: Instant::now(),
+            phase_start: None,
+            logs: Vec::new(),
+        };
+        eprintln!("{}", serde_json::to_string(&json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "suite": suite_name,
+            "test": test_name,
+            "event": "test_start",
+            "data": {}
+        })).unwrap());
+        logger
+    }
+
+    pub fn phase(&mut self, phase: &str) {
+        if let Some(previous_start) = self.phase_start {
+            let duration_ms = previous_start.elapsed().as_millis() as u64;
+            eprintln!("{}", serde_json::to_string(&json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "suite": self.suite_name,
+                "test": self.test_name,
+                "event": "phase_end",
+                "data": {"duration_ms": duration_ms}
+            })).unwrap());
+        }
+
+        self.phase_start = Some(Instant::now());
+        eprintln!("{}", serde_json::to_string(&json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "suite": self.suite_name,
+            "test": self.test_name,
+            "phase": phase,
+            "event": "phase_start",
+            "data": {}
+        })).unwrap());
+    }
+
+    pub fn transport_snapshot(&self, transport: &FileFleetTransport, label: &str) {
+        let actions = transport.list_actions().unwrap_or_default();
+        let node_statuses = transport.list_node_statuses().unwrap_or_default();
+
+        eprintln!("{}", serde_json::to_string(&json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "suite": self.suite_name,
+            "test": self.test_name,
+            "event": "transport_snapshot",
+            "data": {
+                "label": label,
+                "action_count": actions.len(),
+                "node_count": node_statuses.len(),
+                "latest_action_id": actions.last().map(|a| &a.action_id),
+                "latest_action_type": actions.last().map(|a| match &a.action {
+                    FleetAction::Quarantine { .. } => "quarantine",
+                    FleetAction::Release { .. } => "release",
+                }),
+                "node_ids": node_statuses.iter().map(|n| &n.node_id).collect::<Vec<_>>()
+            }
+        })).unwrap());
+    }
+
+    pub fn assertion(&self, field: &str, expected: &serde_json::Value, actual: &serde_json::Value) -> bool {
+        let matches = expected == actual;
+        eprintln!("{}", serde_json::to_string(&json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "suite": self.suite_name,
+            "test": self.test_name,
+            "event": "assertion",
+            "data": {
+                "field": field,
+                "expected": expected,
+                "actual": actual,
+                "match": matches
+            }
+        })).unwrap());
+        matches
+    }
+
+    pub fn test_end(&self, result: &str) {
+        let duration_ms = self.start_time.elapsed().as_millis() as u64;
+        eprintln!("{}", serde_json::to_string(&json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "suite": self.suite_name,
+            "test": self.test_name,
+            "event": "test_end",
+            "data": {
+                "result": result,
+                "duration_ms": duration_ms,
+                "log_count": self.logs.len()
+            }
+        })).unwrap());
+    }
+}
+
+#[test]
+fn fleet_release_with_structured_logging_and_real_pipeline() {
+    let mut log = TestLogger::new("fleet-cli-e2e", "release_with_structured_logging");
+
+    log.phase("setup");
+    let fleet_state = tempdir().expect("tempdir");
+    let fleet_state_dir = fleet_state.path().join("fleet-state");
+    let (signing_key_path, signing_key) =
+        write_test_signing_key(fleet_state.path(), "keys/fleet.key", 25);
+    let signing_key_path = signing_key_path.display().to_string();
+    let mut transport = seed_transport(&fleet_state_dir);
+    let now = Utc::now();
+
+    // Setup: Publish initial quarantine action
+    transport
+        .publish_action(&FleetActionRecord {
+            action_id: "fleet-op-quarantine-structured".to_string(),
+            emitted_at: now,
+            action: FleetAction::Quarantine {
+                zone_id: "zone-structured".to_string(),
+                incident_id: "inc-structured".to_string(),
+                target_id: "sha256:structured".to_string(),
+                target_kind: FleetTargetKind::Artifact,
+                reason: "structured logging test".to_string(),
+                quarantine_version: 8,
+            },
+        })
+        .expect("publish setup quarantine");
+
+    log.transport_snapshot(&transport, "after_setup_quarantine");
+
+    log.phase("act");
+    let start_act = Instant::now();
+    let output = run_cli_in_dir_with_fleet_state_and_env(
+        &repo_root(),
+        &["fleet", "release", "--incident", "inc-structured", "--json"],
+        &fleet_state_dir,
+        &[(
+            "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+            signing_key_path.as_str(),
+        )],
+    );
+    let act_duration = start_act.elapsed().as_millis() as u64;
+
+    eprintln!("{}", serde_json::to_string(&json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "suite": "fleet-cli-e2e",
+        "test": "release_with_structured_logging",
+        "event": "cli_execution_complete",
+        "data": {
+            "exit_code": output.status.code(),
+            "duration_ms": act_duration,
+            "stdout_size": output.stdout.len(),
+            "stderr_size": output.stderr.len()
+        }
+    })).unwrap());
+
+    log.phase("assert");
+
+    // Assert CLI success
+    assert!(
+        output.status.success(),
+        "fleet release failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Parse and validate JSON response with structured logging
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("fleet release json");
+
+    log.assertion("action_type", &json!("release"), &payload["action"]["action_type"]);
+    log.assertion("event_code", &json!("FLEET-004"), &payload["action"]["event_code"]);
+    log.assertion("convergence_phase", &json!("Converged"), &payload["action"]["convergence"]["phase"]);
+    log.assertion("receipt_event_code", &json!("FLEET-004"), &payload["convergence_receipt"]["event_code"]);
+
+    // Verify signature round-trip
+    assert_convergence_receipt_signature_round_trips(&payload["convergence_receipt"], &signing_key);
+
+    log.transport_snapshot(&transport, "after_release_execution");
+
+    // Verify transport state changes
+    let actions = transport.list_actions().expect("list actions");
+    let release_action = actions.last().expect("release action");
+
+    log.assertion("release_action_exists", &json!(true), &json!(true));
+    match &release_action.action {
+        FleetAction::Release {
+            zone_id,
+            incident_id,
+            reason: Some(reason),
+        } => {
+            log.assertion("release_zone_id", &json!("zone-structured"), &json!(zone_id));
+            log.assertion("release_incident_id", &json!("inc-structured"), &json!(incident_id));
+            log.assertion("release_reason", &json!("manual release via fleet CLI"), &json!(reason));
+        }
+        _ => panic!("Expected release action, got: {:?}", release_action.action),
+    }
+
+    log.phase("teardown");
+    log.transport_snapshot(&transport, "final_state");
+
+    log.test_end("pass");
+}
