@@ -1,6 +1,6 @@
 # Verifier SDK Conformance Coverage Matrix
 
-> **Status**: ✅ **100% conformance** with vsdk-v1.0 specification  
+> **Status**: ✅ **100% conformance** for the spec-derived `conformance_harness.rs` matrix  
 > **Last Updated**: 2026-04-23  
 > **Test Suite**: `conformance_harness.rs`
 
@@ -134,8 +134,8 @@ This conformance harness implements **Pattern 4: Spec-Derived Test Matrix** from
 
 - **Total Requirements**: 57 (51 MUST + 6 SHOULD + 0 MAY)
 - **Tested Requirements**: 57 (100% coverage)
-- **Passing Tests**: 57 (100% conformance)
-- **Expected Failures**: 0 (no known divergences)
+- **Passing Tests**: 57 (100% conformance within the harness matrix)
+- **Expected Failures**: 0 (for the clauses exercised by `conformance_harness.rs`)
 
 ### CI Integration
 
@@ -147,9 +147,12 @@ The conformance harness produces structured JSON output for automated reporting:
 
 ## Known Divergences
 
-**Status**: No known divergences from vsdk-v1.0 specification.
+**Harness Status**: No known divergences in the spec-derived `conformance_harness.rs` matrix.
 
-All conformance tests pass, indicating full compliance with the frozen specification. Any future intentional divergences will be documented in `DISCREPANCIES.md`.
+**Auxiliary Fixture Drift**:
+- `sdk/verifier/tests/fixtures/public_api/api_manifest.json` still documents an obsolete `VerifierSdk::new(...) -> Result<...>` constructor shape instead of the live facade constructor contract. This is tracked separately in `bd-3habd`.
+
+This report summarizes the frozen clauses exercised by `conformance_harness.rs`. It does not claim that every auxiliary verifier fixture or contract artifact in `sdk/verifier/tests/` is already aligned. Intentional or discovered drift outside the harness should be called out here until the corresponding fixtures are updated.
 
 ## Maintenance
 
@@ -159,4 +162,4 @@ All conformance tests pass, indicating full compliance with the frozen specifica
 
 ---
 
-**Conformance Score**: 🎯 **100%** (56/56 requirements validated)
+**Conformance Score**: 🎯 **100%** (57/57 requirements validated)
