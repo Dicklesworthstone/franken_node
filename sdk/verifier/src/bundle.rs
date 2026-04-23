@@ -581,9 +581,7 @@ fn validate_verifier_identity(verifier_identity: &str) -> Result<(), BundleError
 
 fn validate_artifacts(bundle: &ReplayBundle) -> Result<(), BundleError> {
     for (path, artifact) in &bundle.artifacts {
-        if path.trim().is_empty() || path.trim() != path {
-            return Err(BundleError::InvalidArtifactPath { path: path.clone() });
-        }
+        validate_artifact_path(path)?;
         validate_nonempty("artifacts.media_type", &artifact.media_type)?;
         validate_nonempty("artifacts.digest", &artifact.digest)?;
         validate_nonempty("artifacts.bytes_hex", &artifact.bytes_hex)?;
@@ -647,13 +645,7 @@ fn validate_chunks(bundle: &ReplayBundle) -> Result<(), BundleError> {
                 actual: chunk.total_chunks,
             });
         }
-        if chunk.artifact_path.trim().is_empty()
-            || chunk.artifact_path.trim() != chunk.artifact_path
-        {
-            return Err(BundleError::InvalidArtifactPath {
-                path: chunk.artifact_path.clone(),
-            });
-        }
+        validate_artifact_path(&chunk.artifact_path)?;
 
         let artifact = bundle.artifacts.get(&chunk.artifact_path).ok_or_else(|| {
             BundleError::ChunkArtifactMissing {
@@ -741,6 +733,27 @@ fn is_canonical_lower_hex(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn validate_artifact_path(path: &str) -> Result<(), BundleError> {
+    if path.trim().is_empty()
+        || path.trim() != path
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path.bytes().any(|byte| {
+            byte == b'\0'
+                || byte.is_ascii_control()
+                || !matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'-' | b'_' | b'/')
+        })
+        || path
+            .split('/')
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+    {
+        return Err(BundleError::InvalidArtifactPath {
+            path: path.to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_canonical_text(field: &'static str, value: &str) -> Result<(), BundleError> {
@@ -1016,6 +1029,76 @@ mod tests {
         assert!(matches!(
             err,
             BundleError::InvalidArtifactPath { path } if path == "artifacts/replay.json "
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_path_traversal_artifact_map_key() {
+        let mut bundle = make_test_bundle("verifier://alpha");
+        let artifact = bundle
+            .artifacts
+            .remove("artifacts/replay.json")
+            .expect("fixture artifact must exist");
+        bundle.artifacts.insert("../escape.json".to_string(), artifact);
+        bundle.chunks[0].artifact_path = "../escape.json".to_string();
+        seal(&mut bundle).expect("test bundle should reseal");
+        let bytes = serialize(&bundle).expect("test bundle should serialize");
+
+        let err = verify(&bytes).expect_err("path traversal artifact path must fail closed");
+
+        assert!(matches!(
+            err,
+            BundleError::InvalidArtifactPath { path } if path == "../escape.json"
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_absolute_chunk_artifact_path() {
+        let mut bundle = make_test_bundle("verifier://alpha");
+        bundle.chunks[0].artifact_path = "/absolute/replay.json".to_string();
+        seal(&mut bundle).expect("test bundle should reseal");
+        let bytes = serialize(&bundle).expect("test bundle should serialize");
+
+        let err = verify(&bytes).expect_err("absolute chunk artifact path must fail closed");
+
+        assert!(matches!(
+            err,
+            BundleError::InvalidArtifactPath { path } if path == "/absolute/replay.json"
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_backslash_artifact_map_key() {
+        let mut bundle = make_test_bundle("verifier://alpha");
+        let artifact = bundle
+            .artifacts
+            .remove("artifacts/replay.json")
+            .expect("fixture artifact must exist");
+        bundle.artifacts.insert("artifacts\\replay.json".to_string(), artifact);
+        bundle.chunks[0].artifact_path = "artifacts\\replay.json".to_string();
+        seal(&mut bundle).expect("test bundle should reseal");
+        let bytes = serialize(&bundle).expect("test bundle should serialize");
+
+        let err = verify(&bytes).expect_err("backslash artifact path must fail closed");
+
+        assert!(matches!(
+            err,
+            BundleError::InvalidArtifactPath { path } if path == "artifacts\\replay.json"
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_null_byte_chunk_artifact_path() {
+        let mut bundle = make_test_bundle("verifier://alpha");
+        bundle.chunks[0].artifact_path = "artifacts/\u{0000}replay.json".to_string();
+        seal(&mut bundle).expect("test bundle should reseal");
+        let bytes = serialize(&bundle).expect("test bundle should serialize");
+
+        let err = verify(&bytes).expect_err("null-byte chunk artifact path must fail closed");
+
+        assert!(matches!(
+            err,
+            BundleError::InvalidArtifactPath { path } if path == "artifacts/\u{0000}replay.json"
         ));
     }
 
