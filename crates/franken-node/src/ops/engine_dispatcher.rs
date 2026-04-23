@@ -1408,7 +1408,7 @@ impl EngineDispatcher {
 
         // Map observability settings to governance config
         let governance = GovernanceConfig {
-            coverage_threshold_millionths: if config.observability.emit_structured_audit_events {
+            min_supremacy_coverage_millionths: if config.observability.emit_structured_audit_events {
                 850_000 // 85% coverage when structured events enabled
             } else {
                 750_000 // 75% coverage for basic observability
@@ -1419,23 +1419,35 @@ impl EngineDispatcher {
         // Map profile to guardplane (security policy) settings
         let guardplane = match config.profile {
             Profile::Strict => GuardplaneConfig {
-                bayesian_prior_millionths: 100_000,        // 10% prior - conservative
-                decision_threshold_millionths: 950_000,    // 95% threshold - strict
-                containment_timeout_ms: 1000,              // 1s containment timeout
+                thresholds: DecisionThresholdsConfig {
+                    tail_confidence_millionths: 950_000,   // 95% confidence - strict
+                    critical_pvalue_millionths: 25_000,    // 2.5% critical p-value
+                    ..DecisionThresholdsConfig::default()
+                },
+                containment: ContainmentConfig {
+                    grace_period_ns: 1_000_000_000,        // 1s grace period
+                    challenge_timeout_ns: 2_000_000_000,   // 2s challenge timeout
+                },
                 ..GuardplaneConfig::default()
             },
             Profile::Balanced => GuardplaneConfig::default(), // Standard security settings
             Profile::LegacyRisky => GuardplaneConfig {
-                bayesian_prior_millionths: 500_000,        // 50% prior - permissive
-                decision_threshold_millionths: 700_000,    // 70% threshold - relaxed
-                containment_timeout_ms: 5000,              // 5s containment timeout
+                thresholds: DecisionThresholdsConfig {
+                    tail_confidence_millionths: 700_000,   // 70% confidence - relaxed
+                    critical_pvalue_millionths: 100_000,   // 10% critical p-value
+                    ..DecisionThresholdsConfig::default()
+                },
+                containment: ContainmentConfig {
+                    grace_period_ns: 5_000_000_000,        // 5s grace period
+                    challenge_timeout_ns: 10_000_000_000,  // 10s challenge timeout
+                },
                 ..GuardplaneConfig::default()
             },
         };
 
         // Map security config to gates (verification thresholds)
         let gates = GatesConfig {
-            workload_verification_threshold_millionths: match config.profile {
+            workload_min_pass_rate_millionths: match config.profile {
                 Profile::Strict => 950_000,      // 95% verification threshold
                 Profile::Balanced => 800_000,    // 80% verification threshold
                 Profile::LegacyRisky => 600_000, // 60% verification threshold
@@ -1452,6 +1464,77 @@ impl EngineDispatcher {
             gates,
             optimization: OptimizationConfig::default(), // Use defaults for optimization
             extension_host: ExtensionHostConfig::default(), // Use defaults for extension host
+        }
+    }
+
+    /// Map franken-node Config to franken-engine OrchestratorConfig.
+    ///
+    /// Maps key orchestration settings from franken-node's Config structure to the
+    /// corresponding OrchestratorConfig expected by franken-engine's ExecutionOrchestrator:
+    /// - Profile-based loss matrix presets and security epochs
+    /// - Policy and trace ID configuration from config namespaces
+    /// - Parser options and execution lanes based on profile strictness
+    /// - Cell management timeouts and saga limits
+    #[cfg(feature = "engine")]
+    fn map_config_to_orchestrator_config(config: &Config) -> OrchestratorConfig {
+        use frankenengine_engine::execution_orchestrator::{
+            LossMatrixPreset, OrchestratorConfig,
+        };
+        use frankenengine_engine::parser::ParserOptions;
+        use frankenengine_engine::security_epoch::SecurityEpoch;
+        use frankenengine_engine::ast::ParseGoal;
+
+        // Map profile to loss matrix preset (risk management strategy)
+        let loss_matrix_preset = match config.profile {
+            Profile::Strict => LossMatrixPreset::Conservative,   // Prioritize safety over performance
+            Profile::Balanced => LossMatrixPreset::Balanced,    // Balance safety and performance
+            Profile::LegacyRisky => LossMatrixPreset::Permissive, // Prioritize performance/compatibility
+        };
+
+        // Map profile to security epoch (versioning for security policies)
+        let epoch = match config.profile {
+            Profile::Strict => SecurityEpoch::from_raw(3),      // Latest security epoch
+            Profile::Balanced => SecurityEpoch::from_raw(2),    // Standard security epoch
+            Profile::LegacyRisky => SecurityEpoch::from_raw(1), // Legacy security epoch for compatibility
+        };
+
+        // Profile-based timeouts and limits (independent of runtime config for orchestrator)
+
+        // Configure parser options based on profile
+        let parser_options = ParserOptions {
+            deterministic_budget: match config.profile {
+                Profile::Strict => 32_000,      // Conservative parsing budget
+                Profile::Balanced => 64_000,    // Standard parsing budget
+                Profile::LegacyRisky => 128_000, // Generous parsing budget for complex legacy code
+            },
+            // Use other defaults for parser options
+            ..ParserOptions::default()
+        };
+
+        // Create orchestrator config with mapped settings
+        OrchestratorConfig {
+            loss_matrix_preset,
+            force_lane: None, // Allow dynamic lane selection based on code analysis
+            drain_deadline_ticks: match config.profile {
+                Profile::Strict => 1000,        // Quick drain for strict safety
+                Profile::Balanced => 3000,      // Moderate drain timeout
+                Profile::LegacyRisky => 10000,   // Extended drain for complex cleanup
+            },
+            cell_close_budget_ms: match config.profile {
+                Profile::Strict => 500,         // Quick cell close
+                Profile::Balanced => 1000,      // Standard cell close budget
+                Profile::LegacyRisky => 3000,    // Extended cell close for compatibility
+            },
+            max_concurrent_sagas: match config.profile {
+                Profile::Strict => 8,           // Limited concurrency for safety
+                Profile::Balanced => 16,        // Standard concurrency
+                Profile::LegacyRisky => 32,      // High concurrency for performance
+            },
+            epoch,
+            parse_goal: ParseGoal::Script, // Default to script parsing (most common)
+            parser_options,
+            trace_id_prefix: config.observability.namespace.clone(), // Use observability namespace
+            policy_id: format!("franken-node-{}", config.profile), // Profile-based policy ID
         }
     }
 
@@ -1497,8 +1580,8 @@ impl EngineDispatcher {
         };
 
         // Configure orchestrator with policy settings
-        let orchestrator_config = OrchestratorConfig::default(); // bd-wlkks: Map from franken-node config
-        let runtime_config = map_config_to_runtime_config(config); // bd-1nkf8: Map from franken-node config
+        let orchestrator_config = Self::map_config_to_orchestrator_config(config); // bd-wlkks: Map from franken-node config
+        let runtime_config = Self::map_config_to_runtime_config(config); // bd-1nkf8: Map from franken-node config
 
         let mut orchestrator = ExecutionOrchestrator::new_with_runtime_config(
             orchestrator_config,
