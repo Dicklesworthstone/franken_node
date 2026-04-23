@@ -131,7 +131,17 @@ fn ensure_counterfactual_references_bundle(
                 actual: "array(len=0)".to_string(),
             });
         }
-        if let Some(actual) = extract_nonempty_string(output, &["metadata", "bundle_hash"]) {
+        if let Some(actual_value) = extract_value(output, &["metadata", "bundle_hash"]) {
+            let actual = actual_value.as_str().ok_or_else(|| {
+                CounterfactualReceiptError::CounterfactualBundleHashMalformed {
+                    actual: describe_value_kind(actual_value),
+                }
+            })?;
+            if actual.trim().is_empty() {
+                return Err(CounterfactualReceiptError::CounterfactualBundleHashMalformed {
+                    actual: actual.to_string(),
+                });
+            }
             validate_bundle_hash(actual).map_err(|actual| {
                 CounterfactualReceiptError::CounterfactualBundleHashMalformed { actual }
             })?;
@@ -176,6 +186,14 @@ fn ensure_counterfactual_references_bundle(
         );
     }
     Ok(())
+}
+
+fn extract_value<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut cursor = value;
+    for segment in path {
+        cursor = cursor.get(*segment)?;
+    }
+    Some(cursor)
 }
 
 fn describe_value_kind(value: &Value) -> String {
@@ -300,6 +318,64 @@ mod tests {
             CounterfactualReceiptError::CounterfactualBundleHashMismatch {
                 expected: TEST_BUNDLE_HASH.to_string(),
                 actual: conflicting_hash.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn verify_counterfactual_receipt_rejects_empty_top_level_bundle_hash_for_sweep() {
+        let baseline_bundle = json!({"integrity_hash": TEST_BUNDLE_HASH});
+        let counterfactual_output = json!({
+            "results": [
+                {"metadata": {"bundle_hash": TEST_BUNDLE_HASH}},
+                {"metadata": {"bundle_hash": TEST_BUNDLE_HASH}}
+            ],
+            "metadata": {"bundle_hash": "   "}
+        });
+        let signing_key = SigningKey::from_bytes(&[28_u8; 32]);
+        let signature_bytes = sign_counterfactual_value(&counterfactual_output, &signing_key);
+
+        let err = verify_counterfactual_receipt(
+            &baseline_bundle,
+            &counterfactual_output,
+            &signing_key.verifying_key(),
+            &signature_bytes,
+        )
+        .expect_err("empty top-level bundle_hash must fail closed for sweep receipts");
+
+        assert_eq!(
+            err,
+            CounterfactualReceiptError::CounterfactualBundleHashMalformed {
+                actual: "   ".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn verify_counterfactual_receipt_rejects_non_string_top_level_bundle_hash_for_sweep() {
+        let baseline_bundle = json!({"integrity_hash": TEST_BUNDLE_HASH});
+        let counterfactual_output = json!({
+            "results": [
+                {"metadata": {"bundle_hash": TEST_BUNDLE_HASH}},
+                {"metadata": {"bundle_hash": TEST_BUNDLE_HASH}}
+            ],
+            "metadata": {"bundle_hash": 7}
+        });
+        let signing_key = SigningKey::from_bytes(&[29_u8; 32]);
+        let signature_bytes = sign_counterfactual_value(&counterfactual_output, &signing_key);
+
+        let err = verify_counterfactual_receipt(
+            &baseline_bundle,
+            &counterfactual_output,
+            &signing_key.verifying_key(),
+            &signature_bytes,
+        )
+        .expect_err("non-string top-level bundle_hash must fail closed for sweep receipts");
+
+        assert_eq!(
+            err,
+            CounterfactualReceiptError::CounterfactualBundleHashMalformed {
+                actual: "number(7)".to_string(),
             }
         );
     }
@@ -723,11 +799,7 @@ mod tests {
 }
 
 fn extract_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
-    let mut cursor = value;
-    for segment in path {
-        cursor = cursor.get(*segment)?;
-    }
-    cursor.as_str()
+    extract_value(value, path)?.as_str()
 }
 
 fn extract_nonempty_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
