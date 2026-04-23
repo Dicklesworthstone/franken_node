@@ -112,13 +112,26 @@ impl TraceContext {
 }
 
 /// Simple span ID generation using timestamp-based entropy.
+#[cfg(any(test, feature = "extended-surfaces", feature = "test-support"))]
+const SPAN_ID_MIX: u64 = 0x517c_c1b7_2722_0a95;
+
+#[cfg(any(test, feature = "extended-surfaces", feature = "test-support"))]
+fn span_id_from_unix_nanos(unix_nanos: u128) -> u64 {
+    let bounded_nanos = u64::try_from(unix_nanos).unwrap_or(u64::MAX);
+    bounded_nanos ^ SPAN_ID_MIX
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn span_id_from_unix_nanos_for_tests(unix_nanos: u128) -> u64 {
+    span_id_from_unix_nanos(unix_nanos)
+}
+
 #[cfg(any(test, feature = "extended-surfaces"))]
 fn rand_span_id() -> u64 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    // Mix nanoseconds with a constant for uniqueness
-    now.as_nanos() as u64 ^ 0x517c_c1b7_2722_0a95
+    span_id_from_unix_nanos(now.as_nanos())
 }
 
 #[cfg(any(test, feature = "extended-surfaces"))]
@@ -808,6 +821,15 @@ mod tests {
         let header = tc.to_traceparent();
         let parsed = TraceContext::from_traceparent(&header).expect("parse roundtrip");
         assert_eq!(tc.trace_id, parsed.trace_id);
+    }
+
+    #[test]
+    fn span_id_generation_saturates_oversized_nanoseconds() {
+        let oversized_nanos = u128::from(u64::MAX).saturating_add(1);
+        let span_id = span_id_from_unix_nanos(oversized_nanos);
+
+        assert_eq!(span_id, u64::MAX ^ SPAN_ID_MIX);
+        assert_ne!(span_id, SPAN_ID_MIX);
     }
 
     fn get_test_keys() -> std::collections::BTreeSet<String> {

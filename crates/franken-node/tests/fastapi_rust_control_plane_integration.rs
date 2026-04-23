@@ -7,7 +7,9 @@ use frankenengine_node::api::fleet_quarantine::{
     activate_shared_fleet_control_manager_for_tests, handle_reconcile,
     reset_shared_fleet_control_manager_for_tests,
 };
-use frankenengine_node::api::middleware::{AuthIdentity, AuthMethod, TraceContext};
+use frankenengine_node::api::middleware::{
+    AuthIdentity, AuthMethod, TraceContext, span_id_from_unix_nanos_for_tests,
+};
 use frankenengine_node::api::operator_routes::assert_process_start_cleanup_lock_order_for_tests;
 use serde::Deserialize;
 use serde_json::Value;
@@ -38,6 +40,15 @@ fn lock_shared_fleet_state() -> MutexGuard<'static, ()> {
 #[test]
 fn operator_process_start_cleanup_uses_init_lock_before_data_locks() {
     assert_process_start_cleanup_lock_order_for_tests();
+}
+
+#[test]
+fn trace_span_id_generation_saturates_oversized_unix_nanos() {
+    let oversized_nanos = u128::from(u64::MAX).saturating_add(1);
+    let span_id = span_id_from_unix_nanos_for_tests(oversized_nanos);
+
+    assert_eq!(span_id, u64::MAX ^ 0x517c_c1b7_2722_0a95);
+    assert_ne!(span_id, 0x517c_c1b7_2722_0a95);
 }
 
 fn fleet_admin_identity() -> AuthIdentity {
