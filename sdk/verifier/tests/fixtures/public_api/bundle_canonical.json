@@ -1,64 +1,61 @@
 {
   "header": {
     "hash_algorithm": "sha256",
-    "payload_length_bytes": 2048,
+    "payload_length_bytes": 77,
     "chunk_count": 1
   },
   "schema_version": "vsdk-replay-bundle-v1.0",
   "sdk_version": "vsdk-v1.0",
-  "bundle_id": "bundle-deterministic-test-001",
-  "incident_id": "incident-2026-04-21-test",
-  "created_at": "2026-04-21T12:00:00Z",
-  "policy_version": "v1.0.0",
-  "verifier_identity": "test-verifier-deterministic",
+  "bundle_id": "facade-bundle-001",
+  "incident_id": "facade-incident-001",
+  "created_at": "2026-04-21T00:00:00.000000Z",
+  "policy_version": "strict@2026-04-21",
+  "verifier_identity": "verifier://facade-test",
   "timeline": [
     {
       "sequence_number": 1,
-      "event_id": "event-001",
-      "timestamp": "2026-04-21T12:00:01Z",
-      "event_type": "claim",
+      "event_id": "evt-facade-001",
+      "timestamp": "2026-04-21T00:00:00.000001Z",
+      "event_type": "trust_state_snapshot",
       "payload": {
-        "action": "verify_integrity",
-        "target": "test_artifact"
+        "anchor": "trust-state-anchor",
+        "epoch": 7
       },
       "state_snapshot": {
-        "verified_count": 1,
-        "status": "active"
+        "epoch": 7,
+        "trust_state": "anchored"
       },
-      "policy_version": "v1.0.0"
+      "causal_parent": null,
+      "policy_version": "strict@2026-04-21"
     }
   ],
   "initial_state_snapshot": {
-    "verified_count": 0,
-    "status": "initialized"
+    "baseline_epoch": 6,
+    "policy": "strict"
   },
   "evidence_refs": [
-    "evidence-ref-001",
-    "evidence-ref-002"
+    "evidence/trust-state.json"
   ],
   "artifacts": {
-    "test_artifact": {
-      "media_type": "application/octet-stream",
-      "digest": "sha256:a1b2c3d4e5f6789012345678901234567890abcdef",
-      "bytes_hex": "deadbeefcafebabe"
+    "evidence/trust-state.json": {
+      "media_type": "application/json",
+      "digest": "ac6cdea047d6d85fa340b4e7398acf5b3b1268e1d8418d5431349660af60cfc1",
+      "bytes_hex": "7b22736368656d615f76657273696f6e223a226661636164652d746573742d7631222c226465636973696f6e223a2274727573742d73746174652d616e63686f72222c2265706f6368223a377d"
     }
   },
   "chunks": [
     {
       "chunk_index": 0,
       "total_chunks": 1,
-      "artifact_path": "test_artifact",
-      "payload_length_bytes": 8,
-      "payload_digest": "sha256:a1b2c3d4e5f6789012345678901234567890abcdef"
+      "artifact_path": "evidence/trust-state.json",
+      "payload_length_bytes": 77,
+      "payload_digest": "ac6cdea047d6d85fa340b4e7398acf5b3b1268e1d8418d5431349660af60cfc1"
     }
   ],
-  "metadata": {
-    "test_key": "test_value",
-    "deterministic": "true"
-  },
-  "integrity_hash": "sha256:b2c3d4e5f6789012345678901234567890abcdefa1b2c3d4e5",
+  "metadata": {},
+  "integrity_hash": "18094c23182386f8fe8f36836ccb6be5e0e2d5621d2b0e186343d53f08aab0f3",
   "signature": {
-    "algorithm": "ed25519",
-    "signature_hex": "deadbeefcafebabe0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    "algorithm": "sha256",
+    "signature_hex": "6e80133645a284708945ad128e93661a1cadfaace2a35415b1db939ee73c9180"
   }
 }

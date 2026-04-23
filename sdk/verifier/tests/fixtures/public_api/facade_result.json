@@ -1,22 +1,22 @@
 {
   "operation": "claim",
   "verdict": "pass",
-  "confidence_score": 0.95,
+  "confidence_score": 1.0,
   "checked_assertions": [
     {
-      "assertion": "integrity_check",
+      "assertion": "capsule_signature_valid",
       "passed": true,
-      "detail": "Artifact hash matches expected value"
+      "detail": "Capsule signature matches the canonical verifier contract"
     },
     {
-      "assertion": "signature_valid",
+      "assertion": "capsule_verdict_reproduced",
       "passed": true,
-      "detail": "Ed25519 signature verification successful"
+      "detail": "Replay reproduced the expected pass verdict"
     }
   ],
-  "execution_timestamp": "2026-04-21T12:00:00Z",
-  "verifier_identity": "test-verifier-deterministic",
-  "artifact_binding_hash": "sha256:a1b2c3d4e5f6789012345678901234567890abcdef",
-  "verifier_signature": "ed25519:deadbeefcafebabe0123456789abcdef0123456789abcdef0123456789abcdef",
+  "execution_timestamp": "2026-04-21T12:00:00.000000Z",
+  "verifier_identity": "verifier://facade-test",
+  "artifact_binding_hash": "ef5b9576bc8bce8c63a8dff3e66f3beb484c9eeec9a339e85fc222d94dcd7318",
+  "verifier_signature": "ce6ea74c132dca20d2f81466f7f2a72c3d8273916846fd953eee76917c7d49b3",
   "sdk_version": "vsdk-v1.0"
 }
