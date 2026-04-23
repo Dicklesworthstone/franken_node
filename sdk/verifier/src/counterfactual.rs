@@ -18,8 +18,11 @@ use crate::bundle::{BundleError, verify_ed25519_signature};
 pub enum CounterfactualReceiptError {
     Json(String),
     BaselineIntegrityHashMissing,
+    BaselineIntegrityHashMalformed { actual: String },
     CounterfactualBundleHashMissing,
+    CounterfactualBundleHashMalformed { actual: String },
     SweepResultBundleHashMissing { index: usize },
+    SweepResultBundleHashMalformed { index: usize, actual: String },
     CounterfactualBundleHashMismatch { expected: String, actual: String },
     Signature(BundleError),
 }
@@ -33,18 +36,30 @@ impl fmt::Display for CounterfactualReceiptError {
             Self::BaselineIntegrityHashMissing => {
                 write!(formatter, "baseline bundle integrity_hash is missing")
             }
+            Self::BaselineIntegrityHashMalformed { actual } => write!(
+                formatter,
+                "baseline bundle integrity_hash must be a 64-nybble hex digest: got {actual}"
+            ),
             Self::CounterfactualBundleHashMissing => {
                 write!(
                     formatter,
                     "counterfactual receipt metadata.bundle_hash is missing"
                 )
             }
+            Self::CounterfactualBundleHashMalformed { actual } => write!(
+                formatter,
+                "counterfactual receipt metadata.bundle_hash must be a 64-nybble hex digest: got {actual}"
+            ),
             Self::SweepResultBundleHashMissing { index } => {
                 write!(
                     formatter,
                     "counterfactual receipt results[{index}].metadata.bundle_hash is missing"
                 )
             }
+            Self::SweepResultBundleHashMalformed { index, actual } => write!(
+                formatter,
+                "counterfactual receipt results[{index}].metadata.bundle_hash must be a 64-nybble hex digest: got {actual}"
+            ),
             Self::CounterfactualBundleHashMismatch { expected, actual } => write!(
                 formatter,
                 "counterfactual receipt bundle hash mismatch: expected {expected}, got {actual}"
@@ -82,6 +97,9 @@ where
     let baseline_value = to_value(baseline_bundle)?;
     let expected_bundle_hash = extract_nonempty_string(&baseline_value, &["integrity_hash"])
         .ok_or(CounterfactualReceiptError::BaselineIntegrityHashMissing)?;
+    validate_bundle_hash(expected_bundle_hash).map_err(|actual| {
+        CounterfactualReceiptError::BaselineIntegrityHashMalformed { actual }
+    })?;
     let counterfactual_value = to_value(counterfactual_output)?;
     ensure_counterfactual_references_bundle(&counterfactual_value, expected_bundle_hash)?;
     let canonical = canonical_json_bytes(&counterfactual_value)?;
@@ -105,6 +123,9 @@ fn ensure_counterfactual_references_bundle(
         for (index, result) in results.iter().enumerate() {
             let actual = extract_nonempty_string(result, &["metadata", "bundle_hash"])
                 .ok_or(CounterfactualReceiptError::SweepResultBundleHashMissing { index })?;
+            validate_bundle_hash(actual).map_err(|actual| {
+                CounterfactualReceiptError::SweepResultBundleHashMalformed { index, actual }
+            })?;
             if actual != expected_bundle_hash {
                 return Err(
                     CounterfactualReceiptError::CounterfactualBundleHashMismatch {
@@ -119,6 +140,10 @@ fn ensure_counterfactual_references_bundle(
 
     let actual = extract_nonempty_string(output, &["metadata", "bundle_hash"])
         .ok_or(CounterfactualReceiptError::CounterfactualBundleHashMissing)?;
+    validate_bundle_hash(actual)
+        .map_err(|actual| CounterfactualReceiptError::CounterfactualBundleHashMalformed {
+            actual,
+        })?;
     if actual != expected_bundle_hash {
         return Err(
             CounterfactualReceiptError::CounterfactualBundleHashMismatch {
@@ -140,6 +165,9 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use serde_json::json;
 
+    const TEST_BUNDLE_HASH: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
     fn sign_counterfactual_value(value: &Value, signing_key: &SigningKey) -> Vec<u8> {
         let canonical = canonical_json_bytes(value).expect("test canonical JSON should serialize");
         signing_key.sign(&canonical).to_bytes().to_vec()
@@ -147,10 +175,10 @@ mod tests {
 
     #[test]
     fn verify_counterfactual_receipt_rejects_sweep_result_missing_bundle_hash() {
-        let baseline_bundle = json!({"integrity_hash": "sha256:test-bundle"});
+        let baseline_bundle = json!({"integrity_hash": TEST_BUNDLE_HASH});
         let counterfactual_output = json!({
             "results": [
-                {"metadata": {"bundle_hash": "sha256:test-bundle"}},
+                {"metadata": {"bundle_hash": TEST_BUNDLE_HASH}},
                 {"metadata": {}}
             ]
         });
@@ -173,11 +201,11 @@ mod tests {
 
     #[test]
     fn verify_counterfactual_receipt_accepts_sweep_when_all_results_match_bundle_hash() {
-        let baseline_bundle = json!({"integrity_hash": "sha256:test-bundle"});
+        let baseline_bundle = json!({"integrity_hash": TEST_BUNDLE_HASH});
         let counterfactual_output = json!({
             "results": [
-                {"metadata": {"bundle_hash": "sha256:test-bundle"}},
-                {"metadata": {"bundle_hash": "sha256:test-bundle"}}
+                {"metadata": {"bundle_hash": TEST_BUNDLE_HASH}},
+                {"metadata": {"bundle_hash": TEST_BUNDLE_HASH}}
             ]
         });
         let signing_key = SigningKey::from_bytes(&[8_u8; 32]);
@@ -196,7 +224,7 @@ mod tests {
     fn verify_counterfactual_receipt_rejects_empty_baseline_integrity_hash() {
         let baseline_bundle = json!({"integrity_hash": "   "});
         let counterfactual_output = json!({
-            "metadata": {"bundle_hash": "sha256:test-bundle"}
+            "metadata": {"bundle_hash": TEST_BUNDLE_HASH}
         });
         let signing_key = SigningKey::from_bytes(&[9_u8; 32]);
         let signature_bytes = sign_counterfactual_value(&counterfactual_output, &signing_key);
@@ -214,7 +242,7 @@ mod tests {
 
     #[test]
     fn verify_counterfactual_receipt_rejects_empty_counterfactual_bundle_hash() {
-        let baseline_bundle = json!({"integrity_hash": "sha256:test-bundle"});
+        let baseline_bundle = json!({"integrity_hash": TEST_BUNDLE_HASH});
         let counterfactual_output = json!({
             "metadata": {"bundle_hash": "   "}
         });
@@ -234,10 +262,10 @@ mod tests {
 
     #[test]
     fn verify_counterfactual_receipt_rejects_empty_sweep_result_bundle_hash() {
-        let baseline_bundle = json!({"integrity_hash": "sha256:test-bundle"});
+        let baseline_bundle = json!({"integrity_hash": TEST_BUNDLE_HASH});
         let counterfactual_output = json!({
             "results": [
-                {"metadata": {"bundle_hash": "sha256:test-bundle"}},
+                {"metadata": {"bundle_hash": TEST_BUNDLE_HASH}},
                 {"metadata": {"bundle_hash": "  "}}
             ]
         });
@@ -257,6 +285,85 @@ mod tests {
             CounterfactualReceiptError::SweepResultBundleHashMissing { index: 1 }
         );
     }
+
+    #[test]
+    fn verify_counterfactual_receipt_rejects_malformed_baseline_integrity_hash() {
+        let baseline_bundle = json!({"integrity_hash": "not-a-hash"});
+        let counterfactual_output = json!({
+            "metadata": {"bundle_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
+        });
+        let signing_key = SigningKey::from_bytes(&[12_u8; 32]);
+        let signature_bytes = sign_counterfactual_value(&counterfactual_output, &signing_key);
+
+        let err = verify_counterfactual_receipt(
+            &baseline_bundle,
+            &counterfactual_output,
+            &signing_key.verifying_key(),
+            &signature_bytes,
+        )
+        .expect_err("malformed baseline integrity_hash must fail closed");
+
+        assert_eq!(
+            err,
+            CounterfactualReceiptError::BaselineIntegrityHashMalformed {
+                actual: "not-a-hash".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn verify_counterfactual_receipt_rejects_malformed_counterfactual_bundle_hash() {
+        let baseline_bundle = json!({ "integrity_hash": TEST_BUNDLE_HASH });
+        let counterfactual_output = json!({
+            "metadata": {"bundle_hash": "bad-hash"}
+        });
+        let signing_key = SigningKey::from_bytes(&[13_u8; 32]);
+        let signature_bytes = sign_counterfactual_value(&counterfactual_output, &signing_key);
+
+        let err = verify_counterfactual_receipt(
+            &baseline_bundle,
+            &counterfactual_output,
+            &signing_key.verifying_key(),
+            &signature_bytes,
+        )
+        .expect_err("malformed signed counterfactual bundle_hash must fail closed");
+
+        assert_eq!(
+            err,
+            CounterfactualReceiptError::CounterfactualBundleHashMalformed {
+                actual: "bad-hash".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn verify_counterfactual_receipt_rejects_malformed_sweep_result_bundle_hash() {
+        let baseline_bundle = json!({ "integrity_hash": TEST_BUNDLE_HASH });
+        let counterfactual_output = json!({
+            "results": [
+                {"metadata": {"bundle_hash": TEST_BUNDLE_HASH}},
+                {"metadata": {"bundle_hash": "still-not-a-hash"}}
+            ]
+        });
+        let signing_key = SigningKey::from_bytes(&[14_u8; 32]);
+        let signature_bytes = sign_counterfactual_value(&counterfactual_output, &signing_key);
+
+        let err = verify_counterfactual_receipt(
+            &baseline_bundle,
+            &counterfactual_output,
+            &signing_key.verifying_key(),
+            &signature_bytes,
+        )
+        .expect_err("malformed sweep result bundle_hash must fail closed");
+
+        assert_eq!(
+            err,
+            CounterfactualReceiptError::SweepResultBundleHashMalformed {
+                index: 1,
+                actual: "still-not-a-hash".to_string(),
+            }
+        );
+    }
 }
 
 fn extract_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
@@ -274,6 +381,14 @@ fn extract_nonempty_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a st
         None
     } else {
         Some(trimmed)
+    }
+}
+
+fn validate_bundle_hash(value: &str) -> Result<(), String> {
+    if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(value.to_string())
     }
 }
 
