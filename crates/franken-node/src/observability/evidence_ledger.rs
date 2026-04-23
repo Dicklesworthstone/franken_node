@@ -4793,4 +4793,309 @@ mod tests {
         assert!(!ct_result, "Should not detect replay in empty ledger");
         assert!(!vulnerable_result, "Vulnerable method comparison baseline");
     }
+
+    // ── Comprehensive Adversarial Input Coverage (bd-3bkf2) ──────────
+
+    #[test]
+    fn test_tampered_signature_first_byte() {
+        let (signing_key, verifying_key) = test_keys();
+        let capacity = LedgerCapacity::new(10, 100_000);
+        let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
+
+        let mut entry = test_entry("TEST-TAMPER-FIRST", 1);
+        sign_evidence_entry(&mut entry, &signing_key);
+
+        // Tamper with first byte of signature
+        let mut sig_bytes = hex::decode(&entry.signature).expect("Valid hex");
+        sig_bytes[0] = sig_bytes[0].wrapping_add(1);
+        entry.signature = hex::encode(sig_bytes);
+
+        let result = ledger.append(entry);
+        assert!(result.is_err(), "Tampered first byte should be rejected");
+
+        if let Err(LedgerError::SignatureInvalid { reason }) = result {
+            assert!(reason.contains("signature verification failed"));
+        } else {
+            panic!("Should return SignatureInvalid error");
+        }
+    }
+
+    #[test]
+    fn test_tampered_signature_middle_byte() {
+        let (signing_key, verifying_key) = test_keys();
+        let capacity = LedgerCapacity::new(10, 100_000);
+        let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
+
+        let mut entry = test_entry("TEST-TAMPER-MIDDLE", 1);
+        sign_evidence_entry(&mut entry, &signing_key);
+
+        // Tamper with middle byte of signature (32nd byte)
+        let mut sig_bytes = hex::decode(&entry.signature).expect("Valid hex");
+        sig_bytes[32] = sig_bytes[32].wrapping_add(1);
+        entry.signature = hex::encode(sig_bytes);
+
+        let result = ledger.append(entry);
+        assert!(result.is_err(), "Tampered middle byte should be rejected");
+
+        if let Err(LedgerError::SignatureInvalid { reason }) = result {
+            assert!(reason.contains("signature verification failed"));
+        } else {
+            panic!("Should return SignatureInvalid error");
+        }
+    }
+
+    #[test]
+    fn test_tampered_signature_last_byte() {
+        let (signing_key, verifying_key) = test_keys();
+        let capacity = LedgerCapacity::new(10, 100_000);
+        let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
+
+        let mut entry = test_entry("TEST-TAMPER-LAST", 1);
+        sign_evidence_entry(&mut entry, &signing_key);
+
+        // Tamper with last byte of signature
+        let mut sig_bytes = hex::decode(&entry.signature).expect("Valid hex");
+        let last_idx = sig_bytes.len() - 1;
+        sig_bytes[last_idx] = sig_bytes[last_idx].wrapping_add(1);
+        entry.signature = hex::encode(sig_bytes);
+
+        let result = ledger.append(entry);
+        assert!(result.is_err(), "Tampered last byte should be rejected");
+
+        if let Err(LedgerError::SignatureInvalid { reason }) = result {
+            assert!(reason.contains("signature verification failed"));
+        } else {
+            panic!("Should return SignatureInvalid error");
+        }
+    }
+
+    #[test]
+    fn test_tampered_timestamp_detected() {
+        let (signing_key, verifying_key) = test_keys();
+        let capacity = LedgerCapacity::new(10, 100_000);
+        let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
+
+        let mut entry = test_entry("TEST-TAMPER-TIMESTAMP", 1);
+        sign_evidence_entry(&mut entry, &signing_key);
+
+        // Tamper with timestamp after signing
+        entry.timestamp_ns = entry.timestamp_ns.saturating_add(1000000000); // Add 1 second
+
+        let result = ledger.append(entry);
+        assert!(result.is_err(), "Tampered timestamp should be rejected");
+
+        if let Err(LedgerError::SignatureInvalid { reason }) = result {
+            assert!(reason.contains("signature verification failed"));
+        } else {
+            panic!("Should return SignatureInvalid error");
+        }
+    }
+
+    #[test]
+    fn test_tampered_payload_detected() {
+        let (signing_key, verifying_key) = test_keys();
+        let capacity = LedgerCapacity::new(10, 100_000);
+        let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
+
+        let mut entry = test_entry("TEST-TAMPER-PAYLOAD", 1);
+        sign_evidence_entry(&mut entry, &signing_key);
+
+        // Tamper with evidence data after signing
+        entry.evidence_data = format!("{}-TAMPERED", entry.evidence_data);
+
+        let result = ledger.append(entry);
+        assert!(result.is_err(), "Tampered payload should be rejected");
+
+        if let Err(LedgerError::SignatureInvalid { reason }) = result {
+            assert!(reason.contains("signature verification failed"));
+        } else {
+            panic!("Should return SignatureInvalid error");
+        }
+    }
+
+    #[test]
+    fn test_tampered_decision_id_detected() {
+        let (signing_key, verifying_key) = test_keys();
+        let capacity = LedgerCapacity::new(10, 100_000);
+        let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
+
+        let mut entry = test_entry("TEST-TAMPER-ID", 1);
+        sign_evidence_entry(&mut entry, &signing_key);
+
+        // Tamper with decision ID after signing
+        entry.decision_id = format!("{}-TAMPERED", entry.decision_id);
+
+        let result = ledger.append(entry);
+        assert!(result.is_err(), "Tampered decision ID should be rejected");
+
+        if let Err(LedgerError::SignatureInvalid { reason }) = result {
+            assert!(reason.contains("signature verification failed"));
+        } else {
+            panic!("Should return SignatureInvalid error");
+        }
+    }
+
+    #[test]
+    fn test_signature_with_invalid_hex_characters() {
+        let (_, verifying_key) = test_keys();
+        let capacity = LedgerCapacity::new(10, 100_000);
+        let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
+
+        let mut entry = test_entry("TEST-INVALID-HEX", 1);
+        // Invalid hex with non-hex characters
+        entry.signature = "abcdeg123456789".to_string(); // 'g' is invalid hex
+
+        let result = ledger.append(entry);
+        assert!(result.is_err(), "Invalid hex should be rejected");
+
+        if let Err(LedgerError::SignatureInvalid { reason }) = result {
+            assert!(reason.contains("invalid hex") || reason.contains("Invalid character"));
+        } else {
+            panic!("Should return SignatureInvalid error for invalid hex");
+        }
+    }
+
+    #[test]
+    fn test_signature_valid_hex_but_invalid_ed25519() {
+        let (_, verifying_key) = test_keys();
+        let capacity = LedgerCapacity::new(10, 100_000);
+        let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
+
+        let mut entry = test_entry("TEST-INVALID-ED25519", 1);
+        // Valid hex that decodes to invalid Ed25519 signature (all zeros)
+        entry.signature = "00".repeat(64); // 64 bytes of zeros
+
+        let result = ledger.append(entry);
+        assert!(result.is_err(), "Invalid Ed25519 signature should be rejected");
+
+        if let Err(LedgerError::SignatureInvalid { reason }) = result {
+            assert!(reason.contains("signature verification failed"));
+        } else {
+            panic!("Should return SignatureInvalid error");
+        }
+    }
+
+    #[test]
+    fn test_signature_odd_length_hex() {
+        let (_, verifying_key) = test_keys();
+        let capacity = LedgerCapacity::new(10, 100_000);
+        let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
+
+        let mut entry = test_entry("TEST-ODD-HEX", 1);
+        // Odd number of hex characters
+        entry.signature = "abcdef123456789".to_string(); // 15 chars (odd)
+
+        let result = ledger.append(entry);
+        assert!(result.is_err(), "Odd-length hex should be rejected");
+
+        if let Err(LedgerError::SignatureInvalid { reason }) = result {
+            assert!(
+                reason.contains("invalid hex") ||
+                reason.contains("Odd number") ||
+                reason.contains("Invalid length")
+            );
+        } else {
+            panic!("Should return SignatureInvalid error for odd-length hex");
+        }
+    }
+
+    #[test]
+    fn test_unicode_in_decision_id_signed_correctly() {
+        let (signing_key, verifying_key) = test_keys();
+        let capacity = LedgerCapacity::new(10, 100_000);
+        let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
+
+        let mut entry = test_entry("TEST-UNICODE-🔐", 1); // Unicode emoji
+        entry.evidence_data = "Unicode test: 测试 🚀".to_string();
+        sign_evidence_entry(&mut entry, &signing_key);
+
+        let result = ledger.append(entry);
+        assert!(result.is_ok(), "Valid Unicode signature should be accepted");
+    }
+
+    #[test]
+    fn test_replay_attack_same_signature_timestamp_id() {
+        let (signing_key, verifying_key) = test_keys();
+        let capacity = LedgerCapacity::new(10, 100_000);
+        let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
+
+        let mut entry = test_entry("TEST-REPLAY", 42);
+        sign_evidence_entry(&mut entry, &signing_key);
+
+        // First submission should succeed
+        let result1 = ledger.append(entry.clone());
+        assert!(result1.is_ok(), "First submission should succeed");
+
+        // Replay with identical signature + timestamp should be rejected
+        let result2 = ledger.append(entry);
+        assert!(result2.is_err(), "Replay attack should be rejected");
+
+        if let Err(LedgerError::ReplayAttackDetected { .. }) = result2 {
+            // Expected error type
+        } else {
+            panic!("Should return ReplayAttackDetected error, got: {:?}", result2);
+        }
+    }
+
+    #[test]
+    fn test_wrong_verifying_key() {
+        let (signing_key, _) = test_keys();
+        // Create a different verifying key
+        let wrong_key = VerifyingKey::from(&SigningKey::generate(&mut rand::thread_rng()));
+        let capacity = LedgerCapacity::new(10, 100_000);
+        let mut ledger = EvidenceLedger::with_verifying_key(capacity, wrong_key);
+
+        let mut entry = test_entry("TEST-WRONG-KEY", 1);
+        sign_evidence_entry(&mut entry, &signing_key); // Sign with correct key
+
+        // Verify with wrong key should fail
+        let result = ledger.append(entry);
+        assert!(result.is_err(), "Wrong verifying key should reject signature");
+
+        if let Err(LedgerError::SignatureInvalid { reason }) = result {
+            assert!(reason.contains("signature verification failed"));
+        } else {
+            panic!("Should return SignatureInvalid error");
+        }
+    }
+
+    #[test]
+    fn test_oversized_entry_rejected() {
+        let (signing_key, verifying_key) = test_keys();
+        let capacity = LedgerCapacity::new(10, 100); // Small byte capacity
+        let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
+
+        let mut entry = test_entry("TEST-OVERSIZED", 1);
+        // Create oversized evidence data
+        entry.evidence_data = "x".repeat(200); // Exceeds 100-byte capacity
+        sign_evidence_entry(&mut entry, &signing_key);
+
+        let result = ledger.append(entry);
+        assert!(result.is_err(), "Oversized entry should be rejected");
+
+        if let Err(LedgerError::CapacityExhausted) = result {
+            // Expected for oversized entry
+        } else {
+            panic!("Should return CapacityExhausted error for oversized entry");
+        }
+    }
+
+    #[test]
+    fn test_empty_entry_fields_handled() {
+        let (signing_key, verifying_key) = test_keys();
+        let capacity = LedgerCapacity::new(10, 100_000);
+        let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
+
+        let mut entry = EvidenceEntry {
+            decision_id: "".to_string(), // Empty decision ID
+            timestamp_ns: 0,
+            evidence_data: "".to_string(), // Empty evidence data
+            signature: "".to_string(),
+        };
+        sign_evidence_entry(&mut entry, &signing_key);
+
+        let result = ledger.append(entry);
+        // Should handle empty fields gracefully (signature verification should work)
+        assert!(result.is_ok(), "Empty fields should be handled correctly");
+    }
 }
