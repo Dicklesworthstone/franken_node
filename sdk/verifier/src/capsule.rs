@@ -284,6 +284,7 @@ pub fn validate_manifest(manifest: &CapsuleManifest) -> Result<(), CapsuleError>
             "creator_identity is empty".into(),
         ));
     }
+    validate_creator_identity(&manifest.creator_identity)?;
     Ok(())
 }
 
@@ -333,6 +334,34 @@ fn validate_verifier_identity(verifier_identity: &str) -> Result<(), CapsuleErro
     {
         return Err(CapsuleError::AccessDenied(
             "verifier_identity must include only ASCII letters, digits, '.', '-', and '_'".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_creator_identity(creator_identity: &str) -> Result<(), CapsuleError> {
+    if creator_identity != creator_identity.trim() {
+        return Err(CapsuleError::ManifestIncomplete(
+            "creator_identity must not contain leading or trailing whitespace".into(),
+        ));
+    }
+    let Some(remainder) = creator_identity.strip_prefix("creator://") else {
+        return Err(CapsuleError::ManifestIncomplete(
+            "creator_identity must use the creator:// scheme".into(),
+        ));
+    };
+    if remainder.trim().is_empty() || remainder != remainder.trim() {
+        return Err(CapsuleError::ManifestIncomplete(
+            "creator_identity must include a non-empty creator name".into(),
+        ));
+    }
+    if !remainder
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'@'))
+    {
+        return Err(CapsuleError::ManifestIncomplete(
+            "creator_identity must include only ASCII letters, digits, '.', '-', '_', and '@'"
+                .into(),
         ));
     }
     Ok(())
@@ -766,6 +795,20 @@ mod tests {
     }
 
     #[test]
+    fn test_replay_rejects_malformed_creator_identity() {
+        let mut capsule = build_reference_capsule();
+        capsule.manifest.creator_identity = " creator://test@example.com".to_string();
+        sign_capsule(&mut capsule);
+
+        match replay(&capsule, "verifier://v1") {
+            Err(CapsuleError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("creator_identity"));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_capsule_manifest_btreemap_ordering() {
         let mut capsule = build_reference_capsule();
         capsule.manifest.metadata.insert("z_key".into(), "z".into());
@@ -958,17 +1001,46 @@ mod tests {
     }
 
     #[test]
-    fn negative_validate_manifest_with_path_traversal_characters_accepts_but_suspicious() {
+    fn negative_validate_manifest_with_path_traversal_creator_identity_rejects() {
         let mut capsule = build_reference_capsule();
         // Inject path traversal sequences into various fields
         capsule.manifest.capsule_id = "../../../etc/passwd".to_string();
         capsule.manifest.description = "payload\\..\\windows\\system32".to_string();
         capsule.manifest.creator_identity = "creator://../root@localhost".to_string();
 
-        // These are just strings, so validation passes, but calling code should sanitize
-        assert!(validate_manifest(&capsule.manifest).is_ok());
-        assert!(capsule.manifest.capsule_id.contains("../"));
-        assert!(capsule.manifest.description.contains("..\\"));
+        match validate_manifest(&capsule.manifest) {
+            Err(CapsuleError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("creator_identity"));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negative_validate_manifest_with_malformed_creator_identities_rejects() {
+        let invalid_creator_identities = vec![
+            " creator://test@example.com",
+            "creator://",
+            "creator:///empty",
+            "creator://space name",
+            "creator://../traversal",
+            "creator://\u{0000}",
+            "verifier://test@example.com",
+            "garbage",
+        ];
+
+        for creator_identity in invalid_creator_identities {
+            let mut capsule = build_reference_capsule();
+            capsule.manifest.creator_identity = creator_identity.to_string();
+            match validate_manifest(&capsule.manifest) {
+                Err(CapsuleError::ManifestIncomplete(msg)) => {
+                    assert!(msg.contains("creator_identity"));
+                }
+                other => panic!(
+                    "expected ManifestIncomplete for creator_identity '{creator_identity}', got {other:?}"
+                ),
+            }
+        }
     }
 
     #[test]
