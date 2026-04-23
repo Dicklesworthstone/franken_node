@@ -263,7 +263,7 @@ pub fn run_suite(cases: &[InteropTestCase]) -> Vec<InteropResult> {
                     check_object_id(&tc.case_id, &tc.input, &tc.expected_output)
                 }
                 InteropClass::Signature => {
-                    check_signature(&tc.case_id, tc.input == tc.expected_output, "cross-check")
+                    check_signature(&tc.case_id, crate::security::constant_time::ct_eq(&tc.input, &tc.expected_output), "cross-check")
                 }
                 InteropClass::Revocation => check_revocation(
                     &tc.case_id,
