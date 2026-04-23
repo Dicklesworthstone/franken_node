@@ -1833,6 +1833,30 @@ impl EngineDispatcher {
 
         result
     }
+
+    /// Test helper: expose map_config_to_runtime_config for conformance testing
+    #[cfg(all(test, feature = "engine"))]
+    pub fn map_config_to_runtime_config_for_tests(config: &Config) -> EngineRuntimeConfig {
+        Self::map_config_to_runtime_config(config)
+    }
+
+    /// Test helper: expose map_config_to_orchestrator_config for conformance testing
+    #[cfg(all(test, feature = "engine"))]
+    pub fn map_config_to_orchestrator_config_for_tests(config: &Config) -> OrchestratorConfig {
+        Self::map_config_to_orchestrator_config(config)
+    }
+
+    /// Test helper: expose map_profile_to_capabilities for conformance testing
+    #[cfg(all(test, feature = "engine"))]
+    pub fn map_profile_to_capabilities_for_tests(profile: Profile) -> Vec<String> {
+        Self::map_profile_to_capabilities(profile)
+    }
+
+    /// Test helper: expose validate_capabilities for conformance testing
+    #[cfg(all(test, feature = "engine"))]
+    pub fn validate_capabilities_for_tests(capabilities: &[String]) -> Result<(), crate::ActionableError> {
+        Self::validate_capabilities(capabilities)
+    }
 }
 
 #[cfg(test)]
