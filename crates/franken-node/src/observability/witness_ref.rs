@@ -600,6 +600,7 @@ mod tests {
             epoch_id: 1,
             payload: serde_json::json!({}),
             size_bytes: 0,
+            signature: String::new(),
         }
     }
 
