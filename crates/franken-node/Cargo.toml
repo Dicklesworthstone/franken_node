@@ -93,6 +93,11 @@ name = "migrate_cli_e2e"
 path = "tests/migrate_cli_e2e.rs"
 
 [[test]]
+name = "verifier_economy_conformance"
+path = "tests/verifier_economy_conformance.rs"
+required-features = ["extended-surfaces"]
+
+[[test]]
 name = "incident_cli_e2e"
 path = "tests/incident_cli_e2e.rs"
 

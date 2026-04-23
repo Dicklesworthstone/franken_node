@@ -1,0 +1,170 @@
+[
+  {
+    "requirement_id": "VEP-REGISTRATION-OK",
+    "level": "MUST",
+    "surface": "verifier_registration",
+    "contract": "VEP-005",
+    "fixture": "register_valid_ed25519_verifier"
+  },
+  {
+    "requirement_id": "VEP-REGISTRATION-INVALID-PUBLIC-KEY",
+    "level": "MUST",
+    "surface": "verifier_registration",
+    "contract": "ERR-VEP-INVALID-PUBLIC-KEY",
+    "fixture": "register_rejects_malformed_public_key"
+  },
+  {
+    "requirement_id": "VEP-REGISTRATION-DUPLICATE",
+    "level": "MUST",
+    "surface": "verifier_registration",
+    "contract": "ERR-VEP-DUPLICATE-SUBMISSION",
+    "fixture": "register_rejects_duplicate_public_key"
+  },
+  {
+    "requirement_id": "VEP-ATTESTATION-OK",
+    "level": "MUST",
+    "surface": "attestation_submission",
+    "contract": "INV-VEP-ATTESTATION|VEP-001",
+    "fixture": "submit_valid_signed_attestation"
+  },
+  {
+    "requirement_id": "VEP-ATTESTATION-SIGNATURE",
+    "level": "MUST",
+    "surface": "attestation_submission",
+    "contract": "INV-VEP-SIGNATURE|ERR-VEP-INVALID-SIGNATURE",
+    "fixture": "submit_rejects_tampered_signature"
+  },
+  {
+    "requirement_id": "VEP-ATTESTATION-UNREGISTERED",
+    "level": "MUST",
+    "surface": "attestation_submission",
+    "contract": "ERR-VEP-UNREGISTERED-VERIFIER",
+    "fixture": "submit_rejects_unknown_verifier"
+  },
+  {
+    "requirement_id": "VEP-ATTESTATION-INCOMPLETE",
+    "level": "MUST",
+    "surface": "attestation_submission",
+    "contract": "ERR-VEP-INCOMPLETE-PAYLOAD",
+    "fixture": "submit_rejects_empty_statement_or_suite"
+  },
+  {
+    "requirement_id": "VEP-ATTESTATION-DUPLICATE",
+    "level": "MUST",
+    "surface": "attestation_submission",
+    "contract": "ERR-VEP-DUPLICATE-SUBMISSION",
+    "fixture": "submit_rejects_duplicate_trace_fingerprint"
+  },
+  {
+    "requirement_id": "VEP-ANTI-GAMING",
+    "level": "MUST",
+    "surface": "attestation_submission",
+    "contract": "ERR-VEP-ANTI-GAMING|VEP-006",
+    "fixture": "submit_rejects_rate_limit_exhaustion"
+  },
+  {
+    "requirement_id": "VEP-REPUTATION",
+    "level": "MUST",
+    "surface": "reputation",
+    "contract": "INV-VEP-REPUTATION|VEP-004",
+    "fixture": "update_reputation_is_deterministic"
+  },
+  {
+    "requirement_id": "VEP-PUBLISH",
+    "level": "MUST",
+    "surface": "publishing",
+    "contract": "INV-VEP-PUBLISH|VEP-002",
+    "fixture": "review_then_publish_makes_attestation_immutable"
+  },
+  {
+    "requirement_id": "VEP-DISPUTE",
+    "level": "SHOULD",
+    "surface": "disputes",
+    "contract": "VEP-003",
+    "fixture": "file_dispute_emits_stable_event"
+  },
+  {
+    "requirement_id": "VEP-REPLAY-ACCESS",
+    "level": "MUST",
+    "surface": "replay_capsule",
+    "contract": "VEP-007",
+    "fixture": "register_and_access_valid_replay_capsule"
+  },
+  {
+    "requirement_id": "VEP-REPLAY-MISSING-FIELDS",
+    "level": "MUST",
+    "surface": "replay_capsule",
+    "contract": "ERR-VEP-CAPSULE-MISSING-FIELDS",
+    "fixture": "capsule_rejects_missing_capsule_id"
+  },
+  {
+    "requirement_id": "VEP-REPLAY-SCHEMA",
+    "level": "MUST",
+    "surface": "replay_capsule",
+    "contract": "ERR-VEP-CAPSULE-SCHEMA",
+    "fixture": "capsule_rejects_wrong_schema_version"
+  },
+  {
+    "requirement_id": "VEP-REPLAY-FRESHNESS",
+    "level": "MUST",
+    "surface": "replay_capsule",
+    "contract": "ERR-VEP-CAPSULE-FRESHNESS",
+    "fixture": "capsule_rejects_expired_window"
+  },
+  {
+    "requirement_id": "VEP-REPLAY-BINDING",
+    "level": "MUST",
+    "surface": "replay_capsule",
+    "contract": "ERR-VEP-CAPSULE-ATTESTATION-BINDING",
+    "fixture": "capsule_rejects_missing_attestation_binding"
+  },
+  {
+    "requirement_id": "VEP-REPLAY-TRACE",
+    "level": "MUST",
+    "surface": "replay_capsule",
+    "contract": "ERR-VEP-CAPSULE-TRACE-COMMITMENT",
+    "fixture": "capsule_rejects_trace_commitment_mismatch"
+  },
+  {
+    "requirement_id": "VEP-REPLAY-INTEGRITY",
+    "level": "MUST",
+    "surface": "replay_capsule",
+    "contract": "ERR-VEP-CAPSULE-INTEGRITY-HASH",
+    "fixture": "capsule_rejects_integrity_hash_mismatch"
+  },
+  {
+    "requirement_id": "VEP-REPLAY-SIGNATURE",
+    "level": "MUST",
+    "surface": "replay_capsule",
+    "contract": "ERR-VEP-CAPSULE-SIGNATURE",
+    "fixture": "capsule_rejects_signature_mismatch"
+  },
+  {
+    "requirement_id": "VEP-REPLAY-HASH-FORMAT",
+    "level": "MUST",
+    "surface": "replay_capsule",
+    "contract": "ERR-VEP-CAPSULE-HASH-FORMAT",
+    "fixture": "capsule_rejects_non_sha256_hash_field"
+  },
+  {
+    "requirement_id": "VEP-REPLAY-VERIFIER-MISMATCH",
+    "level": "MUST",
+    "surface": "replay_capsule",
+    "contract": "ERR-VEP-CAPSULE-VERIFIER-MISMATCH",
+    "fixture": "capsule_rejects_attestation_verifier_mismatch"
+  },
+  {
+    "requirement_id": "VEP-REPLAY-CLAIM-MISMATCH",
+    "level": "MUST",
+    "surface": "replay_capsule",
+    "contract": "ERR-VEP-CAPSULE-CLAIM-MISMATCH",
+    "fixture": "capsule_rejects_claim_metadata_mismatch"
+  },
+  {
+    "requirement_id": "VEP-CAPACITY-CODE",
+    "level": "SHOULD",
+    "surface": "bounded_registries",
+    "contract": "ERR-VEP-CAPACITY-EXCEEDED",
+    "fixture": "capacity_error_code_is_exported_for_boundary_harnesses"
+  }
+]
