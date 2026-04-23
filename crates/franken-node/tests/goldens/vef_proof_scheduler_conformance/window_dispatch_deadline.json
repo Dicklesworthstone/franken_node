@@ -1,0 +1,158 @@
+{
+  "schema_version": "vef-proof-scheduler-v1",
+  "spec_source": "artifacts/section_10_18/bd-28u0/verification_summary.md",
+  "coverage_matrix": [
+    {
+      "section": "10.18 deterministic window selection",
+      "level": "MUST",
+      "clause": "Identical receipt streams and policies produce identical window partitions.",
+      "tested": true,
+      "verdict": "pass"
+    },
+    {
+      "section": "10.18 checkpoint alignment",
+      "level": "MUST",
+      "clause": "Proof windows align to receipt-chain checkpoints when possible.",
+      "tested": true,
+      "verdict": "pass"
+    },
+    {
+      "section": "10.18 priority dispatch",
+      "level": "MUST",
+      "clause": "Critical-tier jobs dispatch before lower-priority tiers.",
+      "tested": true,
+      "verdict": "pass"
+    },
+    {
+      "section": "10.18 bounded scheduling",
+      "level": "MUST",
+      "clause": "Dispatch respects the configured concurrency, compute, and memory budgets.",
+      "tested": true,
+      "verdict": "pass"
+    },
+    {
+      "section": "10.18 deadline enforcement",
+      "level": "MUST",
+      "clause": "Jobs exceeding tier-specific deadlines are marked deadline_exceeded and emit VEF-SCHED-ERR-001.",
+      "tested": true,
+      "verdict": "pass"
+    },
+    {
+      "section": "10.18 event tracing",
+      "level": "SHOULD",
+      "clause": "Lifecycle transitions emit structured SchedulerEvent records with trace IDs.",
+      "tested": true,
+      "verdict": "pass"
+    }
+  ],
+  "dispatch_case": {
+    "window_count": 3,
+    "windows": [
+      {
+        "window_id": "win-0-1",
+        "start_index": 0,
+        "end_index": 1,
+        "entry_count": 2,
+        "aligned_checkpoint_id": 0,
+        "tier": "high",
+        "created_at_millis": 1701100000000,
+        "trace_id": "trace-vef-scheduler-conformance"
+      },
+      {
+        "window_id": "win-2-3",
+        "start_index": 2,
+        "end_index": 3,
+        "entry_count": 2,
+        "aligned_checkpoint_id": 1,
+        "tier": "critical",
+        "created_at_millis": 1701100000000,
+        "trace_id": "trace-vef-scheduler-conformance"
+      },
+      {
+        "window_id": "win-4-4",
+        "start_index": 4,
+        "end_index": 4,
+        "entry_count": 1,
+        "aligned_checkpoint_id": null,
+        "tier": "high",
+        "created_at_millis": 1701100000000,
+        "trace_id": "trace-vef-scheduler-conformance"
+      }
+    ],
+    "queued_job_ids": [
+      "job-00000000",
+      "job-00000001",
+      "job-00000002"
+    ],
+    "dispatched_jobs": [
+      {
+        "job_id": "job-00000001",
+        "window_id": "win-2-3",
+        "tier": "critical",
+        "priority_score": 400,
+        "deadline_millis": 1701100010010,
+        "estimated_compute_millis": 200,
+        "estimated_memory_mib": 16,
+        "status": "dispatched",
+        "created_at_millis": 1701100000010,
+        "dispatched_at_millis": 1701100000020,
+        "completed_at_millis": null,
+        "trace_id": "trace-vef-scheduler-conformance"
+      },
+      {
+        "job_id": "job-00000000",
+        "window_id": "win-0-1",
+        "tier": "high",
+        "priority_score": 300,
+        "deadline_millis": 1701100020010,
+        "estimated_compute_millis": 200,
+        "estimated_memory_mib": 16,
+        "status": "dispatched",
+        "created_at_millis": 1701100000010,
+        "dispatched_at_millis": 1701100000020,
+        "completed_at_millis": null,
+        "trace_id": "trace-vef-scheduler-conformance"
+      }
+    ],
+    "metrics": {
+      "pending_jobs": 1,
+      "dispatched_jobs": 2,
+      "completed_jobs": 0,
+      "deadline_exceeded_jobs": 0,
+      "oldest_pending_age_millis": 1010,
+      "compute_budget_used_millis": 500,
+      "memory_budget_used_mib": 40,
+      "windows_observed": 3
+    },
+    "event_codes": [
+      "VEF-SCHED-001",
+      "VEF-SCHED-001",
+      "VEF-SCHED-001",
+      "VEF-SCHED-002",
+      "VEF-SCHED-002",
+      "VEF-SCHED-004"
+    ]
+  },
+  "deadline_case": {
+    "exceeded_job_ids": [
+      "job-00000001"
+    ],
+    "deadline_event_codes": [
+      "VEF-SCHED-ERR-001"
+    ],
+    "job_statuses": [
+      {
+        "job_id": "job-00000000",
+        "status": "pending"
+      },
+      {
+        "job_id": "job-00000001",
+        "status": "deadline_exceeded"
+      },
+      {
+        "job_id": "job-00000002",
+        "status": "pending"
+      }
+    ]
+  }
+}

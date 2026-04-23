@@ -189,6 +189,11 @@ fn gate_event(code: &str, level: &str, trace_id: &str, message: String) -> GateE
 }
 
 fn lower_risk_than_blocked(blocked: HealthDelta, candidate: HealthDelta) -> bool {
+    // Fail-closed if either cascade risk delta is not finite
+    if !blocked.cascade_risk_delta.is_finite() || !candidate.cascade_risk_delta.is_finite() {
+        return false;
+    }
+
     candidate.cascade_risk_delta <= blocked.cascade_risk_delta
         && candidate.new_fragility_findings <= blocked.new_fragility_findings
         && candidate.new_articulation_points <= blocked.new_articulation_points
@@ -1054,7 +1059,9 @@ mod dgis_migration_gate_hardening_negative_tests {
         // Simulate the vulnerable pattern from evaluate_policy function
         for _ in 0..100 {
             // Attempt to overflow rejection reasons vector
-            if delta.cascade_risk_delta > thresholds.max_cascade_risk_delta {
+            if delta.cascade_risk_delta.is_finite()
+                && thresholds.max_cascade_risk_delta.is_finite()
+                && delta.cascade_risk_delta > thresholds.max_cascade_risk_delta {
                 simulated_reasons.push(format!(
                     "cascade_risk_delta_violation_{}",
                     simulated_reasons.len()
@@ -1080,7 +1087,9 @@ mod dgis_migration_gate_hardening_negative_tests {
         // Test proper bounded version
         let mut bounded_reasons = Vec::new();
         for _ in 0..100 {
-            if delta.cascade_risk_delta > thresholds.max_cascade_risk_delta {
+            if delta.cascade_risk_delta.is_finite()
+                && thresholds.max_cascade_risk_delta.is_finite()
+                && delta.cascade_risk_delta > thresholds.max_cascade_risk_delta {
                 let reason_idx = bounded_reasons.len();
                 push_bounded(
                     &mut bounded_reasons,
@@ -1113,8 +1122,9 @@ mod dgis_migration_gate_hardening_negative_tests {
         };
 
         // With > comparison (vulnerable): boundary values pass incorrectly
-        let vulnerable_cascade_check =
-            boundary_delta.cascade_risk_delta > thresholds.max_cascade_risk_delta;
+        let vulnerable_cascade_check = boundary_delta.cascade_risk_delta.is_finite()
+            && thresholds.max_cascade_risk_delta.is_finite()
+            && boundary_delta.cascade_risk_delta > thresholds.max_cascade_risk_delta;
         let vulnerable_fragility_check = boundary_delta.new_fragility_findings
             > i64::from(thresholds.max_new_fragility_findings);
         let vulnerable_articulation_check = boundary_delta.new_articulation_points
@@ -1135,8 +1145,9 @@ mod dgis_migration_gate_hardening_negative_tests {
         );
 
         // With >= comparison (secure): boundary values are properly rejected
-        let secure_cascade_check =
-            boundary_delta.cascade_risk_delta >= thresholds.max_cascade_risk_delta;
+        let secure_cascade_check = boundary_delta.cascade_risk_delta.is_finite()
+            && thresholds.max_cascade_risk_delta.is_finite()
+            && boundary_delta.cascade_risk_delta >= thresholds.max_cascade_risk_delta;
         let secure_fragility_check = boundary_delta.new_fragility_findings
             >= i64::from(thresholds.max_new_fragility_findings);
         let secure_articulation_check = boundary_delta.new_articulation_points
@@ -1630,6 +1641,211 @@ mod dgis_migration_gate_hardening_negative_tests {
             total_suggestion_size < 5000,
             "Used too much memory: {} bytes",
             total_suggestion_size
+        );
+    }
+
+    #[test]
+    fn regression_nan_infinity_fail_closed_bd_10413() {
+        // bd-10413: [SEC] migration: numeric comparison boundaries fail-open on NaN/infinity values
+        // This test ensures all f64 comparisons fail-closed on NaN/Infinity values
+
+        let valid_thresholds = MigrationGateThresholds {
+            max_cascade_risk_delta: 0.1,
+            max_new_fragility_findings: 1,
+            max_new_articulation_points: 1,
+        };
+
+        let nan_thresholds = MigrationGateThresholds {
+            max_cascade_risk_delta: f64::NAN,
+            max_new_fragility_findings: 1,
+            max_new_articulation_points: 1,
+        };
+
+        let inf_thresholds = MigrationGateThresholds {
+            max_cascade_risk_delta: f64::INFINITY,
+            max_new_fragility_findings: 1,
+            max_new_articulation_points: 1,
+        };
+
+        let neg_inf_thresholds = MigrationGateThresholds {
+            max_cascade_risk_delta: f64::NEG_INFINITY,
+            max_new_fragility_findings: 1,
+            max_new_articulation_points: 1,
+        };
+
+        let baseline = GraphHealthSnapshot {
+            cascade_risk: 0.05,
+            fragility_findings: 0,
+            articulation_points: 0,
+        };
+
+        // Test cases: (threshold_name, projected_risk, thresholds, should_be_allowed)
+        let test_cases = vec![
+            // Valid values should work normally
+            ("valid_within_bounds", 0.08, valid_thresholds, true),
+            ("valid_exceeds_bounds", 0.15, valid_thresholds, false),
+
+            // NaN threshold should fail-closed (always reject)
+            ("nan_threshold_low_input", 0.01, nan_thresholds, false),
+            ("nan_threshold_high_input", 0.15, nan_thresholds, false),
+
+            // Infinity threshold should fail-closed
+            ("inf_threshold_any_input", 0.05, inf_thresholds, false),
+            ("neg_inf_threshold_any_input", 0.05, neg_inf_thresholds, false),
+        ];
+
+        for (test_name, projected_risk, thresholds, should_be_allowed) in test_cases {
+            let projected = GraphHealthSnapshot {
+                cascade_risk: projected_risk,
+                fragility_findings: 0,
+                articulation_points: 0,
+            };
+
+            let evaluation = evaluate_admission(
+                "test_trace_id",
+                baseline,
+                projected,
+                thresholds,
+                &[],
+            );
+
+            let is_allowed = matches!(evaluation.verdict, GateVerdict::Allow);
+            assert_eq!(
+                is_allowed, should_be_allowed,
+                "Test case '{}': expected allowed={}, got allowed={}",
+                test_name, should_be_allowed, is_allowed
+            );
+        }
+
+        // Test NaN input values with valid thresholds
+        let nan_projected = GraphHealthSnapshot {
+            cascade_risk: f64::NAN,
+            fragility_findings: 0,
+            articulation_points: 0,
+        };
+
+        let inf_projected = GraphHealthSnapshot {
+            cascade_risk: f64::INFINITY,
+            fragility_findings: 0,
+            articulation_points: 0,
+        };
+
+        let neg_inf_projected = GraphHealthSnapshot {
+            cascade_risk: f64::NEG_INFINITY,
+            fragility_findings: 0,
+            articulation_points: 0,
+        };
+
+        // All non-finite inputs should be rejected
+        for (name, projected) in [
+            ("nan_input", nan_projected),
+            ("inf_input", inf_projected),
+            ("neg_inf_input", neg_inf_projected),
+        ] {
+            let evaluation = evaluate_admission(
+                "test_trace_id",
+                baseline,
+                projected,
+                valid_thresholds,
+                &[],
+            );
+
+            assert!(
+                !matches!(evaluation.verdict, GateVerdict::Allow),
+                "Non-finite input '{}' should be rejected but was allowed",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn regression_lower_risk_than_blocked_nan_infinity_bd_10413() {
+        // bd-10413: Test lower_risk_than_blocked function specifically
+
+        let valid_blocked = HealthDelta {
+            cascade_risk_delta: 0.1,
+            new_fragility_findings: 2,
+            new_articulation_points: 2,
+        };
+
+        let valid_candidate = HealthDelta {
+            cascade_risk_delta: 0.05,
+            new_fragility_findings: 1,
+            new_articulation_points: 1,
+        };
+
+        let nan_blocked = HealthDelta {
+            cascade_risk_delta: f64::NAN,
+            new_fragility_findings: 2,
+            new_articulation_points: 2,
+        };
+
+        let nan_candidate = HealthDelta {
+            cascade_risk_delta: f64::NAN,
+            new_fragility_findings: 1,
+            new_articulation_points: 1,
+        };
+
+        let inf_blocked = HealthDelta {
+            cascade_risk_delta: f64::INFINITY,
+            new_fragility_findings: 2,
+            new_articulation_points: 2,
+        };
+
+        let inf_candidate = HealthDelta {
+            cascade_risk_delta: f64::INFINITY,
+            new_fragility_findings: 1,
+            new_articulation_points: 1,
+        };
+
+        // Valid comparison should work normally
+        assert!(
+            lower_risk_than_blocked(valid_blocked, valid_candidate),
+            "Valid candidate should be lower risk than blocked"
+        );
+
+        // Any NaN involvement should fail-closed (return false)
+        assert!(
+            !lower_risk_than_blocked(nan_blocked, valid_candidate),
+            "NaN blocked delta should fail-closed"
+        );
+
+        assert!(
+            !lower_risk_than_blocked(valid_blocked, nan_candidate),
+            "NaN candidate delta should fail-closed"
+        );
+
+        assert!(
+            !lower_risk_than_blocked(nan_blocked, nan_candidate),
+            "Both NaN should fail-closed"
+        );
+
+        // Any Infinity involvement should fail-closed
+        assert!(
+            !lower_risk_than_blocked(inf_blocked, valid_candidate),
+            "Infinity blocked delta should fail-closed"
+        );
+
+        assert!(
+            !lower_risk_than_blocked(valid_blocked, inf_candidate),
+            "Infinity candidate delta should fail-closed"
+        );
+
+        assert!(
+            !lower_risk_than_blocked(inf_blocked, inf_candidate),
+            "Both infinity should fail-closed"
+        );
+
+        // Test with denormal (very small) numbers - should work normally
+        let denormal_candidate = HealthDelta {
+            cascade_risk_delta: f64::MIN_POSITIVE,
+            new_fragility_findings: 0,
+            new_articulation_points: 0,
+        };
+
+        assert!(
+            lower_risk_than_blocked(valid_blocked, denormal_candidate),
+            "Denormal numbers should work normally when finite"
         );
     }
 }

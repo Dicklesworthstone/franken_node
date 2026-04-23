@@ -1,0 +1,144 @@
+{
+  "bead_id": "bd-2qyh1",
+  "schema_version": "doctor-close-condition-vectors-v1",
+  "receipt_schema_version": "oracle-close-condition-receipt/v1",
+  "description": "Golden vectors for doctor close-condition JSON output conformance testing.",
+  "vectors": [
+    {
+      "name": "green_verdict_baseline",
+      "input_receipt": {
+        "schema_version": "oracle-close-condition-receipt/v1",
+        "receipt_path": "artifacts/oracle/close_condition_receipt.json",
+        "generated_at_utc": "2026-04-23T06:00:00.000Z",
+        "L1_product_oracle": {
+          "verdict": "Green",
+          "source_path": "tests/",
+          "corpus_version": "v1.2.3",
+          "total_test_cases": 142,
+          "passed_test_cases": 142,
+          "failed_test_cases": 0,
+          "errored_test_cases": 0,
+          "skipped_test_cases": 0,
+          "pass_rate_pct": 100.0,
+          "required_pass_rate_pct": 95.0
+        },
+        "L2_engine_boundary_oracle": {
+          "verdict": "Green",
+          "source": "crates/franken-node/src/",
+          "contract_ref": "split-contract-v2.1",
+          "checks": [
+            {
+              "id": "interface_boundary_check",
+              "status": "Green",
+              "details": "All public interfaces conform to split contract"
+            }
+          ],
+          "summary": {
+            "total_checks": 1,
+            "passed_checks": 1,
+            "failing_checks": 0,
+            "overall_verdict": "Green"
+          },
+          "blocking_findings": []
+        },
+        "release_policy_linkage": {
+          "verdict": "Green",
+          "source": ".franken-node/release-policy.json",
+          "ci_outputs_accessible": true,
+          "ci_output_ref": "ci/security-scan-results.json",
+          "consumed_oracles": ["L1_product_oracle", "L2_engine_boundary_oracle"],
+          "blocking_findings": []
+        },
+        "composite_verdict": "Green",
+        "failing_dimensions": [],
+        "tamper_evidence": {
+          "algorithm": "SHA256",
+          "canonicalization": "JSON-deterministic-ordering",
+          "hash_scope": "receipt-core-excluding-signature",
+          "sha256": "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+          "signature": {
+            "algorithm": "Ed25519",
+            "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+            "key_id": "oracle-close-test-key-001",
+            "key_source": "test-fixture",
+            "signing_identity": "test-oracle",
+            "trust_scope": "test-environment",
+            "signed_payload_sha256": "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "signature_hex": "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+          }
+        }
+      },
+      "expected_hash": "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+      "expected_composite_verdict": "Green",
+      "expected_failing_dimensions": []
+    },
+    {
+      "name": "red_verdict_l1_failure",
+      "input_receipt": {
+        "schema_version": "oracle-close-condition-receipt/v1",
+        "receipt_path": "artifacts/oracle/close_condition_receipt.json",
+        "generated_at_utc": "2026-04-23T06:00:00.000Z",
+        "L1_product_oracle": {
+          "verdict": "Red",
+          "source_path": "tests/",
+          "corpus_version": "v1.2.3",
+          "total_test_cases": 142,
+          "passed_test_cases": 140,
+          "failed_test_cases": 2,
+          "errored_test_cases": 0,
+          "skipped_test_cases": 0,
+          "pass_rate_pct": 98.6,
+          "required_pass_rate_pct": 99.0
+        },
+        "L2_engine_boundary_oracle": {
+          "verdict": "Green",
+          "source": "crates/franken-node/src/",
+          "contract_ref": "split-contract-v2.1",
+          "checks": [
+            {
+              "id": "interface_boundary_check",
+              "status": "Green",
+              "details": "All public interfaces conform to split contract"
+            }
+          ],
+          "summary": {
+            "total_checks": 1,
+            "passed_checks": 1,
+            "failing_checks": 0,
+            "overall_verdict": "Green"
+          },
+          "blocking_findings": []
+        },
+        "release_policy_linkage": {
+          "verdict": "Green",
+          "source": ".franken-node/release-policy.json",
+          "ci_outputs_accessible": true,
+          "ci_output_ref": "ci/security-scan-results.json",
+          "consumed_oracles": ["L1_product_oracle", "L2_engine_boundary_oracle"],
+          "blocking_findings": []
+        },
+        "composite_verdict": "Red",
+        "failing_dimensions": ["L1_product_oracle"],
+        "tamper_evidence": {
+          "algorithm": "SHA256",
+          "canonicalization": "JSON-deterministic-ordering",
+          "hash_scope": "receipt-core-excluding-signature",
+          "sha256": "sha256:cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe",
+          "signature": {
+            "algorithm": "Ed25519",
+            "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+            "key_id": "oracle-close-test-key-001",
+            "key_source": "test-fixture",
+            "signing_identity": "test-oracle",
+            "trust_scope": "test-environment",
+            "signed_payload_sha256": "sha256:cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe",
+            "signature_hex": "fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321"
+          }
+        }
+      },
+      "expected_hash": "sha256:cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe",
+      "expected_composite_verdict": "Red",
+      "expected_failing_dimensions": ["L1_product_oracle"]
+    }
+  ]
+}

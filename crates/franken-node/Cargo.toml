@@ -295,6 +295,10 @@ path = "tests/doctor_close_condition_e2e.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "doctor_close_condition_conformance"
+path = "tests/doctor_close_condition_conformance.rs"
+
+[[test]]
 name = "close_condition_path_gate_regressions"
 path = "tests/close_condition_path_gate_regressions.rs"
 
@@ -311,6 +315,10 @@ required-features = ["test-support"]
 [[test]]
 name = "vef_receipt_schema_conformance"
 path = "tests/vef_receipt_schema_conformance.rs"
+
+[[test]]
+name = "vef_proof_scheduler_conformance"
+path = "tests/vef_proof_scheduler_conformance.rs"
 
 [[test]]
 name = "vef_proof_service_fail_closed"
@@ -403,6 +411,10 @@ path = "tests/artifact_signing_golden_tests.rs"
 [[test]]
 name = "artifact_signing_metamorphic"
 path = "tests/artifact_signing_metamorphic.rs"
+
+[[test]]
+name = "activation_pipeline_metamorphic"
+path = "tests/activation_pipeline_metamorphic.rs"
 
 [[bench]]
 name = "cuckoo_revocation_bench"

@@ -830,17 +830,26 @@ fn validate_engine_dependency_path(cargo_file: &Path, path_str: &str) -> bool {
         "franken_engine/crates/frankenengine-extension-host",
     ];
 
-    // Check if the canonical path ends with one of our allowed paths
+    // Check if the canonical path equals one of our allowed paths (strict equality, not suffix)
+    // This prevents suffix bypass attacks like "frankenengine-engine_evil"
     let canonical_str = canonical_path.to_string_lossy();
     for allowed in &allowed_paths {
-        if canonical_str.ends_with(allowed) {
-            // Additional validation: ensure the path doesn't contain suspicious traversals
-            // even after canonicalization (in case of complex symlink attacks)
-            let normalized = canonical_str.replace('\\', "/");
-            if normalized.contains("/../") || normalized.contains("/./") {
-                continue;
+        // Use strict path component equality instead of suffix matching
+        let normalized = canonical_str.replace('\\', "/");
+
+        // Additional validation: ensure the path doesn't contain suspicious traversals
+        // even after canonicalization (in case of complex symlink attacks)
+        if normalized.contains("/../") || normalized.contains("/./") {
+            continue;
+        }
+
+        // Check if the normalized canonical path ends with exactly the allowed path
+        // with proper path separator boundaries to prevent suffix bypass
+        if let Some(prefix_len) = normalized.len().checked_sub(allowed.len()) {
+            if normalized[prefix_len..] == *allowed &&
+               (prefix_len == 0 || normalized.chars().nth(prefix_len - 1) == Some('/')) {
+                return true;
             }
-            return true;
         }
     }
 
