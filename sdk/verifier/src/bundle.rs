@@ -691,9 +691,9 @@ fn canonicalize_value(value: Value, path: &str) -> Result<Value, BundleError> {
             .map(Value::Array),
         Value::Object(map) => {
             let mut entries = map.into_iter().collect::<Vec<_>>();
-            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
 
-            let mut canonical = serde_json::Map::new();
+            let mut canonical = serde_json::Map::with_capacity(entries.len());
             for (key, item) in entries {
                 canonical.insert(
                     key.clone(),
