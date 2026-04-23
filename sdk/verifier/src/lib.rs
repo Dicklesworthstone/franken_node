@@ -49,6 +49,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
@@ -398,10 +399,10 @@ impl From<bundle::BundleError> for VerifierSdkError {
     }
 }
 
-const FACADE_TIMESTAMP: &str = "2026-02-21T00:00:00Z";
 const RESULT_ORIGIN_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:result-origin:v1:";
 const SESSION_STEP_SIGNATURE_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:session-step:v1:";
 const SESSION_NONCE_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:session-nonce:v1:";
+const TRANSPARENCY_LOG_LEAF_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:transparency-leaf:v1:";
 const TRANSPARENCY_MERKLE_PARENT_DOMAIN: &[u8] =
     b"frankenengine-verifier-sdk:transparency-merkle-parent:v1:";
 const MAX_VERIFIER_IDENTITY_NAME_LEN: usize = 255;
@@ -522,15 +523,13 @@ impl VerifierSdk {
     ) -> Result<TransparencyLogEntry, VerifierSdkError> {
         self.validate_current_verifier_identity()?;
         self.verify_result_belongs_to_current_verifier(result)?;
-        let result_bytes = serde_json::to_vec(result)
-            .map_err(|source| VerifierSdkError::Json(source.to_string()))?;
-        let result_hash = bundle::hash(&result_bytes);
+        let result_hash = transparency_log_leaf_hash(result)?;
         let mut leaf_hashes: Vec<String> =
             log.iter().map(|entry| entry.result_hash.clone()).collect();
         leaf_hashes.push(result_hash.clone());
         let entry = TransparencyLogEntry {
             result_hash: result_hash.clone(),
-            timestamp: FACADE_TIMESTAMP.to_string(),
+            timestamp: current_utc_timestamp(),
             verifier_id: result.verifier_identity.clone(),
             merkle_proof: transparency_merkle_proof(&leaf_hashes, leaf_hashes.len() - 1),
         };
@@ -568,7 +567,7 @@ impl VerifierSdk {
         self.validate_current_verifier_identity()?;
         let session_id = session_id.into();
         validate_session_id(&session_id)?;
-        let created_at = FACADE_TIMESTAMP.to_string();
+        let created_at = current_utc_timestamp();
         let session_nonce = derive_session_nonce(
             &session_id,
             &self.verifier_identity,
@@ -619,7 +618,7 @@ impl VerifierSdk {
             operation: result.operation.clone(),
             verdict: result.verdict.clone(),
             artifact_binding_hash: result.artifact_binding_hash.clone(),
-            timestamp: FACADE_TIMESTAMP.to_string(),
+            timestamp: current_utc_timestamp(),
             step_signature: String::new(),
         };
         let step = SessionStep {
@@ -749,7 +748,7 @@ impl VerifierSdk {
             verdict,
             confidence_score,
             checked_assertions,
-            execution_timestamp: FACADE_TIMESTAMP.to_string(),
+            execution_timestamp: current_utc_timestamp(),
             verifier_identity: self.verifier_identity.clone(),
             artifact_binding_hash,
             verifier_signature: String::new(),
@@ -817,6 +816,10 @@ fn default_result_origin_nonce() -> String {
     bundle::hash(&payload)
 }
 
+fn current_utc_timestamp() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true)
+}
+
 fn derive_session_nonce(
     session_id: &str,
     verifier_identity: &str,
@@ -878,6 +881,16 @@ fn transparency_merkle_parent_hash(left: &str, right: &str) -> String {
     push_length_prefixed(&mut payload, left.as_bytes());
     push_length_prefixed(&mut payload, right.as_bytes());
     bundle::hash(&payload)
+}
+
+fn transparency_log_leaf_hash(result: &VerificationResult) -> Result<String, VerifierSdkError> {
+    let result_bytes =
+        serde_json::to_vec(result).map_err(|source| VerifierSdkError::Json(source.to_string()))?;
+    let mut payload = Vec::new();
+    push_length_prefixed(&mut payload, TRANSPARENCY_LOG_LEAF_DOMAIN);
+    push_length_prefixed(&mut payload, &result_bytes);
+    push_length_prefixed(&mut payload, result.result_origin_nonce.as_bytes());
+    Ok(bundle::hash(&payload))
 }
 
 fn session_step_signature(
@@ -1473,7 +1486,7 @@ mod tests {
             operation: VerificationOperation::Claim,
             verdict: VerificationVerdict::Pass,
             artifact_binding_hash: "artifact-hash-forged".to_string(),
-            timestamp: FACADE_TIMESTAMP.to_string(),
+            timestamp: current_utc_timestamp(),
             step_signature: "forged-step-signature".to_string(),
         });
 
@@ -1516,6 +1529,46 @@ mod tests {
             VerifierSdkError::SessionVerifierMismatch { .. }
         ));
         assert!(log.is_empty());
+    }
+
+    #[test]
+    fn facade_emits_runtime_rfc3339_timestamps() {
+        const LEGACY_PLACEHOLDER_TIMESTAMP: &str = "2026-02-21T00:00:00Z";
+
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let result = sdk
+            .build_result(
+                VerificationOperation::Claim,
+                VerificationVerdict::Pass,
+                vec![AssertionResult {
+                    assertion: "capsule_replay_verified".to_string(),
+                    passed: true,
+                    detail: "same verifier".to_string(),
+                }],
+                "artifact-hash-alpha".to_string(),
+            )
+            .expect("same verifier result should build");
+        let mut session = sdk
+            .create_session("session-alpha")
+            .expect("session should build with live timestamp");
+        let step = sdk
+            .record_session_step(&mut session, &result)
+            .expect("step should record with live timestamp");
+        let mut log = Vec::new();
+        let entry = sdk
+            .append_transparency_log(&mut log, &result)
+            .expect("entry should append with live timestamp");
+
+        for timestamp in [
+            result.execution_timestamp.as_str(),
+            session.created_at.as_str(),
+            step.timestamp.as_str(),
+            entry.timestamp.as_str(),
+        ] {
+            assert_ne!(timestamp, LEGACY_PLACEHOLDER_TIMESTAMP);
+            chrono::DateTime::parse_from_rfc3339(timestamp)
+                .expect("facade timestamps should be RFC3339");
+        }
     }
 
     #[test]
@@ -1571,6 +1624,36 @@ mod tests {
 
         assert!(matches!(err, VerifierSdkError::ResultOriginMismatch { .. }));
         assert!(log.is_empty());
+    }
+
+    #[test]
+    fn transparency_log_leaf_hash_commits_authenticated_result_origin() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let mut result = sdk
+            .build_result(
+                VerificationOperation::Claim,
+                VerificationVerdict::Pass,
+                vec![AssertionResult {
+                    assertion: "capsule_replay_verified".to_string(),
+                    passed: true,
+                    detail: "same verifier".to_string(),
+                }],
+                "artifact-hash-alpha".to_string(),
+            )
+            .expect("same verifier result should be built");
+        let public_json =
+            serde_json::to_string(&result).expect("verification result should serialize");
+        let original_hash =
+            transparency_log_leaf_hash(&result).expect("original leaf hash should compute");
+        result.result_origin_nonce = "alternate-origin-nonce".to_string();
+        let tampered_hash =
+            transparency_log_leaf_hash(&result).expect("tampered leaf hash should compute");
+
+        assert_eq!(
+            serde_json::to_string(&result).expect("tampered result should serialize"),
+            public_json
+        );
+        assert_ne!(original_hash, tampered_hash);
     }
 
     #[test]
