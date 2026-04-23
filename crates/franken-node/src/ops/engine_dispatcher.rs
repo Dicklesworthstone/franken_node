@@ -1477,7 +1477,7 @@ impl EngineDispatcher {
 
         // Configure orchestrator with policy settings
         let orchestrator_config = OrchestratorConfig::default(); // bd-wlkks: Map from franken-node config
-        let runtime_config = EngineRuntimeConfig::default(); // bd-1nkf8: Map from franken-node config
+        let runtime_config = map_config_to_runtime_config(config); // bd-1nkf8: Map from franken-node config
 
         let mut orchestrator = ExecutionOrchestrator::new_with_runtime_config(
             orchestrator_config,
