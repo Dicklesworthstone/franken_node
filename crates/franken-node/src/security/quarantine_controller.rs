@@ -1305,7 +1305,7 @@ mod quarantine_controller_additional_negative_tests {
 
         for forged_evidence in forged_evidence_variants {
             // Signature verification should detect tampering
-            if forged_evidence.signature == original_signature {
+            if constant_time::ct_eq_bytes(forged_evidence.signature.as_bytes(), original_signature.as_bytes()) {
                 // If signature wasn't changed, other fields were modified
                 assert!(forged_evidence.action != evidence.action ||
                        (forged_evidence.posterior - evidence.posterior).abs() > f64::EPSILON,
