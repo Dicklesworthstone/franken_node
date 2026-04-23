@@ -21,6 +21,7 @@
 //! - INV-CLP-STARVATION-DETECT: starvation detected if zero slots for N consecutive ticks
 //! - INV-CLP-CANCEL-NO-STARVE: cancel lane never starved for more than 1 tick
 //! - INV-CLP-PREEMPT: tasks exceeding lane budget are preempted
+//! - INV-CLP-TIMED-DEADLINE: deadline-bound lanes fail closed at deadline expiry
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -56,6 +57,9 @@ pub const DEFAULT_MAX_PREEMPTION_EVENTS: usize = 4096;
 /// Default maximum audit-log entries retained.
 pub const DEFAULT_MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 
+/// Default maximum queued deadline-aware tasks retained.
+pub const DEFAULT_MAX_DEADLINE_QUEUE_ENTRIES: usize = 4096;
+
 // ---- Event codes ----
 
 pub mod event_codes {
@@ -69,6 +73,8 @@ pub mod event_codes {
     pub const LAN_004: &str = "LAN-004";
     /// Task preempted for lane budget enforcement.
     pub const LAN_005: &str = "LAN-005";
+    /// Task timed out at or beyond its lane deadline.
+    pub const LAN_006: &str = "LAN-006";
 }
 
 // ---- Error codes ----
@@ -82,6 +88,8 @@ pub mod error_codes {
     pub const ERR_CLP_INVALID_BUDGET: &str = "ERR_CLP_INVALID_BUDGET";
     pub const ERR_CLP_DUPLICATE_CLASS: &str = "ERR_CLP_DUPLICATE_CLASS";
     pub const ERR_CLP_POLICY_MISMATCH: &str = "ERR_CLP_POLICY_MISMATCH";
+    pub const ERR_CLP_INVALID_TASK_ID: &str = "ERR_CLP_INVALID_TASK_ID";
+    pub const ERR_CLP_DEADLINE_QUEUE_FULL: &str = "ERR_CLP_DEADLINE_QUEUE_FULL";
 }
 
 // ---- Core types ----
@@ -314,6 +322,24 @@ pub struct LanePolicyAuditRecord {
     pub trace_id: String,
 }
 
+/// Deadline-aware task queued for a control-lane scheduling tick.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedControlTask {
+    pub task_id: String,
+    pub task_class: ControlTaskClass,
+    pub lane: ControlLane,
+    pub enqueued_at_ms: u64,
+    pub deadline_at_ms: Option<u64>,
+}
+
+/// Result of a deadline-aware scheduling tick.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeadlineAwareTick {
+    pub metrics: LaneTickMetrics,
+    pub scheduled_task_ids: Vec<String>,
+    pub timed_out_task_ids: Vec<String>,
+}
+
 /// The control-lane policy engine: maps task classes to lanes, enforces budgets,
 /// detects starvation, and tracks scheduling metrics.
 #[derive(Debug)]
@@ -327,10 +353,12 @@ pub struct ControlLanePolicy {
     starvation_events: Vec<StarvationEvent>,
     preemption_events: Vec<PreemptionEvent>,
     audit_log: Vec<LanePolicyAuditRecord>,
+    deadline_queue: Vec<QueuedControlTask>,
     max_tick_history_entries: usize,
     max_starvation_events: usize,
     max_preemption_events: usize,
     max_audit_log_entries: usize,
+    max_deadline_queue_entries: usize,
 }
 
 impl ControlLanePolicy {
@@ -399,10 +427,12 @@ impl ControlLanePolicy {
             starvation_events: Vec::new(),
             preemption_events: Vec::new(),
             audit_log: Vec::new(),
+            deadline_queue: Vec::new(),
             max_tick_history_entries: max_tick_history_entries.max(1),
             max_starvation_events: max_starvation_events.max(1),
             max_preemption_events: max_preemption_events.max(1),
             max_audit_log_entries: max_audit_log_entries.max(1),
+            max_deadline_queue_entries: DEFAULT_MAX_DEADLINE_QUEUE_ENTRIES,
         }
     }
 
@@ -507,6 +537,140 @@ impl ControlLanePolicy {
         Ok(lane)
     }
 
+    /// Queue a task with the canonical lane deadline metadata used by deadline-aware ticks.
+    pub fn enqueue_deadline_task(
+        &mut self,
+        task_class: ControlTaskClass,
+        task_id: &str,
+        enqueued_at_ms: u64,
+        trace_id: &str,
+    ) -> Result<QueuedControlTask, String> {
+        if task_id.is_empty() {
+            return Err(format!(
+                "{}: task id must not be empty",
+                error_codes::ERR_CLP_INVALID_TASK_ID
+            ));
+        }
+        if self.deadline_queue.len() >= self.max_deadline_queue_entries {
+            return Err(format!(
+                "{}: control lane deadline queue is full",
+                error_codes::ERR_CLP_DEADLINE_QUEUE_FULL
+            ));
+        }
+
+        let assignment = self.assignments.get(&task_class).ok_or_else(|| {
+            format!(
+                "{}: unknown task class {:?}",
+                error_codes::ERR_CLP_UNKNOWN_TASK,
+                task_class
+            )
+        })?;
+        let lane = assignment.lane;
+        let timeout_ms = assignment.timeout_ms;
+        let task = QueuedControlTask {
+            task_id: task_id.to_string(),
+            task_class,
+            lane,
+            enqueued_at_ms,
+            deadline_at_ms: timeout_ms.map(|timeout| enqueued_at_ms.saturating_add(timeout)),
+        };
+
+        Self::push_bounded(
+            &mut self.audit_log,
+            LanePolicyAuditRecord {
+                timestamp_ms: enqueued_at_ms,
+                event_code: event_codes::LAN_001.to_string(),
+                task_class: task_class.as_str().to_string(),
+                lane: lane.as_str().to_string(),
+                budget_remaining_ms: timeout_ms.unwrap_or(0),
+                trace_id: trace_id.to_string(),
+            },
+            self.max_audit_log_entries,
+        );
+
+        self.deadline_queue.push(task.clone());
+        Ok(task)
+    }
+
+    /// Schedule queued tasks after expiring deadline-bound work at `now_ms`.
+    pub fn tick_deadline_aware(
+        &mut self,
+        now_ms: u64,
+        total_slots: u32,
+        trace_id: &str,
+    ) -> DeadlineAwareTick {
+        let queued_tasks = std::mem::take(&mut self.deadline_queue);
+        let mut cancel_tasks = Vec::new();
+        let mut timed_tasks = Vec::new();
+        let mut ready_tasks = Vec::new();
+        let mut timed_out_task_ids = Vec::new();
+
+        for task in queued_tasks {
+            if task
+                .deadline_at_ms
+                .is_some_and(|deadline_at_ms| now_ms >= deadline_at_ms)
+            {
+                self.record_deadline_timeout(&task, now_ms, trace_id);
+                timed_out_task_ids.push(task.task_id);
+                continue;
+            }
+
+            match task.lane {
+                ControlLane::Cancel => cancel_tasks.push(task),
+                ControlLane::Timed => timed_tasks.push(task),
+                ControlLane::Ready => ready_tasks.push(task),
+            }
+        }
+
+        cancel_tasks.sort_by_key(|task| (task.enqueued_at_ms, task.task_id.clone()));
+        timed_tasks.sort_by_key(|task| {
+            (
+                task.deadline_at_ms.unwrap_or(u64::MAX),
+                task.enqueued_at_ms,
+                task.task_id.clone(),
+            )
+        });
+        ready_tasks.sort_by_key(|task| (task.enqueued_at_ms, task.task_id.clone()));
+
+        let cancel_pending = Self::usize_to_u32_saturating(cancel_tasks.len());
+        let timed_pending = Self::usize_to_u32_saturating(timed_tasks.len());
+        let ready_pending = Self::usize_to_u32_saturating(ready_tasks.len());
+        let metrics = self.tick(
+            cancel_pending,
+            timed_pending,
+            ready_pending,
+            total_slots,
+            trace_id,
+        );
+
+        let mut scheduled_task_ids = Vec::new();
+        Self::schedule_front_tasks(
+            &mut cancel_tasks,
+            metrics.cancel_lane_tasks_run,
+            &mut scheduled_task_ids,
+        );
+        Self::schedule_front_tasks(
+            &mut timed_tasks,
+            metrics.timed_lane_tasks_run,
+            &mut scheduled_task_ids,
+        );
+        Self::schedule_front_tasks(
+            &mut ready_tasks,
+            metrics.ready_lane_tasks_run,
+            &mut scheduled_task_ids,
+        );
+
+        self.deadline_queue = cancel_tasks;
+        self.deadline_queue.extend(timed_tasks);
+        self.deadline_queue.extend(ready_tasks);
+
+        DeadlineAwareTick {
+            metrics,
+            scheduled_task_ids,
+            timed_out_task_ids,
+        }
+    }
+
     /// Simulate one scheduling tick: processes pending tasks by lane priority,
     /// enforces budgets, and detects starvation.
     pub fn tick(
@@ -520,10 +684,14 @@ impl ControlLanePolicy {
         self.current_tick = self.current_tick.saturating_add(1);
 
         // Allocate slots by budget
-        let cancel_slots = u32::try_from(u64::try_from(total_slots).unwrap_or(u64::MAX) * CANCEL_LANE_BUDGET_PCT as u64 / 100)
-            .unwrap_or(u32::MAX);
-        let timed_slots = u32::try_from(u64::try_from(total_slots).unwrap_or(u64::MAX) * TIMED_LANE_BUDGET_PCT as u64 / 100)
-            .unwrap_or(u32::MAX);
+        let cancel_slots = u32::try_from(
+            u64::try_from(total_slots).unwrap_or(u64::MAX) * CANCEL_LANE_BUDGET_PCT as u64 / 100,
+        )
+        .unwrap_or(u32::MAX);
+        let timed_slots = u32::try_from(
+            u64::try_from(total_slots).unwrap_or(u64::MAX) * TIMED_LANE_BUDGET_PCT as u64 / 100,
+        )
+        .unwrap_or(u32::MAX);
         let ready_slots = total_slots
             .saturating_sub(cancel_slots)
             .saturating_sub(timed_slots);
@@ -709,6 +877,11 @@ impl ControlLanePolicy {
         &self.audit_log
     }
 
+    /// Get pending deadline-aware queued tasks.
+    pub fn deadline_queue(&self) -> &[QueuedControlTask] {
+        &self.deadline_queue
+    }
+
     /// Get the configured audit-log capacity.
     pub fn audit_log_capacity(&self) -> usize {
         self.max_audit_log_entries
@@ -744,6 +917,49 @@ impl ControlLanePolicy {
     /// Scheduling priority comparison: returns true if lane_a should schedule before lane_b.
     pub fn has_priority(lane_a: ControlLane, lane_b: ControlLane) -> bool {
         lane_a.priority() < lane_b.priority()
+    }
+
+    fn record_deadline_timeout(&mut self, task: &QueuedControlTask, now_ms: u64, trace_id: &str) {
+        Self::push_bounded(
+            &mut self.preemption_events,
+            PreemptionEvent {
+                task_id: task.task_id.clone(),
+                lane: task.lane,
+                budget_remaining_ms: 0,
+                event_code: event_codes::LAN_006.to_string(),
+                trace_id: trace_id.to_string(),
+            },
+            self.max_preemption_events,
+        );
+        Self::push_bounded(
+            &mut self.audit_log,
+            LanePolicyAuditRecord {
+                timestamp_ms: now_ms,
+                event_code: event_codes::LAN_006.to_string(),
+                task_class: task.task_class.as_str().to_string(),
+                lane: task.lane.as_str().to_string(),
+                budget_remaining_ms: 0,
+                trace_id: trace_id.to_string(),
+            },
+            self.max_audit_log_entries,
+        );
+    }
+
+    fn schedule_front_tasks(
+        tasks: &mut Vec<QueuedControlTask>,
+        scheduled_count: u32,
+        scheduled_task_ids: &mut Vec<String>,
+    ) {
+        let scheduled_count = usize::try_from(scheduled_count)
+            .unwrap_or(usize::MAX)
+            .min(tasks.len());
+        let remaining_tasks = tasks.split_off(scheduled_count);
+        scheduled_task_ids.extend(tasks.drain(..).map(|task| task.task_id));
+        *tasks = remaining_tasks;
+    }
+
+    fn usize_to_u32_saturating(value: usize) -> u32 {
+        u32::try_from(value).unwrap_or(u32::MAX)
     }
 
     fn push_bounded<T>(entries: &mut Vec<T>, value: T, max_entries: usize) {
@@ -1340,6 +1556,7 @@ mod tests {
         assert_eq!(event_codes::LAN_003, "LAN-003");
         assert_eq!(event_codes::LAN_004, "LAN-004");
         assert_eq!(event_codes::LAN_005, "LAN-005");
+        assert_eq!(event_codes::LAN_006, "LAN-006");
     }
 
     #[test]
@@ -1352,6 +1569,8 @@ mod tests {
         let _ = error_codes::ERR_CLP_INVALID_BUDGET;
         let _ = error_codes::ERR_CLP_DUPLICATE_CLASS;
         let _ = error_codes::ERR_CLP_POLICY_MISMATCH;
+        let _ = error_codes::ERR_CLP_INVALID_TASK_ID;
+        let _ = error_codes::ERR_CLP_DEADLINE_QUEUE_FULL;
     }
 
     #[test]
