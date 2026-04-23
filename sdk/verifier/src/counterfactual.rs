@@ -131,6 +131,19 @@ fn ensure_counterfactual_references_bundle(
                 actual: "array(len=0)".to_string(),
             });
         }
+        if let Some(actual) = extract_nonempty_string(output, &["metadata", "bundle_hash"]) {
+            validate_bundle_hash(actual).map_err(|actual| {
+                CounterfactualReceiptError::CounterfactualBundleHashMalformed { actual }
+            })?;
+            if actual != expected_bundle_hash {
+                return Err(
+                    CounterfactualReceiptError::CounterfactualBundleHashMismatch {
+                        expected: expected_bundle_hash.to_string(),
+                        actual: actual.to_string(),
+                    },
+                );
+            }
+        }
         for (index, result) in results.iter().enumerate() {
             let actual = extract_nonempty_string(result, &["metadata", "bundle_hash"])
                 .ok_or(CounterfactualReceiptError::SweepResultBundleHashMissing { index })?;
@@ -235,6 +248,60 @@ mod tests {
             &signature_bytes,
         )
         .expect("sweep with matching bundle_hash on every result should verify");
+    }
+
+    #[test]
+    fn verify_counterfactual_receipt_accepts_matching_top_level_bundle_hash_for_sweep() {
+        let baseline_bundle = json!({"integrity_hash": TEST_BUNDLE_HASH});
+        let counterfactual_output = json!({
+            "results": [
+                {"metadata": {"bundle_hash": TEST_BUNDLE_HASH}},
+                {"metadata": {"bundle_hash": TEST_BUNDLE_HASH}}
+            ],
+            "metadata": {"bundle_hash": TEST_BUNDLE_HASH}
+        });
+        let signing_key = SigningKey::from_bytes(&[26_u8; 32]);
+        let signature_bytes = sign_counterfactual_value(&counterfactual_output, &signing_key);
+
+        verify_counterfactual_receipt(
+            &baseline_bundle,
+            &counterfactual_output,
+            &signing_key.verifying_key(),
+            &signature_bytes,
+        )
+        .expect("matching top-level bundle_hash should verify for sweep receipts");
+    }
+
+    #[test]
+    fn verify_counterfactual_receipt_rejects_conflicting_top_level_bundle_hash_for_sweep() {
+        let baseline_bundle = json!({"integrity_hash": TEST_BUNDLE_HASH});
+        let conflicting_hash =
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let counterfactual_output = json!({
+            "results": [
+                {"metadata": {"bundle_hash": TEST_BUNDLE_HASH}},
+                {"metadata": {"bundle_hash": TEST_BUNDLE_HASH}}
+            ],
+            "metadata": {"bundle_hash": conflicting_hash}
+        });
+        let signing_key = SigningKey::from_bytes(&[27_u8; 32]);
+        let signature_bytes = sign_counterfactual_value(&counterfactual_output, &signing_key);
+
+        let err = verify_counterfactual_receipt(
+            &baseline_bundle,
+            &counterfactual_output,
+            &signing_key.verifying_key(),
+            &signature_bytes,
+        )
+        .expect_err("conflicting top-level bundle_hash must fail closed for sweep receipts");
+
+        assert_eq!(
+            err,
+            CounterfactualReceiptError::CounterfactualBundleHashMismatch {
+                expected: TEST_BUNDLE_HASH.to_string(),
+                actual: conflicting_hash.to_string(),
+            }
+        );
     }
 
     #[test]
