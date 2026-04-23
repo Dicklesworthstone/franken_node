@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use chrono::{DateTime, FixedOffset};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -153,6 +154,10 @@ pub enum BundleError {
         expected: String,
         actual: String,
     },
+    InvalidTimestamp {
+        field: &'static str,
+        actual: String,
+    },
     NonMonotonicTimestamp {
         previous: String,
         current: String,
@@ -256,6 +261,10 @@ impl fmt::Display for BundleError {
             } => write!(
                 formatter,
                 "replay bundle chunk {artifact_path} digest mismatch: expected {expected}, got {actual}"
+            ),
+            Self::InvalidTimestamp { field, actual } => write!(
+                formatter,
+                "replay bundle field {field} must be RFC3339: got {actual}"
             ),
             Self::NonMonotonicTimestamp {
                 previous,
@@ -471,6 +480,7 @@ fn validate_structure(bundle: &ReplayBundle) -> Result<(), BundleError> {
     validate_nonempty("bundle_id", &bundle.bundle_id)?;
     validate_nonempty("incident_id", &bundle.incident_id)?;
     validate_nonempty("created_at", &bundle.created_at)?;
+    parse_rfc3339_timestamp("created_at", &bundle.created_at)?;
     validate_nonempty("policy_version", &bundle.policy_version)?;
     validate_nonempty("verifier_identity", &bundle.verifier_identity)?;
     validate_verifier_identity(&bundle.verifier_identity)?;
@@ -487,10 +497,11 @@ fn validate_structure(bundle: &ReplayBundle) -> Result<(), BundleError> {
     }
 
     let mut previous_sequence = None;
-    let mut previous_timestamp = None;
+    let mut previous_timestamp: Option<(DateTime<FixedOffset>, &str)> = None;
     for event in &bundle.timeline {
         validate_nonempty("timeline.event_id", &event.event_id)?;
         validate_nonempty("timeline.timestamp", &event.timestamp)?;
+        let parsed_timestamp = parse_rfc3339_timestamp("timeline.timestamp", &event.timestamp)?;
         validate_nonempty("timeline.event_type", &event.event_type)?;
         validate_nonempty("timeline.policy_version", &event.policy_version)?;
         if event.policy_version != bundle.policy_version {
@@ -508,16 +519,16 @@ fn validate_structure(bundle: &ReplayBundle) -> Result<(), BundleError> {
             });
         }
         previous_sequence = Some(event.sequence_number);
-        if let Some(previous) = previous_timestamp
-            && event.timestamp.as_str() <= previous
+        if let Some((previous, previous_raw)) = previous_timestamp
+            && parsed_timestamp <= previous
         {
             return Err(BundleError::NonMonotonicTimestamp {
-                previous: previous.to_string(),
+                previous: previous_raw.to_string(),
                 current: event.timestamp.clone(),
                 event_id: event.event_id.clone(),
             });
         }
-        previous_timestamp = Some(event.timestamp.as_str());
+        previous_timestamp = Some((parsed_timestamp, event.timestamp.as_str()));
     }
     Ok(())
 }
@@ -714,6 +725,16 @@ fn validate_nonempty(field: &'static str, value: &str) -> Result<(), BundleError
     } else {
         Ok(())
     }
+}
+
+fn parse_rfc3339_timestamp(
+    field: &'static str,
+    value: &str,
+) -> Result<DateTime<FixedOffset>, BundleError> {
+    DateTime::parse_from_rfc3339(value).map_err(|_| BundleError::InvalidTimestamp {
+        field,
+        actual: value.to_string(),
+    })
 }
 
 fn compute_signature_hex(integrity_hash: &str) -> String {
@@ -968,6 +989,54 @@ mod tests {
         assert!(matches!(
             err,
             BundleError::InvalidArtifactPath { path } if path == "artifacts/replay.json "
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_malformed_created_at_timestamp() {
+        let mut bundle = make_test_bundle("verifier://alpha");
+        bundle.created_at = "not-a-timestamp".to_string();
+        seal(&mut bundle).expect("test bundle should reseal");
+        let bytes = serialize(&bundle).expect("test bundle should serialize");
+
+        let err = verify(&bytes).expect_err("malformed created_at must fail closed");
+
+        assert!(matches!(
+            err,
+            BundleError::InvalidTimestamp { field, actual }
+                if field == "created_at" && actual == "not-a-timestamp"
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_whitespace_padded_created_at_timestamp() {
+        let mut bundle = make_test_bundle("verifier://alpha");
+        bundle.created_at = " 2026-02-21T00:00:00Z ".to_string();
+        seal(&mut bundle).expect("test bundle should reseal");
+        let bytes = serialize(&bundle).expect("test bundle should serialize");
+
+        let err = verify(&bytes).expect_err("whitespace-padded created_at must fail closed");
+
+        assert!(matches!(
+            err,
+            BundleError::InvalidTimestamp { field, actual }
+                if field == "created_at" && actual == " 2026-02-21T00:00:00Z "
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_malformed_timeline_timestamp() {
+        let mut bundle = make_test_bundle("verifier://alpha");
+        bundle.timeline[0].timestamp = "tomorrow-ish".to_string();
+        seal(&mut bundle).expect("test bundle should reseal");
+        let bytes = serialize(&bundle).expect("test bundle should serialize");
+
+        let err = verify(&bytes).expect_err("malformed timeline timestamp must fail closed");
+
+        assert!(matches!(
+            err,
+            BundleError::InvalidTimestamp { field, actual }
+                if field == "timeline.timestamp" && actual == "tomorrow-ish"
         ));
     }
 
