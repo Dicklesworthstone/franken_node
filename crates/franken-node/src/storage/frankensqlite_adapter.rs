@@ -98,6 +98,172 @@ impl fmt::Display for DurabilityTier {
 }
 
 // ---------------------------------------------------------------------------
+// CallerContext and Authorization
+// ---------------------------------------------------------------------------
+
+/// Represents the identity and role of a caller attempting storage operations.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CallerContext {
+    /// Caller identifier (e.g., "connector::fencing", "ops::telemetry")
+    pub caller_id: String,
+    /// Caller role determining access permissions
+    pub role: CallerRole,
+    /// Trace ID for audit purposes
+    pub trace_id: String,
+}
+
+/// Roles determining what storage operations are permitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CallerRole {
+    /// System-level access, can read/write all persistence classes
+    System,
+    /// Service-level access, can read/write specific classes based on service type
+    Service,
+    /// Read-only access for monitoring and observability
+    ReadOnly,
+    /// Restricted access, very limited permissions
+    Restricted,
+}
+
+impl CallerContext {
+    pub fn new(caller_id: String, role: CallerRole, trace_id: String) -> Self {
+        Self {
+            caller_id,
+            role,
+            trace_id,
+        }
+    }
+
+    /// Create a system-level context for internal operations
+    pub fn system(caller_id: &str, trace_id: &str) -> Self {
+        Self::new(caller_id.to_string(), CallerRole::System, trace_id.to_string())
+    }
+
+    /// Create a service-level context
+    pub fn service(caller_id: &str, trace_id: &str) -> Self {
+        Self::new(caller_id.to_string(), CallerRole::Service, trace_id.to_string())
+    }
+
+    /// Create a read-only context
+    pub fn read_only(caller_id: &str, trace_id: &str) -> Self {
+        Self::new(caller_id.to_string(), CallerRole::ReadOnly, trace_id.to_string())
+    }
+}
+
+/// Error types for authorization failures
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum AuthorizationError {
+    #[error("access denied: {caller_id} (role: {role:?}) cannot {operation} {class}")]
+    AccessDenied {
+        caller_id: String,
+        role: CallerRole,
+        operation: String,
+        class: String,
+    },
+    #[error("invalid caller context: {detail}")]
+    InvalidContext { detail: String },
+}
+
+/// Check if caller is authorized for the requested operation
+fn check_authorization(
+    caller: &CallerContext,
+    operation: &str,
+    class: PersistenceClass,
+) -> Result<(), AuthorizationError> {
+    // Validate caller context
+    if caller.caller_id.is_empty() {
+        return Err(AuthorizationError::InvalidContext {
+            detail: "caller_id cannot be empty".to_string(),
+        });
+    }
+    if caller.trace_id.is_empty() {
+        return Err(AuthorizationError::InvalidContext {
+            detail: "trace_id cannot be empty".to_string(),
+        });
+    }
+
+    match caller.role {
+        CallerRole::System => {
+            // System role can access everything
+            Ok(())
+        }
+        CallerRole::Service => {
+            // Service role has limited access based on caller_id
+            match class {
+                PersistenceClass::ControlState => {
+                    // Only specific services can access control state
+                    if caller.caller_id.starts_with("connector::")
+                        || caller.caller_id.starts_with("ops::")
+                    {
+                        Ok(())
+                    } else {
+                        Err(AuthorizationError::AccessDenied {
+                            caller_id: caller.caller_id.clone(),
+                            role: caller.role,
+                            operation: operation.to_string(),
+                            class: class.label().to_string(),
+                        })
+                    }
+                }
+                PersistenceClass::AuditLog => {
+                    // Audit log writes restricted to audit system
+                    if operation == "write"
+                        && !caller.caller_id.starts_with("observability::")
+                        && !caller.caller_id.starts_with("audit::")
+                    {
+                        Err(AuthorizationError::AccessDenied {
+                            caller_id: caller.caller_id.clone(),
+                            role: caller.role,
+                            operation: operation.to_string(),
+                            class: class.label().to_string(),
+                        })
+                    } else {
+                        Ok(())
+                    }
+                }
+                PersistenceClass::Snapshot | PersistenceClass::Cache => {
+                    // More permissive for snapshot and cache
+                    Ok(())
+                }
+            }
+        }
+        CallerRole::ReadOnly => {
+            // Read-only role can only read, and not from audit logs
+            if operation != "read" {
+                Err(AuthorizationError::AccessDenied {
+                    caller_id: caller.caller_id.clone(),
+                    role: caller.role,
+                    operation: operation.to_string(),
+                    class: class.label().to_string(),
+                })
+            } else if class == PersistenceClass::AuditLog {
+                Err(AuthorizationError::AccessDenied {
+                    caller_id: caller.caller_id.clone(),
+                    role: caller.role,
+                    operation: operation.to_string(),
+                    class: class.label().to_string(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+        CallerRole::Restricted => {
+            // Restricted role can only access cache
+            if class != PersistenceClass::Cache {
+                Err(AuthorizationError::AccessDenied {
+                    caller_id: caller.caller_id.clone(),
+                    role: caller.role,
+                    operation: operation.to_string(),
+                    class: class.label().to_string(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PersistenceClass
 // ---------------------------------------------------------------------------
 
@@ -248,6 +414,7 @@ pub enum AdapterError {
     SchemaMigrationFailed { version: u32, reason: String },
     ConfigValidationFailed { reason: String },
     PoolExhausted,
+    AuthorizationFailed(AuthorizationError),
 }
 
 impl fmt::Display for AdapterError {
@@ -265,6 +432,7 @@ impl fmt::Display for AdapterError {
                 write!(f, "config validation failed: {reason}")
             }
             Self::PoolExhausted => write!(f, "connection pool exhausted"),
+            Self::AuthorizationFailed(auth_err) => write!(f, "authorization failed: {auth_err}"),
         }
     }
 }
@@ -359,12 +527,17 @@ impl FrankensqliteAdapter {
     }
 
     /// Write a key-value pair with persistence-class-appropriate durability.
+    /// Requires caller context for authorization validation.
     pub fn write(
         &mut self,
+        caller: &CallerContext,
         class: PersistenceClass,
         key: &str,
         value: &[u8],
     ) -> Result<WriteResult, AdapterError> {
+        // Security: Check authorization before allowing storage access
+        check_authorization(caller, "write", class)
+            .map_err(AdapterError::AuthorizationFailed)?;
         let start = Instant::now();
         let tier = class.tier();
         let store_key = (class, key.to_string());
@@ -413,18 +586,57 @@ impl FrankensqliteAdapter {
     }
 
     /// Read a value by persistence class and key.
-    pub fn read(&mut self, class: PersistenceClass, key: &str) -> ReadResult {
+    /// Requires caller context for authorization validation.
+    pub fn read(
+        &mut self,
+        caller: &CallerContext,
+        class: PersistenceClass,
+        key: &str,
+    ) -> Result<ReadResult, AdapterError> {
+        // Security: Check authorization before allowing storage access
+        check_authorization(caller, "read", class)
+            .map_err(AdapterError::AuthorizationFailed)?;
+
         self.read_count = self.read_count.saturating_add(1);
         let tier = class.tier();
         let entry = self.store.get(&(class, key.to_string()));
-        ReadResult {
+        Ok(ReadResult {
             found: entry.is_some(),
             key: key.to_string(),
             value: entry.cloned(),
             persistence_class: class,
             tier,
             cache_hit: tier == DurabilityTier::Tier3,
-        }
+        })
+    }
+
+    /// Legacy write method for backwards compatibility.
+    /// WARNING: Uses system-level permissions. Migrate to write(caller, ...) for proper authorization.
+    #[deprecated(note = "Use write(caller, class, key, value) with explicit CallerContext")]
+    pub fn write_legacy(
+        &mut self,
+        class: PersistenceClass,
+        key: &str,
+        value: &[u8],
+    ) -> Result<WriteResult, AdapterError> {
+        let caller = CallerContext::system("legacy::adapter", "legacy-write");
+        self.write(&caller, class, key, value)
+    }
+
+    /// Legacy read method for backwards compatibility.
+    /// WARNING: Uses system-level permissions. Migrate to read(caller, ...) for proper authorization.
+    #[deprecated(note = "Use read(caller, class, key) with explicit CallerContext")]
+    pub fn read_legacy(&mut self, class: PersistenceClass, key: &str) -> ReadResult {
+        let caller = CallerContext::system("legacy::adapter", "legacy-read");
+        // For backwards compatibility, unwrap the Result and return default on auth failure
+        self.read_legacy(&caller, class, key).unwrap_or_else(|_| ReadResult {
+            found: false,
+            key: key.to_string(),
+            value: None,
+            persistence_class: class,
+            tier: class.tier(),
+            cache_hit: false,
+        })
     }
 
     /// Replay audit log entries and verify determinism.
@@ -771,9 +983,9 @@ mod tests {
     fn test_write_read_control_state() {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
-            .write(PersistenceClass::ControlState, "fence_1", b"token_abc")
+            .write_legacy(PersistenceClass::ControlState, "fence_1", b"token_abc")
             .expect("should succeed");
-        let result = adapter.read(PersistenceClass::ControlState, "fence_1");
+        let result = adapter.read_legacy(PersistenceClass::ControlState, "fence_1");
         assert!(result.found);
         assert_eq!(result.value.expect("should succeed"), b"token_abc");
         assert_eq!(result.tier, DurabilityTier::Tier1);
@@ -783,9 +995,9 @@ mod tests {
     fn test_write_read_audit_log() {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
-            .write(PersistenceClass::AuditLog, "entry_1", b"audit_data")
+            .write_legacy(PersistenceClass::AuditLog, "entry_1", b"audit_data")
             .expect("should succeed");
-        let result = adapter.read(PersistenceClass::AuditLog, "entry_1");
+        let result = adapter.read_legacy(PersistenceClass::AuditLog, "entry_1");
         assert!(result.found);
     }
 
@@ -793,9 +1005,9 @@ mod tests {
     fn test_write_read_snapshot() {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
-            .write(PersistenceClass::Snapshot, "snap_1", b"state")
+            .write_legacy(PersistenceClass::Snapshot, "snap_1", b"state")
             .expect("should succeed");
-        let result = adapter.read(PersistenceClass::Snapshot, "snap_1");
+        let result = adapter.read_legacy(PersistenceClass::Snapshot, "snap_1");
         assert!(result.found);
         assert_eq!(result.tier, DurabilityTier::Tier2);
     }
@@ -804,9 +1016,9 @@ mod tests {
     fn test_write_read_cache() {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
-            .write(PersistenceClass::Cache, "cached_1", b"val")
+            .write_legacy(PersistenceClass::Cache, "cached_1", b"val")
             .expect("should succeed");
-        let result = adapter.read(PersistenceClass::Cache, "cached_1");
+        let result = adapter.read_legacy(PersistenceClass::Cache, "cached_1");
         assert!(result.found);
         assert!(result.cache_hit);
         assert_eq!(result.tier, DurabilityTier::Tier3);
@@ -815,7 +1027,7 @@ mod tests {
     #[test]
     fn test_read_missing_key() {
         let mut adapter = FrankensqliteAdapter::default();
-        let result = adapter.read(PersistenceClass::ControlState, "nonexistent");
+        let result = adapter.read_legacy(PersistenceClass::ControlState, "nonexistent");
         assert!(!result.found);
         assert!(result.value.is_none());
     }
@@ -824,12 +1036,12 @@ mod tests {
     fn test_write_overwrites() {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
-            .write(PersistenceClass::ControlState, "k", b"v1")
+            .write_legacy(PersistenceClass::ControlState, "k", b"v1")
             .expect("should succeed");
         adapter
-            .write(PersistenceClass::ControlState, "k", b"v2")
+            .write_legacy(PersistenceClass::ControlState, "k", b"v2")
             .expect("should succeed");
-        let result = adapter.read(PersistenceClass::ControlState, "k");
+        let result = adapter.read_legacy(PersistenceClass::ControlState, "k");
         assert_eq!(result.value.expect("should succeed"), b"v2");
     }
 
@@ -837,15 +1049,15 @@ mod tests {
     fn test_audit_log_rejects_duplicate_keys() {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
-            .write(PersistenceClass::AuditLog, "entry_1", b"audit_data")
+            .write_legacy(PersistenceClass::AuditLog, "entry_1", b"audit_data")
             .expect("initial audit log write should succeed");
 
         let err = adapter
-            .write(PersistenceClass::AuditLog, "entry_1", b"tampered")
+            .write_legacy(PersistenceClass::AuditLog, "entry_1", b"tampered")
             .expect_err("duplicate audit keys must fail closed");
 
         assert!(matches!(err, AdapterError::WriteFailure { .. }));
-        let result = adapter.read(PersistenceClass::AuditLog, "entry_1");
+        let result = adapter.read_legacy(PersistenceClass::AuditLog, "entry_1");
         assert_eq!(
             result
                 .value
@@ -867,10 +1079,10 @@ mod tests {
     fn test_replay_deterministic() {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
-            .write(PersistenceClass::AuditLog, "e1", b"data1")
+            .write_legacy(PersistenceClass::AuditLog, "e1", b"data1")
             .expect("should succeed");
         adapter
-            .write(PersistenceClass::AuditLog, "e2", b"data2")
+            .write_legacy(PersistenceClass::AuditLog, "e2", b"data2")
             .expect("should succeed");
         let results = adapter.replay();
         assert_eq!(results.len(), 2);
@@ -881,7 +1093,7 @@ mod tests {
     fn test_replay_emits_start_event() {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
-            .write(PersistenceClass::AuditLog, "e1", b"data")
+            .write_legacy(PersistenceClass::AuditLog, "e1", b"data")
             .expect("should succeed");
         let _ = adapter.take_events(); // clear init + write events
         adapter.replay();
@@ -899,13 +1111,13 @@ mod tests {
     fn test_crash_recovery_preserves_tier1() {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
-            .write(PersistenceClass::ControlState, "f1", b"fence")
+            .write_legacy(PersistenceClass::ControlState, "f1", b"fence")
             .expect("should succeed");
         adapter
-            .write(PersistenceClass::AuditLog, "a1", b"audit")
+            .write_legacy(PersistenceClass::AuditLog, "a1", b"audit")
             .expect("should succeed");
         adapter
-            .write(PersistenceClass::Cache, "c1", b"cache")
+            .write_legacy(PersistenceClass::Cache, "c1", b"cache")
             .expect("should succeed");
         let recovered = adapter.crash_recovery();
         assert!(recovered >= 2); // at least the two Tier 1 entries
@@ -959,7 +1171,7 @@ mod tests {
         let mut adapter = FrankensqliteAdapter::default();
         for class in PersistenceClass::all() {
             adapter
-                .write(*class, "test_key", b"test")
+                .write_legacy(*class, "test_key", b"test")
                 .expect("should succeed");
         }
         assert!(adapter.gate_pass());
@@ -971,12 +1183,12 @@ mod tests {
     fn test_summary_counts() {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
-            .write(PersistenceClass::ControlState, "k1", b"v")
+            .write_legacy(PersistenceClass::ControlState, "k1", b"v")
             .expect("should succeed");
         adapter
-            .write(PersistenceClass::Cache, "k2", b"v")
+            .write_legacy(PersistenceClass::Cache, "k2", b"v")
             .expect("should succeed");
-        adapter.read(PersistenceClass::ControlState, "k1");
+        adapter.read_legacy(PersistenceClass::ControlState, "k1");
         let summary = adapter.summary();
         assert_eq!(summary.total_writes, 2);
         assert_eq!(summary.total_reads, 1);
@@ -987,10 +1199,10 @@ mod tests {
     fn test_summary_writes_by_tier() {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
-            .write(PersistenceClass::ControlState, "k", b"v")
+            .write_legacy(PersistenceClass::ControlState, "k", b"v")
             .expect("should succeed");
         adapter
-            .write(PersistenceClass::Cache, "k", b"v")
+            .write_legacy(PersistenceClass::Cache, "k", b"v")
             .expect("should succeed");
         let summary = adapter.summary();
         assert!(summary.writes_by_tier.contains_key("tier1_wal_crash_safe"));
@@ -1015,7 +1227,7 @@ mod tests {
         let mut adapter = FrankensqliteAdapter::default();
         let _ = adapter.take_events();
         adapter
-            .write(PersistenceClass::ControlState, "k", b"v")
+            .write_legacy(PersistenceClass::ControlState, "k", b"v")
             .expect("should succeed");
         assert!(
             adapter
@@ -1040,7 +1252,7 @@ mod tests {
         let mut adapter = FrankensqliteAdapter::default();
         for class in PersistenceClass::all() {
             adapter
-                .write(*class, "test", b"val")
+                .write_legacy(*class, "test", b"val")
                 .expect("should succeed");
         }
         let report = adapter.to_report();
@@ -1091,12 +1303,12 @@ mod tests {
             let key = format!("matrix-{index}");
             let value = format!("value-{index}");
             let write = adapter
-                .write(*class, &key, value.as_bytes())
+                .write_legacy(*class, &key, value.as_bytes())
                 .expect("matrix write should succeed");
             assert_eq!(write.persistence_class, *class);
             assert_eq!(write.tier, *expected_tier);
 
-            let read = adapter.read(*class, &key);
+            let read = adapter.read_legacy(*class, &key);
             assert!(read.found, "matrix row should round-trip {}", class.label());
             assert_eq!(read.value.as_deref(), Some(value.as_bytes()));
             assert_eq!(read.persistence_class, *class);
@@ -1144,14 +1356,14 @@ mod tests {
         let mut adapter = FrankensqliteAdapter::default();
         for i in 0..10 {
             adapter
-                .write(
+                .write_legacy(
                     PersistenceClass::ControlState,
                     "shared_key",
                     format!("value_{i}").as_bytes(),
                 )
                 .expect("should succeed");
         }
-        let result = adapter.read(PersistenceClass::ControlState, "shared_key");
+        let result = adapter.read_legacy(PersistenceClass::ControlState, "shared_key");
         assert!(result.found);
         assert_eq!(result.value.expect("should succeed"), b"value_9");
     }
@@ -1161,11 +1373,11 @@ mod tests {
         let mut adapter = FrankensqliteAdapter::default();
         for class in PersistenceClass::all() {
             adapter
-                .write(*class, "same_key", b"class_data")
+                .write_legacy(*class, "same_key", b"class_data")
                 .expect("should succeed");
         }
         for class in PersistenceClass::all() {
-            let result = adapter.read(*class, "same_key");
+            let result = adapter.read_legacy(*class, "same_key");
             assert!(result.found, "Missing data for class {}", class.label());
         }
     }
@@ -1225,8 +1437,8 @@ mod tests {
             a1.write(*class, "k", b"v").expect("should succeed");
             a2.write(*class, "k", b"v").expect("should succeed");
         }
-        let r1 = a1.read(PersistenceClass::ControlState, "k");
-        let r2 = a2.read(PersistenceClass::ControlState, "k");
+        let r1 = a1.read_legacy(PersistenceClass::ControlState, "k");
+        let r2 = a2.read_legacy(PersistenceClass::ControlState, "k");
         assert_eq!(r1.value, r2.value);
     }
 
@@ -1236,7 +1448,7 @@ mod tests {
     fn test_summary_serde_roundtrip() {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
-            .write(PersistenceClass::ControlState, "k", b"v")
+            .write_legacy(PersistenceClass::ControlState, "k", b"v")
             .expect("should succeed");
         let summary = adapter.summary();
         let json = serde_json::to_string(&summary).expect("should succeed");
@@ -1248,7 +1460,7 @@ mod tests {
     fn duplicate_audit_write_does_not_consume_success_counters_or_tier_counts() {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
-            .write(PersistenceClass::AuditLog, "audit-1", b"original")
+            .write_legacy(PersistenceClass::AuditLog, "audit-1", b"original")
             .expect("initial audit write should succeed");
         let writes_before = adapter.summary().total_writes;
         let tier1_before = adapter
@@ -1259,7 +1471,7 @@ mod tests {
         let audit_len_before = adapter.audit_log.len();
 
         let err = adapter
-            .write(PersistenceClass::AuditLog, "audit-1", b"tampered")
+            .write_legacy(PersistenceClass::AuditLog, "audit-1", b"tampered")
             .expect_err("duplicate audit write must fail closed");
 
         assert!(matches!(err, AdapterError::WriteFailure { .. }));
@@ -1285,15 +1497,15 @@ mod tests {
     fn duplicate_audit_failure_keeps_gate_closed_after_prior_success() {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
-            .write(PersistenceClass::ControlState, "control", b"ok")
+            .write_legacy(PersistenceClass::ControlState, "control", b"ok")
             .expect("control write should succeed");
         assert!(adapter.gate_pass());
 
         adapter
-            .write(PersistenceClass::AuditLog, "audit-1", b"original")
+            .write_legacy(PersistenceClass::AuditLog, "audit-1", b"original")
             .expect("initial audit write should succeed");
         let err = adapter
-            .write(PersistenceClass::AuditLog, "audit-1", b"duplicate")
+            .write_legacy(PersistenceClass::AuditLog, "audit-1", b"duplicate")
             .expect_err("duplicate audit write must fail closed");
 
         assert!(matches!(err, AdapterError::WriteFailure { .. }));
@@ -1305,7 +1517,7 @@ mod tests {
     fn replay_mismatch_when_stored_audit_value_is_tampered() {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
-            .write(PersistenceClass::AuditLog, "audit-1", b"expected")
+            .write_legacy(PersistenceClass::AuditLog, "audit-1", b"expected")
             .expect("audit write should succeed");
         adapter.store.insert(
             (PersistenceClass::AuditLog, "audit-1".to_string()),
@@ -1329,7 +1541,7 @@ mod tests {
     fn replay_mismatch_when_audit_entry_missing_from_store() {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
-            .write(PersistenceClass::AuditLog, "audit-1", b"expected")
+            .write_legacy(PersistenceClass::AuditLog, "audit-1", b"expected")
             .expect("audit write should succeed");
         adapter
             .store
@@ -1392,7 +1604,7 @@ mod tests {
     fn missing_read_increments_read_count_without_creating_store_entry() {
         let mut adapter = FrankensqliteAdapter::default();
 
-        let result = adapter.read(PersistenceClass::Snapshot, "missing");
+        let result = adapter.read_legacy(PersistenceClass::Snapshot, "missing");
 
         assert!(!result.found);
         assert!(result.value.is_none());
@@ -1410,10 +1622,10 @@ mod tests {
     fn crash_recovery_excludes_non_tier1_entries() {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
-            .write(PersistenceClass::Snapshot, "snapshot", b"tier2")
+            .write_legacy(PersistenceClass::Snapshot, "snapshot", b"tier2")
             .expect("snapshot write should succeed");
         adapter
-            .write(PersistenceClass::Cache, "cache", b"tier3")
+            .write_legacy(PersistenceClass::Cache, "cache", b"tier3")
             .expect("cache write should succeed");
 
         let recovered = adapter.crash_recovery();
@@ -1457,7 +1669,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
             assert!(write_result.is_ok(), "SQL injection key should be handled safely: {}", malicious_key);
 
             // Verify the key is stored and retrievable (escaped/sanitized)
-            let read_result = adapter.read(PersistenceClass::ControlState, malicious_key);
+            let read_result = adapter.read_legacy(PersistenceClass::ControlState, malicious_key);
             assert!(read_result.found, "malicious key should be retrievable: {}", malicious_key);
             assert_eq!(read_result.value.unwrap(), format!("test_value_{i}").as_bytes());
         }
@@ -1492,7 +1704,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
             assert!(write_result.is_ok(), "Unicode injection should be handled safely");
 
             // Verify data integrity preserved
-            let read_result = adapter.read(PersistenceClass::AuditLog, unicode_key);
+            let read_result = adapter.read_legacy(PersistenceClass::AuditLog, unicode_key);
             assert!(read_result.found);
             assert_eq!(read_result.value.unwrap(), unicode_value.as_bytes());
         }
@@ -1520,7 +1732,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         match write_result {
             Ok(_) => {
                 // If write succeeds, verify data integrity
-                let read_result = adapter.read(PersistenceClass::Cache, &massive_key);
+                let read_result = adapter.read_legacy(PersistenceClass::Cache, &massive_key);
                 assert!(read_result.found);
                 assert_eq!(read_result.value.unwrap().len(), 50_000_000);
 
@@ -1559,7 +1771,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
             // Should handle overflow gracefully with saturating arithmetic
             assert!(write_result.is_ok(), "overflow boundary operation should succeed");
 
-            let read_result = adapter.read(PersistenceClass::ControlState, &key);
+            let read_result = adapter.read_legacy(PersistenceClass::ControlState, &key);
             assert!(read_result.found);
         }
 
@@ -1604,7 +1816,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         // Verify all keys are independently accessible (no collisions)
         for (i, key) in collision_candidates.iter().enumerate() {
             for class in PersistenceClass::all() {
-                let read_result = adapter.read(*class, key);
+                let read_result = adapter.read_legacy(*class, key);
                 assert!(read_result.found, "collision victim key should still be accessible");
                 assert_eq!(
                     read_result.value.unwrap(),
@@ -1639,7 +1851,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
             assert!(write_result.is_ok(), "JSON payload should be stored safely");
 
             // Verify data integrity
-            let read_result = adapter.read(PersistenceClass::Snapshot, &key);
+            let read_result = adapter.read_legacy(PersistenceClass::Snapshot, &key);
             assert!(read_result.found);
             assert_eq!(read_result.value.unwrap(), *payload);
         }
@@ -1803,7 +2015,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
 
         // Verify all keys are accessible regardless of ordering
         for (i, key) in ordering_attack_keys.iter().enumerate() {
-            let read_result = adapter.read(PersistenceClass::ControlState, key);
+            let read_result = adapter.read_legacy(PersistenceClass::ControlState, key);
             assert!(read_result.found, "ordering attack key should be accessible: {:?}", key);
             assert_eq!(
                 read_result.value.unwrap(),
@@ -1829,7 +2041,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
                 .expect("tier mapping write should succeed");
 
             // Verify read result has correct tier
-            let read_result = adapter.read(*class, "test_key");
+            let read_result = adapter.read_legacy(*class, "test_key");
             assert_eq!(read_result.tier, expected_tier,
                 "tier mapping mismatch for class {:?}", class);
 
@@ -1870,7 +2082,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         for i in 0..10 {
             let key = format!("overflow_test_{i}");
             let _ = adapter.write(PersistenceClass::ControlState, &key, b"test");
-            let _ = adapter.read(PersistenceClass::ControlState, &key);
+            let _ = adapter.read_legacy(PersistenceClass::ControlState, &key);
         }
 
         // Create write failure to test failure counter saturation
@@ -1991,7 +2203,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
 
             if result.is_ok() {
                 // If write succeeds, verify read works with same key
-                let read_result = adapter.read(PersistenceClass::Cache, &key);
+                let read_result = adapter.read_legacy(PersistenceClass::Cache, &key);
                 assert!(read_result.found, "key length {} should be readable", length);
                 assert_eq!(read_result.value.unwrap(), b"boundary_test");
 
@@ -2027,7 +2239,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
             assert!(result.is_ok());
 
             // Verify timestamp values don't cause comparison issues
-            let read_result = adapter.read(PersistenceClass::ControlState, &key);
+            let read_result = adapter.read_legacy(PersistenceClass::ControlState, &key);
             assert!(read_result.found);
 
             // Test schema migration with boundary timestamps
@@ -2080,7 +2292,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
                     let _ = adapter.write(PersistenceClass::AuditLog, &key, b"audit");
                 }
                 _ => {
-                    let _ = adapter.read(PersistenceClass::ControlState, &key);
+                    let _ = adapter.read_legacy(PersistenceClass::ControlState, &key);
                 }
             }
         }
@@ -2126,7 +2338,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         let _ = adapter.write(PersistenceClass::ControlState, "overflow_test", b"data");
         assert_eq!(adapter.write_count, usize::MAX, "write_count should saturate at MAX");
 
-        let _ = adapter.read(PersistenceClass::ControlState, "overflow_test");
+        let _ = adapter.read_legacy(PersistenceClass::ControlState, "overflow_test");
         assert_eq!(adapter.read_count, usize::MAX, "read_count should saturate at MAX");
 
         // Force write failure to test failure counter saturation
@@ -2253,7 +2465,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
                     assert!(result.latency_us <= u64::MAX, "latency should not overflow");
 
                     // Verify data length is preserved correctly
-                    let read_result = adapter.read(PersistenceClass::Cache, key);
+                    let read_result = adapter.read_legacy(PersistenceClass::Cache, key);
                     assert_eq!(read_result.value.unwrap().len(), data.len(),
                         "data length should be preserved without cast overflow");
                 }
@@ -2277,7 +2489,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
 
             let result = adapter.write(PersistenceClass::Cache, &small_test_key, &small_test_data);
             if result.is_ok() {
-                let read_result = adapter.read(PersistenceClass::Cache, &small_test_key);
+                let read_result = adapter.read_legacy(PersistenceClass::Cache, &small_test_key);
                 assert!(read_result.found, "boundary length data should be retrievable");
             }
             // Large lengths may be rejected, which is safe behavior
@@ -2316,7 +2528,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
                 let result = adapter.write(*class, key, value.as_bytes());
                 assert!(result.is_ok(), "collision test case should be handled safely");
 
-                let read_result = adapter.read(*class, key);
+                let read_result = adapter.read_legacy(*class, key);
                 assert_eq!(read_result.value.unwrap(), value.as_bytes(),
                     "collision case should preserve data integrity");
             }
@@ -2344,5 +2556,147 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
             assert!(event.detail.contains("tier="), "event should have structured tier field");
             // This ensures proper domain separation in event formatting
         }
+    }
+
+    // -- Authorization tests --
+
+    #[test]
+    fn test_authorization_system_role_access_all() {
+        let mut adapter = FrankensqliteAdapter::default();
+        let system_caller = CallerContext::system("test::system", "auth-test-1");
+
+        // System role should be able to access all persistence classes
+        for class in PersistenceClass::all() {
+            let write_result = adapter.write(&system_caller, *class, "test-key", b"test-value");
+            assert!(write_result.is_ok(), "system role should write to {:?}", class);
+
+            let read_result = adapter.read_legacy(&system_caller, *class, "test-key");
+            assert!(read_result.is_ok(), "system role should read from {:?}", class);
+        }
+    }
+
+    #[test]
+    fn test_authorization_service_role_control_state_access() {
+        let mut adapter = FrankensqliteAdapter::default();
+        let connector_caller = CallerContext::service("connector::fencing", "auth-test-2");
+        let other_caller = CallerContext::service("other::service", "auth-test-3");
+
+        // Connector service should be able to access control state
+        let write_result = adapter.write(&connector_caller, PersistenceClass::ControlState, "fence", b"token");
+        assert!(write_result.is_ok(), "connector service should write control state");
+
+        let read_result = adapter.read_legacy(&connector_caller, PersistenceClass::ControlState, "fence");
+        assert!(read_result.is_ok(), "connector service should read control state");
+
+        // Other service should be denied access to control state
+        let denied_write = adapter.write(&other_caller, PersistenceClass::ControlState, "fence2", b"token2");
+        assert!(denied_write.is_err(), "other service should be denied control state write");
+
+        let denied_read = adapter.read_legacy(&other_caller, PersistenceClass::ControlState, "fence");
+        assert!(denied_read.is_err(), "other service should be denied control state read");
+    }
+
+    #[test]
+    fn test_authorization_audit_log_write_restriction() {
+        let mut adapter = FrankensqliteAdapter::default();
+        let audit_caller = CallerContext::service("observability::audit", "auth-test-4");
+        let service_caller = CallerContext::service("service::worker", "auth-test-5");
+
+        // Audit service should be able to write audit logs
+        let write_result = adapter.write(&audit_caller, PersistenceClass::AuditLog, "audit1", b"entry");
+        assert!(write_result.is_ok(), "audit service should write audit logs");
+
+        // Regular service should be denied audit log write
+        let denied_write = adapter.write(&service_caller, PersistenceClass::AuditLog, "audit2", b"entry");
+        assert!(denied_write.is_err(), "regular service should be denied audit log write");
+
+        // But should be able to read (for queries)
+        let read_result = adapter.read_legacy(&service_caller, PersistenceClass::AuditLog, "audit1");
+        assert!(read_result.is_ok(), "regular service should read audit logs");
+    }
+
+    #[test]
+    fn test_authorization_readonly_role_restrictions() {
+        let mut adapter = FrankensqliteAdapter::default();
+        let readonly_caller = CallerContext::read_only("monitoring::service", "auth-test-6");
+
+        // Read-only role should be denied all writes
+        for class in PersistenceClass::all() {
+            let write_result = adapter.write(&readonly_caller, *class, "readonly-test", b"data");
+            assert!(write_result.is_err(), "read-only role should be denied {:?} write", class);
+        }
+
+        // Read-only should be able to read non-audit logs
+        let read_result = adapter.read_legacy(&readonly_caller, PersistenceClass::Cache, "test");
+        assert!(read_result.is_ok(), "read-only should read cache");
+
+        // But denied audit log access
+        let denied_audit_read = adapter.read_legacy(&readonly_caller, PersistenceClass::AuditLog, "test");
+        assert!(denied_audit_read.is_err(), "read-only should be denied audit log read");
+    }
+
+    #[test]
+    fn test_authorization_restricted_role_cache_only() {
+        let mut adapter = FrankensqliteAdapter::default();
+        let restricted_caller = CallerContext::new(
+            "temp::worker".to_string(),
+            CallerRole::Restricted,
+            "auth-test-7".to_string(),
+        );
+
+        // Restricted role should only access cache
+        let cache_write = adapter.write(&restricted_caller, PersistenceClass::Cache, "cache-key", b"data");
+        assert!(cache_write.is_ok(), "restricted role should write cache");
+
+        let cache_read = adapter.read_legacy(&restricted_caller, PersistenceClass::Cache, "cache-key");
+        assert!(cache_read.is_ok(), "restricted role should read cache");
+
+        // But denied all other persistence classes
+        for class in [PersistenceClass::ControlState, PersistenceClass::AuditLog, PersistenceClass::Snapshot] {
+            let denied_write = adapter.write(&restricted_caller, class, "test", b"data");
+            assert!(denied_write.is_err(), "restricted role should be denied {:?} write", class);
+
+            let denied_read = adapter.read_legacy(&restricted_caller, class, "test");
+            assert!(denied_read.is_err(), "restricted role should be denied {:?} read", class);
+        }
+    }
+
+    #[test]
+    fn test_authorization_invalid_context_rejection() {
+        let mut adapter = FrankensqliteAdapter::default();
+
+        // Empty caller ID should be rejected
+        let invalid_caller = CallerContext::new(
+            "".to_string(),
+            CallerRole::System,
+            "auth-test-8".to_string(),
+        );
+
+        let result = adapter.write(&invalid_caller, PersistenceClass::Cache, "test", b"data");
+        assert!(result.is_err(), "empty caller_id should be rejected");
+
+        // Empty trace ID should be rejected
+        let invalid_trace_caller = CallerContext::new(
+            "test::service".to_string(),
+            CallerRole::System,
+            "".to_string(),
+        );
+
+        let result = adapter.write(&invalid_trace_caller, PersistenceClass::Cache, "test", b"data");
+        assert!(result.is_err(), "empty trace_id should be rejected");
+    }
+
+    #[test]
+    fn test_legacy_methods_use_system_permissions() {
+        let mut adapter = FrankensqliteAdapter::default();
+
+        // Legacy methods should work (using system permissions)
+        #[allow(deprecated)]
+        let write_result = adapter.write_legacy(PersistenceClass::ControlState, "legacy-test", b"data");
+        assert!(write_result.is_ok(), "legacy write should use system permissions");
+
+        #[allow(deprecated)]
+        let read_result = adapter.read_legacy(PersistenceClass::ControlState, "legacy-test");
+        assert!(read_result.found, "legacy read should use system permissions");
     }
 }
