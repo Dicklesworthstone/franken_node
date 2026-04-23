@@ -100,6 +100,10 @@ name = "remotecap_cli_e2e"
 path = "tests/remotecap_cli_e2e.rs"
 
 [[test]]
+name = "remotecap_cli_wire_conformance"
+path = "tests/remotecap_cli_wire_conformance.rs"
+
+[[test]]
 name = "remote_cap_enforcement"
 path = "tests/remote_cap_enforcement.rs"
 

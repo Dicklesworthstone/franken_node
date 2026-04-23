@@ -768,11 +768,13 @@ pub struct CapabilityProvider {
 }
 
 impl CapabilityProvider {
-    #[must_use]
-    pub fn new(signing_secret: &str) -> Self {
-        Self {
+    /// Create a new CapabilityProvider with validated signing secret.
+    /// Fails closed if signing secret is empty or whitespace-only.
+    pub fn new(signing_secret: &str) -> Result<Self, RemoteCapError> {
+        validate_secret_material(signing_secret, "signing")?;
+        Ok(Self {
             signing_secret: signing_secret.to_string(),
-        }
+        })
     }
 
     /// Issue a capability token after explicit operator authorization.
@@ -856,29 +858,31 @@ pub struct CapabilityGate {
 }
 
 impl CapabilityGate {
-    #[must_use]
-    pub fn new(verification_secret: &str) -> Self {
-        Self {
+    /// Create a new CapabilityGate with validated verification secret.
+    /// Fails closed if verification secret is empty or whitespace-only.
+    pub fn new(verification_secret: &str) -> Result<Self, RemoteCapError> {
+        validate_secret_material(verification_secret, "verification")?;
+        Ok(Self {
             verification_secret: verification_secret.to_string(),
             connectivity_mode: ConnectivityMode::Connected,
             consumed_tokens: ReplayTokenSet::default(),
             revoked_tokens: HybridRevocationChecker::default(),
             replay_store: ReplayStoreBackend::from_env(),
             audit_log: Vec::new(),
-        }
+        })
     }
 
-    #[must_use]
-    pub fn with_mode(verification_secret: &str, mode: ConnectivityMode) -> Self {
-        let mut gate = Self::new(verification_secret);
+    pub fn with_mode(verification_secret: &str, mode: ConnectivityMode) -> Result<Self, RemoteCapError> {
+        let mut gate = Self::new(verification_secret)?;
         gate.connectivity_mode = mode;
-        gate
+        Ok(gate)
     }
 
     pub fn with_durable_replay_store(
         verification_secret: &str,
         store_dir: impl AsRef<Path>,
     ) -> Result<Self, RemoteCapError> {
+        validate_secret_material(verification_secret, "verification")?;
         Ok(Self {
             verification_secret: verification_secret.to_string(),
             connectivity_mode: ConnectivityMode::Connected,
@@ -1481,7 +1485,7 @@ mod tests {
 
     #[test]
     fn operator_authorization_required_for_issue() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let err = provider
             .issue(
                 "operator",
@@ -1498,7 +1502,7 @@ mod tests {
 
     #[test]
     fn missing_cap_is_denied() {
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         let err = gate
             .authorize_network(
                 None,
@@ -1514,7 +1518,7 @@ mod tests {
 
     #[test]
     fn expired_token_is_denied() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (cap, _) = provider
             .issue(
                 "operator",
@@ -1527,7 +1531,7 @@ mod tests {
             )
             .expect("issue");
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         let err = gate
             .authorize_network(
                 Some(&cap),
@@ -1542,7 +1546,7 @@ mod tests {
 
     #[test]
     fn token_is_denied_before_its_issue_timestamp() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (cap, _) = provider
             .issue(
                 "operator",
@@ -1555,7 +1559,7 @@ mod tests {
             )
             .expect("issue");
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         let err = gate
             .authorize_network(
                 Some(&cap),
@@ -1570,7 +1574,7 @@ mod tests {
 
     #[test]
     fn token_is_denied_at_exact_expiry_boundary() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (cap, _) = provider
             .issue(
                 "operator",
@@ -1583,7 +1587,7 @@ mod tests {
             )
             .expect("issue");
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         let err = gate
             .authorize_network(
                 Some(&cap),
@@ -1598,7 +1602,7 @@ mod tests {
 
     #[test]
     fn invalid_signature_is_denied() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (mut cap, _) = provider
             .issue(
                 "operator",
@@ -1612,7 +1616,7 @@ mod tests {
             .expect("issue");
         cap.signature = "forged-signature".to_string();
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         let err = gate
             .authorize_network(
                 Some(&cap),
@@ -1627,7 +1631,7 @@ mod tests {
 
     #[test]
     fn scope_escalation_is_denied() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (cap, _) = provider
             .issue(
                 "operator",
@@ -1640,7 +1644,7 @@ mod tests {
             )
             .expect("issue");
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         let err = gate
             .authorize_network(
                 Some(&cap),
@@ -1655,7 +1659,7 @@ mod tests {
 
     #[test]
     fn replay_of_single_use_token_is_denied() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (cap, _) = provider
             .issue(
                 "operator",
@@ -1668,7 +1672,7 @@ mod tests {
             )
             .expect("issue");
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         gate.authorize_network(
             Some(&cap),
             RemoteOperation::TelemetryExport,
@@ -1692,7 +1696,7 @@ mod tests {
 
     #[test]
     fn durable_replay_store_rejects_single_use_token_after_gate_restart() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (cap, _) = provider
             .issue(
                 "operator",
@@ -1739,7 +1743,7 @@ mod tests {
 
     #[test]
     fn recheck_does_not_consume_single_use_token() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (cap, _) = provider
             .issue(
                 "operator",
@@ -1752,7 +1756,7 @@ mod tests {
             )
             .expect("issue");
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         gate.recheck_network(
             Some(&cap),
             RemoteOperation::TelemetryExport,
@@ -1790,7 +1794,7 @@ mod tests {
 
     #[test]
     fn recheck_honors_revocation() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (cap, _) = provider
             .issue(
                 "operator",
@@ -1803,7 +1807,7 @@ mod tests {
             )
             .expect("issue");
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         gate.revoke(&cap, 1_700_000_020, "trace-11f");
 
         let err = gate
@@ -1820,7 +1824,7 @@ mod tests {
 
     #[test]
     fn revocation_takes_effect_immediately() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (cap, _) = provider
             .issue(
                 "operator",
@@ -1833,7 +1837,7 @@ mod tests {
             )
             .expect("issue");
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         gate.revoke(&cap, 1_700_000_020, "trace-13");
 
         let err = gate
@@ -1859,7 +1863,7 @@ mod tests {
 
     #[test]
     fn local_mode_denies_network_even_with_valid_cap() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (cap, _) = provider
             .issue(
                 "operator",
@@ -1894,7 +1898,7 @@ mod tests {
 
     #[test]
     fn lookalike_domain_is_denied_even_with_string_prefix_match() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (cap, _) = provider
             .issue(
                 "operator",
@@ -1907,7 +1911,7 @@ mod tests {
             )
             .expect("issue");
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         let err = gate
             .authorize_network(
                 Some(&cap),
@@ -1922,7 +1926,7 @@ mod tests {
 
     #[test]
     fn endpoint_with_explicit_port_is_allowed_for_host_prefix() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (cap, _) = provider
             .issue(
                 "operator",
@@ -1935,7 +1939,7 @@ mod tests {
             )
             .expect("issue");
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         gate.authorize_network(
             Some(&cap),
             RemoteOperation::TelemetryExport,
@@ -1962,7 +1966,7 @@ mod tests {
 
     #[test]
     fn issued_caps_preserve_endpoint_prefix_boundaries() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let lhs_scope = scope_with_endpoint_prefixes(&["alpha,beta", "gamma"]);
         let rhs_scope = scope_with_endpoint_prefixes(&["alpha", "beta,gamma"]);
 
@@ -1997,7 +2001,7 @@ mod tests {
 
     #[test]
     fn issuing_identical_endpoint_prefix_scopes_is_deterministic() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let lhs_scope = scope_with_endpoint_prefixes(&["alpha,beta", "gamma"]);
         let rhs_scope = scope_with_endpoint_prefixes(&["alpha,beta", "gamma"]);
 
@@ -2030,7 +2034,7 @@ mod tests {
 
     #[test]
     fn token_ids_resist_legacy_boundary_shift_collisions() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let baseline_scope = scope_with_endpoint_prefixes(&["https://safe.example.com/base"]);
         let shifted_scope = scope_with_endpoint_prefixes(&["https://safe.example.com/shifted"]);
 
@@ -2097,7 +2101,7 @@ mod tests {
 
     #[test]
     fn zero_ttl_issue_is_rejected_without_issuance_audit() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
 
         let err = provider
             .issue(
@@ -2117,7 +2121,7 @@ mod tests {
 
     #[test]
     fn empty_signing_secret_rejects_issuance_as_crypto_unavailable() {
-        let provider = CapabilityProvider::new("  ");
+        let provider = CapabilityProvider::new("  ").expect_err("whitespace should fail");
 
         let err = provider
             .issue(
@@ -2137,7 +2141,7 @@ mod tests {
 
     #[test]
     fn empty_endpoint_scope_denies_otherwise_allowed_operation() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let empty_endpoint_scope = RemoteScope::new(
             vec![RemoteOperation::TelemetryExport],
             vec![" ".to_string(), String::new()],
@@ -2154,7 +2158,7 @@ mod tests {
             )
             .expect("empty endpoint scope can be issued but must authorize nothing");
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         let err = gate
             .authorize_network(
                 Some(&cap),
@@ -2176,7 +2180,7 @@ mod tests {
 
     #[test]
     fn endpoint_prefix_without_delimiter_boundary_is_denied() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (cap, _) = provider
             .issue(
                 "operator",
@@ -2189,7 +2193,7 @@ mod tests {
             )
             .expect("issue");
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         let err = gate
             .authorize_network(
                 Some(&cap),
@@ -2211,7 +2215,7 @@ mod tests {
 
     #[test]
     fn tampered_issuer_identity_invalidates_signature() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (mut cap, _) = provider
             .issue(
                 "operator",
@@ -2225,7 +2229,7 @@ mod tests {
             .expect("issue");
         cap.issuer_identity = "operator-escalated".to_string();
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         let err = gate
             .authorize_network(
                 Some(&cap),
@@ -2241,7 +2245,7 @@ mod tests {
 
     #[test]
     fn wrong_verification_secret_denial_does_not_consume_single_use_token() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (cap, _) = provider
             .issue(
                 "operator",
@@ -2254,7 +2258,7 @@ mod tests {
             )
             .expect("issue");
 
-        let mut wrong_gate = CapabilityGate::new("secret-b");
+        let mut wrong_gate = CapabilityGate::new("secret-b").expect("valid gate");
         let err = wrong_gate
             .authorize_network(
                 Some(&cap),
@@ -2266,7 +2270,7 @@ mod tests {
             .expect_err("wrong secret must fail signature validation");
         assert_eq!(err.code(), "REMOTECAP_INVALID");
 
-        let mut correct_gate = CapabilityGate::new("secret-a");
+        let mut correct_gate = CapabilityGate::new("secret-a").expect("valid gate");
         correct_gate
             .authorize_network(
                 Some(&cap),
@@ -2280,7 +2284,7 @@ mod tests {
 
     #[test]
     fn empty_verification_secret_denial_does_not_consume_single_use_token() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (cap, _) = provider
             .issue(
                 "operator",
@@ -2293,7 +2297,7 @@ mod tests {
             )
             .expect("issue");
 
-        let mut empty_secret_gate = CapabilityGate::new("");
+        let mut empty_secret_gate = CapabilityGate::new("").expect_err("empty should fail");
         let err = empty_secret_gate
             .authorize_network(
                 Some(&cap),
@@ -2313,7 +2317,7 @@ mod tests {
             Some("REMOTECAP_CRYPTO_UNAVAILABLE")
         );
 
-        let mut correct_gate = CapabilityGate::new("secret-a");
+        let mut correct_gate = CapabilityGate::new("secret-a").expect("valid gate");
         correct_gate
             .authorize_network(
                 Some(&cap),
@@ -2350,7 +2354,7 @@ mod tests {
 
     #[test]
     fn revoked_token_denial_precedes_signature_validation() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (mut cap, _) = provider
             .issue(
                 "operator",
@@ -2364,7 +2368,7 @@ mod tests {
             .expect("issue");
         let original = cap.clone();
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         gate.revoke(&original, 1_700_000_005, "trace-revoke-first");
         cap.signature = "tampered-after-revoke".to_string();
 
@@ -2383,7 +2387,7 @@ mod tests {
 
     #[test]
     fn recheck_after_single_use_consumption_reports_replay() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (cap, _) = provider
             .issue(
                 "operator",
@@ -2396,7 +2400,7 @@ mod tests {
             )
             .expect("issue");
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         gate.authorize_network(
             Some(&cap),
             RemoteOperation::TelemetryExport,
@@ -2421,7 +2425,7 @@ mod tests {
 
     #[test]
     fn tampered_token_id_invalidates_signature() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (mut cap, _) = provider
             .issue(
                 "operator",
@@ -2435,7 +2439,7 @@ mod tests {
             .expect("issue");
         cap.token_id.push_str("-forged");
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         let err = gate
             .authorize_network(
                 Some(&cap),
@@ -2451,7 +2455,7 @@ mod tests {
 
     #[test]
     fn tampered_expiry_invalidates_signature_before_expiry_logic() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (mut cap, _) = provider
             .issue(
                 "operator",
@@ -2465,7 +2469,7 @@ mod tests {
             .expect("issue");
         cap.expires_at_epoch_secs = 1_700_999_999;
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         let err = gate
             .authorize_network(
                 Some(&cap),
@@ -2481,7 +2485,7 @@ mod tests {
 
     #[test]
     fn tampered_single_use_flag_invalidates_signature() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (mut cap, _) = provider
             .issue(
                 "operator",
@@ -2495,7 +2499,7 @@ mod tests {
             .expect("issue");
         cap.single_use = false;
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         let err = gate
             .authorize_network(
                 Some(&cap),
@@ -2511,7 +2515,7 @@ mod tests {
 
     #[test]
     fn tampered_scope_expansion_invalidates_signature() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (mut cap, _) = provider
             .issue(
                 "operator",
@@ -2528,7 +2532,7 @@ mod tests {
             .expect("issue");
         cap.scope.endpoint_prefixes = vec!["https://telemetry.example.com".to_string()];
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         let err = gate
             .authorize_network(
                 Some(&cap),
@@ -2544,7 +2548,7 @@ mod tests {
 
     #[test]
     fn path_prefix_without_delimiter_boundary_is_denied() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (cap, _) = provider
             .issue(
                 "operator",
@@ -2557,7 +2561,7 @@ mod tests {
             )
             .expect("issue");
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         let err = gate
             .authorize_network(
                 Some(&cap),
@@ -2573,7 +2577,7 @@ mod tests {
 
     #[test]
     fn scope_denial_does_not_consume_single_use_token() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (cap, _) = provider
             .issue(
                 "operator",
@@ -2589,7 +2593,7 @@ mod tests {
             )
             .expect("issue");
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         let err = gate
             .authorize_network(
                 Some(&cap),
@@ -2614,7 +2618,7 @@ mod tests {
 
     #[test]
     fn expired_single_use_token_denial_does_not_mark_consumed() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (cap, _) = provider
             .issue(
                 "operator",
@@ -2627,7 +2631,7 @@ mod tests {
             )
             .expect("issue");
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         let err = gate
             .authorize_network(
                 Some(&cap),
@@ -2644,7 +2648,7 @@ mod tests {
 
     #[test]
     fn recheck_scope_denial_does_not_consume_single_use_token() {
-        let provider = CapabilityProvider::new("secret-a");
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider").expect("valid provider");
         let (cap, _) = provider
             .issue(
                 "operator",
@@ -2660,7 +2664,7 @@ mod tests {
             )
             .expect("issue");
 
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
         let err = gate
             .recheck_network(
                 Some(&cap),
@@ -2696,7 +2700,7 @@ mod tests {
 
     #[test]
     fn capability_gate_replay_sets_are_bounded_fifo() {
-        let mut gate = CapabilityGate::new("secret-a");
+        let mut gate = CapabilityGate::new("secret-a").expect("valid gate").expect("valid gate");
 
         for index in 0..(MAX_REPLAY_ENTRIES + 32) {
             gate.consumed_tokens.insert(format!("consumed-{index:05}"));
@@ -2837,7 +2841,7 @@ mod remote_cap_comprehensive_negative_tests {
     /// Negative test: Unicode injection and encoding attacks in capability tokens
     #[test]
     fn negative_unicode_injection_and_encoding_attacks() {
-        let provider = CapabilityProvider::new("secret-key");
+        let provider = CapabilityProvider::new("secret-key").expect("valid provider");
 
         // Test malicious Unicode in issuer identity
         let malicious_issuer = "operator\u{202e}\u{0000}\u{feff}evil\u{200b}";
@@ -2858,7 +2862,7 @@ mod remote_cap_comprehensive_negative_tests {
         assert!(result.is_ok(), "Unicode in issuer should be handled gracefully");
 
         let (cap, _) = result.unwrap();
-        let mut gate = CapabilityGate::new("secret-key");
+        let mut gate = CapabilityGate::new("secret-key").expect("valid gate");
 
         // Token should still function correctly despite Unicode content
         gate.authorize_network(
@@ -2907,7 +2911,7 @@ mod remote_cap_comprehensive_negative_tests {
     /// Negative test: Arithmetic overflow protection in timestamps and TTL calculations
     #[test]
     fn negative_arithmetic_overflow_protection() {
-        let provider = CapabilityProvider::new("secret-key");
+        let provider = CapabilityProvider::new("secret-key").expect("valid provider");
         let scope = RemoteScope::new(
             vec![RemoteOperation::RemoteComputation],
             vec!["https://compute.example.com".to_string()],
@@ -2934,7 +2938,7 @@ mod remote_cap_comprehensive_negative_tests {
         assert!(cap.expires_at_epoch_secs >= near_max_time);
         assert!(cap.expires_at_epoch_secs == u64::MAX || cap.expires_at_epoch_secs > near_max_time);
 
-        let mut gate = CapabilityGate::new("secret-key");
+        let mut gate = CapabilityGate::new("secret-key").expect("valid gate");
 
         // Test with current time that could cause overflow during validation
         let validation_result = gate.authorize_network(
@@ -2970,7 +2974,7 @@ mod remote_cap_comprehensive_negative_tests {
     /// Negative test: Memory exhaustion attacks with massive capability scopes
     #[test]
     fn negative_memory_exhaustion_with_massive_scopes() {
-        let provider = CapabilityProvider::new("secret-key");
+        let provider = CapabilityProvider::new("secret-key").expect("valid provider");
 
         // Create scope with extremely large number of operations and endpoints
         let mut operations = Vec::new();
@@ -3021,7 +3025,7 @@ mod remote_cap_comprehensive_negative_tests {
         assert!(cap.scope.operations.len() <= 7); // Only 7 unique operation types exist
         assert!(cap.scope.endpoint_prefixes.len() <= 20000); // May have many unique endpoints
 
-        let mut gate = CapabilityGate::new("secret-key");
+        let mut gate = CapabilityGate::new("secret-key").expect("valid gate");
 
         // Authorization check should complete efficiently even with large scope
         let start = std::time::Instant::now();
@@ -3041,7 +3045,7 @@ mod remote_cap_comprehensive_negative_tests {
     /// Negative test: Concurrent operation corruption and race conditions
     #[test]
     fn negative_concurrent_operation_corruption() {
-        let provider = CapabilityProvider::new("secret-key");
+        let provider = CapabilityProvider::new("secret-key").expect("valid provider");
         let scope = RemoteScope::new(
             vec![RemoteOperation::TelemetryExport, RemoteOperation::FederationSync],
             vec!["https://api.example.com".to_string()],
@@ -3063,7 +3067,7 @@ mod remote_cap_comprehensive_negative_tests {
             push_bounded(&mut tokens, token, MAX_TEST_TOKENS);
         }
 
-        let mut gate = CapabilityGate::new("secret-key");
+        let mut gate = CapabilityGate::new("secret-key").expect("valid gate");
 
         // Simulate concurrent access attempts on the same gate
         let mut results = Vec::new();
@@ -3107,7 +3111,7 @@ mod remote_cap_comprehensive_negative_tests {
     /// Negative test: Cryptographic timing attacks and hash collision resistance
     #[test]
     fn negative_cryptographic_timing_attacks_and_collision_resistance() {
-        let provider = CapabilityProvider::new("secret-key");
+        let provider = CapabilityProvider::new("secret-key").expect("valid provider");
         let scope = RemoteScope::new(
             vec![RemoteOperation::RemoteAttestationVerify],
             vec!["https://attestation.example.com".to_string()],
@@ -3124,7 +3128,7 @@ mod remote_cap_comprehensive_negative_tests {
             "trace-timing-attack",
         ).expect("legitimate token");
 
-        let mut gate = CapabilityGate::new("secret-key");
+        let mut gate = CapabilityGate::new("secret-key").expect("valid gate");
 
         // Test with various malformed signatures to detect timing differences
         let malformed_signatures = vec![
@@ -3196,7 +3200,7 @@ mod remote_cap_comprehensive_negative_tests {
     /// Negative test: Resource exhaustion attacks through audit log flooding
     #[test]
     fn negative_resource_exhaustion_audit_log_flooding() {
-        let provider = CapabilityProvider::new("secret-key");
+        let provider = CapabilityProvider::new("secret-key").expect("valid provider");
         let scope = RemoteScope::new(
             vec![RemoteOperation::ArtifactUpload],
             vec!["https://upload.example.com".to_string()],
@@ -3212,7 +3216,7 @@ mod remote_cap_comprehensive_negative_tests {
             "trace-flood-test",
         ).expect("flood test token");
 
-        let mut gate = CapabilityGate::new("secret-key");
+        let mut gate = CapabilityGate::new("secret-key").expect("valid gate");
 
         // Attempt to flood the audit log with massive number of requests
         for i in 0..50000 {
@@ -3257,7 +3261,7 @@ mod remote_cap_comprehensive_negative_tests {
     /// Negative test: Edge cases in endpoint prefix matching with malformed URLs
     #[test]
     fn negative_endpoint_prefix_malformed_url_edge_cases() {
-        let provider = CapabilityProvider::new("secret-key");
+        let provider = CapabilityProvider::new("secret-key").expect("valid provider");
 
         // Create scope with various malformed and edge-case endpoint prefixes
         let malformed_endpoints = vec![
@@ -3292,7 +3296,7 @@ mod remote_cap_comprehensive_negative_tests {
             "trace-malformed-endpoints",
         ).expect("malformed endpoints token");
 
-        let mut gate = CapabilityGate::new("secret-key");
+        let mut gate = CapabilityGate::new("secret-key").expect("valid gate");
 
         // Test various target URLs against malformed prefixes
         let test_urls = vec![
@@ -3344,7 +3348,7 @@ mod remote_cap_comprehensive_negative_tests {
     /// Negative test: Advanced cryptographic attack scenarios
     #[test]
     fn negative_advanced_cryptographic_attacks() {
-        let provider = CapabilityProvider::new("secret-key");
+        let provider = CapabilityProvider::new("secret-key").expect("valid provider");
         let scope = RemoteScope::new(
             vec![RemoteOperation::RemoteComputation],
             vec!["https://compute.example.com".to_string()],
@@ -3360,7 +3364,7 @@ mod remote_cap_comprehensive_negative_tests {
             "trace-crypto-attacks",
         ).expect("legitimate token");
 
-        let mut gate = CapabilityGate::new("secret-key");
+        let mut gate = CapabilityGate::new("secret-key").expect("valid gate");
 
         // Test signature manipulation attacks
         let original_sig = legitimate_token.signature();
@@ -3493,9 +3497,9 @@ mod remote_cap_comprehensive_negative_tests {
 
         // Test 4: Integration with CapabilityGate
         std::env::set_var(CUCKOO_REVOCATION_ENV, "true");
-        let mut gate = CapabilityGate::new("test-secret");
+        let mut gate = CapabilityGate::new("test-secret").expect("valid gate");
 
-        let provider = CapabilityProvider::new("test-secret");
+        let provider = CapabilityProvider::new("test-secret").expect("valid provider");
         let scope = RemoteScope::new(
             vec![RemoteOperation::NetworkEgress],
             vec!["https://example.com".to_string()],
@@ -3574,5 +3578,68 @@ mod remote_cap_comprehensive_negative_tests {
         assert!(negative_lookup_duration < std::time::Duration::from_millis(25));
 
         std::env::remove_var(CUCKOO_REVOCATION_ENV);
+    }
+
+    #[test]
+    fn empty_signing_secret_fails_closed_at_construction() {
+        let result = CapabilityProvider::new("");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), "ERR_REMOTE_CAP_CRYPTO_UNAVAILABLE");
+        assert!(err.to_string().contains("signing material is unavailable"));
+    }
+
+    #[test]
+    fn whitespace_signing_secret_fails_closed_at_construction() {
+        let result = CapabilityProvider::new("   \t\n  ");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), "ERR_REMOTE_CAP_CRYPTO_UNAVAILABLE");
+        assert!(err.to_string().contains("signing material is unavailable"));
+    }
+
+    #[test]
+    fn empty_verification_secret_fails_closed_at_construction() {
+        let result = CapabilityGate::new("").expect_err("empty should fail");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), "ERR_REMOTE_CAP_CRYPTO_UNAVAILABLE");
+        assert!(err.to_string().contains("verification material is unavailable"));
+    }
+
+    #[test]
+    fn whitespace_verification_secret_fails_closed_at_construction() {
+        let result = CapabilityGate::new("  \r\n\t  ");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), "ERR_REMOTE_CAP_CRYPTO_UNAVAILABLE");
+        assert!(err.to_string().contains("verification material is unavailable"));
+    }
+
+    #[test]
+    fn empty_secrets_prevent_remote_capability_operations() {
+        // Verify that empty secrets cannot be used to issue or authorize tokens
+
+        // Issuer with valid secret
+        let provider = CapabilityProvider::new("valid-secret").expect("valid provider");
+        let scope = RemoteScope::new(
+            vec![RemoteOperation::NetworkEgress],
+            vec!["https://example.com".to_string()],
+        );
+
+        let (cap, _) = provider
+            .issue("operator", scope, 1_700_000_000, 3600, true, false, "trace-test")
+            .expect("capability issuance with valid secret");
+
+        // Gate with empty secret should fail at construction
+        let empty_gate_result = CapabilityGate::new("").expect_err("empty should fail");
+        assert!(empty_gate_result.is_err(), "Empty verification secret should fail at construction");
+
+        // Provider with empty secret should fail at construction
+        let empty_provider_result = CapabilityProvider::new("");
+        assert!(empty_provider_result.is_err(), "Empty signing secret should fail at construction");
+
+        // This ensures empty secrets cannot be used to forge or verify tokens
+        // since the constructors themselves reject them
     }
 }
