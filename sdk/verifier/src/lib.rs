@@ -448,7 +448,7 @@ impl VerifierSdk {
 
         let verified = bundle::verify(state)?;
         self.verify_bundle_belongs_to_current_verifier(&verified)?;
-        let anchor_matches = verified.integrity_hash == anchor_integrity_hash;
+        let anchor_matches = constant_time_eq(&verified.integrity_hash, anchor_integrity_hash);
         let assertions = vec![
             AssertionResult {
                 assertion: "trust_state_bundle_integrity_verified".to_string(),
@@ -1268,6 +1268,23 @@ mod tests {
                 actual: padded_hash,
             }
         );
+    }
+
+    #[test]
+    fn verify_trust_state_marks_mismatched_anchor_as_failed_assertion() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let state = make_replay_bundle_bytes("verifier://alpha");
+
+        let result = sdk
+            .verify_trust_state(&state, &"0".repeat(64))
+            .expect("mismatched trust anchor should still return a result");
+
+        assert_eq!(result.verdict, VerificationVerdict::Fail);
+        assert!(result
+            .assertions
+            .iter()
+            .any(|assertion| assertion.assertion == "trust_anchor_matches_integrity_hash"
+                && !assertion.passed));
     }
 
     #[test]
