@@ -38,6 +38,11 @@ const WIRE_CLAUSES: &[WireClause] = &[
         test_case: "verify/use emit structured audit events",
     },
     WireClause {
+        spec_marker: "Verify the token (without consuming single-use tokens)",
+        level: "MUST",
+        test_case: "verify requires operation and endpoint scope arguments",
+    },
+    WireClause {
         spec_marker: "INV-REMOTECAP-AUDIT",
         level: "MUST",
         test_case: "all JSON command responses preserve trace IDs",
@@ -78,6 +83,37 @@ fn remotecap_cli_wire_matrix_covers_required_spec_clauses() -> Result<(), String
             ));
         }
     }
+
+    Ok(())
+}
+
+#[test]
+fn remotecap_verify_contract_documents_scope_authorization_args() -> Result<(), String> {
+    let verify_block = REMOTECAP_SPEC
+        .split("# Verify the token (without consuming single-use tokens)")
+        .nth(1)
+        .and_then(|tail| tail.split("# Use the token for a network operation").next())
+        .ok_or_else(|| "RemoteCap spec must include the verify command block".to_string())?;
+
+    for required in [
+        "--token-file capability.json",
+        "--operation network_egress",
+        "--endpoint https://api.example.com/v1/status",
+        "--json",
+    ] {
+        assert!(
+            verify_block.contains(required),
+            "RemoteCap verify spec must document `{required}`"
+        );
+    }
+    assert!(
+        REMOTECAP_SPEC.contains("FRANKEN_NODE_REMOTECAP_KEY"),
+        "RemoteCap spec must document the implemented signing key environment variable"
+    );
+    assert!(
+        !REMOTECAP_SPEC.contains("FRANKEN_NODE_REMOTECAP_SECRET"),
+        "RemoteCap spec must not document the stale signing key environment variable"
+    );
 
     Ok(())
 }
