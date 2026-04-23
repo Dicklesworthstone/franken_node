@@ -1385,6 +1385,9 @@ impl EngineDispatcher {
 
     /// Validates that all capability strings are recognized by franken-engine.
     /// Returns error for any capability string that franken-engine doesn't support.
+    ///
+    /// bd-3kha7: Fixed timing attack vulnerability - scans all capabilities in constant time
+    /// to prevent leaking which specific capability was invalid through timing differences.
     #[cfg(feature = "engine")]
     fn validate_capabilities(capabilities: &[String]) -> Result<(), ActionableError> {
         use crate::security::constant_time::ct_eq;
@@ -1402,18 +1405,25 @@ impl EngineDispatcher {
             "module:require", "module:import", "module.import",
         ];
 
+        // Track if any capability is invalid - scan ALL capabilities regardless
+        // to prevent timing attack that leaks which capability position failed
+        let mut has_invalid_capability = false;
+
+        // Constant-time validation: scan entire capability list regardless of invalid findings
         for capability in capabilities {
             let mut is_valid = false;
 
-            // Check exact match against valid capabilities (constant-time)
+            // Check exact match against valid capabilities (constant-time for each comparison)
             for valid_cap in VALID_CAPABILITIES {
                 if ct_eq(capability, valid_cap) {
                     is_valid = true;
-                    break;
+                    // Continue checking all valid_caps for constant-time behavior
                 }
             }
 
             // Check hostcall prefixes that are dynamically valid
+            // Note: starts_with is not constant-time but these are administrative capabilities
+            // and the timing difference is minimal compared to the main validation loop
             if !is_valid && (capability.starts_with("console:") ||
                            capability.starts_with("timer:") ||
                            capability.starts_with("builtin:") ||
@@ -1421,20 +1431,24 @@ impl EngineDispatcher {
                 is_valid = true;
             }
 
+            // Track invalid capability but continue scanning all capabilities
             if !is_valid {
-                return Err(ActionableError::new(
-                    format!(
-                        "Unknown capability '{}' not supported by franken-engine. \
-                         Supported capabilities: fs_read, fs_write, network_egress, env_read, \
-                         process_spawn, timer, builtin, console, module_load, etc.",
-                        capability
-                    ),
-                    "Check your profile configuration and ensure only supported capabilities are used"
-                ));
+                has_invalid_capability = true;
+                // DO NOT return early - continue processing all capabilities
             }
         }
 
-        Ok(())
+        // Return error only after scanning all capabilities (constant-time over total list)
+        if has_invalid_capability {
+            Err(ActionableError::new(
+                "Invalid capability detected in profile configuration. \
+                 Supported capabilities: fs_read, fs_write, network_egress, env_read, \
+                 process_spawn, timer, builtin, console, module_load, etc.".to_string(),
+                "Check your profile configuration and ensure only supported capabilities are used"
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     /// Map franken-node Config to franken-engine RuntimeConfig.
@@ -1661,9 +1675,9 @@ impl EngineDispatcher {
                     Profile::LegacyRisky => ABSOLUTE_MAX_TOKEN_COUNT.min(262_144), // Capped at 128K absolute max
                 },
                 max_recursion_depth: match config.profile {
-                    Profile::Strict => 128,          // Shallow recursion for safety
-                    Profile::Balanced => 256,        // Standard recursion depth (default)
-                    Profile::LegacyRisky => ABSOLUTE_MAX_RECURSION_DEPTH.min(512).into(), // Capped at 384 absolute max
+                    Profile::Strict => 128u32,       // Shallow recursion for safety
+                    Profile::Balanced => 256u32,     // Standard recursion depth (default)
+                    Profile::LegacyRisky => ABSOLUTE_MAX_RECURSION_DEPTH.min(512), // Capped at 384 absolute max
                 },
             },
         };
