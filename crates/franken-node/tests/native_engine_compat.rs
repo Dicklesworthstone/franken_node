@@ -169,10 +169,11 @@ fn test_native_engine_execution_with_telemetry() {
     // Create test telemetry bridge
     let socket_path = temp_dir.path().join("test-telemetry.sock");
     let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
-    let telemetry_bridge = TelemetryBridge::new(&socket_path.to_string_lossy(), adapter);
+    let _telemetry_bridge = TelemetryBridge::new(&socket_path.to_string_lossy(), adapter);
+    let policy_mode = config.profile.to_string();
 
     // Execute through native engine
-    let result = dispatcher.dispatch_run(&app_path, &config, &telemetry_bridge);
+    let result = dispatcher.dispatch_run(&app_path, &config, &policy_mode);
 
     // Verify successful execution
     assert!(
@@ -220,10 +221,11 @@ fn test_strict_profile_rejects_fallback_without_native_engine() {
     // Create test telemetry bridge
     let socket_path = temp_dir.path().join("test-telemetry.sock");
     let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
-    let telemetry_bridge = TelemetryBridge::new(&socket_path.to_string_lossy(), adapter);
+    let _telemetry_bridge = TelemetryBridge::new(&socket_path.to_string_lossy(), adapter);
+    let policy_mode = config.profile.to_string();
 
     // Execute and expect failure
-    let result = dispatcher.dispatch_run(&app_path, &config, &telemetry_bridge);
+    let result = dispatcher.dispatch_run(&app_path, &config, &policy_mode);
 
     assert!(
         result.is_err(),
@@ -264,10 +266,11 @@ fn test_balanced_profile_allows_external_process_fallback() {
     // Create test telemetry bridge
     let socket_path = temp_dir.path().join("test-telemetry.sock");
     let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
-    let telemetry_bridge = TelemetryBridge::new(&socket_path.to_string_lossy(), adapter);
+    let _telemetry_bridge = TelemetryBridge::new(&socket_path.to_string_lossy(), adapter);
+    let policy_mode = config.profile.to_string();
 
     // This should succeed by falling back to external process
-    let result = dispatcher.dispatch_run(&app_path, &config, &telemetry_bridge);
+    let result = dispatcher.dispatch_run(&app_path, &config, &policy_mode);
 
     // Note: This test may fail if no Node/Bun is available, but that's expected behavior
     // The key is that it shouldn't fail with "native engine required" error
@@ -297,9 +300,10 @@ fn test_native_engine_error_handling_propagation() {
     // Create test telemetry bridge
     let socket_path = temp_dir.path().join("test-telemetry.sock");
     let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
-    let telemetry_bridge = TelemetryBridge::new(&socket_path.to_string_lossy(), adapter);
+    let _telemetry_bridge = TelemetryBridge::new(&socket_path.to_string_lossy(), adapter);
+    let policy_mode = config.profile.to_string();
 
-    let result = dispatcher.dispatch_run(&nonexistent_path, &config, &telemetry_bridge);
+    let result = dispatcher.dispatch_run(&nonexistent_path, &config, &policy_mode);
 
     assert!(
         result.is_err(),
@@ -322,7 +326,7 @@ fn test_native_engine_error_handling_propagation() {
         r#"this is not valid javascript syntax !@#$%"#,
     );
 
-    let result = dispatcher.dispatch_run(&invalid_app_path, &config, &telemetry_bridge);
+    let result = dispatcher.dispatch_run(&invalid_app_path, &config, &policy_mode);
 
     // Engine may or may not reject invalid syntax - depends on implementation
     // The key is that errors should propagate properly, not crash
@@ -340,7 +344,9 @@ fn test_native_engine_error_handling_propagation() {
 #[test]
 fn test_engine_timeout_handling() {
     // Set a short timeout for testing (5 seconds instead of default 5 minutes)
-    std::env::set_var("FRANKEN_ENGINE_TIMEOUT_SECS", "5");
+    unsafe {
+        std::env::set_var("FRANKEN_ENGINE_TIMEOUT_SECS", "5");
+    }
 
     // Clean up the env var when test completes
     struct EnvCleanup(&'static str);
@@ -376,11 +382,12 @@ fn test_engine_timeout_handling() {
     // Create test telemetry bridge
     let socket_path = temp_dir.path().join("test-telemetry.sock");
     let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
-    let telemetry_bridge = TelemetryBridge::new(&socket_path.to_string_lossy(), adapter);
+    let _telemetry_bridge = TelemetryBridge::new(&socket_path.to_string_lossy(), adapter);
+    let policy_mode = config.profile.to_string();
 
     // Execute and measure timing
     let start = std::time::Instant::now();
-    let result = dispatcher.dispatch_run(&app_path, &config, &telemetry_bridge);
+    let result = dispatcher.dispatch_run(&app_path, &config, &policy_mode);
     let duration = start.elapsed();
 
     // The execution should fail due to timeout, not complete successfully
@@ -545,7 +552,9 @@ fn test_engine_crash_signal_error_handling() {
     );
 
     // Set short timeout for faster test completion
-    std::env::set_var("FRANKEN_ENGINE_TIMEOUT_SECS", "10");
+    unsafe {
+        std::env::set_var("FRANKEN_ENGINE_TIMEOUT_SECS", "10");
+    }
 
     // Clean up env var when test completes
     struct EnvCleanup(&'static str);

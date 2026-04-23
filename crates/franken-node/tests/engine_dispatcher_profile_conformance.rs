@@ -382,7 +382,8 @@ fn conformance_profile_capability_mappings() {
     ];
 
     for (profile, expected_capabilities) in &test_cases {
-        let capabilities = EngineDispatcher::map_profile_to_capabilities_for_tests(*profile);
+        let capabilities = EngineDispatcher::get_validated_capabilities_for_tests(*profile)
+            .expect("profile capability mapping should validate");
 
         // MUST: Profile must generate expected capability count
         assert_eq!(
@@ -399,13 +400,6 @@ fn conformance_profile_capability_mappings() {
                 profile, expected_cap
             );
         }
-
-        // MUST: All capabilities must be valid (pass validation)
-        assert!(
-            EngineDispatcher::validate_capabilities_for_tests(&capabilities).is_ok(),
-            "{:?} profile capabilities must pass validation",
-            profile
-        );
 
         println!("✓ Profile {:?}: {} capabilities validated", profile, capabilities.len());
     }
@@ -427,7 +421,8 @@ fn generate_profile_conformance_report() {
 
         let runtime_config = EngineDispatcher::map_config_to_runtime_config_for_tests(&config);
         let orchestrator_config = EngineDispatcher::map_config_to_orchestrator_config_for_tests(&config);
-        let capabilities = EngineDispatcher::map_profile_to_capabilities_for_tests(*profile);
+        let capabilities = EngineDispatcher::get_validated_capabilities_for_tests(*profile)
+            .expect("profile capability mapping should validate");
 
         println!("Profile: {:?}", profile);
         println!("├─ RuntimeConfig:");

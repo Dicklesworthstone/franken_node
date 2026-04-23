@@ -112,11 +112,17 @@ fn trace_builder_preserves_step_order() {
         // Additional invariant: no gaps in sequence numbering
         let first_seq = trace.steps.first().map(|s| s.seq).unwrap_or(0);
         let last_seq = trace.steps.last().map(|s| s.seq).unwrap_or(0);
-        let expected_range = first_seq..=last_seq;
+        let expected_len = if trace.steps.is_empty() {
+            0
+        } else {
+            last_seq.saturating_sub(first_seq).saturating_add(1) as usize
+        };
         prop_assert_eq!(
-            expected_range.len(),
+            expected_len,
             trace.steps.len(),
-            "Sequence numbers have gaps: range {first_seq}..={last_seq} vs {} steps",
+            "Sequence numbers have gaps: range {}..={} vs {} steps",
+            first_seq,
+            last_seq,
             trace.steps.len()
         );
         Ok(())
