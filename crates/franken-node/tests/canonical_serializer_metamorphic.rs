@@ -328,6 +328,52 @@ fn canonical_serializer_preserves_content_under_object_insertion_permutation() -
     Ok(())
 }
 
+/// Equivalent JSON texts must collapse to one canonical byte string.
+#[test]
+fn canonical_serializer_collapses_semantically_equivalent_json_texts() -> Result<(), String> {
+    let json_variants = [
+        r#"{
+            "message": "line\nbreak",
+            "path": "\/tmp\/replay",
+            "unicode": "franken",
+            "items": [1, 2, 3],
+            "nested": {"beta": true, "alpha": null}
+        }"#,
+        r#"{"nested":{"alpha":null,"beta":true},"items":[1,2,3],"unicode":"\u0066\u0072\u0061\u006e\u006b\u0065\u006e","path":"/tmp/replay","message":"line\nbreak"}"#,
+        r#"{
+            "items" : [ 1 , 2 , 3 ],
+            "message" : "line\u000abreak",
+            "nested" : { "beta" : true, "alpha" : null },
+            "path" : "/tmp/replay",
+            "unicode" : "franken"
+        }"#,
+    ];
+
+    let expected = serde_json::json!({
+        "items": [1, 2, 3],
+        "message": "line\nbreak",
+        "nested": {
+            "alpha": null,
+            "beta": true,
+        },
+        "path": "/tmp/replay",
+        "unicode": "franken",
+    });
+    let expected_canonical =
+        to_canonical_json(&expected).map_err(|error| error.to_string())?;
+
+    for json_text in json_variants {
+        let parsed: Value = serde_json::from_str(json_text).map_err(|error| error.to_string())?;
+        let canonical = to_canonical_json(&parsed).map_err(|error| error.to_string())?;
+        assert_eq!(
+            canonical, expected_canonical,
+            "semantic JSON text equivalence did not preserve canonical bytes"
+        );
+    }
+
+    Ok(())
+}
+
 /// Test canonical serialization preserves semantic equivalence
 #[test]
 fn canonical_serialization_preserves_semantics() {
