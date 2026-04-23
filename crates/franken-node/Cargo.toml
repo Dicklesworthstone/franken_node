@@ -284,6 +284,10 @@ name = "replay_window_metamorphic"
 path = "tests/replay_window_metamorphic.rs"
 
 [[test]]
+name = "trust_card_metamorphic"
+path = "tests/trust_card_metamorphic.rs"
+
+[[test]]
 name = "epoch_key_derivation_metamorphic"
 path = "tests/epoch_key_derivation_metamorphic.rs"
 
