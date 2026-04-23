@@ -232,6 +232,8 @@ pub struct VerificationResult {
     pub artifact_binding_hash: String,
     pub verifier_signature: String,
     pub sdk_version: String,
+    #[serde(skip, default)]
+    result_origin_nonce: String,
 }
 
 /// Single append-only step in a verification session.
@@ -266,24 +268,45 @@ pub enum VerifierSdkError {
     UnsupportedSdk(String),
     Capsule(capsule::CapsuleError),
     Bundle(bundle::BundleError),
-    InvalidVerifierIdentity { actual: String, reason: String },
-    InvalidSessionId { actual: String, reason: String },
+    InvalidVerifierIdentity {
+        actual: String,
+        reason: String,
+    },
+    InvalidSessionId {
+        actual: String,
+        reason: String,
+    },
     EmptyTrustAnchor,
-    MalformedTrustAnchor { actual: String },
+    MalformedTrustAnchor {
+        actual: String,
+    },
     SessionSealed(String),
-    SessionVerifierMismatch { expected: String, actual: String },
+    SessionVerifierMismatch {
+        expected: String,
+        actual: String,
+    },
     SessionProvenanceMismatch {
         field: &'static str,
         expected: String,
         actual: String,
     },
-    SessionStepSequenceMismatch { expected: usize, actual: usize },
+    SessionStepSequenceMismatch {
+        expected: usize,
+        actual: usize,
+    },
     SessionStepSignatureMismatch {
         step_index: usize,
         expected: String,
         actual: String,
     },
-    ResultSignatureMismatch { expected: String, actual: String },
+    ResultSignatureMismatch {
+        expected: String,
+        actual: String,
+    },
+    ResultOriginMismatch {
+        expected: String,
+        actual: String,
+    },
     Json(String),
 }
 
@@ -337,6 +360,10 @@ impl fmt::Display for VerifierSdkError {
                 formatter,
                 "verifier SDK result signature mismatch: expected={expected}, actual={actual}"
             ),
+            Self::ResultOriginMismatch { expected, actual } => write!(
+                formatter,
+                "verifier SDK result origin mismatch: expected={expected}, actual={actual}"
+            ),
             Self::Json(message) => write!(formatter, "verifier SDK JSON error: {message}"),
         }
     }
@@ -357,6 +384,7 @@ impl From<bundle::BundleError> for VerifierSdkError {
 }
 
 const FACADE_TIMESTAMP: &str = "2026-02-21T00:00:00Z";
+const RESULT_ORIGIN_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:result-origin:v1:";
 const SESSION_STEP_SIGNATURE_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:session-step:v1:";
 const SESSION_NONCE_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:session-nonce:v1:";
 const MAX_VERIFIER_IDENTITY_NAME_LEN: usize = 255;
@@ -369,6 +397,8 @@ pub struct VerifierSdk {
     pub verifier_identity: String,
     pub sdk_version: String,
     pub config: BTreeMap<String, String>,
+    #[serde(skip, default = "default_result_origin_nonce")]
+    result_origin_nonce: String,
 }
 
 impl VerifierSdk {
@@ -384,6 +414,7 @@ impl VerifierSdk {
             verifier_identity: verifier_identity.into(),
             sdk_version: SDK_VERSION.to_string(),
             config,
+            result_origin_nonce: default_result_origin_nonce(),
         }
     }
 
@@ -691,6 +722,12 @@ impl VerifierSdk {
         result: &VerificationResult,
     ) -> Result<(), VerifierSdkError> {
         self.validate_current_verifier_identity()?;
+        if !constant_time_eq(&result.result_origin_nonce, &self.result_origin_nonce) {
+            return Err(VerifierSdkError::ResultOriginMismatch {
+                expected: self.result_origin_nonce.clone(),
+                actual: result.result_origin_nonce.clone(),
+            });
+        }
         self.verify_result_signature(result)?;
         if result.verifier_identity != self.verifier_identity {
             return Err(VerifierSdkError::SessionVerifierMismatch {
@@ -737,6 +774,7 @@ impl VerifierSdk {
             artifact_binding_hash,
             verifier_signature: String::new(),
             sdk_version: self.sdk_version.clone(),
+            result_origin_nonce: self.result_origin_nonce.clone(),
         };
         result.verifier_signature = facade_result_signature(&result)?;
         Ok(result)
@@ -769,6 +807,7 @@ fn facade_result_signature(result: &VerificationResult) -> Result<String, Verifi
         verifier_identity: &'a str,
         artifact_binding_hash: &'a str,
         sdk_version: &'a str,
+        result_origin_nonce: &'a str,
     }
 
     let payload = serde_json::to_vec(&SignatureView {
@@ -780,9 +819,22 @@ fn facade_result_signature(result: &VerificationResult) -> Result<String, Verifi
         verifier_identity: &result.verifier_identity,
         artifact_binding_hash: &result.artifact_binding_hash,
         sdk_version: &result.sdk_version,
+        result_origin_nonce: &result.result_origin_nonce,
     })
     .map_err(|source| VerifierSdkError::Json(source.to_string()))?;
     Ok(bundle::hash(&payload))
+}
+
+fn default_result_origin_nonce() -> String {
+    let mut payload = Vec::new();
+    push_length_prefixed(&mut payload, RESULT_ORIGIN_DOMAIN);
+    push_length_prefixed(&mut payload, SDK_VERSION.as_bytes());
+    payload.extend_from_slice(
+        &SESSION_NONCE_COUNTER
+            .fetch_add(1, Ordering::Relaxed)
+            .to_le_bytes(),
+    );
+    bundle::hash(&payload)
 }
 
 fn derive_session_nonce(
@@ -878,8 +930,8 @@ fn validate_verifier_identity(verifier_identity: &str) -> Result<(), VerifierSdk
     {
         return Err(VerifierSdkError::InvalidVerifierIdentity {
             actual: verifier_identity.to_string(),
-            reason:
-                "identity must include only ASCII letters, digits, '.', '-', and '_'".to_string(),
+            reason: "identity must include only ASCII letters, digits, '.', '-', and '_'"
+                .to_string(),
         });
     }
     Ok(())
@@ -910,9 +962,8 @@ fn validate_session_id(session_id: &str) -> Result<(), VerifierSdkError> {
     {
         return Err(VerifierSdkError::InvalidSessionId {
             actual: session_id.to_string(),
-            reason:
-                "session id must include only ASCII letters, digits, '.', '-', and '_'"
-                    .to_string(),
+            reason: "session id must include only ASCII letters, digits, '.', '-', and '_'"
+                .to_string(),
         });
     }
     Ok(())
@@ -1052,7 +1103,10 @@ mod tests {
         assert_eq!(step.step_index, 0);
         assert_eq!(step.verdict, VerificationVerdict::Pass);
         assert_eq!(session.steps().len(), 1);
-        assert_eq!(session.steps()[0].artifact_binding_hash, "artifact-hash-alpha");
+        assert_eq!(
+            session.steps()[0].artifact_binding_hash,
+            "artifact-hash-alpha"
+        );
         assert!(!session.steps()[0].step_signature.is_empty());
     }
 
@@ -1084,6 +1138,38 @@ mod tests {
             err,
             VerifierSdkError::SessionVerifierMismatch { .. }
         ));
+        assert!(session.steps().is_empty());
+    }
+
+    #[test]
+    fn record_session_step_rejects_forged_same_verifier_result() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let mut session = sdk
+            .create_session("session-alpha")
+            .expect("same verifier session should be created");
+        let mut forged_result = sdk
+            .build_result(
+                VerificationOperation::Claim,
+                VerificationVerdict::Pass,
+                vec![AssertionResult {
+                    assertion: "capsule_replay_verified".to_string(),
+                    passed: true,
+                    detail: "same verifier".to_string(),
+                }],
+                "artifact-hash-alpha".to_string(),
+            )
+            .expect("same verifier result should be built");
+        forged_result.verdict = VerificationVerdict::Fail;
+        forged_result.checked_assertions[0].detail = "forged locally".to_string();
+        forged_result.result_origin_nonce.clear();
+        forged_result.verifier_signature =
+            facade_result_signature(&forged_result).expect("forged signature should compute");
+
+        let err = sdk
+            .record_session_step(&mut session, &forged_result)
+            .expect_err("forged same-verifier result must be rejected");
+
+        assert!(matches!(err, VerifierSdkError::ResultOriginMismatch { .. }));
         assert!(session.steps().is_empty());
     }
 
@@ -1126,7 +1212,10 @@ mod tests {
 
         assert_eq!(verdict, VerificationVerdict::Inconclusive);
         assert!(session.sealed);
-        assert_eq!(session.final_verdict, Some(VerificationVerdict::Inconclusive));
+        assert_eq!(
+            session.final_verdict,
+            Some(VerificationVerdict::Inconclusive)
+        );
     }
 
     #[test]
@@ -1279,6 +1368,35 @@ mod tests {
     }
 
     #[test]
+    fn transparency_log_rejects_deserialized_same_verifier_result() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let result = sdk
+            .build_result(
+                VerificationOperation::Claim,
+                VerificationVerdict::Pass,
+                vec![AssertionResult {
+                    assertion: "capsule_replay_verified".to_string(),
+                    passed: true,
+                    detail: "same verifier".to_string(),
+                }],
+                "artifact-hash-alpha".to_string(),
+            )
+            .expect("same verifier result should be built");
+        let serialized =
+            serde_json::to_string(&result).expect("verification result serialization should work");
+        let detached: VerificationResult = serde_json::from_str(&serialized)
+            .expect("verification result deserialization should work");
+        let mut log = Vec::new();
+
+        let err = sdk
+            .append_transparency_log(&mut log, &detached)
+            .expect_err("detached same-verifier result must be rejected");
+
+        assert!(matches!(err, VerifierSdkError::ResultOriginMismatch { .. }));
+        assert!(log.is_empty());
+    }
+
+    #[test]
     fn verify_migration_artifact_accepts_same_verifier_bundle() {
         let sdk = create_verifier_sdk("verifier://alpha");
         let artifact = make_replay_bundle_bytes("verifier://alpha");
@@ -1385,11 +1503,9 @@ mod tests {
             .expect("mismatched trust anchor should still return a result");
 
         assert_eq!(result.verdict, VerificationVerdict::Fail);
-        assert!(result
-            .assertions
-            .iter()
-            .any(|assertion| assertion.assertion == "trust_anchor_matches_integrity_hash"
-                && !assertion.passed));
+        assert!(result.assertions.iter().any(|assertion| assertion.assertion
+            == "trust_anchor_matches_integrity_hash"
+            && !assertion.passed));
     }
 
     #[test]
