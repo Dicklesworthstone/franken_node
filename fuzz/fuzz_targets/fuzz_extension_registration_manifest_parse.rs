@@ -155,11 +155,17 @@ fn fuzz_structured_registration(case: ExtensionRegistrationManifestCase) {
             !result.success,
             "malformed or divergent signed manifest must fail closed"
         );
-        assert_eq!(
-            result.error_code.as_deref(),
-            Some(event_codes::SER_ERR_INVALID_INPUT),
-            "manifest parser/divergence failure must be reported as invalid input"
-        );
+        if admission_can_reach_manifest_parser(
+            case.signature_mode,
+            case.key_id_mode,
+            case.provenance_mode,
+        ) {
+            assert_eq!(
+                result.error_code.as_deref(),
+                Some(event_codes::SER_ERR_INVALID_INPUT),
+                "manifest parser/divergence failure must be reported as invalid input"
+            );
+        }
         assert!(
             registry.query_by_name(&name).is_none(),
             "failed manifest admission must not mutate registry state"
@@ -167,6 +173,16 @@ fn fuzz_structured_registration(case: ExtensionRegistrationManifestCase) {
     }
 
     assert!(registry.list(None).len() <= 1);
+}
+
+fn admission_can_reach_manifest_parser(
+    signature_mode: SignatureMode,
+    key_id_mode: KeyIdMode,
+    provenance_mode: ProvenanceMode,
+) -> bool {
+    matches!(signature_mode, SignatureMode::SignManifestBytes)
+        && matches!(key_id_mode, KeyIdMode::Trusted)
+        && matches!(provenance_mode, ProvenanceMode::Valid)
 }
 
 fn manifest_bytes_for_case(
