@@ -264,6 +264,12 @@ pub fn verify_evidence_entry(
         });
     }
 
+    if !is_canonical_lower_hex(&entry.signature) {
+        return Err(LedgerError::SignatureInvalid {
+            reason: "signature must use canonical lowercase hex".to_string(),
+        });
+    }
+
     let signature_bytes =
         hex::decode(&entry.signature).map_err(|e| LedgerError::SignatureInvalid {
             reason: format!("invalid hex signature: {}", e),
@@ -274,6 +280,13 @@ pub fn verify_evidence_entry(
             reason: format!("signature verification failed: {:?}", e),
         }
     })
+}
+
+fn is_canonical_lower_hex(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 // ── LedgerError ─────────────────────────────────────────────────────
@@ -5024,6 +5037,26 @@ mod tests {
 
         if let Err(LedgerError::SignatureInvalid { reason }) = result {
             assert!(reason.contains("signature verification failed"));
+        } else {
+            panic!("Should return SignatureInvalid error");
+        }
+    }
+
+    #[test]
+    fn test_signature_uppercase_hex_rejected() {
+        let (signing_key, verifying_key) = test_keys();
+        let capacity = LedgerCapacity::new(10, 100_000);
+        let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
+
+        let mut entry = test_entry("TEST-UPPERCASE-HEX", 1);
+        sign_evidence_entry(&mut entry, &signing_key);
+        entry.signature = entry.signature.to_uppercase();
+
+        let result = ledger.append(entry);
+        assert!(result.is_err(), "Uppercase signature hex should be rejected");
+
+        if let Err(LedgerError::SignatureInvalid { reason }) = result {
+            assert!(reason.contains("canonical lowercase hex"));
         } else {
             panic!("Should return SignatureInvalid error");
         }
