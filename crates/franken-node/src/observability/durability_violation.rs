@@ -260,6 +260,121 @@ impl ViolationBundle {
 
     /// Serialize as JSON for export.
     pub fn to_json(&self) -> String {
+        // Pre-allocate buffer to avoid repeated reallocations during JSON writing
+        let estimated_size = self.estimate_json_size();
+        let mut buffer = Vec::with_capacity(estimated_size);
+
+        // Serialize directly to buffer using serde_json::to_writer for efficiency
+        match self.serialize_to_writer(&mut buffer) {
+            Ok(()) => String::from_utf8(buffer).unwrap_or_else(|_| {
+                // Fallback to safe serialization if UTF-8 conversion fails
+                self.to_json_fallback()
+            }),
+            Err(_) => {
+                // Fallback to safe serialization if direct serialization fails
+                self.to_json_fallback()
+            }
+        }
+    }
+
+    /// Serialize bundle to writer using efficient direct JSON generation.
+    fn serialize_to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), std::io::Error> {
+        write!(writer, "{{")?;
+        write!(writer, "\"bundle_id\":\"{}\",", self.bundle_id.as_str())?;
+        write!(writer, "\"event_count\":{},", self.event_count())?;
+        write!(writer, "\"artifact_count\":{},", self.artifact_count())?;
+        write!(writer, "\"hardening_level\":\"{}\",", self.hardening_level)?;
+        write!(writer, "\"epoch_id\":{},", self.epoch_id)?;
+        write!(writer, "\"timestamp_ms\":{},", self.timestamp_ms)?;
+
+        // Serialize causal_events array directly
+        write!(writer, "\"causal_events\":[")?;
+        for (i, event) in self.causal_event_sequence.iter().enumerate() {
+            if i > 0 { write!(writer, ",")?; }
+            write!(writer, "{{")?;
+            write!(writer, "\"type\":\"{}\",", event.event_type.label())?;
+            write!(writer, "\"timestamp_ms\":{},", event.timestamp_ms)?;
+            write!(writer, "\"description\":")?;
+            serde_json::to_writer(&mut *writer, &event.description)?;
+            write!(writer, ",\"evidence_ref\":")?;
+            serde_json::to_writer(&mut *writer, &event.evidence_ref)?;
+            write!(writer, "}}")?;
+        }
+        write!(writer, "],")?;
+
+        // Serialize failed_artifacts array directly
+        write!(writer, "\"failed_artifacts\":[")?;
+        for (i, artifact) in self.failed_artifacts.iter().enumerate() {
+            if i > 0 { write!(writer, ",")?; }
+            write!(writer, "{{")?;
+            write!(writer, "\"path\":")?;
+            serde_json::to_writer(&mut *writer, &artifact.artifact_path)?;
+            write!(writer, ",\"expected_hash\":")?;
+            serde_json::to_writer(&mut *writer, &artifact.expected_hash)?;
+            write!(writer, ",\"actual_hash\":")?;
+            serde_json::to_writer(&mut *writer, &artifact.actual_hash)?;
+            write!(writer, ",\"reason\":")?;
+            serde_json::to_writer(&mut *writer, &artifact.failure_reason)?;
+            write!(writer, "}}")?;
+        }
+        write!(writer, "],")?;
+
+        // Serialize proof_context object directly
+        write!(writer, "\"proof_context\":{{")?;
+        write!(writer, "\"failed_proofs\":")?;
+        serde_json::to_writer(&mut *writer, &self.proof_context.failed_proofs)?;
+        write!(writer, ",\"missing_proofs\":")?;
+        serde_json::to_writer(&mut *writer, &self.proof_context.missing_proofs)?;
+        write!(writer, ",\"passed_proofs\":")?;
+        serde_json::to_writer(&mut *writer, &self.proof_context.passed_proofs)?;
+        write!(writer, "}}")?;
+
+        write!(writer, "}}")?;
+        Ok(())
+    }
+
+    /// Estimate JSON size for buffer pre-allocation.
+    fn estimate_json_size(&self) -> usize {
+        let mut size: usize = 200; // Base JSON structure overhead
+
+        size = size.saturating_add(self.bundle_id.as_str().len());
+        size = size.saturating_add(self.hardening_level.len());
+
+        // Estimate causal events size
+        for event in &self.causal_event_sequence {
+            size = size.saturating_add(100); // JSON structure overhead per event
+            size = size.saturating_add(event.event_type.label().len());
+            size = size.saturating_add(event.description.len());
+            if let Some(ref evidence_ref) = event.evidence_ref {
+                size = size.saturating_add(evidence_ref.len());
+            }
+        }
+
+        // Estimate failed artifacts size
+        for artifact in &self.failed_artifacts {
+            size = size.saturating_add(50); // JSON structure overhead per artifact
+            size = size.saturating_add(artifact.artifact_path.len());
+            size = size.saturating_add(artifact.expected_hash.len());
+            size = size.saturating_add(artifact.actual_hash.len());
+            size = size.saturating_add(artifact.failure_reason.len());
+        }
+
+        // Estimate proof context size
+        for proof in &self.proof_context.failed_proofs {
+            size = size.saturating_add(proof.len().saturating_add(4));
+        }
+        for proof in &self.proof_context.missing_proofs {
+            size = size.saturating_add(proof.len().saturating_add(4));
+        }
+        for proof in &self.proof_context.passed_proofs {
+            size = size.saturating_add(proof.len().saturating_add(4));
+        }
+
+        size
+    }
+
+    /// Fallback serialization using the original method (kept for safety).
+    fn to_json_fallback(&self) -> String {
         let causal_events: Vec<serde_json::Value> = self
             .causal_event_sequence
             .iter()

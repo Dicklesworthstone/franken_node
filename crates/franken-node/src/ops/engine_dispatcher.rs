@@ -1892,13 +1892,13 @@ impl EngineDispatcher {
     }
 
     /// Test helper: expose map_config_to_runtime_config for conformance testing
-    #[cfg(all(test, feature = "engine"))]
+    #[cfg(feature = "engine")]
     pub fn map_config_to_runtime_config_for_tests(config: &Config) -> EngineRuntimeConfig {
         Self::map_config_to_runtime_config(config)
     }
 
     /// Test helper: expose map_config_to_orchestrator_config for conformance testing
-    #[cfg(all(test, feature = "engine"))]
+    #[cfg(feature = "engine")]
     pub fn map_config_to_orchestrator_config_for_tests(config: &Config) -> OrchestratorConfig {
         Self::map_config_to_orchestrator_config(config)
     }
@@ -1907,7 +1907,7 @@ impl EngineDispatcher {
     ///
     /// bd-kkqz3: Combined helper that ensures all capability access goes through validation.
     /// Prefer this over separate map + validate calls to prevent trust boundary bypass.
-    #[cfg(all(test, feature = "engine"))]
+    #[cfg(feature = "engine")]
     pub fn get_validated_capabilities_for_tests(profile: Profile) -> Result<Vec<String>, crate::ActionableError> {
         let caps = Self::map_profile_to_capabilities(profile);
         Self::validate_capabilities(&caps)?;
@@ -1918,13 +1918,13 @@ impl EngineDispatcher {
     ///
     /// WARNING: This bypasses validation! Use get_validated_capabilities_for_tests() instead
     /// to maintain trust boundary consistency.
-    #[cfg(all(test, feature = "engine"))]
+    #[cfg(feature = "engine")]
     pub fn map_profile_to_capabilities_for_tests(profile: Profile) -> Vec<String> {
         Self::map_profile_to_capabilities(profile)
     }
 
     /// Test helper: expose validate_capabilities for conformance testing
-    #[cfg(all(test, feature = "engine"))]
+    #[cfg(feature = "engine")]
     pub fn validate_capabilities_for_tests(capabilities: &[String]) -> Result<(), crate::ActionableError> {
         Self::validate_capabilities(capabilities)
     }

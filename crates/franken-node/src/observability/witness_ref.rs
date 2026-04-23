@@ -206,10 +206,9 @@ impl WitnessRef {
 
     /// Format integrity hash as hex string.
     pub fn hash_hex(&self) -> String {
-        self.integrity_hash
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        // PERF: Pre-allocate with exact capacity (32 bytes = 64 hex chars) and use direct hex encoding
+        // instead of per-byte format!() + collect() which creates many small allocations
+        hex::encode(self.integrity_hash)
     }
 }
 

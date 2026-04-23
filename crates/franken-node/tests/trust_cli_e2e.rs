@@ -15,6 +15,9 @@ use frankenengine_node::supply_chain::trust_card::{
 };
 use serde_json::Value;
 
+// DE-MOCKED: Removed FRANKEN_ENGINE_BIN="" and FRANKEN_NODE_ENGINE_BINARY_PATH="" environment
+// variable overrides from 5 test functions to use real engine binary detection instead of stubs
+
 #[derive(Debug, serde::Deserialize)]
 struct StructuredLogEvent {
     timestamp: String,
@@ -765,13 +768,12 @@ fn run_missing_registry_suggests_init_scan() {
     let current_path = std::env::var("PATH").unwrap_or_default();
     let real_node_path = format!("{}:{}", node_dir.display(), current_path);
 
+    // DE-MOCKED: Use real engine binary detection instead of empty env overrides
     let output = run_cli_in_workspace_with_env(
         workspace.path(),
         &["run", "--policy", "strict", "--runtime", "node", "."],
         &[
             ("PATH", &real_node_path),  // Real Node.js binary in PATH
-            ("FRANKEN_ENGINE_BIN", ""),
-            ("FRANKEN_NODE_ENGINE_BINARY_PATH", ""),
         ],
     );
 
@@ -880,13 +882,12 @@ fn run_explicit_runtime_missing_returns_127() {
     let empty_path = workspace.path().join("empty-bin");
     fs::create_dir_all(&empty_path).expect("create empty PATH dir");
 
+    // DE-MOCKED: Use real engine binary detection with empty PATH to test missing runtime
     let output = run_cli_in_workspace_with_env(
         workspace.path(),
         &["run", "--policy", "balanced", "--runtime", "node", "."],
         &[
             ("PATH", empty_path.to_str().expect("utf8 path")),
-            ("FRANKEN_ENGINE_BIN", ""),
-            ("FRANKEN_NODE_ENGINE_BINARY_PATH", ""),
         ],
     );
 
@@ -927,13 +928,12 @@ preferred = "node"
 
     let runtime_path = runtime_path_env(&["node", "bun"]);
 
+    // DE-MOCKED: Use real engine binary detection with real runtime PATH
     let output = run_cli_in_workspace_with_env(
         workspace.path(),
         &["run", "--policy", "balanced", "--json", "."],
         &[
             ("PATH", runtime_path.as_str()),
-            ("FRANKEN_ENGINE_BIN", ""),
-            ("FRANKEN_NODE_ENGINE_BINARY_PATH", ""),
         ],
     );
 
@@ -1701,13 +1701,12 @@ fn full_init_to_run_pipeline_empty_registry_warns_on_untracked_dependency_json()
         "--json",
         ".",
     ];
+    // DE-MOCKED: Use real engine binary detection with real runtime PATH
     let run_output = run_cli_in_workspace_with_structured_logs_and_env(
         workspace.path(),
         &run_args,
         &[
             ("PATH", runtime_path.as_str()),
-            ("FRANKEN_ENGINE_BIN", ""),
-            ("FRANKEN_NODE_ENGINE_BINARY_PATH", ""),
         ],
     );
     ensure_command_success(
@@ -1806,13 +1805,12 @@ fn full_init_to_run_pipeline_with_trust_data_reports_trusted_extensions_json() {
         "--json",
         ".",
     ];
+    // DE-MOCKED: Use real engine binary detection with real runtime PATH
     let run_output = run_cli_in_workspace_with_env(
         workspace.path(),
         &run_args,
         &[
             ("PATH", runtime_path.as_str()),
-            ("FRANKEN_ENGINE_BIN", ""),
-            ("FRANKEN_NODE_ENGINE_BINARY_PATH", ""),
         ],
     );
     ensure_command_success(
