@@ -16,11 +16,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use frankenengine_node::tools::replay_bundle::{
-    EventType, INCIDENT_EVIDENCE_SCHEMA, IncidentEvidenceEvent, IncidentEvidenceMetadata,
-    IncidentEvidencePackage, IncidentSeverity, ReplayBundle,
-    read_bundle_from_path_with_trusted_key, validate_bundle_integrity,
+    read_bundle_from_path_with_trusted_key, validate_bundle_integrity, EventType,
+    IncidentEvidenceEvent, IncidentEvidenceMetadata, IncidentEvidencePackage, IncidentSeverity,
+    ReplayBundle, INCIDENT_EVIDENCE_SCHEMA,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::golden::{assert_golden, assert_scrubbed_golden};
 
