@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use frankenengine_node::config::{LaneOverflowPolicy, RuntimeConfig, RuntimeLaneConfig};
 use frankenengine_node::runtime::bounded_mask::CapabilityContext;
-use frankenengine_node::runtime::lane_router::{event_codes, LaneRouter};
+use frankenengine_node::runtime::lane_router::{LaneRouter, ProductLane, event_codes};
 
 fn lane_cfg(
     max_concurrent: usize,
@@ -105,4 +105,137 @@ fn queued_promotion_respects_configured_priority_weights() {
         .map(|event| event.operation_id.as_str())
         .collect();
     assert_eq!(promoted, vec!["bg-q", "rt-q", "timed-q"]);
+}
+
+fn lane_metric(
+    router: &LaneRouter,
+    lane: ProductLane,
+) -> frankenengine_node::runtime::lane_router::LaneMetricsSnapshot {
+    router
+        .metrics_snapshot()
+        .lanes
+        .into_iter()
+        .find(|metric| metric.lane == lane)
+        .expect("lane metric")
+}
+
+#[test]
+fn reload_shrinks_enqueue_with_timeout_queue_by_rejecting_newest_overflow() {
+    let mut cfg = runtime_config(1);
+    cfg.lanes.get_mut("timed").expect("timed lane").queue_limit = 3;
+    let mut router = LaneRouter::from_runtime_config(&cfg).expect("router");
+    let timed = cx("lane.timed");
+
+    router
+        .assign_operation(&timed, "timed-active", None, 1)
+        .expect("timed active");
+    for (idx, operation_id) in ["timed-q-old", "timed-q-mid", "timed-q-new"]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(
+            router
+                .assign_operation(
+                    &timed,
+                    operation_id,
+                    None,
+                    2 + u64::try_from(idx).expect("small index fits u64"),
+                )
+                .expect("timed queued")
+                .queued
+        );
+    }
+
+    let mut tightened = cfg;
+    tightened
+        .lanes
+        .get_mut("timed")
+        .expect("timed lane")
+        .queue_limit = 1;
+    router
+        .reload_config(
+            frankenengine_node::runtime::lane_router::LaneRouterConfig::from_runtime_config(
+                &tightened,
+            )
+            .expect("tightened config"),
+            10,
+        )
+        .expect("reload");
+
+    let timed_metric = lane_metric(&router, ProductLane::Timed);
+    assert_eq!(timed_metric.queued, 1);
+    assert_eq!(timed_metric.rejected, 2);
+
+    let event_count = router.events().len();
+    router
+        .complete_operation("timed-active", 11, false)
+        .expect("complete active timed");
+    let promoted: Vec<&str> = router.events()[event_count..]
+        .iter()
+        .filter(|event| event.event_code == event_codes::LANE_ASSIGNED)
+        .map(|event| event.operation_id.as_str())
+        .collect();
+    assert_eq!(promoted, vec!["timed-q-old"]);
+}
+
+#[test]
+fn reload_shrinks_shed_oldest_queue_by_rejecting_oldest_overflow() {
+    let mut cfg = runtime_config(1);
+    cfg.lanes
+        .get_mut("background")
+        .expect("background lane")
+        .queue_limit = 3;
+    let mut router = LaneRouter::from_runtime_config(&cfg).expect("router");
+    let background = cx("lane.background");
+
+    router
+        .assign_operation(&background, "background-active", None, 1)
+        .expect("background active");
+    for (idx, operation_id) in ["background-q-old", "background-q-mid", "background-q-new"]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(
+            router
+                .assign_operation(
+                    &background,
+                    operation_id,
+                    None,
+                    2 + u64::try_from(idx).expect("small index fits u64"),
+                )
+                .expect("background queued")
+                .queued
+        );
+    }
+
+    let mut tightened = cfg;
+    tightened
+        .lanes
+        .get_mut("background")
+        .expect("background lane")
+        .queue_limit = 1;
+    router
+        .reload_config(
+            frankenengine_node::runtime::lane_router::LaneRouterConfig::from_runtime_config(
+                &tightened,
+            )
+            .expect("tightened config"),
+            10,
+        )
+        .expect("reload");
+
+    let background_metric = lane_metric(&router, ProductLane::Background);
+    assert_eq!(background_metric.queued, 1);
+    assert_eq!(background_metric.rejected, 2);
+
+    let event_count = router.events().len();
+    router
+        .complete_operation("background-active", 11, false)
+        .expect("complete active background");
+    let promoted: Vec<&str> = router.events()[event_count..]
+        .iter()
+        .filter(|event| event.event_code == event_codes::LANE_ASSIGNED)
+        .map(|event| event.operation_id.as_str())
+        .collect();
+    assert_eq!(promoted, vec!["background-q-new"]);
 }

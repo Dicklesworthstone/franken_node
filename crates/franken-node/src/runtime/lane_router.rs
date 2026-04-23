@@ -704,6 +704,8 @@ impl LaneRouter {
                 .or_insert_with(|| LaneState::new(*lane));
         }
 
+        self.reconcile_queues_after_reload();
+
         self.emit_event(LaneEvent {
             event_code: event_codes::LANE_CONFIG_RELOAD.to_string(),
             operation_id: "config-reload".to_string(),
@@ -718,6 +720,50 @@ impl LaneRouter {
         });
 
         Ok(())
+    }
+
+    fn reconcile_queues_after_reload(&mut self) {
+        for lane in ProductLane::all() {
+            let Some(lane_cfg) = self.config.lanes.get(lane).cloned() else {
+                continue;
+            };
+
+            let mut evicted_operation_ids = Vec::new();
+            if let Some(lane_state) = self.lanes.get_mut(lane) {
+                match lane_cfg.overflow_policy {
+                    LaneOverflowPolicy::Reject => {
+                        while let Some(evicted) = lane_state.queue.pop_front() {
+                            evicted_operation_ids.push(evicted.operation_id);
+                        }
+                    }
+                    LaneOverflowPolicy::EnqueueWithTimeout => {
+                        while lane_state.queue.len() > lane_cfg.queue_limit {
+                            let Some(evicted) = lane_state.queue.pop_back() else {
+                                break;
+                            };
+                            evicted_operation_ids.push(evicted.operation_id);
+                        }
+                    }
+                    LaneOverflowPolicy::ShedOldest => {
+                        while lane_state.queue.len() > lane_cfg.queue_limit {
+                            let Some(evicted) = lane_state.queue.pop_front() else {
+                                break;
+                            };
+                            evicted_operation_ids.push(evicted.operation_id);
+                        }
+                    }
+                }
+
+                lane_state.metrics.queued = lane_state.queue.len();
+                let evicted_count = u64::try_from(evicted_operation_ids.len()).unwrap_or(u64::MAX);
+                lane_state.metrics.rejected =
+                    lane_state.metrics.rejected.saturating_add(evicted_count);
+            }
+
+            for operation_id in evicted_operation_ids {
+                self.queued_operation_ids.remove(&operation_id);
+            }
+        }
     }
 
     #[must_use]
