@@ -18,9 +18,9 @@ use serde_json::json;
 /// API contract requirement levels for test prioritization
 #[derive(Debug, Clone, Copy)]
 enum RequirementLevel {
-    Must,    // Breaking changes are NOT allowed
-    Should,  // Breaking changes require major version bump
-    May,     // Breaking changes allowed with documentation
+    Must,   // Breaking changes are NOT allowed
+    Should, // Breaking changes require major version bump
+    May,    // Breaking changes allowed with documentation
 }
 
 /// Test categories for organization
@@ -42,19 +42,83 @@ struct ApiContractTest {
     test_fn: fn() -> Result<(), String>,
 }
 
+fn make_structural_bundle_bytes(verifier_identity: &str) -> Result<Vec<u8>, String> {
+    let artifact_bytes = br#"{"event":"replay"}"#;
+    let artifact_path = "artifacts/replay.json".to_string();
+    let mut artifacts = BTreeMap::new();
+    artifacts.insert(
+        artifact_path.clone(),
+        bundle::BundleArtifact {
+            media_type: "application/json".to_string(),
+            digest: bundle::hash(artifact_bytes),
+            bytes_hex: hex::encode(artifact_bytes),
+        },
+    );
+
+    let mut replay_bundle = bundle::ReplayBundle {
+        header: bundle::BundleHeader {
+            hash_algorithm: bundle::REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
+            payload_length_bytes: u64::try_from(artifact_bytes.len())
+                .map_err(|err| format!("artifact length conversion failed: {err}"))?,
+            chunk_count: 1,
+        },
+        schema_version: bundle::REPLAY_BUNDLE_SCHEMA_VERSION.to_string(),
+        sdk_version: SDK_VERSION.to_string(),
+        bundle_id: "bundle-contract-001".to_string(),
+        incident_id: "incident-contract-001".to_string(),
+        created_at: "2026-04-23T12:00:00Z".to_string(),
+        policy_version: "policy.v1".to_string(),
+        verifier_identity: verifier_identity.to_string(),
+        timeline: vec![bundle::TimelineEvent {
+            sequence_number: 1,
+            event_id: "evt-contract-001".to_string(),
+            timestamp: "2026-04-23T12:00:01Z".to_string(),
+            event_type: "verification.started".to_string(),
+            payload: json!({"phase": "replay"}),
+            state_snapshot: json!({"step": 1}),
+            causal_parent: None,
+            policy_version: "policy.v1".to_string(),
+        }],
+        initial_state_snapshot: json!({"baseline": true}),
+        evidence_refs: vec!["evidence://capsule/contract".to_string()],
+        artifacts,
+        chunks: vec![bundle::BundleChunk {
+            chunk_index: 0,
+            total_chunks: 1,
+            artifact_path,
+            payload_length_bytes: u64::try_from(artifact_bytes.len())
+                .map_err(|err| format!("chunk length conversion failed: {err}"))?,
+            payload_digest: bundle::hash(artifact_bytes),
+        }],
+        metadata: BTreeMap::new(),
+        integrity_hash: String::new(),
+        signature: bundle::BundleSignature {
+            algorithm: bundle::REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
+            signature_hex: String::new(),
+        },
+    };
+
+    bundle::seal(&mut replay_bundle).map_err(|err| err.to_string())?;
+    bundle::serialize(&replay_bundle).map_err(|err| err.to_string())
+}
+
 // =============================================================================
 // Constants Contract Tests
 // =============================================================================
 
 fn test_sdk_version_constant() -> Result<(), String> {
-    assert_eq!(SDK_VERSION, "vsdk-v1.0",
-        "SDK_VERSION constant changed - BREAKING for downstream consumers");
+    assert_eq!(
+        SDK_VERSION, "vsdk-v1.0",
+        "SDK_VERSION constant changed - BREAKING for downstream consumers"
+    );
     Ok(())
 }
 
 fn test_sdk_version_min_constant() -> Result<(), String> {
-    assert_eq!(SDK_VERSION_MIN, "vsdk-v1.0",
-        "SDK_VERSION_MIN constant changed - BREAKING for version checks");
+    assert_eq!(
+        SDK_VERSION_MIN, "vsdk-v1.0",
+        "SDK_VERSION_MIN constant changed - BREAKING for version checks"
+    );
     Ok(())
 }
 
@@ -70,7 +134,10 @@ fn test_event_codes_constants() -> Result<(), String> {
 
 fn test_error_codes_constants() -> Result<(), String> {
     // Error codes must remain stable - downstream error handling depends on them
-    assert_eq!(ERR_CAPSULE_SIGNATURE_INVALID, "ERR_CAPSULE_SIGNATURE_INVALID");
+    assert_eq!(
+        ERR_CAPSULE_SIGNATURE_INVALID,
+        "ERR_CAPSULE_SIGNATURE_INVALID"
+    );
     assert_eq!(ERR_CAPSULE_SCHEMA_MISMATCH, "ERR_CAPSULE_SCHEMA_MISMATCH");
     assert_eq!(ERR_CAPSULE_REPLAY_DIVERGED, "ERR_CAPSULE_REPLAY_DIVERGED");
     assert_eq!(ERR_CAPSULE_VERDICT_MISMATCH, "ERR_CAPSULE_VERDICT_MISMATCH");
@@ -83,8 +150,14 @@ fn test_invariant_constants() -> Result<(), String> {
     // Invariant identifiers must remain stable - used in compliance checking
     assert_eq!(INV_CAPSULE_STABLE_SCHEMA, "INV-CAPSULE-STABLE-SCHEMA");
     assert_eq!(INV_CAPSULE_VERSIONED_API, "INV-CAPSULE-VERSIONED-API");
-    assert_eq!(INV_CAPSULE_NO_PRIVILEGED_ACCESS, "INV-CAPSULE-NO-PRIVILEGED-ACCESS");
-    assert_eq!(INV_CAPSULE_VERDICT_REPRODUCIBLE, "INV-CAPSULE-VERDICT-REPRODUCIBLE");
+    assert_eq!(
+        INV_CAPSULE_NO_PRIVILEGED_ACCESS,
+        "INV-CAPSULE-NO-PRIVILEGED-ACCESS"
+    );
+    assert_eq!(
+        INV_CAPSULE_VERDICT_REPRODUCIBLE,
+        "INV-CAPSULE-VERDICT-REPRODUCIBLE"
+    );
     Ok(())
 }
 
@@ -101,12 +174,24 @@ fn test_verification_verdict_serde() -> Result<(), String> {
     // Test serialization
     assert_eq!(serde_json::to_string(&pass).unwrap(), "\"pass\"");
     assert_eq!(serde_json::to_string(&fail).unwrap(), "\"fail\"");
-    assert_eq!(serde_json::to_string(&inconclusive).unwrap(), "\"inconclusive\"");
+    assert_eq!(
+        serde_json::to_string(&inconclusive).unwrap(),
+        "\"inconclusive\""
+    );
 
     // Test deserialization (round-trip)
-    assert_eq!(serde_json::from_str::<VerificationVerdict>("\"pass\"").unwrap(), pass);
-    assert_eq!(serde_json::from_str::<VerificationVerdict>("\"fail\"").unwrap(), fail);
-    assert_eq!(serde_json::from_str::<VerificationVerdict>("\"inconclusive\"").unwrap(), inconclusive);
+    assert_eq!(
+        serde_json::from_str::<VerificationVerdict>("\"pass\"").unwrap(),
+        pass
+    );
+    assert_eq!(
+        serde_json::from_str::<VerificationVerdict>("\"fail\"").unwrap(),
+        fail
+    );
+    assert_eq!(
+        serde_json::from_str::<VerificationVerdict>("\"inconclusive\"").unwrap(),
+        inconclusive
+    );
 
     Ok(())
 }
@@ -120,15 +205,30 @@ fn test_verification_operation_serde() -> Result<(), String> {
 
     // Test serialization
     assert_eq!(serde_json::to_string(&claim).unwrap(), "\"claim\"");
-    assert_eq!(serde_json::to_string(&migration).unwrap(), "\"migration_artifact\"");
+    assert_eq!(
+        serde_json::to_string(&migration).unwrap(),
+        "\"migration_artifact\""
+    );
     assert_eq!(serde_json::to_string(&trust).unwrap(), "\"trust_state\"");
     assert_eq!(serde_json::to_string(&workflow).unwrap(), "\"workflow\"");
 
     // Test round-trip deserialization
-    assert_eq!(serde_json::from_str::<VerificationOperation>("\"claim\"").unwrap(), claim);
-    assert_eq!(serde_json::from_str::<VerificationOperation>("\"migration_artifact\"").unwrap(), migration);
-    assert_eq!(serde_json::from_str::<VerificationOperation>("\"trust_state\"").unwrap(), trust);
-    assert_eq!(serde_json::from_str::<VerificationOperation>("\"workflow\"").unwrap(), workflow);
+    assert_eq!(
+        serde_json::from_str::<VerificationOperation>("\"claim\"").unwrap(),
+        claim
+    );
+    assert_eq!(
+        serde_json::from_str::<VerificationOperation>("\"migration_artifact\"").unwrap(),
+        migration
+    );
+    assert_eq!(
+        serde_json::from_str::<VerificationOperation>("\"trust_state\"").unwrap(),
+        trust
+    );
+    assert_eq!(
+        serde_json::from_str::<VerificationOperation>("\"workflow\"").unwrap(),
+        workflow
+    );
 
     Ok(())
 }
@@ -140,14 +240,32 @@ fn test_validation_workflow_serde() -> Result<(), String> {
     let audit = ValidationWorkflow::ComplianceAudit;
 
     // Test serialization
-    assert_eq!(serde_json::to_string(&release).unwrap(), "\"release_validation\"");
-    assert_eq!(serde_json::to_string(&incident).unwrap(), "\"incident_validation\"");
-    assert_eq!(serde_json::to_string(&audit).unwrap(), "\"compliance_audit\"");
+    assert_eq!(
+        serde_json::to_string(&release).unwrap(),
+        "\"release_validation\""
+    );
+    assert_eq!(
+        serde_json::to_string(&incident).unwrap(),
+        "\"incident_validation\""
+    );
+    assert_eq!(
+        serde_json::to_string(&audit).unwrap(),
+        "\"compliance_audit\""
+    );
 
     // Test round-trip
-    assert_eq!(serde_json::from_str::<ValidationWorkflow>("\"release_validation\"").unwrap(), release);
-    assert_eq!(serde_json::from_str::<ValidationWorkflow>("\"incident_validation\"").unwrap(), incident);
-    assert_eq!(serde_json::from_str::<ValidationWorkflow>("\"compliance_audit\"").unwrap(), audit);
+    assert_eq!(
+        serde_json::from_str::<ValidationWorkflow>("\"release_validation\"").unwrap(),
+        release
+    );
+    assert_eq!(
+        serde_json::from_str::<ValidationWorkflow>("\"incident_validation\"").unwrap(),
+        incident
+    );
+    assert_eq!(
+        serde_json::from_str::<ValidationWorkflow>("\"compliance_audit\"").unwrap(),
+        audit
+    );
 
     Ok(())
 }
@@ -187,7 +305,12 @@ fn test_verification_result_json_shape() -> Result<(), String> {
     assert!(parsed_value.get("checked_assertions").unwrap().is_array());
     assert!(parsed_value.get("execution_timestamp").unwrap().is_string());
     assert!(parsed_value.get("verifier_identity").unwrap().is_string());
-    assert!(parsed_value.get("artifact_binding_hash").unwrap().is_string());
+    assert!(
+        parsed_value
+            .get("artifact_binding_hash")
+            .unwrap()
+            .is_string()
+    );
     assert!(parsed_value.get("verifier_signature").unwrap().is_string());
     assert!(parsed_value.get("sdk_version").unwrap().is_string());
 
@@ -216,7 +339,12 @@ fn test_session_step_json_shape() -> Result<(), String> {
     assert!(parsed_value.get("step_index").unwrap().is_number());
     assert!(parsed_value.get("operation").unwrap().is_string());
     assert!(parsed_value.get("verdict").unwrap().is_string());
-    assert!(parsed_value.get("artifact_binding_hash").unwrap().is_string());
+    assert!(
+        parsed_value
+            .get("artifact_binding_hash")
+            .unwrap()
+            .is_string()
+    );
     assert!(parsed_value.get("timestamp").unwrap().is_string());
     assert!(parsed_value.get("step_signature").unwrap().is_string());
 
@@ -261,6 +389,10 @@ fn test_verifier_sdk_error_display() -> Result<(), String> {
     let unsupported = VerifierSdkError::UnsupportedSdk("test message".to_string());
     let empty_anchor = VerifierSdkError::EmptyTrustAnchor;
     let session_sealed = VerifierSdkError::SessionSealed("session-123".to_string());
+    let structural_bundle = VerifierSdkError::UnauthenticatedStructuralBundle {
+        bundle_id: "bundle-contract-001".to_string(),
+        verifier_identity: "verifier://alpha".to_string(),
+    };
     let signature_mismatch = VerifierSdkError::ResultSignatureMismatch {
         expected: "expected_sig".to_string(),
         actual: "actual_sig".to_string(),
@@ -270,9 +402,16 @@ fn test_verifier_sdk_error_display() -> Result<(), String> {
     // Test display formats
     assert_eq!(format!("{}", unsupported), "test message");
     assert_eq!(format!("{}", empty_anchor), "trust anchor is empty");
-    assert_eq!(format!("{}", session_sealed), "verification session session-123 is sealed");
+    assert_eq!(
+        format!("{}", session_sealed),
+        "verification session session-123 is sealed"
+    );
+    assert!(format!("{}", structural_bundle).contains("structural-only"));
     assert!(format!("{}", signature_mismatch).contains("verifier SDK result signature mismatch"));
-    assert_eq!(format!("{}", json_error), "verifier SDK JSON error: json parse error");
+    assert_eq!(
+        format!("{}", json_error),
+        "verifier SDK JSON error: json parse error"
+    );
 
     Ok(())
 }
@@ -306,6 +445,53 @@ fn test_verifier_sdk_new_function() -> Result<(), String> {
     assert_eq!(sdk.config.get("schema_version").unwrap(), "vsdk-v1.0");
 
     Ok(())
+}
+
+fn test_verify_migration_artifact_rejects_structural_bundle() -> Result<(), String> {
+    let sdk = create_verifier_sdk("verifier://alpha");
+    let artifact = make_structural_bundle_bytes("verifier://alpha")?;
+
+    match sdk.verify_migration_artifact(&artifact) {
+        Err(VerifierSdkError::UnauthenticatedStructuralBundle {
+            bundle_id,
+            verifier_identity,
+        }) => {
+            assert_eq!(bundle_id, "bundle-contract-001");
+            assert_eq!(verifier_identity, "verifier://alpha");
+            Ok(())
+        }
+        Ok(result) => Err(format!(
+            "expected structural bundle rejection, got success verdict {:?}",
+            result.verdict
+        )),
+        Err(other) => Err(format!(
+            "expected UnauthenticatedStructuralBundle, got {other:?}"
+        )),
+    }
+}
+
+fn test_verify_trust_state_rejects_structural_bundle() -> Result<(), String> {
+    let sdk = create_verifier_sdk("verifier://alpha");
+    let state = make_structural_bundle_bytes("verifier://alpha")?;
+    let verified = bundle::verify(&state).map_err(|err| err.to_string())?;
+
+    match sdk.verify_trust_state(&state, &verified.integrity_hash) {
+        Err(VerifierSdkError::UnauthenticatedStructuralBundle {
+            bundle_id,
+            verifier_identity,
+        }) => {
+            assert_eq!(bundle_id, "bundle-contract-001");
+            assert_eq!(verifier_identity, "verifier://alpha");
+            Ok(())
+        }
+        Ok(result) => Err(format!(
+            "expected structural bundle rejection, got success verdict {:?}",
+            result.verdict
+        )),
+        Err(other) => Err(format!(
+            "expected UnauthenticatedStructuralBundle, got {other:?}"
+        )),
+    }
 }
 
 // =============================================================================
@@ -349,7 +535,6 @@ const API_CONTRACT_TESTS: &[ApiContractTest] = &[
         description: "Invariant constants must remain stable",
         test_fn: test_invariant_constants,
     },
-
     // Enums - MUST level (serde names cannot change)
     ApiContractTest {
         id: "API-ENUM-001",
@@ -372,7 +557,6 @@ const API_CONTRACT_TESTS: &[ApiContractTest] = &[
         description: "ValidationWorkflow enum serde must remain stable",
         test_fn: test_validation_workflow_serde,
     },
-
     // Structures - MUST level (JSON shape cannot change)
     ApiContractTest {
         id: "API-STRUCT-001",
@@ -395,7 +579,6 @@ const API_CONTRACT_TESTS: &[ApiContractTest] = &[
         description: "TransparencyLogEntry JSON shape must remain stable",
         test_fn: test_transparency_log_entry_json_shape,
     },
-
     // Error handling - SHOULD level (display can improve, semantics cannot)
     ApiContractTest {
         id: "API-ERROR-001",
@@ -404,7 +587,6 @@ const API_CONTRACT_TESTS: &[ApiContractTest] = &[
         description: "VerifierSdkError display formats should remain stable",
         test_fn: test_verifier_sdk_error_display,
     },
-
     // Functions - MUST level (signature and behavior cannot change)
     ApiContractTest {
         id: "API-FUNC-001",
@@ -419,6 +601,20 @@ const API_CONTRACT_TESTS: &[ApiContractTest] = &[
         level: RequirementLevel::Must,
         description: "VerifierSdk::new function behavior must remain stable",
         test_fn: test_verifier_sdk_new_function,
+    },
+    ApiContractTest {
+        id: "API-FUNC-003",
+        category: TestCategory::Functions,
+        level: RequirementLevel::Must,
+        description: "VerifierSdk::verify_migration_artifact must reject structural-only same-verifier bundles",
+        test_fn: test_verify_migration_artifact_rejects_structural_bundle,
+    },
+    ApiContractTest {
+        id: "API-FUNC-004",
+        category: TestCategory::Functions,
+        level: RequirementLevel::Must,
+        description: "VerifierSdk::verify_trust_state must reject structural-only same-verifier bundles",
+        test_fn: test_verify_trust_state_rejects_structural_bundle,
     },
 ];
 
@@ -446,7 +642,7 @@ fn public_api_conformance_suite() {
                 match test_case.level {
                     RequirementLevel::Must => must_pass += 1,
                     RequirementLevel::Should => should_pass += 1,
-                    RequirementLevel::May => {},
+                    RequirementLevel::May => {}
                 }
                 println!("PASS");
                 "PASS"
@@ -487,20 +683,42 @@ fn public_api_conformance_suite() {
     let total_tests = API_CONTRACT_TESTS.len();
 
     println!("\n=== Public API Conformance Summary ===");
-    println!("MUST requirements:   {}/{} pass ({:.1}%)", must_pass, must_total,
-        if must_total > 0 { must_pass as f64 / must_total as f64 * 100.0 } else { 100.0 });
-    println!("SHOULD requirements: {}/{} pass ({:.1}%)", should_pass, should_total,
-        if should_total > 0 { should_pass as f64 / should_total as f64 * 100.0 } else { 100.0 });
+    println!(
+        "MUST requirements:   {}/{} pass ({:.1}%)",
+        must_pass,
+        must_total,
+        if must_total > 0 {
+            must_pass as f64 / must_total as f64 * 100.0
+        } else {
+            100.0
+        }
+    );
+    println!(
+        "SHOULD requirements: {}/{} pass ({:.1}%)",
+        should_pass,
+        should_total,
+        if should_total > 0 {
+            should_pass as f64 / should_total as f64 * 100.0
+        } else {
+            100.0
+        }
+    );
     println!("Total tests: {}", total_tests);
 
     // Fail if any MUST requirements failed
     if must_fail > 0 {
-        panic!("{} MUST requirements failed - API contract broken!", must_fail);
+        panic!(
+            "{} MUST requirements failed - API contract broken!",
+            must_fail
+        );
     }
 
     // Warn if SHOULD requirements failed
     if should_fail > 0 {
-        eprintln!("WARNING: {} SHOULD requirements failed - consider major version bump", should_fail);
+        eprintln!(
+            "WARNING: {} SHOULD requirements failed - consider major version bump",
+            should_fail
+        );
     }
 
     println!("✅ Public API contract verified!");
