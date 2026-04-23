@@ -453,7 +453,10 @@ fn test_native_engine_missing_binary_error_handling() {
         Some(nonexistent_engine_path.clone()),
         PreferredRuntime::FrankenEngine,
     );
-    let telemetry_bridge = TelemetryBridge::null();
+    // Create test telemetry bridge
+    let socket_path = temp_dir.path().join("test-telemetry.sock");
+    let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+    let telemetry_bridge = TelemetryBridge::new(&socket_path.to_string_lossy(), adapter);
 
     // Execute and expect failure due to missing binary
     let result = dispatcher.dispatch_run(&app_path, &config, &telemetry_bridge);
@@ -475,7 +478,7 @@ fn test_native_engine_missing_binary_error_handling() {
     );
 
     // Verify ActionableError provides actionable guidance
-    let actionable = error.actionable_error();
+    let actionable = error.to_actionable();
     assert!(
         actionable.title.contains("engine") || actionable.title.contains("binary") ||
         actionable.title.contains("not found"),
@@ -509,7 +512,10 @@ fn test_engine_non_zero_exit_code_error_handling() {
         Some(failing_engine_path.clone()),
         PreferredRuntime::FrankenEngine,
     );
-    let telemetry_bridge = TelemetryBridge::null();
+    // Create test telemetry bridge
+    let socket_path = temp_dir.path().join("test-telemetry.sock");
+    let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+    let telemetry_bridge = TelemetryBridge::new(&socket_path.to_string_lossy(), adapter);
 
     // Execute and expect failure due to non-zero exit
     let result = dispatcher.dispatch_run(&app_path, &config, &telemetry_bridge);
@@ -531,7 +537,7 @@ fn test_engine_non_zero_exit_code_error_handling() {
     );
 
     // Verify ActionableError chain provides guidance
-    let actionable = error.actionable_error();
+    let actionable = error.to_actionable();
     assert!(
         !actionable.title.is_empty(),
         "ActionableError should have a title"
@@ -563,7 +569,10 @@ fn test_engine_crash_signal_error_handling() {
         Some(crashing_engine_path.clone()),
         PreferredRuntime::FrankenEngine,
     );
-    let telemetry_bridge = TelemetryBridge::null();
+    // Create test telemetry bridge
+    let socket_path = temp_dir.path().join("test-telemetry.sock");
+    let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+    let telemetry_bridge = TelemetryBridge::new(&socket_path.to_string_lossy(), adapter);
 
     // Set short timeout for faster test completion
     std::env::set_var("FRANKEN_ENGINE_TIMEOUT_SECS", "10");
@@ -572,7 +581,9 @@ fn test_engine_crash_signal_error_handling() {
     struct EnvCleanup(&'static str);
     impl Drop for EnvCleanup {
         fn drop(&mut self) {
-            std::env::remove_var(self.0);
+            unsafe {
+                std::env::remove_var(self.0);
+            }
         }
     }
     let _cleanup = EnvCleanup("FRANKEN_ENGINE_TIMEOUT_SECS");
@@ -598,7 +609,7 @@ fn test_engine_crash_signal_error_handling() {
     );
 
     // Verify ActionableError provides meaningful context
-    let actionable = error.actionable_error();
+    let actionable = error.to_actionable();
     assert!(
         !actionable.title.is_empty() && !actionable.guidance.is_empty(),
         "ActionableError should provide title and guidance for engine crash"
