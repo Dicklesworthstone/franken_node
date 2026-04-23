@@ -397,6 +397,10 @@ fn test_verifier_sdk_error_display() -> Result<(), String> {
         expected: "expected_sig".to_string(),
         actual: "actual_sig".to_string(),
     };
+    let result_origin_mismatch = VerifierSdkError::ResultOriginMismatch {
+        expected: "origin-a".to_string(),
+        actual: "origin-b".to_string(),
+    };
     let json_error = VerifierSdkError::Json("json parse error".to_string());
 
     // Test display formats
@@ -408,6 +412,7 @@ fn test_verifier_sdk_error_display() -> Result<(), String> {
     );
     assert!(format!("{}", structural_bundle).contains("structural-only"));
     assert!(format!("{}", signature_mismatch).contains("verifier SDK result signature mismatch"));
+    assert!(format!("{}", result_origin_mismatch).contains("result origin mismatch"));
     assert_eq!(
         format!("{}", json_error),
         "verifier SDK JSON error: json parse error"
@@ -490,6 +495,125 @@ fn test_verify_trust_state_rejects_structural_bundle() -> Result<(), String> {
         )),
         Err(other) => Err(format!(
             "expected UnauthenticatedStructuralBundle, got {other:?}"
+        )),
+    }
+}
+
+fn test_verify_trust_state_rejects_malformed_trust_anchor() -> Result<(), String> {
+    let sdk = create_verifier_sdk("verifier://alpha");
+    let state = make_structural_bundle_bytes("verifier://alpha")?;
+
+    match sdk.verify_trust_state(&state, "not-a-sha256-digest") {
+        Err(VerifierSdkError::MalformedTrustAnchor { actual }) => {
+            assert_eq!(actual, "not-a-sha256-digest");
+            Ok(())
+        }
+        Ok(result) => Err(format!(
+            "expected malformed trust-anchor rejection, got success verdict {:?}",
+            result.verdict
+        )),
+        Err(other) => Err(format!("expected MalformedTrustAnchor, got {other:?}")),
+    }
+}
+
+fn test_create_session_rejects_malformed_session_ids() -> Result<(), String> {
+    let sdk = create_verifier_sdk("verifier://alpha");
+    let invalid_cases = [
+        ("", "session id must be non-empty"),
+        (
+            " session-alpha ",
+            "session id must not contain leading or trailing whitespace",
+        ),
+        (
+            "session-\u{0000}-alpha",
+            "session id must include only ASCII letters, digits, '.', '-', and '_'",
+        ),
+    ];
+
+    for (session_id, expected_reason) in invalid_cases {
+        match sdk.create_session(session_id) {
+            Err(VerifierSdkError::InvalidSessionId { actual, reason }) => {
+                assert_eq!(actual, session_id);
+                assert_eq!(reason, expected_reason);
+            }
+            Ok(session) => {
+                return Err(format!(
+                    "expected InvalidSessionId for {session_id:?}, got session {:?}",
+                    session.session_id
+                ));
+            }
+            Err(other) => {
+                return Err(format!(
+                    "expected InvalidSessionId for {session_id:?}, got {other:?}"
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn test_record_session_step_rejects_same_verifier_result_from_different_sdk_instance()
+-> Result<(), String> {
+    let sdk = create_verifier_sdk("verifier://alpha");
+    let sibling_sdk = create_verifier_sdk("verifier://alpha");
+    let mut session = sdk
+        .create_session("session-contract-alpha")
+        .map_err(|err| format!("primary session creation failed: {err}"))?;
+    let capsule = capsule::build_reference_capsule();
+    let sibling_result = sibling_sdk
+        .verify_claim(&capsule)
+        .map_err(|err| format!("sibling claim verification failed: {err}"))?;
+
+    match sdk.record_session_step(&mut session, &sibling_result) {
+        Err(VerifierSdkError::ResultOriginMismatch { .. }) => Ok(()),
+        Ok(step) => Err(format!(
+            "expected ResultOriginMismatch, but record_session_step accepted step {step:?}"
+        )),
+        Err(other) => Err(format!("expected ResultOriginMismatch, got {other:?}")),
+    }
+}
+
+fn test_append_transparency_log_rejects_same_verifier_result_from_different_sdk_instance()
+-> Result<(), String> {
+    let sdk = create_verifier_sdk("verifier://alpha");
+    let sibling_sdk = create_verifier_sdk("verifier://alpha");
+    let capsule = capsule::build_reference_capsule();
+    let sibling_result = sibling_sdk
+        .verify_claim(&capsule)
+        .map_err(|err| format!("sibling claim verification failed: {err}"))?;
+    let mut log = Vec::new();
+
+    match sdk.append_transparency_log(&mut log, &sibling_result) {
+        Err(VerifierSdkError::ResultOriginMismatch { .. }) => Ok(()),
+        Ok(entry) => Err(format!(
+            "expected ResultOriginMismatch, but append_transparency_log accepted entry {entry:?}"
+        )),
+        Err(other) => Err(format!("expected ResultOriginMismatch, got {other:?}")),
+    }
+}
+
+fn test_validate_bundle_accepts_same_verifier_bundle() -> Result<(), String> {
+    let sdk = create_verifier_sdk("verifier://alpha");
+    let bundle = make_structural_bundle_bytes("verifier://alpha")?;
+
+    sdk.validate_bundle(&bundle)
+        .map_err(|err| format!("expected same-verifier bundle acceptance, got {err:?}"))
+}
+
+fn test_validate_bundle_rejects_foreign_verifier_bundle() -> Result<(), String> {
+    let sdk = create_verifier_sdk("verifier://alpha");
+    let foreign_bundle = make_structural_bundle_bytes("verifier://beta")?;
+
+    match sdk.validate_bundle(&foreign_bundle) {
+        Err(VerifierSdkError::SessionVerifierMismatch { expected, actual }) => {
+            assert_eq!(expected, "verifier://alpha");
+            assert_eq!(actual, "verifier://beta");
+            Ok(())
+        }
+        Ok(()) => Err("expected foreign bundle rejection, got success".to_string()),
+        Err(other) => Err(format!(
+            "expected SessionVerifierMismatch for foreign bundle, got {other:?}"
         )),
     }
 }
@@ -615,6 +739,49 @@ const API_CONTRACT_TESTS: &[ApiContractTest] = &[
         level: RequirementLevel::Must,
         description: "VerifierSdk::verify_trust_state must reject structural-only same-verifier bundles",
         test_fn: test_verify_trust_state_rejects_structural_bundle,
+    },
+    ApiContractTest {
+        id: "API-FUNC-005",
+        category: TestCategory::Functions,
+        level: RequirementLevel::Must,
+        description: "VerifierSdk::verify_trust_state must reject malformed trust anchors before structural bundle handling",
+        test_fn: test_verify_trust_state_rejects_malformed_trust_anchor,
+    },
+    ApiContractTest {
+        id: "API-FUNC-006",
+        category: TestCategory::Functions,
+        level: RequirementLevel::Must,
+        description: "VerifierSdk::create_session must reject malformed session ids with stable details",
+        test_fn: test_create_session_rejects_malformed_session_ids,
+    },
+    ApiContractTest {
+        id: "API-FUNC-007",
+        category: TestCategory::Functions,
+        level: RequirementLevel::Must,
+        description: "VerifierSdk::record_session_step must reject same-verifier results from a different SDK instance",
+        test_fn: test_record_session_step_rejects_same_verifier_result_from_different_sdk_instance,
+    },
+    ApiContractTest {
+        id: "API-FUNC-008",
+        category: TestCategory::Functions,
+        level: RequirementLevel::Must,
+        description: "VerifierSdk::append_transparency_log must reject same-verifier results from a different SDK instance",
+        test_fn:
+            test_append_transparency_log_rejects_same_verifier_result_from_different_sdk_instance,
+    },
+    ApiContractTest {
+        id: "API-FUNC-009",
+        category: TestCategory::Functions,
+        level: RequirementLevel::Must,
+        description: "VerifierSdk::validate_bundle must accept same-verifier bundles",
+        test_fn: test_validate_bundle_accepts_same_verifier_bundle,
+    },
+    ApiContractTest {
+        id: "API-FUNC-010",
+        category: TestCategory::Functions,
+        level: RequirementLevel::Must,
+        description: "VerifierSdk::validate_bundle must reject foreign-verifier bundles",
+        test_fn: test_validate_bundle_rejects_foreign_verifier_bundle,
     },
 ];
 
