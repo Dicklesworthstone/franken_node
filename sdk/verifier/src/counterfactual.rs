@@ -339,6 +339,33 @@ mod tests {
     }
 
     #[test]
+    fn verify_counterfactual_receipt_rejects_uppercase_baseline_integrity_hash() {
+        let baseline_bundle = json!({
+            "integrity_hash": TEST_BUNDLE_HASH.to_uppercase()
+        });
+        let counterfactual_output = json!({
+            "metadata": {"bundle_hash": TEST_BUNDLE_HASH}
+        });
+        let signing_key = SigningKey::from_bytes(&[18_u8; 32]);
+        let signature_bytes = sign_counterfactual_value(&counterfactual_output, &signing_key);
+
+        let err = verify_counterfactual_receipt(
+            &baseline_bundle,
+            &counterfactual_output,
+            &signing_key.verifying_key(),
+            &signature_bytes,
+        )
+        .expect_err("uppercase baseline integrity_hash must fail closed");
+
+        assert_eq!(
+            err,
+            CounterfactualReceiptError::BaselineIntegrityHashMalformed {
+                actual: TEST_BUNDLE_HASH.to_uppercase(),
+            }
+        );
+    }
+
+    #[test]
     fn verify_counterfactual_receipt_rejects_malformed_counterfactual_bundle_hash() {
         let baseline_bundle = json!({ "integrity_hash": TEST_BUNDLE_HASH });
         let counterfactual_output = json!({
@@ -389,6 +416,31 @@ mod tests {
     }
 
     #[test]
+    fn verify_counterfactual_receipt_rejects_uppercase_counterfactual_bundle_hash() {
+        let baseline_bundle = json!({ "integrity_hash": TEST_BUNDLE_HASH });
+        let counterfactual_output = json!({
+            "metadata": {"bundle_hash": TEST_BUNDLE_HASH.to_uppercase()}
+        });
+        let signing_key = SigningKey::from_bytes(&[19_u8; 32]);
+        let signature_bytes = sign_counterfactual_value(&counterfactual_output, &signing_key);
+
+        let err = verify_counterfactual_receipt(
+            &baseline_bundle,
+            &counterfactual_output,
+            &signing_key.verifying_key(),
+            &signature_bytes,
+        )
+        .expect_err("uppercase signed counterfactual bundle_hash must fail closed");
+
+        assert_eq!(
+            err,
+            CounterfactualReceiptError::CounterfactualBundleHashMalformed {
+                actual: TEST_BUNDLE_HASH.to_uppercase(),
+            }
+        );
+    }
+
+    #[test]
     fn verify_counterfactual_receipt_rejects_malformed_sweep_result_bundle_hash() {
         let baseline_bundle = json!({ "integrity_hash": TEST_BUNDLE_HASH });
         let counterfactual_output = json!({
@@ -413,6 +465,35 @@ mod tests {
             CounterfactualReceiptError::SweepResultBundleHashMalformed {
                 index: 1,
                 actual: "still-not-a-hash".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn verify_counterfactual_receipt_rejects_uppercase_sweep_result_bundle_hash() {
+        let baseline_bundle = json!({ "integrity_hash": TEST_BUNDLE_HASH });
+        let counterfactual_output = json!({
+            "results": [
+                {"metadata": {"bundle_hash": TEST_BUNDLE_HASH}},
+                {"metadata": {"bundle_hash": TEST_BUNDLE_HASH.to_uppercase()}}
+            ]
+        });
+        let signing_key = SigningKey::from_bytes(&[20_u8; 32]);
+        let signature_bytes = sign_counterfactual_value(&counterfactual_output, &signing_key);
+
+        let err = verify_counterfactual_receipt(
+            &baseline_bundle,
+            &counterfactual_output,
+            &signing_key.verifying_key(),
+            &signature_bytes,
+        )
+        .expect_err("uppercase sweep result bundle_hash must fail closed");
+
+        assert_eq!(
+            err,
+            CounterfactualReceiptError::SweepResultBundleHashMalformed {
+                index: 1,
+                actual: TEST_BUNDLE_HASH.to_uppercase(),
             }
         );
     }
@@ -465,7 +546,11 @@ fn extract_nonempty_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a st
 }
 
 fn validate_bundle_hash(value: &str) -> Result<(), String> {
-    if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
         Ok(())
     } else {
         Err(value.to_string())
