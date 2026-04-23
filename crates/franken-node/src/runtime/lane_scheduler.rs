@@ -996,6 +996,42 @@ impl LaneScheduler {
             return Err(LaneSchedulerError::InvalidPolicy { detail });
         }
 
+        let removed_lanes: Vec<String> = self
+            .counters
+            .keys()
+            .filter(|lane| !new_policy.lane_configs.contains_key(*lane))
+            .cloned()
+            .collect();
+        for lane in &removed_lanes {
+            let counter_active = self
+                .counters
+                .get(lane)
+                .map(|counters| counters.active_count)
+                .unwrap_or_default();
+            let counter_queued = self
+                .counters
+                .get(lane)
+                .map(|counters| counters.queued_count)
+                .unwrap_or_default();
+            let active_tasks = self
+                .active_tasks
+                .values()
+                .filter(|assignment| assignment.lane.as_str() == lane)
+                .count();
+            let queued_tasks = self
+                .queued_tasks
+                .get(lane)
+                .map(Vec::len)
+                .unwrap_or_default();
+            if counter_active > 0 || counter_queued > 0 || active_tasks > 0 || queued_tasks > 0 {
+                return Err(LaneSchedulerError::InvalidPolicy {
+                    detail: format!(
+                        "cannot remove lane {lane} with active={counter_active}/{active_tasks} queued={counter_queued}/{queued_tasks}"
+                    ),
+                });
+            }
+        }
+
         // Add counters for any new lanes
         for config in new_policy.lane_configs.values() {
             self.counters
@@ -1004,6 +1040,11 @@ impl LaneScheduler {
             self.queued_tasks
                 .entry(config.lane.as_str().to_string())
                 .or_default();
+        }
+
+        for lane in removed_lanes {
+            self.counters.remove(&lane);
+            self.queued_tasks.remove(&lane);
         }
 
         self.policy = new_policy;
