@@ -827,28 +827,11 @@ impl LaneScheduler {
         Ok(assignment.lane)
     }
 
-    /// Abort a queued task assignment, decrementing the queue depth.
-    pub fn abort_queued_task(&mut self, task_class: &TaskClass) -> Result<(), LaneSchedulerError> {
-        let lane =
-            self.policy
-                .resolve(task_class)
-                .ok_or_else(|| LaneSchedulerError::UnknownClass {
-                    task_class: task_class.to_string(),
-                })?;
-
-        if let Some(queue) = self.queued_tasks.get_mut(lane.as_str()) {
-            if let Some(position) = queue
-                .iter()
-                .position(|queued| queued.task_class == *task_class)
-            {
-                queue.remove(position);
-                self.refresh_lane_queue_counters(lane)?;
-            }
-        }
-        Ok(())
-    }
-
     /// Abort one specific queued task identity.
+    ///
+    /// Class-only queue aborts are intentionally unsupported: cap-pressure
+    /// callers receive an explicit queued task ID and must present that ID to
+    /// mutate queue state.
     pub fn abort_queued_task_id(
         &mut self,
         task_id: &str,
@@ -1144,6 +1127,18 @@ mod tests {
         policy
             .add_lane(config)
             .expect("lane config should be unique in test setup");
+    }
+
+    fn queued_task_id_from(error: LaneSchedulerError) -> String {
+        let queued_task_id = match error {
+            LaneSchedulerError::CapExceeded { queued_task_id, .. } => queued_task_id,
+            _ => None,
+        };
+        assert!(
+            queued_task_id.is_some(),
+            "cap pressure should retain a queued task identity"
+        );
+        queued_task_id.unwrap_or_default()
     }
 
     // ---- SchedulerLane ----
@@ -2042,7 +2037,7 @@ mod tests {
     }
 
     #[test]
-    fn abort_queued_task_decrements_queue_depth() {
+    fn abort_queued_task_id_decrements_queue_depth() {
         let mut p = LaneMappingPolicy::new();
         add_lane_ok(&mut p, LaneConfig::new(SchedulerLane::Background, 10, 1));
         p.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
@@ -2053,20 +2048,32 @@ mod tests {
             .unwrap();
 
         // Queue two more
-        let _ = s.assign_task(&task_classes::log_rotation(), 1001, "t2");
-        let _ = s.assign_task(&task_classes::log_rotation(), 1002, "t3");
+        let first_queued = queued_task_id_from(
+            s.assign_task(&task_classes::log_rotation(), 1001, "t2")
+                .expect_err("cap pressure should queue a specific task"),
+        );
+        let second_queued = queued_task_id_from(
+            s.assign_task(&task_classes::log_rotation(), 1002, "t3")
+                .expect_err("cap pressure should queue a specific task"),
+        );
 
         let counters = s.lane_counter(SchedulerLane::Background).unwrap();
         assert_eq!(counters.queued_count, 2);
 
         // Abort one queued task
-        s.abort_queued_task(&task_classes::log_rotation()).unwrap();
+        let aborted = s
+            .abort_queued_task_id(&first_queued, 1003, "abort-first")
+            .unwrap();
+        assert_eq!(aborted.task_id, first_queued);
 
         let counters = s.lane_counter(SchedulerLane::Background).unwrap();
         assert_eq!(counters.queued_count, 1);
 
         // Abort the other queued task
-        s.abort_queued_task(&task_classes::log_rotation()).unwrap();
+        let aborted = s
+            .abort_queued_task_id(&second_queued, 1004, "abort-second")
+            .unwrap();
+        assert_eq!(aborted.task_id, second_queued);
 
         let counters = s.lane_counter(SchedulerLane::Background).unwrap();
         assert_eq!(counters.queued_count, 0);
@@ -2074,7 +2081,7 @@ mod tests {
     }
 
     #[test]
-    fn negative_abort_queued_unknown_class_preserves_queue_state() {
+    fn negative_abort_queued_unknown_id_preserves_queue_state() {
         let mut p = LaneMappingPolicy::new();
         add_lane_ok(&mut p, LaneConfig::new(SchedulerLane::Background, 10, 1));
         p.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
@@ -2082,13 +2089,20 @@ mod tests {
 
         s.assign_task(&task_classes::log_rotation(), 1000, "trace-active")
             .unwrap();
-        let _ = s.assign_task(&task_classes::log_rotation(), 1001, "trace-queued");
+        let queued = queued_task_id_from(
+            s.assign_task(&task_classes::log_rotation(), 1001, "trace-queued")
+                .expect_err("cap pressure should queue a specific task"),
+        );
 
         let err = s
-            .abort_queued_task(&TaskClass::new("not_mapped"))
-            .expect_err("unknown queued task class must fail without mutation");
+            .abort_queued_task_id("not-mapped-task-id", 1002, "trace-missing-id")
+            .expect_err("unknown queued task id must fail without mutation");
 
-        assert_eq!(err.code(), error_codes::ERR_LANE_UNKNOWN_CLASS);
+        assert_eq!(err.code(), error_codes::ERR_LANE_TASK_NOT_FOUND);
+        assert_eq!(
+            s.queued_task_ids(SchedulerLane::Background),
+            vec![queued]
+        );
         let counters = s.lane_counter(SchedulerLane::Background).unwrap();
         assert_eq!(counters.queued_count, 1);
         assert_eq!(counters.first_queued_at_ms, Some(1001));
