@@ -175,6 +175,11 @@ pub enum BundleError {
     InvalidVerifierIdentity {
         actual: String,
     },
+    EventPolicyVersionMismatch {
+        bundle_policy_version: String,
+        event_id: String,
+        event_policy_version: String,
+    },
     Ed25519SignatureMalformed {
         length: usize,
     },
@@ -279,6 +284,14 @@ impl fmt::Display for BundleError {
             Self::InvalidVerifierIdentity { actual } => write!(
                 formatter,
                 "replay bundle verifier identity must use external verifier:// scheme with non-empty name: got {actual}"
+            ),
+            Self::EventPolicyVersionMismatch {
+                bundle_policy_version,
+                event_id,
+                event_policy_version,
+            } => write!(
+                formatter,
+                "replay bundle event {event_id} policy_version mismatch: bundle={bundle_policy_version}, event={event_policy_version}"
             ),
             Self::Ed25519SignatureMalformed { length } => write!(
                 formatter,
@@ -474,6 +487,13 @@ fn validate_structure(bundle: &ReplayBundle) -> Result<(), BundleError> {
         validate_nonempty("timeline.timestamp", &event.timestamp)?;
         validate_nonempty("timeline.event_type", &event.event_type)?;
         validate_nonempty("timeline.policy_version", &event.policy_version)?;
+        if event.policy_version != bundle.policy_version {
+            return Err(BundleError::EventPolicyVersionMismatch {
+                bundle_policy_version: bundle.policy_version.clone(),
+                event_id: event.event_id.clone(),
+                event_policy_version: event.policy_version.clone(),
+            });
+        }
         if let Some(previous) = previous_sequence
             && event.sequence_number <= previous
         {
@@ -827,5 +847,37 @@ mod tests {
         let err = verify(&bytes).expect_err("empty verifier name must fail closed");
 
         assert!(matches!(err, BundleError::InvalidVerifierIdentity { .. }));
+    }
+
+    #[test]
+    fn verify_accepts_uniform_event_policy_versions() {
+        let bundle = make_test_bundle("verifier://alpha");
+        let bytes = serialize(&bundle).expect("test bundle should serialize");
+
+        let verified = verify(&bytes).expect("uniform policy_version should verify");
+
+        assert_eq!(verified.policy_version, "policy.v1");
+        assert_eq!(verified.timeline[0].policy_version, "policy.v1");
+    }
+
+    #[test]
+    fn verify_rejects_mixed_event_policy_versions() {
+        let mut bundle = make_test_bundle("verifier://alpha");
+        bundle.timeline[0].policy_version = "policy.v2".to_string();
+        seal(&mut bundle).expect("test bundle should reseal");
+        let bytes = serialize(&bundle).expect("test bundle should serialize");
+
+        let err = verify(&bytes).expect_err("mixed event policy_version must fail closed");
+
+        assert!(matches!(
+            err,
+            BundleError::EventPolicyVersionMismatch {
+                bundle_policy_version,
+                event_id,
+                event_policy_version,
+            } if bundle_policy_version == "policy.v1"
+                && event_id == "evt-1"
+                && event_policy_version == "policy.v2"
+        ));
     }
 }
