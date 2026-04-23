@@ -618,6 +618,29 @@ fn test_validate_bundle_rejects_foreign_verifier_bundle() -> Result<(), String> 
     }
 }
 
+fn test_execute_workflow_rejects_structural_bundle() -> Result<(), String> {
+    let sdk = create_verifier_sdk("verifier://alpha");
+    let bundle = make_structural_bundle_bytes("verifier://alpha")?;
+
+    match sdk.execute_workflow(ValidationWorkflow::ReleaseValidation, &bundle) {
+        Err(VerifierSdkError::UnauthenticatedStructuralBundle {
+            bundle_id,
+            verifier_identity,
+        }) => {
+            assert_eq!(bundle_id, "bundle-contract-001");
+            assert_eq!(verifier_identity, "verifier://alpha");
+            Ok(())
+        }
+        Ok(result) => Err(format!(
+            "expected structural bundle rejection, got workflow verdict {:?}",
+            result.verdict
+        )),
+        Err(other) => Err(format!(
+            "expected UnauthenticatedStructuralBundle, got {other:?}"
+        )),
+    }
+}
+
 // =============================================================================
 // Test Matrix Definition
 // =============================================================================
@@ -782,6 +805,13 @@ const API_CONTRACT_TESTS: &[ApiContractTest] = &[
         level: RequirementLevel::Must,
         description: "VerifierSdk::validate_bundle must reject foreign-verifier bundles",
         test_fn: test_validate_bundle_rejects_foreign_verifier_bundle,
+    },
+    ApiContractTest {
+        id: "API-FUNC-011",
+        category: TestCategory::Functions,
+        level: RequirementLevel::Must,
+        description: "VerifierSdk::execute_workflow must reject structural-only same-verifier bundles",
+        test_fn: test_execute_workflow_rejects_structural_bundle,
     },
 ];
 
