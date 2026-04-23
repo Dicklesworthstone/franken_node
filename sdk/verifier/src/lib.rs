@@ -458,7 +458,8 @@ impl VerifierSdk {
     /// Validate canonical replay bundle bytes without producing a facade result.
     pub fn validate_bundle(&self, bundle: &[u8]) -> Result<(), VerifierSdkError> {
         check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
-        bundle::verify(bundle)?;
+        let verified = bundle::verify(bundle)?;
+        self.verify_bundle_belongs_to_current_verifier(&verified)?;
         Ok(())
     }
 
@@ -1091,6 +1092,30 @@ mod tests {
         let err = sdk
             .verify_trust_state(&foreign_state, &verified.integrity_hash)
             .expect_err("foreign-verifier trust-state bundle must be rejected");
+
+        assert!(matches!(
+            err,
+            VerifierSdkError::SessionVerifierMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_bundle_accepts_same_verifier_bundle() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let bundle = make_replay_bundle_bytes("verifier://alpha");
+
+        sdk.validate_bundle(&bundle)
+            .expect("same-verifier bundle should validate");
+    }
+
+    #[test]
+    fn validate_bundle_rejects_foreign_verifier_bundle() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let foreign_bundle = make_replay_bundle_bytes("verifier://beta");
+
+        let err = sdk
+            .validate_bundle(&foreign_bundle)
+            .expect_err("foreign-verifier bundle must be rejected during validation");
 
         assert!(matches!(
             err,
