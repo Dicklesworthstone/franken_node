@@ -366,6 +366,34 @@ impl TempFileGuard {
     fn defuse(&mut self) {
         self.0 = None;
     }
+
+    fn orphan_with(
+        mut self,
+        rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    ) -> Result<(), PersistError> {
+        let Some(path) = self.0.take() else {
+            return Ok(());
+        };
+        Self::orphan_path_with(&path, rename)
+    }
+
+    fn orphan_path_with(
+        path: &Path,
+        rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    ) -> Result<(), PersistError> {
+        if !path.is_file() {
+            return Ok(());
+        }
+
+        let abandoned_path = Self::abandoned_path(path);
+        rename(path, &abandoned_path).map_err(|error| PersistError::IoError {
+            message: format!(
+                "failed to orphan rollout temp file {} to {}: {error}",
+                path.display(),
+                abandoned_path.display()
+            ),
+        })
+    }
 }
 
 impl Drop for TempFileGuard {
@@ -373,7 +401,14 @@ impl Drop for TempFileGuard {
         if let Some(path) = self.0.take()
             && path.is_file()
         {
-            let _ = std::fs::rename(&path, Self::abandoned_path(&path));
+            if let Err(error) = Self::orphan_path_with(&path, |from, to| std::fs::rename(from, to))
+            {
+                tracing::warn!(
+                    error = %error,
+                    path = %path.display(),
+                    "failed to orphan abandoned rollout temp file"
+                );
+            }
         }
     }
 }
@@ -409,6 +444,24 @@ fn persist_with_obligation_tracker_and_rename(
     trace_id: &str,
     rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<(), PersistError> {
+    persist_with_obligation_tracker_and_rename_and_orphan(
+        state,
+        path,
+        tracker,
+        trace_id,
+        rename,
+        |from, to| std::fs::rename(from, to),
+    )
+}
+
+fn persist_with_obligation_tracker_and_rename_and_orphan(
+    state: &RolloutState,
+    path: &Path,
+    tracker: &mut ObligationTracker,
+    trace_id: &str,
+    rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    orphan_rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), PersistError> {
     let _guard = persist_lock().lock().map_err(|_| PersistError::IoError {
         message: "persist lock poisoned".to_string(),
     })?;
@@ -442,18 +495,48 @@ fn persist_with_obligation_tracker_and_rename(
     // TempFileGuard ensures cleanup on rename failure.
     let tmp_path = path.with_extension(format!("tmp.{}", uuid::Uuid::now_v7()));
     let mut tmp_guard = TempFileGuard::new(tmp_path.clone());
-    std::fs::write(&tmp_path, &json).map_err(|e| PersistError::IoError {
-        message: e.to_string(),
-    })?;
-    rename(&tmp_path, path).map_err(|e| PersistError::IoError {
-        message: e.to_string(),
-    })?;
+    if let Err(error) = std::fs::write(&tmp_path, &json) {
+        return Err(persist_error_with_orphan_result(
+            format!(
+                "failed to write rollout temp file {}: {error}",
+                tmp_path.display()
+            ),
+            tmp_guard.orphan_with(orphan_rename),
+        ));
+    }
+    if let Err(error) = rename(&tmp_path, path) {
+        return Err(persist_error_with_orphan_result(
+            format!(
+                "failed to rename rollout temp file {} to {}: {error}",
+                tmp_path.display(),
+                path.display()
+            ),
+            tmp_guard.orphan_with(orphan_rename),
+        ));
+    }
     tmp_guard.defuse();
     obligation_guard
         .commit(now_unix_ms())
         .map_err(|message| PersistError::IoError { message })?;
 
     Ok(())
+}
+
+fn persist_error_with_orphan_result(
+    primary_message: String,
+    orphan_result: Result<(), PersistError>,
+) -> PersistError {
+    match orphan_result {
+        Ok(()) => PersistError::IoError {
+            message: primary_message,
+        },
+        Err(PersistError::IoError { message }) => PersistError::IoError {
+            message: format!("{primary_message}; {message}"),
+        },
+        Err(other) => PersistError::IoError {
+            message: format!("{primary_message}; temp orphan failed with {other}"),
+        },
+    }
 }
 
 #[cfg(feature = "test-support")]
@@ -475,6 +558,25 @@ pub fn persist_with_obligation_tracker_and_rename_for_test(
     rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<(), PersistError> {
     persist_with_obligation_tracker_and_rename(state, path, tracker, trace_id, rename)
+}
+
+#[cfg(feature = "test-support")]
+pub fn persist_with_obligation_tracker_and_rename_and_orphan_for_test(
+    state: &RolloutState,
+    path: &Path,
+    tracker: &mut ObligationTracker,
+    trace_id: &str,
+    rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    orphan_rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), PersistError> {
+    persist_with_obligation_tracker_and_rename_and_orphan(
+        state,
+        path,
+        tracker,
+        trace_id,
+        rename,
+        orphan_rename,
+    )
 }
 
 fn rollout_obligation_payload(state: &RolloutState, path: &Path) -> Result<Vec<u8>, PersistError> {
@@ -1026,17 +1128,19 @@ mod tests {
 
         let err = verify_replay(&expected, &actual).unwrap_err();
 
-        match err {
-            PersistError::ReplayMismatch {
-                field,
-                expected,
-                actual,
-            } => {
-                assert_eq!(field, "connector_id");
-                assert_eq!(expected, "test-connector-1");
-                assert_eq!(actual, "other-connector");
-            }
-            other => panic!("expected connector_id replay mismatch, got {other:?}"),
+        assert!(
+            matches!(&err, PersistError::ReplayMismatch { .. }),
+            "expected connector_id replay mismatch, got {err:?}"
+        );
+        if let PersistError::ReplayMismatch {
+            field,
+            expected,
+            actual,
+        } = err
+        {
+            assert_eq!(field, "connector_id");
+            assert_eq!(expected, "test-connector-1");
+            assert_eq!(actual, "other-connector");
         }
     }
 
@@ -1048,17 +1152,19 @@ mod tests {
 
         let err = verify_replay(&expected, &actual).unwrap_err();
 
-        match err {
-            PersistError::ReplayMismatch {
-                field,
-                expected,
-                actual,
-            } => {
-                assert_eq!(field, "version");
-                assert_eq!(expected, "1");
-                assert_eq!(actual, "2");
-            }
-            other => panic!("expected version replay mismatch, got {other:?}"),
+        assert!(
+            matches!(&err, PersistError::ReplayMismatch { .. }),
+            "expected version replay mismatch, got {err:?}"
+        );
+        if let PersistError::ReplayMismatch {
+            field,
+            expected,
+            actual,
+        } = err
+        {
+            assert_eq!(field, "version");
+            assert_eq!(expected, "1");
+            assert_eq!(actual, "2");
         }
     }
 
@@ -1070,17 +1176,19 @@ mod tests {
 
         let err = verify_replay(&expected, &actual).unwrap_err();
 
-        match err {
-            PersistError::ReplayMismatch {
-                field,
-                expected,
-                actual,
-            } => {
-                assert_eq!(field, "cancel_phase");
-                assert_eq!(expected, "finalizing");
-                assert_eq!(actual, "<none>");
-            }
-            other => panic!("expected cancel_phase replay mismatch, got {other:?}"),
+        assert!(
+            matches!(&err, PersistError::ReplayMismatch { .. }),
+            "expected cancel_phase replay mismatch, got {err:?}"
+        );
+        if let PersistError::ReplayMismatch {
+            field,
+            expected,
+            actual,
+        } = err
+        {
+            assert_eq!(field, "cancel_phase");
+            assert_eq!(expected, "finalizing");
+            assert_eq!(actual, "<none>");
         }
     }
 
