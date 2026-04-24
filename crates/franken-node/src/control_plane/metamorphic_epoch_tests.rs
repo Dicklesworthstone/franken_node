@@ -3,7 +3,7 @@
 //! Tests that epoch system maintains monotonic progression and signing
 //! invariants regardless of concurrent operation ordering.
 
-use super::control_epoch::*;
+use super::control_epoch::{ControlEpoch, EpochStore, invalid_artifact_id_reason};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
@@ -16,12 +16,22 @@ enum EpochOperation {
 /// Generate test epoch operations
 fn generate_epoch_operations() -> Vec<EpochOperation> {
     vec![
-        EpochOperation::Advance { reason: "test_advance_1".to_string() },
+        EpochOperation::Advance {
+            reason: "test_advance_1".to_string(),
+        },
         EpochOperation::ReadCurrent,
-        EpochOperation::Advance { reason: "test_advance_2".to_string() },
-        EpochOperation::ValidateArtifact { artifact_id: "valid/path/file.txt".to_string() },
-        EpochOperation::Advance { reason: "test_advance_3".to_string() },
-        EpochOperation::ValidateArtifact { artifact_id: "../invalid/path".to_string() },
+        EpochOperation::Advance {
+            reason: "test_advance_2".to_string(),
+        },
+        EpochOperation::ValidateArtifact {
+            artifact_id: "valid/path/file.txt".to_string(),
+        },
+        EpochOperation::Advance {
+            reason: "test_advance_3".to_string(),
+        },
+        EpochOperation::ValidateArtifact {
+            artifact_id: "../invalid/path".to_string(),
+        },
         EpochOperation::ReadCurrent,
     ]
 }
@@ -30,13 +40,17 @@ fn generate_epoch_operations() -> Vec<EpochOperation> {
 /// Epoch advances should maintain monotonic progression regardless of operation ordering
 #[cfg(test)]
 mod mr_epoch_monotonic_ordering {
-    use super::*;
+    use super::{EpochStore, is_gap_free, is_monotonic};
 
     #[test]
     fn monotonic_progression_under_reorder() {
         // Test advance operations in original order
         let mut store1 = EpochStore::recover(0);
-        let advances = vec!["reason1".to_string(), "reason2".to_string(), "reason3".to_string()];
+        let advances = vec![
+            "reason1".to_string(),
+            "reason2".to_string(),
+            "reason3".to_string(),
+        ];
         let mut original_epochs = vec![store1.epoch_read()];
 
         for reason in &advances {
@@ -60,21 +74,37 @@ mod mr_epoch_monotonic_ordering {
         }
 
         // INV-EPOCH-MONOTONIC: Both sequences should be strictly monotonic
-        assert!(is_monotonic(&original_epochs),
-            "Original epoch sequence not monotonic: {:?}", original_epochs);
-        assert!(is_monotonic(&reordered_epochs),
-            "Reordered epoch sequence not monotonic: {:?}", reordered_epochs);
+        assert!(
+            is_monotonic(&original_epochs),
+            "Original epoch sequence not monotonic: {:?}",
+            original_epochs
+        );
+        assert!(
+            is_monotonic(&reordered_epochs),
+            "Reordered epoch sequence not monotonic: {:?}",
+            reordered_epochs
+        );
 
         // INV-EPOCH-NO-GAP: Both should advance by exactly 1 per operation
-        assert!(is_gap_free(&original_epochs),
-            "Original sequence has gaps: {:?}", original_epochs);
-        assert!(is_gap_free(&reordered_epochs),
-            "Reordered sequence has gaps: {:?}", reordered_epochs);
+        assert!(
+            is_gap_free(&original_epochs),
+            "Original sequence has gaps: {:?}",
+            original_epochs
+        );
+        assert!(
+            is_gap_free(&reordered_epochs),
+            "Reordered sequence has gaps: {:?}",
+            reordered_epochs
+        );
 
         // Final epochs should be the same (same number of advances)
-        assert_eq!(original_epochs.last(), reordered_epochs.last(),
+        assert_eq!(
+            original_epochs.last(),
+            reordered_epochs.last(),
             "Final epochs differ: original={:?}, reordered={:?}",
-            original_epochs.last(), reordered_epochs.last());
+            original_epochs.last(),
+            reordered_epochs.last()
+        );
     }
 }
 
@@ -82,13 +112,13 @@ mod mr_epoch_monotonic_ordering {
 /// Artifact validation should be deterministic regardless of operation ordering
 #[cfg(test)]
 mod mr_artifact_validation_consistency {
-    use super::*;
+    use super::{BTreeMap, invalid_artifact_id_reason};
 
     #[test]
     fn artifact_decisions_consistent_under_reorder() {
         let artifacts = vec![
             "valid/path/file.txt",
-            "../invalid/path",  // Should be rejected
+            "../invalid/path",   // Should be rejected
             "/absolute/invalid", // Should be rejected
             "another/valid/file.dat",
         ];
@@ -112,14 +142,15 @@ mod mr_artifact_validation_consistency {
         // Validation results should be identical regardless of ordering
         for (artifact_id, original_result) in &original_results {
             if let Some(reordered_result) = reordered_results.get(artifact_id) {
-                assert_eq!(original_result, reordered_result,
+                assert_eq!(
+                    original_result, reordered_result,
                     "Artifact {} validation changed: {:?} -> {:?}",
-                    artifact_id, original_result, reordered_result);
+                    artifact_id, original_result, reordered_result
+                );
             }
         }
     }
 }
-
 
 // Helper functions for testing
 fn is_monotonic(epochs: &[ControlEpoch]) -> bool {
@@ -132,7 +163,7 @@ fn is_gap_free(epochs: &[ControlEpoch]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{ControlEpoch, is_gap_free, is_monotonic};
 
     #[test]
     fn test_monotonic_detection() {

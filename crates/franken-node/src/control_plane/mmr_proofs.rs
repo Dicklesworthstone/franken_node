@@ -563,8 +563,12 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        InclusionProof, MAX_LEAF_HASHES, MmrCheckpoint, MmrRoot, PrefixProof, ProofError,
+        marker_leaf_hash, mmr_inclusion_proof, mmr_prefix_proof, verify_inclusion, verify_prefix,
+    };
     use crate::control_plane::marker_stream::MarkerEventType;
+    use crate::control_plane::marker_stream::MarkerStream;
 
     fn build_stream(count: u64) -> MarkerStream {
         let mut stream = MarkerStream::new();
@@ -1009,11 +1013,7 @@ mod tests {
         let mut checkpoint = MmrCheckpoint::enabled();
 
         // Test with extreme tree sizes that could cause overflow
-        let extreme_cases = vec![
-            u64::MAX,
-            u64::MAX - 1,
-            u64::MAX / 2,
-        ];
+        let extreme_cases = vec![u64::MAX, u64::MAX - 1, u64::MAX / 2];
 
         for tree_size in extreme_cases {
             // Create proof with massive tree size
@@ -1034,7 +1034,7 @@ mod tests {
 
             // Either succeeds or fails gracefully, but no panic
             match result {
-                Ok(_) => {},  // Acceptable if logic handles it
+                Ok(_) => {} // Acceptable if logic handles it
                 Err(err) => {
                     // Should have a proper error code, not crash
                     assert!(!err.code().is_empty());
@@ -1045,8 +1045,10 @@ mod tests {
         // Test tree size arithmetic doesn't overflow
         let massive_leaf_count = u64::MAX / 1000;
         // This should either work or fail gracefully, not overflow
-        assert_eq!(checkpoint.tree_size().saturating_add(massive_leaf_count),
-                   checkpoint.tree_size().saturating_add(massive_leaf_count));
+        assert_eq!(
+            checkpoint.tree_size().saturating_add(massive_leaf_count),
+            checkpoint.tree_size().saturating_add(massive_leaf_count)
+        );
     }
 
     #[test]
@@ -1055,13 +1057,13 @@ mod tests {
 
         // Test problematic unicode characters in marker hashes
         let problematic_markers = vec![
-            "marker-🔥-test",               // Emoji
-            "標記-測試-🌟",                 // Mixed CJK with emoji
+            "marker-🔥-test",              // Emoji
+            "標記-測試-🌟",                // Mixed CJK with emoji
             "علامة-اختبار-٧٨٩",             // Arabic with numbers
-            "marker\u{200B}hidden",         // Zero-width space
+            "marker\u{200B}hidden",        // Zero-width space
             "marker\u{FEFF}bom",           // Byte order mark
-            "marker‌invisible‍chars",       // Zero-width joiners
-            "𝒎𝒂𝒓𝒌𝒆𝒓",                   // Mathematical script unicode
+            "marker‌invisible‍chars",        // Zero-width joiners
+            "𝒎𝒂𝒓𝒌𝒆𝒓",                      // Mathematical script unicode
             "marker\u{0301}\u{0302}combo", // Combining diacriticals
             "marker\u{1F600}emoji",        // Emoji codepoint
             "marker\u{202E}rtl\u{202D}",   // RTL/LTR override
@@ -1080,8 +1082,11 @@ mod tests {
                     // Verify hash is deterministic
                     let hash1 = marker_leaf_hash(marker);
                     let hash2 = marker_leaf_hash(marker);
-                    assert_eq!(hash1, hash2, "Hash should be deterministic for unicode input");
-                },
+                    assert_eq!(
+                        hash1, hash2,
+                        "Hash should be deterministic for unicode input"
+                    );
+                }
                 Err(_) => {
                     // Graceful rejection is also acceptable
                 }
@@ -1095,15 +1100,15 @@ mod tests {
     #[test]
     fn negative_null_bytes_and_control_characters_in_hash_inputs() {
         let problematic_hashes = vec![
-            "marker\0null",              // Null byte
-            "marker\x01\x02control",    // Control characters
-            "marker\r\nlinebreak",      // Line breaks
-            "marker\t\x0Btab",          // Tab and vertical tab
-            "marker\x7F\u{80}\u{FF}",   // DEL and high bytes
-            "marker\u{FFFE}nonchar",    // Unicode non-character
-            "marker\u{FFFF}invalid",    // Another non-character
-            "",                         // Empty string
-            "\0\0\0\0",                 // Only null bytes
+            "marker\0null",           // Null byte
+            "marker\x01\x02control",  // Control characters
+            "marker\r\nlinebreak",    // Line breaks
+            "marker\t\x0Btab",        // Tab and vertical tab
+            "marker\x7F\u{80}\u{FF}", // DEL and high bytes
+            "marker\u{FFFE}nonchar",  // Unicode non-character
+            "marker\u{FFFF}invalid",  // Another non-character
+            "",                       // Empty string
+            "\0\0\0\0",               // Only null bytes
         ];
 
         for hash_input in &problematic_hashes {
@@ -1111,15 +1116,21 @@ mod tests {
             let leaf_hash = marker_leaf_hash(hash_input);
 
             // Should produce valid hex output
-            assert!(leaf_hash.chars().all(|c| c.is_ascii_hexdigit()),
-                   "Hash should be valid hex despite problematic input: {:?}", hash_input);
+            assert!(
+                leaf_hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "Hash should be valid hex despite problematic input: {:?}",
+                hash_input
+            );
 
             // Should be deterministic
             assert_eq!(marker_leaf_hash(hash_input), marker_leaf_hash(hash_input));
 
             // Should not be empty unless input caused total failure
             if !hash_input.is_empty() {
-                assert!(!leaf_hash.is_empty(), "Hash should not be empty for non-empty input");
+                assert!(
+                    !leaf_hash.is_empty(),
+                    "Hash should not be empty for non-empty input"
+                );
             }
         }
 
@@ -1161,7 +1172,7 @@ mod tests {
 
         // Should either succeed efficiently or fail gracefully
         match result {
-            Ok(_) => {}, // Acceptable if verification logic handles it
+            Ok(_) => {} // Acceptable if verification logic handles it
             Err(err) => {
                 // Should have proper error handling, not OOM
                 assert!(!err.code().is_empty());
@@ -1180,9 +1191,9 @@ mod tests {
         let collision_candidates = vec![
             ("test1", "test2"),
             ("abc", "def"),
-            ("hash", "hsah"),  // Anagram
+            ("hash", "hsah"), // Anagram
             ("a", "b"),
-            ("", " "),         // Empty vs space
+            ("", " "),          // Empty vs space
             ("test\0", "test"), // Null vs non-null
             ("UPPER", "upper"), // Case sensitivity
         ];
@@ -1194,8 +1205,11 @@ mod tests {
             let hash2 = marker_leaf_hash(input2);
 
             // Hashes should be different for different inputs
-            assert_ne!(hash1, hash2,
-                      "Hash collision detected between {:?} and {:?}", input1, input2);
+            assert_ne!(
+                hash1, hash2,
+                "Hash collision detected between {:?} and {:?}",
+                input1, input2
+            );
 
             // Collect all hashes to check for global collisions
             hashes.push((input1, hash1.clone()));
@@ -1203,7 +1217,9 @@ mod tests {
 
             // Add to checkpoint to test internal collision handling
             if checkpoint.append_marker_hash(input1).is_ok() {
-                checkpoint.append_marker_hash(input2).expect("second append should succeed");
+                checkpoint
+                    .append_marker_hash(input2)
+                    .expect("second append should succeed");
             }
         }
 
@@ -1211,8 +1227,10 @@ mod tests {
         hashes.sort_by(|a, b| a.1.cmp(&b.1));
         for window in hashes.windows(2) {
             if window[0].1 == window[1].1 {
-                panic!("Hash collision found: {:?} and {:?} both hash to {}",
-                       window[0].0, window[1].0, window[0].1);
+                panic!(
+                    "Hash collision found: {:?} and {:?} both hash to {}",
+                    window[0].0, window[1].0, window[0].1
+                );
             }
         }
 
@@ -1227,9 +1245,9 @@ mod tests {
     fn negative_extreme_leaf_indices_boundary_testing() {
         // Test edge cases around leaf index boundaries
         let boundary_cases = vec![
-            (0, 1),           // First leaf in single-item tree
-            (0, 2),           // First leaf in two-item tree
-            (1, 2),           // Last leaf in two-item tree
+            (0, 1),                   // First leaf in single-item tree
+            (0, 2),                   // First leaf in two-item tree
+            (1, 2),                   // Last leaf in two-item tree
             (u64::MAX - 1, u64::MAX), // Near-maximum indices
         ];
 
@@ -1256,7 +1274,7 @@ mod tests {
             } else {
                 // Valid indices should either succeed or fail for other reasons
                 match result {
-                    Ok(_) => {},
+                    Ok(_) => {}
                     Err(err) => {
                         // Should not fail due to boundary issues
                         assert_ne!(err.code(), "MMR_SEQUENCE_OUT_OF_RANGE");
@@ -1270,10 +1288,10 @@ mod tests {
     fn negative_malformed_merkle_tree_construction() {
         // Test edge cases in merkle tree construction
         let edge_cases = vec![
-            Vec::<String>::new(),                    // Empty leaf set
-            vec!["single".to_string()],             // Single leaf
-            vec!["".to_string()],                   // Single empty leaf
-            vec!["a".to_string(), "".to_string()],  // Mixed empty/non-empty
+            Vec::<String>::new(),                  // Empty leaf set
+            vec!["single".to_string()],            // Single leaf
+            vec!["".to_string()],                  // Single empty leaf
+            vec!["a".to_string(), "".to_string()], // Mixed empty/non-empty
         ];
 
         for leaves in edge_cases {
@@ -1283,14 +1301,14 @@ mod tests {
                 0 => {
                     // Empty leaf set should return None
                     assert!(root_result.is_none(), "Empty leaf set should return None");
-                },
+                }
                 1 => {
                     // Single leaf should return that leaf as root
                     assert!(root_result.is_some(), "Single leaf should produce root");
                     if let Some(root) = root_result {
                         assert!(!root.is_empty(), "Root should not be empty");
                     }
-                },
+                }
                 _ => {
                     // Multiple leaves should produce a root
                     assert!(root_result.is_some(), "Multiple leaves should produce root");
@@ -1306,7 +1324,7 @@ mod tests {
                         1 => {
                             // Single leaf should have empty audit path
                             assert_eq!(audit_result, Some(Vec::new()));
-                        },
+                        }
                         _ => {
                             // Multiple leaves should have non-empty audit path
                             assert!(audit_result.is_some(), "Should produce audit path");
@@ -1325,7 +1343,9 @@ mod tests {
         // Fill checkpoint to near capacity with overflow-prone operations
         for i in 0..10 {
             let marker = format!("overflow-test-{}", i);
-            checkpoint.append_marker_hash(&marker).expect("append should succeed");
+            checkpoint
+                .append_marker_hash(&marker)
+                .expect("append should succeed");
         }
 
         // Test tree size calculations don't overflow
@@ -1354,7 +1374,7 @@ mod tests {
             let result = mmr_prefix_proof(&small_checkpoint, &checkpoint);
             // Should handle size disparity gracefully
             match result {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(err) => {
                     assert!(!err.code().is_empty());
                 }
@@ -1382,15 +1402,31 @@ mod tests {
             let hash2 = marker_leaf_hash(input);
             let hash3 = marker_leaf_hash(input);
 
-            assert_eq!(hash1, hash2, "Hash should be deterministic for: {:?}", input);
-            assert_eq!(hash2, hash3, "Hash should be deterministic for: {:?}", input);
+            assert_eq!(
+                hash1, hash2,
+                "Hash should be deterministic for: {:?}",
+                input
+            );
+            assert_eq!(
+                hash2, hash3,
+                "Hash should be deterministic for: {:?}",
+                input
+            );
 
             // Hash should be valid hex
-            assert!(hash1.chars().all(|c| c.is_ascii_hexdigit()),
-                   "Hash should be valid hex for: {:?}", input);
+            assert!(
+                hash1.chars().all(|c| c.is_ascii_hexdigit()),
+                "Hash should be valid hex for: {:?}",
+                input
+            );
 
             // Hash should have consistent length
-            assert_eq!(hash1.len(), 64, "SHA256 hash should be 64 hex chars for: {:?}", input);
+            assert_eq!(
+                hash1.len(),
+                64,
+                "SHA256 hash should be 64 hex chars for: {:?}",
+                input
+            );
 
             // Test pair hashing as well
             let pair_hash1 = hash_pair(&hash1, &hash1);
@@ -1401,7 +1437,10 @@ mod tests {
         // Test domain separation is working
         let marker_hash = marker_leaf_hash("test");
         let direct_sha = sha256_hex(b"test");
-        assert_ne!(marker_hash, direct_sha, "Domain separation should prevent direct hash matches");
+        assert_ne!(
+            marker_hash, direct_sha,
+            "Domain separation should prevent direct hash matches"
+        );
     }
 
     #[test]
@@ -1416,7 +1455,10 @@ mod tests {
 
         // Verify leaf uses distinct domain from formatted version
         let formatted_leaf = sha256_hex(b"leaf:boundary");
-        assert_ne!(leaf1, formatted_leaf, "Length-prefixed leaf should differ from formatted version");
+        assert_ne!(
+            leaf1, formatted_leaf,
+            "Length-prefixed leaf should differ from formatted version"
+        );
 
         // Test 2: Node hash domain separation
         let node1 = hash_pair("left", "right");
@@ -1425,13 +1467,19 @@ mod tests {
 
         // Verify node uses distinct domain from formatted version
         let formatted_node = sha256_hex(b"node:left:right");
-        assert_ne!(node1, formatted_node, "Length-prefixed node should differ from formatted version");
+        assert_ne!(
+            node1, formatted_node,
+            "Length-prefixed node should differ from formatted version"
+        );
 
         // Test 3: Length-prefix prevents boundary attacks
         // These should produce different hashes despite same concatenated content
-        let attack1 = hash_pair("ab", "cd");     // ab + cd
-        let attack2 = hash_pair("a", "bcd");     // a + bcd
-        assert_ne!(attack1, attack2, "Length-prefixing prevents boundary attacks");
+        let attack1 = hash_pair("ab", "cd"); // ab + cd
+        let attack2 = hash_pair("a", "bcd"); // a + bcd
+        assert_ne!(
+            attack1, attack2,
+            "Length-prefixing prevents boundary attacks"
+        );
 
         // Test 4: Cross-domain separation (leaf vs node)
         // A leaf hash should never equal a node hash even with same content
@@ -1445,9 +1493,21 @@ mod tests {
         let mutated_right = hash_pair("original_left", "tampered_right");
         let both_mutated = hash_pair("tampered_left", "tampered_right");
 
-        assert_ne!(original_node, mutated_left, "Left sibling mutation should change hash");
-        assert_ne!(original_node, mutated_right, "Right sibling mutation should change hash");
-        assert_ne!(original_node, both_mutated, "Both sibling mutations should change hash");
-        assert_ne!(mutated_left, mutated_right, "Different mutations should produce different hashes");
+        assert_ne!(
+            original_node, mutated_left,
+            "Left sibling mutation should change hash"
+        );
+        assert_ne!(
+            original_node, mutated_right,
+            "Right sibling mutation should change hash"
+        );
+        assert_ne!(
+            original_node, both_mutated,
+            "Both sibling mutations should change hash"
+        );
+        assert_ne!(
+            mutated_left, mutated_right,
+            "Different mutations should produce different hashes"
+        );
     }
 }

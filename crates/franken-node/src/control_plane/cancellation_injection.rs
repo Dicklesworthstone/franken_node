@@ -892,7 +892,11 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        AwaitPoint, CancelError, CancelInjectionMatrix, CancelMatrixEntry, CancelTestOutcome,
+        CancellationInjectionFramework, ResourceDelta, ResourceSnapshot, StateSnapshot, WorkflowId,
+        WorkflowRegistration, error_codes,
+    };
 
     fn make_framework() -> CancellationInjectionFramework {
         let mut f = CancellationInjectionFramework::new();

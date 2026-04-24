@@ -701,7 +701,10 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        DetectionResult, DivergenceDetector, MarkerProofVerifier, ReconciliationSuggestion,
+        RollbackDetector, RollbackProof, StateVector, event_codes,
+    };
     use crate::control_plane::marker_stream::{MarkerEventType, MarkerStream};
     use crate::security::constant_time;
 

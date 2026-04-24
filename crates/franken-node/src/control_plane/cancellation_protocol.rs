@@ -815,7 +815,12 @@ pub fn generate_timing_report(protocol: &CancellationProtocol) -> (String, Vec<S
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        CancelPhase, CancelProtocolError, CancellationProtocol, CancellationRecord,
+        DEFAULT_DRAIN_TIMEOUT_MS, DrainConfig, MIN_DRAIN_TIMEOUT_MS, ResourceTracker,
+        SCHEMA_VERSION, cancellation_readiness_check, error_codes, event_codes,
+        generate_timing_report,
+    };
 
     // ---- Phase FSM ----
 
@@ -1539,11 +1544,7 @@ mod tests {
     fn test_negative_cancellation_id_with_unicode_injection_attacks() {
         use crate::security::constant_time;
 
-        let mut proto = CancellationProtocol::new(
-            Duration::from_millis(1000),
-            1000,
-            1000,
-        );
+        let mut proto = CancellationProtocol::new(Duration::from_millis(1000), 1000, 1000);
 
         let malicious_cancellation_ids = [
             "cancel\u{202E}fake\u{202C}",        // BiDi override attack
@@ -1552,9 +1553,9 @@ mod tests {
             "cancel\"}{\"admin\":true,\"bypass", // JSON injection attempt
             "cancel/../../etc/passwd",           // Path traversal attempt
             "cancel\u{FEFF}BOM",                 // Byte order mark
-            "cancel\u{200B}\u{200C}\u{200D}",   // Zero-width characters
-            "cancel<script>alert(1)</script>",  // XSS attempt
-            "cancel'; DROP TABLE records; --",  // SQL injection attempt
+            "cancel\u{200B}\u{200C}\u{200D}",    // Zero-width characters
+            "cancel<script>alert(1)</script>",   // XSS attempt
+            "cancel'; DROP TABLE records; --",   // SQL injection attempt
             "cancel||rm -rf /",                  // Shell injection attempt
             "x".repeat(100_000),                 // Extremely long ID (100KB)
         ];
@@ -1562,23 +1563,39 @@ mod tests {
         for malicious_id in malicious_cancellation_ids {
             // Test cancel request with malicious ID
             let result = proto.request_cancel(malicious_id, "test-reason", "test-trace");
-            assert!(result.is_ok(), "protocol should handle malicious cancellation ID safely");
+            assert!(
+                result.is_ok(),
+                "protocol should handle malicious cancellation ID safely"
+            );
 
             // Verify ID is preserved exactly for forensics
             let record = proto.get_record(malicious_id).expect("record should exist");
-            assert_eq!(record.cancellation_id, malicious_id, "ID should be preserved");
+            assert_eq!(
+                record.cancellation_id, malicious_id,
+                "ID should be preserved"
+            );
 
             // Test JSON serialization safety
             let json = serde_json::to_string(&record).expect("serialization should work");
-            let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON should be valid");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&json).expect("JSON should be valid");
 
             // Verify no injection occurred in JSON structure
-            assert!(parsed.get("admin").is_none(), "JSON injection should not create admin field");
-            assert!(parsed.get("bypass").is_none(), "JSON injection should not create bypass field");
+            assert!(
+                parsed.get("admin").is_none(),
+                "JSON injection should not create admin field"
+            );
+            assert!(
+                parsed.get("bypass").is_none(),
+                "JSON injection should not create bypass field"
+            );
 
             // Test constant-time comparison for cancellation IDs
             let normal_id = "normal-cancel-123";
-            assert!(!constant_time::ct_eq(malicious_id, normal_id), "ID comparison should be constant-time");
+            assert!(
+                !constant_time::ct_eq(malicious_id, normal_id),
+                "ID comparison should be constant-time"
+            );
 
             // Complete cancellation to clean up for next iteration
             let _ = proto.start_drain(malicious_id, "test-trace");
@@ -1600,31 +1617,34 @@ mod tests {
 
         for bypass_id in bypass_ids {
             let result = proto.request_cancel(bypass_id, "bypass-test", "bypass-trace");
-            assert!(result.is_ok(), "protocol should handle bypass attempts safely");
+            assert!(
+                result.is_ok(),
+                "protocol should handle bypass attempts safely"
+            );
 
             // Should still follow normal protocol phases
             let record = proto.get_record(bypass_id).expect("record should exist");
-            assert_eq!(record.phase, CancelPhase::CancelRequested, "should be in normal REQUEST phase");
+            assert_eq!(
+                record.phase,
+                CancelPhase::CancelRequested,
+                "should be in normal REQUEST phase"
+            );
         }
     }
 
     #[test]
     fn test_negative_state_machine_with_illegal_phase_transitions() {
-        let mut proto = CancellationProtocol::new(
-            Duration::from_millis(1000),
-            1000,
-            1000,
-        );
+        let mut proto = CancellationProtocol::new(Duration::from_millis(1000), 1000, 1000);
 
         let cancel_id = "illegal-transition-test";
         proto.request_cancel(cancel_id, "test", "trace").unwrap();
 
         // Test illegal direct transitions from CancelRequested
         let illegal_from_requested = [
-            CancelPhase::DrainComplete,  // Skip drain
-            CancelPhase::Finalizing,     // Skip drain entirely
-            CancelPhase::Finalized,      // Complete bypass
-            CancelPhase::Idle,           // Backward transition
+            CancelPhase::DrainComplete, // Skip drain
+            CancelPhase::Finalizing,    // Skip drain entirely
+            CancelPhase::Finalized,     // Complete bypass
+            CancelPhase::Idle,          // Backward transition
         ];
 
         for illegal_phase in illegal_from_requested {
@@ -1634,8 +1654,11 @@ mod tests {
 
             // Verify legal targets don't include illegal phases
             let legal = initial_phase.legal_targets();
-            assert!(!legal.contains(&illegal_phase),
-                   "legal targets should not include illegal phase {:?}", illegal_phase);
+            assert!(
+                !legal.contains(&illegal_phase),
+                "legal targets should not include illegal phase {:?}",
+                illegal_phase
+            );
         }
 
         // Test proper transition sequence
@@ -1647,14 +1670,17 @@ mod tests {
         let illegal_from_draining = [
             CancelPhase::Idle,
             CancelPhase::CancelRequested,
-            CancelPhase::Finalizing,     // Skip drain completion
+            CancelPhase::Finalizing, // Skip drain completion
             CancelPhase::Finalized,
         ];
 
         for illegal_phase in illegal_from_draining {
             let legal = drain_phase.legal_targets();
-            assert!(!legal.contains(&illegal_phase),
-                   "legal targets from Draining should not include illegal phase {:?}", illegal_phase);
+            assert!(
+                !legal.contains(&illegal_phase),
+                "legal targets from Draining should not include illegal phase {:?}",
+                illegal_phase
+            );
         }
 
         // Complete drain properly
@@ -1666,14 +1692,17 @@ mod tests {
         let illegal_from_complete = [
             CancelPhase::Idle,
             CancelPhase::CancelRequested,
-            CancelPhase::Draining,       // Backward transition
-            CancelPhase::Finalized,      // Skip finalization
+            CancelPhase::Draining,  // Backward transition
+            CancelPhase::Finalized, // Skip finalization
         ];
 
         for illegal_phase in illegal_from_complete {
             let legal = drain_complete_phase.legal_targets();
-            assert!(!legal.contains(&illegal_phase),
-                   "legal targets from DrainComplete should not include illegal phase {:?}", illegal_phase);
+            assert!(
+                !legal.contains(&illegal_phase),
+                "legal targets from DrainComplete should not include illegal phase {:?}",
+                illegal_phase
+            );
         }
 
         // Test terminal state enforcement
@@ -1683,22 +1712,28 @@ mod tests {
 
         // All transitions from Finalized should be illegal
         let legal_from_final = final_phase.legal_targets();
-        assert!(legal_from_final.is_empty(), "no transitions should be legal from Finalized");
+        assert!(
+            legal_from_final.is_empty(),
+            "no transitions should be legal from Finalized"
+        );
 
         // Verify subsequent operations fail on finalized cancellation
         let result = proto.start_drain(cancel_id, "trace");
-        assert!(result.is_err(), "operations on finalized cancellation should fail");
+        assert!(
+            result.is_err(),
+            "operations on finalized cancellation should fail"
+        );
     }
 
     #[test]
     fn test_negative_drain_timeout_with_arithmetic_overflow_attempts() {
         // Test with extreme timeout values that might cause overflow
         let extreme_timeouts = [
-            Duration::from_millis(0),                    // Zero timeout
-            Duration::from_millis(1),                    // Minimum timeout
-            Duration::from_millis(u64::MAX),             // Maximum duration
-            Duration::from_secs(u64::MAX / 1000),        // Near-maximum seconds
-            Duration::from_millis(MIN_DRAIN_TIMEOUT_MS), // At minimum boundary
+            Duration::from_millis(0),                        // Zero timeout
+            Duration::from_millis(1),                        // Minimum timeout
+            Duration::from_millis(u64::MAX),                 // Maximum duration
+            Duration::from_secs(u64::MAX / 1000),            // Near-maximum seconds
+            Duration::from_millis(MIN_DRAIN_TIMEOUT_MS),     // At minimum boundary
             Duration::from_millis(MIN_DRAIN_TIMEOUT_MS - 1), // Below minimum
         ];
 
@@ -1707,7 +1742,9 @@ mod tests {
 
             let cancel_id = format!("timeout-test-{:?}", extreme_timeout.as_millis());
 
-            proto.request_cancel(&cancel_id, "extreme timeout test", "trace").unwrap();
+            proto
+                .request_cancel(&cancel_id, "extreme timeout test", "trace")
+                .unwrap();
             proto.start_drain(&cancel_id, "trace").unwrap();
 
             // Simulate immediate timeout check
@@ -1731,7 +1768,10 @@ mod tests {
                 let json_str = serde_json::to_string(&json).expect("serialization should work");
 
                 // Should not contain injection patterns
-                assert!(!json_str.contains("admin"), "serialized timeout should not contain injection");
+                assert!(
+                    !json_str.contains("admin"),
+                    "serialized timeout should not contain injection"
+                );
             }
         }
 
@@ -1746,7 +1786,9 @@ mod tests {
             let proto = CancellationProtocol::new(duration, 10, 10);
 
             let cancel_id = format!("overflow-test-{}", duration.as_millis());
-            proto.request_cancel(&cancel_id, "overflow test", "trace").unwrap();
+            proto
+                .request_cancel(&cancel_id, "overflow test", "trace")
+                .unwrap();
             proto.start_drain(&cancel_id, "trace").unwrap();
 
             // Test that timeout calculation uses saturating arithmetic
@@ -1771,43 +1813,50 @@ mod tests {
 
     #[test]
     fn test_negative_resource_leak_detection_with_malicious_resource_names() {
-        let mut proto = CancellationProtocol::new(
-            Duration::from_millis(1000),
-            1000,
-            1000,
-        );
+        let mut proto = CancellationProtocol::new(Duration::from_millis(1000), 1000, 1000);
 
         let cancel_id = "resource-leak-test";
-        proto.request_cancel(cancel_id, "leak test", "trace").unwrap();
+        proto
+            .request_cancel(cancel_id, "leak test", "trace")
+            .unwrap();
         proto.start_drain(cancel_id, "trace").unwrap();
         proto.complete_drain(cancel_id, "trace").unwrap();
 
         // Test with malicious resource names that might cause injection
         let malicious_resource_names = vec![
-            "resource\u{202E}fake\u{202C}".to_string(),        // BiDi override
-            "resource\x1b[31mred\x1b[0m".to_string(),          // ANSI escape
-            "resource\0null\r\n\t".to_string(),                // Control chars
+            "resource\u{202E}fake\u{202C}".to_string(), // BiDi override
+            "resource\x1b[31mred\x1b[0m".to_string(),   // ANSI escape
+            "resource\0null\r\n\t".to_string(),         // Control chars
             "resource\"}{\"admin\":true,\"bypass".to_string(), // JSON injection
-            "resource<script>alert(1)</script>".to_string(),  // XSS attempt
-            "resource'; DROP TABLE leaks; --".to_string(),    // SQL injection
-            "resource||rm -rf /".to_string(),                  // Shell injection
-            format!("resource_{}", "X".repeat(100_000)),       // Massive resource name
-            "".to_string(),                                     // Empty resource name
-            "null".to_string(),                                // Literal "null"
-            "undefined".to_string(),                           // Literal "undefined"
-            "admin.override".to_string(),                      // Admin-like resource
-            "system.bypass".to_string(),                       // System-like resource
+            "resource<script>alert(1)</script>".to_string(), // XSS attempt
+            "resource'; DROP TABLE leaks; --".to_string(), // SQL injection
+            "resource||rm -rf /".to_string(),           // Shell injection
+            format!("resource_{}", "X".repeat(100_000)), // Massive resource name
+            "".to_string(),                             // Empty resource name
+            "null".to_string(),                         // Literal "null"
+            "undefined".to_string(),                    // Literal "undefined"
+            "admin.override".to_string(),               // Admin-like resource
+            "system.bypass".to_string(),                // System-like resource
         ];
 
         let result = proto.finalize(cancel_id, "trace", malicious_resource_names.clone());
-        assert!(result.is_ok(), "finalization should handle malicious resource names");
+        assert!(
+            result.is_ok(),
+            "finalization should handle malicious resource names"
+        );
 
         // Verify resource names are preserved exactly for forensics
         let record = proto.get_record(cancel_id).unwrap();
         assert_eq!(record.resource_leaks.len(), malicious_resource_names.len());
 
-        for (original, stored) in malicious_resource_names.iter().zip(record.resource_leaks.iter()) {
-            assert_eq!(original, stored, "resource names should be preserved exactly");
+        for (original, stored) in malicious_resource_names
+            .iter()
+            .zip(record.resource_leaks.iter())
+        {
+            assert_eq!(
+                original, stored,
+                "resource names should be preserved exactly"
+            );
         }
 
         // Test JSON serialization safety with malicious resource names
@@ -1815,11 +1864,19 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON should be valid");
 
         // Verify no injection occurred in JSON structure
-        assert!(parsed.get("admin").is_none(), "JSON injection should not create admin field");
-        assert!(parsed.get("bypass").is_none(), "JSON injection should not create bypass field");
+        assert!(
+            parsed.get("admin").is_none(),
+            "JSON injection should not create admin field"
+        );
+        assert!(
+            parsed.get("bypass").is_none(),
+            "JSON injection should not create bypass field"
+        );
 
         // Verify resource leaks array is properly contained
-        let leaks = parsed.get("resource_leaks").expect("resource_leaks field should exist");
+        let leaks = parsed
+            .get("resource_leaks")
+            .expect("resource_leaks field should exist");
         assert!(leaks.is_array(), "resource_leaks should be an array");
 
         let leaks_array = leaks.as_array().unwrap();
@@ -1827,15 +1884,21 @@ mod tests {
 
         // Test audit log with resource leak detection
         let audit_entries = proto.audit_log();
-        let leak_events: Vec<_> = audit_entries.iter()
+        let leak_events: Vec<_> = audit_entries
+            .iter()
             .filter(|entry| entry.event_code == event_codes::CAN_006)
             .collect();
 
-        assert!(!leak_events.is_empty(), "resource leak events should be logged");
+        assert!(
+            !leak_events.is_empty(),
+            "resource leak events should be logged"
+        );
 
         // Test with extremely large number of resource leaks
         let massive_cancel_id = "massive-leak-test";
-        proto.request_cancel(massive_cancel_id, "massive leak test", "trace").unwrap();
+        proto
+            .request_cancel(massive_cancel_id, "massive leak test", "trace")
+            .unwrap();
         proto.start_drain(massive_cancel_id, "trace").unwrap();
         proto.complete_drain(massive_cancel_id, "trace").unwrap();
 
@@ -1844,7 +1907,10 @@ mod tests {
             .collect();
 
         let massive_result = proto.finalize(massive_cancel_id, "trace", massive_leaks.clone());
-        assert!(massive_result.is_ok(), "should handle massive resource leak list");
+        assert!(
+            massive_result.is_ok(),
+            "should handle massive resource leak list"
+        );
 
         let massive_record = proto.get_record(massive_cancel_id).unwrap();
         assert_eq!(massive_record.resource_leaks.len(), massive_leaks.len());
@@ -1852,81 +1918,121 @@ mod tests {
 
     #[test]
     fn test_negative_cancellation_reason_with_injection_patterns() {
-        let mut proto = CancellationProtocol::new(
-            Duration::from_millis(1000),
-            1000,
-            1000,
-        );
+        let mut proto = CancellationProtocol::new(Duration::from_millis(1000), 1000, 1000);
 
         let malicious_reasons = [
-            "reason\u{202E}fake\u{202C}",           // BiDi override
-            "reason\x1b[31mred\x1b[0m",             // ANSI escape
-            "reason\0null\r\n\t",                   // Control characters
-            "reason\"}{\"admin\":true,\"bypass\"", // JSON injection
-            "reason<script>alert(1)</script>",     // XSS attempt
-            "reason'; DROP TABLE cancellations; --", // SQL injection
-            "reason||rm -rf /",                     // Shell injection
+            "reason\u{202E}fake\u{202C}",                 // BiDi override
+            "reason\x1b[31mred\x1b[0m",                   // ANSI escape
+            "reason\0null\r\n\t",                         // Control characters
+            "reason\"}{\"admin\":true,\"bypass\"",        // JSON injection
+            "reason<script>alert(1)</script>",            // XSS attempt
+            "reason'; DROP TABLE cancellations; --",      // SQL injection
+            "reason||rm -rf /",                           // Shell injection
             &format!("reason_{}", "X".repeat(1_000_000)), // Massive reason (1MB)
         ];
 
         for malicious_reason in malicious_reasons {
-            let cancel_id = format!("reason-test-{}", malicious_reasons.iter().position(|&r| r == malicious_reason).unwrap());
+            let cancel_id = format!(
+                "reason-test-{}",
+                malicious_reasons
+                    .iter()
+                    .position(|&r| r == malicious_reason)
+                    .unwrap()
+            );
 
             let result = proto.request_cancel(&cancel_id, malicious_reason, "test-trace");
-            assert!(result.is_ok(), "should handle malicious cancellation reason");
+            assert!(
+                result.is_ok(),
+                "should handle malicious cancellation reason"
+            );
 
             // Verify reason is preserved exactly for forensics
             let record = proto.get_record(&cancel_id).unwrap();
-            assert_eq!(record.cancel_reason, malicious_reason, "reason should be preserved");
+            assert_eq!(
+                record.cancel_reason, malicious_reason,
+                "reason should be preserved"
+            );
 
             // Test JSON serialization safety
             let json = serde_json::to_string(&record).expect("serialization should work");
-            let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON should be valid");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&json).expect("JSON should be valid");
 
             // Verify no injection occurred
-            assert!(parsed.get("admin").is_none(), "JSON injection should not create admin field");
-            assert!(parsed.get("bypass").is_none(), "JSON injection should not create bypass field");
+            assert!(
+                parsed.get("admin").is_none(),
+                "JSON injection should not create admin field"
+            );
+            assert!(
+                parsed.get("bypass").is_none(),
+                "JSON injection should not create bypass field"
+            );
 
             // Verify reason is properly escaped in JSON
             if let Some(reason) = parsed.get("cancel_reason").and_then(|r| r.as_str()) {
-                assert_eq!(reason, malicious_reason, "reason should be preserved in JSON");
+                assert_eq!(
+                    reason, malicious_reason,
+                    "reason should be preserved in JSON"
+                );
             }
 
             // Test audit log entry with malicious reason
             let audit_entries = proto.audit_log();
-            let request_events: Vec<_> = audit_entries.iter()
-                .filter(|entry| entry.event_code == event_codes::CAN_001 && entry.cancellation_id == cancel_id)
+            let request_events: Vec<_> = audit_entries
+                .iter()
+                .filter(|entry| {
+                    entry.event_code == event_codes::CAN_001 && entry.cancellation_id == cancel_id
+                })
                 .collect();
 
-            assert!(!request_events.is_empty(), "cancel request events should be logged");
+            assert!(
+                !request_events.is_empty(),
+                "cancel request events should be logged"
+            );
 
             for event in request_events {
                 // Verify event details don't propagate injection
-                assert!(!event.detail.contains("admin"), "audit detail should not contain injection");
+                assert!(
+                    !event.detail.contains("admin"),
+                    "audit detail should not contain injection"
+                );
             }
         }
 
         // Test with reasons that might bypass cancellation logic
         let bypass_reasons = [
-            "",                           // Empty reason
-            "null",                       // Literal "null"
-            "undefined",                  // Literal "undefined"
-            "false",                      // Boolean-like
-            "admin.emergency.bypass",     // Administrative bypass
-            "system.force.cancel",        // System forcing
-            "debug.override.protocol",    // Debug override
+            "",                        // Empty reason
+            "null",                    // Literal "null"
+            "undefined",               // Literal "undefined"
+            "false",                   // Boolean-like
+            "admin.emergency.bypass",  // Administrative bypass
+            "system.force.cancel",     // System forcing
+            "debug.override.protocol", // Debug override
         ];
 
         for bypass_reason in bypass_reasons {
-            let cancel_id = format!("bypass-reason-{}", bypass_reasons.iter().position(|&r| r == bypass_reason).unwrap());
+            let cancel_id = format!(
+                "bypass-reason-{}",
+                bypass_reasons
+                    .iter()
+                    .position(|&r| r == bypass_reason)
+                    .unwrap()
+            );
 
             let result = proto.request_cancel(&cancel_id, bypass_reason, "bypass-trace");
             assert!(result.is_ok(), "should handle bypass reason attempts");
 
             // Should still follow normal protocol
             let record = proto.get_record(&cancel_id).unwrap();
-            assert_eq!(record.phase, CancelPhase::CancelRequested, "should be in normal REQUEST phase");
-            assert_eq!(record.cancel_reason, bypass_reason, "bypass reason should be preserved");
+            assert_eq!(
+                record.phase,
+                CancelPhase::CancelRequested,
+                "should be in normal REQUEST phase"
+            );
+            assert_eq!(
+                record.cancel_reason, bypass_reason,
+                "bypass reason should be preserved"
+            );
         }
     }
 
@@ -1934,11 +2040,7 @@ mod tests {
     fn test_negative_trace_id_with_massive_forensic_payloads() {
         use crate::security::constant_time;
 
-        let mut proto = CancellationProtocol::new(
-            Duration::from_millis(1000),
-            1000,
-            1000,
-        );
+        let mut proto = CancellationProtocol::new(Duration::from_millis(1000), 1000, 1000);
 
         // Test with massive trace IDs for memory stress
         let massive_trace_id = format!("trace_{}", "Z".repeat(5_000_000)); // 5MB trace ID
@@ -1949,18 +2051,31 @@ mod tests {
 
         // Verify trace ID is preserved in audit log
         let audit_entries = proto.audit_log();
-        let request_event = audit_entries.iter()
-            .find(|entry| entry.event_code == event_codes::CAN_001 && entry.cancellation_id == cancel_id)
+        let request_event = audit_entries
+            .iter()
+            .find(|entry| {
+                entry.event_code == event_codes::CAN_001 && entry.cancellation_id == cancel_id
+            })
             .expect("request event should exist");
 
-        assert_eq!(request_event.trace_id, massive_trace_id, "massive trace ID should be preserved");
+        assert_eq!(
+            request_event.trace_id, massive_trace_id,
+            "massive trace ID should be preserved"
+        );
 
         // Test JSON serialization with massive trace ID
         let json = serde_json::to_string(&request_event).expect("serialization should work");
-        assert!(json.len() > 5_000_000, "serialized JSON should include massive trace ID");
+        assert!(
+            json.len() > 5_000_000,
+            "serialized JSON should include massive trace ID"
+        );
 
-        let parsed: CancellationAuditEntry = serde_json::from_str(&json).expect("deserialization should work");
-        assert_eq!(parsed.trace_id, massive_trace_id, "trace ID should survive roundtrip");
+        let parsed: CancellationAuditEntry =
+            serde_json::from_str(&json).expect("deserialization should work");
+        assert_eq!(
+            parsed.trace_id, massive_trace_id,
+            "trace ID should survive roundtrip"
+        );
 
         // Test with injection patterns in trace ID
         let injection_trace_ids = [
@@ -1974,30 +2089,49 @@ mod tests {
         ];
 
         for injection_trace_id in injection_trace_ids {
-            let cancel_id = format!("injection-trace-{}", injection_trace_ids.iter().position(|&t| t == injection_trace_id).unwrap());
+            let cancel_id = format!(
+                "injection-trace-{}",
+                injection_trace_ids
+                    .iter()
+                    .position(|&t| t == injection_trace_id)
+                    .unwrap()
+            );
 
             let result = proto.request_cancel(&cancel_id, "injection test", injection_trace_id);
             assert!(result.is_ok(), "should handle injection trace ID safely");
 
             // Test constant-time comparison for trace IDs
             let normal_trace = "normal-trace-123";
-            assert!(!constant_time::ct_eq(injection_trace_id, normal_trace),
-                   "trace ID comparison should be constant-time");
+            assert!(
+                !constant_time::ct_eq(injection_trace_id, normal_trace),
+                "trace ID comparison should be constant-time"
+            );
 
             // Verify injection is contained in audit log
             let audit_entries = proto.audit_log();
-            let injection_event = audit_entries.iter()
+            let injection_event = audit_entries
+                .iter()
                 .find(|entry| entry.cancellation_id == cancel_id)
                 .expect("injection event should exist");
 
-            assert_eq!(injection_event.trace_id, injection_trace_id, "injection trace ID should be preserved");
+            assert_eq!(
+                injection_event.trace_id, injection_trace_id,
+                "injection trace ID should be preserved"
+            );
 
             // Test JSON safety
             let json = serde_json::to_string(&injection_event).expect("serialization should work");
-            let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON should be valid");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&json).expect("JSON should be valid");
 
-            assert!(parsed.get("admin").is_none(), "JSON injection should not create admin field");
-            assert!(parsed.get("bypass").is_none(), "JSON injection should not create bypass field");
+            assert!(
+                parsed.get("admin").is_none(),
+                "JSON injection should not create admin field"
+            );
+            assert!(
+                parsed.get("bypass").is_none(),
+                "JSON injection should not create bypass field"
+            );
         }
     }
 
@@ -2006,8 +2140,8 @@ mod tests {
         // Create protocol with small capacity for testing
         let mut proto = CancellationProtocol::new(
             Duration::from_millis(1000),
-            10,  // Small audit log capacity
-            10,  // Small records capacity
+            10, // Small audit log capacity
+            10, // Small records capacity
         );
 
         // Attempt to exhaust memory with many cancellation records
@@ -2027,45 +2161,67 @@ mod tests {
 
         // Verify bounded storage is enforced
         let audit_log = proto.audit_log();
-        assert!(audit_log.len() <= 50, "audit log should be bounded (got {})", audit_log.len()); // Allow some overhead
+        assert!(
+            audit_log.len() <= 50,
+            "audit log should be bounded (got {})",
+            audit_log.len()
+        ); // Allow some overhead
 
         let records = proto.records();
-        assert!(records.len() <= 10, "records should be bounded to capacity (got {})", records.len());
+        assert!(
+            records.len() <= 10,
+            "records should be bounded to capacity (got {})",
+            records.len()
+        );
 
         // Test with massive single audit entry
         let massive_cancel_id = "massive-audit-test";
         let massive_reason = format!("massive_reason_{}", "X".repeat(1_000_000)); // 1MB reason
-        let massive_trace = format!("massive_trace_{}", "Y".repeat(1_000_000));   // 1MB trace
+        let massive_trace = format!("massive_trace_{}", "Y".repeat(1_000_000)); // 1MB trace
 
         let result = proto.request_cancel(&massive_cancel_id, &massive_reason, &massive_trace);
         assert!(result.is_ok(), "should handle massive audit entry");
 
         // Verify massive entry doesn't break bounded storage
         let audit_log_after = proto.audit_log();
-        assert!(audit_log_after.len() <= 100, "audit log should remain bounded even with massive entries");
+        assert!(
+            audit_log_after.len() <= 100,
+            "audit log should remain bounded even with massive entries"
+        );
 
         // Test rapid-fire cancellations to stress FIFO eviction
         for i in 0..100 {
             let rapid_id = format!("rapid-{:03}", i);
-            let result = proto.request_cancel(&rapid_id, "rapid test", &format!("rapid-trace-{:03}", i));
+            let result =
+                proto.request_cancel(&rapid_id, "rapid test", &format!("rapid-trace-{:03}", i));
             assert!(result.is_ok(), "should handle rapid cancellation {}", i);
         }
 
         // Verify FIFO eviction maintains most recent entries
         let final_records = proto.records();
-        assert!(final_records.len() <= 10, "records should maintain capacity bound");
+        assert!(
+            final_records.len() <= 10,
+            "records should maintain capacity bound"
+        );
 
-        let recent_exists = final_records.iter()
+        let recent_exists = final_records
+            .iter()
             .any(|record| record.cancellation_id.starts_with("rapid-09"));
         // Most recent should be preserved (unless capacity is very constrained)
 
         // Verify protocol still functions after stress testing
         let final_test_id = "final-functionality-test";
         let final_result = proto.request_cancel(final_test_id, "final test", "final-trace");
-        assert!(final_result.is_ok(), "protocol should still function after stress testing");
+        assert!(
+            final_result.is_ok(),
+            "protocol should still function after stress testing"
+        );
 
         let final_record = proto.get_record(final_test_id);
-        assert!(final_record.is_some(), "should be able to retrieve final test record");
+        assert!(
+            final_record.is_some(),
+            "should be able to retrieve final test record"
+        );
     }
 
     #[test]
@@ -2142,11 +2298,17 @@ mod tests {
         let final_records = final_proto.records();
 
         // Should have some records (exact count depends on eviction and race conditions)
-        assert!(final_records.len() <= 1000, "should respect capacity bounds under concurrency");
+        assert!(
+            final_records.len() <= 1000,
+            "should respect capacity bounds under concurrency"
+        );
 
         // Verify all remaining records are in valid states
         for record in final_records {
-            assert!(record.cancellation_id.starts_with("concurrent-"), "records should be from concurrent test");
+            assert!(
+                record.cancellation_id.starts_with("concurrent-"),
+                "records should be from concurrent test"
+            );
 
             // Phase should be valid
             match record.phase {
@@ -2156,19 +2318,31 @@ mod tests {
                 }
                 CancelPhase::Draining => {
                     // Valid intermediate state
-                    assert!(record.drain_started_at.is_some(), "draining phase should have start time");
+                    assert!(
+                        record.drain_started_at.is_some(),
+                        "draining phase should have start time"
+                    );
                 }
                 CancelPhase::DrainComplete => {
                     // Valid intermediate state
-                    assert!(record.drain_started_at.is_some(), "drain complete should have start time");
-                    assert!(record.drain_completed_at.is_some(), "drain complete should have completion time");
+                    assert!(
+                        record.drain_started_at.is_some(),
+                        "drain complete should have start time"
+                    );
+                    assert!(
+                        record.drain_completed_at.is_some(),
+                        "drain complete should have completion time"
+                    );
                 }
                 CancelPhase::Finalizing => {
                     // Unlikely but valid
                 }
                 CancelPhase::Finalized => {
                     // Terminal state - should be complete
-                    assert!(record.finalized_at.is_some(), "finalized phase should have completion time");
+                    assert!(
+                        record.finalized_at.is_some(),
+                        "finalized phase should have completion time"
+                    );
                 }
             }
         }
@@ -2178,16 +2352,15 @@ mod tests {
             let mut locked_proto = final_proto;
             locked_proto.request_cancel("post-concurrent-test", "functionality test", "post-trace")
         };
-        assert!(test_result.is_ok(), "protocol should function after concurrent access");
+        assert!(
+            test_result.is_ok(),
+            "protocol should function after concurrent access"
+        );
     }
 
     #[test]
     fn test_negative_audit_log_injection_with_structured_events() {
-        let mut proto = CancellationProtocol::new(
-            Duration::from_millis(1000),
-            1000,
-            1000,
-        );
+        let mut proto = CancellationProtocol::new(Duration::from_millis(1000), 1000, 1000);
 
         let cancel_id = "audit-injection-test";
 
@@ -2208,17 +2381,29 @@ mod tests {
             let reason_with_pattern = format!("reason_{}", pattern);
 
             // Request cancellation
-            proto.request_cancel(&phase_cancel_id, &reason_with_pattern, &trace_with_pattern).unwrap();
+            proto
+                .request_cancel(&phase_cancel_id, &reason_with_pattern, &trace_with_pattern)
+                .unwrap();
 
             // Start drain
-            proto.start_drain(&phase_cancel_id, &trace_with_pattern).unwrap();
+            proto
+                .start_drain(&phase_cancel_id, &trace_with_pattern)
+                .unwrap();
 
             // Complete drain
-            proto.complete_drain(&phase_cancel_id, &trace_with_pattern).unwrap();
+            proto
+                .complete_drain(&phase_cancel_id, &trace_with_pattern)
+                .unwrap();
 
             // Finalize with resource leaks containing injection patterns
             let leak_with_pattern = format!("leak_{}", pattern);
-            proto.finalize(&phase_cancel_id, &trace_with_pattern, vec![leak_with_pattern]).unwrap();
+            proto
+                .finalize(
+                    &phase_cancel_id,
+                    &trace_with_pattern,
+                    vec![leak_with_pattern],
+                )
+                .unwrap();
         }
 
         // Verify all audit entries are safe
@@ -2227,30 +2412,56 @@ mod tests {
 
         for entry in audit_log {
             // Test JSON serialization safety for each entry
-            let json = serde_json::to_string(&entry).expect("audit entry serialization should work");
-            let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON should be valid");
+            let json =
+                serde_json::to_string(&entry).expect("audit entry serialization should work");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&json).expect("JSON should be valid");
 
             // Verify no injection fields were created
-            assert!(parsed.get("admin").is_none(), "audit entry should not contain admin field");
-            assert!(parsed.get("bypass").is_none(), "audit entry should not contain bypass field");
+            assert!(
+                parsed.get("admin").is_none(),
+                "audit entry should not contain admin field"
+            );
+            assert!(
+                parsed.get("bypass").is_none(),
+                "audit entry should not contain bypass field"
+            );
 
             // Verify event structure integrity
-            assert!(parsed.get("event_code").is_some(), "audit entry should have event_code");
-            assert!(parsed.get("cancellation_id").is_some(), "audit entry should have cancellation_id");
-            assert!(parsed.get("trace_id").is_some(), "audit entry should have trace_id");
-            assert!(parsed.get("timestamp").is_some(), "audit entry should have timestamp");
+            assert!(
+                parsed.get("event_code").is_some(),
+                "audit entry should have event_code"
+            );
+            assert!(
+                parsed.get("cancellation_id").is_some(),
+                "audit entry should have cancellation_id"
+            );
+            assert!(
+                parsed.get("trace_id").is_some(),
+                "audit entry should have trace_id"
+            );
+            assert!(
+                parsed.get("timestamp").is_some(),
+                "audit entry should have timestamp"
+            );
 
             // Verify injection patterns are contained as literal strings
             if let Some(trace_id) = parsed.get("trace_id").and_then(|t| t.as_str()) {
                 if trace_id.contains("script") {
                     // Should be literal string, not executed script
-                    assert!(trace_id.contains("<script>"), "script tag should be literal");
+                    assert!(
+                        trace_id.contains("<script>"),
+                        "script tag should be literal"
+                    );
                 }
             }
 
             if let Some(detail) = parsed.get("detail").and_then(|d| d.as_str()) {
                 // Detail should not contain unescaped injection
-                assert!(!detail.contains("\"admin\":true"), "detail should not contain unescaped JSON injection");
+                assert!(
+                    !detail.contains("\"admin\":true"),
+                    "detail should not contain unescaped JSON injection"
+                );
             }
         }
 
@@ -2260,10 +2471,15 @@ mod tests {
             let massive_trace = format!("trace_{}", "X".repeat(10_000)); // 10KB trace
             let massive_reason = format!("reason_{}", "Y".repeat(10_000)); // 10KB reason
 
-            proto.request_cancel(&stress_id, &massive_reason, &massive_trace).unwrap();
+            proto
+                .request_cancel(&stress_id, &massive_reason, &massive_trace)
+                .unwrap();
         }
 
         let stressed_audit_log = proto.audit_log();
-        assert!(stressed_audit_log.len() <= 1500, "audit log should remain bounded under stress");
+        assert!(
+            stressed_audit_log.len() <= 1500,
+            "audit log should remain bounded under stress"
+        );
     }
 }

@@ -593,7 +593,11 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        ControlEpoch, EpochArtifactEvent, EpochError, EpochRejectionReason, EpochStore,
+        EpochTransition, RESERVED_ARTIFACT_ID, ValidityWindowPolicy, check_artifact_epoch,
+        event_codes,
+    };
 
     fn mhash(n: u32) -> String {
         format!("manifest-hash-{n:016x}")
@@ -1618,7 +1622,10 @@ mod tests {
         sha2::Digest::update(&mut hasher_without_domain, timestamp.to_le_bytes());
         sha2::Digest::update(&mut hasher_without_domain, b"test-hash");
         sha2::Digest::update(&mut hasher_without_domain, b"test-trace");
-        let mac_without_domain = format!("mac:{}", hex::encode(sha2::Digest::finalize(hasher_without_domain)));
+        let mac_without_domain = format!(
+            "mac:{}",
+            hex::encode(sha2::Digest::finalize(hasher_without_domain))
+        );
 
         // Domain separator should make hashes different
         assert_ne!(
@@ -1762,8 +1769,14 @@ mod tests {
             "Different strings should not match"
         );
         assert!(constant_time::ct_eq("", ""), "Empty strings should match");
-        assert!(!constant_time::ct_eq("a", ""), "Different lengths should not match");
-        assert!(!constant_time::ct_eq("", "b"), "Different lengths should not match");
+        assert!(
+            !constant_time::ct_eq("a", ""),
+            "Different lengths should not match"
+        );
+        assert!(
+            !constant_time::ct_eq("", "b"),
+            "Different lengths should not match"
+        );
 
         // Test timing-sensitive scenarios
         let reference = "epoch:1234567890abcdef";

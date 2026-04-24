@@ -150,7 +150,10 @@ impl TransitionAbortEvent {
     /// Export as JSON string.
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_else(|e| {
-            format!("{{\"error\":\"serialization_failed\",\"details\":\"{}\"}}", e)
+            format!(
+                "{{\"error\":\"serialization_failed\",\"details\":\"{}\"}}",
+                e
+            )
         })
     }
 }
@@ -199,17 +202,32 @@ impl ForceTransitionPolicy {
         // Length-prefix each participant individually to prevent delimiter collisions.
         sha2::Digest::update(
             &mut hasher,
-            u64::try_from(self.skippable_participants.len()).unwrap_or(u64::MAX).to_le_bytes(),
+            u64::try_from(self.skippable_participants.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
         );
         for participant in &self.skippable_participants {
-            sha2::Digest::update(&mut hasher, u64::try_from(participant.len()).unwrap_or(u64::MAX).to_le_bytes());
+            sha2::Digest::update(
+                &mut hasher,
+                u64::try_from(participant.len())
+                    .unwrap_or(u64::MAX)
+                    .to_le_bytes(),
+            );
             sha2::Digest::update(&mut hasher, participant.as_bytes());
         }
         for field in [self.operator_id.as_str(), self.audit_reason.as_str()] {
-            sha2::Digest::update(&mut hasher, u64::try_from(field.len()).unwrap_or(u64::MAX).to_le_bytes());
+            sha2::Digest::update(
+                &mut hasher,
+                u64::try_from(field.len()).unwrap_or(u64::MAX).to_le_bytes(),
+            );
             sha2::Digest::update(&mut hasher, field.as_bytes());
         }
-        sha2::Digest::update(&mut hasher, u64::try_from(self.max_skippable).unwrap_or(u64::MAX).to_le_bytes());
+        sha2::Digest::update(
+            &mut hasher,
+            u64::try_from(self.max_skippable)
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         format!("policy:{}", hex::encode(sha2::Digest::finalize(hasher)))
     }
 }
@@ -517,9 +535,14 @@ impl TransitionAbortManager {
     pub fn export_audit_log_jsonl(&self) -> String {
         self.audit_log
             .iter()
-            .map(|r| serde_json::to_string(r).unwrap_or_else(|e| {
-                format!("{{\"error\":\"serialization_failed\",\"details\":\"{}\"}}", e)
-            }))
+            .map(|r| {
+                serde_json::to_string(r).unwrap_or_else(|e| {
+                    format!(
+                        "{{\"error\":\"serialization_failed\",\"details\":\"{}\"}}",
+                        e
+                    )
+                })
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -555,7 +578,12 @@ fn push_bounded<T>(entries: &mut Vec<T>, entry: T, max_entries: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        AbortError, ForceTransitionPolicy, ParticipantAbortState, SCHEMA_VERSION,
+        TransitionAbortEvent, TransitionAbortManager, TransitionAbortReason, error_codes,
+        event_codes,
+    };
+    use std::collections::BTreeSet;
 
     fn participants_3() -> BTreeSet<String> {
         ["svc-a", "svc-b", "svc-c"]
@@ -1240,9 +1268,8 @@ mod tests {
 
     #[test]
     fn serde_rejects_unknown_abort_reason_variant() {
-        let err =
-            serde_json::from_str::<TransitionAbortReason>(r#"{"ClockSkew":{"ms":50}}"#)
-                .unwrap_err();
+        let err = serde_json::from_str::<TransitionAbortReason>(r#"{"ClockSkew":{"ms":50}}"#)
+            .unwrap_err();
 
         assert!(err.to_string().contains("unknown variant"));
     }

@@ -677,7 +677,10 @@ impl Default for MarkerStream {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        DivergenceResult, GENESIS_PREV_HASH, MAX_MARKERS, Marker, MarkerEventType, MarkerStream,
+        MarkerStreamError, find_divergence_point, len_to_u64,
+    };
     use crate::security::constant_time;
 
     fn trace(n: u32) -> String {

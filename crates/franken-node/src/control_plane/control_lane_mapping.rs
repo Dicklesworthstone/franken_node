@@ -737,7 +737,12 @@ pub fn select_next_lane(pending: &BTreeMap<ControlLane, usize>) -> Option<Contro
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        ControlLane, ControlLanePolicy, ControlLanePolicyError, ControlLaneScheduler,
+        ControlTaskClass, LaneBudget, SCHEMA_VERSION, default_control_lane_policy, error_codes,
+        event_codes, select_next_lane, task_classes,
+    };
+    use std::collections::BTreeMap;
 
     fn make_scheduler() -> ControlLaneScheduler {
         ControlLaneScheduler::new(default_control_lane_policy()).unwrap()

@@ -14,9 +14,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
 #[cfg(feature = "asupersync-transport")]
 use crate::capacity_defaults::aliases::MAX_CONTROL_EVENTS;
+use crate::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::Signer;
 use rand::Rng;
@@ -638,13 +638,11 @@ impl Drop for FleetActionCompactionGuard {
     }
 }
 
-fn lock_fleet_action_compaction_process() -> Result<FleetActionCompactionGuard, FleetTransportError> {
+fn lock_fleet_action_compaction_process() -> Result<FleetActionCompactionGuard, FleetTransportError>
+{
     // Attempt to atomically transition from AVAILABLE (2) to PROCESSING (1)
-    match FLEET_ACTION_COMPACTION_STATE.compare_exchange(
-        2, 1,
-        Ordering::AcqRel,
-        Ordering::Acquire
-    ) {
+    match FLEET_ACTION_COMPACTION_STATE.compare_exchange(2, 1, Ordering::AcqRel, Ordering::Acquire)
+    {
         Ok(_) => {
             // Successfully acquired coordination
             Ok(FleetActionCompactionGuard)
@@ -652,7 +650,7 @@ fn lock_fleet_action_compaction_process() -> Result<FleetActionCompactionGuard, 
         Err(_) => {
             // Another process is already handling compaction
             Err(FleetTransportError::lock_contention(
-                "fleet action compaction already in progress by another agent"
+                "fleet action compaction already in progress by another agent",
             ))
         }
     }
@@ -1365,12 +1363,25 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        ACTION_LOG_RETENTION_DAYS, FLEET_NODE_DIR, FLEET_SHARED_STATE_SCHEMA, FileFleetTransport,
+        FleetAction, FleetActionRecord, FleetSharedState, FleetTargetKind, FleetTransport,
+        FleetTransportError, FleetTransportLayout, MAX_ACTION_LOG_ENTRIES, MAX_ACTION_RECORD_BYTES,
+        MAX_NODE_ID_LEN, MAX_NODES_CAP, NodeHealth, NodeStatus, TempFileGuard,
+        canonical_fleet_convergence_receipt_payload, fleet_convergence_receipt_verdict,
+        lock_retry_base_backoffs, parse_jsonl_records, push_bounded,
+        sign_fleet_convergence_receipt_payload, validate_node_id, validate_zone_id,
+        wait_until_fleet_converged_or_timeout,
+    };
+    use chrono::{DateTime, Utc};
+    use ed25519_dalek::{Signer, SigningKey};
+    use sha2::{Digest, Sha256};
     use std::{
-        fs,
+        fs::{self, OpenOptions},
         io::Write as _,
+        path::{Path, PathBuf},
         sync::{Arc, Barrier, mpsc},
-        time::Instant,
+        time::{Duration, Instant},
     };
 
     use tempfile::tempdir;
@@ -2558,7 +2569,8 @@ mod tests {
             &signing_key,
             "test",
             "test-identity",
-        ).expect("signing should succeed");
+        )
+        .expect("signing should succeed");
 
         // Manually compute what the legacy bare hash would be
         let canonical_payload = canonical_fleet_convergence_receipt_payload(&test_payload)
@@ -2569,8 +2581,7 @@ mod tests {
 
         // The new hash should be different from the legacy hash
         assert_ne!(
-            receipt.signed_payload_sha256,
-            legacy_hash,
+            receipt.signed_payload_sha256, legacy_hash,
             "Domain-separated hash should differ from legacy bare hash"
         );
 
@@ -2582,8 +2593,7 @@ mod tests {
         let expected_hash = hex::encode(expected_hasher.finalize());
 
         assert_eq!(
-            receipt.signed_payload_sha256,
-            expected_hash,
+            receipt.signed_payload_sha256, expected_hash,
             "Domain-separated hash should match expected pattern"
         );
 
@@ -2593,11 +2603,11 @@ mod tests {
             &signing_key,
             "test",
             "test-identity",
-        ).expect("second signing should succeed");
+        )
+        .expect("second signing should succeed");
 
         assert_eq!(
-            receipt.signed_payload_sha256,
-            receipt2.signed_payload_sha256,
+            receipt.signed_payload_sha256, receipt2.signed_payload_sha256,
             "Hash should be deterministic for same input"
         );
     }
@@ -2608,7 +2618,11 @@ mod tests {
     /// timing attacks, and filesystem edge cases in fleet transport operations.
     #[cfg(test)]
     mod fleet_transport_comprehensive_negative_tests {
-        use super::*;
+        use super::{
+            DateTime, FileFleetTransport, FleetAction, FleetActionRecord, FleetTargetKind,
+            FleetTransport, FleetTransportError, NodeHealth, NodeStatus, Utc, fs, node_status,
+            release_action_record, tempdir,
+        };
 
         #[test]
         fn unicode_injection_in_fleet_identifiers_handled_safely() {
@@ -3285,7 +3299,10 @@ mod tests {
         let result = transport.compact_action_log_if_needed(100, 1); // Small size to force compaction
 
         // The compaction should fail due to permissions
-        assert!(result.is_err(), "Expected compaction to fail due to permissions");
+        assert!(
+            result.is_err(),
+            "Expected compaction to fail due to permissions"
+        );
 
         // Restore permissions for cleanup
         let metadata = fs::metadata(layout.actions_path()).expect("get metadata");

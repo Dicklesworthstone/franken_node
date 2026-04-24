@@ -775,17 +775,21 @@ impl EpochTransitionBarrier {
         barrier.transcript.phase = BarrierPhase::Committed;
 
         // Record audit
-        push_bounded(&mut self.history, BarrierAuditRecord {
-            barrier_id: barrier.barrier_id.clone(),
-            current_epoch: barrier.current_epoch,
-            target_epoch: barrier.target_epoch,
-            outcome: "COMMITTED".to_string(),
-            participant_count: barrier.participants.len(),
-            acks_received: barrier.ack_count(),
-            elapsed_ms: timestamp_ms.saturating_sub(barrier.propose_timestamp_ms),
-            abort_reason: None,
-            schema_version: SCHEMA_VERSION.to_string(),
-        }, MAX_BARRIER_HISTORY);
+        push_bounded(
+            &mut self.history,
+            BarrierAuditRecord {
+                barrier_id: barrier.barrier_id.clone(),
+                current_epoch: barrier.current_epoch,
+                target_epoch: barrier.target_epoch,
+                outcome: "COMMITTED".to_string(),
+                participant_count: barrier.participants.len(),
+                acks_received: barrier.ack_count(),
+                elapsed_ms: timestamp_ms.saturating_sub(barrier.propose_timestamp_ms),
+                abort_reason: None,
+                schema_version: SCHEMA_VERSION.to_string(),
+            },
+            MAX_BARRIER_HISTORY,
+        );
 
         Ok(BarrierCommitOutcome::Committed { target_epoch })
     }
@@ -854,17 +858,21 @@ impl EpochTransitionBarrier {
         let current_epoch = barrier.current_epoch;
 
         // Record audit
-        push_bounded(&mut self.history, BarrierAuditRecord {
-            barrier_id: barrier.barrier_id.clone(),
-            current_epoch: barrier.current_epoch,
-            target_epoch: barrier.target_epoch,
-            outcome: "ABORTED".to_string(),
-            participant_count: barrier.participants.len(),
-            acks_received: barrier.ack_count(),
-            elapsed_ms: timestamp_ms.saturating_sub(barrier.propose_timestamp_ms),
-            abort_reason: Some(reason_str),
-            schema_version: SCHEMA_VERSION.to_string(),
-        }, MAX_BARRIER_HISTORY);
+        push_bounded(
+            &mut self.history,
+            BarrierAuditRecord {
+                barrier_id: barrier.barrier_id.clone(),
+                current_epoch: barrier.current_epoch,
+                target_epoch: barrier.target_epoch,
+                outcome: "ABORTED".to_string(),
+                participant_count: barrier.participants.len(),
+                acks_received: barrier.ack_count(),
+                elapsed_ms: timestamp_ms.saturating_sub(barrier.propose_timestamp_ms),
+                abort_reason: Some(reason_str),
+                schema_version: SCHEMA_VERSION.to_string(),
+            },
+            MAX_BARRIER_HISTORY,
+        );
 
         // INV-BARRIER-ABORT-SAFE: return current epoch (not advanced)
         Ok(current_epoch)
@@ -992,7 +1000,11 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        AbortReason, BarrierCommitOutcome, BarrierConfig, BarrierError, BarrierPhase,
+        DEFAULT_BARRIER_TIMEOUT_MS, DEFAULT_DRAIN_TIMEOUT_MS, DrainAck, EpochTransitionBarrier,
+        MAX_TRANSCRIPT_ENTRIES, SCHEMA_VERSION, error_codes, event_codes,
+    };
     use crate::control_plane::control_epoch::ControlEpoch;
     use crate::security::constant_time;
     use crate::security::epoch_scoped_keys::{
@@ -2084,7 +2096,10 @@ mod tests {
 
 #[cfg(test)]
 mod epoch_transition_barrier_comprehensive_negative_tests {
-    use super::*;
+    use super::{
+        AbortReason, BarrierCommitOutcome, BarrierConfig, BarrierError, BarrierPhase, DrainAck,
+        EpochTransitionBarrier, error_codes,
+    };
     use std::collections::HashMap;
 
     /// Negative test: Unicode injection and encoding attacks in barrier identifiers
@@ -2094,13 +2109,13 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
 
         // Test malicious Unicode in participant IDs
         let malicious_participants = vec![
-            "svc\u{202e}evil\u{200b}", // Right-to-left override + zero-width space
-            "svc\u{0000}injection", // Null byte injection
-            "svc\u{feff}bom", // Byte order mark
-            "svc\u{2028}newline", // Line separator
-            "svc\u{2029}paragraph", // Paragraph separator
+            "svc\u{202e}evil\u{200b}",    // Right-to-left override + zero-width space
+            "svc\u{0000}injection",       // Null byte injection
+            "svc\u{feff}bom",             // Byte order mark
+            "svc\u{2028}newline",         // Line separator
+            "svc\u{2029}paragraph",       // Paragraph separator
             "svc\u{200c}\u{200d}joiners", // Zero-width joiners
-            "svc\u{034f}combining", // Combining grapheme joiner
+            "svc\u{034f}combining",       // Combining grapheme joiner
         ];
 
         for malicious_participant in &malicious_participants {
@@ -2108,7 +2123,10 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         }
 
         // Should handle Unicode participants without corruption
-        assert_eq!(b.registered_participants().len(), malicious_participants.len());
+        assert_eq!(
+            b.registered_participants().len(),
+            malicious_participants.len()
+        );
 
         // Propose barrier with Unicode participants
         let result = b.propose(0, 1, 1000, "trace-unicode");
@@ -2132,8 +2150,15 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
                 Ok(_) => {
                     // Unicode was accepted, verify transcript integrity
                     let transcript = b.transcript().unwrap();
-                    assert!(transcript.entries.iter().any(|e| e.trace_id.contains(&unicode_trace.chars().filter(|c| !c.is_control()).collect::<String>())));
-                },
+                    assert!(transcript.entries.iter().any(|e| {
+                        e.trace_id.contains(
+                            &unicode_trace
+                                .chars()
+                                .filter(|c| !c.is_control())
+                                .collect::<String>(),
+                        )
+                    }));
+                }
                 Err(_) => {
                     // Unicode rejection is also acceptable
                     continue;
@@ -2155,8 +2180,13 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
             Ok(_) => {
                 // Verify Unicode in abort reason doesn't corrupt transcript
                 let transcript = b.transcript().unwrap();
-                assert!(transcript.entries.iter().any(|e| e.event_code == event_codes::BARRIER_ABORTED));
-            },
+                assert!(
+                    transcript
+                        .entries
+                        .iter()
+                        .any(|e| e.event_code == event_codes::BARRIER_ABORTED)
+                );
+            }
             Err(_) => {
                 // Unicode handling error is acceptable
             }
@@ -2186,16 +2216,28 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         b.barrier_counter = u64::MAX;
 
         let overflow_result = b.propose(300, 301, 5000, "trace-counter-overflow");
-        assert!(overflow_result.is_err(), "Should reject barrier counter overflow");
-        assert_eq!(overflow_result.unwrap_err().code(), error_codes::ERR_BARRIER_ID_OVERFLOW);
+        assert!(
+            overflow_result.is_err(),
+            "Should reject barrier counter overflow"
+        );
+        assert_eq!(
+            overflow_result.unwrap_err().code(),
+            error_codes::ERR_BARRIER_ID_OVERFLOW
+        );
 
         // Test epoch overflow protection
         b = EpochTransitionBarrier::default();
         b.register_participant("test-svc");
 
         let epoch_overflow_result = b.propose(u64::MAX, u64::MAX, 5000, "trace-epoch-overflow");
-        assert!(epoch_overflow_result.is_err(), "Should reject epoch overflow");
-        assert_eq!(epoch_overflow_result.unwrap_err().code(), error_codes::ERR_BARRIER_EPOCH_OVERFLOW);
+        assert!(
+            epoch_overflow_result.is_err(),
+            "Should reject epoch overflow"
+        );
+        assert_eq!(
+            epoch_overflow_result.unwrap_err().code(),
+            error_codes::ERR_BARRIER_EPOCH_OVERFLOW
+        );
 
         // Test drain ACK with overflow elapsed time
         b = EpochTransitionBarrier::default();
@@ -2206,16 +2248,21 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
             participant_id: "overflow-svc".to_string(),
             barrier_id: b.active_barrier().unwrap().barrier_id.clone(),
             drained_items: u64::MAX, // Maximum items drained
-            elapsed_ms: u64::MAX, // Maximum elapsed time
+            elapsed_ms: u64::MAX,    // Maximum elapsed time
             trace_id: "trace-overflow-ack".to_string(),
         };
 
         let ack_result = b.record_drain_ack(overflow_ack);
-        assert!(ack_result.is_ok(), "Should handle overflow values in drain ACK");
+        assert!(
+            ack_result.is_ok(),
+            "Should handle overflow values in drain ACK"
+        );
 
         // Verify saturating addition in transcript timestamp calculation
         let transcript = b.transcript().unwrap();
-        let ack_entry = transcript.entries.iter()
+        let ack_entry = transcript
+            .entries
+            .iter()
             .find(|e| e.event_code == event_codes::BARRIER_DRAIN_ACK)
             .unwrap();
 
@@ -2225,7 +2272,10 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         // Test massive timeout configuration
         let massive_config = BarrierConfig::new(u64::MAX, u64::MAX - 1);
         let validation_result = massive_config.validate();
-        assert!(validation_result.is_ok(), "Should handle maximum timeout values");
+        assert!(
+            validation_result.is_ok(),
+            "Should handle maximum timeout values"
+        );
     }
 
     /// Negative test: Memory exhaustion attacks with massive participant sets and logs
@@ -2269,7 +2319,10 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         }
 
         // Should process reasonable number without memory exhaustion
-        assert!(successful_acks > 0, "Should process some ACKs without memory exhaustion");
+        assert!(
+            successful_acks > 0,
+            "Should process some ACKs without memory exhaustion"
+        );
 
         // Test massive transcript generation
         let transcript = b.transcript().unwrap();
@@ -2289,7 +2342,7 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
                 cycle as u64,
                 (cycle as u64).saturating_add(1),
                 10000_u64.saturating_add(cycle as u64),
-                &format!("cycle-trace-{}-{}", "y".repeat(200), cycle)
+                &format!("cycle-trace-{}-{}", "y".repeat(200), cycle),
             );
 
             if let Ok(_) = propose_result {
@@ -2320,8 +2373,14 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         b.propose(10, 11, 5000, "trace-concurrent-1").unwrap();
 
         let concurrent_result = b.propose(11, 12, 5001, "trace-concurrent-2");
-        assert!(concurrent_result.is_err(), "Concurrent proposals should be rejected");
-        assert_eq!(concurrent_result.unwrap_err().code(), error_codes::ERR_BARRIER_CONCURRENT);
+        assert!(
+            concurrent_result.is_err(),
+            "Concurrent proposals should be rejected"
+        );
+        assert_eq!(
+            concurrent_result.unwrap_err().code(),
+            error_codes::ERR_BARRIER_CONCURRENT
+        );
 
         // Test overlapping drain ACK operations
         let barrier_id = b.active_barrier().unwrap().barrier_id.clone();
@@ -2342,11 +2401,18 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
 
         // All ACKs should succeed despite concurrency
         for (i, result) in ack_results.iter().enumerate() {
-            assert!(result.is_ok(), "ACK {} should succeed in concurrent scenario", i);
+            assert!(
+                result.is_ok(),
+                "ACK {} should succeed in concurrent scenario",
+                i
+            );
         }
 
         // Verify state consistency despite concurrent operations
-        assert!(b.active_barrier().unwrap().all_acked(), "All participants should be ACKed");
+        assert!(
+            b.active_barrier().unwrap().all_acked(),
+            "All participants should be ACKed"
+        );
         assert_eq!(b.active_barrier().unwrap().ack_count(), participants.len());
 
         // Test concurrent commit attempts
@@ -2364,16 +2430,27 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
 
         let late_result = b.record_drain_ack(late_ack);
         assert!(late_result.is_err(), "Late ACK should be rejected");
-        assert_eq!(late_result.unwrap_err().code(), error_codes::ERR_BARRIER_ALREADY_COMPLETE);
+        assert_eq!(
+            late_result.unwrap_err().code(),
+            error_codes::ERR_BARRIER_ALREADY_COMPLETE
+        );
 
         // Test concurrent abort on completed barrier
         let concurrent_abort = b.abort(
-            AbortReason::Cancelled { detail: "concurrent".to_string() },
+            AbortReason::Cancelled {
+                detail: "concurrent".to_string(),
+            },
             5300,
             "trace-concurrent-abort",
         );
-        assert!(concurrent_abort.is_err(), "Abort on completed barrier should fail");
-        assert_eq!(concurrent_abort.unwrap_err().code(), error_codes::ERR_BARRIER_ALREADY_COMPLETE);
+        assert!(
+            concurrent_abort.is_err(),
+            "Abort on completed barrier should fail"
+        );
+        assert_eq!(
+            concurrent_abort.unwrap_err().code(),
+            error_codes::ERR_BARRIER_ALREADY_COMPLETE
+        );
     }
 
     /// Negative test: Configuration validation edge cases and boundary attacks
@@ -2381,36 +2458,64 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
     fn negative_configuration_validation_edge_cases() {
         // Test zero and boundary timeout values
         let zero_global_config = BarrierConfig::new(0, 100);
-        assert!(zero_global_config.validate().is_err(), "Zero global timeout should be invalid");
+        assert!(
+            zero_global_config.validate().is_err(),
+            "Zero global timeout should be invalid"
+        );
 
         let zero_drain_config = BarrierConfig::new(1000, 0);
-        assert!(zero_drain_config.validate().is_err(), "Zero drain timeout should be invalid");
+        assert!(
+            zero_drain_config.validate().is_err(),
+            "Zero drain timeout should be invalid"
+        );
 
         // Test inverted timeout relationship
         let inverted_config = BarrierConfig::new(100, 1000);
-        assert!(inverted_config.validate().is_err(), "Drain timeout exceeding global should be invalid");
+        assert!(
+            inverted_config.validate().is_err(),
+            "Drain timeout exceeding global should be invalid"
+        );
 
         // Test boundary values
         let boundary_config = BarrierConfig::new(1, 1);
-        assert!(boundary_config.validate().is_ok(), "Minimum valid timeouts should be accepted");
+        assert!(
+            boundary_config.validate().is_ok(),
+            "Minimum valid timeouts should be accepted"
+        );
 
         let max_config = BarrierConfig::new(u64::MAX, u64::MAX);
-        assert!(max_config.validate().is_err(), "Equal max timeouts should be rejected");
+        assert!(
+            max_config.validate().is_err(),
+            "Equal max timeouts should be rejected"
+        );
 
         let near_max_config = BarrierConfig::new(u64::MAX, u64::MAX - 1);
-        assert!(near_max_config.validate().is_ok(), "Near-max timeouts should be valid");
+        assert!(
+            near_max_config.validate().is_ok(),
+            "Near-max timeouts should be valid"
+        );
 
         // Test participant timeout overrides with edge cases
         let mut override_config = BarrierConfig::new(10000, 1000);
 
         // Zero participant timeout
-        override_config.participant_timeouts.insert("zero-svc".to_string(), 0);
-        assert!(override_config.validate().is_err(), "Zero participant timeout should be invalid");
+        override_config
+            .participant_timeouts
+            .insert("zero-svc".to_string(), 0);
+        assert!(
+            override_config.validate().is_err(),
+            "Zero participant timeout should be invalid"
+        );
 
         // Maximum participant timeout
         override_config.participant_timeouts.clear();
-        override_config.participant_timeouts.insert("max-svc".to_string(), u64::MAX);
-        assert!(override_config.validate().is_ok(), "Max participant timeout should be valid");
+        override_config
+            .participant_timeouts
+            .insert("max-svc".to_string(), u64::MAX);
+        assert!(
+            override_config.validate().is_ok(),
+            "Max participant timeout should be valid"
+        );
 
         // Test capping behavior
         assert_eq!(
@@ -2429,13 +2534,15 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         // Test massive participant timeout map
         let mut massive_config = BarrierConfig::new(30000, 1000);
         for i in 0..10000 {
-            massive_config.participant_timeouts.insert(
-                format!("participant-{}", i),
-                1000 + (i % 5000) as u64,
-            );
+            massive_config
+                .participant_timeouts
+                .insert(format!("participant-{}", i), 1000 + (i % 5000) as u64);
         }
 
-        assert!(massive_config.validate().is_ok(), "Large participant timeout map should be valid");
+        assert!(
+            massive_config.validate().is_ok(),
+            "Large participant timeout map should be valid"
+        );
 
         // Test timeout lookup performance doesn't degrade
         let start_time = std::time::Instant::now();
@@ -2443,7 +2550,10 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
             let _ = massive_config.drain_timeout_for(&format!("participant-{}", i));
         }
         let lookup_duration = start_time.elapsed();
-        assert!(lookup_duration < std::time::Duration::from_millis(100), "Timeout lookups should be fast");
+        assert!(
+            lookup_duration < std::time::Duration::from_millis(100),
+            "Timeout lookups should be fast"
+        );
     }
 
     /// Negative test: Transcript integrity under corruption and attack scenarios
@@ -2454,7 +2564,8 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
 
         // Test transcript with extremely long event details
         let huge_detail = "x".repeat(100000);
-        b.propose(50, 51, 20000, &format!("attack-{}", huge_detail)).unwrap();
+        b.propose(50, 51, 20000, &format!("attack-{}", huge_detail))
+            .unwrap();
 
         // Verify transcript handles large entries without corruption
         let transcript = b.transcript().unwrap();
@@ -2462,7 +2573,8 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         assert!(transcript.entries[0].detail.len() > 50000);
 
         // Test transcript with malicious JSON-breaking content
-        let json_attack_detail = r#"{"malicious": "attack", "quote": "\"", "newline": "\n", "null": "\0"}"#;
+        let json_attack_detail =
+            r#"{"malicious": "attack", "quote": "\"", "newline": "\n", "null": "\0"}"#;
         let barrier_id = b.active_barrier().unwrap().barrier_id.clone();
 
         let attack_ack = DrainAck {
@@ -2484,23 +2596,23 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         for line in jsonl_export.lines() {
             if !line.trim().is_empty() {
                 let parse_result: Result<serde_json::Value, _> = serde_json::from_str(line);
-                assert!(parse_result.is_ok(), "Each JSONL line should be valid JSON: {}", line);
+                assert!(
+                    parse_result.is_ok(),
+                    "Each JSONL line should be valid JSON: {}",
+                    line
+                );
             }
         }
 
         // Test transcript capacity limits with flooding attack
         for flood_idx in 0..MAX_TRANSCRIPT_ENTRIES.saturating_add(1000) {
             let flood_detail = format!("flood-attack-{}-{}", flood_idx, "padding".repeat(100));
-            b.active_barrier
-                .as_mut()
-                .unwrap()
-                .transcript
-                .record(
-                    "FLOOD_ATTACK",
-                    &flood_detail,
-                    20000 + flood_idx as u64,
-                    &format!("flood-trace-{}", flood_idx),
-                );
+            b.active_barrier.as_mut().unwrap().transcript.record(
+                "FLOOD_ATTACK",
+                &flood_detail,
+                20000 + flood_idx as u64,
+                &format!("flood-trace-{}", flood_idx),
+            );
         }
 
         // Verify transcript is properly bounded
@@ -2512,8 +2624,7 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
 
         // Test transcript schema version consistency
         assert_eq!(
-            flooded_transcript.schema_version,
-            SCHEMA_VERSION,
+            flooded_transcript.schema_version, SCHEMA_VERSION,
             "Schema version should remain consistent"
         );
 
@@ -2525,7 +2636,8 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
             },
             25000,
             "abort-trace",
-        ).unwrap();
+        )
+        .unwrap();
 
         let final_transcript = b.transcript().unwrap();
         assert_eq!(
@@ -2545,7 +2657,10 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         for line in audit_jsonl.lines() {
             if !line.trim().is_empty() {
                 let parse_result: Result<serde_json::Value, _> = serde_json::from_str(line);
-                assert!(parse_result.is_ok(), "Audit JSONL should be valid despite attack content");
+                assert!(
+                    parse_result.is_ok(),
+                    "Audit JSONL should be valid despite attack content"
+                );
             }
         }
     }
@@ -2590,7 +2705,10 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         let min_timing = timing_results.iter().min().unwrap();
         let timing_ratio = max_timing.as_nanos() as f64 / min_timing.as_nanos() as f64;
 
-        assert!(timing_ratio.is_finite(), "Timing ratio must be finite for meaningful comparison");
+        assert!(
+            timing_ratio.is_finite(),
+            "Timing ratio must be finite for meaningful comparison"
+        );
         assert!(
             timing_ratio < 5.0,
             "Participant validation timing variance too high: {}",
@@ -2625,9 +2743,13 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         // Barrier ID validation timing should also be consistent
         let max_barrier_timing = barrier_timing_results.iter().max().unwrap();
         let min_barrier_timing = barrier_timing_results.iter().min().unwrap();
-        let barrier_timing_ratio = max_barrier_timing.as_nanos() as f64 / min_barrier_timing.as_nanos() as f64;
+        let barrier_timing_ratio =
+            max_barrier_timing.as_nanos() as f64 / min_barrier_timing.as_nanos() as f64;
 
-        assert!(barrier_timing_ratio.is_finite(), "Barrier timing ratio must be finite for meaningful comparison");
+        assert!(
+            barrier_timing_ratio.is_finite(),
+            "Barrier timing ratio must be finite for meaningful comparison"
+        );
         assert!(
             barrier_timing_ratio < 4.0,
             "Barrier ID validation timing variance too high: {}",
@@ -2639,7 +2761,9 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         for participant in &all_test_participants {
             timeout_barrier.register_participant(participant);
         }
-        timeout_barrier.propose(40, 41, 30000, "timeout-timing-test").unwrap();
+        timeout_barrier
+            .propose(40, 41, 30000, "timeout-timing-test")
+            .unwrap();
 
         let mut timeout_timing_results = Vec::new();
         for _ in 0..10 {
@@ -2652,9 +2776,13 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         // Timeout checking should have consistent performance
         let max_timeout_timing = timeout_timing_results.iter().max().unwrap();
         let min_timeout_timing = timeout_timing_results.iter().min().unwrap();
-        let timeout_timing_ratio = max_timeout_timing.as_nanos() as f64 / min_timeout_timing.as_nanos() as f64;
+        let timeout_timing_ratio =
+            max_timeout_timing.as_nanos() as f64 / min_timeout_timing.as_nanos() as f64;
 
-        assert!(timeout_timing_ratio.is_finite(), "Timeout timing ratio must be finite for meaningful comparison");
+        assert!(
+            timeout_timing_ratio.is_finite(),
+            "Timeout timing ratio must be finite for meaningful comparison"
+        );
         assert!(
             timeout_timing_ratio < 3.0,
             "Timeout check timing variance too high: {}",
@@ -2680,7 +2808,11 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         // Test exact capacity boundary
         let mut exact_items = vec![1, 2, 3];
         push_bounded(&mut exact_items, 4, 3);
-        assert_eq!(exact_items, vec![2, 3, 4], "Should maintain capacity exactly");
+        assert_eq!(
+            exact_items,
+            vec![2, 3, 4],
+            "Should maintain capacity exactly"
+        );
 
         // Test massive overflow scenario
         let mut massive_items: Vec<i32> = (1..50000).collect();
@@ -2694,7 +2826,12 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
 
         // Create many barriers to flood audit history
         for i in 0..MAX_BARRIER_HISTORY.saturating_add(500) {
-            let propose_result = b.propose(i as u64, (i as u64).saturating_add(1), (i as u64).saturating_mul(1000), &format!("audit-flood-{}", i));
+            let propose_result = b.propose(
+                i as u64,
+                (i as u64).saturating_add(1),
+                (i as u64).saturating_mul(1000),
+                &format!("audit-flood-{}", i),
+            );
 
             if let Ok(_) = propose_result {
                 // Complete barrier immediately
@@ -2709,7 +2846,12 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
 
                 if b.record_drain_ack(ack).is_ok() {
                     // Note: In stress test, commit may fail due to overflow - that's expected behavior
-                    if b.try_commit((i as u64).saturating_mul(1000).saturating_add(100), &format!("commit-{}", i)).is_err() {
+                    if b.try_commit(
+                        (i as u64).saturating_mul(1000).saturating_add(100),
+                        &format!("commit-{}", i),
+                    )
+                    .is_err()
+                    {
                         // If commit fails (e.g., overflow), that's part of stress testing - continue
                     }
                 }
@@ -2737,7 +2879,9 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         // Test transcript capacity during flooding
         let mut transcript_flood_barrier = EpochTransitionBarrier::default();
         transcript_flood_barrier.register_participant("transcript-svc");
-        transcript_flood_barrier.propose(1000, 1001, 50000, "transcript-flood").unwrap();
+        transcript_flood_barrier
+            .propose(1000, 1001, 50000, "transcript-flood")
+            .unwrap();
 
         // Flood transcript with massive number of entries
         for flood_i in 0..MAX_TRANSCRIPT_ENTRIES + 2000 {
@@ -2768,7 +2912,10 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
             "Most recent entries should be preserved"
         );
         assert!(
-            last_entry.detail.contains(&format!("flood-detail-{}", MAX_TRANSCRIPT_ENTRIES + 2000 - 1)),
+            last_entry.detail.contains(&format!(
+                "flood-detail-{}",
+                MAX_TRANSCRIPT_ENTRIES + 2000 - 1
+            )),
             "Latest flood entry should be preserved"
         );
     }
@@ -2807,7 +2954,10 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
 
         let unknown_result = b.record_drain_ack(unknown_ack);
         assert!(unknown_result.is_err());
-        assert_eq!(unknown_result.unwrap_err().code(), error_codes::ERR_BARRIER_UNKNOWN_PARTICIPANT);
+        assert_eq!(
+            unknown_result.unwrap_err().code(),
+            error_codes::ERR_BARRIER_UNKNOWN_PARTICIPANT
+        );
 
         // Barrier should remain in consistent state
         assert!(b.is_barrier_active());
@@ -2825,7 +2975,10 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
 
         let wrong_id_result = b.record_drain_ack(wrong_id_ack);
         assert!(wrong_id_result.is_err());
-        assert_eq!(wrong_id_result.unwrap_err().code(), error_codes::ERR_BARRIER_ID_MISMATCH);
+        assert_eq!(
+            wrong_id_result.unwrap_err().code(),
+            error_codes::ERR_BARRIER_ID_MISMATCH
+        );
 
         // State should still be consistent
         assert!(b.is_barrier_active());
@@ -2862,7 +3015,10 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
 
         let post_commit_result = b.record_drain_ack(post_commit_ack);
         assert!(post_commit_result.is_err());
-        assert_eq!(post_commit_result.unwrap_err().code(), error_codes::ERR_BARRIER_ALREADY_COMPLETE);
+        assert_eq!(
+            post_commit_result.unwrap_err().code(),
+            error_codes::ERR_BARRIER_ALREADY_COMPLETE
+        );
 
         // Test participant registration/deregistration consistency
         let before_participants = b.registered_participants().len();

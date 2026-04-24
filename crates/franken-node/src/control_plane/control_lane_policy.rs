@@ -1006,7 +1006,12 @@ impl ControlLanePolicySnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        CANCEL_LANE_BUDGET_PCT, CANCEL_MAX_STARVE_TICKS, ControlLane, ControlLanePolicy,
+        ControlLanePolicySnapshot, ControlTaskClass, DEFAULT_STARVATION_THRESHOLD_TICKS,
+        LaneBudget, READY_LANE_BUDGET_PCT, SCHEMA_VERSION, TIMED_LANE_BUDGET_PCT, error_codes,
+        event_codes,
+    };
 
     fn make_policy_with_capacities(
         max_tick_history_entries: usize,

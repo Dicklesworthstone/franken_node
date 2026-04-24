@@ -837,7 +837,11 @@ impl Default for DporExplorer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        Counterexample, CounterexampleStep, DEFAULT_BUDGET_SECONDS, DEFAULT_MEMORY_BUDGET,
+        DporError, DporExplorer, ExplorationBudget, Operation, ProtocolModel, ProtocolModelId,
+        SCHEMA_VERSION, SafetyProperty, ScheduleResult, error_codes, event_codes,
+    };
 
     fn make_explorer() -> DporExplorer {
         let mut e = DporExplorer::default();

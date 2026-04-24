@@ -377,11 +377,12 @@ impl KeyRoleRegistry {
     ) -> Result<&KeyRoleBinding, KeyRoleSeparationError> {
         // Check INV-KRS-ROLE-EXCLUSIVITY: same key cannot serve two roles.
         // Extract data from existing binding before any mutable borrow.
-        if let Some((existing_role, material_matches)) = self
-            .active
-            .get(key_id)
-            .map(|b| (b.role, constant_time::ct_eq_bytes(&b.public_key_bytes, &public_key_bytes)))
-        {
+        if let Some((existing_role, material_matches)) = self.active.get(key_id).map(|b| {
+            (
+                b.role,
+                constant_time::ct_eq_bytes(&b.public_key_bytes, &public_key_bytes),
+            )
+        }) {
             if existing_role != role {
                 self.push_event(KeyRoleEvent::violation(
                     key_id,
@@ -648,7 +649,9 @@ impl Default for KeyRoleRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        KeyRole, KeyRoleBinding, KeyRoleRegistry, KeyRoleSeparationError, MAX_ACTIVE_BINDINGS,
+    };
 
     // Helpers
     fn pub_key(seed: u8) -> Vec<u8> {
@@ -2318,13 +2321,7 @@ mod tests {
             };
 
             // Bind with unique roles to avoid conflicts
-            let result = reg.bind_key_to_role(
-                &key_id,
-                role,
-                100 + i as u64,
-                3600,
-                &tid(i as u64),
-            );
+            let result = reg.bind_key_to_role(&key_id, role, 100 + i as u64, 3600, &tid(i as u64));
 
             if result.is_ok() {
                 // Should use saturating arithmetic for internal counters
@@ -2351,8 +2348,14 @@ mod tests {
         let key_id_3 = b"control_plane_signing_key_v1_abcdef123457"; // Different by one
 
         // Correct pattern: use constant-time comparison for key verification
-        assert!(constant_time::ct_eq_bytes(key_id_1, key_id_2), "Identical key IDs should match");
-        assert!(!constant_time::ct_eq_bytes(key_id_1, key_id_3), "Different key IDs should not match");
+        assert!(
+            constant_time::ct_eq_bytes(key_id_1, key_id_2),
+            "Identical key IDs should match"
+        );
+        assert!(
+            !constant_time::ct_eq_bytes(key_id_1, key_id_3),
+            "Different key IDs should not match"
+        );
 
         // Test with role tag comparison (security-sensitive)
         let role_tag_1 = KeyRole::Signing.tag();
@@ -2363,13 +2366,22 @@ mod tests {
         let role_tag_2_bytes = role_tag_2.as_slice();
         let role_tag_3_bytes = role_tag_3.as_slice();
 
-        assert!(constant_time::ct_eq_bytes(role_tag_1_bytes, role_tag_2_bytes), "Identical role tags should match");
-        assert!(!constant_time::ct_eq_bytes(role_tag_1_bytes, role_tag_3_bytes), "Different role tags should not match");
+        assert!(
+            constant_time::ct_eq_bytes(role_tag_1_bytes, role_tag_2_bytes),
+            "Identical role tags should match"
+        );
+        assert!(
+            !constant_time::ct_eq_bytes(role_tag_1_bytes, role_tag_3_bytes),
+            "Different role tags should not match"
+        );
 
         // Test with different length key IDs
         let short_key = b"short_key";
         let long_key = b"much_longer_control_plane_key_identifier";
-        assert!(!constant_time::ct_eq_bytes(short_key, long_key), "Different length keys should not match");
+        assert!(
+            !constant_time::ct_eq_bytes(short_key, long_key),
+            "Different length keys should not match"
+        );
     }
 
     #[test]
@@ -2388,7 +2400,8 @@ mod tests {
             bind_time,
             max_validity,
             &tid(1),
-        ).unwrap();
+        )
+        .unwrap();
 
         // Test at exact expiry boundary - should be considered expired (fail-closed)
         let result_at_boundary = reg.verify_key_for_role(
@@ -2400,7 +2413,10 @@ mod tests {
         );
 
         // With fail-closed semantics (>= pattern), exact boundary should be considered expired
-        assert!(result_at_boundary.is_err(), "Key should be expired at exact boundary (fail-closed)");
+        assert!(
+            result_at_boundary.is_err(),
+            "Key should be expired at exact boundary (fail-closed)"
+        );
 
         // Test just before expiry - should not be expired
         let result_before = reg.verify_key_for_role(
@@ -2420,7 +2436,10 @@ mod tests {
             max_validity,
             &tid(4),
         );
-        assert!(result_after.is_err(), "Key should be expired after expiry time");
+        assert!(
+            result_after.is_err(),
+            "Key should be expired after expiry time"
+        );
     }
 
     #[test]
@@ -2494,8 +2513,11 @@ mod tests {
         let hash_without_domain = hasher_without_domain.finalize();
 
         // Should be different due to domain separation
-        assert_ne!(hash_with_domain[..], hash_without_domain[..],
-                   "Domain separator should change hash output");
+        assert_ne!(
+            hash_with_domain[..],
+            hash_without_domain[..],
+            "Domain separator should change hash output"
+        );
 
         // Test role verification hash with domain separation
         let verification_domain = b"control_plane_role_verification_v1:";
@@ -2506,8 +2528,11 @@ mod tests {
         verification_hasher.update(&bind_time.to_le_bytes());
         let verification_hash = verification_hasher.finalize();
 
-        assert_ne!(hash_with_domain[..], verification_hash[..],
-                   "Different domains should produce different hashes");
+        assert_ne!(
+            hash_with_domain[..],
+            verification_hash[..],
+            "Different domains should produce different hashes"
+        );
 
         // Test length-prefixed inputs to prevent delimiter collision
         let field1 = "key_identifier_part1";
@@ -2555,15 +2580,20 @@ mod tests {
 
             if result.is_ok() {
                 // Event log should be bounded using push_bounded pattern
-                assert!(reg.events().len() <= MAX_EVENTS,
-                        "Event log should be bounded at iteration {}, got len {}",
-                        i, reg.events().len());
+                assert!(
+                    reg.events().len() <= MAX_EVENTS,
+                    "Event log should be bounded at iteration {}, got len {}",
+                    i,
+                    reg.events().len()
+                );
 
                 // Try to revoke the key to generate another event
                 let _ = reg.revoke_key(&key_id, 1_700_001_000 + i as u64, &tid(i as u64 + 1000));
 
-                assert!(reg.events().len() <= MAX_EVENTS,
-                        "Event log should remain bounded after revocation");
+                assert!(
+                    reg.events().len() <= MAX_EVENTS,
+                    "Event log should remain bounded after revocation"
+                );
             } else {
                 // If binding fails due to capacity, that's expected
                 break;
@@ -2577,8 +2607,10 @@ mod tests {
         if reg.events().len() == MAX_EVENTS {
             let oldest_event = &reg.events()[0];
             // Should not contain very early event IDs if they were evicted
-            assert!(!oldest_event.trace_id.contains("tid-0"),
-                    "Oldest events should be evicted when capacity exceeded");
+            assert!(
+                !oldest_event.trace_id.contains("tid-0"),
+                "Oldest events should be evicted when capacity exceeded"
+            );
         }
     }
 }

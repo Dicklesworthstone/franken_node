@@ -473,7 +473,11 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        CapturedEvidence, DecisionType, EvidenceReplayGate, GateDecision, RPL_001_REPLAY_INITIATED,
+        RPL_002_REPRODUCED, RPL_004_ERROR, RPL_005_GATE_DECISION, ReplayVerdict,
+    };
+    use std::collections::BTreeMap;
 
     fn make_evidence(id: &str, dtype: DecisionType, action: &str) -> CapturedEvidence {
         let mut ev = CapturedEvidence {
