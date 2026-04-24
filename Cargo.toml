@@ -5,6 +5,7 @@ members = [
 ]
 exclude = [
   "fuzz",
+  "crates/franken-node/fuzz",
 ]
 resolver = "2"
 

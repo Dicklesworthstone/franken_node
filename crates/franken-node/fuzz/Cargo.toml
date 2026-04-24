@@ -1,0 +1,31 @@
+[package]
+name = "frankenengine-node-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.frankenengine-node]
+path = ".."
+features = ["fuzz"]
+
+[[bin]]
+name = "fuzz_target_1"
+path = "fuzz_targets/fuzz_target_1.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "workflow_trace_validate"
+path = "fuzz_targets/workflow_trace_validate.rs"
+test = false
+doc = false
+bench = false
