@@ -2277,13 +2277,43 @@ pub struct EngineConfig {
 
 // -- Runtime --
 
+/// JavaScript runtime preference for execution dispatch.
+///
+/// Controls which runtime is selected for executing JavaScript code.
+/// Auto-detection is performed when `Auto` is selected.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum PreferredRuntime {
+    /// Auto-detect runtime based on availability and compatibility.
+    ///
+    /// Selection criteria (in priority order):
+    /// 1. FrankenEngine if available and compatible
+    /// 2. Node.js if available in PATH
+    /// 3. Bun if available in PATH
+    /// 4. Fallback error if none available
+    ///
+    /// Auto-detection fires on first execution and caches the result
+    /// for the session duration.
     #[default]
     Auto,
+
+    /// Force Node.js runtime.
+    ///
+    /// Requires Node.js to be available in PATH. Execution will fail
+    /// if Node.js is not found or incompatible version detected.
     Node,
+
+    /// Force Bun runtime.
+    ///
+    /// Requires Bun to be available in PATH. Execution will fail
+    /// if Bun is not found or incompatible version detected.
     Bun,
+
+    /// Force FrankenEngine runtime.
+    ///
+    /// Uses the sibling franken_engine crate for execution. This is
+    /// the preferred option for trust-native execution with full
+    /// security policy enforcement and replay capabilities.
     FrankenEngine,
 }
 
@@ -2755,10 +2785,29 @@ require_lockstep_validation = true
     fn profile_parsing_rejects_invalid_values_with_no_fallback() {
         // bd-83lv0: Test that invalid profile values are hard-rejected with no silent fallback
         let invalid_profiles = [
-            "invalid", "INVALID", "garbage", "", " ", "strictt", "balancced",
-            "legacy", "risky", "strict ", " balanced", "strict-risky",
-            "null", "undefined", "default", "auto", "999", "true", "false",
-            "../../../etc/passwd", "<script>alert(1)</script>", "\0", "\n\r"
+            "invalid",
+            "INVALID",
+            "garbage",
+            "",
+            " ",
+            "strictt",
+            "balancced",
+            "legacy",
+            "risky",
+            "strict ",
+            " balanced",
+            "strict-risky",
+            "null",
+            "undefined",
+            "default",
+            "auto",
+            "999",
+            "true",
+            "false",
+            "../../../etc/passwd",
+            "<script>alert(1)</script>",
+            "\0",
+            "\n\r",
         ];
 
         for invalid in invalid_profiles {
@@ -2766,7 +2815,8 @@ require_lockstep_validation = true
             assert!(
                 result.is_err(),
                 "Profile '{}' should be rejected but was accepted: {:?}",
-                invalid, result
+                invalid,
+                result
             );
 
             if let Err(err) = result {
@@ -2774,7 +2824,8 @@ require_lockstep_validation = true
                 assert!(
                     err_msg.contains("Invalid profile") && err_msg.contains("No fallback"),
                     "Error message for '{}' should mention 'Invalid profile' and 'No fallback': {}",
-                    invalid, err_msg
+                    invalid,
+                    err_msg
                 );
             }
         }
@@ -2784,16 +2835,19 @@ require_lockstep_validation = true
             ("strict", Profile::Strict),
             ("balanced", Profile::Balanced),
             ("legacy-risky", Profile::LegacyRisky),
-            ("STRICT", Profile::Strict),  // Case normalization
+            ("STRICT", Profile::Strict), // Case normalization
             ("Balanced", Profile::Balanced),
-            ("Legacy_Risky", Profile::LegacyRisky),  // Underscore normalization
+            ("Legacy_Risky", Profile::LegacyRisky), // Underscore normalization
         ];
 
         for (input, expected) in valid_profiles {
             let result = input.parse::<Profile>();
             assert_eq!(
-                result.unwrap(), expected,
-                "Valid profile '{}' should parse to {:?}", input, expected
+                result.unwrap(),
+                expected,
+                "Valid profile '{}' should parse to {:?}",
+                input,
+                expected
             );
         }
     }
@@ -3752,7 +3806,11 @@ min_quality_score = "0.8"
         assert_eq!(policy.max_degraded_duration_secs, 91);
     }
 
-    #[cfg(any(feature = "remote-ops", feature = "control-plane", feature = "verifier-tools"))]
+    #[cfg(any(
+        feature = "remote-ops",
+        feature = "control-plane",
+        feature = "verifier-tools"
+    ))]
     #[test]
     fn config_component_factories_apply_remote_compatibility_and_replay_ttls() {
         let mut config = Config::for_profile(Profile::Balanced);
