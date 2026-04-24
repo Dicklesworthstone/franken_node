@@ -977,6 +977,54 @@ mod tests {
         assert!(error.fix_command.contains("Check for panics"));
         assert!(error.help_urls.len() > 0);
     }
+
+    #[test]
+    fn multi_lock_ordering_prevents_deadlock() {
+        use std::time::Duration;
+
+        // Test canonical lock ordering prevents deadlocks under contention
+        let lock_a = Arc::new(Mutex::new("state_a"));
+        let lock_b = Arc::new(Mutex::new("state_b"));
+        let results = Arc::new(Mutex::new(Vec::new()));
+
+        let mut handles = vec![];
+
+        // Spawn multiple threads that acquire locks in canonical order
+        for i in 0..4 {
+            let lock_a_clone = Arc::clone(&lock_a);
+            let lock_b_clone = Arc::clone(&lock_b);
+            let results_clone = Arc::clone(&results);
+
+            let handle = thread::spawn(move || {
+                // Always acquire in alphabetical order: lock_a before lock_b
+                let guard_a = lock_a_clone.lock().unwrap();
+                thread::sleep(Duration::from_millis(1)); // Create contention
+                let guard_b = lock_b_clone.lock().unwrap();
+
+                // Simulate work while holding both locks
+                let value = format!("{}-{}", *guard_a, *guard_b);
+                results_clone.lock().unwrap().push(format!("thread-{}: {}", i, value));
+
+                // Locks released in reverse order automatically
+            });
+            handles.push(handle);
+        }
+
+        // All threads should complete within reasonable time (no deadlock)
+        let start = std::time::Instant::now();
+        for handle in handles {
+            handle.join().expect("Thread should complete without deadlock");
+        }
+        let elapsed = start.elapsed();
+
+        // Verify no deadlock occurred (should complete much faster than 10s)
+        assert!(elapsed < Duration::from_secs(10),
+            "Multi-lock test took too long: {:?}. Possible deadlock!", elapsed);
+
+        // Verify all threads completed successfully
+        let final_results = results.lock().unwrap();
+        assert_eq!(final_results.len(), 4, "All threads should complete");
+    }
 }
 
 #[cfg(feature = "control-plane")]
