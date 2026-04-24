@@ -8773,6 +8773,7 @@ mod trust_command_tests {
     #[test]
     fn trust_scan_deep_fetch_denies_token_without_network_egress_scope() {
         let secret = "trust-scan-egress-test-secret";
+        let issued_at = now_unix_secs();
         let provider = CapabilityProvider::new(secret).expect("provider");
         let (cap, _) = provider
             .issue(
@@ -8781,7 +8782,7 @@ mod trust_command_tests {
                     vec![RemoteOperation::TelemetryExport],
                     vec!["https://telemetry.example.com".to_string()],
                 ),
-                1_700_000_000,
+                issued_at,
                 3_600,
                 true,
                 false,
@@ -8791,7 +8792,7 @@ mod trust_command_tests {
         let mut remote_cap = TrustScanRemoteCapContext {
             cap: Some(cap),
             gate: CapabilityGate::new(secret).expect("gate"),
-            now_epoch_secs: 1_700_000_010,
+            now_epoch_secs: issued_at.saturating_add(10),
             trace_id: "trace-trust-scan-denied".to_string(),
         };
 

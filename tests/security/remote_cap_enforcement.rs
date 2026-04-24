@@ -522,6 +522,10 @@ fn trust_scan_deep_denies_token_without_network_egress_scope() {
     let workspace = tempfile::tempdir().expect("tempdir");
     write_scannable_trust_workspace(workspace.path());
     let secret = "trust-scan-cli-remote-cap-secret";
+    let issued_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_secs();
     let provider = CapabilityProvider::new(secret).expect("provider");
     let (cap, _) = provider
         .issue(
@@ -530,7 +534,7 @@ fn trust_scan_deep_denies_token_without_network_egress_scope() {
                 vec![RemoteOperation::TelemetryExport],
                 vec!["https://telemetry.example.com".to_string()],
             ),
-            1_700_000_000,
+            issued_at,
             3_600,
             true,
             false,
