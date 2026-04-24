@@ -1,8 +1,11 @@
 use frankenengine_node::migration::{
     MigrationAuditReport, MigrationRewriteReport, MigrationRollbackPlan, MigrationValidateReport,
+    run_rewrite,
 };
+use proptest::prelude::*;
 use serde::Deserialize;
 use serde_json::{Map, Value};
+use std::path::Path;
 
 const MIGRATION_REPORT_SCHEMA_VECTORS_JSON: &str =
     include_str!("../../../artifacts/conformance/migration_report_schema_vectors.json");
@@ -496,4 +499,160 @@ fn migration_report_conformance_vectors_match_json_schema() -> TestResult {
         assert_schema(vector)?;
     }
     Ok(())
+}
+
+fn write_rewrite_fixture_file(project: &Path, relative_path: &str, content: &str) -> TestResult {
+    let path = project.join(relative_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("create parent directory for {relative_path}: {err}"))?;
+    }
+    std::fs::write(path, content).map_err(|err| format!("write {relative_path}: {err}"))
+}
+
+fn write_rewrite_metamorphic_fixture(project: &Path, seed: u8) -> TestResult {
+    match seed % 4 {
+        0 => {
+            write_rewrite_fixture_file(project, "src/index.js", "console.log('start');\n")?;
+            write_rewrite_fixture_file(project, "tools/build.mjs", "console.log('build');\n")?;
+            let manifest = serde_json::json!({
+                "name": format!("metamorphic-script-{seed}"),
+                "version": "1.0.0",
+                "scripts": {
+                    "start": format!("node src/index.js --seed={seed}"),
+                    "build": "bun tools/build.mjs",
+                    "lint": "eslint ."
+                }
+            });
+            let manifest = serde_json::to_string_pretty(&manifest)
+                .map_err(|err| format!("serialize script manifest: {err}"))?;
+            write_rewrite_fixture_file(project, "package.json", &manifest)
+        }
+        1 => {
+            write_rewrite_fixture_file(
+                project,
+                "package.json",
+                r#"{
+                  "name":"metamorphic-hardened",
+                  "version":"1.0.0",
+                  "engines":{"node":">=20 <23"},
+                  "scripts":{"test":"node test.js"}
+                }"#,
+            )?;
+            write_rewrite_fixture_file(project, "local.js", "module.exports = 42;\n")?;
+            write_rewrite_fixture_file(
+                project,
+                "index.js",
+                "const fs = require(\"fs\");\nconst local = require(\"./local\");\nconsole.log(fs.existsSync(\"package.json\"), local);\n",
+            )
+        }
+        2 => {
+            let manifest = serde_json::json!({
+                "name": format!("metamorphic-esm-{seed}"),
+                "version": "1.0.0",
+                "type": "module",
+                "engines": {"node": ">=20 <23"}
+            });
+            let manifest = serde_json::to_string_pretty(&manifest)
+                .map_err(|err| format!("serialize esm manifest: {err}"))?;
+            write_rewrite_fixture_file(project, "package.json", &manifest)?;
+            write_rewrite_fixture_file(
+                project,
+                "src/index.js",
+                "import fs from \"fs\";\nimport path from \"path\";\nexport const exists = fs.existsSync(path.join(\".\"));\n",
+            )
+        }
+        _ => {
+            write_rewrite_fixture_file(project, "src/local.js", "module.exports = 'local';\n")?;
+            write_rewrite_fixture_file(
+                project,
+                "src/index.js",
+                "const path = require(\"path\");\nconst local = require(\"./local\");\nconsole.log(path.sep, local);\n",
+            )?;
+            let manifest = serde_json::json!({
+                "name": format!("metamorphic-combo-{seed}"),
+                "version": "1.0.0",
+                "scripts": {
+                    "start": format!("node src/index.js --seed={seed}")
+                }
+            });
+            let manifest = serde_json::to_string_pretty(&manifest)
+                .map_err(|err| format!("serialize combo manifest: {err}"))?;
+            write_rewrite_fixture_file(project, "package.json", &manifest)
+        }
+    }
+}
+
+fn project_text_snapshot(project: &Path) -> Result<Vec<(String, String)>, String> {
+    fn collect(project: &Path, dir: &Path, snapshot: &mut Vec<(String, String)>) -> TestResult {
+        let mut entries = std::fs::read_dir(dir)
+            .map_err(|err| format!("read directory {}: {err}", dir.display()))?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|err| format!("read directory entry in {}: {err}", dir.display()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        entries.sort();
+
+        for path in entries {
+            if path.is_dir() {
+                collect(project, &path, snapshot)?;
+            } else {
+                let relative = path
+                    .strip_prefix(project)
+                    .map_err(|err| format!("strip project prefix from {}: {err}", path.display()))?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|err| format!("read text file {}: {err}", path.display()))?;
+                snapshot.push((relative, text));
+            }
+        }
+
+        Ok(())
+    }
+
+    let mut snapshot = Vec::new();
+    collect(project, project, &mut snapshot)?;
+    snapshot.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(snapshot)
+}
+
+proptest! {
+    #[test]
+    fn migration_rewrite_apply_many_inputs_reaches_fixed_point(seed in 0_u8..64) {
+        let temp = tempfile::tempdir()
+            .map_err(|err| TestCaseError::fail(format!("create tempdir: {err}")))?;
+        let project = temp.path();
+        write_rewrite_metamorphic_fixture(project, seed)
+            .map_err(TestCaseError::fail)?;
+
+        let first = run_rewrite(project, true)
+            .map_err(|err| TestCaseError::fail(format!("first rewrite failed: {err}")))?;
+        prop_assert!(first.rewrites_applied <= first.rewrites_planned);
+        let after_first = project_text_snapshot(project).map_err(TestCaseError::fail)?;
+
+        let second = run_rewrite(project, true)
+            .map_err(|err| TestCaseError::fail(format!("second rewrite failed: {err}")))?;
+        let after_second = project_text_snapshot(project).map_err(TestCaseError::fail)?;
+        prop_assert_eq!(
+            &after_first,
+            &after_second,
+            "rewrite(apply(rewrite(apply(project)))) changed the fixed-point project"
+        );
+        prop_assert_eq!(second.rewrites_applied, 0);
+        prop_assert_eq!(second.rollback_entries.len(), 0);
+
+        let dry_run_after_apply = run_rewrite(project, false)
+            .map_err(|err| TestCaseError::fail(format!("dry run after apply failed: {err}")))?;
+        let after_dry_run = project_text_snapshot(project).map_err(TestCaseError::fail)?;
+        prop_assert_eq!(
+            &after_second,
+            &after_dry_run,
+            "dry-run rewrite mutated a fixed-point project"
+        );
+        prop_assert_eq!(dry_run_after_apply.rewrites_planned, 0);
+        prop_assert_eq!(dry_run_after_apply.rewrites_applied, 0);
+    }
 }
