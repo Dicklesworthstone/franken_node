@@ -3261,6 +3261,61 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_digest_environment_vars_duplicate_keys_generated_cases() {
+        let mut runner = TestRunner::default();
+        let strategy = prop::collection::vec(
+            (
+                0_u8..=15,
+                prop_oneof![
+                    Just(String::new()),
+                    prop::collection::vec(any::<char>(), 0..=64)
+                        .prop_map(|chars| chars.into_iter().collect::<String>()),
+                    prop::collection::vec(any::<char>(), 512..=1024)
+                        .prop_map(|chars| chars.into_iter().collect::<String>()),
+                ],
+            ),
+            0..=100,
+        );
+
+        runner
+            .run(&strategy, |entries| {
+                let duplicated_entries: Vec<(String, String)> = entries
+                    .into_iter()
+                    .flat_map(|(key_id, value)| {
+                        let key = format!("DUP_KEY_{key_id}");
+                        [(key.clone(), value.clone()), (key, value)]
+                    })
+                    .collect();
+
+                let mut env_vars_order1 = BTreeMap::new();
+                for (key, value) in &duplicated_entries {
+                    env_vars_order1.insert(key.clone(), value.clone());
+                }
+
+                let mut env_vars_order2 = BTreeMap::new();
+                for (key, value) in duplicated_entries.iter().rev() {
+                    env_vars_order2.insert(key.clone(), value.clone());
+                }
+
+                let env1 = EnvironmentSnapshot::new(1000, env_vars_order1, "linux", "v1.0");
+                let env2 = EnvironmentSnapshot::new(1000, env_vars_order2, "linux", "v1.0");
+
+                prop_assert_eq!(
+                    env1.env_vars,
+                    env2.env_vars,
+                    "duplicate generated environment keys with identical values must converge to the same canonical map"
+                );
+                prop_assert_eq!(
+                    serde_json::to_string(&env1).expect("serialize duplicate-key env1"),
+                    serde_json::to_string(&env2).expect("serialize duplicate-key env2"),
+                    "duplicate generated environment keys must not perturb canonical serialization"
+                );
+                Ok(())
+            })
+            .expect("duplicate generated environment keys should canonicalize deterministically");
+    }
+
+    #[test]
     fn metamorphic_digest_step_construction_method_independence() {
         // METAMORPHIC TEST: Creating the same TraceStep via different construction methods
         // should produce identical digests (field access order independence)
