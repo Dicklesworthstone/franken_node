@@ -1101,6 +1101,49 @@ mod tests {
     }
 
     #[test]
+    fn test_contract_concurrency_model_matches_adapter_defaults() {
+        let matrix = persistence_matrix_contract();
+        let config = AdapterConfig::default();
+
+        let checklist = matrix
+            .checklist
+            .iter()
+            .find(|item| item.requirement == "concurrency_model_defined")
+            .expect("concurrency model checklist item");
+        assert_eq!(checklist.status, "defined");
+        assert!(
+            checklist.detail.contains("Pool size")
+                && checklist.detail.contains("isolation level")
+                && checklist.detail.contains("conflict resolution"),
+            "concurrency checklist must cover pool size, isolation, and conflicts"
+        );
+
+        assert_eq!(
+            matrix.concurrency_model.pool_size, config.pool_size,
+            "adapter default pool size must match bd-1a1j concurrency contract"
+        );
+        assert_eq!(
+            matrix.concurrency_model.isolation_level,
+            "serializable_tier1_read_committed_tier2"
+        );
+        assert!(
+            matrix
+                .concurrency_model
+                .isolation_level
+                .contains("serializable")
+                && matrix
+                    .concurrency_model
+                    .isolation_level
+                    .contains("read_committed"),
+            "tiered isolation contract must keep Tier1 serializable and Tier2 read-committed"
+        );
+        assert_eq!(
+            matrix.concurrency_model.conflict_resolution,
+            "fencing_then_retry_with_backoff"
+        );
+    }
+
+    #[test]
     fn test_canonical_unique_domains() {
         let classes = canonical_classes();
         let domains: Vec<&str> = classes.iter().map(|c| c.domain.as_str()).collect();
