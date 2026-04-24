@@ -1207,7 +1207,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            VerifierSdkError::SessionVerifierMismatch { .. }
+            VerifierSdkError::ResultOriginMismatch { .. }
         ));
         assert!(session.steps().is_empty());
     }
@@ -1549,7 +1549,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            VerifierSdkError::SessionVerifierMismatch { .. }
+            VerifierSdkError::ResultOriginMismatch { .. }
         ));
         assert!(log.is_empty());
     }

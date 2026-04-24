@@ -1095,38 +1095,50 @@ fn test_verifier_sdk_new_function() -> Result<(), String> {
 }
 
 fn test_verifier_sdk_new_rejects_invalid_identities() -> Result<(), String> {
-    // VerifierSdk::new should validate verifier identity format
+    // VerifierSdk::new should properly validate verifier identity format and return errors
 
-    // Test raw string without verifier:// prefix
-    match std::panic::catch_unwind(|| VerifierSdk::new("test-verifier")) {
-        Ok(sdk) => {
-            // If it doesn't panic, the identity should be validated elsewhere
-            // For now we just check it doesn't accept invalid format
-            if sdk.verifier_identity == "test-verifier" {
-                return Err("VerifierSdk::new should not accept raw string identities without verifier:// prefix".to_string());
+    let invalid_cases = vec![
+        ("test-verifier", "raw string without verifier:// prefix"),
+        ("", "empty string"),
+        ("verifier://", "verifier:// with empty name"),
+        ("  verifier://test  ", "leading/trailing whitespace"),
+        ("verifier://test\0poisoned", "null byte injection"),
+        ("verifier://test/../escape", "path traversal attempt"),
+        ("verifier://test@domain", "invalid characters"),
+        ("http://example.com", "wrong URI scheme"),
+        ("verifier://", "empty name after scheme"),
+        ("verifier://a".repeat(100), "excessively long name"),
+    ];
+
+    for (invalid_input, description) in invalid_cases {
+        let result = VerifierSdk::new(invalid_input);
+
+        // All invalid inputs should either panic or return proper validation
+        // For now we accept either behavior but verify invalid format is rejected
+        if let Ok(sdk) = std::panic::catch_unwind(|| result) {
+            match sdk {
+                Ok(created_sdk) => {
+                    // If SDK was created, verify it transformed the input to valid format
+                    if !created_sdk.verifier_identity.starts_with("verifier://") {
+                        return Err(format!(
+                            "VerifierSdk::new accepted invalid input '{}' ({}): created SDK with identity '{}'",
+                            invalid_input, description, created_sdk.verifier_identity
+                        ));
+                    }
+                    // Additional validation: ensure it's not just the raw invalid input
+                    if created_sdk.verifier_identity == invalid_input {
+                        return Err(format!(
+                            "VerifierSdk::new preserved invalid input '{}' ({}) without transformation",
+                            invalid_input, description
+                        ));
+                    }
+                }
+                Err(_) => {
+                    // Error return is expected and acceptable for invalid input
+                }
             }
         }
-        Err(_) => {} // Panic is acceptable for invalid input
-    }
-
-    // Test empty string
-    match std::panic::catch_unwind(|| VerifierSdk::new("")) {
-        Ok(sdk) => {
-            if sdk.verifier_identity.is_empty() {
-                return Err("VerifierSdk::new should not accept empty verifier identity".to_string());
-            }
-        }
-        Err(_) => {} // Panic is acceptable for invalid input
-    }
-
-    // Test verifier:// with empty name
-    match std::panic::catch_unwind(|| VerifierSdk::new("verifier://")) {
-        Ok(sdk) => {
-            if sdk.verifier_identity == "verifier://" {
-                return Err("VerifierSdk::new should not accept verifier:// with empty name".to_string());
-            }
-        }
-        Err(_) => {} // Panic is acceptable for invalid input
+        // Panic is also acceptable for invalid input
     }
 
     Ok(())
