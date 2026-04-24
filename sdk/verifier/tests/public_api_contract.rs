@@ -179,6 +179,10 @@ fn fixture_object_string<'a>(
         .ok_or_else(|| format!("{context}.{key} must be a string"))
 }
 
+fn is_lower_hex_digest(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
 fn bundle_error_display_from_fixture(entry: &ErrorMatrixEntry) -> Result<String, String> {
     let display = match entry.error_type.as_str() {
         "Json" => format!(
@@ -650,8 +654,14 @@ fn test_session_step_fixture_matches_live_json_contract() -> Result<(), String> 
     assert_eq!(fixture.step_index, 1);
     assert_eq!(fixture.operation, VerificationOperation::Claim);
     assert_eq!(fixture.verdict, VerificationVerdict::Pass);
-    assert!(!fixture.artifact_binding_hash.is_empty());
-    assert!(!fixture.step_signature.is_empty());
+    assert!(
+        is_lower_hex_digest(&fixture.artifact_binding_hash),
+        "session_step artifact_binding_hash must be a bare lowercase 64-hex digest"
+    );
+    assert!(
+        is_lower_hex_digest(&fixture.step_signature),
+        "session_step step_signature must be a bare lowercase 64-hex digest"
+    );
 
     Ok(())
 }

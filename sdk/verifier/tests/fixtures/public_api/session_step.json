@@ -2,7 +2,7 @@
   "step_index": 1,
   "operation": "claim",
   "verdict": "pass",
-  "artifact_binding_hash": "sha256:a1b2c3d4e5f6789012345678901234567890abcdef",
+  "artifact_binding_hash": "ef5b9576bc8bce8c63a8dff3e66f3beb484c9eeec9a339e85fc222d94dcd7318",
   "timestamp": "2026-04-21T12:00:00Z",
-  "step_signature": "sha256:session-step-signature-fixture"
+  "step_signature": "6d406cfeb6704a44d5073d5d342ea2348e9521828ed0f5195b5c365eb4d0c1a7"
 }
