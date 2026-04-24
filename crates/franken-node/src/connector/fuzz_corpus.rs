@@ -615,10 +615,37 @@ fn load_live_budget_config(repo_root: &Path) -> Result<LiveBudgetConfig, String>
     })
 }
 
+fn validate_fuzz_category(category: &str) -> Result<(), String> {
+    // Reject path traversal attempts
+    if category.contains("..") {
+        return Err("fuzz category contains path traversal segments".to_string());
+    }
+
+    // Reject absolute paths
+    if category.starts_with('/') {
+        return Err("fuzz category must be relative".to_string());
+    }
+
+    // Reject backslashes (Windows path separators that could enable traversal)
+    if category.contains('\\') {
+        return Err("fuzz category contains invalid path separators".to_string());
+    }
+
+    // Reject null bytes (path injection)
+    if category.contains('\0') {
+        return Err("fuzz category contains null bytes".to_string());
+    }
+
+    Ok(())
+}
+
 fn prepare_truthful_campaign(
     repo_root: &Path,
     target: &FuzzTargetDescriptor,
 ) -> Result<PreparedFuzzCampaign, String> {
+    // Validate category before using it in path construction
+    validate_fuzz_category(&target.category)?;
+
     let mut seeds = read_seed_directory(
         repo_root,
         &format!("fuzz/corpus/{}", target.category),
@@ -2049,5 +2076,49 @@ targets = ["directory_scan"]
         assert_eq!(aggregate.targets[0].outcome, "error");
         let detail = aggregate.error_detail.as_deref().expect("error detail");
         assert!(detail.contains("unsupported truthful fuzz target"));
+    }
+
+    #[test]
+    fn validate_fuzz_category_rejects_path_traversal() {
+        // Test rejection of .. segments
+        assert!(validate_fuzz_category("../escapes").is_err());
+        assert!(validate_fuzz_category("valid/../escapes").is_err());
+        assert!(validate_fuzz_category("escapes/..").is_err());
+        assert!(validate_fuzz_category("../../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn validate_fuzz_category_rejects_absolute_paths() {
+        // Test rejection of leading slash
+        assert!(validate_fuzz_category("/absolute/path").is_err());
+        assert!(validate_fuzz_category("/etc/passwd").is_err());
+        assert!(validate_fuzz_category("/").is_err());
+    }
+
+    #[test]
+    fn validate_fuzz_category_rejects_backslashes() {
+        // Test rejection of backslashes
+        assert!(validate_fuzz_category("windows\\path").is_err());
+        assert!(validate_fuzz_category("path\\with\\backslashes").is_err());
+        assert!(validate_fuzz_category("\\windows\\absolute").is_err());
+    }
+
+    #[test]
+    fn validate_fuzz_category_rejects_null_bytes() {
+        // Test rejection of null bytes
+        assert!(validate_fuzz_category("path\0injection").is_err());
+        assert!(validate_fuzz_category("\0null_start").is_err());
+        assert!(validate_fuzz_category("null_end\0").is_err());
+    }
+
+    #[test]
+    fn validate_fuzz_category_accepts_valid_categories() {
+        // Test acceptance of valid categories
+        assert!(validate_fuzz_category("corpus").is_ok());
+        assert!(validate_fuzz_category("regression").is_ok());
+        assert!(validate_fuzz_category("valid_category").is_ok());
+        assert!(validate_fuzz_category("sub/category").is_ok());
+        assert!(validate_fuzz_category("category-with-dashes").is_ok());
+        assert!(validate_fuzz_category("category_with_underscores").is_ok());
     }
 }
