@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use frankenengine_node::config::{LaneOverflowPolicy, RuntimeConfig, RuntimeLaneConfig};
+use frankenengine_node::config::{
+    CliOverrides, Config, LaneOverflowPolicy, RuntimeConfig, RuntimeLaneConfig,
+};
 use frankenengine_node::runtime::bounded_mask::CapabilityContext;
 use frankenengine_node::runtime::lane_router::{LaneRouter, ProductLane, event_codes};
 
@@ -51,6 +53,51 @@ fn cx(scope: &str) -> CapabilityContext {
         "operator-priority",
         [scope.to_string()],
     )
+}
+
+fn env_lookup(map: BTreeMap<String, String>) -> impl Fn(&str) -> Option<String> {
+    move |key| map.get(key).cloned()
+}
+
+#[test]
+fn configured_merge_decision_cap_bounds_resolved_diagnostics() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("franken_node.toml");
+    std::fs::write(
+        &path,
+        r#"
+[security]
+max_merge_decisions = 2
+
+[runtime]
+preferred = "bun"
+remote_max_in_flight = 77
+bulkhead_retry_after_ms = 33
+"#,
+    )
+    .unwrap();
+
+    let resolved = Config::resolve_with_env(
+        Some(&path),
+        CliOverrides::default(),
+        &env_lookup(BTreeMap::new()),
+    )
+    .unwrap();
+
+    assert_eq!(resolved.config.security.max_merge_decisions, 2);
+    assert_eq!(resolved.decisions.len(), 2);
+    let retained_fields: Vec<&str> = resolved
+        .decisions
+        .iter()
+        .map(|decision| decision.field.as_str())
+        .collect();
+    assert_eq!(
+        retained_fields,
+        vec![
+            "runtime.remote_max_in_flight",
+            "runtime.bulkhead_retry_after_ms"
+        ]
+    );
 }
 
 #[test]
