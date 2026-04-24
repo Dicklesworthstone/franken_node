@@ -9,9 +9,13 @@ use serde::{Deserialize, Serialize};
 
 pub mod timeouts;
 
-/// Maximum number of configuration merge decisions to track.
+/// Default number of configuration merge decisions to track.
 /// Prevents memory exhaustion from adversarial config override patterns.
-const MAX_MERGE_DECISIONS: usize = 100;
+pub const DEFAULT_MAX_MERGE_DECISIONS: usize = 100;
+
+const fn default_max_merge_decisions() -> usize {
+    DEFAULT_MAX_MERGE_DECISIONS
+}
 
 /// Push item to vector with bounded capacity to prevent memory exhaustion.
 /// When capacity is exceeded, removes oldest entries to maintain the limit.
@@ -137,6 +141,7 @@ impl Config {
                 },
                 security: SecurityConfig {
                     max_degraded_duration_secs: timeouts::SECURITY_MAX_DEGRADED_DURATION_SECS,
+                    max_merge_decisions: DEFAULT_MAX_MERGE_DECISIONS,
                     decision_receipt_signing_key_path: None,
                     authorized_api_keys: std::collections::BTreeSet::new(),
                     network_policy: NetworkPolicyConfig::default(),
@@ -198,6 +203,7 @@ impl Config {
                 },
                 security: SecurityConfig {
                     max_degraded_duration_secs: timeouts::SECURITY_MAX_DEGRADED_DURATION_SECS,
+                    max_merge_decisions: DEFAULT_MAX_MERGE_DECISIONS,
                     decision_receipt_signing_key_path: None,
                     authorized_api_keys: std::collections::BTreeSet::new(),
                     network_policy: NetworkPolicyConfig::default(),
@@ -259,6 +265,7 @@ impl Config {
                 },
                 security: SecurityConfig {
                     max_degraded_duration_secs: timeouts::SECURITY_MAX_DEGRADED_DURATION_SECS,
+                    max_merge_decisions: DEFAULT_MAX_MERGE_DECISIONS,
                     decision_receipt_signing_key_path: None,
                     authorized_api_keys: std::collections::BTreeSet::new(),
                     network_policy: NetworkPolicyConfig::default(),
@@ -345,7 +352,7 @@ impl Config {
             push_bounded(
                 &mut decisions,
                 MergeDecision::new(MergeStage::File, "profile", profile.to_string()),
-                MAX_MERGE_DECISIONS,
+                DEFAULT_MAX_MERGE_DECISIONS,
             );
         }
 
@@ -362,7 +369,7 @@ impl Config {
             push_bounded(
                 &mut decisions,
                 MergeDecision::new(MergeStage::Env, "profile", parsed.to_string()),
-                MAX_MERGE_DECISIONS,
+                DEFAULT_MAX_MERGE_DECISIONS,
             );
         }
 
@@ -371,7 +378,7 @@ impl Config {
             push_bounded(
                 &mut decisions,
                 MergeDecision::new(MergeStage::Cli, "profile", profile.to_string()),
-                MAX_MERGE_DECISIONS,
+                DEFAULT_MAX_MERGE_DECISIONS,
             );
         }
 
@@ -458,6 +465,21 @@ impl Config {
         stage: MergeStage,
         mut decisions: &mut Vec<MergeDecision>,
     ) {
+        #[allow(non_snake_case)]
+        let mut MAX_MERGE_DECISIONS = self.security.max_merge_decisions;
+
+        if let Some(section) = &overrides.security
+            && let Some(value) = section.max_merge_decisions
+        {
+            self.security.max_merge_decisions = value;
+            MAX_MERGE_DECISIONS = value;
+            push_bounded(
+                &mut decisions,
+                MergeDecision::new(stage.clone(), "security.max_merge_decisions", value),
+                MAX_MERGE_DECISIONS,
+            );
+        }
+
         if let Some(section) = &overrides.compatibility {
             if let Some(value) = section.mode {
                 self.compatibility.mode = value;
@@ -975,12 +997,27 @@ impl Config {
         env_lookup: &impl Fn(&str) -> Option<String>,
         mut decisions: &mut Vec<MergeDecision>,
     ) -> Result<(), ConfigError> {
+        #[allow(non_snake_case)]
+        let mut MAX_MERGE_DECISIONS = self.security.max_merge_decisions;
+
+        if let Some(raw) = env_lookup("FRANKEN_NODE_SECURITY_MAX_MERGE_DECISIONS") {
+            let parsed = parse_env_usize("FRANKEN_NODE_SECURITY_MAX_MERGE_DECISIONS", &raw)?;
+            self.security.max_merge_decisions = parsed;
+            MAX_MERGE_DECISIONS = parsed;
+            push_bounded(
+                &mut decisions,
+                MergeDecision::new(MergeStage::Env, "security.max_merge_decisions", parsed),
+                MAX_MERGE_DECISIONS,
+            );
+        }
+
         apply_env_field_bool(
             "FRANKEN_NODE_COMPATIBILITY_EMIT_DIVERGENCE_RECEIPTS",
             env_lookup,
             &mut self.compatibility.emit_divergence_receipts,
             "compatibility.emit_divergence_receipts",
             decisions,
+            MAX_MERGE_DECISIONS,
         )?;
 
         if let Some(raw) = env_lookup("FRANKEN_NODE_COMPATIBILITY_MODE") {
@@ -1028,6 +1065,7 @@ impl Config {
             &mut self.migration.autofix,
             "migration.autofix",
             decisions,
+            MAX_MERGE_DECISIONS,
         )?;
         apply_env_field_bool(
             "FRANKEN_NODE_MIGRATION_REQUIRE_LOCKSTEP_VALIDATION",
@@ -1035,6 +1073,7 @@ impl Config {
             &mut self.migration.require_lockstep_validation,
             "migration.require_lockstep_validation",
             decisions,
+            MAX_MERGE_DECISIONS,
         )?;
         apply_env_field_opt_f64(
             "FRANKEN_NODE_MIGRATION_VERIFICATION_THRESHOLD",
@@ -1042,6 +1081,7 @@ impl Config {
             &mut self.migration.verification_threshold,
             "migration.verification_threshold",
             decisions,
+            MAX_MERGE_DECISIONS,
         )?;
         apply_env_field_opt_f64(
             "FRANKEN_NODE_MIGRATION_CONFIDENCE_LEVEL",
@@ -1049,6 +1089,7 @@ impl Config {
             &mut self.migration.confidence_level,
             "migration.confidence_level",
             decisions,
+            MAX_MERGE_DECISIONS,
         )?;
         apply_env_field_opt_f64(
             "FRANKEN_NODE_MIGRATION_DETERMINISM_RATE",
@@ -1056,6 +1097,7 @@ impl Config {
             &mut self.migration.determinism_rate,
             "migration.determinism_rate",
             decisions,
+            MAX_MERGE_DECISIONS,
         )?;
 
         apply_env_field_bool(
@@ -1064,6 +1106,7 @@ impl Config {
             &mut self.trust.risky_requires_fresh_revocation,
             "trust.risky_requires_fresh_revocation",
             decisions,
+            MAX_MERGE_DECISIONS,
         )?;
         apply_env_field_bool(
             "FRANKEN_NODE_TRUST_DANGEROUS_REQUIRES_FRESH_REVOCATION",
@@ -1071,6 +1114,7 @@ impl Config {
             &mut self.trust.dangerous_requires_fresh_revocation,
             "trust.dangerous_requires_fresh_revocation",
             decisions,
+            MAX_MERGE_DECISIONS,
         )?;
         apply_env_field_bool(
             "FRANKEN_NODE_TRUST_QUARANTINE_ON_HIGH_RISK",
@@ -1078,6 +1122,7 @@ impl Config {
             &mut self.trust.quarantine_on_high_risk,
             "trust.quarantine_on_high_risk",
             decisions,
+            MAX_MERGE_DECISIONS,
         )?;
         if let Some(raw) = env_lookup("FRANKEN_NODE_TRUST_CARD_CACHE_TTL_SECS") {
             let parsed = parse_env_u64("FRANKEN_NODE_TRUST_CARD_CACHE_TTL_SECS", &raw)?;
@@ -1103,6 +1148,7 @@ impl Config {
             &mut self.trust.min_trust_score,
             "trust.min_trust_score",
             decisions,
+            MAX_MERGE_DECISIONS,
         )?;
         apply_env_field_opt_f64(
             "FRANKEN_NODE_TRUST_DECAY_FACTOR",
@@ -1110,6 +1156,7 @@ impl Config {
             &mut self.trust.decay_factor,
             "trust.decay_factor",
             decisions,
+            MAX_MERGE_DECISIONS,
         )?;
 
         apply_env_field_bool(
@@ -1118,6 +1165,7 @@ impl Config {
             &mut self.replay.persist_high_severity,
             "replay.persist_high_severity",
             decisions,
+            MAX_MERGE_DECISIONS,
         )?;
         if let Some(value) = env_lookup("FRANKEN_NODE_REPLAY_BUNDLE_VERSION") {
             self.replay.bundle_version = value.clone();
@@ -1159,6 +1207,7 @@ impl Config {
             &mut self.registry.require_signatures,
             "registry.require_signatures",
             decisions,
+            MAX_MERGE_DECISIONS,
         )?;
         apply_env_field_bool(
             "FRANKEN_NODE_REGISTRY_REQUIRE_PROVENANCE",
@@ -1166,6 +1215,7 @@ impl Config {
             &mut self.registry.require_provenance,
             "registry.require_provenance",
             decisions,
+            MAX_MERGE_DECISIONS,
         )?;
 
         if let Some(raw) = env_lookup("FRANKEN_NODE_REGISTRY_MINIMUM_ASSURANCE_LEVEL") {
@@ -1269,6 +1319,7 @@ impl Config {
             &mut self.observability.emit_structured_audit_events,
             "observability.emit_structured_audit_events",
             decisions,
+            MAX_MERGE_DECISIONS,
         )?;
         if let Some(raw) = env_lookup("FRANKEN_NODE_OBSERVABILITY_MAX_RECEIPTS") {
             let parsed = parse_env_usize("FRANKEN_NODE_OBSERVABILITY_MAX_RECEIPTS", &raw)?;
@@ -1380,6 +1431,7 @@ impl Config {
             &mut self.thresholds.max_failure_rate,
             "thresholds.max_failure_rate",
             decisions,
+            MAX_MERGE_DECISIONS,
         )?;
         apply_env_field_opt_f64(
             "FRANKEN_NODE_THRESHOLDS_MIN_QUALITY_SCORE",
@@ -1387,6 +1439,7 @@ impl Config {
             &mut self.thresholds.min_quality_score,
             "thresholds.min_quality_score",
             decisions,
+            MAX_MERGE_DECISIONS,
         )?;
         apply_env_field_opt_f64(
             "FRANKEN_NODE_THRESHOLDS_MAX_VARIANCE_PCT",
@@ -1394,6 +1447,7 @@ impl Config {
             &mut self.thresholds.max_variance_pct,
             "thresholds.max_variance_pct",
             decisions,
+            MAX_MERGE_DECISIONS,
         )?;
         apply_env_field_opt_f64(
             "FRANKEN_NODE_THRESHOLDS_REGRESSION_THRESHOLD_PCT",
@@ -1401,6 +1455,7 @@ impl Config {
             &mut self.thresholds.regression_threshold_pct,
             "thresholds.regression_threshold_pct",
             decisions,
+            MAX_MERGE_DECISIONS,
         )?;
         apply_env_field_opt_f64(
             "FRANKEN_NODE_THRESHOLDS_MIN_RESILIENCE_SCORE",
@@ -1408,6 +1463,7 @@ impl Config {
             &mut self.thresholds.min_resilience_score,
             "thresholds.min_resilience_score",
             decisions,
+            MAX_MERGE_DECISIONS,
         )?;
 
         Ok(())
@@ -1483,6 +1539,11 @@ impl Config {
         if self.security.max_degraded_duration_secs == 0 {
             return Err(ConfigError::ValidationFailed(
                 "security.max_degraded_duration_secs must be > 0".to_string(),
+            ));
+        }
+        if self.security.max_merge_decisions == 0 {
+            return Err(ConfigError::ValidationFailed(
+                "security.max_merge_decisions must be > 0".to_string(),
             ));
         }
         if let Some(binary_path) = &self.engine.binary_path
@@ -1592,6 +1653,7 @@ fn apply_env_field_bool(
     slot: &mut bool,
     field: &str,
     mut decisions: &mut Vec<MergeDecision>,
+    merge_decision_cap: usize,
 ) -> Result<(), ConfigError> {
     if let Some(raw) = env_lookup(key) {
         let parsed = parse_env_bool(key, &raw)?;
@@ -1599,7 +1661,7 @@ fn apply_env_field_bool(
         push_bounded(
             &mut decisions,
             MergeDecision::new(MergeStage::Env, field, parsed),
-            MAX_MERGE_DECISIONS,
+            merge_decision_cap,
         );
     }
     Ok(())
@@ -1673,6 +1735,7 @@ fn apply_env_field_opt_f64(
     slot: &mut Option<f64>,
     field: &str,
     mut decisions: &mut Vec<MergeDecision>,
+    merge_decision_cap: usize,
 ) -> Result<(), ConfigError> {
     if let Some(raw) = env_lookup(key) {
         let parsed = parse_env_f64(key, &raw)?;
@@ -1680,7 +1743,7 @@ fn apply_env_field_opt_f64(
         push_bounded(
             &mut decisions,
             MergeDecision::new(MergeStage::Env, field, parsed),
-            MAX_MERGE_DECISIONS,
+            merge_decision_cap,
         );
     }
     Ok(())
@@ -1893,6 +1956,7 @@ struct RemoteOverrides {
 #[serde(default, deny_unknown_fields)]
 struct SecurityOverrides {
     pub max_degraded_duration_secs: Option<u64>,
+    pub max_merge_decisions: Option<usize>,
     pub decision_receipt_signing_key_path: Option<PathBuf>,
     pub authorized_api_keys: Option<BTreeSet<String>>,
 }
@@ -2027,11 +2091,36 @@ pub struct CompatibilityConfig {
     pub gate_ttl_secs: Option<u64>,
 }
 
+/// API compatibility mode controlling migration behavior and runtime dispatch.
+///
+/// Determines how strictly franken_node enforces compatibility with existing
+/// Node.js/JavaScript APIs during migration and execution. More strict modes
+/// provide better correctness but may break legacy code patterns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CompatibilityMode {
+    /// Strict API compatibility with comprehensive validation and fail-fast behavior.
+    ///
+    /// **Compatibility level:** Highest correctness, strict spec compliance.
+    /// **Performance trade-offs:** Slower due to extensive validation overhead.
+    /// **Migration implications:** May break legacy code that relies on loose semantics.
+    /// Best for new projects or when correctness is paramount.
     Strict,
+
+    /// Balanced compatibility providing good correctness with practical flexibility.
+    ///
+    /// **Compatibility level:** Good spec compliance with common-case tolerance.
+    /// **Performance trade-offs:** Moderate validation overhead, good throughput.
+    /// **Migration implications:** Handles most legacy patterns while catching real bugs.
+    /// Recommended for most migration scenarios.
     Balanced,
+
+    /// Legacy-first compatibility prioritizing migration success over strict correctness.
+    ///
+    /// **Compatibility level:** Maximum tolerance for non-standard JavaScript patterns.
+    /// **Performance trade-offs:** Fastest execution with minimal validation.
+    /// **Migration implications:** Allows questionable legacy code to continue working.
+    /// Use during initial migration phases or with heavily legacy codebases.
     LegacyRisky,
 }
 
@@ -2187,6 +2276,10 @@ pub struct RemoteConfig {
 pub struct SecurityConfig {
     /// Maximum time the system may remain in degraded mode before suspension.
     pub max_degraded_duration_secs: u64,
+
+    /// Maximum number of configuration merge decisions retained in diagnostics.
+    #[serde(default = "default_max_merge_decisions")]
+    pub max_merge_decisions: usize,
 
     /// Optional Ed25519 private signing key path for live decision-receipt export.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2559,26 +2652,65 @@ pub struct ThresholdsConfig {
 
 // -- Errors --
 
+/// Errors that can occur during configuration loading, parsing, and validation.
+///
+/// Each error provides specific context about the failure to help with debugging
+/// and resolution. Most errors include file paths or values that caused the issue.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    /// Failed to read a configuration file from disk.
+    ///
+    /// **When it occurs:** File doesn't exist, permission denied, or I/O error.
+    /// **Common causes:** Missing franken_node.toml, incorrect file permissions, disk issues.
+    /// **Resolution:** Check file exists, verify permissions, ensure disk is accessible.
     #[error("failed to read config file {0}: {1}")]
     ReadFailed(PathBuf, std::io::Error),
 
+    /// Failed to parse TOML configuration file syntax.
+    ///
+    /// **When it occurs:** Invalid TOML syntax, type mismatches, or unknown fields.
+    /// **Common causes:** Syntax errors, wrong data types, typos in field names.
+    /// **Resolution:** Validate TOML syntax, check field names against documentation.
     #[error("failed to parse config file {0}: {1}")]
     ParseFailed(PathBuf, toml::de::Error),
 
+    /// Failed to serialize configuration to TOML format.
+    ///
+    /// **When it occurs:** Attempting to save config with non-serializable values.
+    /// **Common causes:** Internal error during config export or default generation.
+    /// **Resolution:** Report as bug; config structure may be corrupted.
     #[error("failed to serialize config: {0}")]
     SerializeFailed(toml::ser::Error),
 
+    /// Invalid runtime profile name specified.
+    ///
+    /// **When it occurs:** Unknown profile in CLI args or config file.
+    /// **Common causes:** Typos like "strict-mode" instead of "strict".
+    /// **Resolution:** Use one of: strict, balanced, legacy-risky.
     #[error("invalid profile: {0} (expected: strict, balanced, legacy-risky)")]
     InvalidProfile(String),
 
+    /// Invalid compatibility mode specified.
+    ///
+    /// **When it occurs:** Unknown mode in compatibility config section.
+    /// **Common causes:** Typos or using profile names instead of mode names.
+    /// **Resolution:** Use one of: strict, balanced, legacy-risky.
     #[error("invalid compatibility mode: {0} (expected: strict, balanced, legacy-risky)")]
     InvalidCompatibilityMode(String),
 
+    /// Invalid preferred runtime specified.
+    ///
+    /// **When it occurs:** Unknown runtime in runtime config section.
+    /// **Common causes:** Typos like "nodejs" instead of "node".
+    /// **Resolution:** Use one of: auto, node, bun, franken-engine.
     #[error("invalid preferred runtime: {0} (expected: auto, node, bun, franken-engine)")]
     InvalidPreferredRuntime(String),
 
+    /// Failed to parse environment variable override.
+    ///
+    /// **When it occurs:** Invalid format in environment variable for config override.
+    /// **Common causes:** Wrong data type, malformed JSON, missing quotes.
+    /// **Resolution:** Check environment variable syntax matches expected type.
     #[error("environment override parse error for {key}=`{value}`: {reason}")]
     EnvParseFailed {
         key: String,
@@ -2586,6 +2718,11 @@ pub enum ConfigError {
         reason: String,
     },
 
+    /// Configuration failed semantic validation.
+    ///
+    /// **When it occurs:** Config is syntactically valid but logically inconsistent.
+    /// **Common causes:** Invalid ranges, conflicting settings, missing dependencies.
+    /// **Resolution:** Check value ranges and setting combinations in error message.
     #[error("config validation failed: {0}")]
     ValidationFailed(String),
 }
@@ -2613,6 +2750,10 @@ mod tests {
         assert_eq!(config.replay.max_replay_capsule_freshness_secs, 3_600);
         assert_eq!(config.remote.idempotency_ttl_secs, 604_800);
         assert_eq!(config.security.max_degraded_duration_secs, 3_600);
+        assert_eq!(
+            config.security.max_merge_decisions,
+            DEFAULT_MAX_MERGE_DECISIONS
+        );
         assert_eq!(config.engine.binary_path, None);
         assert_eq!(config.runtime.preferred, PreferredRuntime::Auto);
         assert_eq!(config.runtime.remote_max_in_flight, 50);
@@ -2983,6 +3124,47 @@ overflow_policy = "reject"
         assert_eq!(cancel.queue_limit, 22);
         assert_eq!(cancel.enqueue_timeout_ms, 44);
         assert_eq!(cancel.overflow_policy, LaneOverflowPolicy::Reject);
+    }
+
+    #[test]
+    fn resolve_honors_configured_merge_decision_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("franken_node.toml");
+        std::fs::write(
+            &path,
+            r#"
+[security]
+max_merge_decisions = 2
+
+[runtime]
+preferred = "bun"
+remote_max_in_flight = 77
+bulkhead_retry_after_ms = 33
+"#,
+        )
+        .unwrap();
+
+        let resolved = Config::resolve_with_env(
+            Some(&path),
+            CliOverrides::default(),
+            &map_lookup(BTreeMap::new()),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.config.security.max_merge_decisions, 2);
+        assert_eq!(resolved.decisions.len(), 2);
+        let retained_fields: Vec<&str> = resolved
+            .decisions
+            .iter()
+            .map(|decision| decision.field.as_str())
+            .collect();
+        assert_eq!(
+            retained_fields,
+            vec![
+                "runtime.remote_max_in_flight",
+                "runtime.bulkhead_retry_after_ms"
+            ]
+        );
     }
 
     #[test]
