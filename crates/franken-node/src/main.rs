@@ -7282,27 +7282,34 @@ fn build_doctor_report_with_cwd_and_policy_input(
 
     // Add benchmark validation check
     checks.push(evaluate_doctor_check(
-        "DR-BENCH-006",
-        "DOC-006",
+        "DR-BENCH-015",
+        "DOC-015",
         "benchmark.validation",
-        || {
-            match validate_benchmark_thresholds() {
-                Ok(result) if result.passed => (
-                    DoctorStatus::Pass,
-                    result.message,
-                    "Benchmark thresholds are met. No action required.".to_string(),
-                ),
-                Ok(result) => (
-                    DoctorStatus::Fail,
-                    result.message,
-                    format!("Fix benchmark performance issues: {}", result.details.join("; ")).to_string(),
-                ),
-                Err(e) => (
-                    DoctorStatus::Warn,
-                    format!("Benchmark validation failed to run: {}", e),
-                    "Run category shift validation to generate benchmark results first.".to_string(),
-                ),
-            }
+        || match validate_benchmark_thresholds() {
+            Ok(result) if result.passed => (
+                DoctorStatus::Pass,
+                result.message,
+                "Benchmark thresholds are met. No action required.".to_string(),
+            ),
+            Ok(result) if result.details.is_empty() => (
+                DoctorStatus::Warn,
+                result.message,
+                "Run category shift validation to generate benchmark results first.".to_string(),
+            ),
+            Ok(result) => (
+                DoctorStatus::Fail,
+                result.message,
+                format!(
+                    "Fix benchmark performance issues: {}",
+                    result.details.join("; ")
+                )
+                .to_string(),
+            ),
+            Err(e) => (
+                DoctorStatus::Warn,
+                format!("Benchmark validation failed to run: {}", e),
+                "Run category shift validation to generate benchmark results first.".to_string(),
+            ),
         },
     ));
 
@@ -7393,8 +7400,8 @@ fn doctor_structured_log_line(
         error_code: doctor_log_error_code(check),
         surface: "OPS-CLI",
         metric_refs: vec![
-            "franken.doctor.check.duration_ms".to_string(),
-            "franken.doctor.check.status".to_string(),
+            "franken.security.doctor_check_duration_ms".to_string(),
+            "franken.security.doctor_check_status".to_string(),
         ],
         recovery_hint: DoctorRecoveryHintLog {
             action: doctor_recovery_action(check.status),
@@ -8149,10 +8156,57 @@ mod doctor_tests {
                 "DR-OBS-006",
                 "DR-ENV-007",
                 "DR-CONFIG-008",
+                "DR-BENCH-015",
             ]
         );
+        let event_codes = report
+            .checks
+            .iter()
+            .map(|check| check.event_code.as_str())
+            .collect::<Vec<_>>();
+        let unique_event_codes = event_codes
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            unique_event_codes.len(),
+            event_codes.len(),
+            "doctor event codes must be one-to-one with checks"
+        );
+        let benchmark_check = report
+            .checks
+            .iter()
+            .find(|check| check.code == "DR-BENCH-015")
+            .expect("benchmark check present");
+        assert_eq!(benchmark_check.event_code, "DOC-015");
         assert_eq!(report.structured_logs.len(), report.checks.len());
         assert_eq!(report.trace_id, "trace-test");
+    }
+
+    #[test]
+    fn doctor_structured_log_metric_refs_use_canonical_namespace() {
+        let report = build_doctor_report_with_cwd(
+            &resolved_fixture(Profile::Balanced),
+            "trace-metrics",
+            Ok(PathBuf::from(".")),
+        );
+        let line = doctor_structured_log_line(
+            &report,
+            report.checks.first().expect("doctor check should exist"),
+        );
+
+        assert_eq!(
+            line.metric_refs,
+            vec![
+                "franken.security.doctor_check_duration_ms".to_string(),
+                "franken.security.doctor_check_status".to_string(),
+            ]
+        );
+        assert!(
+            line.metric_refs
+                .iter()
+                .all(|metric| metric.starts_with("franken.security."))
+        );
     }
 
     #[test]
