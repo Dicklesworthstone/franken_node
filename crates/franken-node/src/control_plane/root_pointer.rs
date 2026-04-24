@@ -888,11 +888,12 @@ fn publish_root_with_delay_for_test(
 #[cfg(test)]
 mod tests {
     use super::{
-        ControlEpoch, Hmac, Mac, OpenOptions, PublishStep, ROOT_POINTER_FORMAT_VERSION,
-        ROOT_PUBLISH_COMPLETE, RootAuthConfig, RootPointer, RootPointerError, Sha256, Utc,
-        bootstrap_root, fs, hash_hex, publish_lock, publish_root,
-        publish_root_with_crash_injection, publish_root_with_delay_for_test, read_root,
-        root_pointer_path, root_publication_lock_path, sign_payload, thread, verify_publish_event,
+        BootstrapError, ControlEpoch, Digest, Hmac, KeyInit, Mac, OpenOptions, PublishStep,
+        ROOT_POINTER_FORMAT_VERSION, ROOT_PUBLISH_COMPLETE, ROOT_PUBLISH_START, RootAuthConfig,
+        RootAuthRecord, RootPointer, RootPointerError, Sha256, TempFileGuard, Utc, bootstrap_root,
+        fs, hash_hex, publish_lock, publish_root, publish_root_with_crash_injection,
+        publish_root_with_delay_for_test, read_root, root_auth_path, root_pointer_path,
+        root_publication_lock_path, sign_payload, thread, verify_publish_event,
     };
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
