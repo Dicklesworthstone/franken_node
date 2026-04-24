@@ -77,6 +77,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::{DateTime, Utc};
 use clap::Parser;
+use uuid::Uuid;
 use frankenengine_node::control_plane::fleet_transport::{
     FileFleetTransport, FleetAction as PersistedFleetAction,
     FleetActionRecord as PersistedFleetActionRecord, FleetConvergenceReceiptSignature,
@@ -197,7 +198,6 @@ const REGISTRY_LOCAL_ARTIFACT_MANIFEST_SCHEMA_VERSION: &str =
 const REGISTRY_LOCAL_ARTIFACT_MANIFEST_FILE_NAME: &str = "artifact.manifest.json";
 const INCIDENT_EVIDENCE_FILE_NAME: &str = "evidence.v1.json";
 const RUN_EXECUTION_RECEIPT_SCHEMA_VERSION: &str = "franken-node/run-execution-receipt/v1";
-const RUN_EXECUTION_RECEIPT_ID_PLACEHOLDER: &str = "pending";
 const RUN_EXECUTION_RECEIPT_DEFAULT_MAX_RECEIPTS: usize = 100;
 const RUN_EXECUTION_RECEIPT_AUTO_QUARANTINE_THRESHOLD: usize = 1;
 const TRUST_SCAN_NPM_REGISTRY_BASE_URL: &str = "https://registry.npmjs.org";
@@ -326,6 +326,7 @@ struct TrustScanDeepMetadata {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct TrustScanAuditMetadata {
     vulnerability_ids: Vec<String>,
+    risk_lowering_authenticated: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -333,6 +334,7 @@ struct TrustSyncAuditRefreshReport {
     refreshed_count: usize,
     vulnerabilities_found: usize,
     network_errors: usize,
+    risk_lowering_rejections: usize,
     warnings: Vec<String>,
 }
 
@@ -5962,7 +5964,7 @@ fn build_run_execution_receipt(
 ) -> Result<RunExecutionReceipt> {
     let violation_count = ssrf_violations.len();
     let mut core = RunExecutionReceiptCore {
-        receipt_id: RUN_EXECUTION_RECEIPT_ID_PLACEHOLDER.to_string(),
+        receipt_id: Uuid::new_v4().to_string(),
         schema_version: RUN_EXECUTION_RECEIPT_SCHEMA_VERSION.to_string(),
         app_path: app_path.display().to_string(),
         policy_mode: policy_mode.to_string(),
@@ -7902,6 +7904,7 @@ mod trust_scan_tests {
             refresh_trust_sync_audit_with(&mut state, now_secs + 120, true, |name, _| match name {
                 "@acme/auth-guard" => Ok(TrustScanAuditMetadata {
                     vulnerability_ids: vec!["OSV-2026-0001".to_string()],
+                    risk_lowering_authenticated: false,
                 }),
                 "@beta/telemetry-bridge" => Err(anyhow::anyhow!("simulated network failure")),
                 other => Err(anyhow::anyhow!("unexpected package {other}")),
@@ -7955,6 +7958,7 @@ mod trust_scan_tests {
             refresh_trust_sync_audit_with(&mut state, now_secs + 120, true, |name, _| match name {
                 "@acme/auth-guard" => Ok(TrustScanAuditMetadata {
                     vulnerability_ids: vec!["OSV-2026-0001".to_string()],
+                    risk_lowering_authenticated: false,
                 }),
                 "@beta/telemetry-bridge" => Err(anyhow::anyhow!("simulated network failure")),
                 other => Err(anyhow::anyhow!("unexpected package {other}")),
@@ -7965,6 +7969,7 @@ mod trust_scan_tests {
             refresh_trust_sync_audit_with(&mut state, now_secs + 240, true, |name, _| match name {
                 "@acme/auth-guard" => Ok(TrustScanAuditMetadata {
                     vulnerability_ids: Vec::new(),
+                    risk_lowering_authenticated: true,
                 }),
                 "@beta/telemetry-bridge" => Err(anyhow::anyhow!("simulated network failure")),
                 other => Err(anyhow::anyhow!("unexpected package {other}")),
@@ -7987,6 +7992,74 @@ mod trust_scan_tests {
         assert_eq!(
             auth_guard.user_facing_risk_assessment.summary,
             "No known OSV vulnerabilities from latest refresh"
+        );
+    }
+
+    #[test]
+    fn refresh_trust_sync_audit_with_rejects_unauthenticated_risk_lowering() {
+        let now_secs = 2_000;
+        let registry =
+            supply_chain::trust_card::fixture_registry(now_secs).expect("fixture trust registry");
+        let path = tempfile::tempdir()
+            .expect("tempdir")
+            .path()
+            .join("trust-sync-unauth-clean.json");
+        let mut state = TrustCardCliRegistryState {
+            path,
+            registry,
+            cache_ttl_secs: 60,
+        };
+
+        let first_report =
+            refresh_trust_sync_audit_with(&mut state, now_secs + 120, true, |name, _| match name {
+                "@acme/auth-guard" => Ok(TrustScanAuditMetadata {
+                    vulnerability_ids: vec!["OSV-2026-0001".to_string()],
+                    risk_lowering_authenticated: false,
+                }),
+                "@beta/telemetry-bridge" => Err(anyhow::anyhow!("simulated network failure")),
+                other => Err(anyhow::anyhow!("unexpected package {other}")),
+            });
+        assert_eq!(first_report.vulnerabilities_found, 1);
+
+        let second_report =
+            refresh_trust_sync_audit_with(&mut state, now_secs + 240, true, |name, _| match name {
+                "@acme/auth-guard" => Ok(TrustScanAuditMetadata {
+                    vulnerability_ids: Vec::new(),
+                    risk_lowering_authenticated: false,
+                }),
+                "@beta/telemetry-bridge" => Err(anyhow::anyhow!("simulated network failure")),
+                other => Err(anyhow::anyhow!("unexpected package {other}")),
+            });
+        assert_eq!(second_report.refreshed_count, 0);
+        assert_eq!(second_report.risk_lowering_rejections, 1);
+        assert!(
+            second_report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("unauthenticated") && warning.contains("lower"))
+        );
+
+        let cards = state
+            .registry
+            .list(
+                &TrustCardListFilter::empty(),
+                "trace-test-trust-sync-unauth-clean-refresh",
+                now_secs + 240,
+            )
+            .expect("list cards");
+        let auth_guard = cards
+            .iter()
+            .find(|card| card.extension.extension_id == "npm:@acme/auth-guard")
+            .expect("auth guard card");
+        assert_eq!(
+            auth_guard.user_facing_risk_assessment.level,
+            RiskLevel::High
+        );
+        assert!(
+            auth_guard
+                .user_facing_risk_assessment
+                .summary
+                .contains("OSV-2026-0001")
         );
     }
 }
@@ -11184,7 +11257,8 @@ fn fetch_trust_scan_audit_metadata(
         body["version"] = serde_json::Value::String(version.to_string());
     }
 
-    let mut response = ureq::post(&trust_scan_osv_query_url())
+    let query_config = trust_scan_osv_query_config();
+    let mut response = ureq::post(&query_config.url)
         .header("User-Agent", &trust_scan_user_agent())
         .header("Content-Type", "application/json")
         .send(body.to_string())
@@ -11196,15 +11270,26 @@ fn fetch_trust_scan_audit_metadata(
         .with_context(|| format!("invalid OSV JSON for {dependency_name}"))?;
     Ok(TrustScanAuditMetadata {
         vulnerability_ids: parse_osv_vulnerability_ids(&payload),
+        risk_lowering_authenticated: query_config.risk_lowering_authenticated,
     })
 }
 
-fn trust_scan_osv_query_url() -> String {
-    std::env::var("FRANKEN_NODE_OSV_QUERY_URL")
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrustScanOsvQueryConfig {
+    url: String,
+    risk_lowering_authenticated: bool,
+}
+
+fn trust_scan_osv_query_config() -> TrustScanOsvQueryConfig {
+    let configured_url = std::env::var("FRANKEN_NODE_OSV_QUERY_URL")
         .ok()
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| TRUST_SCAN_OSV_QUERY_URL.to_string())
+        .filter(|value| !value.is_empty());
+    let url = configured_url.unwrap_or_else(|| TRUST_SCAN_OSV_QUERY_URL.to_string());
+    TrustScanOsvQueryConfig {
+        risk_lowering_authenticated: url == TRUST_SCAN_OSV_QUERY_URL,
+        url,
+    }
 }
 
 fn default_trust_scan_publisher(dependency_name: &str) -> PublisherIdentity {
@@ -11704,16 +11789,13 @@ fn evaluate_run_trust_preflight(
                                         let detail = format!(
                                             "dependency `{extension_id}` is revoked: {reason}"
                                         );
-                                        if policy_mode == Profile::LegacyRisky {
-                                            warnings.push(detail.clone());
-                                        } else {
-                                            violations.push(TrustViolation {
-                                                dependency_name: Some(dependency_name.clone()),
-                                                extension_id: Some(extension_id.clone()),
-                                                kind: TrustViolationKind::Revoked,
-                                                detail: detail.clone(),
-                                            });
-                                        }
+                                        // Revoked dependencies always block, even in legacy-risky mode (fail-closed)
+                                        violations.push(TrustViolation {
+                                            dependency_name: Some(dependency_name.clone()),
+                                            extension_id: Some(extension_id.clone()),
+                                            kind: TrustViolationKind::Revoked,
+                                            detail: detail.clone(),
+                                        });
 
                                         results.push(RunDependencyTrustResult {
                                             dependency_name,
@@ -14161,11 +14243,12 @@ fn render_trust_sync_summary(
         .filter(|card| card.user_facing_risk_assessment.level == RiskLevel::Critical)
         .count();
     format!(
-        "trust sync completed: force={force} cards={} refreshed={} vulnerabilities={} network_errors={} cache_hits={} cache_misses={} stale_refreshes={} forced_refreshes={} revoked={} quarantined={} critical_risk={critical}",
+        "trust sync completed: force={force} cards={} refreshed={} vulnerabilities={} network_errors={} risk_lowering_rejections={} cache_hits={} cache_misses={} stale_refreshes={} forced_refreshes={} revoked={} quarantined={} critical_risk={critical}",
         cards.len(),
         audit_report.refreshed_count,
         audit_report.vulnerabilities_found,
         audit_report.network_errors,
+        audit_report.risk_lowering_rejections,
         sync_report.cache_hits,
         sync_report.cache_misses,
         sync_report.stale_refreshes,
@@ -14287,13 +14370,22 @@ where
 
         match fetcher(package_name, Some(card.extension.version.as_str())) {
             Ok(audit_metadata) => {
-                report.refreshed_count = report.refreshed_count.saturating_add(1);
-                report.vulnerabilities_found = report
-                    .vulnerabilities_found
-                    .saturating_add(audit_metadata.vulnerability_ids.len());
-
                 let mutation = if audit_metadata.vulnerability_ids.is_empty() {
                     let risk_assessment = trust_sync_clean_risk_assessment(&card);
+                    if risk_assessment.level < card.user_facing_risk_assessment.level
+                        && !audit_metadata.risk_lowering_authenticated
+                    {
+                        report.risk_lowering_rejections =
+                            report.risk_lowering_rejections.saturating_add(1);
+                        report.warnings.push(format!(
+                            "{}@{}: unauthenticated OSV refresh cannot lower risk from {:?} to {:?}",
+                            package_name,
+                            card.extension.version,
+                            card.user_facing_risk_assessment.level,
+                            risk_assessment.level
+                        ));
+                        continue;
+                    }
                     TrustCardMutation {
                         certification_level: None,
                         revocation_status: None,
@@ -14339,6 +14431,11 @@ where
                         evidence_refs: None,
                     }
                 };
+
+                report.refreshed_count = report.refreshed_count.saturating_add(1);
+                report.vulnerabilities_found = report
+                    .vulnerabilities_found
+                    .saturating_add(audit_metadata.vulnerability_ids.len());
 
                 if let Err(err) = state.registry.update(
                     &card.extension.extension_id,
@@ -19618,7 +19715,7 @@ mod run_trust_gate_tests {
     }
 
     #[test]
-    fn trust_gate_legacy_risky_warns_but_does_not_block_revoked_dependency() {
+    fn trust_gate_legacy_risky_blocks_revoked_dependency_fail_closed() {
         let tmp = TempDir::new().expect("tempdir");
         write_demo_project(tmp.path(), &[("@beta/telemetry-bridge", "^0.9.1")]);
         write_fixture_registry_to(tmp.path());
@@ -19626,16 +19723,40 @@ mod run_trust_gate_tests {
         let report = evaluate_preflight(tmp.path(), Profile::LegacyRisky);
 
         match &report.verdict {
-            PreFlightVerdict::Passed {
-                warnings, results, ..
+            PreFlightVerdict::Blocked {
+                reason,
+                violations,
+                results,
+                ..
             } => {
-                assert_eq!(warnings.len(), 1);
+                assert!(reason.contains("blocking trust findings detected"));
+                assert_eq!(violations.len(), 1);
+                assert_eq!(violations[0].kind, TrustViolationKind::Revoked);
                 assert_eq!(results.len(), 1);
                 assert_eq!(results[0].status, RunDependencyTrustStatus::Revoked);
             }
-            other => panic!("expected passed verdict, got {other:?}"),
+            other => panic!("expected blocked verdict for revoked dependency in legacy-risky mode, got {other:?}"),
         }
-        assert_eq!(report.receipt.decision, Decision::Approved);
+        assert_eq!(report.receipt.decision, Decision::Denied);
+    }
+
+    #[test]
+    fn trust_gate_legacy_risky_revocation_regression_test() {
+        // Regression test for bd-2ak3z: ensure revoked dependencies are blocked
+        // even in legacy-risky mode (fail-closed against revocation)
+        let tmp = TempDir::new().expect("tempdir");
+        write_demo_project(tmp.path(), &[("@beta/telemetry-bridge", "^0.9.1")]);
+        write_fixture_registry_to(tmp.path());
+
+        let report = evaluate_preflight(tmp.path(), Profile::LegacyRisky);
+
+        // Revoked dependency must be rejected even in legacy-risky mode
+        assert!(matches!(report.verdict, PreFlightVerdict::Blocked { .. }));
+        assert_eq!(report.receipt.decision, Decision::Denied);
+
+        if let PreFlightVerdict::Blocked { violations, .. } = &report.verdict {
+            assert!(violations.iter().any(|v| v.kind == TrustViolationKind::Revoked));
+        }
     }
 
     #[test]
@@ -21190,6 +21311,71 @@ mod run_trust_gate_tests {
 
             // This demonstrates the defense-in-depth: both resolve_remotecap_signing_key()
             // AND the CapabilityProvider/Gate constructors validate the key material
+        }
+
+        #[test]
+        fn test_execution_receipt_id_no_placeholder_regression() {
+            // Regression test for bd-zxa8x: Ensure receipt IDs are never placeholder strings
+            use crate::ops::engine_dispatcher::{RunDispatchReport, EngineRuntime};
+            use std::time::SystemTime;
+
+            // Create minimal test data for receipt generation
+            let preflight = RunPreFlightReport {
+                warnings: vec![],
+                policy_applied: true,
+            };
+            let dispatch = RunDispatchReport {
+                started_at_utc: "2026-01-01T00:00:00Z".to_string(),
+                finished_at_utc: "2026-01-01T00:01:00Z".to_string(),
+                duration_ms: 60000,
+                exit_code: 0,
+                runtime: EngineRuntime::Node,
+            };
+            let app_path = std::path::Path::new("/test/app");
+
+            // Generate receipt
+            let receipt = build_run_execution_receipt(
+                app_path,
+                "strict",
+                Profile::Development,
+                &preflight,
+                &dispatch,
+                vec![], // ssrf_violations
+                vec![], // auto_quarantined_extensions
+                None,   // lockstep_verdict
+            ).expect("receipt generation should succeed");
+
+            // Critical assertion: receipt ID must never be the old placeholder
+            assert_ne!(
+                receipt.core.receipt_id,
+                "pending",
+                "Receipt ID must not be placeholder string - should be proper UUID"
+            );
+
+            // Additional validation: receipt ID should look like a UUID
+            assert!(
+                receipt.core.receipt_id.len() == 36 && receipt.core.receipt_id.chars().filter(|&c| c == '-').count() == 4,
+                "Receipt ID should be UUID format, got: {}",
+                receipt.core.receipt_id
+            );
+
+            // Ensure it's different on each call (UUIDs should be unique)
+            let receipt2 = build_run_execution_receipt(
+                app_path,
+                "strict",
+                Profile::Development,
+                &preflight,
+                &dispatch,
+                vec![],
+                vec![],
+                None,
+            ).expect("second receipt generation should succeed");
+
+            assert_ne!(
+                receipt.core.receipt_id,
+                receipt2.core.receipt_id,
+                "Receipt IDs should be unique per call"
+            );
         }
     }
 }
