@@ -840,6 +840,14 @@ pub struct IncidentReplayArgs {
     /// Path to incident bundle file.
     #[arg(long)]
     pub bundle: PathBuf,
+
+    /// Trusted Ed25519 public key file for replay bundle signature verification.
+    #[arg(long = "trusted-public-key", alias = "trust-anchor")]
+    pub trusted_public_key: Option<PathBuf>,
+
+    /// Directory containing trusted Ed25519 public keys for replay bundle verification.
+    #[arg(long = "key-dir", alias = "trusted-key-dir")]
+    pub trusted_key_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
@@ -847,6 +855,14 @@ pub struct IncidentCounterfactualArgs {
     /// Path to incident bundle file.
     #[arg(long)]
     pub bundle: PathBuf,
+
+    /// Trusted Ed25519 public key file for replay bundle signature verification.
+    #[arg(long = "trusted-public-key", alias = "trust-anchor")]
+    pub trusted_public_key: Option<PathBuf>,
+
+    /// Directory containing trusted Ed25519 public keys for replay bundle verification.
+    #[arg(long = "key-dir", alias = "trusted-key-dir")]
+    pub trusted_key_dir: Option<PathBuf>,
 
     /// Policy to simulate.
     #[arg(long)]

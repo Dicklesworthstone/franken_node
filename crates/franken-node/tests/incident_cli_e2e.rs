@@ -63,6 +63,15 @@ fn write_receipt_signing_key(path: &Path) {
     fs::write(path, hex::encode(signing_key.to_bytes())).expect("write receipt signing key");
 }
 
+fn write_replay_trust_anchor(path: &Path) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create key dir");
+    }
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x42_u8; 32]);
+    fs::write(path, hex::encode(signing_key.verifying_key().to_bytes()))
+        .expect("write replay trust anchor");
+}
+
 fn replay_bundle_trusted_key_id() -> String {
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42_u8; 32]);
     frankenengine_node::supply_chain::artifact_signing::KeyId::from_verifying_key(
@@ -521,6 +530,9 @@ fn incident_replay_counterfactual_pipeline_is_deterministic_and_fail_closed() {
     assert!(bundle_stderr.contains("incident bundle written:"));
 
     let bundle_path = workspace.path().join("INC-E2E-PIPE-001.fnbundle");
+    let trust_anchor_path = workspace.path().join("keys/replay-trust-anchor.pub");
+    write_replay_trust_anchor(&trust_anchor_path);
+    let trust_anchor_arg = trust_anchor_path.to_string_lossy().to_string();
     let trusted_key_id = replay_bundle_trusted_key_id();
     let bundle = read_bundle_from_path_with_trusted_key(&bundle_path, Some(&trusted_key_id))
         .expect("read bundle");
@@ -545,6 +557,8 @@ fn incident_replay_counterfactual_pipeline_is_deterministic_and_fail_closed() {
                 "replay",
                 "--bundle",
                 "INC-E2E-PIPE-001.fnbundle",
+                "--trusted-public-key",
+                &trust_anchor_arg,
             ],
         );
         assert!(
@@ -582,6 +596,8 @@ fn incident_replay_counterfactual_pipeline_is_deterministic_and_fail_closed() {
             "counterfactual",
             "--bundle",
             "INC-E2E-PIPE-001.fnbundle",
+            "--trusted-public-key",
+            &trust_anchor_arg,
             "--policy",
             "strict",
         ],
@@ -631,6 +647,8 @@ fn incident_replay_counterfactual_pipeline_is_deterministic_and_fail_closed() {
             "replay",
             "--bundle",
             "INC-E2E-PIPE-001-corrupt.fnbundle",
+            "--trusted-public-key",
+            &trust_anchor_arg,
         ],
     );
     assert!(

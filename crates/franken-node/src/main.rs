@@ -92,7 +92,6 @@ use frankenengine_node::{
     ActionableError,
     config::{self, CliOverrides, Profile},
     ops, runtime,
-    supply_chain::category_shift::validate_benchmark_thresholds,
     security::{
         decision_receipt::{
             Decision, Receipt, ReceiptQuery, append_signed_receipt, export_receipts_to_path,
@@ -103,6 +102,7 @@ use frankenengine_node::{
             RemoteScope,
         },
     },
+    supply_chain::category_shift::validate_benchmark_thresholds,
     supply_chain::{
         certification::{EvidenceType, VerifiedEvidenceRef},
         extension_registry::{
@@ -132,9 +132,9 @@ use frankenengine_node::{
         },
         replay_bundle::{
             ReplayBundleSigningMaterial, generate_replay_bundle_from_evidence,
-            read_bundle_from_path_with_trusted_key, read_incident_evidence_package,
-            replay_bundle_with_trusted_key, sign_replay_bundle, validate_bundle_integrity,
-            write_bundle_to_path, write_bundle_to_path_with_trusted_key,
+            read_bundle_from_path_with_trusted_key, read_bundle_from_path_with_trusted_keys,
+            read_incident_evidence_package, replay_bundle_with_trusted_keys, sign_replay_bundle,
+            validate_bundle_integrity, write_bundle_to_path_with_trusted_key,
         },
     },
 };
@@ -4789,11 +4789,62 @@ fn missing_replay_bundle_signing_key_error(action: &str) -> ActionableError {
     )
 }
 
-fn signing_material_key_id(signing_material: &Ed25519SigningMaterial) -> String {
-    frankenengine_node::supply_chain::artifact_signing::KeyId::from_verifying_key(
-        &signing_material.signing_key.verifying_key(),
+fn missing_replay_trust_anchor_error() -> ActionableError {
+    ActionableError::new(
+        "incident replay requires a trusted public key; pass --trusted-public-key or --key-dir so the embedded bundle anchor can be verified against the current trust set",
+        "franken-node incident replay --bundle <bundle.fnbundle> --trusted-public-key <publisher.pub>",
     )
-    .to_string()
+}
+
+fn verifying_key_id(verifying_key: &ed25519_dalek::VerifyingKey) -> String {
+    frankenengine_node::supply_chain::artifact_signing::KeyId::from_verifying_key(verifying_key)
+        .to_string()
+}
+
+fn signing_material_key_id(signing_material: &Ed25519SigningMaterial) -> String {
+    verifying_key_id(&signing_material.signing_key.verifying_key())
+}
+
+fn load_replay_trust_anchor(path: &Path) -> Result<ed25519_dalek::VerifyingKey> {
+    if !path.is_file() {
+        anyhow::bail!(
+            "--trusted-public-key must point to a file: {}",
+            path.display()
+        );
+    }
+
+    let raw = std::fs::read(path).with_context(|| {
+        format!(
+            "failed reading trusted replay public key {}",
+            path.display()
+        )
+    })?;
+    parse_verifying_key_from_blob(&raw).ok_or_else(|| {
+        anyhow::anyhow!(
+            "failed decoding Ed25519 trusted replay public key from {}",
+            path.display()
+        )
+    })
+}
+
+fn replay_trusted_key_ids(
+    trusted_public_key: Option<&Path>,
+    trusted_key_dir: Option<&Path>,
+) -> Result<Vec<String>> {
+    let mut key_ids = BTreeSet::new();
+    if let Some(path) = trusted_public_key {
+        key_ids.insert(verifying_key_id(&load_replay_trust_anchor(path)?));
+    }
+    if let Some(key_dir) = trusted_key_dir {
+        for verifying_key in load_verifying_keys(key_dir)? {
+            key_ids.insert(verifying_key_id(&verifying_key));
+        }
+    }
+    if key_ids.is_empty() {
+        return Err(missing_replay_trust_anchor_error().into());
+    }
+
+    Ok(key_ids.into_iter().collect())
 }
 
 fn missing_trust_registry_message(path: &Path, policy_mode: Profile) -> String {
@@ -10160,6 +10211,10 @@ mod incident_list_tests {
         .to_string()
     }
 
+    fn incident_test_trusted_key_ids() -> Vec<String> {
+        vec![incident_test_trusted_key_id()]
+    }
+
     fn configure_incident_test_signing_key(workspace: &Path) {
         std::fs::write(
             workspace.join("franken_node.toml"),
@@ -10488,7 +10543,9 @@ mod incident_list_tests {
         let bundle_path = temp.path().join("INC-REPLAY-001.fnbundle");
         write_fixture_bundle(&bundle_path, "INC-REPLAY-001", "high");
 
-        let summary = incident_replay_cli_summary(&bundle_path).expect("replay summary");
+        let trusted_key_ids = incident_test_trusted_key_ids();
+        let summary =
+            incident_replay_cli_summary(&bundle_path, &trusted_key_ids).expect("replay summary");
 
         assert_eq!(summary.incident_id, "INC-REPLAY-001");
         assert!(summary.matched);
@@ -10504,7 +10561,9 @@ mod incident_list_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let missing = temp.path().join("missing.fnbundle");
 
-        let err = incident_replay_cli_summary(&missing).expect_err("missing bundle must fail");
+        let trusted_key_ids = incident_test_trusted_key_ids();
+        let err = incident_replay_cli_summary(&missing, &trusted_key_ids)
+            .expect_err("missing bundle must fail");
 
         assert!(
             format!("{err:#}").contains("failed reading replay bundle"),
@@ -10519,7 +10578,9 @@ mod incident_list_tests {
         write_fixture_bundle(&bundle_path, "INC-REPLAY-CORRUPT", "high");
         corrupt_bundle_integrity_hash(&bundle_path);
 
-        let err = incident_replay_cli_summary(&bundle_path).expect_err("corrupt bundle must fail");
+        let trusted_key_ids = incident_test_trusted_key_ids();
+        let err = incident_replay_cli_summary(&bundle_path, &trusted_key_ids)
+            .expect_err("corrupt bundle must fail");
 
         assert!(
             format!("{err:#}").contains("bundle integrity mismatch"),
@@ -10533,8 +10594,9 @@ mod incident_list_tests {
         let bundle_path = temp.path().join("INC-CF-001.fnbundle");
         write_fixture_bundle(&bundle_path, "INC-CF-001", "high");
 
-        let summary =
-            incident_counterfactual_cli_summary(&bundle_path, "strict").expect("counterfactual");
+        let trusted_key_ids = incident_test_trusted_key_ids();
+        let summary = incident_counterfactual_cli_summary(&bundle_path, &trusted_key_ids, "strict")
+            .expect("counterfactual");
         let canonical: serde_json::Value =
             serde_json::from_str(&summary.canonical_json).expect("counterfactual json");
 
@@ -10553,8 +10615,10 @@ mod incident_list_tests {
         let bundle_path = temp.path().join("INC-CF-BAD-POLICY.fnbundle");
         write_fixture_bundle(&bundle_path, "INC-CF-BAD-POLICY", "high");
 
-        let err = incident_counterfactual_cli_summary(&bundle_path, "not-a-policy")
-            .expect_err("invalid policy must fail");
+        let trusted_key_ids = incident_test_trusted_key_ids();
+        let err =
+            incident_counterfactual_cli_summary(&bundle_path, &trusted_key_ids, "not-a-policy")
+                .expect_err("invalid policy must fail");
 
         assert!(
             format!("{err:#}").contains("invalid policy override spec `not-a-policy`"),
@@ -12149,13 +12213,13 @@ struct IncidentReplayCliSummary {
     replayed_sequence_hash: String,
 }
 
-fn incident_replay_cli_summary(bundle_path: &Path) -> Result<IncidentReplayCliSummary> {
-    let trusted_signing_material = load_receipt_signing_material(None)?
-        .ok_or_else(|| missing_replay_bundle_signing_key_error("replay"))?;
-    let trusted_key_id = signing_material_key_id(&trusted_signing_material);
-    let bundle = read_bundle_from_path_with_trusted_key(bundle_path, Some(&trusted_key_id))
+fn incident_replay_cli_summary(
+    bundle_path: &Path,
+    trusted_key_ids: &[String],
+) -> Result<IncidentReplayCliSummary> {
+    let bundle = read_bundle_from_path_with_trusted_keys(bundle_path, trusted_key_ids)
         .with_context(|| format!("failed reading replay bundle {}", bundle_path.display()))?;
-    let outcome = replay_bundle_with_trusted_key(&bundle, &trusted_key_id)
+    let outcome = replay_bundle_with_trusted_keys(&bundle, trusted_key_ids)
         .with_context(|| format!("failed replaying bundle {}", bundle_path.display()))?;
 
     Ok(IncidentReplayCliSummary {
@@ -12172,7 +12236,11 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
         "franken-node incident replay: bundle={}",
         args.bundle.display()
     );
-    let summary = incident_replay_cli_summary(&args.bundle)?;
+    let trusted_key_ids = replay_trusted_key_ids(
+        args.trusted_public_key.as_deref(),
+        args.trusted_key_dir.as_deref(),
+    )?;
+    let summary = incident_replay_cli_summary(&args.bundle, &trusted_key_ids)?;
     eprintln!(
         "incident replay result: matched={} event_count={} expected={} replayed={}",
         summary.matched,
@@ -12200,12 +12268,10 @@ struct IncidentCounterfactualCliSummary {
 
 fn incident_counterfactual_cli_summary(
     bundle_path: &Path,
+    trusted_key_ids: &[String],
     policy: &str,
 ) -> Result<IncidentCounterfactualCliSummary> {
-    let trusted_signing_material = load_receipt_signing_material(None)?
-        .ok_or_else(|| missing_replay_bundle_signing_key_error("counterfactual"))?;
-    let trusted_key_id = signing_material_key_id(&trusted_signing_material);
-    let bundle = read_bundle_from_path_with_trusted_key(bundle_path, Some(&trusted_key_id))
+    let bundle = read_bundle_from_path_with_trusted_keys(bundle_path, trusted_key_ids)
         .with_context(|| format!("failed reading replay bundle {}", bundle_path.display()))?;
     let baseline_policy = PolicyConfig::from_bundle(&bundle);
     let mode = PolicyConfig::from_cli_spec(policy, &baseline_policy)
@@ -12237,7 +12303,12 @@ fn handle_incident_counterfactual_command(args: &cli::IncidentCounterfactualArgs
         args.bundle.display(),
         args.policy
     );
-    let summary = incident_counterfactual_cli_summary(&args.bundle, &args.policy)?;
+    let trusted_key_ids = replay_trusted_key_ids(
+        args.trusted_public_key.as_deref(),
+        args.trusted_key_dir.as_deref(),
+    )?;
+    let summary =
+        incident_counterfactual_cli_summary(&args.bundle, &trusted_key_ids, &args.policy)?;
     eprintln!(
         "counterfactual summary: total_decisions={} changed_decisions={} severity_delta={}",
         summary.total_decisions, summary.changed_decisions, summary.severity_delta

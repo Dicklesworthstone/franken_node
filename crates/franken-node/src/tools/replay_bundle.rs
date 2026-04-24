@@ -889,6 +889,30 @@ pub fn verify_replay_bundle_signature(
         .map_err(|_| ReplayBundleError::SignatureInvalid)
 }
 
+pub fn verify_replay_bundle_signature_with_trust_set(
+    bundle: &ReplayBundle,
+    trusted_key_ids: &[String],
+) -> Result<(), ReplayBundleError> {
+    let signature = bundle
+        .signature
+        .as_ref()
+        .ok_or(ReplayBundleError::SignatureMissing)?;
+    if trusted_key_ids.is_empty() {
+        return Err(ReplayBundleError::SignatureTrustAnchorMissing);
+    }
+    if !trusted_key_ids
+        .iter()
+        .any(|trusted_key_id| constant_time::ct_eq(trusted_key_id, &signature.key_id))
+    {
+        return Err(ReplayBundleError::SignatureKeyUntrusted {
+            actual: signature.key_id.clone(),
+            expected: "configured replay trust set".to_string(),
+        });
+    }
+
+    verify_replay_bundle_signature(bundle, Some(&signature.key_id))
+}
+
 pub fn replay_bundle(bundle: &ReplayBundle) -> Result<ReplayOutcome, ReplayBundleError> {
     if !validate_bundle_integrity(bundle)? {
         return Err(ReplayBundleError::IntegrityMismatch);
@@ -906,6 +930,18 @@ pub fn replay_bundle_with_trusted_key(
         return Err(ReplayBundleError::IntegrityMismatch);
     }
     verify_replay_bundle_signature(bundle, Some(trusted_key_id))?;
+
+    replay_bundle_after_signature_verification(bundle)
+}
+
+pub fn replay_bundle_with_trusted_keys(
+    bundle: &ReplayBundle,
+    trusted_key_ids: &[String],
+) -> Result<ReplayOutcome, ReplayBundleError> {
+    if !validate_bundle_integrity(bundle)? {
+        return Err(ReplayBundleError::IntegrityMismatch);
+    }
+    verify_replay_bundle_signature_with_trust_set(bundle, trusted_key_ids)?;
 
     replay_bundle_after_signature_verification(bundle)
 }
@@ -1019,6 +1055,20 @@ pub fn read_bundle_from_path_with_trusted_key(
         return Err(ReplayBundleError::IntegrityMismatch);
     }
     verify_replay_bundle_signature(&bundle, trusted_key_id)?;
+    Ok(bundle)
+}
+
+pub fn read_bundle_from_path_with_trusted_keys(
+    path: &Path,
+    trusted_key_ids: &[String],
+) -> Result<ReplayBundle, ReplayBundleError> {
+    let file = std::fs::File::open(path)?;
+    let reader = std::io::BufReader::new(file);
+    let bundle: ReplayBundle = serde_json::from_reader(reader)?;
+    if !validate_bundle_integrity(&bundle)? {
+        return Err(ReplayBundleError::IntegrityMismatch);
+    }
+    verify_replay_bundle_signature_with_trust_set(&bundle, trusted_key_ids)?;
     Ok(bundle)
 }
 
