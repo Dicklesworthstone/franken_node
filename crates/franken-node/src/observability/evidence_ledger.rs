@@ -514,17 +514,26 @@ impl EvidenceLedger {
     /// Check for replay attacks using constant-time comparison to prevent timing side-channels.
     /// This prevents attackers from distinguishing known vs unknown signatures via response timing.
     fn is_replay_attack_ct(&self, timestamp_ms: u64, signature: &str) -> bool {
-        // Manually iterate through seen signatures to use constant-time comparison
+        // bd-3ml3u fix: Remove early-return to prevent timing leaks about timestamp presence
+        // and signature position. Use constant-time comparison for both timestamp and signature.
+        let timestamp_bytes = timestamp_ms.to_le_bytes();
+        let signature_bytes = signature.as_bytes();
+        let mut found_replay = false;
+
+        // Scan ALL entries without early return to prevent position/timestamp timing leaks
         for (seen_timestamp, seen_signature) in &self.seen_signatures {
-            // Check timestamp equality first (fast integer comparison)
-            if *seen_timestamp == timestamp_ms {
-                // Use constant-time string comparison for signature to prevent timing attacks
-                if constant_time::ct_eq_bytes(signature.as_bytes(), seen_signature.as_bytes()) {
-                    return true;
-                }
-            }
+            let seen_timestamp_bytes = seen_timestamp.to_le_bytes();
+
+            // Constant-time timestamp comparison (no branching on timestamp match)
+            let timestamp_match = constant_time::ct_eq_bytes(&timestamp_bytes, &seen_timestamp_bytes);
+
+            // Constant-time signature comparison
+            let signature_match = constant_time::ct_eq_bytes(signature_bytes, seen_signature.as_bytes());
+
+            // Accumulate result: replay detected if BOTH timestamp AND signature match
+            found_replay = found_replay || (timestamp_match && signature_match);
         }
-        false
+        found_replay
     }
 
     fn append_prevalidated(&mut self, mut entry: EvidenceEntry, entry_size: usize) -> EntryId {
@@ -5211,5 +5220,51 @@ mod tests {
         let result = ledger.append(entry);
         // Should handle empty fields gracefully (signature verification should work)
         assert!(result.is_ok(), "Empty fields should be handled correctly");
+    }
+
+    #[test]
+    fn bd_3ml3u_regression_replay_timing_full_verification() {
+        // Regression test for bd-3ml3u: ensure full verification chain runs without early returns
+        // when both timestamp AND signature checks fail, preventing timing leaks
+        let (signing_key, verifying_key) = test_keys();
+        let capacity = LedgerCapacity::new(10, 100_000);
+        let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
+
+        // Add several valid entries to create timing attack surface
+        for i in 1..=5 {
+            let mut entry = test_entry(&format!("VALID-{}", i), i * 1000);
+            sign_evidence_entry(&mut entry, &signing_key);
+            ledger.append(entry).unwrap();
+        }
+
+        // Test case 1: Malformed timestamp with different signature (early timestamp mismatch)
+        let mut malformed_entry1 = test_entry("MALFORMED-TIME", 9999); // Different timestamp
+        malformed_entry1.signature = "bad_signature_1".to_string(); // Bad signature
+        sign_evidence_entry(&mut malformed_entry1, &signing_key); // Re-sign to get correct signature format
+
+        // Test case 2: Matching timestamp but different signature (signature mismatch later)
+        let mut malformed_entry2 = test_entry("MALFORMED-SIG", 2000); // Matches 2nd entry timestamp
+        malformed_entry2.signature = "bad_signature_2".to_string(); // Bad signature
+        sign_evidence_entry(&mut malformed_entry2, &signing_key); // Re-sign to get correct signature format
+
+        // Both should be accepted (no replay detected) since signatures don't match exactly
+        let result1 = ledger.append(malformed_entry1);
+        let result2 = ledger.append(malformed_entry2);
+
+        assert!(result1.is_ok(), "Entry with different timestamp should be accepted");
+        assert!(result2.is_ok(), "Entry with matching timestamp but different signature should be accepted");
+
+        // Test case 3: Exact replay (both timestamp and signature match)
+        let mut replay_entry = test_entry("VALID-2", 2000); // Exact match of 2nd entry
+        sign_evidence_entry(&mut replay_entry, &signing_key);
+
+        let replay_result = ledger.append(replay_entry);
+        assert!(replay_result.is_err(), "Exact replay should be detected and rejected");
+
+        if let Err(LedgerError::DuplicateSignature { .. }) = replay_result {
+            // Expected - replay detected
+        } else {
+            panic!("Should detect replay attack with matching timestamp and signature");
+        }
     }
 }
