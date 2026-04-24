@@ -305,7 +305,7 @@ fn validate_rollback_entry(
         });
     }
 
-    if entry.path.contains('\\') {
+    if rollback_path_has_unsafe_separator(&entry.path) {
         return Err(MigrationRollbackValidationError::UnsafePathSeparator {
             index,
             path: entry.path.clone(),
@@ -341,6 +341,10 @@ fn rollback_path_is_absolute(path: &str) -> bool {
             .as_bytes()
             .get(1)
             .is_some_and(|separator| *separator == b':')
+}
+
+fn rollback_path_has_unsafe_separator(path: &str) -> bool {
+    path.contains('\\')
 }
 
 fn rollback_path_has_parent_traversal(path: &str) -> bool {
