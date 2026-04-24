@@ -323,7 +323,11 @@ impl Config {
         Self::resolve_with_env(explicit_path, cli_overrides, &|key| std::env::var(key).ok())
     }
 
-    fn resolve_with_env(
+    /// Resolve configuration using an injected environment lookup.
+    ///
+    /// This keeps precedence tests deterministic without mutating process-global
+    /// environment variables.
+    pub fn resolve_with_env(
         explicit_path: Option<&Path>,
         cli_overrides: CliOverrides,
         env_lookup: &impl Fn(&str) -> Option<String>,
@@ -2623,31 +2627,54 @@ impl std::fmt::Display for LaneOverflowPolicy {
 
 // -- Thresholds --
 
+const DEFAULT_THRESHOLD_MAX_FAILURE_RATE: f64 = 0.05;
+const DEFAULT_THRESHOLD_MIN_QUALITY_SCORE: f64 = 0.8;
+const DEFAULT_THRESHOLD_MAX_VARIANCE_PCT: f64 = 5.0;
+const DEFAULT_THRESHOLD_REGRESSION_THRESHOLD_PCT: f64 = 10.0;
+const DEFAULT_THRESHOLD_MIN_RESILIENCE_SCORE: f64 = 0.7;
+
 /// Algorithmic and statistical threshold constants that don't fit in a
 /// specific section. All fields are optional; when `None` consumers fall
 /// back to their compile-time defaults.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ThresholdsConfig {
     /// Maximum tolerable failure rate.
-    /// When `None`, consumers use the default (0.05).
+    /// When `None`, consumers use `DEFAULT_THRESHOLD_MAX_FAILURE_RATE`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_failure_rate: Option<f64>,
+
     /// Minimum quality score for acceptance.
-    /// When `None`, consumers use the default (0.8).
+    /// When `None`, consumers use `DEFAULT_THRESHOLD_MIN_QUALITY_SCORE`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_quality_score: Option<f64>,
+
     /// Maximum acceptable variance percentage.
-    /// When `None`, consumers use the default (5.0).
+    /// When `None`, consumers use `DEFAULT_THRESHOLD_MAX_VARIANCE_PCT`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_variance_pct: Option<f64>,
+
     /// Regression detection threshold percentage.
-    /// When `None`, consumers use the default (10.0).
+    /// When `None`, consumers use `DEFAULT_THRESHOLD_REGRESSION_THRESHOLD_PCT`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub regression_threshold_pct: Option<f64>,
+
     /// Minimum resilience score for healthy status.
-    /// When `None`, consumers use the default (0.7).
+    /// When `None`, consumers use `DEFAULT_THRESHOLD_MIN_RESILIENCE_SCORE`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_resilience_score: Option<f64>,
+}
+
+impl ThresholdsConfig {
+    #[must_use]
+    pub const fn default_values() -> Self {
+        Self {
+            max_failure_rate: Some(DEFAULT_THRESHOLD_MAX_FAILURE_RATE),
+            min_quality_score: Some(DEFAULT_THRESHOLD_MIN_QUALITY_SCORE),
+            max_variance_pct: Some(DEFAULT_THRESHOLD_MAX_VARIANCE_PCT),
+            regression_threshold_pct: Some(DEFAULT_THRESHOLD_REGRESSION_THRESHOLD_PCT),
+            min_resilience_score: Some(DEFAULT_THRESHOLD_MIN_RESILIENCE_SCORE),
+        }
+    }
 }
 
 // -- Errors --
@@ -3976,6 +4003,30 @@ min_quality_score = "0.8"
         let result: Result<ThresholdsConfig, _> = toml::from_str(raw);
 
         assert!(result.is_err(), "thresholds must remain numeric");
+    }
+
+    #[test]
+    fn thresholds_config_default_values_centralize_documented_thresholds() {
+        assert_eq!(
+            ThresholdsConfig::default_values(),
+            ThresholdsConfig {
+                max_failure_rate: Some(DEFAULT_THRESHOLD_MAX_FAILURE_RATE),
+                min_quality_score: Some(DEFAULT_THRESHOLD_MIN_QUALITY_SCORE),
+                max_variance_pct: Some(DEFAULT_THRESHOLD_MAX_VARIANCE_PCT),
+                regression_threshold_pct: Some(DEFAULT_THRESHOLD_REGRESSION_THRESHOLD_PCT),
+                min_resilience_score: Some(DEFAULT_THRESHOLD_MIN_RESILIENCE_SCORE),
+            }
+        );
+        assert_eq!(
+            ThresholdsConfig::default(),
+            ThresholdsConfig {
+                max_failure_rate: None,
+                min_quality_score: None,
+                max_variance_pct: None,
+                regression_threshold_pct: None,
+                min_resilience_score: None,
+            }
+        );
     }
 
     #[test]
