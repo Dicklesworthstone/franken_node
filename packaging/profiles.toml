@@ -2,8 +2,12 @@
 #
 # Defines three deployment profiles: local, dev, enterprise.
 # These are packaging/build metadata for release tooling and artifact assembly.
-# They are not consumed by the current runtime CLI/env selector path, which
-# still uses runtime policy profiles: strict, balanced, legacy-risky.
+# They are NOT consumed by the runtime CLI/env selector path, which uses
+# separate runtime policy profiles: strict, balanced, legacy-risky.
+#
+# Two distinct profile namespaces:
+#   - Packaging:   local|dev|enterprise (build-time, this file)
+#   - Runtime CLI: --profile strict|balanced|legacy-risky (src/config.rs)
 #
 # Bead: bd-3kn | Section: 10.6 Performance + Packaging
 

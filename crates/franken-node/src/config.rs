@@ -7,6 +7,8 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+pub mod timeouts;
+
 /// Maximum number of configuration merge decisions to track.
 /// Prevents memory exhaustion from adversarial config override patterns.
 const MAX_MERGE_DECISIONS: usize = 100;
@@ -87,7 +89,7 @@ impl Config {
                 compatibility: CompatibilityConfig {
                     mode: CompatibilityMode::Strict,
                     emit_divergence_receipts: true,
-                    default_receipt_ttl_secs: 3_600,
+                    default_receipt_ttl_secs: timeouts::COMPAT_DEFAULT_RECEIPT_TTL_SECS,
                     gate_ttl_secs: None,
                 },
                 migration: MigrationConfig {
@@ -109,7 +111,7 @@ impl Config {
                 replay: ReplayConfig {
                     persist_high_severity: true,
                     bundle_version: "v1".to_string(),
-                    max_replay_capsule_freshness_secs: 3_600,
+                    max_replay_capsule_freshness_secs: timeouts::REPLAY_CAPSULE_FRESHNESS_SECS,
                     capsule_freshness_secs: None,
                 },
                 registry: RegistryConfig {
@@ -122,7 +124,7 @@ impl Config {
                     state_dir: None,
                     node_id: None,
                     poll_interval_seconds: None,
-                    convergence_timeout_seconds: 60,
+                    convergence_timeout_seconds: timeouts::FLEET_STRICT_CONVERGENCE_TIMEOUT_SECS,
                     barrier_timeout_ms: None,
                 },
                 observability: ObservabilityConfig {
@@ -131,10 +133,10 @@ impl Config {
                     max_receipts: None,
                 },
                 remote: RemoteConfig {
-                    idempotency_ttl_secs: 604_800,
+                    idempotency_ttl_secs: timeouts::REMOTE_IDEMPOTENCY_TTL_SECS,
                 },
                 security: SecurityConfig {
-                    max_degraded_duration_secs: 3_600,
+                    max_degraded_duration_secs: timeouts::SECURITY_MAX_DEGRADED_DURATION_SECS,
                     decision_receipt_signing_key_path: None,
                     authorized_api_keys: std::collections::BTreeSet::new(),
                     network_policy: NetworkPolicyConfig::default(),
@@ -148,7 +150,7 @@ impl Config {
                 compatibility: CompatibilityConfig {
                     mode: CompatibilityMode::Balanced,
                     emit_divergence_receipts: true,
-                    default_receipt_ttl_secs: 3_600,
+                    default_receipt_ttl_secs: timeouts::COMPAT_DEFAULT_RECEIPT_TTL_SECS,
                     gate_ttl_secs: None,
                 },
                 migration: MigrationConfig {
@@ -170,7 +172,7 @@ impl Config {
                 replay: ReplayConfig {
                     persist_high_severity: true,
                     bundle_version: "v1".to_string(),
-                    max_replay_capsule_freshness_secs: 3_600,
+                    max_replay_capsule_freshness_secs: timeouts::REPLAY_CAPSULE_FRESHNESS_SECS,
                     capsule_freshness_secs: None,
                 },
                 registry: RegistryConfig {
@@ -183,7 +185,7 @@ impl Config {
                     state_dir: None,
                     node_id: None,
                     poll_interval_seconds: None,
-                    convergence_timeout_seconds: 120,
+                    convergence_timeout_seconds: timeouts::FLEET_BALANCED_CONVERGENCE_TIMEOUT_SECS,
                     barrier_timeout_ms: None,
                 },
                 observability: ObservabilityConfig {
@@ -192,10 +194,10 @@ impl Config {
                     max_receipts: None,
                 },
                 remote: RemoteConfig {
-                    idempotency_ttl_secs: 604_800,
+                    idempotency_ttl_secs: timeouts::REMOTE_IDEMPOTENCY_TTL_SECS,
                 },
                 security: SecurityConfig {
-                    max_degraded_duration_secs: 3_600,
+                    max_degraded_duration_secs: timeouts::SECURITY_MAX_DEGRADED_DURATION_SECS,
                     decision_receipt_signing_key_path: None,
                     authorized_api_keys: std::collections::BTreeSet::new(),
                     network_policy: NetworkPolicyConfig::default(),
@@ -209,7 +211,7 @@ impl Config {
                 compatibility: CompatibilityConfig {
                     mode: CompatibilityMode::LegacyRisky,
                     emit_divergence_receipts: false,
-                    default_receipt_ttl_secs: 3_600,
+                    default_receipt_ttl_secs: timeouts::COMPAT_DEFAULT_RECEIPT_TTL_SECS,
                     gate_ttl_secs: None,
                 },
                 migration: MigrationConfig {
@@ -231,7 +233,7 @@ impl Config {
                 replay: ReplayConfig {
                     persist_high_severity: true,
                     bundle_version: "v1".to_string(),
-                    max_replay_capsule_freshness_secs: 3_600,
+                    max_replay_capsule_freshness_secs: timeouts::REPLAY_CAPSULE_FRESHNESS_SECS,
                     capsule_freshness_secs: None,
                 },
                 registry: RegistryConfig {
@@ -244,7 +246,7 @@ impl Config {
                     state_dir: None,
                     node_id: None,
                     poll_interval_seconds: None,
-                    convergence_timeout_seconds: 300,
+                    convergence_timeout_seconds: timeouts::FLEET_LEGACY_CONVERGENCE_TIMEOUT_SECS,
                     barrier_timeout_ms: None,
                 },
                 observability: ObservabilityConfig {
@@ -253,10 +255,10 @@ impl Config {
                     max_receipts: None,
                 },
                 remote: RemoteConfig {
-                    idempotency_ttl_secs: 604_800,
+                    idempotency_ttl_secs: timeouts::REMOTE_IDEMPOTENCY_TTL_SECS,
                 },
                 security: SecurityConfig {
-                    max_degraded_duration_secs: 3_600,
+                    max_degraded_duration_secs: timeouts::SECURITY_MAX_DEGRADED_DURATION_SECS,
                     decision_receipt_signing_key_path: None,
                     authorized_api_keys: std::collections::BTreeSet::new(),
                     network_policy: NetworkPolicyConfig::default(),
@@ -1914,12 +1916,46 @@ struct ThresholdsOverrides {
 }
 
 // -- Profile --
+//
+// Runtime policy profiles: strict, balanced, legacy-risky.
+// These control runtime behavior and security policy strictness.
+//
+// NOTE: These are SEPARATE from packaging profiles (local/dev/enterprise)
+// defined in packaging/profiles.toml, which control build/release metadata.
+// Two distinct namespaces:
+//   - Runtime CLI: --profile strict|balanced|legacy-risky
+//   - Packaging:   local|dev|enterprise (build-time only)
 
+/// Runtime security and compatibility profile for franken_node behavior.
+///
+/// Controls the overall security posture, compatibility level, and performance
+/// characteristics of the runtime. Higher security profiles provide stronger
+/// protections but may impact compatibility with legacy JavaScript/Node.js code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Profile {
+    /// Strict security profile with maximum protection and minimal compatibility.
+    ///
+    /// **Security:** All security features enabled, fail-closed on violations.
+    /// **Compatibility:** Limited to modern, well-behaved JavaScript only.
+    /// **Performance:** May be slower due to additional security checks.
+    /// **Use when:** High-security environments, no legacy code dependencies.
     Strict,
+
+    /// Balanced profile providing good security with reasonable compatibility.
+    ///
+    /// **Security:** Most security features enabled with some flexibility.
+    /// **Compatibility:** Supports common JavaScript patterns and some legacy code.
+    /// **Performance:** Good balance between security overhead and execution speed.
+    /// **Use when:** Production environments with mixed modern/legacy code.
     Balanced,
+
+    /// Legacy-compatible profile prioritizing compatibility over security.
+    ///
+    /// **Security:** Reduced security checks to allow legacy JavaScript patterns.
+    /// **Compatibility:** Maximum compatibility with old Node.js/JavaScript code.
+    /// **Performance:** Fastest execution but with security trade-offs.
+    /// **Use when:** Migration scenarios, development, or non-security-critical environments.
     LegacyRisky,
 }
 
@@ -1968,7 +2004,7 @@ pub struct CompatibilityConfig {
     /// TTL for signed compatibility receipts (seconds).
     pub default_receipt_ttl_secs: u64,
     /// Optional override for compat-gate TTL (seconds).
-    /// When `None`, consumers use `COMPAT_DEFAULT_TTL_SECS` (3600).
+    /// When `None`, consumers use `timeouts::COMPAT_DEFAULT_RECEIPT_TTL_SECS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_ttl_secs: Option<u64>,
 }
@@ -2037,11 +2073,11 @@ pub struct TrustConfig {
     /// Automatically quarantine high-risk extensions.
     pub quarantine_on_high_risk: bool,
     /// Optional override for trust-card cache TTL (seconds).
-    /// When `None`, consumers use `DEFAULT_CACHE_TTL_SECS` (60).
+    /// When `None`, consumers use `timeouts::TRUST_CARD_CACHE_TTL_SECS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub card_cache_ttl_secs: Option<u64>,
     /// Optional override for trust freshness window (seconds).
-    /// When `None`, consumers use `30 * 24 * 3600` (30 days).
+    /// When `None`, consumers use `timeouts::TRUST_FRESHNESS_WINDOW_SECS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freshness_window_secs: Option<u64>,
     /// Optional minimum trust score threshold.
@@ -2065,7 +2101,7 @@ pub struct ReplayConfig {
     /// Maximum permitted replay capsule freshness window (seconds).
     pub max_replay_capsule_freshness_secs: u64,
     /// Optional override for capsule freshness check (seconds).
-    /// When `None`, consumers use `MAX_REPLAY_CAPSULE_FRESHNESS_SECS` (3600).
+    /// When `None`, consumers use `timeouts::REPLAY_CAPSULE_FRESHNESS_SECS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capsule_freshness_secs: Option<u64>,
 }
@@ -2101,7 +2137,7 @@ pub struct FleetConfig {
     /// Fleet convergence timeout for quarantine/release operations (seconds).
     pub convergence_timeout_seconds: u64,
     /// Optional override for fleet barrier timeout (milliseconds).
-    /// When `None`, consumers use `DEFAULT_BARRIER_TIMEOUT_MS` (30000).
+    /// When `None`, consumers use `timeouts::FLEET_BARRIER_TIMEOUT_MS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub barrier_timeout_ms: Option<u64>,
 }
@@ -2276,7 +2312,7 @@ pub struct RuntimeConfig {
     /// Per-lane scheduler settings keyed by lane name.
     pub lanes: BTreeMap<String, RuntimeLaneConfig>,
     /// Optional override for graceful drain timeout (milliseconds).
-    /// When `None`, consumers use `DEFAULT_DRAIN_TIMEOUT_MS` (30000).
+    /// When `None`, consumers use `timeouts::RUNTIME_DRAIN_TIMEOUT_MS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drain_timeout_ms: Option<u64>,
 }
@@ -2402,11 +2438,35 @@ impl RuntimeLaneConfig {
     }
 }
 
+/// Policy for handling task queue overflow when a lane reaches its queue_limit.
+///
+/// Different policies provide trade-offs between throughput, latency, and
+/// resource usage when the task scheduler becomes overloaded.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum LaneOverflowPolicy {
+    /// Immediately reject new tasks when the queue is full.
+    ///
+    /// **Behavior:** New tasks fail immediately with an error.
+    /// **Performance:** Fastest policy with no blocking or memory growth.
+    /// **Use cases:** High-priority lanes where latency is critical,
+    /// systems with external retry logic, or when backpressure is preferred.
     Reject,
+
+    /// Wait up to enqueue_timeout_ms for space in the queue before rejecting.
+    ///
+    /// **Behavior:** Block new tasks briefly, hoping space becomes available.
+    /// **Performance:** Moderate latency impact, may improve throughput.
+    /// **Use cases:** Medium-priority lanes with bursty workloads,
+    /// when brief delays are acceptable to avoid dropping tasks.
     EnqueueWithTimeout,
+
+    /// Remove the oldest queued task to make room for the new one.
+    ///
+    /// **Behavior:** Always accepts new tasks by evicting old ones.
+    /// **Performance:** Constant memory usage but may waste work on evicted tasks.
+    /// **Use cases:** Background lanes, telemetry, or when newer tasks
+    /// are more valuable than older ones (time-sensitive data).
     ShedOldest,
 }
 
