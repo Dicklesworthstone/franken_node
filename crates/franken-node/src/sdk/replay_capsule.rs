@@ -134,6 +134,8 @@ pub enum CapsuleError {
     NoOutputs,
     /// The environment snapshot is incomplete.
     IncompleteEnvironment(String),
+    /// A length prefix could not be encoded without truncation.
+    LengthPrefixOverflow { field: &'static str, len: usize },
     /// Replay produced a different hash than expected.
     ReplayMismatch { expected: String, actual: String },
 }
@@ -155,6 +157,12 @@ impl std::fmt::Display for CapsuleError {
             Self::NoOutputs => write!(f, "capsule has no expected outputs"),
             Self::IncompleteEnvironment(msg) => {
                 write!(f, "incomplete environment snapshot: {msg}")
+            }
+            Self::LengthPrefixOverflow { field, len } => {
+                write!(
+                    f,
+                    "length prefix overflow for {field}: len={len} cannot be encoded safely"
+                )
             }
             Self::ReplayMismatch { expected, actual } => {
                 write!(f, "replay mismatch: expected={expected}, actual={actual}")
@@ -179,22 +187,55 @@ fn deterministic_hash(data: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+fn encode_len_prefix_with_limit(
+    field: &'static str,
+    len: usize,
+    max_prefix: u64,
+) -> Result<[u8; 8], CapsuleError> {
+    let prefix =
+        u64::try_from(len).map_err(|_| CapsuleError::LengthPrefixOverflow { field, len })?;
+    if prefix > max_prefix {
+        return Err(CapsuleError::LengthPrefixOverflow { field, len });
+    }
+    Ok(prefix.to_le_bytes())
+}
+
 /// Compute the deterministic replay hash over capsule inputs using
 /// length-prefixed encoding to prevent delimiter collision attacks.
 ///
 /// Each input contributes: `seq` as u64 LE bytes, then length-prefixed `data`.
 /// This replaces the prior pipe-delimited string concatenation that was
 /// vulnerable to hash collisions when input data contained pipe/colon chars.
-fn compute_inputs_hash(inputs: &[CapsuleInput]) -> String {
+fn try_compute_inputs_hash(inputs: &[CapsuleInput]) -> Result<String, CapsuleError> {
+    try_compute_inputs_hash_with_prefix_limit(inputs, u64::MAX)
+}
+
+fn try_compute_inputs_hash_with_prefix_limit(
+    inputs: &[CapsuleInput],
+    max_prefix: u64,
+) -> Result<String, CapsuleError> {
     let mut hasher = Sha256::new();
     hasher.update(b"replay_capsule_inputs_v1:");
-    hasher.update((inputs.len() as u64).to_le_bytes());
+    hasher.update(encode_len_prefix_with_limit(
+        "inputs",
+        inputs.len(),
+        max_prefix,
+    )?);
     for inp in inputs {
         hasher.update(inp.seq.to_le_bytes());
-        hasher.update((inp.data.len() as u64).to_le_bytes());
+        hasher.update(encode_len_prefix_with_limit(
+            "input.data",
+            inp.data.len(),
+            max_prefix,
+        )?);
         hasher.update(&inp.data);
     }
-    hex::encode(hasher.finalize())
+    Ok(hex::encode(hasher.finalize()))
+}
+
+#[cfg(test)]
+fn compute_inputs_hash(inputs: &[CapsuleInput]) -> String {
+    try_compute_inputs_hash(inputs).expect("test input lengths should encode")
 }
 
 fn validate_environment_snapshot(environment: &EnvironmentSnapshot) -> Result<(), CapsuleError> {
@@ -264,7 +305,7 @@ pub fn validate_capsule(capsule: &ReplayCapsule) -> Result<(), CapsuleError> {
 /// INV-VSK-CAPSULE-SELF-CONTAINED: uses only data from the capsule.
 pub fn replay(capsule: &ReplayCapsule) -> Result<String, CapsuleError> {
     validate_capsule(capsule)?;
-    Ok(compute_inputs_hash(&capsule.inputs))
+    try_compute_inputs_hash(&capsule.inputs)
 }
 
 /// Replay a capsule and compare the result to all declared expected output hashes.
@@ -306,7 +347,7 @@ pub fn create_capsule(
     validate_environment_snapshot(&environment)?;
 
     // Compute the expected output hash from inputs using length-prefixed encoding.
-    let output_hash = compute_inputs_hash(&inputs);
+    let output_hash = try_compute_inputs_hash(&inputs)?;
 
     let expected_outputs = vec![CapsuleOutput {
         seq: 0,
@@ -891,6 +932,26 @@ mod tests {
         }];
         let hash_binary = compute_inputs_hash(&binary_data);
         assert_eq!(hash_binary.len(), 64);
+    }
+
+    #[test]
+    fn test_compute_inputs_hash_rejects_oversized_length_prefix() {
+        let inputs = vec![CapsuleInput {
+            seq: 0,
+            data: vec![0, 1, 2, 3],
+            metadata: BTreeMap::new(),
+        }];
+
+        let err = try_compute_inputs_hash_with_prefix_limit(&inputs, 3)
+            .expect_err("data length beyond the prefix limit should fail closed");
+
+        assert_eq!(
+            err,
+            CapsuleError::LengthPrefixOverflow {
+                field: "input.data",
+                len: 4,
+            }
+        );
     }
 
     /// Test expected_outputs_match_hash with timing attack resistance

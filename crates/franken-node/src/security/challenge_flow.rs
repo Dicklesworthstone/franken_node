@@ -40,9 +40,21 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
 }
 
-fn update_length_prefixed(hasher: &mut Sha256, field: &[u8]) {
-    hasher.update((field.len() as u64).to_le_bytes());
+/// Safe conversion of field length to u64 with overflow protection.
+fn safe_field_len_as_u64(len: usize, field_name: &str) -> Result<u64, ChallengeError> {
+    u64::try_from(len).map_err(|_| {
+        ChallengeError::new(
+            ERR_LENGTH_OVERFLOW,
+            format!("Field '{}' length {} exceeds u64 range", field_name, len),
+        )
+    })
+}
+
+fn update_length_prefixed(hasher: &mut Sha256, field: &[u8]) -> Result<(), ChallengeError> {
+    let len_u64 = safe_field_len_as_u64(field.len(), "hash_field")?;
+    hasher.update(len_u64.to_le_bytes());
     hasher.update(field);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -65,6 +77,7 @@ pub const ERR_CHALLENGE_ACTIVE: &str = "ERR_CHALLENGE_ACTIVE";
 pub const ERR_NO_ACTIVE_CHALLENGE: &str = "ERR_NO_ACTIVE_CHALLENGE";
 pub const ERR_INVALID_ARTIFACT_ID: &str = "ERR_INVALID_ARTIFACT_ID";
 pub const ERR_PROOF_INVALID: &str = "ERR_PROOF_INVALID";
+pub const ERR_LENGTH_OVERFLOW: &str = "ERR_LENGTH_OVERFLOW";
 
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 
@@ -923,25 +936,25 @@ impl ChallengeFlowController {
     ) -> Result<String, ChallengeError> {
         let mut hasher = Sha256::new();
         hasher.update(b"challenge_proof_v1:");
-        update_length_prefixed(&mut hasher, artifact_id.as_str().as_bytes());
+        update_length_prefixed(&mut hasher, artifact_id.as_str().as_bytes())?;
 
         // Add proof-type-specific context for additional security
         match proof_type {
             RequiredProofType::ProvenanceAttestation => {
-                update_length_prefixed(&mut hasher, b"provenance_attestation");
+                update_length_prefixed(&mut hasher, b"provenance_attestation")?;
             }
             RequiredProofType::IntegrityProof => {
-                update_length_prefixed(&mut hasher, b"integrity_verification");
+                update_length_prefixed(&mut hasher, b"integrity_verification")?;
             }
             RequiredProofType::EpochBoundaryProof => {
-                update_length_prefixed(&mut hasher, b"epoch_boundary_validation");
+                update_length_prefixed(&mut hasher, b"epoch_boundary_validation")?;
             }
             RequiredProofType::OriginSignature => {
-                update_length_prefixed(&mut hasher, b"origin_signature_verification");
+                update_length_prefixed(&mut hasher, b"origin_signature_verification")?;
             }
             RequiredProofType::Custom(custom_type) => {
-                update_length_prefixed(&mut hasher, b"custom");
-                update_length_prefixed(&mut hasher, custom_type.as_bytes());
+                update_length_prefixed(&mut hasher, b"custom")?;
+                update_length_prefixed(&mut hasher, custom_type.as_bytes())?;
             }
         }
 

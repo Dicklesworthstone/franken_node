@@ -616,7 +616,7 @@ pub fn new(cohort: &CohortDefinition) -> Result<PipelineState, PipelineError> {
         extensions.insert(ext.name.clone(), ext.source_version.clone());
     }
 
-    let idempotency_key = calculate_idempotency_key(cohort);
+    let idempotency_key = calculate_idempotency_key(cohort)?;
 
     Ok(PipelineState {
         current_stage: PipelineStage::Intake,
@@ -656,7 +656,7 @@ pub fn advance(mut state: PipelineState) -> Result<PipelineState, PipelineError>
         }
         PipelineStage::Analysis => {
             // Generate compatibility report
-            let report = run_analysis(&state);
+            let report = run_analysis(&state)?;
             state.compatibility_report = Some(report);
         }
         PipelineStage::PlanGeneration => {
@@ -668,7 +668,7 @@ pub fn advance(mut state: PipelineState) -> Result<PipelineState, PipelineError>
                     code: error_codes::ERR_PIPE_INVALID_TRANSITION.to_string(),
                     message: "Cannot generate plan without compatibility report".to_string(),
                 })?;
-            let plan = generate_plan(&state, report);
+            let plan = generate_plan(&state, report)?;
             state.migration_plan = Some(plan);
         }
         PipelineStage::PlanReview => {
@@ -687,7 +687,7 @@ pub fn advance(mut state: PipelineState) -> Result<PipelineState, PipelineError>
         }
         PipelineStage::Verification => {
             // Run verification and enforce 95% threshold
-            let report = run_verification(&state);
+            let report = run_verification(&state)?;
             if !report.meets_threshold {
                 state.verification_report = Some(report.clone());
                 return Err(PipelineError {
@@ -722,7 +722,7 @@ pub fn advance(mut state: PipelineState) -> Result<PipelineState, PipelineError>
                 });
             }
             // Issue signed receipt
-            let receipt = issue_receipt(&state);
+            let receipt = issue_receipt(&state)?;
             state.migration_receipt = Some(receipt);
         }
         PipelineStage::Complete | PipelineStage::Rollback => {
@@ -785,22 +785,31 @@ pub fn is_idempotent(a: &PipelineState, b: &PipelineState) -> bool {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/// Convert length to u64 safely for hash prefixing.
+fn safe_length_prefix(len: usize) -> Result<[u8; 8], PipelineError> {
+    let len_u64 = u64::try_from(len).map_err(|_| PipelineError {
+        code: "HASH_LENGTH_OVERFLOW".to_string(),
+        message: format!("Collection length {len} exceeds u64::MAX for hash prefixing"),
+    })?;
+    Ok(len_u64.to_le_bytes())
+}
+
 /// Compute a deterministic idempotency key from a cohort definition.
-fn calculate_idempotency_key(cohort: &CohortDefinition) -> String {
+fn calculate_idempotency_key(cohort: &CohortDefinition) -> Result<String, PipelineError> {
     let mut hasher = Sha256::new();
     hasher.update(b"migration_idempotency_v1:");
-    hasher.update((cohort.cohort_id.len() as u64).to_le_bytes());
+    hasher.update(safe_length_prefix(cohort.cohort_id.len())?);
     hasher.update(cohort.cohort_id.as_bytes());
-    hasher.update((cohort.extensions.len() as u64).to_le_bytes());
+    hasher.update(safe_length_prefix(cohort.extensions.len())?);
     for ext in &cohort.extensions {
-        hasher.update((ext.name.len() as u64).to_le_bytes());
+        hasher.update(safe_length_prefix(ext.name.len())?);
         hasher.update(ext.name.as_bytes());
-        hasher.update((ext.source_version.len() as u64).to_le_bytes());
+        hasher.update(safe_length_prefix(ext.source_version.len())?);
         hasher.update(ext.source_version.as_bytes());
-        hasher.update((ext.target_version.len() as u64).to_le_bytes());
+        hasher.update(safe_length_prefix(ext.target_version.len())?);
         hasher.update(ext.target_version.as_bytes());
     }
-    hex::encode(hasher.finalize())
+    Ok(hex::encode(hasher.finalize()))
 }
 
 impl CompatibilityBand {
@@ -813,14 +822,14 @@ impl CompatibilityBand {
     }
 }
 
-fn stable_digest(prefix: &str, parts: &[String]) -> String {
+fn stable_digest(prefix: &str, parts: &[String]) -> Result<String, PipelineError> {
     let mut hasher = Sha256::new();
     hasher.update(prefix.as_bytes());
     for part in parts {
-        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(safe_length_prefix(part.len())?);
         hasher.update(part.as_bytes());
     }
-    hex::encode(hasher.finalize())
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn stable_string_list(value: &[String]) -> String {
@@ -1021,12 +1030,12 @@ fn build_rollback_certificate(
     phase: RolloutPhase,
     extension_names: &[String],
     rollback_cost_score: u32,
-) -> RollbackCertificate {
+) -> Result<RollbackCertificate, PipelineError> {
     let mut digest_inputs = vec![phase.as_str().to_string(), rollback_cost_score.to_string()];
     digest_inputs.extend(extension_names.iter().cloned());
-    let digest = stable_digest("rollback_certificate_v1", &digest_inputs);
+    let digest = stable_digest("rollback_certificate_v1", &digest_inputs)?;
 
-    RollbackCertificate {
+    Ok(RollbackCertificate {
         certificate_id: format!("rollback-{}-{}", phase.as_str(), &digest[..12]),
         rollback_procedure_hash: digest,
         rollback_cost_score,
@@ -1037,7 +1046,7 @@ fn build_rollback_certificate(
             rollback_cost_score,
             extension_names.len()
         ),
-    }
+    })
 }
 
 fn build_counterexample(
@@ -1045,22 +1054,22 @@ fn build_counterexample(
     reason_code: &str,
     witness_kind: &str,
     minimal_slice: Vec<String>,
-) -> CounterexampleWitness {
+) -> Result<CounterexampleWitness, PipelineError> {
     let mut digest_inputs = vec![
         extension_name.to_string(),
         reason_code.to_string(),
         witness_kind.to_string(),
     ];
     digest_inputs.extend(minimal_slice.iter().cloned());
-    let digest = stable_digest("counterexample_witness_v1", &digest_inputs);
+    let digest = stable_digest("counterexample_witness_v1", &digest_inputs)?;
 
-    CounterexampleWitness {
+    Ok(CounterexampleWitness {
         extension_name: extension_name.to_string(),
         reason_code: reason_code.to_string(),
         witness_kind: witness_kind.to_string(),
         minimal_slice,
         digest,
-    }
+    })
 }
 
 fn wilson_interval(successes: u32, total: u32, confidence_level: f64) -> CalibrationInterval {
@@ -1098,7 +1107,7 @@ fn wilson_interval(successes: u32, total: u32, confidence_level: f64) -> Calibra
 }
 
 /// Run compatibility analysis on the extensions.
-fn run_analysis(state: &PipelineState) -> CompatibilityReport {
+fn run_analysis(state: &PipelineState) -> Result<CompatibilityReport, PipelineError> {
     let mut per_extension_results = BTreeMap::new();
     let mut blockers = Vec::new();
     let mut findings = BTreeMap::new();
@@ -1319,7 +1328,7 @@ fn run_analysis(state: &PipelineState) -> CompatibilityReport {
         evidence_artifacts.push(PipelineEvidenceArtifact {
             artifact_id: format!("analysis-{name}"),
             artifact_kind: "analysis".to_string(),
-            digest: stable_digest("analysis_artifact_v1", &artifact_inputs),
+            digest: stable_digest("analysis_artifact_v1", &artifact_inputs)?,
             detail: artifact_detail,
         });
 
@@ -1347,18 +1356,18 @@ fn run_analysis(state: &PipelineState) -> CompatibilityReport {
         "analysis aggregate degraded-mode",
     );
 
-    CompatibilityReport {
+    Ok(CompatibilityReport {
         per_extension_results,
         blockers,
         overall_pass_rate,
         findings,
         degraded_mode,
         evidence_artifacts,
-    }
+    })
 }
 
 /// Generate a migration plan from compatibility results.
-fn generate_plan(state: &PipelineState, report: &CompatibilityReport) -> MigrationPlan {
+fn generate_plan(state: &PipelineState, report: &CompatibilityReport) -> Result<MigrationPlan, PipelineError> {
     let mut steps = Vec::new();
     for (name, spec) in &state.extension_specs {
         let Some(finding) = report.findings.get(name) else {
@@ -1374,7 +1383,7 @@ fn generate_plan(state: &PipelineState, report: &CompatibilityReport) -> Migrati
                 spec.risk_tier.to_string(),
                 spec.dependency_complexity.to_string(),
             ],
-        );
+        )?;
         let post_hash = stable_digest(
             "migration_post_hash_v2",
             &[
@@ -1382,7 +1391,7 @@ fn generate_plan(state: &PipelineState, report: &CompatibilityReport) -> Migrati
                 finding.compatibility_band.label().to_string(),
                 finding.confidence_bps.to_string(),
             ],
-        );
+        )?;
         steps.push(TransformationStep {
             action: choose_action(spec, finding),
             target: name.clone(),
@@ -1465,7 +1474,7 @@ fn generate_plan(state: &PipelineState, report: &CompatibilityReport) -> Migrati
         ));
 
         let rollback_certificate =
-            build_rollback_certificate(phase, &extension_names, rollback_cost_score);
+            build_rollback_certificate(phase, &extension_names, rollback_cost_score)?;
 
         phases.push(RolloutPhasePlan {
             phase,
@@ -1504,7 +1513,7 @@ fn generate_plan(state: &PipelineState, report: &CompatibilityReport) -> Migrati
         evidence_artifacts.push(PipelineEvidenceArtifact {
             artifact_id: format!("plan-{}", phase.phase.as_str()),
             artifact_kind: "rollout_plan".to_string(),
-            digest: stable_digest("migration_plan_phase_v1", &artifact_inputs),
+            digest: stable_digest("migration_plan_phase_v1", &artifact_inputs)?,
             detail: format!(
                 "{} phase extensions={}",
                 phase.phase.as_str(),
@@ -1534,10 +1543,10 @@ fn generate_plan(state: &PipelineState, report: &CompatibilityReport) -> Migrati
             .iter()
             .map(|phase| phase.rollback_certificate.certificate_id.clone()),
     );
-    let plan_digest = stable_digest("migration_plan_id_v2", &plan_id_inputs);
+    let plan_digest = stable_digest("migration_plan_id_v2", &plan_id_inputs)?;
     let plan_id = format!("plan-{}", &plan_digest[..16]);
 
-    MigrationPlan {
+    Ok(MigrationPlan {
         plan_id,
         steps,
         risk_score,
@@ -1545,7 +1554,7 @@ fn generate_plan(state: &PipelineState, report: &CompatibilityReport) -> Migrati
         phases,
         explanation_trace,
         evidence_artifacts,
-    }
+    })
 }
 
 /// Execute migration steps and produce traces.
@@ -1600,7 +1609,7 @@ fn run_execution(state: &PipelineState) -> Vec<ExecutionTrace> {
 }
 
 /// Run verification and produce a report.
-fn run_verification(state: &PipelineState) -> VerificationReport {
+fn run_verification(state: &PipelineState) -> Result<VerificationReport, PipelineError> {
     let mut per_extension_results = BTreeMap::new();
     let mut extension_details = BTreeMap::new();
     let mut counterexample_witnesses = Vec::new();
@@ -1717,7 +1726,7 @@ fn run_verification(state: &PipelineState) -> VerificationReport {
                 } else {
                     minimal_slice
                 },
-            ))
+            )?)
         };
 
         if let Some(witness) = counterexample_witness.clone() {
@@ -1747,7 +1756,7 @@ fn run_verification(state: &PipelineState) -> VerificationReport {
                     format!("{:.5}", success_interval.lower_bound),
                     format!("{:.5}", success_interval.upper_bound),
                 ],
-            ),
+            )?,
             detail: format!(
                 "{} pass={} samples={} failures={}",
                 name, pass, total_samples, total_failures
@@ -1777,7 +1786,7 @@ fn run_verification(state: &PipelineState) -> VerificationReport {
         "verification aggregate degraded-mode",
     );
 
-    VerificationReport {
+    Ok(VerificationReport {
         pass_rate,
         per_extension_results,
         meets_threshold,
@@ -1785,19 +1794,19 @@ fn run_verification(state: &PipelineState) -> VerificationReport {
         degraded_mode,
         counterexample_witnesses,
         evidence_artifacts,
-    }
+    })
 }
 
 /// Issue a signed migration receipt.
-fn issue_receipt(state: &PipelineState) -> MigrationReceipt {
+fn issue_receipt(state: &PipelineState) -> Result<MigrationReceipt, PipelineError> {
     let pre_hash = {
         let mut h = Sha256::new();
         h.update(b"migration_receipt_pre_v1:");
-        h.update((state.extensions.len() as u64).to_le_bytes());
+        h.update(safe_length_prefix(state.extensions.len())?);
         for (name, ver) in &state.extensions {
-            h.update((name.len() as u64).to_le_bytes());
+            h.update(safe_length_prefix(name.len())?);
             h.update(name.as_bytes());
-            h.update((ver.len() as u64).to_le_bytes());
+            h.update(safe_length_prefix(ver.len())?);
             h.update(ver.as_bytes());
         }
         hex::encode(h.finalize())
@@ -1812,7 +1821,7 @@ fn issue_receipt(state: &PipelineState) -> MigrationReceipt {
     let post_hash = {
         let mut h = Sha256::new();
         h.update(b"migration_receipt_post_v1:");
-        h.update((pre_hash.len() as u64).to_le_bytes());
+        h.update(safe_length_prefix(pre_hash.len())?);
         h.update(pre_hash.as_bytes());
         h.update(b"migrated");
         hex::encode(h.finalize())
@@ -1867,7 +1876,7 @@ fn issue_receipt(state: &PipelineState) -> MigrationReceipt {
         degraded_mode_summary,
     };
     receipt.signature = sign_receipt(&receipt);
-    receipt
+    Ok(receipt)
 }
 
 fn canonical_receipt_payload(receipt: &MigrationReceipt) -> Vec<u8> {
@@ -2339,7 +2348,7 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_phase_evidence_artifact_preserves_extension_boundaries() {
+    fn test_plan_phase_evidence_artifact_preserves_extension_boundaries() -> Result<(), Box<dyn std::error::Error>> {
         let cohort_a = CohortDefinition {
             cohort_id: "cohort-comma-a".to_string(),
             extensions: vec![
@@ -2349,8 +2358,8 @@ mod tests {
             selection_criteria: "comma-a".to_string(),
         };
         let state_a = new(&cohort_a).expect("should succeed");
-        let report_a = run_analysis(&state_a);
-        let plan_a = generate_plan(&state_a, &report_a);
+        let report_a = run_analysis(&state_a)?;
+        let plan_a = generate_plan(&state_a, &report_a)?;
 
         let cohort_b = CohortDefinition {
             cohort_id: "cohort-comma-b".to_string(),
@@ -2361,8 +2370,8 @@ mod tests {
             selection_criteria: "comma-b".to_string(),
         };
         let state_b = new(&cohort_b).expect("should succeed");
-        let report_b = run_analysis(&state_b);
-        let plan_b = generate_plan(&state_b, &report_b);
+        let report_b = run_analysis(&state_b)?;
+        let plan_b = generate_plan(&state_b, &report_b)?;
 
         let shadow_a = plan_a
             .evidence_artifacts
@@ -2385,6 +2394,7 @@ mod tests {
             shadow_b.detail,
             "shadow phase extensions=[\"alpha\",\"beta,gamma\"]"
         );
+        Ok(())
     }
 
     // ── Execution ───────────────────────────────────────────────────────
@@ -2424,7 +2434,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verification_threshold_enforced() {
+    fn test_verification_threshold_enforced() -> Result<(), Box<dyn std::error::Error>> {
         let cohort = single_ext_cohort_with_evidence(
             "verification_regression",
             verification_failure_evidence(),
@@ -2450,22 +2460,23 @@ mod tests {
         for _ in 0..5 {
             state = advance(state).expect("should succeed");
         }
-        let report = run_verification(&state);
+        let report = run_verification(&state)?;
         assert_eq!(report.counterexample_witnesses.len(), 1);
         assert_eq!(
             report.counterexample_witnesses[0].extension_name,
             "verification_regression"
         );
+        Ok(())
     }
 
     #[test]
-    fn test_verification_without_analysis_finding_fails_closed() {
+    fn test_verification_without_analysis_finding_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
         let cohort = single_ext_cohort("missing_analysis_finding");
         let mut state = new(&cohort).expect("should succeed");
         state.current_stage = PipelineStage::Verification;
         state.compatibility_report = None;
 
-        let report = run_verification(&state);
+        let report = run_verification(&state)?;
         let detail = report
             .extension_details
             .get("missing_analysis_finding")
@@ -2482,6 +2493,7 @@ mod tests {
                 .reason_code,
             "ERR_PIPE_ANALYSIS_BLOCKED"
         );
+        Ok(())
     }
 
     #[test]
@@ -2522,7 +2534,7 @@ mod tests {
     }
 
     #[test]
-    fn test_blocked_dependency_withholds_dependent_from_canary() {
+    fn test_blocked_dependency_withholds_dependent_from_canary() -> Result<(), Box<dyn std::error::Error>> {
         let mut dependent_evidence = healthy_evidence();
         dependent_evidence.dependency_edges = vec!["blocked_core".to_string()];
         let cohort = CohortDefinition {
@@ -2541,8 +2553,8 @@ mod tests {
             selection_criteria: "dependency-block".to_string(),
         };
         let state = new(&cohort).expect("should succeed");
-        let report = run_analysis(&state);
-        let plan = generate_plan(&state, &report);
+        let report = run_analysis(&state)?;
+        let plan = generate_plan(&state, &report)?;
         let shadow = plan
             .phases
             .iter()
@@ -2570,6 +2582,7 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("blocked dependency blocked_core"))
         );
+        Ok(())
     }
 
     // ── Receipt issuance ────────────────────────────────────────────────

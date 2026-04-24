@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::security::constant_time;
+use chrono::{DateTime, SecondsFormat, Utc};
 
 /// Maximum audit trail entries before oldest are evicted.
 const MAX_AUDIT_TRAIL: usize = 4096;
@@ -92,6 +93,7 @@ pub const ERR_QUARANTINE_CAPACITY_EXCEEDED: &str = "ERR_QUARANTINE_CAPACITY_EXCE
 pub const ERR_QUARANTINE_DUPLICATE_ORDER_ID: &str = "ERR_QUARANTINE_DUPLICATE_ORDER_ID";
 pub const ERR_RECALL_RECEIPT_MISMATCH: &str = "ERR_RECALL_RECEIPT_MISMATCH";
 pub const ERR_AUDIT_CHAIN_BROKEN: &str = "ERR_AUDIT_CHAIN_BROKEN";
+pub const ERR_QUARANTINE_INVALID_AUDIT_TIMESTAMP: &str = "ERR_QUARANTINE_INVALID_AUDIT_TIMESTAMP";
 
 // ── Quarantine mode ─────────────────────────────────────────────────────────
 
@@ -113,6 +115,97 @@ pub enum QuarantineSeverity {
     Medium,
     High,
     Critical,
+}
+
+/// Strongly typed monotonic identifier for quarantine audit entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct QuarantineAuditId(u64);
+
+impl QuarantineAuditId {
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<u64> for QuarantineAuditId {
+    fn from(value: u64) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<QuarantineAuditId> for u64 {
+    fn from(value: QuarantineAuditId) -> Self {
+        value.get()
+    }
+}
+
+impl std::fmt::Display for QuarantineAuditId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Canonical RFC3339 timestamp for quarantine audit entries.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct QuarantineAuditTimestamp(DateTime<Utc>);
+
+impl QuarantineAuditTimestamp {
+    #[must_use]
+    pub fn canonical_rfc3339(&self) -> String {
+        self.0.to_rfc3339_opts(SecondsFormat::Secs, true)
+    }
+}
+
+impl TryFrom<&str> for QuarantineAuditTimestamp {
+    type Error = chrono::ParseError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        DateTime::parse_from_rfc3339(value).map(|timestamp| Self(timestamp.with_timezone(&Utc)))
+    }
+}
+
+impl From<DateTime<Utc>> for QuarantineAuditTimestamp {
+    fn from(value: DateTime<Utc>) -> Self {
+        Self(value)
+    }
+}
+
+impl From<QuarantineAuditTimestamp> for DateTime<Utc> {
+    fn from(value: QuarantineAuditTimestamp) -> Self {
+        value.0
+    }
+}
+
+impl std::fmt::Display for QuarantineAuditTimestamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.canonical_rfc3339())
+    }
+}
+
+impl Serialize for QuarantineAuditTimestamp {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.canonical_rfc3339())
+    }
+}
+
+impl<'de> Deserialize<'de> for QuarantineAuditTimestamp {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::try_from(raw.as_str()).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Scope of a quarantine order.
@@ -291,7 +384,7 @@ pub struct QuarantineClearance {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QuarantineAuditEntry {
     /// Sequential entry index.
-    pub sequence: u64,
+    pub sequence: QuarantineAuditId,
     /// Event code (one of the QUARANTINE_* or RECALL_* constants).
     pub event_code: String,
     /// Reference to the quarantine or recall order.
@@ -303,7 +396,7 @@ pub struct QuarantineAuditEntry {
     /// Trace ID for correlation.
     pub trace_id: String,
     /// Timestamp (RFC 3339).
-    pub timestamp: String,
+    pub timestamp: QuarantineAuditTimestamp,
     /// Additional details.
     pub details: String,
     /// SHA-256 hash of the previous entry (hash chain).
@@ -316,7 +409,7 @@ pub struct QuarantineAuditEntry {
 fn compute_entry_hash(entry: &QuarantineAuditEntry) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"quarantine_entry_v1:");
-    hasher.update(entry.sequence.to_le_bytes());
+    hasher.update(entry.sequence.get().to_le_bytes());
     hasher.update(len_to_u64(entry.event_code.len()).to_le_bytes());
     hasher.update(entry.event_code.as_bytes());
     hasher.update(len_to_u64(entry.order_id.len()).to_le_bytes());
@@ -335,8 +428,9 @@ fn compute_entry_hash(entry: &QuarantineAuditEntry) -> String {
 
     hasher.update(len_to_u64(entry.trace_id.len()).to_le_bytes());
     hasher.update(entry.trace_id.as_bytes());
-    hasher.update(len_to_u64(entry.timestamp.len()).to_le_bytes());
-    hasher.update(entry.timestamp.as_bytes());
+    let timestamp = entry.timestamp.canonical_rfc3339();
+    hasher.update(len_to_u64(timestamp.len()).to_le_bytes());
+    hasher.update(timestamp.as_bytes());
     hasher.update(len_to_u64(entry.details.len()).to_le_bytes());
     hasher.update(entry.details.as_bytes());
     hasher.update(len_to_u64(entry.prev_hash.len()).to_le_bytes());
@@ -379,7 +473,7 @@ pub struct QuarantineRegistry {
     /// Anchor hash: entry_hash of the most recently evicted audit entry.
     chain_anchor_hash: Option<String>,
     /// Monotonic sequence counter (not reset by eviction).
-    next_sequence: u64,
+    next_sequence: QuarantineAuditId,
     /// Propagation tracking: node_id -> last propagation timestamp.
     propagation_status: BTreeMap<String, String>,
     /// Total quarantines issued.
@@ -403,7 +497,7 @@ impl QuarantineRegistry {
             active_quarantines: BTreeMap::new(),
             audit_trail: Vec::new(),
             chain_anchor_hash: None,
-            next_sequence: 0,
+            next_sequence: QuarantineAuditId::new(0),
             propagation_status: BTreeMap::new(),
             total_quarantines: 0,
             total_recalls: 0,
@@ -488,7 +582,7 @@ impl QuarantineRegistry {
             &trace_id,
             &timestamp,
             "Quarantine order issued",
-        );
+        )?;
 
         if initial_state == QuarantineState::Enforced {
             self.append_audit(
@@ -499,7 +593,7 @@ impl QuarantineRegistry {
                 &trace_id,
                 &timestamp,
                 "Critical severity: immediate enforcement via fast-path",
-            );
+            )?;
         }
 
         Ok(record)
@@ -562,7 +656,7 @@ impl QuarantineRegistry {
             &trace_id,
             timestamp,
             &format!("Propagated to node {node_id}"),
-        );
+        )?;
 
         Ok(())
     }
@@ -611,7 +705,7 @@ impl QuarantineRegistry {
                 &trace_id,
                 timestamp,
                 "Extension suspended",
-            );
+            )?;
         }
 
         Ok(())
@@ -662,7 +756,7 @@ impl QuarantineRegistry {
             &trace_id,
             timestamp,
             "Session drain started",
-        );
+        )?;
 
         Ok(())
     }
@@ -716,7 +810,7 @@ impl QuarantineRegistry {
             &trace_id,
             timestamp,
             "All sessions drained, extension isolated",
-        );
+        )?;
 
         Ok(())
     }
@@ -809,7 +903,7 @@ impl QuarantineRegistry {
             &trace_id,
             &timestamp,
             "Recall initiated: artifact removal in progress",
-        );
+        )?;
 
         Ok(())
     }
@@ -874,7 +968,7 @@ impl QuarantineRegistry {
             &trace_id,
             &timestamp,
             &format!("Recall receipt from node {node_id}"),
-        );
+        )?;
 
         Ok(())
     }
@@ -933,7 +1027,7 @@ impl QuarantineRegistry {
             &trace_id,
             timestamp,
             "Recall completed: all artifacts removed",
-        );
+        )?;
 
         Ok(())
     }
@@ -1001,7 +1095,7 @@ impl QuarantineRegistry {
             &trace_id,
             &timestamp,
             "Quarantine lifted with signed clearance",
-        );
+        )?;
 
         Ok(())
     }
@@ -1197,7 +1291,7 @@ impl QuarantineRegistry {
         trace_id: &str,
         timestamp: &str,
         details: &str,
-    ) {
+    ) -> Result<(), QuarantineError> {
         let genesis_hash = hex::encode(Sha256::digest(b"quarantine_genesis_v1:"));
         let prev_hash = self
             .audit_trail
@@ -1207,7 +1301,8 @@ impl QuarantineRegistry {
             .unwrap_or(genesis_hash);
 
         let sequence = self.next_sequence;
-        self.next_sequence = self.next_sequence.saturating_add(1);
+        self.next_sequence = QuarantineAuditId::new(self.next_sequence.get().saturating_add(1));
+        let timestamp = parse_audit_timestamp(timestamp)?;
 
         let mut entry = QuarantineAuditEntry {
             sequence,
@@ -1216,7 +1311,7 @@ impl QuarantineRegistry {
             extension_id: extension_id.to_owned(),
             severity,
             trace_id: trace_id.to_owned(),
-            timestamp: timestamp.to_owned(),
+            timestamp,
             details: details.to_owned(),
             prev_hash,
             entry_hash: String::new(),
@@ -1229,6 +1324,7 @@ impl QuarantineRegistry {
             MAX_AUDIT_TRAIL,
             &mut self.chain_anchor_hash,
         );
+        Ok(())
     }
 }
 
@@ -1249,6 +1345,13 @@ impl std::fmt::Display for QuarantineError {
 
 impl std::error::Error for QuarantineError {}
 
+fn parse_audit_timestamp(raw: &str) -> Result<QuarantineAuditTimestamp, QuarantineError> {
+    QuarantineAuditTimestamp::try_from(raw).map_err(|err| QuarantineError {
+        code: ERR_QUARANTINE_INVALID_AUDIT_TIMESTAMP.to_owned(),
+        message: format!("invalid quarantine audit timestamp `{raw}`: {err}"),
+    })
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1256,9 +1359,10 @@ mod tests {
     use super::{
         ERR_AUDIT_CHAIN_BROKEN, ERR_LIFT_REQUIRES_CLEARANCE, ERR_QUARANTINE_ALREADY_ACTIVE,
         MAX_AUDIT_TRAIL, MAX_PROPAGATION_STATUS, MAX_STATE_HISTORY, QuarantineAuditEntry,
-        QuarantineClearance, QuarantineError, QuarantineImpactReport, QuarantineMode,
-        QuarantineOrder, QuarantineReason, QuarantineRecord, QuarantineRegistry, QuarantineScope,
-        QuarantineSeverity, QuarantineState, RecallOrder, RecallReceipt, constant_time,
+        QuarantineAuditId, QuarantineAuditTimestamp, QuarantineClearance, QuarantineError,
+        QuarantineImpactReport, QuarantineMode, QuarantineOrder, QuarantineReason,
+        QuarantineRecord, QuarantineRegistry, QuarantineScope, QuarantineSeverity, QuarantineState,
+        RecallOrder, RecallReceipt, constant_time,
     };
 
     fn make_order(id: &str, severity: QuarantineSeverity, mode: QuarantineMode) -> QuarantineOrder {
@@ -2061,7 +2165,14 @@ mod tests {
         assert!(reg.audit_trail().len() <= MAX_AUDIT_TRAIL);
 
         // First entry's sequence > 0 means entries were evicted.
-        assert!(reg.audit_trail().first().expect("should succeed").sequence > 0);
+        assert!(
+            reg.audit_trail()
+                .first()
+                .expect("should succeed")
+                .sequence
+                .get()
+                > 0
+        );
 
         // Integrity check must still pass despite eviction.
         assert!(reg.verify_audit_integrity().expect("should succeed"));
@@ -2330,7 +2441,7 @@ mod tests {
             let mut reg = QuarantineRegistry::new();
 
             // Set sequence counter near overflow boundary
-            reg.next_sequence = u64::MAX.saturating_sub(5);
+            reg.next_sequence = QuarantineAuditId::new(u64::MAX.saturating_sub(5));
 
             // Test sequence counter overflow protection
             for i in 0..10 {
@@ -2349,13 +2460,13 @@ mod tests {
                 // Verify sequence counter uses saturating arithmetic
                 let current_sequence = reg.next_sequence;
                 assert!(
-                    current_sequence <= u64::MAX,
+                    current_sequence.get() <= u64::MAX,
                     "Sequence should not wrap around"
                 );
 
                 if i > 0 {
                     assert!(
-                        current_sequence >= reg.next_sequence.saturating_sub(1),
+                        current_sequence.get() >= reg.next_sequence.get().saturating_sub(1),
                         "Sequence should increment safely"
                     );
                 }
@@ -3184,13 +3295,13 @@ mod tests {
             // Lines 292-314 have multiple instances of .len() as u64
 
             let mut test_entry = QuarantineAuditEntry {
-                sequence: 1,
+                sequence: QuarantineAuditId::new(1),
                 event_code: "TEST_EVENT".to_string(),
                 order_id: "test-order-id".to_string(),
                 extension_id: "test-ext".to_string(),
                 severity: QuarantineSeverity::High,
                 trace_id: "test-trace".to_string(),
-                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                timestamp: QuarantineAuditTimestamp::try_from("2026-01-01T00:00:00Z").unwrap(),
                 details: "test details".to_string(),
                 prev_hash: "prev-hash".to_string(),
                 entry_hash: String::new(),
