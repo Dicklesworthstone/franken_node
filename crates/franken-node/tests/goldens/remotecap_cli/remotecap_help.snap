@@ -1,0 +1,17 @@
+---
+source: crates/franken-node/tests/cli_subcommand_goldens.rs
+---
+Remote capability token issuance and inspection
+
+Usage: franken-node remotecap <COMMAND>
+
+Commands:
+  issue   Issue a signed capability token for network-bound operations
+  verify  Verify a capability token without consuming single-use tokens
+  use     Use a capability token for one network-bound operation
+  revoke  Revoke a capability token in the local CLI state
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version

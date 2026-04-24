@@ -1,0 +1,12 @@
+---
+source: crates/franken-node/tests/supply_chain_golden_artifacts.rs
+expression: scrubbed
+---
+extension: npm:@acme/security-scanner@2.1.0
+publisher: ACME Corporation
+certification: Gold
+reputation: 8750bp (Improving)
+revocation: revoked (Security vulnerability discovered in dependency)
+quarantine: true
+capabilities: network.scan, fs.read_config
+risk: Critical - REVOKED: Security vulnerability in transitive dependency

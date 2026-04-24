@@ -17,11 +17,8 @@ use frankenengine_node::supply_chain::trust_card::{
     TrustCardDiffEntry, render_comparison_human, render_trust_card_human, to_canonical_json,
 };
 use frankenengine_node::observability::durability_violation::{
-    DurabilityViolationDetector, DurabilityViolationContext, CausalEvent, CausalEventType,
-    FailedArtifact, ProofContext, HaltPolicy,
-};
-use frankenengine_node::connector::canonical_serializer::{
-    CanonicalSerializer, TrustObjectType, SchemaRegistration,
+    DurabilityViolationDetector, ViolationContext, CausalEvent, CausalEventType,
+    FailedArtifact, HaltPolicy, ProofContext,
 };
 
 use regex::Regex;
@@ -354,54 +351,51 @@ fn golden_registry_complete_lifecycle_receipt() {
 // === DURABILITY VIOLATION GOLDEN TESTS ===
 
 /// Create a deterministic test context for golden comparison.
-fn canonical_durability_violation_context() -> DurabilityViolationContext {
-    let mut ctx = DurabilityViolationContext::new(
-        1000, // Fixed epoch_id
-        2000, // Fixed timestamp_ms
-        "test-hardening-level".to_string(),
-    );
+fn canonical_durability_violation_context() -> ViolationContext {
+    let mut proofs = ProofContext::new();
+    proofs.add_missing_proof("proof-test-001".to_string());
+    proofs.add_failed_proof("proof-test-002".to_string());
 
-    // Add deterministic causal events
-    ctx.add_causal_event(CausalEvent {
-        event_type: CausalEventType::GuardrailRejection,
-        timestamp_ms: 1500,
-        description: "Test guardrail rejection event".to_string(),
-        evidence_ref: Some("EVD-TEST-001".to_string()),
-    });
-
-    ctx.add_causal_event(CausalEvent {
-        event_type: CausalEventType::IntegrityCheckFailed,
-        timestamp_ms: 1800,
-        description: "Test integrity check failure".to_string(),
-        evidence_ref: None,
-    });
-
-    // Add deterministic failed artifacts
-    ctx.add_failed_artifact(FailedArtifact {
-        artifact_path: "objects/test-artifact-001".to_string(),
-        expected_hash: "deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678".to_string(),
-        actual_hash: "cafebabe1234567890abcdef1234567890abcdef1234567890abcdef12345678".to_string(),
-        failure_reason: "Test hash mismatch".to_string(),
-    });
-
-    ctx.add_failed_artifact(FailedArtifact {
-        artifact_path: "signatures/test-signature.sig".to_string(),
-        expected_hash: "facefeed1234567890abcdef1234567890abcdef1234567890abcdef12345678".to_string(),
-        actual_hash: "".to_string(),
-        failure_reason: "Test missing artifact".to_string(),
-    });
-
-    // Add deterministic proof context
-    ctx.proofs.add_missing_proof("proof-test-001".to_string());
-    ctx.proofs.add_invalid_proof("proof-test-002".to_string(), "Test validation failed".to_string());
-
-    ctx
+    ViolationContext {
+        events: vec![
+            CausalEvent {
+                event_type: CausalEventType::GuardrailRejection,
+                timestamp_ms: 1500,
+                description: "Test guardrail rejection event".to_string(),
+                evidence_ref: Some("EVD-TEST-001".to_string()),
+            },
+            CausalEvent {
+                event_type: CausalEventType::IntegrityCheckFailed,
+                timestamp_ms: 1800,
+                description: "Test integrity check failure".to_string(),
+                evidence_ref: None,
+            },
+        ],
+        artifacts: vec![
+            FailedArtifact {
+                artifact_path: "objects/test-artifact-001".to_string(),
+                expected_hash: "deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678".to_string(),
+                actual_hash: "cafebabe1234567890abcdef1234567890abcdef1234567890abcdef12345678".to_string(),
+                failure_reason: "Test hash mismatch".to_string(),
+            },
+            FailedArtifact {
+                artifact_path: "signatures/test-signature.sig".to_string(),
+                expected_hash: "facefeed1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12345678".to_string(),
+                actual_hash: "".to_string(),
+                failure_reason: "Test missing artifact".to_string(),
+            },
+        ],
+        proofs,
+        hardening_level: "test-hardening-level".to_string(),
+        epoch_id: 1000,
+        timestamp_ms: 2000,
+    }
 }
 
 #[test]
 fn golden_durability_violation_bundle_json() {
     let ctx = canonical_durability_violation_context();
-    let detector = DurabilityViolationDetector::new(HaltPolicy::HaltAll);
+    let mut detector = DurabilityViolationDetector::new(HaltPolicy::HaltAll);
     let bundle = detector.generate_bundle(&ctx);
 
     let json_output = bundle.to_json();
@@ -413,20 +407,23 @@ fn golden_durability_violation_bundle_json() {
 #[test]
 fn golden_durability_violation_bundle_minimal() {
     // Test with minimal context to ensure clean output
-    let mut ctx = DurabilityViolationContext::new(
-        42, // Fixed epoch_id
-        5000, // Fixed timestamp_ms
-        "critical".to_string(),
-    );
+    let ctx = ViolationContext {
+        events: vec![
+            CausalEvent {
+                event_type: CausalEventType::ArtifactUnverifiable,
+                timestamp_ms: 4500,
+                description: "Single test event".to_string(),
+                evidence_ref: None,
+            }
+        ],
+        artifacts: vec![],
+        proofs: ProofContext::new(),
+        hardening_level: "critical".to_string(),
+        epoch_id: 42,
+        timestamp_ms: 5000,
+    };
 
-    ctx.add_causal_event(CausalEvent {
-        event_type: CausalEventType::ArtifactUnverifiable,
-        timestamp_ms: 4500,
-        description: "Single test event".to_string(),
-        evidence_ref: None,
-    });
-
-    let detector = DurabilityViolationDetector::new(HaltPolicy::WarnOnly);
+    let mut detector = DurabilityViolationDetector::new(HaltPolicy::WarnOnly);
     let bundle = detector.generate_bundle(&ctx);
 
     let json_output = bundle.to_json();
@@ -438,27 +435,30 @@ fn golden_durability_violation_bundle_minimal() {
 #[test]
 fn golden_durability_violation_bundle_escaping() {
     // Test proper JSON escaping of special characters
-    let mut ctx = DurabilityViolationContext::new(
-        999, // Fixed epoch_id
-        7000, // Fixed timestamp_ms
-        "level with quotes and newlines".to_string(),
-    );
+    let ctx = ViolationContext {
+        events: vec![
+            CausalEvent {
+                event_type: CausalEventType::RepairFailed,
+                timestamp_ms: 6500,
+                description: "Event with quotes and tabs and backslashes".to_string(),
+                evidence_ref: Some("EVD-escape-test".to_string()),
+            }
+        ],
+        artifacts: vec![
+            FailedArtifact {
+                artifact_path: "path/with spaces/and quotes.bin".to_string(),
+                expected_hash: "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+                actual_hash: "2222222222222222222222222222222222222222222222222222222222222222".to_string(),
+                failure_reason: "Reason with quotes and newlines and tabs".to_string(),
+            }
+        ],
+        proofs: ProofContext::new(),
+        hardening_level: "level with quotes and newlines".to_string(),
+        epoch_id: 999,
+        timestamp_ms: 7000,
+    };
 
-    ctx.add_causal_event(CausalEvent {
-        event_type: CausalEventType::RepairFailed,
-        timestamp_ms: 6500,
-        description: "Event with quotes and tabs and backslashes".to_string(),
-        evidence_ref: Some("EVD-escape-test".to_string()),
-    });
-
-    ctx.add_failed_artifact(FailedArtifact {
-        artifact_path: "path/with spaces/and quotes.bin".to_string(),
-        expected_hash: "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-        actual_hash: "2222222222222222222222222222222222222222222222222222222222222222".to_string(),
-        failure_reason: "Reason with quotes and newlines and tabs".to_string(),
-    });
-
-    let detector = DurabilityViolationDetector::new(HaltPolicy::HaltScope("test-scope".to_string()));
+    let mut detector = DurabilityViolationDetector::new(HaltPolicy::HaltScope("test-scope".to_string()));
     let bundle = detector.generate_bundle(&ctx);
 
     let json_output = bundle.to_json();

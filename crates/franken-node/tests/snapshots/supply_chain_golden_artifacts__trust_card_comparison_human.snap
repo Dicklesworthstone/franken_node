@@ -1,0 +1,7 @@
+---
+source: crates/franken-node/tests/supply_chain_golden_artifacts.rs
+expression: rendered
+---
+compare npm:@acme/security-scanner vs npm:@acme/security-scanner:
+- certification_level: gold -> platinum
+- reputation_score_basis_points: 8750 -> 9500

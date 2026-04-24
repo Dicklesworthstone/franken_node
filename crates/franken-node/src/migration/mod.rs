@@ -3901,6 +3901,7 @@ fn render_sarif(report: &MigrationAuditReport) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn write_project_file(project: &Path, relative_path: &str, content: &str) {
         let path = project.join(relative_path);
@@ -3925,6 +3926,105 @@ mod tests {
 
     fn write_lockfile(project: &Path) {
         write_project_file(project, "package-lock.json", "{}\n");
+    }
+
+    fn write_metamorphic_rewrite_project(project: &Path, seed: u8) {
+        let scenario = seed % 4;
+        let script_flag = format!("--case={seed}");
+
+        match scenario {
+            0 => {
+                write_project_file(project, "src/index.js", "console.log('start');\n");
+                write_project_file(project, "tools/build.mjs", "console.log('build');\n");
+                let manifest = serde_json::json!({
+                    "name": format!("demo-{seed}"),
+                    "version": "1.0.0",
+                    "scripts": {
+                        "start": format!("node src/index.js {script_flag}"),
+                        "build": "bun tools/build.mjs",
+                        "lint": "eslint ."
+                    }
+                });
+                write_project_file(
+                    project,
+                    "package.json",
+                    &serde_json::to_string_pretty(&manifest).unwrap(),
+                );
+            }
+            1 => {
+                write_hardened_manifest(project);
+                write_project_file(project, "local.js", "module.exports = 42;\n");
+                write_project_file(
+                    project,
+                    "index.js",
+                    "const fs = require(\"fs\");\nconst local = require(\"./local\");\nconsole.log(fs.existsSync(\"package.json\"), local);\n",
+                );
+            }
+            2 => {
+                let manifest = serde_json::json!({
+                    "name": format!("esm-demo-{seed}"),
+                    "version": "1.0.0",
+                    "type": "module",
+                    "engines": {"node": ">=20 <23"}
+                });
+                write_project_file(
+                    project,
+                    "package.json",
+                    &serde_json::to_string_pretty(&manifest).unwrap(),
+                );
+                write_project_file(
+                    project,
+                    "src/index.js",
+                    "import fs from \"fs\";\nimport path from \"path\";\nexport const exists = fs.existsSync(path.join(\".\"));\n",
+                );
+            }
+            _ => {
+                write_project_file(project, "src/local.js", "module.exports = 'local';\n");
+                write_project_file(
+                    project,
+                    "src/index.js",
+                    "const path = require(\"path\");\nconst local = require(\"./local\");\nconsole.log(path.sep, local);\n",
+                );
+                let manifest = serde_json::json!({
+                    "name": format!("combo-demo-{seed}"),
+                    "version": "1.0.0",
+                    "scripts": {
+                        "start": format!("node src/index.js {script_flag}")
+                    }
+                });
+                write_project_file(
+                    project,
+                    "package.json",
+                    &serde_json::to_string_pretty(&manifest).unwrap(),
+                );
+            }
+        }
+    }
+
+    fn project_text_snapshot(project: &Path) -> Vec<(String, String)> {
+        fn collect(project: &Path, dir: &Path, snapshot: &mut Vec<(String, String)>) {
+            let mut entries: Vec<_> = std::fs::read_dir(dir)
+                .expect("read project dir")
+                .map(|entry| entry.expect("read project entry").path())
+                .collect();
+            entries.sort();
+
+            for path in entries {
+                if path.is_dir() {
+                    collect(project, &path, snapshot);
+                } else {
+                    snapshot.push((
+                        relative_display(project, &path),
+                        std::fs::read_to_string(&path).expect("snapshot text file"),
+                    ));
+                }
+            }
+        }
+
+        let mut snapshot = Vec::new();
+        collect(project, project, &mut snapshot);
+        snapshot.sort_by(|left, right| left.0.cmp(&right.0));
+        snapshot
     }
 
     #[test]
@@ -4096,6 +4196,38 @@ mod tests {
             first.rollback_entries[0].rewritten_content,
             second.rollback_entries[0].rewritten_content
         );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        #[test]
+        fn run_rewrite_apply_is_metamorphically_idempotent(seed in 0_u8..64) {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let project = temp.path();
+            write_metamorphic_rewrite_project(project, seed);
+
+            let first = run_rewrite(project, true).expect("first rewrite");
+            prop_assert!(
+                first.rewrites_applied > 0,
+                "generated rewrite scenario should exercise at least one applied rewrite"
+            );
+            let after_first = project_text_snapshot(project);
+
+            let second = run_rewrite(project, true).expect("second rewrite");
+            let after_second = project_text_snapshot(project);
+
+            prop_assert_eq!(
+                &after_second,
+                &after_first,
+                "rewrite(rewrite(project)) changed the project snapshot for seed {seed}"
+            );
+            prop_assert_eq!(second.rewrites_applied, 0);
+            prop_assert!(
+                second.rollback_entries.is_empty(),
+                "idempotent second rewrite must not add rollback entries"
+            );
+        }
     }
 
     #[test]

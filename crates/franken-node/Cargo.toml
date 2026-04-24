@@ -207,6 +207,10 @@ name = "replay_bundle_integrity_conformance"
 path = "tests/replay_bundle_integrity_conformance.rs"
 
 [[test]]
+name = "replay_coverage_gate_conformance"
+path = "tests/replay_coverage_gate_conformance.rs"
+
+[[test]]
 name = "migration_report_conformance"
 path = "tests/migration_report_conformance.rs"
 

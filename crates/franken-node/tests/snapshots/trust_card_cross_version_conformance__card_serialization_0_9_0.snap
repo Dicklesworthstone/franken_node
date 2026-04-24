@@ -1,0 +1,84 @@
+---
+source: crates/franken-node/tests/trust_card_cross_version_conformance.rs
+expression: deserialized_card
+---
+{
+  "schema_version": "0.9.0",
+  "trust_card_version": 1,
+  "previous_version_hash": null,
+  "extension": {
+    "extension_id": "npm:@conformance/test-extension",
+    "version": "1.0.0"
+  },
+  "publisher": {
+    "publisher_id": "conformance-publisher",
+    "display_name": "Conformance Test Publisher"
+  },
+  "certification_level": "gold",
+  "capability_declarations": [
+    {
+      "name": "filesystem.read",
+      "description": "Read file system",
+      "risk": "medium"
+    },
+    {
+      "name": "network.http",
+      "description": "HTTP client",
+      "risk": "low"
+    }
+  ],
+  "behavioral_profile": {
+    "network_access": true,
+    "filesystem_access": true,
+    "subprocess_access": false,
+    "profile_summary": "File processor with network sync"
+  },
+  "revocation_status": {
+    "status": "active"
+  },
+  "provenance_summary": {
+    "attestation_level": "signed",
+    "source_uri": "https://registry.npmjs.org/@conformance/test-extension/-/test-extension-1.0.0.tgz",
+    "artifact_hashes": [
+      "sha256:conformance1234567890",
+      "sha512:conformance0987654321"
+    ],
+    "verified_at": "2024-01-01T00:00:00Z"
+  },
+  "reputation_score_basis_points": 8500,
+  "reputation_trend": "stable",
+  "active_quarantine": false,
+  "dependency_trust_summary": [
+    {
+      "dependency_id": "npm:lodash",
+      "trust_level": "verified"
+    }
+  ],
+  "last_verified_timestamp": "2024-01-01T00:00:00Z",
+  "user_facing_risk_assessment": {
+    "level": "low",
+    "summary": "Well-maintained conformance test package"
+  },
+  "audit_history": [
+    {
+      "timestamp": "1970-01-01T00:16:40Z",
+      "event_code": "TRUST_CARD_CREATED",
+      "detail": "trust card created",
+      "trace_id": "conformance-trace"
+    }
+  ],
+  "derivation_evidence": {
+    "evidence_refs": [
+      {
+        "evidence_id": "conformance-evidence-1",
+        "evidence_type": "provenance_chain",
+        "verified_at_epoch": 1000,
+        "verification_receipt_hash": "conformance-receipt-hash-1"
+      }
+    ],
+    "derived_at_epoch": 1000,
+    "derivation_chain_hash": "sha256:d14390dc6cf9c9aa39d2a6c95b5730d05e02e1a1b5f820f7d7e1d7f5c6850f21"
+  },
+  "card_hash": "f5669d09fc6e22dacf34ddaa04382fa23c0b94c78fb64e7b8adf6937f09dbc2f",
+  "registry_signature": "bf9ab63aede6bceed992f15e350c3c9b71510dcbdf462c0e7ce350707d11d90a"
+}

@@ -1,0 +1,17 @@
+---
+source: crates/franken-node/tests/cli_subcommand_goldens.rs
+---
+Incident replay and forensics
+
+Usage: franken-node incident <COMMAND>
+
+Commands:
+  bundle          Export deterministic incident bundle
+  replay          Replay incident timeline locally
+  counterfactual  Simulate alternative policy actions
+  list            List recorded incidents
+  help            Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version

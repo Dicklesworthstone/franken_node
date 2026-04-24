@@ -1,0 +1,17 @@
+---
+source: crates/franken-node/tests/cli_subcommand_goldens.rs
+---
+Fleet control plane operations
+
+Usage: franken-node fleet <COMMAND>
+
+Commands:
+  status     Show policy and quarantine state across nodes
+  release    Lift quarantine[PATH] controls with receipts
+  reconcile  Reconcile fleet state for convergence
+  agent      Run as a fleet agent that polls for and applies fleet actions
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version

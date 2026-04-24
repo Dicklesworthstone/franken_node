@@ -1,0 +1,26 @@
+---
+source: crates/franken-node/tests/cli_subcommand_goldens.rs
+---
+franken-node: trust-native JavaScript[PATH] runtime platform
+
+Usage: franken-node <COMMAND>
+
+Commands:
+  init        Bootstrap config, policy profile, and workspace metadata
+  run         Run app under policy-governed runtime controls
+  runtime     Runtime lane and epoch inspection[PATH]
+  migrate     Migration audit, rewrite, and validation workflows
+  verify      Compatibility verification across runtimes
+  trust       Extension trust management
+  remotecap   Remote capability token issuance and inspection
+  trust-card  Trust-card API[PATH] parity surfaces
+  fleet       Fleet control plane operations
+  incident    Incident replay and forensics
+  registry    Extension registry operations
+  bench       Benchmark suite execution
+  doctor      Diagnose environment and policy setup
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version

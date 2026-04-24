@@ -939,6 +939,7 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     // ── TrustObjectType tests ───────────────────────────────────────
 
@@ -1094,6 +1095,117 @@ mod tests {
         let e1 = canonical_encode(b"same data").unwrap();
         let e2 = canonical_encode(b"same data").unwrap();
         assert_eq!(e1, e2);
+    }
+
+    fn mutated_sample_payload(object_type: TrustObjectType, seed: u64) -> serde_json::Value {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&sample_payload_for_type(object_type)).unwrap();
+        let object = value.as_object_mut().expect("sample payload is an object");
+
+        for (field_index, field_name) in default_schema(object_type)
+            .field_order
+            .iter()
+            .enumerate()
+        {
+            let field_value = object
+                .get_mut(field_name)
+                .expect("sample payload covers schema field");
+            match field_value {
+                serde_json::Value::String(text) => {
+                    if field_name.contains("hash") {
+                        *text = format!("sha256:{seed:016x}{field_index:02x}");
+                    } else if field_name.contains("timestamp")
+                        || field_name.contains("issued_at")
+                        || field_name.contains("effective_at")
+                        || field_name.contains("established_at")
+                    {
+                        *text = format!("2026-04-21T00:{:02}:00Z", seed % 60);
+                    } else {
+                        *text = format!("{field_name}-{seed:x}-{field_index}");
+                    }
+                }
+                serde_json::Value::Number(number) => {
+                    *number = serde_json::Number::from(seed.saturating_add(field_index as u64));
+                }
+                _ => {}
+            }
+        }
+
+        value
+    }
+
+    fn object_json_with_permuted_fields(value: &serde_json::Value, seed: u64) -> String {
+        let object = value.as_object().expect("metamorphic payload is an object");
+        let mut entries: Vec<_> = object.iter().collect();
+        let rotation = seed as usize % entries.len();
+        entries.rotate_left(rotation);
+        if seed & 1 == 1 {
+            entries.reverse();
+        }
+
+        let mut rendered = String::from("{");
+        for (index, (key, field_value)) in entries.iter().enumerate() {
+            if index > 0 {
+                rendered.push(',');
+            }
+            rendered.push_str(&serde_json::to_string(key).unwrap());
+            rendered.push(':');
+            rendered.push_str(&serde_json::to_string(field_value).unwrap());
+        }
+        rendered.push('}');
+        rendered
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(96))]
+
+        #[test]
+        fn metamorphic_canonical_serializer_round_trip_and_field_order_invariance(seed in 0_u64..4096) {
+            let object_type =
+                TrustObjectType::all()[seed as usize % TrustObjectType::all().len()];
+            let logical_payload = mutated_sample_payload(object_type, seed);
+            let canonical_field_json = serde_json::to_string(&logical_payload).unwrap();
+            let permuted_field_json = object_json_with_permuted_fields(&logical_payload, seed);
+
+            let mut baseline_serializer = CanonicalSerializer::with_all_schemas();
+            let baseline = baseline_serializer
+                .serialize(object_type, canonical_field_json.as_bytes(), "metamorphic-baseline")
+                .unwrap();
+
+            let mut permuted_serializer = CanonicalSerializer::with_all_schemas();
+            let permuted = permuted_serializer
+                .serialize(object_type, permuted_field_json.as_bytes(), "metamorphic-permuted")
+                .unwrap();
+
+            prop_assert_eq!(
+                &permuted,
+                &baseline,
+                "field-order permutation changed canonical serialization for {:?}",
+                object_type
+            );
+
+            let decoded = permuted_serializer.deserialize(object_type, &permuted).unwrap();
+            let re_encoded = canonical_encode(&decoded).unwrap();
+            prop_assert_eq!(
+                &re_encoded,
+                &permuted,
+                "deserialize(serialize(x)) did not re-encode to the same canonical bytes"
+            );
+
+            let mut round_trip_serializer = CanonicalSerializer::with_all_schemas();
+            let round_trip = round_trip_serializer
+                .round_trip_canonical(
+                    object_type,
+                    permuted_field_json.as_bytes(),
+                    "metamorphic-round-trip",
+                )
+                .unwrap();
+            prop_assert_eq!(
+                &round_trip,
+                &baseline,
+                "round_trip_canonical disagreed with direct canonical serialization"
+            );
+        }
     }
 
     // ── Float detection tests ───────────────────────────────────────

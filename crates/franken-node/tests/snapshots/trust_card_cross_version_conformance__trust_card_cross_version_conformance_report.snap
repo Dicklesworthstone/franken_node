@@ -1,0 +1,48 @@
+---
+source: crates/franken-node/tests/trust_card_cross_version_conformance.rs
+expression: final_report
+---
+{
+  "trust_card_cross_version_conformance": {
+    "schema_version": "conformance-report/v1",
+    "generated_at": "2024-01-01T00:00:00Z",
+    "conformance_score": "50.0%",
+    "total_tests": 4,
+    "conformant_tests": 2,
+    "failed_tests": 2,
+    "test_results": {
+      "legacy_card_current_verifier": {
+        "card_schema": "0.9.0",
+        "registry_schema": "franken-node/trust-card-registry-state/v0",
+        "verifier_version": "Current",
+        "expected": "Pass",
+        "actual": "Fail",
+        "conformant": false
+      },
+      "future_card_current_verifier": {
+        "card_schema": "1.1.0",
+        "registry_schema": "franken-node/trust-card-registry-state/v2",
+        "verifier_version": "Current",
+        "expected": "Fail(\"unsupported_schema\")",
+        "actual": "Fail",
+        "conformant": true
+      },
+      "schema_transition_chain_valid": {
+        "card_schema": "1.0.0",
+        "registry_schema": "franken-node/trust-card-registry-state/v1",
+        "verifier_version": "Current",
+        "expected": "Pass",
+        "actual": "Pass",
+        "conformant": true
+      },
+      "mixed_schema_history": {
+        "card_schema": "1.0.0",
+        "registry_schema": "franken-node/trust-card-registry-state/v1",
+        "verifier_version": "Current",
+        "expected": "Pass",
+        "actual": "Fail",
+        "conformant": false
+      }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+---
+source: crates/franken-node/tests/cli_subcommand_goldens.rs
+---
+Compatibility verification across runtimes
+
+Usage: franken-node verify <COMMAND>
+
+Commands:
+  module         Verify module conformance against the public verifier contract
+  migration      Verify migration compatibility contract output
+  compatibility  Verify compatibility claims for a target profile[PATH]
+  corpus         Verify corpus schema and coverage contract output
+  lockstep       Compare behavior across runtimes in lockstep
+  release        Verify release artifact signatures and checksums
+  help           Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version

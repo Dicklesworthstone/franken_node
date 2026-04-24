@@ -1,0 +1,12 @@
+---
+source: crates/franken-node/tests/supply_chain_golden_artifacts.rs
+expression: scrubbed
+---
+extension: npm:@acme/security-scanner@2.1.0
+publisher: ACME Corporation
+certification: Gold
+reputation: 8750bp (Improving)
+revocation: active
+quarantine: false
+capabilities: network.scan, fs.read_config
+risk: Low - Well-maintained security tool with verified provenance

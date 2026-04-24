@@ -1,0 +1,18 @@
+---
+source: crates/franken-node/tests/cli_subcommand_goldens.rs
+---
+Trust-card API[PATH] parity surfaces
+
+Usage: franken-node trust-card <COMMAND>
+
+Commands:
+  show     Show trust-card details for one extension
+  export   Export a trust card in machine-readable form
+  list     List trust cards with publisher[PATH] filters
+  compare  Compare trust posture between two extensions
+  diff     Diff two trust-card versions for the same extension
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
