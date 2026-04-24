@@ -1530,6 +1530,7 @@ fn trust_sync_rejects_unauthenticated_clean_refresh_that_lowers_risk() {
     assert!(stdout.contains("risk_lowering_rejections=1"));
     let stderr = String::from_utf8_lossy(&clean.stderr);
     assert!(stderr.contains("unauthenticated OSV refresh cannot lower risk"));
+    assert!(stderr.contains("@acme/auth-guard"));
 
     let exported = run_cli_in_workspace(
         workspace.path(),
