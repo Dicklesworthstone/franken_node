@@ -6,6 +6,13 @@ use frankenengine_node::observability::test_support::{
 use frankenengine_node::observability::witness_ref::{
     WitnessKind, WitnessValidationError, WitnessValidator,
 };
+use frankenengine_node::security::quarantine_controller::{
+    ControlAction, QuarantineController, QuarantineThresholdPolicy,
+};
+
+fn quarantine_controller() -> QuarantineController {
+    QuarantineController::new(QuarantineThresholdPolicy::default(), "salt").expect("controller")
+}
 
 #[test]
 fn observability_adversarial_regressions_locator_injection_attacks_fail_closed() {
@@ -100,4 +107,55 @@ fn observability_adversarial_regressions_high_impact_missing_witness_is_typed() 
     assert_eq!(err.code(), "ERR_MISSING_WITNESSES");
     assert_eq!(validator.rejected_count(), 1);
     assert_eq!(validator.validated_count(), 0);
+}
+
+#[test]
+fn quarantine_controller_clamps_nan_posterior_before_signing() {
+    let controller = quarantine_controller();
+    let decision = controller
+        .decide_for_posterior("ext:nan", f64::NAN, "trace-nan")
+        .expect("non-finite posterior should fail closed to revoke");
+
+    assert_eq!(decision.action, ControlAction::Revoke);
+    assert_eq!(decision.posterior, controller.policy().revoke);
+    assert_eq!(
+        decision.signed_evidence.posterior,
+        controller.policy().revoke
+    );
+    assert!(decision.posterior.is_finite());
+    assert!(decision.signed_evidence.posterior.is_finite());
+    assert!(controller.verify_decision(&decision));
+
+    let json = serde_json::to_string(&decision).expect("finite clamped decision should serialize");
+    assert!(!json.contains("NaN"));
+    assert!(!json.contains("null"));
+}
+
+#[test]
+fn quarantine_controller_clamps_infinite_posteriors_before_signing() {
+    let controller = quarantine_controller();
+
+    for (principal_id, posterior) in [
+        ("ext:positive-limit", f64::INFINITY),
+        ("ext:negative-limit", f64::NEG_INFINITY),
+    ] {
+        let decision = controller
+            .decide_for_posterior(principal_id, posterior, "trace-boundary")
+            .expect("non-finite posterior should fail closed to revoke");
+
+        assert_eq!(decision.action, ControlAction::Revoke);
+        assert_eq!(decision.posterior, controller.policy().revoke);
+        assert_eq!(
+            decision.signed_evidence.posterior,
+            controller.policy().revoke
+        );
+        assert!(decision.posterior.is_finite());
+        assert!(decision.signed_evidence.posterior.is_finite());
+        assert!(controller.verify_decision(&decision));
+
+        let json =
+            serde_json::to_string(&decision).expect("finite clamped decision should serialize");
+        assert!(!json.contains("inf"));
+        assert!(!json.contains("null"));
+    }
 }
