@@ -23,7 +23,13 @@ use frankenengine_node::security::network_guard::{
 use frankenengine_node::security::remote_cap::{
     CapabilityGate, CapabilityProvider, ConnectivityMode, RemoteOperation, RemoteScope,
 };
-use frankenengine_node::supply_chain::trust_card::fixture_registry;
+use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
+use frankenengine_node::supply_chain::trust_card::{
+    BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
+    DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
+    ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCardInput,
+    TrustCardRegistry,
+};
 
 static TEST_TRACING_INIT: Once = Once::new();
 
@@ -171,7 +177,145 @@ fn seeded_fixture_trust_workspace() -> tempfile::TempDir {
     )
     .expect("write config");
 
-    let registry = fixture_registry(1_000).expect("fixture registry");
+    let mut registry = TrustCardRegistry::default();
+    registry
+        .create(
+            TrustCardInput {
+                extension: ExtensionIdentity {
+                    extension_id: "npm:@acme/auth-guard".to_string(),
+                    version: "1.4.2".to_string(),
+                },
+                publisher: PublisherIdentity {
+                    publisher_id: "pub-acme".to_string(),
+                    display_name: "Acme Security".to_string(),
+                },
+                certification_level: CertificationLevel::Gold,
+                capability_declarations: vec![
+                    CapabilityDeclaration {
+                        name: "auth.validate-token".to_string(),
+                        description: "Validate JWT and attach identity context".to_string(),
+                        risk: CapabilityRisk::Medium,
+                    },
+                    CapabilityDeclaration {
+                        name: "auth.revoke-session".to_string(),
+                        description: "Invalidate compromised sessions".to_string(),
+                        risk: CapabilityRisk::High,
+                    },
+                ],
+                behavioral_profile: BehavioralProfile {
+                    network_access: true,
+                    filesystem_access: false,
+                    subprocess_access: false,
+                    profile_summary: "Network-only auth checks with bounded side effects"
+                        .to_string(),
+                },
+                revocation_status: RevocationStatus::Active,
+                provenance_summary: ProvenanceSummary {
+                    attestation_level: "slsa-l3".to_string(),
+                    source_uri:
+                        "https://registry.npmjs.org/@acme/auth-guard/-/auth-guard-1.4.2.tgz"
+                            .to_string(),
+                    artifact_hashes: vec![format!("sha256:deadbeef{}", "a".repeat(56))],
+                    verified_at: "2026-02-20T12:00:00Z".to_string(),
+                },
+                reputation_score_basis_points: 920,
+                reputation_trend: ReputationTrend::Improving,
+                active_quarantine: false,
+                dependency_trust_summary: vec![DependencyTrustStatus {
+                    dependency_id: "npm:jsonwebtoken@9".to_string(),
+                    trust_level: "verified".to_string(),
+                }],
+                last_verified_timestamp: "2026-02-20T12:00:00Z".to_string(),
+                user_facing_risk_assessment: RiskAssessment {
+                    level: RiskLevel::Low,
+                    summary:
+                        "Token validation extension with strong provenance and no local disk access"
+                            .to_string(),
+                },
+                evidence_refs: vec![
+                    VerifiedEvidenceRef {
+                        evidence_id: "ev-fixture-prov-001".to_string(),
+                        evidence_type: EvidenceType::ProvenanceChain,
+                        verified_at_epoch: 1_000,
+                        verification_receipt_hash: "a".repeat(64),
+                    },
+                    VerifiedEvidenceRef {
+                        evidence_id: "ev-fixture-rep-001".to_string(),
+                        evidence_type: EvidenceType::ReputationSignal,
+                        verified_at_epoch: 1_000,
+                        verification_receipt_hash: "b".repeat(64),
+                    },
+                ],
+            },
+            1_000,
+            "trace-remote-cap-fixture-auth-guard",
+        )
+        .expect("create auth-guard trust card");
+    registry
+        .create(
+            TrustCardInput {
+                extension: ExtensionIdentity {
+                    extension_id: "npm:@beta/telemetry-bridge".to_string(),
+                    version: "0.9.1".to_string(),
+                },
+                publisher: PublisherIdentity {
+                    publisher_id: "pub-beta".to_string(),
+                    display_name: "Beta Labs".to_string(),
+                },
+                certification_level: CertificationLevel::Silver,
+                capability_declarations: vec![CapabilityDeclaration {
+                    name: "telemetry.forward".to_string(),
+                    description: "Forward runtime telemetry to remote collector".to_string(),
+                    risk: CapabilityRisk::High,
+                }],
+                behavioral_profile: BehavioralProfile {
+                    network_access: true,
+                    filesystem_access: true,
+                    subprocess_access: false,
+                    profile_summary: "Network telemetry forwarding with local spool fallback"
+                        .to_string(),
+                },
+                revocation_status: RevocationStatus::Active,
+                provenance_summary: ProvenanceSummary {
+                    attestation_level: "slsa-l2".to_string(),
+                    source_uri: "https://registry.npmjs.org/@beta/telemetry-bridge/-/telemetry-bridge-0.9.1.tgz"
+                        .to_string(),
+                    artifact_hashes: vec![format!("sha256:deadbeef{}", "b".repeat(56))],
+                    verified_at: "2026-02-20T12:00:00Z".to_string(),
+                },
+                reputation_score_basis_points: 640,
+                reputation_trend: ReputationTrend::Stable,
+                active_quarantine: false,
+                dependency_trust_summary: vec![DependencyTrustStatus {
+                    dependency_id: "npm:ws@8".to_string(),
+                    trust_level: "conditional".to_string(),
+                }],
+                last_verified_timestamp: "2026-02-20T12:00:00Z".to_string(),
+                user_facing_risk_assessment: RiskAssessment {
+                    level: RiskLevel::Medium,
+                    summary:
+                        "Telemetry egress remains operator-reviewed because runtime signals leave the host"
+                            .to_string(),
+                },
+                evidence_refs: vec![
+                    VerifiedEvidenceRef {
+                        evidence_id: "ev-fixture-prov-002".to_string(),
+                        evidence_type: EvidenceType::ProvenanceChain,
+                        verified_at_epoch: 1_000,
+                        verification_receipt_hash: "c".repeat(64),
+                    },
+                    VerifiedEvidenceRef {
+                        evidence_id: "ev-fixture-rep-002".to_string(),
+                        evidence_type: EvidenceType::ReputationSignal,
+                        verified_at_epoch: 1_000,
+                        verification_receipt_hash: "d".repeat(64),
+                    },
+                ],
+            },
+            1_000,
+            "trace-remote-cap-fixture-telemetry-bridge",
+        )
+        .expect("create telemetry-bridge trust card");
     let path = dir
         .path()
         .join(".franken-node/state/trust-card-registry.v1.json");
@@ -655,8 +799,8 @@ fn osv_trust_sync_network_egress_requires_authorization() {
     tracing::info!(
         phase = "cap_issued",
         token_id = %cap.token_id(),
-        issued_at_epoch_secs = cap.issued_at_epoch_secs,
-        expires_at_epoch_secs = cap.expires_at_epoch_secs,
+        issued_at_epoch_secs = cap.issued_at_epoch_secs(),
+        expires_at_epoch_secs = cap.expires_at_epoch_secs(),
         "issued RemoteCap token for trust sync"
     );
 
