@@ -1161,50 +1161,52 @@ mod tests {
 
         #[test]
         fn metamorphic_canonical_serializer_round_trip_and_field_order_invariance(seed in 0_u64..4096) {
-            let object_type =
-                TrustObjectType::all()[seed as usize % TrustObjectType::all().len()];
-            let logical_payload = mutated_sample_payload(object_type, seed);
-            let canonical_field_json = serde_json::to_string(&logical_payload).unwrap();
-            let permuted_field_json = object_json_with_permuted_fields(&logical_payload, seed);
+            for (type_index, object_type) in TrustObjectType::all().iter().copied().enumerate() {
+                let case_seed = seed.saturating_add((type_index as u64).saturating_mul(4096));
+                let logical_payload = mutated_sample_payload(object_type, case_seed);
+                let canonical_field_json = serde_json::to_string(&logical_payload).unwrap();
+                let permuted_field_json =
+                    object_json_with_permuted_fields(&logical_payload, case_seed);
 
-            let mut baseline_serializer = CanonicalSerializer::with_all_schemas();
-            let baseline = baseline_serializer
-                .serialize(object_type, canonical_field_json.as_bytes(), "metamorphic-baseline")
-                .unwrap();
+                let mut baseline_serializer = CanonicalSerializer::with_all_schemas();
+                let baseline = baseline_serializer
+                    .serialize(object_type, canonical_field_json.as_bytes(), "metamorphic-baseline")
+                    .unwrap();
 
-            let mut permuted_serializer = CanonicalSerializer::with_all_schemas();
-            let permuted = permuted_serializer
-                .serialize(object_type, permuted_field_json.as_bytes(), "metamorphic-permuted")
-                .unwrap();
+                let mut permuted_serializer = CanonicalSerializer::with_all_schemas();
+                let permuted = permuted_serializer
+                    .serialize(object_type, permuted_field_json.as_bytes(), "metamorphic-permuted")
+                    .unwrap();
 
-            prop_assert_eq!(
-                &permuted,
-                &baseline,
-                "field-order permutation changed canonical serialization for {:?}",
-                object_type
-            );
+                prop_assert_eq!(
+                    &permuted,
+                    &baseline,
+                    "field-order permutation changed canonical serialization for {:?}",
+                    object_type
+                );
 
-            let decoded = permuted_serializer.deserialize(object_type, &permuted).unwrap();
-            let re_encoded = canonical_encode(&decoded).unwrap();
-            prop_assert_eq!(
-                &re_encoded,
-                &permuted,
-                "deserialize(serialize(x)) did not re-encode to the same canonical bytes"
-            );
+                let decoded = permuted_serializer.deserialize(object_type, &permuted).unwrap();
+                let re_encoded = canonical_encode(&decoded).unwrap();
+                prop_assert_eq!(
+                    &re_encoded,
+                    &permuted,
+                    "deserialize(serialize(x)) did not re-encode to the same canonical bytes"
+                );
 
-            let mut round_trip_serializer = CanonicalSerializer::with_all_schemas();
-            let round_trip = round_trip_serializer
-                .round_trip_canonical(
-                    object_type,
-                    permuted_field_json.as_bytes(),
-                    "metamorphic-round-trip",
-                )
-                .unwrap();
-            prop_assert_eq!(
-                &round_trip,
-                &baseline,
-                "round_trip_canonical disagreed with direct canonical serialization"
-            );
+                let mut round_trip_serializer = CanonicalSerializer::with_all_schemas();
+                let round_trip = round_trip_serializer
+                    .round_trip_canonical(
+                        object_type,
+                        permuted_field_json.as_bytes(),
+                        "metamorphic-round-trip",
+                    )
+                    .unwrap();
+                prop_assert_eq!(
+                    &round_trip,
+                    &baseline,
+                    "round_trip_canonical disagreed with direct canonical serialization"
+                );
+            }
         }
     }
 
