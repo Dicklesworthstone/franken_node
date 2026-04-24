@@ -174,8 +174,7 @@ fn replay_coverage_matrix_matches_spec_enumeration_and_summary() -> Result<(), B
     assert_eq!(matrix.bead_id, "bd-2l1k");
     assert_eq!(matrix.trace_id, "trace-bd-2l1k-replay-coverage");
     assert!(
-        (matrix.minimum_required_coverage_ratio - REQUIRED_COVERAGE_RATIO).abs()
-            < f64::EPSILON
+        (matrix.minimum_required_coverage_ratio - REQUIRED_COVERAGE_RATIO).abs() < f64::EPSILON
     );
     assert_eq!(matrix.new_incident_type_sla_days, NEW_INCIDENT_SLA_DAYS);
     assert_eq!(
@@ -188,7 +187,10 @@ fn replay_coverage_matrix_matches_spec_enumeration_and_summary() -> Result<(), B
 
     let verdict = evaluate_gate(&matrix.replay_artifacts, &matrix.required_incident_types);
     assert!(verdict.pass);
-    assert_eq!(matrix.coverage_summary.required_count, verdict.required_count);
+    assert_eq!(
+        matrix.coverage_summary.required_count,
+        verdict.required_count
+    );
     assert_eq!(matrix.coverage_summary.covered_count, verdict.covered_count);
     assert!(
         (matrix.coverage_summary.coverage_ratio - REQUIRED_COVERAGE_RATIO).abs() < f64::EPSILON
@@ -210,7 +212,10 @@ fn replay_coverage_records_match_checked_in_artifacts() -> Result<(), Box<dyn Er
         let artifact = load_artifact(&record.artifact_path)?;
 
         assert_eq!(artifact.incident_type, record.incident_type);
-        assert_eq!(artifact.initial_state_snapshot, record.initial_state_snapshot);
+        assert_eq!(
+            artifact.initial_state_snapshot,
+            record.initial_state_snapshot
+        );
         assert_eq!(artifact.input_sequence, record.input_sequence);
         assert_eq!(
             artifact.expected_behavior_trace,
@@ -261,8 +266,8 @@ fn replay_coverage_records_satisfy_determinism_content_and_sla() -> Result<(), B
 }
 
 #[test]
-fn replay_coverage_verdict_is_order_independent_and_perturbation_sensitive(
-) -> Result<(), Box<dyn Error>> {
+fn replay_coverage_verdict_is_order_independent_and_perturbation_sensitive()
+-> Result<(), Box<dyn Error>> {
     let matrix = load_matrix()?;
     let baseline = evaluate_gate(&matrix.replay_artifacts, &matrix.required_incident_types);
     assert!(baseline.pass);
@@ -275,11 +280,12 @@ fn replay_coverage_verdict_is_order_independent_and_perturbation_sensitive(
     );
 
     let mut perturbed = matrix.replay_artifacts.clone();
-    let removed = perturbed
-        .pop()
-        .ok_or_else(|| {
-            IoError::new(ErrorKind::InvalidData, "expected at least one replay artifact")
-        })?;
+    let removed = perturbed.pop().ok_or_else(|| {
+        IoError::new(
+            ErrorKind::InvalidData,
+            "expected at least one replay artifact",
+        )
+    })?;
     let perturbed_verdict = evaluate_gate(&perturbed, &matrix.required_incident_types);
     assert!(!perturbed_verdict.pass);
     assert_eq!(
