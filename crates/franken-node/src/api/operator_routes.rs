@@ -192,7 +192,7 @@ pub(crate) fn clear_process_start_override_for_tests() {
 #[cfg(any(test, feature = "control-plane"))]
 fn try_lock_process_start_override_with_timeout(
     timeout: Duration
-) -> Result<std::sync::MutexGuard<'_, Option<ProcessStartState>>, &'static str> {
+) -> Result<std::sync::MutexGuard<'static, Option<ProcessStartState>>, &'static str> {
     let start = std::time::Instant::now();
     let mut backoff = Duration::from_millis(1);
 
