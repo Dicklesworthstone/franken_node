@@ -29,6 +29,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+use crate::runtime::clock;
+
 use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_REPORTS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
@@ -358,7 +360,7 @@ impl MigrationKitEcosystem {
             compatibility,
             steps,
             content_hash,
-            created_at: Utc::now().to_rfc3339(),
+            created_at: clock::wall_now().to_rfc3339(),
         };
 
         self.kits.insert(kit_id.clone(), kit);
@@ -597,7 +599,7 @@ impl MigrationKitEcosystem {
             progress_pct: progress,
             overall_status: status,
             content_hash,
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: clock::wall_now().to_rfc3339(),
         };
 
         self.log(
@@ -641,7 +643,7 @@ impl MigrationKitEcosystem {
                 record_id: Uuid::now_v7().to_string(),
                 event_code: event_code.to_string(),
                 kit_id: kit_id.to_string(),
-                timestamp: Utc::now().to_rfc3339(),
+                timestamp: clock::wall_now().to_rfc3339(),
                 trace_id: trace_id.to_string(),
                 details,
             },

@@ -498,6 +498,10 @@ required-features = ["engine"]
 name = "replay_bundle_event_reorder_metamorphic"
 path = "tests/replay_bundle_event_reorder_metamorphic.rs"
 
+[[test]]
+name = "proof_carrying_decode"
+path = "tests/proof_carrying_decode.rs"
+
 [[bench]]
 name = "cuckoo_revocation_bench"
 harness = false

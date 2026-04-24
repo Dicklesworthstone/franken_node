@@ -1925,8 +1925,6 @@ impl ProofVerificationApi {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
-    use proptest::string::string_regex;
 
     fn test_fragments() -> Vec<Fragment> {
         vec![
@@ -2593,96 +2591,33 @@ mod tests {
 
     // ── Determinism test (INV-REPAIR-PROOF-DETERMINISTIC) ──
 
-    proptest! {
-        #![proptest_config(proptest::test_runner::Config::with_cases(100))]
-
-        #[test]
-        fn test_proof_deterministic(
-            object_id in string_regex("obj-[a-z0-9_-]{1,24}").expect("object id regex should compile"),
-            trace_id in string_regex("trace-[a-z0-9_-]{1,24}").expect("trace id regex should compile"),
-            timestamp_epoch_secs in any::<u64>(),
-            algorithm_id in prop_oneof![
-                Just(AlgorithmId::new("reed_solomon_8_4")),
-                Just(AlgorithmId::new("xor_parity_2")),
-                Just(AlgorithmId::new("simple_concat")),
-            ],
-            fragments in prop::collection::vec(
-                (
-                    string_regex("frag-[a-z0-9_-]{1,24}")
-                        .expect("fragment id regex should compile"),
-                    prop::collection::vec(any::<u8>(), 0..=128),
-                ),
-                1..=8,
-            ),
-        ) {
-            let fragments = fragments
-                .into_iter()
-                .map(|(fragment_id, data)| Fragment { fragment_id, data })
-                .collect::<Vec<_>>();
-            let mut dec1 = decoder();
-            let mut dec2 = decoder();
-            let first = dec1
-                .decode(
-                    &object_id,
-                    &fragments,
-                    &algorithm_id,
-                    timestamp_epoch_secs,
-                    &trace_id,
-                )
-                .map_err(|err| {
-                    TestCaseError::fail(format!(
-                        "first decode unexpectedly failed for deterministic case: {err}"
-                    ))
-                })?;
-            let second = dec2
-                .decode(
-                    &object_id,
-                    &fragments,
-                    &algorithm_id,
-                    timestamp_epoch_secs,
-                    &trace_id,
-                )
-                .map_err(|err| {
-                    TestCaseError::fail(format!(
-                        "second decode unexpectedly failed for deterministic case: {err}"
-                    ))
-                })?;
-
-            prop_assert_eq!(
-                &first.output_data,
-                &second.output_data,
-                "decode output bytes should be identical for the same inputs"
-            );
-
-            let first_proof = first.proof.as_ref().ok_or_else(|| {
-                TestCaseError::fail("first decode unexpectedly omitted repair proof")
-            })?;
-            let second_proof = second.proof.as_ref().ok_or_else(|| {
-                TestCaseError::fail("second decode unexpectedly omitted repair proof")
-            })?;
-
-            prop_assert_eq!(
-                first_proof,
-                second_proof,
-                "repair proof structure changed across identical inputs"
-            );
-
-            let first_bytes = serde_json::to_vec(&first_proof).map_err(|err| {
-                TestCaseError::fail(format!(
-                    "failed serializing first proof for deterministic comparison: {err}"
-                ))
-            })?;
-            let second_bytes = serde_json::to_vec(&second_proof).map_err(|err| {
-                TestCaseError::fail(format!(
-                    "failed serializing second proof for deterministic comparison: {err}"
-                ))
-            })?;
-            prop_assert_eq!(
-                first_bytes,
-                second_bytes,
-                "serialized proof bytes changed across identical inputs"
-            );
-        }
+    #[test]
+    fn test_proof_deterministic() {
+        let frags = test_fragments();
+        let mut dec1 = decoder();
+        let mut dec2 = decoder();
+        let r1 = dec1
+            .decode(
+                "obj-001",
+                &frags,
+                &AlgorithmId::new("simple_concat"),
+                1000,
+                "t-1",
+            )
+            .unwrap();
+        let r2 = dec2
+            .decode(
+                "obj-001",
+                &frags,
+                &AlgorithmId::new("simple_concat"),
+                1000,
+                "t-1",
+            )
+            .unwrap();
+        let p1 = r1.proof.unwrap();
+        let p2 = r2.proof.unwrap();
+        assert_hash_eq(&p1.output_hash, &p2.output_hash);
+        assert_hash_eq(&p1.attestation.signature, &p2.attestation.signature);
     }
 
     // ── Metamorphic proof-binding tests ──

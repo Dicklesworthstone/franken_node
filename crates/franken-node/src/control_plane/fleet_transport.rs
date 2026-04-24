@@ -28,6 +28,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::runtime::clock;
+
 pub const FLEET_SHARED_STATE_SCHEMA: &str = "franken-node/fleet-transport-state/v1";
 pub const FLEET_ACTION_LOG_FILE: &str = "actions.jsonl";
 pub const FLEET_NODE_DIR: &str = "nodes";
@@ -488,7 +490,7 @@ impl AsupersyncFleetTransport {
         let event = AsupersyncFleetControlEvent {
             operation: operation.to_string(),
             node_id: self.node_id.clone(),
-            observed_at: Utc::now(),
+            observed_at: clock::wall_now(),
         };
         push_bounded(&mut state.control_events, event, MAX_CONTROL_EVENTS);
     }
@@ -943,7 +945,7 @@ impl FileFleetTransport {
                     temp_path.display()
                 ))
             })?;
-            temp_file.sync_data().map_err(|err| {
+            temp_file.sync_all().map_err(|err| {
                 FleetTransportError::io(format!(
                     "failed syncing temp node status {}: {err}",
                     temp_path.display()
@@ -1026,7 +1028,7 @@ impl FleetTransport for FileFleetTransport {
         self.compact_action_log_if_needed(
             ACTION_LOG_COMPACTION_THRESHOLD_BYTES,
             ACTION_LOG_RETENTION_DAYS,
-            Utc::now(),
+            clock::wall_now(),
         )
     }
 
@@ -1072,7 +1074,7 @@ impl FleetTransport for FileFleetTransport {
                         self.layout.actions_path().display()
                     ))
                 })?;
-                file.sync_data().map_err(|err| {
+                file.sync_all().map_err(|err| {
                     FleetTransportError::io(format!(
                         "failed syncing fleet action log {}: {err}",
                         self.layout.actions_path().display()
@@ -2230,7 +2232,7 @@ mod tests {
                     transport
                         .publish_action(&FleetActionRecord {
                             action_id: format!("worker-{worker}-action-{index}"),
-                            emitted_at: Utc::now(),
+                            emitted_at: clock::wall_now(),
                             action: FleetAction::Release {
                                 zone_id: "prod".to_string(),
                                 incident_id: format!("inc-{worker}-{index}"),
@@ -2698,7 +2700,7 @@ mod tests {
                         let node_result = transport.upsert_node_status(&NodeStatus {
                             zone_id: malicious_zone.clone(),
                             node_id: malicious_node.clone(),
-                            last_seen: Utc::now(),
+                            last_seen: clock::wall_now(),
                             quarantine_version: 1,
                             health: NodeHealth::Healthy,
                         });
@@ -2714,7 +2716,7 @@ mod tests {
                         // Test action validation
                         let action_result = transport.publish_action(&FleetActionRecord {
                             action_id: malicious_action.clone(),
-                            emitted_at: Utc::now(),
+                            emitted_at: clock::wall_now(),
                             action: FleetAction::Release {
                                 zone_id: malicious_zone.clone(),
                                 incident_id: "inc-test".to_string(),
@@ -2748,7 +2750,7 @@ mod tests {
                 let status_result = transport.upsert_node_status(&NodeStatus {
                     zone_id: "prod".to_string(),
                     node_id: "overflow-test".to_string(),
-                    last_seen: Utc::now(),
+                    last_seen: clock::wall_now(),
                     quarantine_version: extreme_version,
                     health: NodeHealth::Healthy,
                 });
@@ -2762,7 +2764,7 @@ mod tests {
 
                 let action_result = transport.publish_action(&FleetActionRecord {
                     action_id: format!("action-overflow-{}", extreme_version),
-                    emitted_at: Utc::now(),
+                    emitted_at: clock::wall_now(),
                     action: FleetAction::Quarantine {
                         zone_id: "prod".to_string(),
                         incident_id: "inc-overflow".to_string(),
@@ -2806,7 +2808,7 @@ mod tests {
             for action_idx in 0..massive_action_count {
                 let action_result = transport.publish_action(&FleetActionRecord {
                     action_id: format!("flood_action_{action_idx:05}"),
-                    emitted_at: Utc::now(),
+                    emitted_at: clock::wall_now(),
                     action: FleetAction::Quarantine {
                         zone_id: "prod".to_string(),
                         incident_id: format!("flood_inc_{action_idx:05}"),
@@ -2828,7 +2830,7 @@ mod tests {
             // Test oversized action rejection
             let oversized_result = transport.publish_action(&FleetActionRecord {
                 action_id: "oversized_action".to_string(),
-                emitted_at: Utc::now(),
+                emitted_at: clock::wall_now(),
                 action: FleetAction::Quarantine {
                     zone_id: "prod".to_string(),
                     incident_id: "oversized_inc".to_string(),
@@ -2877,14 +2879,14 @@ mod tests {
                             let _ = transport.upsert_node_status(&NodeStatus {
                                 zone_id: "prod".to_string(),
                                 node_id: node_id.clone(),
-                                last_seen: Utc::now(),
+                                last_seen: clock::wall_now(),
                                 quarantine_version: op_id as u64,
                                 health: NodeHealth::Healthy,
                             });
                         } else {
                             let _ = transport.publish_action(&FleetActionRecord {
                                 action_id: action_id.clone(),
-                                emitted_at: Utc::now(),
+                                emitted_at: clock::wall_now(),
                                 action: FleetAction::Release {
                                     zone_id: "prod".to_string(),
                                     incident_id: format!("inc-{thread_id}-{op_id}"),
@@ -2955,7 +2957,7 @@ mod tests {
                 let status_result = transport.upsert_node_status(&NodeStatus {
                     zone_id: "prod".to_string(),
                     node_id: malicious_path.to_string(),
-                    last_seen: Utc::now(),
+                    last_seen: clock::wall_now(),
                     quarantine_version: 1,
                     health: NodeHealth::Healthy,
                 });
@@ -3087,7 +3089,7 @@ mod tests {
                 // Test in various string fields
                 let action_result = transport.publish_action(&FleetActionRecord {
                     action_id: format!("injection-test-{}", malicious_string.len()),
-                    emitted_at: Utc::now(),
+                    emitted_at: clock::wall_now(),
                     action: FleetAction::Quarantine {
                         zone_id: "prod".to_string(),
                         incident_id: malicious_string.to_string(),
@@ -3108,7 +3110,7 @@ mod tests {
                 let status_result = transport.upsert_node_status(&NodeStatus {
                     zone_id: "prod".to_string(),
                     node_id: format!("node-{}", malicious_string.len()),
-                    last_seen: Utc::now(),
+                    last_seen: clock::wall_now(),
                     quarantine_version: 1,
                     health: NodeHealth::Healthy,
                 });
@@ -3306,8 +3308,8 @@ mod tests {
             action_id: "large-action".to_string(),
             node_id: "node-1".to_string(),
             action_type: FleetActionType::Start,
-            requested_at: Utc::now(),
-            emitted_at: Utc::now(),
+            requested_at: clock::wall_now(),
+            emitted_at: clock::wall_now(),
             timeout_secs: 30,
         };
 

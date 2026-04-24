@@ -13,6 +13,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+use crate::runtime::clock;
+
 const MAX_INTERACTIONS: usize = 4096;
 
 // ---------------------------------------------------------------------------
@@ -520,7 +522,7 @@ impl UpdateCopilot {
             requires_acknowledgement: requires_ack,
             playbook,
             summary,
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: clock::wall_now().to_rfc3339(),
         };
 
         // Log the interaction
@@ -533,7 +535,7 @@ impl UpdateCopilot {
             interaction_id: Uuid::now_v7().to_string(),
             event_code: event_code.to_string(),
             proposal_id: proposal.proposal_id.clone(),
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: clock::wall_now().to_rfc3339(),
             trace_id: trace_id.to_string(),
             recommendation_id: Some(recommendation.recommendation_id.clone()),
             operator_decision: None,
@@ -568,7 +570,7 @@ impl UpdateCopilot {
             interaction_id: Uuid::now_v7().to_string(),
             event_code: event_code.to_string(),
             proposal_id: receipt.proposal_id.clone(),
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: clock::wall_now().to_rfc3339(),
             trace_id: trace_id.to_string(),
             recommendation_id: None,
             operator_decision: Some(receipt.decision),
@@ -929,7 +931,7 @@ mod tests {
             operator_identity: "admin@example.com".to_string(),
             decision: AcknowledgementDecision::Approved,
             reason: "Reviewed and accepted risk".to_string(),
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: clock::wall_now().to_rfc3339(),
             signature_hex: "deadbeef01020304".to_string(),
         }
     }
@@ -1094,7 +1096,7 @@ mod tests {
             operator_identity: String::new(),
             decision: AcknowledgementDecision::Approved,
             reason: "ok".to_string(),
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: clock::wall_now().to_rfc3339(),
             signature_hex: "abc".to_string(),
         };
         assert!(ack.validate().is_err());
@@ -1108,7 +1110,7 @@ mod tests {
             operator_identity: "admin".to_string(),
             decision: AcknowledgementDecision::Approved,
             reason: "ok".to_string(),
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: clock::wall_now().to_rfc3339(),
             signature_hex: String::new(),
         };
         assert!(ack.validate().is_err());
@@ -1498,7 +1500,7 @@ mod tests {
             "operator_identity": "admin@example.com",
             "decision": "approved",
             "reason": "ok",
-            "timestamp": Utc::now().to_rfc3339()
+            "timestamp": clock::wall_now().to_rfc3339()
         });
 
         let err = serde_json::from_value::<AcknowledgementReceipt>(json).unwrap_err();
@@ -1527,7 +1529,7 @@ mod tests {
         let json = serde_json::json!({
             "interaction_id": "interaction-missing-event",
             "proposal_id": "proposal-1",
-            "timestamp": Utc::now().to_rfc3339(),
+            "timestamp": clock::wall_now().to_rfc3339(),
             "trace_id": "trace-1",
             "recommendation_id": null,
             "operator_decision": null,

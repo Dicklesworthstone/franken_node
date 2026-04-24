@@ -807,7 +807,17 @@ impl SpillWriter {
                 })?;
                 file.flush().map_err(|e| LedgerError::SpillError {
                     reason: format!("flush: {e}"),
-                })?;
+                })
+                // NOTE: Removed per-record sync_all - use sync_durability() for batch sync
+            }
+        }
+    }
+
+    /// Sync accumulated writes to durable storage for critical evidence preservation.
+    fn sync_durability(&mut self) -> Result<(), LedgerError> {
+        match self {
+            Self::Generic(_) => Ok(()), // No-op for generic writers
+            Self::File(file) => {
                 file.sync_all().map_err(|e| LedgerError::SpillError {
                     reason: format!("sync: {e}"),
                 })
@@ -886,6 +896,14 @@ impl LabSpillMode {
 
         eprintln!("{}", format_ledger_spill_event(id, json_line.len()));
         Ok(id)
+    }
+
+    /// Sync all accumulated evidence entries to durable storage.
+    ///
+    /// Call this after batches of critical evidence entries to ensure durability.
+    /// Individual append() calls are buffered for performance.
+    pub fn sync_evidence_durability(&mut self) -> Result<(), LedgerError> {
+        self.spill_writer.sync_durability()
     }
 
     pub fn ledger(&self) -> &EvidenceLedger {

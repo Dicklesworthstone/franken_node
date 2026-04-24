@@ -5,7 +5,7 @@
 //! displayed via CLI.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs::{File, OpenOptions, TryLockError},
     io::Write,
     path::{Path, PathBuf},

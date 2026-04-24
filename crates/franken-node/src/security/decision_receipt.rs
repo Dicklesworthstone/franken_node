@@ -18,6 +18,8 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+
+use crate::runtime::clock;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -179,7 +181,7 @@ impl Receipt {
             receipt_id: Uuid::now_v7().to_string(),
             action_name: action_name.to_string(),
             actor_identity: actor_identity.to_string(),
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: clock::wall_now().to_rfc3339(),
             input_hash: hash_canonical_json(input)?,
             output_hash: hash_canonical_json(output)?,
             decision,

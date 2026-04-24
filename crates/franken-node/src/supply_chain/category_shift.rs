@@ -13,6 +13,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::runtime::clock;
 use crate::security::constant_time;
 use crate::tools::benchmark_suite::{BenchmarkDimension, run_default_suite};
 
@@ -2796,7 +2797,7 @@ mod tests {
     #[test]
     fn real_benchmark_metrics_integration() {
         // Test that the benchmark metrics function uses real data when available
-        let now_secs = chrono::Utc::now().timestamp() as u64;
+        let now_secs = clock::wall_now().timestamp() as u64;
 
         // This may fail if benchmark suite can't run, but should not panic
         match generate_benchmark_metrics(now_secs) {

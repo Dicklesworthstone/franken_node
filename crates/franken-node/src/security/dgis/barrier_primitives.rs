@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use uuid::Uuid;
 
+use crate::runtime::clock;
 use crate::security::constant_time;
 
 // ---------------------------------------------------------------------------
@@ -491,7 +492,7 @@ impl BarrierAuditReceipt {
             node_id: barrier.node_id.clone(),
             barrier_type: barrier.barrier_type,
             action,
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: clock::wall_now().to_rfc3339(),
             trace_id: trace_id.to_string(),
             details,
             override_justification: None,
@@ -537,7 +538,7 @@ impl RolloutState {
     pub fn new(phase: RolloutPhase) -> Self {
         Self {
             current_phase: phase,
-            phase_entered_at: Utc::now().to_rfc3339(),
+            phase_entered_at: clock::wall_now().to_rfc3339(),
             success_count: 0,
             error_count: 0,
             total_count: 0,
@@ -1052,7 +1053,7 @@ impl BarrierEngine {
 
         let old_phase = state.current_phase;
         state.current_phase = next_phase;
-        state.phase_entered_at = Utc::now().to_rfc3339();
+        state.phase_entered_at = clock::wall_now().to_rfc3339();
         state.success_count = 0;
         state.error_count = 0;
         state.total_count = 0;
@@ -1090,7 +1091,7 @@ impl BarrierEngine {
 
         let old_phase = state.current_phase;
         state.current_phase = RolloutPhase::Canary;
-        state.phase_entered_at = Utc::now().to_rfc3339();
+        state.phase_entered_at = clock::wall_now().to_rfc3339();
         state.success_count = 0;
         state.error_count = 0;
         state.total_count = 0;
@@ -1199,7 +1200,7 @@ impl BarrierEngine {
             }
         })?;
 
-        if Utc::now() >= expiry.with_timezone(&Utc) {
+        if clock::wall_now() >= expiry.with_timezone(&Utc) {
             self.push_expired_receipt(barrier, trace_id, "now >= expires_at");
             return Err(BarrierError::BarrierExpired {
                 barrier_id: barrier.barrier_id.clone(),
@@ -1273,7 +1274,7 @@ impl BarrierEngine {
             node_id: node_id.to_string(),
             barrier_type,
             action: BarrierAction::NotApplicable,
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: clock::wall_now().to_rfc3339(),
             trace_id: trace_id.to_string(),
             details,
             override_justification: None,
@@ -1356,7 +1357,7 @@ mod tests {
                 denied_capabilities: vec!["network_raw".to_string(), "fs_write_root".to_string()],
                 risk_threshold: RiskLevel::High,
             }),
-            applied_at: Utc::now().to_rfc3339(),
+            applied_at: clock::wall_now().to_rfc3339(),
             expires_at: None,
             source_plan_id: None,
         }
@@ -1372,7 +1373,7 @@ mod tests {
                 blocked_capabilities: vec!["exec_child".to_string(), "network_raw".to_string()],
                 allow_list: vec!["network_raw".to_string()],
             }),
-            applied_at: Utc::now().to_rfc3339(),
+            applied_at: clock::wall_now().to_rfc3339(),
             expires_at: None,
             source_plan_id: None,
         }
@@ -1389,7 +1390,7 @@ mod tests {
                 signature_pubkey_hex: "deadbeef".to_string(),
                 expected_digest: expected_digest.to_string(),
             }),
-            applied_at: Utc::now().to_rfc3339(),
+            applied_at: clock::wall_now().to_rfc3339(),
             expires_at: None,
             source_plan_id: None,
         }
@@ -1410,7 +1411,7 @@ mod tests {
                 progression_criteria: criteria,
                 auto_rollback_on_breach: true,
             }),
-            applied_at: Utc::now().to_rfc3339(),
+            applied_at: clock::wall_now().to_rfc3339(),
             expires_at: None,
             source_plan_id: None,
         }
@@ -1426,7 +1427,7 @@ mod tests {
             override_id: Uuid::now_v7().to_string(),
             principal_identity: "admin@example.com".to_string(),
             reason: "emergency fix".to_string(),
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: clock::wall_now().to_rfc3339(),
             signature_hex: "deadbeef01020304".to_string(),
         }
     }
@@ -1614,7 +1615,7 @@ mod tests {
         let mut engine = BarrierEngine::new();
         let barrier = with_expiry(
             make_rollout_barrier("expired-rollout"),
-            Utc::now().to_rfc3339(),
+            clock::wall_now().to_rfc3339(),
         );
         let barrier_id = barrier.barrier_id.clone();
         let trace = make_trace_id();
@@ -1707,7 +1708,7 @@ mod tests {
             override_id: Uuid::now_v7().to_string(),
             principal_identity: "admin@example.com".to_string(),
             reason: "emergency fix".to_string(),
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: clock::wall_now().to_rfc3339(),
             signature_hex: String::new(), // empty!
         };
 
@@ -1727,7 +1728,7 @@ mod tests {
             override_id: Uuid::now_v7().to_string(),
             principal_identity: "admin@example.com".to_string(),
             reason: "emergency production fix".to_string(),
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: clock::wall_now().to_rfc3339(),
             signature_hex: "deadbeef01020304".to_string(),
         };
 
@@ -1877,7 +1878,7 @@ mod tests {
                     progression_criteria: criteria,
                     auto_rollback_on_breach: true,
                 }),
-                applied_at: Utc::now().to_rfc3339(),
+                applied_at: clock::wall_now().to_rfc3339(),
                 expires_at: None,
                 source_plan_id: None,
             };
@@ -1912,7 +1913,7 @@ mod tests {
 
         let plan = BarrierPlan {
             plan_id: "plan-001".to_string(),
-            created_at: Utc::now().to_rfc3339(),
+            created_at: clock::wall_now().to_rfc3339(),
             barriers: vec![
                 make_sandbox_barrier("plan-node-1", SandboxTier::Strict),
                 make_firewall_barrier("plan-node-2", "boundary-plan"),
@@ -1939,7 +1940,7 @@ mod tests {
             .collect();
         let plan = BarrierPlan {
             plan_id: "oversized-plan".to_string(),
-            created_at: Utc::now().to_rfc3339(),
+            created_at: clock::wall_now().to_rfc3339(),
             barriers,
         };
 
@@ -2310,7 +2311,7 @@ mod tests {
         second.barrier_id = duplicate_id;
         let plan = BarrierPlan {
             plan_id: "plan-with-duplicate".to_string(),
-            created_at: Utc::now().to_rfc3339(),
+            created_at: clock::wall_now().to_rfc3339(),
             barriers: vec![first, second],
         };
 
