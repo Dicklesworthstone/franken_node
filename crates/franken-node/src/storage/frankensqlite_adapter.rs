@@ -1,8 +1,13 @@
-//! bd-2tua: frankensqlite adapter layer for franken_node persistence.
+//! bd-2tua: frankensqlite adapter conformance model for franken_node persistence.
 //!
-//! Routes all persistence APIs through frankensqlite with tiered durability:
-//! - **Tier 1** (WAL, crash-safe): fencing tokens, lease state, rollout state, audit logs
-//! - **Tier 2** (periodic flush): snapshot state, CRDT merge state
+//! This module is an in-memory model of the planned frankensqlite adapter
+//! contract. It exercises the adapter API, tier mapping, authorization,
+//! schema-version, replay, and crash-recovery semantics, but it is not the live
+//! frankensqlite-backed durable store yet.
+//!
+//! Modelled target durability tiers:
+//! - **Tier 1** (target WAL, crash-safe): fencing tokens, lease state, rollout state, audit logs
+//! - **Tier 2** (target periodic flush): snapshot state, CRDT merge state
 //! - **Tier 3** (ephemeral): cache, transient metrics
 //!
 //! # Event Codes
@@ -16,7 +21,7 @@
 //!
 //! # Invariants
 //!
-//! - **INV-FSA-TIER1-DURABLE**: Tier 1 writes survive simulated crash
+//! - **INV-FSA-TIER1-DURABLE**: Tier 1 writes survive simulated crash in the model
 //! - **INV-FSA-REPLAY-DETERMINISTIC**: Replay produces identical state
 //! - **INV-FSA-CONCURRENT-SAFE**: Concurrent access causes no corruption
 //! - **INV-FSA-SCHEMA-VERSIONED**: Schema migrations are versioned and reversible
@@ -69,9 +74,9 @@ pub const INV_FSA_SCHEMA_VERSIONED: &str = "INV-FSA-SCHEMA-VERSIONED";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum DurabilityTier {
-    /// WAL-mode, crash-safe. Survives process death.
+    /// Target WAL-mode, crash-safe tier. In this model, survives simulated crash recovery.
     Tier1,
-    /// Periodic flush. Survives graceful shutdown.
+    /// Target periodic-flush tier. In this model, participates in deterministic replay.
     Tier2,
     /// Ephemeral / memory-backed. Lost on restart.
     Tier3,
@@ -683,7 +688,7 @@ impl FrankensqliteAdapter {
         results
     }
 
-    /// Simulate crash recovery for Tier 1 data.
+    /// Simulate crash recovery for Tier 1 data in the in-memory conformance model.
     pub fn crash_recovery(&mut self) -> usize {
         self.emit_event(
             event_codes::FRANKENSQLITE_CRASH_RECOVERY,
