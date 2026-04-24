@@ -14,7 +14,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_CONTROL_EVENTS, MAX_NODES_CAP};
+use crate::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
+#[cfg(feature = "asupersync-transport")]
+use crate::capacity_defaults::aliases::MAX_CONTROL_EVENTS;
 use chrono::{DateTime, Utc};
 use ed25519_dalek::Signer;
 use rand::Rng;

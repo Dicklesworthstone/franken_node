@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 use std::sync::RwLock;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use super::error::ApiError;

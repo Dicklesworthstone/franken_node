@@ -6,7 +6,6 @@
 //!
 //! **Bead:** bd-2ms — Section 10.10 (FCP-Inspired Hardening)
 
-use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
