@@ -711,7 +711,7 @@ impl ChallengeFlowController {
 
                 // Verify proof timestamp is within acceptable bounds
                 let proof_age_ms = timestamp_ms.saturating_sub(proof.submitted_at_ms);
-                if proof_age_ms > 3600_000 {
+                if proof_age_ms >= 3600_000 {
                     // 1 hour max age
                     return Err(ChallengeError::new(
                         ERR_PROOF_INVALID,
@@ -3055,5 +3055,36 @@ mod tests {
         let final_metrics = ctrl.metrics();
         assert!(final_metrics.challenges_issued_total > MAX_CHALLENGES as u64);
         assert!(final_metrics.challenges_resolved_total > 0);
+    }
+
+    #[test]
+    fn test_proof_max_age_exact_boundary_rejection() {
+        // Regression test for bd-3hqpz: proof exactly at max age (3600_000ms) should be rejected
+        let mut ctrl = ChallengeController::new();
+        let challenge_type = "boundary_test";
+        let challenger = "test_challenger";
+
+        // Issue challenge at time 0
+        let challenge_result = ctrl.issue_challenge(challenge_type, challenger, 0);
+        assert!(challenge_result.is_ok());
+
+        let challenge_id = challenge_result.unwrap();
+
+        // Submit proof exactly 1 hour (3600_000ms) later - should be rejected
+        let proof = ChallengeProof {
+            challenge_id: challenge_id.clone(),
+            response_data: vec![1, 2, 3],
+            submitted_at_ms: 0, // Proof submitted at time 0
+        };
+
+        // Verify at exactly 3600_000ms later (exact boundary)
+        let result = ctrl.verify_proof(proof, challenge_type, 3600_000);
+
+        // Should be rejected due to >= comparison (fail-closed expiry)
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.error_code() == ERR_PROOF_INVALID);
+        assert!(err.message().contains("too old"));
+        assert!(err.message().contains("3600000ms")); // age should be exactly 3600000ms
     }
 }
