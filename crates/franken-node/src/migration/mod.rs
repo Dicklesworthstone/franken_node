@@ -5460,4 +5460,32 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn bd_3uajr_regression_rollback_path_has_unsafe_separator() {
+        // Regression test for bd-3uajr: ensure rollback_path_has_unsafe_separator function
+        // properly detects backslash separators in rollback paths (commit 3066d7f3, bd-wdjiw)
+
+        // Should detect backslash in simple path
+        assert!(rollback_path_has_unsafe_separator("src\\file.js"));
+
+        // Should detect backslash in nested path
+        assert!(rollback_path_has_unsafe_separator("src\\components\\App.tsx"));
+
+        // Should detect backslash in parent traversal attempts
+        assert!(rollback_path_has_unsafe_separator("..\\..\\etc\\passwd"));
+
+        // Should detect backslash mixed with forward slashes
+        assert!(rollback_path_has_unsafe_separator("src/utils\\helper.js"));
+
+        // Should NOT flag safe paths with forward slashes
+        assert!(!rollback_path_has_unsafe_separator("src/file.js"));
+        assert!(!rollback_path_has_unsafe_separator("src/components/App.tsx"));
+        assert!(!rollback_path_has_unsafe_separator("../parent/file.js"));
+
+        // Should NOT flag empty or single character paths
+        assert!(!rollback_path_has_unsafe_separator(""));
+        assert!(!rollback_path_has_unsafe_separator("a"));
+        assert!(!rollback_path_has_unsafe_separator("/"));
+    }
 }
