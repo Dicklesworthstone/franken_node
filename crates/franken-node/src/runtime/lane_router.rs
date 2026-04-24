@@ -513,6 +513,11 @@ impl LaneRouter {
                 ),
             });
         }
+        if operation_id.chars().any(char::is_control) {
+            return Err(LaneRouterError::InvalidConfig {
+                detail: "operation_id must not contain control characters".to_string(),
+            });
+        }
         if self.active.contains_key(operation_id)
             || self.queued_operation_ids.contains(operation_id)
         {
@@ -2552,31 +2557,41 @@ mod tests {
         let mut router = LaneRouter::from_runtime_config(&runtime_config()).expect("router");
         let cx = cx_with_scope("lane.background");
 
-        // Test problematic characters in operation IDs
-        let problematic_ids = vec![
+        // Control bytes must never enter active state, queues, or audit records.
+        let control_ids = [
             "op\0null",                                                   // Null byte
             "op\x01\x02control",                                          // Control characters
             "op\r\ninjection",                                            // Line breaks
             &format!("op\x7F{}", String::from_utf8_lossy(&[0x80, 0xFF])), // High bytes and DEL
-            "op\u{FFFE}invalid",                                          // Unicode non-character
-            "op\u{FFFF}invalid",                                          // Unicode non-character
-            "op\u{202E}rtl", // RTL override (potential display corruption)
-            "op\u{200E}ltr", // LTR mark
         ];
 
-        for op_id in &problematic_ids {
+        for op_id in control_ids {
+            let result = router.assign_operation(&cx, op_id, None, 1);
+            assert!(
+                matches!(result, Err(LaneRouterError::InvalidConfig { .. })),
+                "control-character operation ID should be rejected: {op_id:?}"
+            );
+        }
+
+        // Non-control Unicode identifiers are allowed when they otherwise satisfy bounds.
+        let unicode_ids = vec![
+            "op\u{FFFE}invalid", // Unicode non-character
+            "op\u{FFFF}invalid", // Unicode non-character
+            "op\u{202E}rtl",     // RTL override (potential display corruption)
+            "op\u{200E}ltr",     // LTR mark
+        ];
+
+        for op_id in &unicode_ids {
             if op_id.len() <= MAX_OPERATION_ID_LEN {
-                // Should either handle gracefully or reject cleanly
                 let result = router.assign_operation(&cx, op_id, None, 1);
 
                 match result {
                     Ok(outcome) => {
-                        // If accepted, should complete without corruption
                         if !outcome.queued {
                             let complete_result = router.complete_operation(op_id, 2, false);
                             assert!(
                                 complete_result.is_ok(),
-                                "Control char operation should complete cleanly"
+                                "Unicode operation should complete cleanly"
                             );
                         }
                     }
