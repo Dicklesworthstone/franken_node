@@ -461,6 +461,10 @@ name = "engine_dispatcher_profile_conformance"
 path = "tests/engine_dispatcher_profile_conformance.rs"
 required-features = ["engine"]
 
+[[test]]
+name = "replay_bundle_event_reorder_metamorphic"
+path = "tests/replay_bundle_event_reorder_metamorphic.rs"
+
 [[bench]]
 name = "cuckoo_revocation_bench"
 harness = false
