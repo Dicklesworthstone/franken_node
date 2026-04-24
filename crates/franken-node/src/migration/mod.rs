@@ -4227,6 +4227,20 @@ mod tests {
                 second.rollback_entries.is_empty(),
                 "idempotent second rewrite must not add rollback entries"
             );
+
+            let dry_run_after_apply = run_rewrite(project, false).expect("dry run after apply");
+            let after_dry_run = project_text_snapshot(project);
+            prop_assert_eq!(
+                &after_dry_run,
+                &after_second,
+                "dry-run rewrite after fixed point mutated the project snapshot for seed {seed}"
+            );
+            prop_assert_eq!(dry_run_after_apply.rewrites_planned, 0);
+            prop_assert_eq!(dry_run_after_apply.rewrites_applied, 0);
+            prop_assert!(
+                dry_run_after_apply.rollback_entries.is_empty(),
+                "dry-run at the rewrite fixed point must not propose rollback entries"
+            );
         }
     }
 
