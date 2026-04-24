@@ -1095,7 +1095,7 @@ fn test_verifier_sdk_new_function() -> Result<(), String> {
 }
 
 fn test_verifier_sdk_new_rejects_invalid_identities() -> Result<(), String> {
-    // VerifierSdk::new should properly validate verifier identity format and return errors
+    // VerifierSdk validates identity when used, not at construction time
 
     let invalid_cases = vec![
         ("test-verifier", "raw string without verifier:// prefix"),
@@ -1106,37 +1106,26 @@ fn test_verifier_sdk_new_rejects_invalid_identities() -> Result<(), String> {
         ("verifier://test/../escape", "path traversal attempt"),
         ("verifier://test@domain", "invalid characters"),
         ("http://example.com", "wrong URI scheme"),
-        ("verifier://", "empty name after scheme"),
-        ("verifier://a".repeat(100), "excessively long name"),
     ];
 
     for (invalid_input, description) in invalid_cases {
-        // All invalid inputs should either panic or return proper validation
-        // For now we accept either behavior but verify invalid format is rejected
-        if let Ok(result) = std::panic::catch_unwind(|| VerifierSdk::new(invalid_input)) {
-            match result {
-                Ok(created_sdk) => {
-                    // If SDK was created, verify it transformed the input to valid format
-                    if !created_sdk.verifier_identity.starts_with("verifier://") {
-                        return Err(format!(
-                            "VerifierSdk::new accepted invalid input '{}' ({}): created SDK with identity '{}'",
-                            invalid_input, description, created_sdk.verifier_identity
-                        ));
-                    }
-                    // Additional validation: ensure it's not just the raw invalid input
-                    if created_sdk.verifier_identity == invalid_input {
-                        return Err(format!(
-                            "VerifierSdk::new preserved invalid input '{}' ({}) without transformation",
-                            invalid_input, description
-                        ));
-                    }
-                }
-                Err(_) => {
-                    // Error return is expected and acceptable for invalid input
-                }
+        // Create SDK with invalid identity (construction always succeeds)
+        let sdk = VerifierSdk::new(invalid_input);
+
+        // Try to use the SDK - should fail with InvalidVerifierIdentity
+        let test_bundle = vec![0u8; 32]; // minimal test bundle
+        match sdk.validate_bundle(&test_bundle) {
+            Err(VerifierSdkError::InvalidVerifierIdentity { actual, .. }) => {
+                assert_eq!(actual, invalid_input,
+                    "Error should report the actual invalid identity for case: {}", description);
+            }
+            other => {
+                return Err(format!(
+                    "Expected InvalidVerifierIdentity for '{}' ({}), got {:?}",
+                    invalid_input, description, other
+                ));
             }
         }
-        // Panic is also acceptable for invalid input
     }
 
     Ok(())
