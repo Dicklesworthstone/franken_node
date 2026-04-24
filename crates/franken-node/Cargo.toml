@@ -352,6 +352,10 @@ name = "doctor_close_condition_conformance"
 path = "tests/doctor_close_condition_conformance.rs"
 
 [[test]]
+name = "doctor_json_schema_conformance"
+path = "tests/doctor_json_schema_conformance.rs"
+
+[[test]]
 name = "close_condition_path_gate_regressions"
 path = "tests/close_condition_path_gate_regressions.rs"
 
