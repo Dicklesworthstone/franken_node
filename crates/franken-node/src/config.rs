@@ -2347,10 +2347,39 @@ fn default_runtime_lanes(
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeLaneConfig {
+    /// Maximum number of concurrent tasks that can execute in this lane.
+    ///
+    /// Controls the parallelism level for the lane. Higher values allow more
+    /// concurrent execution but consume more resources. Typical range: 4-16.
+    /// Default varies by lane type (e.g., 8 for high-priority, 4 for background).
     pub max_concurrent: usize,
+
+    /// Priority weight for scheduler lane ordering.
+    ///
+    /// Higher values get scheduled before lower values when multiple lanes have
+    /// pending tasks. Used for proportional scheduling algorithms.
+    /// Typical range: 20-100, where 100 = highest priority, 20 = background.
     pub priority_weight: u32,
+
+    /// Maximum number of tasks that can be queued in this lane.
+    ///
+    /// When this limit is reached, the overflow_policy determines behavior.
+    /// Higher values provide more buffering but consume more memory.
+    /// Typical range: 16-32 depending on lane priority and expected load.
     pub queue_limit: usize,
+
+    /// Timeout in milliseconds for enqueue operations when using EnqueueWithTimeout policy.
+    ///
+    /// Maximum time to wait when trying to enqueue a task in a full lane.
+    /// Only applies when overflow_policy is EnqueueWithTimeout.
+    /// Typical range: 25-100ms, with lower values for high-priority lanes.
     pub enqueue_timeout_ms: u64,
+
+    /// Policy for handling queue overflow when queue_limit is exceeded.
+    ///
+    /// - Reject: Immediately reject new tasks when queue is full
+    /// - EnqueueWithTimeout: Wait up to enqueue_timeout_ms for space
+    /// - ShedOldest: Remove oldest queued task to make room for new one
     pub overflow_policy: LaneOverflowPolicy,
 }
 
