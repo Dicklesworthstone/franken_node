@@ -48,6 +48,14 @@ fn update_f64_mac(mac: &mut Hmac<Sha256>, value: f64) {
     mac.update(&value.to_le_bytes());
 }
 
+fn finite_signed_posterior(posterior: f64, revoke_threshold: f64) -> f64 {
+    if posterior.is_finite() {
+        posterior
+    } else {
+        revoke_threshold
+    }
+}
+
 #[derive(Debug, Clone, thiserror::Error, PartialEq)]
 pub enum QuarantineControllerError {
     #[error("threshold `{name}` must be in [0.0, 1.0], got {value}")]
@@ -235,6 +243,7 @@ impl QuarantineController {
         trace_id: &str,
     ) -> Option<ControlDecision> {
         let action = self.action_for_posterior(posterior)?;
+        let signed_posterior = finite_signed_posterior(posterior, self.policy.revoke);
         let threshold = match action {
             ControlAction::Throttle => self.policy.throttle,
             ControlAction::Isolate => self.policy.isolate,
@@ -247,7 +256,7 @@ impl QuarantineController {
             event_code: EVD_QUAR_CTRL_001.to_string(),
             principal_id: principal_id.to_string(),
             action,
-            posterior,
+            posterior: signed_posterior,
             threshold,
             policy_version: policy_version.clone(),
             policy_hash: policy_hash.clone(),
@@ -262,7 +271,7 @@ impl QuarantineController {
         Some(ControlDecision {
             principal_id: principal_id.to_string(),
             action,
-            posterior,
+            posterior: signed_posterior,
             threshold,
             policy_version,
             policy_hash,
@@ -330,6 +339,9 @@ impl QuarantineController {
             return false;
         }
         if !constant_time::ct_eq(&entry.policy_hash, &self.policy_hash()) {
+            return false;
+        }
+        if !entry.posterior.is_finite() || !entry.threshold.is_finite() {
             return false;
         }
         if self.action_for_posterior(entry.posterior) != Some(entry.action) {
@@ -1011,8 +1023,47 @@ mod quarantine_controller_additional_negative_tests {
             .expect("non-finite posterior must still produce a control decision");
 
         assert_eq!(decision.action, ControlAction::Revoke);
+        assert!(decision.posterior.is_finite());
+        assert_eq!(decision.posterior, controller.policy().revoke);
+        assert!(decision.signed_evidence.posterior.is_finite());
+        assert_eq!(decision.signed_evidence.posterior, controller.policy().revoke);
         assert_eq!(decision.threshold, controller.policy().revoke);
         assert!(controller.verify_signature(&decision.signed_evidence));
+        serde_json::to_string(&decision).expect("clamped non-finite posterior should serialize");
+    }
+
+    #[test]
+    fn decide_for_infinite_posteriors_clamps_before_signing() {
+        let controller = controller();
+
+        for (principal_id, posterior) in [
+            ("ext:positive-inf", f64::INFINITY),
+            ("ext:negative-inf", f64::NEG_INFINITY),
+        ] {
+            let decision = controller
+                .decide_for_posterior(principal_id, posterior, "trace-inf")
+                .expect("non-finite posterior must fail closed to revoke");
+
+            assert_eq!(decision.action, ControlAction::Revoke);
+            assert_eq!(decision.posterior, controller.policy().revoke);
+            assert_eq!(decision.signed_evidence.posterior, controller.policy().revoke);
+            assert!(decision.posterior.is_finite());
+            assert!(decision.signed_evidence.posterior.is_finite());
+            assert!(controller.verify_decision(&decision));
+            serde_json::to_string(&decision)
+                .expect("clamped infinite posterior should serialize cleanly");
+        }
+    }
+
+    #[test]
+    fn signature_verification_rejects_non_finite_signed_posterior() {
+        let controller = controller();
+        let mut decision = controller
+            .decide_for_posterior("ext:a", 0.91, "trace-a")
+            .expect("decision");
+        decision.signed_evidence.posterior = f64::NAN;
+
+        assert!(!controller.verify_signature(&decision.signed_evidence));
     }
 
     #[test]

@@ -302,6 +302,10 @@ pub enum VerifierSdkError {
         expected: String,
         actual: String,
     },
+    BoundedStateExceeded {
+        surface: &'static str,
+        max: usize,
+    },
     ResultSignatureMismatch {
         expected: String,
         actual: String,
@@ -370,6 +374,10 @@ impl fmt::Display for VerifierSdkError {
                 formatter,
                 "verification session step signature mismatch at index {step_index}: expected={expected}, actual={actual}"
             ),
+            Self::BoundedStateExceeded { surface, max } => write!(
+                formatter,
+                "verifier SDK bounded state exceeded for {surface}: max={max}"
+            ),
             Self::ResultSignatureMismatch { expected, actual } => write!(
                 formatter,
                 "verifier SDK result signature mismatch: expected={expected}, actual={actual}"
@@ -405,6 +413,10 @@ const TRANSPARENCY_MERKLE_PARENT_DOMAIN: &[u8] =
     b"frankenengine-verifier-sdk:transparency-merkle-parent:v1:";
 const MAX_VERIFIER_IDENTITY_NAME_LEN: usize = 255;
 const MAX_SESSION_ID_LEN: usize = 255;
+/// Maximum recorded steps retained in one verifier SDK session.
+pub const MAX_VERIFICATION_SESSION_STEPS: usize = 1024;
+/// Maximum entries accepted in one in-memory verifier SDK transparency log.
+pub const MAX_TRANSPARENCY_LOG_ENTRIES: usize = 1024;
 static SESSION_NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Top-level facade for external verifier integrations.
@@ -526,17 +538,28 @@ impl VerifierSdk {
     ) -> Result<TransparencyLogEntry, VerifierSdkError> {
         self.validate_current_verifier_identity()?;
         self.verify_result_belongs_to_current_verifier(result)?;
+        ensure_bounded_capacity(log.len(), MAX_TRANSPARENCY_LOG_ENTRIES, "transparency_log")?;
         let result_hash = transparency_log_leaf_hash(result)?;
         let mut leaf_hashes: Vec<String> =
             log.iter().map(|entry| entry.result_hash.clone()).collect();
-        leaf_hashes.push(result_hash.clone());
+        push_bounded(
+            &mut leaf_hashes,
+            result_hash.clone(),
+            MAX_TRANSPARENCY_LOG_ENTRIES,
+            "transparency_log_leaf_hashes",
+        )?;
         let entry = TransparencyLogEntry {
             result_hash: result_hash.clone(),
             timestamp: current_utc_timestamp(),
             verifier_id: result.verifier_identity.clone(),
             merkle_proof: transparency_merkle_proof(&leaf_hashes, leaf_hashes.len() - 1),
         };
-        log.push(entry.clone());
+        push_bounded(
+            log,
+            entry.clone(),
+            MAX_TRANSPARENCY_LOG_ENTRIES,
+            "transparency_log",
+        )?;
         Ok(entry)
     }
 
@@ -610,6 +633,11 @@ impl VerifierSdk {
                 actual: result.verifier_identity.clone(),
             });
         }
+        ensure_bounded_capacity(
+            session.steps.len(),
+            MAX_VERIFICATION_SESSION_STEPS,
+            "verification_session_steps",
+        )?;
         let step = SessionStep {
             step_index: session.steps.len(),
             operation: result.operation.clone(),
@@ -622,7 +650,12 @@ impl VerifierSdk {
             step_signature: session_step_signature(session, &step)?,
             ..step
         };
-        session.steps.push(step.clone());
+        push_bounded(
+            &mut session.steps,
+            step.clone(),
+            MAX_VERIFICATION_SESSION_STEPS,
+            "verification_session_steps",
+        )?;
         Ok(step)
     }
 
@@ -904,6 +937,29 @@ fn transparency_merkle_proof(leaf_hashes: &[String], target_index: usize) -> Vec
     encoded.push(format!("tree_size:{}", leaf_hashes.len()));
     encoded.extend(proof);
     encoded
+}
+
+fn ensure_bounded_capacity(
+    len: usize,
+    cap: usize,
+    surface: &'static str,
+) -> Result<(), VerifierSdkError> {
+    if len >= cap {
+        Err(VerifierSdkError::BoundedStateExceeded { surface, max: cap })
+    } else {
+        Ok(())
+    }
+}
+
+fn push_bounded<T>(
+    items: &mut Vec<T>,
+    item: T,
+    cap: usize,
+    surface: &'static str,
+) -> Result<(), VerifierSdkError> {
+    ensure_bounded_capacity(items.len(), cap, surface)?;
+    items.push(item);
+    Ok(())
 }
 
 fn transparency_merkle_parent_hash(left: &str, right: &str) -> String {
@@ -1288,6 +1344,49 @@ mod tests {
     }
 
     #[test]
+    fn record_session_step_rejects_when_step_cap_is_reached() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let mut session = sdk
+            .create_session("session-alpha")
+            .expect("same verifier session should be created");
+        let result = sdk
+            .build_result(
+                VerificationOperation::Claim,
+                VerificationVerdict::Pass,
+                vec![AssertionResult {
+                    assertion: "capsule_replay_verified".to_string(),
+                    passed: true,
+                    detail: "same verifier".to_string(),
+                }],
+                "artifact-hash-alpha".to_string(),
+            )
+            .expect("same verifier result should be built");
+        session.steps = (0..MAX_VERIFICATION_SESSION_STEPS)
+            .map(|step_index| SessionStep {
+                step_index,
+                operation: VerificationOperation::Claim,
+                verdict: VerificationVerdict::Pass,
+                artifact_binding_hash: format!("artifact-hash-{step_index}"),
+                timestamp: current_utc_timestamp(),
+                step_signature: format!("step-signature-{step_index}"),
+            })
+            .collect();
+
+        let err = sdk
+            .record_session_step(&mut session, &result)
+            .expect_err("full session step log must fail closed");
+
+        assert!(matches!(
+            err,
+            VerifierSdkError::BoundedStateExceeded {
+                surface: "verification_session_steps",
+                max: MAX_VERIFICATION_SESSION_STEPS
+            }
+        ));
+        assert_eq!(session.steps().len(), MAX_VERIFICATION_SESSION_STEPS);
+    }
+
+    #[test]
     fn transparency_log_accepts_signed_result_from_same_verifier() {
         let sdk = create_verifier_sdk("verifier://alpha");
         let result = sdk
@@ -1314,6 +1413,44 @@ mod tests {
         assert_eq!(entry.merkle_proof[2], "tree_size:1");
         assert_eq!(log.len(), 1);
         assert_eq!(log[0], entry);
+    }
+
+    #[test]
+    fn transparency_log_rejects_when_entry_cap_is_reached() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let result = sdk
+            .build_result(
+                VerificationOperation::Claim,
+                VerificationVerdict::Pass,
+                vec![AssertionResult {
+                    assertion: "capsule_replay_verified".to_string(),
+                    passed: true,
+                    detail: "same verifier".to_string(),
+                }],
+                "artifact-hash-alpha".to_string(),
+            )
+            .expect("same verifier result should be built");
+        let mut log: Vec<TransparencyLogEntry> = (0..MAX_TRANSPARENCY_LOG_ENTRIES)
+            .map(|index| TransparencyLogEntry {
+                result_hash: bundle::hash(format!("result-{index}").as_bytes()),
+                timestamp: current_utc_timestamp(),
+                verifier_id: "verifier://alpha".to_string(),
+                merkle_proof: Vec::new(),
+            })
+            .collect();
+
+        let err = sdk
+            .append_transparency_log(&mut log, &result)
+            .expect_err("full transparency log must fail closed");
+
+        assert!(matches!(
+            err,
+            VerifierSdkError::BoundedStateExceeded {
+                surface: "transparency_log",
+                max: MAX_TRANSPARENCY_LOG_ENTRIES
+            }
+        ));
+        assert_eq!(log.len(), MAX_TRANSPARENCY_LOG_ENTRIES);
     }
 
     #[test]

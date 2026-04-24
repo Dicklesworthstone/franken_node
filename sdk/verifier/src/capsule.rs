@@ -1883,9 +1883,9 @@ mod tests {
         let tricky_keys = vec![
             "1".to_string(),
             "10".to_string(),
-            "2".to_string(),   // Lexicographic: "1" < "10" < "2"
-            "a_".to_string(),  // Valid ASCII with underscore
-            "z".to_string(),   // ASCII
+            "2".to_string(),      // Lexicographic: "1" < "10" < "2"
+            "a_".to_string(),     // Valid ASCII with underscore
+            "z".to_string(),      // ASCII
             "Z-test".to_string(), // Valid ASCII with dash
         ];
 
