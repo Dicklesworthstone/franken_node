@@ -1,8 +1,8 @@
 //! Manual performance test for canonical encoding optimization
 
 use super::trust_card::canonicalize_value;
-use std::time::{Duration, Instant};
 use serde_json::{Map, Value};
+use std::time::{Duration, Instant};
 
 /// Generate complex nested JSON for performance testing
 fn generate_complex_trust_card() -> Value {
@@ -74,8 +74,14 @@ mod perf_tests {
 
         println!("Optimized canonicalize_value:");
         println!("  {} iterations in {:?}", iterations, duration);
-        println!("  Average: {:?} per iteration", duration / iterations as u32);
-        println!("  Throughput: {:.0} ops/sec", iterations as f64 / duration.as_secs_f64());
+        println!(
+            "  Average: {:?} per iteration",
+            duration / iterations as u32
+        );
+        println!(
+            "  Throughput: {:.0} ops/sec",
+            iterations as f64 / duration.as_secs_f64()
+        );
 
         // Test with serialization (full pipeline)
         let start = Instant::now();
@@ -87,8 +93,14 @@ mod perf_tests {
 
         println!("Full pipeline (canonicalize + serialize):");
         println!("  {} iterations in {:?}", iterations, duration_full);
-        println!("  Average: {:?} per iteration", duration_full / iterations as u32);
-        println!("  Throughput: {:.0} ops/sec", iterations as f64 / duration_full.as_secs_f64());
+        println!(
+            "  Average: {:?} per iteration",
+            duration_full / iterations as u32
+        );
+        println!(
+            "  Throughput: {:.0} ops/sec",
+            iterations as f64 / duration_full.as_secs_f64()
+        );
 
         // Memory usage estimation
         let json_size = serde_json::to_string(&test_data).unwrap().len();

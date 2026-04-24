@@ -694,17 +694,17 @@ fn build_request_log(
 pub fn default_rate_limit(group: EndpointGroup) -> RateLimitConfig {
     match group {
         EndpointGroup::Operator => RateLimitConfig {
-            sustained_rps: 100,   // PERFORMANCE: protect instance from read overload
+            sustained_rps: 100, // PERFORMANCE: protect instance from read overload
             burst_size: 200,
             fail_closed: true, // SECURITY: fail-closed to prevent DoS on rate limiter failure
         },
         EndpointGroup::Verifier => RateLimitConfig {
-            sustained_rps: 50,    // PERFORMANCE: protect crypto operations from overload
+            sustained_rps: 50, // PERFORMANCE: protect crypto operations from overload
             burst_size: 100,
             fail_closed: true, // SECURITY: fail-closed to prevent DoS on rate limiter failure
         },
         EndpointGroup::FleetControl => RateLimitConfig {
-            sustained_rps: 20,    // PERFORMANCE: protect dangerous mutations from overload
+            sustained_rps: 20, // PERFORMANCE: protect dangerous mutations from overload
             burst_size: 40,
             fail_closed: true, // fail-closed for dangerous mutations
         },

@@ -923,13 +923,17 @@ impl GuardrailMonitorSet {
             if let GuardrailVerdict::Block { budget_id, .. } = &verdict {
                 push_bounded(&mut blocking_budget_ids, budget_id.clone(), MAX_MONITORS);
             }
-            push_bounded(&mut findings, GuardrailFinding {
-                monitor_name: monitor.name().to_string(),
-                budget_id: monitor.budget_id().clone(),
-                event_code: verdict.event_code(),
-                anytime_valid: monitor.is_valid_at_any_stopping_point(),
-                verdict,
-            }, MAX_MONITORS);
+            push_bounded(
+                &mut findings,
+                GuardrailFinding {
+                    monitor_name: monitor.name().to_string(),
+                    budget_id: monitor.budget_id().clone(),
+                    event_code: verdict.event_code(),
+                    anytime_valid: monitor.is_valid_at_any_stopping_point(),
+                    verdict,
+                },
+                MAX_MONITORS,
+            );
         }
 
         blocking_budget_ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));

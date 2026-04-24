@@ -1501,7 +1501,10 @@ mod tests {
 
         // Unicode injection in action evaluation
         let decision = engine.evaluate_action(bidi_override, mixed_scripts, 1_001, zero_width);
-        assert!(decision.permitted || !decision.permitted, "Unicode should not crash action evaluation");
+        assert!(
+            decision.permitted || !decision.permitted,
+            "Unicode should not crash action evaluation"
+        );
 
         // Verify audit log contains entries (no corruption)
         assert!(!engine.audit_log().is_empty());
@@ -1518,12 +1521,15 @@ mod tests {
 
         // Attempt to exceed MAX_MANDATORY_AUDIT_EVENTS
         for i in 0..MAX_MANDATORY_AUDIT_EVENTS + 100 {
-            policy = policy.with_mandatory_audit_event(AuditEventSpec::new(format!("EVENT_{}", i), 60));
+            policy =
+                policy.with_mandatory_audit_event(AuditEventSpec::new(format!("EVENT_{}", i), 60));
         }
 
         // Attempt to exceed MAX_AUTO_RECOVERY_CRITERIA
         for i in 0..MAX_AUTO_RECOVERY_CRITERIA + 100 {
-            policy = policy.with_recovery_criterion(RecoveryCriterion::OperatorAcknowledged(format!("op-{}", i)));
+            policy = policy.with_recovery_criterion(RecoveryCriterion::OperatorAcknowledged(
+                format!("op-{}", i),
+            ));
         }
 
         // Verify bounded collections are properly capped
@@ -1543,7 +1549,12 @@ mod tests {
                     &format!("trace-{}", i),
                 );
             }
-            let _ = engine.evaluate_action(&format!("action-{}", i), "actor", 1_000 + i as u64, &format!("trace-{}", i));
+            let _ = engine.evaluate_action(
+                &format!("action-{}", i),
+                "actor",
+                1_000 + i as u64,
+                &format!("trace-{}", i),
+            );
         }
 
         // Verify audit log is bounded
@@ -1646,8 +1657,10 @@ mod tests {
         let newline_injection = "normal\nfield\rwith\ncontrol\tchars";
 
         // Test action evaluation with injection payloads
-        let decision1 = engine.evaluate_action(json_injection, script_injection, 1_001, sql_injection);
-        let decision2 = engine.evaluate_action(newline_injection, json_injection, 1_002, script_injection);
+        let decision1 =
+            engine.evaluate_action(json_injection, script_injection, 1_001, sql_injection);
+        let decision2 =
+            engine.evaluate_action(newline_injection, json_injection, 1_002, script_injection);
 
         // Verify audit events were created despite injection attempts
         assert!(engine.audit_log().len() >= 3);
@@ -1655,12 +1668,21 @@ mod tests {
         // Attempt serialization of audit events to detect corruption
         for event in engine.audit_log() {
             let serialized = serde_json::to_string(event);
-            assert!(serialized.is_ok(), "Audit event should serialize safely despite injection attempts");
+            assert!(
+                serialized.is_ok(),
+                "Audit event should serialize safely despite injection attempts"
+            );
 
             // Verify no unescaped injection payloads in serialized form
             let json_str = serialized.unwrap();
-            assert!(!json_str.contains(r#""malicious":"#), "JSON injection should be escaped");
-            assert!(!json_str.contains("<script>"), "Script injection should be escaped");
+            assert!(
+                !json_str.contains(r#""malicious":"#),
+                "JSON injection should be escaped"
+            );
+            assert!(
+                !json_str.contains("<script>"),
+                "Script injection should be escaped"
+            );
         }
 
         // Test mandatory audit with injection payloads
@@ -1684,34 +1706,59 @@ mod tests {
 
         // Attempt to bypass denied actions through case manipulation
         let decision1 = engine.evaluate_action("Policy.Change", "attacker", 1_001, "trace-1");
-        assert!(!decision1.permitted, "Case variation should not bypass deny list");
+        assert!(
+            !decision1.permitted,
+            "Case variation should not bypass deny list"
+        );
 
         let decision2 = engine.evaluate_action("POLICY.CHANGE", "attacker", 1_002, "trace-2");
-        assert!(!decision2.permitted, "Uppercase should not bypass deny list");
+        assert!(
+            !decision2.permitted,
+            "Uppercase should not bypass deny list"
+        );
 
         let decision3 = engine.evaluate_action("policy.change ", "attacker", 1_003, "trace-3");
-        assert!(!decision3.permitted, "Trailing space should not bypass deny list");
+        assert!(
+            !decision3.permitted,
+            "Trailing space should not bypass deny list"
+        );
 
         let decision4 = engine.evaluate_action(" policy.change", "attacker", 1_004, "trace-4");
-        assert!(!decision4.permitted, "Leading space should not bypass deny list");
+        assert!(
+            !decision4.permitted,
+            "Leading space should not bypass deny list"
+        );
 
         // Attempt Unicode normalization bypass
         let decision5 = engine.evaluate_action("policy․change", "attacker", 1_005, "trace-5"); // One-dot leader U+2024
-        assert!(!decision5.permitted || decision5.permitted, "Unicode lookalikes handled gracefully");
+        assert!(
+            !decision5.permitted || decision5.permitted,
+            "Unicode lookalikes handled gracefully"
+        );
 
         // Verify null byte injection doesn't bypass
-        let decision6 = engine.evaluate_action("policy.change\0allowed", "attacker", 1_006, "trace-6");
-        assert!(!decision6.permitted || decision6.permitted, "Null byte injection handled safely");
+        let decision6 =
+            engine.evaluate_action("policy.change\0allowed", "attacker", 1_006, "trace-6");
+        assert!(
+            !decision6.permitted || decision6.permitted,
+            "Null byte injection handled safely"
+        );
 
         // Test suspended mode permit list circumvention
         engine.maybe_escalate_to_suspended(1_200, "trace-suspend");
         assert_eq!(engine.state(), DegradedModeState::Suspended);
 
         let decision7 = engine.evaluate_action("Health.Check", "attacker", 1_201, "trace-7");
-        assert!(!decision7.permitted, "Case variation should not bypass suspended permit list");
+        assert!(
+            !decision7.permitted,
+            "Case variation should not bypass suspended permit list"
+        );
 
         let decision8 = engine.evaluate_action("health.check\t", "attacker", 1_202, "trace-8");
-        assert!(!decision8.permitted || decision8.permitted, "Control chars handled safely");
+        assert!(
+            !decision8.permitted || decision8.permitted,
+            "Control chars handled safely"
+        );
     }
 
     #[test]
@@ -1772,7 +1819,7 @@ mod tests {
         let partial_status = RecoveryStatus::default()
             .with_healthy_gate("revocation_frontier")
             .with_error_rate(0.01);
-            // Missing federation_peer capability
+        // Missing federation_peer capability
 
         engine.observe_recovery(&partial_status, 2_000, "trace-recovery");
         assert_eq!(engine.state(), DegradedModeState::Degraded);
@@ -1809,17 +1856,26 @@ mod tests {
         // Verify only one activation succeeded (fail-closed behavior)
         let engine = engine.lock().unwrap();
         assert!(
-            matches!(engine.state(), DegradedModeState::Degraded | DegradedModeState::Normal),
+            matches!(
+                engine.state(),
+                DegradedModeState::Degraded | DegradedModeState::Normal
+            ),
             "State should be consistent after concurrent access"
         );
 
         // Verify audit log is coherent (no corruption)
         let audit_count = engine.audit_log().len();
-        assert!(audit_count <= 20, "Audit log should not exceed reasonable bounds");
+        assert!(
+            audit_count <= 20,
+            "Audit log should not exceed reasonable bounds"
+        );
 
         // Verify all audit events are serializable (no corruption)
         for event in engine.audit_log() {
-            assert!(serde_json::to_string(event).is_ok(), "Audit events should remain valid");
+            assert!(
+                serde_json::to_string(event).is_ok(),
+                "Audit events should remain valid"
+            );
         }
 
         // Test concurrent action evaluations
@@ -1846,6 +1902,9 @@ mod tests {
 
         // Final consistency check
         let engine = engine.lock().unwrap();
-        assert!(engine.audit_log().len() < 1000, "Audit log should remain bounded under concurrent load");
+        assert!(
+            engine.audit_log().len() < 1000,
+            "Audit log should remain bounded under concurrent load"
+        );
     }
 }

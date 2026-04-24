@@ -318,7 +318,9 @@ fn signature_preimage<T: Serialize>(domain: &str, value: &T) -> Result<Vec<u8>, 
     preimage.extend_from_slice(b"compat_preimage_v1:");
     preimage.extend_from_slice(&(u64::try_from(domain.len()).unwrap_or(u64::MAX)).to_le_bytes());
     preimage.extend_from_slice(domain.as_bytes());
-    preimage.extend_from_slice(&(u64::try_from(canonical_payload.len()).unwrap_or(u64::MAX)).to_le_bytes());
+    preimage.extend_from_slice(
+        &(u64::try_from(canonical_payload.len()).unwrap_or(u64::MAX)).to_le_bytes(),
+    );
     preimage.extend_from_slice(&canonical_payload);
     Ok(preimage)
 }

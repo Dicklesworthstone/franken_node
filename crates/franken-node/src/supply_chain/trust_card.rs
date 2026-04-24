@@ -90,13 +90,25 @@ fn compute_trust_card_derivation_hash(refs: &[VerifiedEvidenceRef], derived_at: 
     hasher.update(derived_at.to_le_bytes());
     hasher.update(u64::try_from(refs.len()).unwrap_or(u64::MAX).to_le_bytes());
     for r in refs {
-        hasher.update(u64::try_from(r.evidence_id.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(r.evidence_id.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(r.evidence_id.as_bytes());
         let type_tag = serde_json::to_string(&r.evidence_type).unwrap_or_default();
-        hasher.update(u64::try_from(type_tag.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(type_tag.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(type_tag.as_bytes());
         hasher.update(r.verified_at_epoch.to_le_bytes());
-        hasher.update(u64::try_from(r.verification_receipt_hash.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(r.verification_receipt_hash.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(r.verification_receipt_hash.as_bytes());
     }
     format!("sha256:{}", hex::encode(hasher.finalize()))
@@ -466,13 +478,14 @@ impl TrustCardRegistry {
     }
 
     fn advance_snapshot_sequence_for_mutation(&mut self) {
-        self.previous_snapshot_hash = if self.snapshot_epoch == 0 && self.cards_by_extension.is_empty() {
-            None
-        } else {
-            self.last_snapshot_hash
-                .clone()
-                .or_else(|| self.snapshot().ok().map(|s| s.snapshot_hash))
-        };
+        self.previous_snapshot_hash =
+            if self.snapshot_epoch == 0 && self.cards_by_extension.is_empty() {
+                None
+            } else {
+                self.last_snapshot_hash
+                    .clone()
+                    .or_else(|| self.snapshot().ok().map(|s| s.snapshot_hash))
+            };
         self.snapshot_epoch = self.snapshot_epoch.saturating_add(1);
         self.last_snapshot_hash = None;
     }
@@ -575,18 +588,19 @@ impl TrustCardRegistry {
                     path: high_water_path.clone(),
                     detail: err.to_string(),
                 })?;
-            high_water_temp.write_all(high_water_encoded.as_bytes()).map_err(|err| {
-                TrustCardError::SnapshotWrite {
+            high_water_temp
+                .write_all(high_water_encoded.as_bytes())
+                .map_err(|err| TrustCardError::SnapshotWrite {
                     path: high_water_path.clone(),
                     detail: err.to_string(),
-                }
-            })?;
-            high_water_temp.as_file().sync_all().map_err(|err| {
-                TrustCardError::SnapshotWrite {
+                })?;
+            high_water_temp
+                .as_file()
+                .sync_all()
+                .map_err(|err| TrustCardError::SnapshotWrite {
                     path: high_water_path.clone(),
                     detail: err.to_string(),
-                }
-            })?;
+                })?;
             high_water_temp.persist(&high_water_path).map_err(|err| {
                 TrustCardError::SnapshotWrite {
                     path: high_water_path.clone(),
@@ -712,8 +726,7 @@ impl TrustCardRegistry {
         }
 
         let mut next = latest.clone();
-        next.trust_card_version =
-            next_trust_card_version(latest.trust_card_version, extension_id)?;
+        next.trust_card_version = next_trust_card_version(latest.trust_card_version, extension_id)?;
         next.previous_version_hash = Some(latest.card_hash.clone());
         if let Some(level) = mutation.certification_level {
             next.certification_level = level;
@@ -1529,7 +1542,11 @@ pub fn compute_card_hash(card: &TrustCard) -> Result<String, TrustCardError> {
     let encoded = serde_json::to_vec(&canonical)?;
     let mut hasher = Sha256::new();
     hasher.update(b"trust_card_hash_v1:");
-    hasher.update(u64::try_from(encoded.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(
+        u64::try_from(encoded.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     hasher.update(&encoded);
     let digest = hasher.finalize();
     Ok(hex::encode(digest))
@@ -1780,7 +1797,11 @@ fn compute_snapshot_hash(snapshot: &TrustCardRegistrySnapshot) -> Result<String,
     let encoded = serde_json::to_vec(&canonical)?;
     let mut hasher = Sha256::new();
     hasher.update(b"trust_card_registry_snapshot_hash_v1:");
-    hasher.update(u64::try_from(encoded.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(
+        u64::try_from(encoded.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     hasher.update(&encoded);
     Ok(hex::encode(hasher.finalize()))
 }
@@ -1845,7 +1866,11 @@ fn high_water_signature(
     let mut mac =
         HmacSha256::new_from_slice(registry_key).map_err(|_| TrustCardError::InvalidRegistryKey)?;
     mac.update(b"trust_card_registry_high_water_sig_v1:");
-    mac.update(&u64::try_from(encoded.len()).unwrap_or(u64::MAX).to_le_bytes());
+    mac.update(
+        &u64::try_from(encoded.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     mac.update(&encoded);
     Ok(hex::encode(mac.finalize().into_bytes()))
 }
@@ -1964,11 +1989,10 @@ fn write_snapshot_high_water(
         detail: err.to_string(),
     })?;
     let encoded = to_canonical_json(high_water)?;
-    let mut temp =
-        NamedTempFile::new_in(parent).map_err(|err| TrustCardError::SnapshotWrite {
-            path: high_water_path.clone(),
-            detail: err.to_string(),
-        })?;
+    let mut temp = NamedTempFile::new_in(parent).map_err(|err| TrustCardError::SnapshotWrite {
+        path: high_water_path.clone(),
+        detail: err.to_string(),
+    })?;
     temp.write_all(encoded.as_bytes())
         .map_err(|err| TrustCardError::SnapshotWrite {
             path: high_water_path.clone(),
@@ -2061,11 +2085,11 @@ mod canonical_perf_test;
 #[cfg(test)]
 mod tests {
     use super::{
-        TrustCard, TrustCardRegistry, TrustCardMutation, TrustCardError, ExtensionIdentity,
-        PublisherIdentity, CertificationLevel, ReputationTrend, CapabilityRisk, RiskLevel,
-        RevocationStatus, CapabilityDeclaration, BehavioralProfile, ProvenanceSummary,
-        DependencyTrustStatus, RiskAssessment, AuditRecord, VerifiedEvidenceRef,
-        canonicalize_value, update_card_hash, validate_trust_card_structure
+        AuditRecord, BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
+        DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
+        ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCard, TrustCardError,
+        TrustCardMutation, TrustCardRegistry, VerifiedEvidenceRef, canonicalize_value,
+        update_card_hash, validate_trust_card_structure,
     };
 
     fn test_evidence_refs() -> Vec<VerifiedEvidenceRef> {
@@ -3132,8 +3156,11 @@ mod tests {
         registry
             .persist_authoritative_state(&path)
             .expect("persist revoked high-water state");
-        std::fs::write(&path, to_canonical_json(&older_snapshot).expect("older json"))
-            .expect("install older snapshot");
+        std::fs::write(
+            &path,
+            to_canonical_json(&older_snapshot).expect("older json"),
+        )
+        .expect("install older snapshot");
 
         let err = TrustCardRegistry::load_authoritative_state(&path, 60, 2_000)
             .expect_err("older signed snapshot must be rejected after high-water advances");
@@ -3278,9 +3305,13 @@ mod tests {
         // Use an empty key which should be invalid for HMAC
         let invalid_key = b"";
         let mut registry = TrustCardRegistry::new(0, invalid_key);
-        registry.create(sample_input(), 1_000, "trace-create").expect("create");
+        registry
+            .create(sample_input(), 1_000, "trace-create")
+            .expect("create");
 
-        let err = registry.snapshot().expect_err("snapshot with invalid key should fail");
+        let err = registry
+            .snapshot()
+            .expect_err("snapshot with invalid key should fail");
         assert!(matches!(err, TrustCardError::InvalidRegistryKey));
     }
 
@@ -3291,15 +3322,15 @@ mod tests {
         use crate::security::constant_time;
 
         let malicious_publisher_ids = [
-            "publisher\u{202E}fake\u{202C}",       // BiDi override attack
-            "publisher\x1b[31mred\x1b[0m",         // ANSI escape injection
-            "publisher\0null\r\n\t",               // Control character injection
+            "publisher\u{202E}fake\u{202C}",      // BiDi override attack
+            "publisher\x1b[31mred\x1b[0m",        // ANSI escape injection
+            "publisher\0null\r\n\t",              // Control character injection
             "publisher\"}{\"admin\":true,\"fake", // JSON injection attempt
-            "publisher/../../etc/passwd",          // Path traversal attempt
+            "publisher/../../etc/passwd",         // Path traversal attempt
             "publisher\u{200B}\u{FEFF}",          // Zero-width character injection
-            "publisher.with.dots",                 // Domain confusion
-            "PUBLISHER",                           // Case sensitivity test
-            "publisher@domain.com",                // Email-like format
+            "publisher.with.dots",                // Domain confusion
+            "PUBLISHER",                          // Case sensitivity test
+            "publisher@domain.com",               // Email-like format
         ];
 
         for malicious_id in malicious_publisher_ids {
@@ -3310,30 +3341,50 @@ mod tests {
                 contact_email: Some("test@example.com".to_string()),
                 verified_at_epoch: 1234567890,
                 signature_algorithm: "ecdsa-p256".to_string(),
-                public_key_pem: "-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----".to_string(),
+                public_key_pem: "-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----"
+                    .to_string(),
             };
 
             // Verify serialization handles malicious publisher ID safely
             let json = serde_json::to_string(&publisher).expect("serialization should work");
-            let parsed: TrustCardPublisher = serde_json::from_str(&json).expect("deserialization should work");
+            let parsed: TrustCardPublisher =
+                serde_json::from_str(&json).expect("deserialization should work");
 
             // Verify malicious content is preserved exactly for forensics but contained
-            assert_eq!(parsed.publisher_id, malicious_id, "publisher ID should be preserved");
+            assert_eq!(
+                parsed.publisher_id, malicious_id,
+                "publisher ID should be preserved"
+            );
 
             // Verify JSON structure integrity
-            let json_value: serde_json::Value = serde_json::from_str(&json).expect("JSON should be valid");
-            let expected_keys = ["publisher_id", "display_name", "domain", "contact_email", "verified_at_epoch", "signature_algorithm", "public_key_pem"];
+            let json_value: serde_json::Value =
+                serde_json::from_str(&json).expect("JSON should be valid");
+            let expected_keys = [
+                "publisher_id",
+                "display_name",
+                "domain",
+                "contact_email",
+                "verified_at_epoch",
+                "signature_algorithm",
+                "public_key_pem",
+            ];
 
             if let Some(obj) = json_value.as_object() {
                 for key in obj.keys() {
-                    assert!(expected_keys.contains(&key.as_str()),
-                           "unexpected field '{}' - possible JSON injection", key);
+                    assert!(
+                        expected_keys.contains(&key.as_str()),
+                        "unexpected field '{}' - possible JSON injection",
+                        key
+                    );
                 }
             }
 
             // Verify constant-time comparison works for publisher IDs
             let normal_id = "normal-publisher-123";
-            assert!(!constant_time::ct_eq(&parsed.publisher_id, normal_id), "publisher ID comparison should be constant-time");
+            assert!(
+                !constant_time::ct_eq(&parsed.publisher_id, normal_id),
+                "publisher ID comparison should be constant-time"
+            );
         }
     }
 
@@ -3345,7 +3396,11 @@ mod tests {
                 evidence_id: format!("evidence_{}_with_long_suffix_{}", i, "X".repeat(1000)),
                 evidence_type: EvidenceType::ProvenanceAttestation,
                 verified_at_epoch: 1234567890_u64.saturating_add(i as u64),
-                verification_receipt_hash: format!("hash_{}_with_long_suffix_{}", i, "Y".repeat(500)),
+                verification_receipt_hash: format!(
+                    "hash_{}_with_long_suffix_{}",
+                    i,
+                    "Y".repeat(500)
+                ),
             })
             .collect();
 
@@ -3359,18 +3414,27 @@ mod tests {
         assert_eq!(hash1, hash2, "derivation hash should be deterministic");
 
         // Verify hash format and length
-        assert!(hash1.starts_with("sha256:"), "hash should have proper prefix");
+        assert!(
+            hash1.starts_with("sha256:"),
+            "hash should have proper prefix"
+        );
         assert_eq!(hash1.len(), 71, "sha256 hash should have correct length");
 
         // Verify different inputs produce different hashes
         let different_refs = massive_refs[0..9999].to_vec(); // One less ref
         let hash3 = compute_trust_card_derivation_hash(&different_refs, derived_at);
-        assert_ne!(hash1, hash3, "different inputs should produce different hashes");
+        assert_ne!(
+            hash1, hash3,
+            "different inputs should produce different hashes"
+        );
 
         // Test with extreme derived_at values
         let hash_min = compute_trust_card_derivation_hash(&massive_refs, 0);
         let hash_max = compute_trust_card_derivation_hash(&massive_refs, u64::MAX);
-        assert_ne!(hash_min, hash_max, "different timestamps should produce different hashes");
+        assert_ne!(
+            hash_min, hash_max,
+            "different timestamps should produce different hashes"
+        );
 
         // Test collision resistance with similar evidence IDs
         let collision_refs = vec![
@@ -3392,28 +3456,31 @@ mod tests {
 
         let hash_original = compute_trust_card_derivation_hash(&collision_refs, 123);
         let hash_swapped = compute_trust_card_derivation_hash(&swapped_refs, 123);
-        assert_ne!(hash_original, hash_swapped, "order should affect hash (collision resistance)");
+        assert_ne!(
+            hash_original, hash_swapped,
+            "order should affect hash (collision resistance)"
+        );
     }
 
     #[test]
     fn test_negative_capability_declaration_with_malicious_injection_patterns() {
         let malicious_capabilities = vec![
             CapabilityDeclaration {
-                name: "cap\u{202E}fake\u{202C}".to_string(),     // BiDi override
+                name: "cap\u{202E}fake\u{202C}".to_string(), // BiDi override
                 scope: "global".to_string(),
                 impact: "critical".to_string(),
-                evidence_ref: "ref\x1b[31m".to_string(),         // ANSI escape
+                evidence_ref: "ref\x1b[31m".to_string(), // ANSI escape
             },
             CapabilityDeclaration {
                 name: "capability\"}{\"admin\":true,\"bypass".to_string(), // JSON injection
-                scope: "local\0null".to_string(),                // Null byte injection
-                impact: "high\r\n\t".to_string(),                // Control chars
-                evidence_ref: "ref/../../etc/passwd".to_string(), // Path traversal
+                scope: "local\0null".to_string(),                          // Null byte injection
+                impact: "high\r\n\t".to_string(),                          // Control chars
+                evidence_ref: "ref/../../etc/passwd".to_string(),          // Path traversal
             },
             CapabilityDeclaration {
-                name: "X".repeat(10_000), // Massive field (10KB)
-                scope: "Y".repeat(5_000), // Massive field (5KB)
-                impact: "Z".repeat(5_000), // Massive field (5KB)
+                name: "X".repeat(10_000),         // Massive field (10KB)
+                scope: "Y".repeat(5_000),         // Massive field (5KB)
+                impact: "Z".repeat(5_000),        // Massive field (5KB)
                 evidence_ref: "W".repeat(10_000), // Massive field (10KB)
             },
         ];
@@ -3438,26 +3505,55 @@ mod tests {
         };
 
         // Verify serialization handles malicious capabilities
-        let json = serde_json::to_string(&trust_card).expect("serialization should handle malicious capabilities");
+        let json = serde_json::to_string(&trust_card)
+            .expect("serialization should handle malicious capabilities");
         let parsed: TrustCard = serde_json::from_str(&json).expect("deserialization should work");
 
         // Verify capabilities are preserved (for forensics) but contained
-        assert_eq!(parsed.capability_declarations.len(), malicious_capabilities.len());
+        assert_eq!(
+            parsed.capability_declarations.len(),
+            malicious_capabilities.len()
+        );
 
-        for (original, parsed_cap) in malicious_capabilities.iter().zip(parsed.capability_declarations.iter()) {
-            assert_eq!(original.name, parsed_cap.name, "capability name should be preserved");
-            assert_eq!(original.scope, parsed_cap.scope, "capability scope should be preserved");
-            assert_eq!(original.impact, parsed_cap.impact, "capability impact should be preserved");
-            assert_eq!(original.evidence_ref, parsed_cap.evidence_ref, "capability evidence_ref should be preserved");
+        for (original, parsed_cap) in malicious_capabilities
+            .iter()
+            .zip(parsed.capability_declarations.iter())
+        {
+            assert_eq!(
+                original.name, parsed_cap.name,
+                "capability name should be preserved"
+            );
+            assert_eq!(
+                original.scope, parsed_cap.scope,
+                "capability scope should be preserved"
+            );
+            assert_eq!(
+                original.impact, parsed_cap.impact,
+                "capability impact should be preserved"
+            );
+            assert_eq!(
+                original.evidence_ref, parsed_cap.evidence_ref,
+                "capability evidence_ref should be preserved"
+            );
         }
 
         // Verify JSON structure integrity
-        let json_value: serde_json::Value = serde_json::from_str(&json).expect("JSON should be valid");
-        assert!(json_value.get("admin").is_none(), "JSON injection should not create admin field");
+        let json_value: serde_json::Value =
+            serde_json::from_str(&json).expect("JSON should be valid");
+        assert!(
+            json_value.get("admin").is_none(),
+            "JSON injection should not create admin field"
+        );
 
         // Test that massive fields are handled without memory explosion
-        assert!(json.len() > 50_000, "serialized JSON should include massive fields");
-        assert!(json.len() < 1_000_000, "serialized JSON should be reasonably bounded");
+        assert!(
+            json.len() > 50_000,
+            "serialized JSON should include massive fields"
+        );
+        assert!(
+            json.len() < 1_000_000,
+            "serialized JSON should be reasonably bounded"
+        );
 
         // Test display functionality with malicious content
         let display = format!("{:?}", trust_card);
@@ -3476,18 +3572,17 @@ mod tests {
                 contact_email: Some("test@example.com".to_string()),
                 verified_at_epoch: 1234567890,
                 signature_algorithm: "ecdsa-p256".to_string(),
-                public_key_pem: "-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----".to_string(),
+                public_key_pem: "-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----"
+                    .to_string(),
             },
             extension_id: "Test-Extension".to_string(),
             certification_level: CertificationLevel::Verified,
-            capability_declarations: vec![
-                CapabilityDeclaration {
-                    name: "Network-Access".to_string(), // Mixed case capability
-                    scope: "global".to_string(),
-                    impact: "medium".to_string(),
-                    evidence_ref: "ref123".to_string(),
-                },
-            ],
+            capability_declarations: vec![CapabilityDeclaration {
+                name: "Network-Access".to_string(), // Mixed case capability
+                scope: "global".to_string(),
+                impact: "medium".to_string(),
+                evidence_ref: "ref123".to_string(),
+            }],
             reputation_score: 0.95,
             trust_card_schema_version: "1.0.0".to_string(),
             derived_at_epoch: 1234567890,
@@ -3505,13 +3600,13 @@ mod tests {
         let filter_exact_case = TrustCardListFilter {
             certification_level: Some(CertificationLevel::Verified),
             publisher_id: Some("Publisher-123".to_string()), // Exact match
-            capability: Some("Network-Access".to_string()), // Exact match
+            capability: Some("Network-Access".to_string()),  // Exact match
         };
 
         let filter_wrong_case = TrustCardListFilter {
             certification_level: Some(CertificationLevel::Verified),
             publisher_id: Some("publisher-123".to_string()), // Different case
-            capability: Some("network-access".to_string()), // Different case
+            capability: Some("network-access".to_string()),  // Different case
         };
 
         let filter_partial_match = TrustCardListFilter {
@@ -3521,16 +3616,22 @@ mod tests {
         };
 
         // Test exact case matching
-        assert!(card_matches_filter(&test_card, &filter_exact_case),
-               "exact case should match");
+        assert!(
+            card_matches_filter(&test_card, &filter_exact_case),
+            "exact case should match"
+        );
 
         // Test case sensitivity in publisher_id (should fail with wrong case)
-        assert!(!card_matches_filter(&test_card, &filter_wrong_case),
-               "wrong case should not match publisher_id");
+        assert!(
+            !card_matches_filter(&test_card, &filter_wrong_case),
+            "wrong case should not match publisher_id"
+        );
 
         // Test capability partial matching (contains() is case-sensitive)
-        assert!(card_matches_filter(&test_card, &filter_partial_match),
-               "partial capability match should work");
+        assert!(
+            card_matches_filter(&test_card, &filter_partial_match),
+            "partial capability match should work"
+        );
 
         let filter_partial_wrong_case = TrustCardListFilter {
             certification_level: Some(CertificationLevel::Verified),
@@ -3538,8 +3639,10 @@ mod tests {
             capability: Some("network".to_string()), // Lowercase partial (should fail)
         };
 
-        assert!(!card_matches_filter(&test_card, &filter_partial_wrong_case),
-               "case-sensitive capability partial match should fail");
+        assert!(
+            !card_matches_filter(&test_card, &filter_partial_wrong_case),
+            "case-sensitive capability partial match should fail"
+        );
 
         // Test with unicode normalization bypass attempts
         let filter_unicode_bypass = TrustCardListFilter {
@@ -3548,8 +3651,10 @@ mod tests {
             capability: None,
         };
 
-        assert!(!card_matches_filter(&test_card, &filter_unicode_bypass),
-               "unicode normalization bypass should not work");
+        assert!(
+            !card_matches_filter(&test_card, &filter_unicode_bypass),
+            "unicode normalization bypass should not work"
+        );
     }
 
     #[test]
@@ -3557,13 +3662,13 @@ mod tests {
         use crate::security::constant_time;
 
         let malicious_keys = [
-            b"key\0null".as_slice(),                    // Null byte injection
-            b"key\r\n\t".as_slice(),                    // Control characters
-            b"key\x1b[31mred\x1b[0m".as_slice(),       // ANSI escape sequences
-            &[0u8; 0],                                  // Empty key
-            &[0u8; 1],                                  // Single null byte
-            &[255u8; 1000],                             // All-ones key
-            b"very_long_key_".repeat(100).as_slice(),   // Extremely long key
+            b"key\0null".as_slice(),                  // Null byte injection
+            b"key\r\n\t".as_slice(),                  // Control characters
+            b"key\x1b[31mred\x1b[0m".as_slice(),      // ANSI escape sequences
+            &[0u8; 0],                                // Empty key
+            &[0u8; 1],                                // Single null byte
+            &[255u8; 1000],                           // All-ones key
+            b"very_long_key_".repeat(100).as_slice(), // Extremely long key
         ];
 
         for malicious_key in malicious_keys {
@@ -3579,7 +3684,7 @@ mod tests {
                 b"data\0with\0nulls",
                 b"data\r\nwith\r\ncontrol\tchars",
                 b"\x1b[31mdata with ansi\x1b[0m",
-                &[0u8; 10000], // Large zero buffer
+                &[0u8; 10000],        // Large zero buffer
                 &b"A".repeat(100000), // Very large input
             ];
 
@@ -3589,7 +3694,11 @@ mod tests {
                 let result_bytes = result.into_bytes();
 
                 // Verify HMAC output is always 32 bytes for SHA256
-                assert_eq!(result_bytes.len(), 32, "HMAC-SHA256 should always produce 32 bytes");
+                assert_eq!(
+                    result_bytes.len(),
+                    32,
+                    "HMAC-SHA256 should always produce 32 bytes"
+                );
 
                 // Verify output doesn't contain obvious patterns that might indicate key leakage
                 let all_zero = result_bytes.iter().all(|&b| b == 0);
@@ -3597,7 +3706,10 @@ mod tests {
 
                 // While technically possible, these patterns are extremely unlikely with proper HMAC
                 if malicious_key.len() > 0 && !malicious_key.iter().all(|&b| b == 0) {
-                    assert!(!all_zero, "HMAC output should not be all zeros with non-zero key");
+                    assert!(
+                        !all_zero,
+                        "HMAC output should not be all zeros with non-zero key"
+                    );
                     assert!(!all_same, "HMAC output should not be all same byte");
                 }
             }
@@ -3617,10 +3729,10 @@ mod tests {
         let result2 = mac2.finalize().into_bytes();
 
         // Different keys should produce different outputs
-        assert!(!constant_time::ct_eq(
-            &hex::encode(&result1),
-            &hex::encode(&result2)
-        ), "different keys should produce different HMAC outputs");
+        assert!(
+            !constant_time::ct_eq(&hex::encode(&result1), &hex::encode(&result2)),
+            "different keys should produce different HMAC outputs"
+        );
     }
 
     #[test]
@@ -3634,8 +3746,16 @@ mod tests {
                 audit_type: "security_review".to_string(),
                 auditor_id: format!("auditor_{}_with_long_id_{}", i, "X".repeat(500)),
                 finding_summary: format!("finding_{}_with_massive_content_{}", i, "Y".repeat(5000)),
-                severity: if i % 2 == 0 { "high".to_string() } else { "medium".to_string() },
-                remediation_status: if i % 3 == 0 { "resolved".to_string() } else { "pending".to_string() },
+                severity: if i % 2 == 0 {
+                    "high".to_string()
+                } else {
+                    "medium".to_string()
+                },
+                remediation_status: if i % 3 == 0 {
+                    "resolved".to_string()
+                } else {
+                    "pending".to_string()
+                },
             });
         }
 
@@ -3659,7 +3779,11 @@ mod tests {
         };
 
         // Verify bounded storage kicks in
-        assert_eq!(trust_card.audit_history.len(), 1000, "should start with 1000 entries");
+        assert_eq!(
+            trust_card.audit_history.len(),
+            1000,
+            "should start with 1000 entries"
+        );
 
         // Add more entries to test push_bounded
         for i in 1000..1500 {
@@ -3676,22 +3800,35 @@ mod tests {
         }
 
         // Should be bounded to MAX_AUDIT_HISTORY
-        assert_eq!(trust_card.audit_history.len(), MAX_AUDIT_HISTORY,
-                  "audit history should be bounded to MAX_AUDIT_HISTORY");
+        assert_eq!(
+            trust_card.audit_history.len(),
+            MAX_AUDIT_HISTORY,
+            "audit history should be bounded to MAX_AUDIT_HISTORY"
+        );
 
         // Verify latest entries are preserved
         let latest_entry = &trust_card.audit_history[trust_card.audit_history.len() - 1];
-        assert_eq!(latest_entry.audit_type, "additional_review", "latest entry should be preserved");
+        assert_eq!(
+            latest_entry.audit_type, "additional_review",
+            "latest entry should be preserved"
+        );
 
         // Test serialization with massive audit history
-        let json = serde_json::to_string(&trust_card).expect("serialization should handle massive audit history");
+        let json = serde_json::to_string(&trust_card)
+            .expect("serialization should handle massive audit history");
         assert!(json.len() > 100_000, "serialized JSON should be large");
-        assert!(json.len() < 10_000_000, "serialized JSON should be reasonably bounded");
+        assert!(
+            json.len() < 10_000_000,
+            "serialized JSON should be reasonably bounded"
+        );
 
         // Test deserialization roundtrip
         let parsed: TrustCard = serde_json::from_str(&json).expect("deserialization should work");
-        assert_eq!(parsed.audit_history.len(), trust_card.audit_history.len(),
-                  "audit history length should be preserved");
+        assert_eq!(
+            parsed.audit_history.len(),
+            trust_card.audit_history.len(),
+            "audit history length should be preserved"
+        );
     }
 
     #[test]
@@ -3726,8 +3863,10 @@ mod tests {
 
         // Test with empty refs
         let empty_result = ensure_evidence_refs_present(&[]);
-        assert!(matches!(empty_result, Err(TrustCardError::EvidenceMissing)),
-               "should reject empty evidence refs");
+        assert!(
+            matches!(empty_result, Err(TrustCardError::EvidenceMissing)),
+            "should reject empty evidence refs"
+        );
 
         // Test derivation hash with collision candidates
         let hash1 = compute_trust_card_derivation_hash(&collision_candidates, 123);
@@ -3744,7 +3883,10 @@ mod tests {
         let different_refs = vec![collision_candidates[0].clone()]; // Just one ref
         let hash_different = compute_trust_card_derivation_hash(&different_refs, 123);
 
-        assert!(!constant_time::ct_eq(&hash1, &hash_different), "different refs should produce different hashes");
+        assert!(
+            !constant_time::ct_eq(&hash1, &hash_different),
+            "different refs should produce different hashes"
+        );
 
         // Test with malicious evidence IDs that might cause hash collisions
         let malicious_refs = vec![
@@ -3766,7 +3908,10 @@ mod tests {
         let hash_without_null = compute_trust_card_derivation_hash(&malicious_refs[1..], 123);
 
         // Length prefixing in the hash function should prevent null-byte collisions
-        assert_ne!(hash_with_null, hash_without_null, "null byte should not cause collision");
+        assert_ne!(
+            hash_with_null, hash_without_null,
+            "null byte should not cause collision"
+        );
     }
 
     #[test]
@@ -3796,7 +3941,8 @@ mod tests {
             match NamedTempFile::new_in(dir.path()) {
                 Ok(mut temp_file) => {
                     // Write test content
-                    let test_content = r#"{"test": "content with unicode \u{1F4A9} and control \r\n chars"}"#;
+                    let test_content =
+                        r#"{"test": "content with unicode \u{1F4A9} and control \r\n chars"}"#;
 
                     match write!(temp_file, "{}", test_content) {
                         Ok(_) => {
@@ -3805,7 +3951,10 @@ mod tests {
                                 Ok(_) => {
                                     // Verify file exists and content is correct
                                     if let Ok(content) = std::fs::read_to_string(&path) {
-                                        assert_eq!(content, test_content, "file content should be preserved");
+                                        assert_eq!(
+                                            content, test_content,
+                                            "file content should be preserved"
+                                        );
                                     }
 
                                     // Clean up
@@ -3851,8 +4000,10 @@ mod tests {
                 // Verify no files were created outside the temp directory
                 // (This is a basic check - full verification would require path canonicalization)
                 if target_path.exists() {
-                    assert!(target_path.starts_with(dir.path()),
-                           "created file should be within temp directory");
+                    assert!(
+                        target_path.starts_with(dir.path()),
+                        "created file should be within temp directory"
+                    );
                 }
             }
         }
@@ -3867,7 +4018,7 @@ mod tests {
         let large_cap = if cfg!(target_pointer_width = "64") {
             1000 // Use reasonable size for testing
         } else {
-            100  // Smaller for 32-bit
+            100 // Smaller for 32-bit
         };
 
         // Fill vector to capacity
@@ -3881,8 +4032,16 @@ mod tests {
 
         // This should trigger the overflow protection in push_bounded
         push_bounded(&mut overflow_vec, 999, large_cap);
-        assert_eq!(overflow_vec.len(), large_cap, "should be reduced to capacity");
-        assert_eq!(overflow_vec[overflow_vec.len() - 1], 999, "latest item should be preserved");
+        assert_eq!(
+            overflow_vec.len(),
+            large_cap,
+            "should be reduced to capacity"
+        );
+        assert_eq!(
+            overflow_vec[overflow_vec.len() - 1],
+            999,
+            "latest item should be preserved"
+        );
 
         // Test with zero capacity (special case)
         let mut zero_cap_vec = vec![1, 2, 3, 4, 5];
@@ -3892,7 +4051,11 @@ mod tests {
         // Test with capacity 1 (minimum non-zero)
         let mut single_cap_vec = vec![1, 2, 3];
         push_bounded(&mut single_cap_vec, 4, 1);
-        assert_eq!(single_cap_vec.len(), 1, "capacity 1 should keep only latest");
+        assert_eq!(
+            single_cap_vec.len(),
+            1,
+            "capacity 1 should keep only latest"
+        );
         assert_eq!(single_cap_vec[0], 4, "should keep the newly pushed item");
 
         // Test saturating arithmetic in the drain calculation
@@ -3910,10 +4073,18 @@ mod tests {
         for (i, &expected_val) in expected.iter().enumerate() {
             if i < 4 {
                 // First 4 elements should be from original vector
-                assert!(extreme_vec[i] <= 999, "element {} should be from original range", i);
+                assert!(
+                    extreme_vec[i] <= 999,
+                    "element {} should be from original range",
+                    i
+                );
             } else {
                 // Last element should be the new one
-                assert_eq!(extreme_vec[i], expected_val, "element {} should be new value", i);
+                assert_eq!(
+                    extreme_vec[i], expected_val,
+                    "element {} should be new value",
+                    i
+                );
             }
         }
     }
@@ -3941,7 +4112,8 @@ mod tests {
         let now_secs = 1000;
 
         // Path 1: Create active, then revoke via mutation
-        let card1 = registry1.create(base_input.clone(), now_secs, "trace1")
+        let card1 = registry1
+            .create(base_input.clone(), now_secs, "trace1")
             .expect("create active card");
 
         let revoke_mutation = TrustCardMutation {
@@ -3958,12 +4130,14 @@ mod tests {
             evidence_refs: None,
         };
 
-        let final_card1 = registry1.mutate(
-            &card1.extension.extension_id,
-            revoke_mutation,
-            now_secs + 100,
-            "trace1-revoke"
-        ).expect("revoke card");
+        let final_card1 = registry1
+            .mutate(
+                &card1.extension.extension_id,
+                revoke_mutation,
+                now_secs + 100,
+                "trace1-revoke",
+            )
+            .expect("revoke card");
 
         // Path 2: Create with revoked status directly
         let mut revoked_input = base_input;
@@ -3972,23 +4146,39 @@ mod tests {
             revoked_at: revoke_time,
         };
 
-        let final_card2 = registry2.create(revoked_input, now_secs, "trace2")
+        let final_card2 = registry2
+            .create(revoked_input, now_secs, "trace2")
             .expect("create revoked card");
 
         // Metamorphic relation: Both paths should result in equivalent revoked state
-        assert!(matches!(final_card1.revocation_status, RevocationStatus::Revoked { .. }));
-        assert!(matches!(final_card2.revocation_status, RevocationStatus::Revoked { .. }));
+        assert!(matches!(
+            final_card1.revocation_status,
+            RevocationStatus::Revoked { .. }
+        ));
+        assert!(matches!(
+            final_card2.revocation_status,
+            RevocationStatus::Revoked { .. }
+        ));
 
         // Core properties should be identical (ignoring version-specific fields)
         assert_eq!(final_card1.extension, final_card2.extension);
         assert_eq!(final_card1.publisher, final_card2.publisher);
-        assert_eq!(final_card1.certification_level, final_card2.certification_level);
+        assert_eq!(
+            final_card1.certification_level,
+            final_card2.certification_level
+        );
 
         // Both should have revoked status with same reason
-        match (&final_card1.revocation_status, &final_card2.revocation_status) {
-            (RevocationStatus::Revoked { reason: r1, .. }, RevocationStatus::Revoked { reason: r2, .. }) => {
+        match (
+            &final_card1.revocation_status,
+            &final_card2.revocation_status,
+        ) {
+            (
+                RevocationStatus::Revoked { reason: r1, .. },
+                RevocationStatus::Revoked { reason: r2, .. },
+            ) => {
                 assert_eq!(r1, r2, "Revocation reasons should match");
-            },
+            }
             _ => panic!("Both cards should be revoked"),
         }
     }
@@ -4011,8 +4201,12 @@ mod tests {
 
         let extension_id = &input.extension.extension_id;
 
-        registry1.create(input.clone(), now_secs, "trace1").expect("create card1");
-        registry2.create(input, now_secs, "trace2").expect("create card2");
+        registry1
+            .create(input.clone(), now_secs, "trace1")
+            .expect("create card1");
+        registry2
+            .create(input, now_secs, "trace2")
+            .expect("create card2");
 
         // Independent mutations: reputation score + quarantine status
         let reputation_mutation = TrustCardMutation {
@@ -4038,19 +4232,36 @@ mod tests {
         };
 
         // Path 1: reputation then quarantine
-        registry1.mutate(extension_id, reputation_mutation.clone(), now_secs + 100, "trace1a")
+        registry1
+            .mutate(
+                extension_id,
+                reputation_mutation.clone(),
+                now_secs + 100,
+                "trace1a",
+            )
             .expect("reputation mutation");
-        let final1 = registry1.mutate(extension_id, quarantine_mutation.clone(), now_secs + 200, "trace1b")
+        let final1 = registry1
+            .mutate(
+                extension_id,
+                quarantine_mutation.clone(),
+                now_secs + 200,
+                "trace1b",
+            )
             .expect("quarantine mutation");
 
         // Path 2: quarantine then reputation
-        registry2.mutate(extension_id, quarantine_mutation, now_secs + 100, "trace2a")
+        registry2
+            .mutate(extension_id, quarantine_mutation, now_secs + 100, "trace2a")
             .expect("quarantine mutation");
-        let final2 = registry2.mutate(extension_id, reputation_mutation, now_secs + 200, "trace2b")
+        let final2 = registry2
+            .mutate(extension_id, reputation_mutation, now_secs + 200, "trace2b")
             .expect("reputation mutation");
 
         // Metamorphic relation: Final state should be identical
-        assert_eq!(final1.reputation_score_basis_points, final2.reputation_score_basis_points);
+        assert_eq!(
+            final1.reputation_score_basis_points,
+            final2.reputation_score_basis_points
+        );
         assert_eq!(final1.active_quarantine, final2.active_quarantine);
 
         // Core properties should remain unchanged
@@ -4070,15 +4281,13 @@ mod tests {
         let mut scrubbed = output.to_string();
 
         // UUIDs → [UUID]
-        let uuid_re = Regex::new(
-            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-        ).unwrap();
+        let uuid_re =
+            Regex::new(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").unwrap();
         scrubbed = uuid_re.replace_all(&scrubbed, "[UUID]").to_string();
 
         // ISO timestamps → [TIMESTAMP]
-        let ts_re = Regex::new(
-            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?"
-        ).unwrap();
+        let ts_re =
+            Regex::new(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?").unwrap();
         scrubbed = ts_re.replace_all(&scrubbed, "[TIMESTAMP]").to_string();
 
         // Epoch timestamps → [EPOCH]

@@ -1602,8 +1602,7 @@ mod tests {
         );
         assert_eq!(store.recover_inflight("trace-abandoned-digest"), 1);
 
-        let result =
-            store.check_or_insert(key, b"recover-changed", 1001, "trace-abandoned-digest");
+        let result = store.check_or_insert(key, b"recover-changed", 1001, "trace-abandoned-digest");
 
         match result {
             DedupeResult::Conflict {
@@ -1627,7 +1626,12 @@ mod tests {
             DedupeResult::New
         );
         store
-            .complete(key, b"complete-outcome".to_vec(), 1001, "trace-complete-stats")
+            .complete(
+                key,
+                b"complete-outcome".to_vec(),
+                1001,
+                "trace-complete-stats",
+            )
             .expect("completion should succeed");
 
         let result = store.check_or_insert(key, b"complete-changed", 1002, "trace-complete-stats");
@@ -1651,7 +1655,10 @@ mod tests {
 
         assert!(matches!(result, DedupeResult::Conflict { .. }));
         assert_eq!(store.audit_log_len(), 1);
-        assert_eq!(store.audit_log()[0].event_code, event_codes::ID_ENTRY_CONFLICT);
+        assert_eq!(
+            store.audit_log()[0].event_code,
+            event_codes::ID_ENTRY_CONFLICT
+        );
     }
 
     #[test]

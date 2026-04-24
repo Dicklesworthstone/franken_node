@@ -1061,7 +1061,8 @@ mod dgis_migration_gate_hardening_negative_tests {
             // Attempt to overflow rejection reasons vector
             if delta.cascade_risk_delta.is_finite()
                 && thresholds.max_cascade_risk_delta.is_finite()
-                && delta.cascade_risk_delta > thresholds.max_cascade_risk_delta {
+                && delta.cascade_risk_delta > thresholds.max_cascade_risk_delta
+            {
                 simulated_reasons.push(format!(
                     "cascade_risk_delta_violation_{}",
                     simulated_reasons.len()
@@ -1089,7 +1090,8 @@ mod dgis_migration_gate_hardening_negative_tests {
         for _ in 0..100 {
             if delta.cascade_risk_delta.is_finite()
                 && thresholds.max_cascade_risk_delta.is_finite()
-                && delta.cascade_risk_delta > thresholds.max_cascade_risk_delta {
+                && delta.cascade_risk_delta > thresholds.max_cascade_risk_delta
+            {
                 let reason_idx = bounded_reasons.len();
                 push_bounded(
                     &mut bounded_reasons,
@@ -1684,14 +1686,17 @@ mod dgis_migration_gate_hardening_negative_tests {
             // Valid values should work normally
             ("valid_within_bounds", 0.08, valid_thresholds, true),
             ("valid_exceeds_bounds", 0.15, valid_thresholds, false),
-
             // NaN threshold should fail-closed (always reject)
             ("nan_threshold_low_input", 0.01, nan_thresholds, false),
             ("nan_threshold_high_input", 0.15, nan_thresholds, false),
-
             // Infinity threshold should fail-closed
             ("inf_threshold_any_input", 0.05, inf_thresholds, false),
-            ("neg_inf_threshold_any_input", 0.05, neg_inf_thresholds, false),
+            (
+                "neg_inf_threshold_any_input",
+                0.05,
+                neg_inf_thresholds,
+                false,
+            ),
         ];
 
         for (test_name, projected_risk, thresholds, should_be_allowed) in test_cases {
@@ -1701,13 +1706,8 @@ mod dgis_migration_gate_hardening_negative_tests {
                 articulation_points: 0,
             };
 
-            let evaluation = evaluate_admission(
-                "test_trace_id",
-                baseline,
-                projected,
-                thresholds,
-                &[],
-            );
+            let evaluation =
+                evaluate_admission("test_trace_id", baseline, projected, thresholds, &[]);
 
             let is_allowed = matches!(evaluation.verdict, GateVerdict::Allow);
             assert_eq!(
@@ -1742,13 +1742,8 @@ mod dgis_migration_gate_hardening_negative_tests {
             ("inf_input", inf_projected),
             ("neg_inf_input", neg_inf_projected),
         ] {
-            let evaluation = evaluate_admission(
-                "test_trace_id",
-                baseline,
-                projected,
-                valid_thresholds,
-                &[],
-            );
+            let evaluation =
+                evaluate_admission("test_trace_id", baseline, projected, valid_thresholds, &[]);
 
             assert!(
                 !matches!(evaluation.verdict, GateVerdict::Allow),

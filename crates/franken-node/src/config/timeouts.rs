@@ -9,8 +9,7 @@ pub const TRUST_CARD_CACHE_TTL: Duration = Duration::from_secs(TRUST_CARD_CACHE_
 pub const TRUST_FRESHNESS_WINDOW_SECS: u64 = 30 * 24 * 3_600;
 pub const TRUST_FRESHNESS_WINDOW: Duration = Duration::from_secs(TRUST_FRESHNESS_WINDOW_SECS);
 pub const REPLAY_CAPSULE_FRESHNESS_SECS: u64 = 3_600;
-pub const REPLAY_CAPSULE_FRESHNESS: Duration =
-    Duration::from_secs(REPLAY_CAPSULE_FRESHNESS_SECS);
+pub const REPLAY_CAPSULE_FRESHNESS: Duration = Duration::from_secs(REPLAY_CAPSULE_FRESHNESS_SECS);
 pub const REMOTE_IDEMPOTENCY_TTL_SECS: u64 = 604_800;
 pub const REMOTE_IDEMPOTENCY_TTL: Duration = Duration::from_secs(REMOTE_IDEMPOTENCY_TTL_SECS);
 pub const SECURITY_MAX_DEGRADED_DURATION_SECS: u64 = 3_600;

@@ -1462,8 +1462,12 @@ fn terminate_runtime_smoke_process_tree(child: &mut Child) -> Result<(), anyhow:
     #[cfg(unix)]
     terminate_runtime_smoke_process_group(child.id())?;
 
-    child.kill().map_err(|err| anyhow::anyhow!("failed to kill runtime smoke process: {err}"))?;
-    child.wait().map_err(|err| anyhow::anyhow!("failed to wait for runtime smoke process: {err}"))?;
+    child
+        .kill()
+        .map_err(|err| anyhow::anyhow!("failed to kill runtime smoke process: {err}"))?;
+    child
+        .wait()
+        .map_err(|err| anyhow::anyhow!("failed to wait for runtime smoke process: {err}"))?;
     Ok(())
 }
 
@@ -1490,8 +1494,10 @@ fn signal_runtime_smoke_process_group(pid: u32, signal: &str) -> Result<(), std:
     if !status.success() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Other,
-            format!("kill command failed with signal {signal} for process group {pid}: exit code {}",
-                status.code().unwrap_or(-1))
+            format!(
+                "kill command failed with signal {signal} for process group {pid}: exit code {}",
+                status.code().unwrap_or(-1)
+            ),
         ));
     }
     Ok(())
@@ -5618,7 +5624,9 @@ mod tests {
         assert!(rollback_path_has_unsafe_separator("src\\file.js"));
 
         // Should detect backslash in nested path
-        assert!(rollback_path_has_unsafe_separator("src\\components\\App.tsx"));
+        assert!(rollback_path_has_unsafe_separator(
+            "src\\components\\App.tsx"
+        ));
 
         // Should detect backslash in parent traversal attempts
         assert!(rollback_path_has_unsafe_separator("..\\..\\etc\\passwd"));
@@ -5628,7 +5636,9 @@ mod tests {
 
         // Should NOT flag safe paths with forward slashes
         assert!(!rollback_path_has_unsafe_separator("src/file.js"));
-        assert!(!rollback_path_has_unsafe_separator("src/components/App.tsx"));
+        assert!(!rollback_path_has_unsafe_separator(
+            "src/components/App.tsx"
+        ));
         assert!(!rollback_path_has_unsafe_separator("../parent/file.js"));
 
         // Should NOT flag empty or single character paths

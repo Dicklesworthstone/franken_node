@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::security::constant_time;
-use crate::tools::benchmark_suite::{run_default_suite, BenchmarkDimension};
+use crate::tools::benchmark_suite::{BenchmarkDimension, run_default_suite};
 
 const MAX_HISTORY_ENTRIES: usize = 4096;
 const MAX_BET_ENTRIES: usize = 4096;
@@ -57,8 +57,7 @@ pub const INV_CSR_IDEMPOTENT: &str = "INV-CSR-IDEMPOTENT";
 // ── Default configuration ────────────────────────────────────────────────────
 
 /// Default freshness window for artifacts in seconds (30 days).
-pub const DEFAULT_FRESHNESS_WINDOW_SECS: u64 =
-    crate::config::timeouts::TRUST_FRESHNESS_WINDOW_SECS;
+pub const DEFAULT_FRESHNESS_WINDOW_SECS: u64 = crate::config::timeouts::TRUST_FRESHNESS_WINDOW_SECS;
 
 /// Default report schedule interval description.
 pub const DEFAULT_SCHEDULE: &str = "monthly";
@@ -1178,8 +1177,10 @@ pub fn real_pipeline(
             source_name: "real-benchmark-runner".to_string(),
             source_bead: format!("bd-bench-{}", now_secs % 100000),
             claims: vec![ClaimInput {
-                summary: format!("franken_node achieves {:.1}% Node.js API compatibility",
-                    benchmark_data.compatibility_percent),
+                summary: format!(
+                    "franken_node achieves {:.1}% Node.js API compatibility",
+                    benchmark_data.compatibility_percent
+                ),
                 value: benchmark_data.compatibility_percent,
                 unit: "percent".to_string(),
                 evidence: EvidenceInput {
@@ -1195,8 +1196,10 @@ pub fn real_pipeline(
             source_name: "real-security-analyzer".to_string(),
             source_bead: format!("bd-sec-{}", now_secs % 100000),
             claims: vec![ClaimInput {
-                summary: format!("franken_node achieves {:.1}x compromise surface reduction",
-                    security_data.surface_reduction_factor),
+                summary: format!(
+                    "franken_node achieves {:.1}x compromise surface reduction",
+                    security_data.surface_reduction_factor
+                ),
                 value: security_data.surface_reduction_factor,
                 unit: "factor".to_string(),
                 evidence: EvidenceInput {
@@ -1212,8 +1215,10 @@ pub fn real_pipeline(
             source_name: "real-migration-tracker".to_string(),
             source_bead: format!("bd-mig-{}", now_secs % 100000),
             claims: vec![ClaimInput {
-                summary: format!("franken_node migration is {:.1}x faster than manual migration",
-                    migration_data.velocity_factor),
+                summary: format!(
+                    "franken_node migration is {:.1}x faster than manual migration",
+                    migration_data.velocity_factor
+                ),
                 value: migration_data.velocity_factor,
                 unit: "factor".to_string(),
                 evidence: EvidenceInput {
@@ -1229,8 +1234,10 @@ pub fn real_pipeline(
             source_name: "real-verifier-registry".to_string(),
             source_bead: format!("bd-adopt-{}", now_secs % 100000),
             claims: vec![ClaimInput {
-                summary: format!("{} verifiers registered with {} attestations",
-                    adoption_data.verifier_count, adoption_data.attestation_volume),
+                summary: format!(
+                    "{} verifiers registered with {} attestations",
+                    adoption_data.verifier_count, adoption_data.attestation_volume
+                ),
                 value: adoption_data.verifier_count as f64,
                 unit: "count".to_string(),
                 evidence: EvidenceInput {
@@ -1246,8 +1253,11 @@ pub fn real_pipeline(
             source_name: "real-trust-economics".to_string(),
             source_bead: format!("bd-econ-{}", now_secs % 100000),
             claims: vec![ClaimInput {
-                summary: format!("{:.1}x cost-benefit ratio with {:.0}% attacker ROI delta",
-                    economics_data.cost_benefit_ratio, economics_data.attacker_roi_delta * 100.0),
+                summary: format!(
+                    "{:.1}x cost-benefit ratio with {:.0}% attacker ROI delta",
+                    economics_data.cost_benefit_ratio,
+                    economics_data.attacker_roi_delta * 100.0
+                ),
                 value: economics_data.cost_benefit_ratio,
                 unit: "ratio".to_string(),
                 evidence: EvidenceInput {
@@ -1334,25 +1344,31 @@ pub struct BenchmarkValidationResult {
 /// Generate real benchmark metrics from compatibility test results
 fn generate_benchmark_metrics(now_secs: u64) -> Result<RealBenchmarkMetrics, CategoryShiftError> {
     // Run the actual benchmark suite to get real performance data
-    let benchmark_report = run_default_suite(None)
-        .map_err(|e| CategoryShiftError::BenchmarkRunFailed {
+    let benchmark_report =
+        run_default_suite(None).map_err(|e| CategoryShiftError::BenchmarkRunFailed {
             msg: format!("failed to run benchmark suite: {}", e),
         })?;
 
     // Extract compatibility percentage from actual compatibility corpus results
-    let compatibility_percent = load_compatibility_corpus_pass_rate()
-        .unwrap_or(94.5); // fallback to baseline if corpus not available
+    let compatibility_percent = load_compatibility_corpus_pass_rate().unwrap_or(94.5); // fallback to baseline if corpus not available
 
     // Calculate throughput from benchmark scenarios
-    let throughput_scenario = benchmark_report.scenarios.iter()
-        .find(|s| s.name.contains("throughput") || s.dimension == BenchmarkDimension::PerformanceUnderHardening)
+    let throughput_scenario = benchmark_report
+        .scenarios
+        .iter()
+        .find(|s| {
+            s.name.contains("throughput")
+                || s.dimension == BenchmarkDimension::PerformanceUnderHardening
+        })
         .map(|s| s.raw_value)
         .unwrap_or(145000.0);
 
     let throughput_ops_per_sec = throughput_scenario as u64;
 
     // Extract latency from cold start or latency scenarios
-    let latency_p99_ms = benchmark_report.scenarios.iter()
+    let latency_p99_ms = benchmark_report
+        .scenarios
+        .iter()
         .find(|s| s.name.contains("latency") || s.name.contains("cold_start"))
         .map(|s| s.raw_value)
         .unwrap_or(2.3);
@@ -1372,7 +1388,8 @@ fn load_compatibility_corpus_pass_rate() -> Option<f64> {
     let corpus_path = "artifacts/13/compatibility_corpus_results.json";
     if let Ok(content) = fs::read_to_string(corpus_path) {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
-            return value.get("totals")
+            return value
+                .get("totals")
                 .and_then(|t| t.get("overall_pass_rate_pct"))
                 .and_then(|p| p.as_f64());
         }
@@ -1381,7 +1398,10 @@ fn load_compatibility_corpus_pass_rate() -> Option<f64> {
 }
 
 /// Save benchmark results to artifacts folder for CI gating and regression detection
-fn save_benchmark_results(report: &crate::tools::benchmark_suite::BenchmarkReport, timestamp: u64) -> Result<(), CategoryShiftError> {
+fn save_benchmark_results(
+    report: &crate::tools::benchmark_suite::BenchmarkReport,
+    timestamp: u64,
+) -> Result<(), CategoryShiftError> {
     // Create artifacts directory if it doesn't exist
     if let Err(e) = fs::create_dir_all("artifacts/category_shift") {
         return Err(CategoryShiftError::ArtifactSaveFailed {
@@ -1390,41 +1410,51 @@ fn save_benchmark_results(report: &crate::tools::benchmark_suite::BenchmarkRepor
     }
 
     // Save detailed benchmark report
-    let report_path = format!("artifacts/category_shift/benchmark_report_{}.json", timestamp);
-    let report_json = serde_json::to_string_pretty(report)
-        .map_err(|e| CategoryShiftError::ArtifactSaveFailed {
+    let report_path = format!(
+        "artifacts/category_shift/benchmark_report_{}.json",
+        timestamp
+    );
+    let report_json = serde_json::to_string_pretty(report).map_err(|e| {
+        CategoryShiftError::ArtifactSaveFailed {
             msg: format!("failed to serialize benchmark report: {}", e),
-        })?;
+        }
+    })?;
 
-    fs::write(&report_path, report_json)
-        .map_err(|e| CategoryShiftError::ArtifactSaveFailed {
-            msg: format!("failed to write benchmark report to {}: {}", report_path, e),
-        })?;
+    fs::write(&report_path, report_json).map_err(|e| CategoryShiftError::ArtifactSaveFailed {
+        msg: format!("failed to write benchmark report to {}: {}", report_path, e),
+    })?;
 
     // Save summary metrics for CI gate comparison
     let summary = BenchmarkSummary {
         timestamp,
         aggregate_score: report.aggregate_score,
-        scenarios: report.scenarios.iter().map(|s| ScenarioSummary {
-            name: s.name.clone(),
-            dimension: format!("{:?}", s.dimension),
-            raw_value: s.raw_value,
-            score: s.score,
-            unit: s.unit.clone(),
-        }).collect(),
+        scenarios: report
+            .scenarios
+            .iter()
+            .map(|s| ScenarioSummary {
+                name: s.name.clone(),
+                dimension: format!("{:?}", s.dimension),
+                raw_value: s.raw_value,
+                score: s.score,
+                unit: s.unit.clone(),
+            })
+            .collect(),
         provenance_hash: report.provenance_hash.clone(),
     };
 
     let summary_path = "artifacts/category_shift/latest_benchmark_summary.json";
-    let summary_json = serde_json::to_string_pretty(&summary)
-        .map_err(|e| CategoryShiftError::ArtifactSaveFailed {
+    let summary_json = serde_json::to_string_pretty(&summary).map_err(|e| {
+        CategoryShiftError::ArtifactSaveFailed {
             msg: format!("failed to serialize benchmark summary: {}", e),
-        })?;
+        }
+    })?;
 
-    fs::write(summary_path, summary_json)
-        .map_err(|e| CategoryShiftError::ArtifactSaveFailed {
-            msg: format!("failed to write benchmark summary to {}: {}", summary_path, e),
-        })?;
+    fs::write(summary_path, summary_json).map_err(|e| CategoryShiftError::ArtifactSaveFailed {
+        msg: format!(
+            "failed to write benchmark summary to {}: {}",
+            summary_path, e
+        ),
+    })?;
 
     Ok(())
 }
@@ -1441,18 +1471,19 @@ pub fn validate_benchmark_thresholds() -> Result<BenchmarkValidationResult, Cate
         });
     }
 
-    let summary_content = fs::read_to_string(summary_path)
-        .map_err(|e| CategoryShiftError::ArtifactSaveFailed {
+    let summary_content =
+        fs::read_to_string(summary_path).map_err(|e| CategoryShiftError::ArtifactSaveFailed {
             msg: format!("failed to read benchmark summary: {}", e),
         })?;
 
-    let summary: BenchmarkSummary = serde_json::from_str(&summary_content)
-        .map_err(|e| CategoryShiftError::Json(format!("failed to parse benchmark summary: {}", e)))?;
+    let summary: BenchmarkSummary = serde_json::from_str(&summary_content).map_err(|e| {
+        CategoryShiftError::Json(format!("failed to parse benchmark summary: {}", e))
+    })?;
 
     // Define baseline thresholds for CI gating
     let thresholds = BenchmarkThresholds {
-        min_aggregate_score: 70, // Require minimum aggregate score of 70/100
-        max_latency_ms: 500.0,   // Maximum acceptable latency
+        min_aggregate_score: 70,   // Require minimum aggregate score of 70/100
+        max_latency_ms: 500.0,     // Maximum acceptable latency
         min_throughput_ops: 50000, // Minimum required throughput
     };
 
@@ -1533,7 +1564,11 @@ fn generate_migration_metrics(
 ) -> Result<RealMigrationMetrics, CategoryShiftError> {
     // Base velocity from config thresholds and automation settings
     let base_velocity = if migration_config.autofix { 3.8 } else { 2.1 };
-    let lockstep_bonus = if migration_config.require_lockstep_validation { 0.5 } else { 0.0 };
+    let lockstep_bonus = if migration_config.require_lockstep_validation {
+        0.5
+    } else {
+        0.0
+    };
     let velocity_factor = base_velocity + lockstep_bonus;
 
     // Success rate from verification threshold (higher threshold = higher success rate)
@@ -1622,7 +1657,11 @@ fn generate_real_moonshot_bets(
         MoonshotBetEntry {
             initiative_id: "moonshot-migration".to_string(),
             title: "3x Migration Velocity".to_string(),
-            status: if migration_config.autofix { BetStatus::Completed } else { BetStatus::OnTrack },
+            status: if migration_config.autofix {
+                BetStatus::Completed
+            } else {
+                BetStatus::OnTrack
+            },
             progress_percent: if migration_config.autofix { 100 } else { 85 },
             blockers: if migration_config.autofix {
                 vec![]
@@ -1635,7 +1674,11 @@ fn generate_real_moonshot_bets(
         MoonshotBetEntry {
             initiative_id: "moonshot-security".to_string(),
             title: "10x Compromise Reduction".to_string(),
-            status: if attestation_count > 5000 { BetStatus::OnTrack } else { BetStatus::AtRisk },
+            status: if attestation_count > 5000 {
+                BetStatus::OnTrack
+            } else {
+                BetStatus::AtRisk
+            },
             progress_percent: (80 + (attestation_count / 100).min(15)) as u8,
             blockers: if verifier_count < 50 {
                 vec!["Insufficient verifier network coverage".to_string()]
@@ -1651,7 +1694,11 @@ fn generate_real_moonshot_bets(
         bets.push(MoonshotBetEntry {
             initiative_id: "moonshot-adoption".to_string(),
             title: "500 Verifier Network".to_string(),
-            status: if verifier_count >= 100 { BetStatus::OnTrack } else { BetStatus::AtRisk },
+            status: if verifier_count >= 100 {
+                BetStatus::OnTrack
+            } else {
+                BetStatus::AtRisk
+            },
             progress_percent: ((verifier_count as f64 / 500.0) * 100.0).min(100.0) as u8,
             blockers: if verifier_count < 50 {
                 vec!["Slow verifier onboarding rate".to_string()]
@@ -2759,12 +2806,19 @@ mod tests {
                 assert!(metrics.compatibility_percent <= 100.0);
                 assert!(metrics.throughput_ops_per_sec > 0);
                 assert!(metrics.latency_p99_ms > 0.0);
-                println!("Real benchmark metrics: compatibility={}%, throughput={} ops/sec, latency={}ms",
-                    metrics.compatibility_percent, metrics.throughput_ops_per_sec, metrics.latency_p99_ms);
+                println!(
+                    "Real benchmark metrics: compatibility={}%, throughput={} ops/sec, latency={}ms",
+                    metrics.compatibility_percent,
+                    metrics.throughput_ops_per_sec,
+                    metrics.latency_p99_ms
+                );
             }
             Err(e) => {
                 // If benchmark suite fails, that's expected in some environments
-                println!("Benchmark run failed (expected in some environments): {}", e);
+                println!(
+                    "Benchmark run failed (expected in some environments): {}",
+                    e
+                );
             }
         }
     }

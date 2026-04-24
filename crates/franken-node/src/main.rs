@@ -5249,7 +5249,11 @@ fn runtime_cli_timestamp_ms(timestamp_ms: Option<u64>) -> u64 {
     timestamp_ms.unwrap_or_else(|| now_unix_secs().saturating_mul(1_000))
 }
 
-fn emit_json_or_human<T: Serialize>(value: &T, json: bool, human: impl FnOnce() -> String) -> Result<()> {
+fn emit_json_or_human<T: Serialize>(
+    value: &T,
+    json: bool,
+    human: impl FnOnce() -> String,
+) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(value)?);
     } else {
@@ -5347,7 +5351,9 @@ fn resolve_remotecap_signing_key() -> Result<String> {
             }
             #[cfg(not(any(test, feature = "dev-keys")))]
             {
-                anyhow::bail!("FRANKEN_NODE_REMOTECAP_KEY environment variable is empty - production deployments require an explicit signing key")
+                anyhow::bail!(
+                    "FRANKEN_NODE_REMOTECAP_KEY environment variable is empty - production deployments require an explicit signing key"
+                )
             }
         }
         Err(_) => {
@@ -5357,7 +5363,9 @@ fn resolve_remotecap_signing_key() -> Result<String> {
             }
             #[cfg(not(any(test, feature = "dev-keys")))]
             {
-                anyhow::bail!("FRANKEN_NODE_REMOTECAP_KEY environment variable is not set - production deployments require an explicit signing key")
+                anyhow::bail!(
+                    "FRANKEN_NODE_REMOTECAP_KEY environment variable is not set - production deployments require an explicit signing key"
+                )
             }
         }
     }
@@ -5436,8 +5444,7 @@ fn remotecap_cli_capability_gate(signing_key: &str, cap: &RemoteCap) -> Result<C
         CapabilityGate::with_durable_replay_store(signing_key, remotecap_cli_replay_store_path())
             .map_err(|err| anyhow::anyhow!(err.to_string()))
     } else {
-        CapabilityGate::try_new(signing_key)
-            .map_err(|err| anyhow::anyhow!(err.to_string()))
+        CapabilityGate::try_new(signing_key).map_err(|err| anyhow::anyhow!(err.to_string()))
     }
 }
 
@@ -6020,7 +6027,9 @@ fn compute_run_execution_receipt_hash(core: &RunExecutionReceiptCore) -> Result<
         serde_json::to_vec(core).context("failed serializing run execution receipt for hashing")?;
     Ok(format!(
         "sha256:{}",
-        hex::encode(sha2::Sha256::digest([b"run_execution_receipt_v1:" as &[u8], payload.as_slice()].concat()))
+        hex::encode(sha2::Sha256::digest(
+            [b"run_execution_receipt_v1:" as &[u8], payload.as_slice()].concat()
+        ))
     ))
 }
 
@@ -7564,12 +7573,8 @@ fn render_init_structured_logs_jsonl(report: &InitReport) -> Result<String> {
     let mut lines = String::new();
 
     // Event: init started
-    let init_line = init_structured_log_line(
-        report,
-        "INIT-001",
-        "init command started",
-        "bootstrap"
-    );
+    let init_line =
+        init_structured_log_line(report, "INIT-001", "init command started", "bootstrap");
     lines.push_str(&serde_json::to_string(&init_line)?);
     lines.push('\n');
 
@@ -7578,8 +7583,11 @@ fn render_init_structured_logs_jsonl(report: &InitReport) -> Result<String> {
         let scan_line = init_structured_log_line(
             report,
             "INIT-002",
-            &format!("trust scan completed: created {} cards", trust_scan.created_cards),
-            "scan"
+            &format!(
+                "trust scan completed: created {} cards",
+                trust_scan.created_cards
+            ),
+            "scan",
         );
         lines.push_str(&serde_json::to_string(&scan_line)?);
         lines.push('\n');
@@ -7589,8 +7597,12 @@ fn render_init_structured_logs_jsonl(report: &InitReport) -> Result<String> {
     let complete_line = init_structured_log_line(
         report,
         "INIT-003",
-        &format!("init completed: {} file actions, profile={}", report.file_actions.len(), report.selected_profile),
-        "complete"
+        &format!(
+            "init completed: {} file actions, profile={}",
+            report.file_actions.len(),
+            report.selected_profile
+        ),
+        "complete",
     );
     lines.push_str(&serde_json::to_string(&complete_line)?);
     lines.push('\n');
@@ -7637,14 +7649,25 @@ fn render_run_structured_logs_jsonl(
     let now = chrono::Utc::now().to_rfc3339();
 
     // Event: preflight completed
-    let preflight_verdict = if preflight.verdict.is_blocked() { "blocked" } else { "passed" };
-    let preflight_event_code = if preflight.verdict.is_blocked() { "RUN-002" } else { "RUN-001" };
+    let preflight_verdict = if preflight.verdict.is_blocked() {
+        "blocked"
+    } else {
+        "passed"
+    };
+    let preflight_event_code = if preflight.verdict.is_blocked() {
+        "RUN-002"
+    } else {
+        "RUN-001"
+    };
     let preflight_line = run_structured_log_line(
         &now,
         preflight_event_code,
-        &format!("run preflight {}: policy={}", preflight_verdict, preflight.policy_mode),
+        &format!(
+            "run preflight {}: policy={}",
+            preflight_verdict, preflight.policy_mode
+        ),
         trace_id,
-        "preflight"
+        "preflight",
     );
     lines.push_str(&serde_json::to_string(&preflight_line)?);
     lines.push('\n');
@@ -7658,9 +7681,12 @@ fn render_run_structured_logs_jsonl(
     let dispatch_line = run_structured_log_line(
         &now,
         "RUN-003",
-        &format!("run dispatch completed: runtime={} exit_code={:?}", dispatch.runtime, dispatch.exit_code),
+        &format!(
+            "run dispatch completed: runtime={} exit_code={:?}",
+            dispatch.runtime, dispatch.exit_code
+        ),
         trace_id,
-        "dispatch"
+        "dispatch",
     );
     lines.push_str(&serde_json::to_string(&dispatch_line)?);
     lines.push('\n');
@@ -7669,9 +7695,12 @@ fn render_run_structured_logs_jsonl(
     let receipt_line = run_structured_log_line(
         &now,
         "RUN-004",
-        &format!("run receipt written: id={} violations={}", receipt.core.receipt_id, receipt.core.violation_count),
+        &format!(
+            "run receipt written: id={} violations={}",
+            receipt.core.receipt_id, receipt.core.violation_count
+        ),
         trace_id,
-        "receipt"
+        "receipt",
     );
     lines.push_str(&serde_json::to_string(&receipt_line)?);
     lines.push('\n');
@@ -8769,7 +8798,7 @@ mod trust_command_tests {
         assert!(
             tmp.path()
                 .join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH)
-            .is_file()
+                .is_file()
         );
     }
 
@@ -19387,7 +19416,10 @@ fn main() -> Result<()> {
             )?;
 
             if structured_logs_jsonl {
-                eprint!("{}", render_run_structured_logs_jsonl(&preflight, &dispatch, &receipt, &trace_id)?);
+                eprint!(
+                    "{}",
+                    render_run_structured_logs_jsonl(&preflight, &dispatch, &receipt, &trace_id)?
+                );
             }
 
             emit_run_completion_output(&preflight, &dispatch, &receipt, &receipt_path, json)?;
@@ -20318,7 +20350,9 @@ mod run_trust_gate_tests {
                 assert_eq!(results.len(), 1);
                 assert_eq!(results[0].status, RunDependencyTrustStatus::Revoked);
             }
-            other => panic!("expected blocked verdict for revoked dependency in legacy-risky mode, got {other:?}"),
+            other => panic!(
+                "expected blocked verdict for revoked dependency in legacy-risky mode, got {other:?}"
+            ),
         }
         assert_eq!(report.receipt.decision, Decision::Denied);
     }
@@ -20338,7 +20372,11 @@ mod run_trust_gate_tests {
         assert_eq!(report.receipt.decision, Decision::Denied);
 
         if let PreFlightVerdict::Blocked { violations, .. } = &report.verdict {
-            assert!(violations.iter().any(|v| v.kind == TrustViolationKind::Revoked));
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| v.kind == TrustViolationKind::Revoked)
+            );
         }
     }
 
@@ -21804,16 +21842,20 @@ mod run_trust_gate_tests {
 
             // In test mode, this will use the dev fallback and succeed
             let result_with_test_cfg = resolve_remotecap_signing_key();
-            assert!(result_with_test_cfg.is_ok(),
-                "In test mode, empty key should fall back to dev key");
+            assert!(
+                result_with_test_cfg.is_ok(),
+                "In test mode, empty key should fall back to dev key"
+            );
 
             // Test 2: Absent environment variable should be rejected in production
             std::env::remove_var("FRANKEN_NODE_REMOTECAP_KEY");
 
             // In test mode, this will use the dev fallback and succeed
             let result_absent_with_test_cfg = resolve_remotecap_signing_key();
-            assert!(result_absent_with_test_cfg.is_ok(),
-                "In test mode, absent key should fall back to dev key");
+            assert!(
+                result_absent_with_test_cfg.is_ok(),
+                "In test mode, absent key should fall back to dev key"
+            );
 
             // Test 3: Valid key should always work
             std::env::set_var("FRANKEN_NODE_REMOTECAP_KEY", "valid-production-key-12345");
@@ -21838,7 +21880,10 @@ mod run_trust_gate_tests {
             // Test case 1: Whitespace-only key should be rejected
             std::env::set_var("FRANKEN_NODE_REMOTECAP_KEY", "   ");
             let result = resolve_remotecap_signing_key();
-            assert!(result.is_ok(), "Even whitespace key falls back to dev in test mode");
+            assert!(
+                result.is_ok(),
+                "Even whitespace key falls back to dev in test mode"
+            );
 
             // Test case 2: Very short key should still work (no minimum length requirement)
             std::env::set_var("FRANKEN_NODE_REMOTECAP_KEY", "x");
@@ -21866,31 +21911,50 @@ mod run_trust_gate_tests {
             // BD-2VZVM: Verify that CapabilityProvider and CapabilityGate construction
             // depends on resolve_remotecap_signing_key() for security
 
-            use crate::security::remote_cap::{CapabilityProvider, CapabilityGate};
+            use crate::security::remote_cap::{CapabilityGate, CapabilityProvider};
 
             // Get a valid signing key (will use dev fallback in test mode)
-            let signing_key = resolve_remotecap_signing_key().expect("Should get signing key in test mode");
+            let signing_key =
+                resolve_remotecap_signing_key().expect("Should get signing key in test mode");
 
             // Test that both CapabilityProvider and CapabilityGate can be constructed
             // with the resolved signing key
             let provider_result = CapabilityProvider::new(&signing_key);
-            assert!(provider_result.is_ok(), "CapabilityProvider should construct with resolved key");
+            assert!(
+                provider_result.is_ok(),
+                "CapabilityProvider should construct with resolved key"
+            );
 
             let gate_result = CapabilityGate::new(&signing_key);
-            assert!(gate_result.is_ok(), "CapabilityGate should construct with resolved key");
+            assert!(
+                gate_result.is_ok(),
+                "CapabilityGate should construct with resolved key"
+            );
 
             // Test that empty/whitespace keys are rejected by the constructors themselves
             let empty_provider = CapabilityProvider::new("");
-            assert!(empty_provider.is_err(), "CapabilityProvider should reject empty key");
+            assert!(
+                empty_provider.is_err(),
+                "CapabilityProvider should reject empty key"
+            );
 
             let whitespace_provider = CapabilityProvider::new("   ");
-            assert!(whitespace_provider.is_err(), "CapabilityProvider should reject whitespace key");
+            assert!(
+                whitespace_provider.is_err(),
+                "CapabilityProvider should reject whitespace key"
+            );
 
             let empty_gate = CapabilityGate::new("");
-            assert!(empty_gate.is_err(), "CapabilityGate should reject empty key");
+            assert!(
+                empty_gate.is_err(),
+                "CapabilityGate should reject empty key"
+            );
 
             let whitespace_gate = CapabilityGate::new("  \t\n  ");
-            assert!(whitespace_gate.is_err(), "CapabilityGate should reject whitespace key");
+            assert!(
+                whitespace_gate.is_err(),
+                "CapabilityGate should reject whitespace key"
+            );
 
             // This demonstrates the defense-in-depth: both resolve_remotecap_signing_key()
             // AND the CapabilityProvider/Gate constructors validate the key material
@@ -21899,7 +21963,7 @@ mod run_trust_gate_tests {
         #[test]
         fn test_execution_receipt_id_no_placeholder_regression() {
             // Regression test for bd-zxa8x: Ensure receipt IDs are never placeholder strings
-            use crate::ops::engine_dispatcher::{RunDispatchReport, EngineRuntime};
+            use crate::ops::engine_dispatcher::{EngineRuntime, RunDispatchReport};
             use std::time::SystemTime;
 
             // Create minimal test data for receipt generation
@@ -21926,18 +21990,25 @@ mod run_trust_gate_tests {
                 vec![], // ssrf_violations
                 vec![], // auto_quarantined_extensions
                 None,   // lockstep_verdict
-            ).expect("receipt generation should succeed");
+            )
+            .expect("receipt generation should succeed");
 
             // Critical assertion: receipt ID must never be the old placeholder
             assert_ne!(
-                receipt.core.receipt_id,
-                "pending",
+                receipt.core.receipt_id, "pending",
                 "Receipt ID must not be placeholder string - should be proper UUID"
             );
 
             // Additional validation: receipt ID should look like a UUID
             assert!(
-                receipt.core.receipt_id.len() == 36 && receipt.core.receipt_id.chars().filter(|&c| c == '-').count() == 4,
+                receipt.core.receipt_id.len() == 36
+                    && receipt
+                        .core
+                        .receipt_id
+                        .chars()
+                        .filter(|&c| c == '-')
+                        .count()
+                        == 4,
                 "Receipt ID should be UUID format, got: {}",
                 receipt.core.receipt_id
             );
@@ -21952,11 +22023,11 @@ mod run_trust_gate_tests {
                 vec![],
                 vec![],
                 None,
-            ).expect("second receipt generation should succeed");
+            )
+            .expect("second receipt generation should succeed");
 
             assert_ne!(
-                receipt.core.receipt_id,
-                receipt2.core.receipt_id,
+                receipt.core.receipt_id, receipt2.core.receipt_id,
                 "Receipt IDs should be unique per call"
             );
         }

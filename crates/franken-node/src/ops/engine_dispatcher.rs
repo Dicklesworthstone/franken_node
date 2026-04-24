@@ -3,18 +3,18 @@ use crate::ops::telemetry_bridge::{
 };
 use crate::runtime::lockstep_harness::LockstepHarness;
 use crate::storage::frankensqlite_adapter::FrankensqliteAdapter;
-#[cfg(feature = "engine")]
-use frankenengine_engine::execution_orchestrator::{
-    ExecutionOrchestrator, ExtensionPackage, OrchestratorConfig,
-};
-#[cfg(feature = "engine")]
-use frankenengine_engine::runtime_config::RuntimeConfig as EngineRuntimeConfig;
 use crate::{
     ActionableError,
     config::{Config, PreferredRuntime, Profile},
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
+#[cfg(feature = "engine")]
+use frankenengine_engine::execution_orchestrator::{
+    ExecutionOrchestrator, ExtensionPackage, OrchestratorConfig,
+};
+#[cfg(feature = "engine")]
+use frankenengine_engine::runtime_config::RuntimeConfig as EngineRuntimeConfig;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::io::{self, Read};
@@ -26,9 +26,9 @@ use std::time::Instant;
 
 // Security epoch constants to prevent hardcoded value drift across the module
 // These values must stay synchronized with franken-engine SecurityEpoch evolution
-const LEGACY_SECURITY_EPOCH: u64 = 1;    // Legacy security epoch for compatibility (LegacyRisky profile)
-const STANDARD_SECURITY_EPOCH: u64 = 2;  // Standard security epoch (Balanced profile)
-const CURRENT_SECURITY_EPOCH: u64 = 3;   // Latest security epoch (Strict profile)
+const LEGACY_SECURITY_EPOCH: u64 = 1; // Legacy security epoch for compatibility (LegacyRisky profile)
+const STANDARD_SECURITY_EPOCH: u64 = 2; // Standard security epoch (Balanced profile)
+const CURRENT_SECURITY_EPOCH: u64 = 3; // Latest security epoch (Strict profile)
 
 pub struct EngineDispatcher {
     engine_bin_path: String,
@@ -113,10 +113,7 @@ enum EngineProcessError {
 #[derive(Debug)]
 pub enum EngineDispatchError {
     /// Engine feature not compiled in (rebuild required)
-    EngineNotBuilt {
-        app_path: PathBuf,
-        profile: Profile,
-    },
+    EngineNotBuilt { app_path: PathBuf, profile: Profile },
     /// Engine returned an error during execution
     EngineExecutionError {
         app_path: PathBuf,
@@ -165,32 +162,44 @@ impl std::fmt::Display for EngineDispatchError {
                 "Native engine required for {:?} profile but engine feature not compiled",
                 profile
             ),
-            Self::EngineExecutionError { error_message, phase, .. } => write!(
+            Self::EngineExecutionError {
+                error_message,
+                phase,
+                ..
+            } => write!(
                 f,
                 "Engine execution failed during {}: {}",
                 phase, error_message
             ),
-            Self::EnginePanic { panic_message, cleanup_successful, .. } => write!(
+            Self::EnginePanic {
+                panic_message,
+                cleanup_successful,
+                ..
+            } => write!(
                 f,
                 "Engine panicked: {} (cleanup: {})",
                 panic_message,
-                if *cleanup_successful { "successful" } else { "failed" }
+                if *cleanup_successful {
+                    "successful"
+                } else {
+                    "failed"
+                }
             ),
-            Self::EngineTimeout { timeout_duration, phase, .. } => write!(
+            Self::EngineTimeout {
+                timeout_duration,
+                phase,
+                ..
+            } => write!(
                 f,
                 "Engine execution timed out after {:?} during {}",
                 timeout_duration, phase
             ),
-            Self::SourceReadError { io_error, .. } => write!(
-                f,
-                "Failed to read application source: {}",
-                io_error
-            ),
-            Self::TelemetryError { telemetry_error, .. } => write!(
-                f,
-                "Telemetry bridge error: {}",
-                telemetry_error
-            ),
+            Self::SourceReadError { io_error, .. } => {
+                write!(f, "Failed to read application source: {}", io_error)
+            }
+            Self::TelemetryError {
+                telemetry_error, ..
+            } => write!(f, "Telemetry bridge error: {}", telemetry_error),
         }
     }
 }
@@ -208,22 +217,40 @@ impl EngineDispatchError {
                     app_path.display()
                 ),
             ),
-            Self::EngineExecutionError { app_path, error_message, phase } => ActionableError::new(
-                format!("Engine execution failed during {}: {}", phase, error_message),
+            Self::EngineExecutionError {
+                app_path,
+                error_message,
+                phase,
+            } => ActionableError::new(
+                format!(
+                    "Engine execution failed during {}: {}",
+                    phase, error_message
+                ),
                 format!(
                     "Check application code and runtime configuration for {}",
                     app_path.display()
                 ),
             ),
-            Self::EnginePanic { app_path, panic_message, .. } => ActionableError::new(
+            Self::EnginePanic {
+                app_path,
+                panic_message,
+                ..
+            } => ActionableError::new(
                 format!("Engine crashed with panic: {}", panic_message),
                 format!(
                     "This indicates a bug in the engine. Please report this issue with the code: {}",
                     app_path.display()
                 ),
             ),
-            Self::EngineTimeout { app_path, timeout_duration, phase } => ActionableError::new(
-                format!("Engine execution timed out after {:?} during {}", timeout_duration, phase),
+            Self::EngineTimeout {
+                app_path,
+                timeout_duration,
+                phase,
+            } => ActionableError::new(
+                format!(
+                    "Engine execution timed out after {:?} during {}",
+                    timeout_duration, phase
+                ),
                 format!(
                     "Consider optimizing the application or increasing timeout limits for {}",
                     app_path.display()
@@ -236,7 +263,10 @@ impl EngineDispatchError {
                     app_path.display()
                 ),
             ),
-            Self::TelemetryError { app_path, telemetry_error } => ActionableError::new(
+            Self::TelemetryError {
+                app_path,
+                telemetry_error,
+            } => ActionableError::new(
                 format!("Telemetry bridge failed: {}", telemetry_error),
                 format!(
                     "Check system resources and retry: franken-node run {}",
@@ -1096,7 +1126,10 @@ impl EngineDispatcher {
         {
             let caps = Self::map_profile_to_capabilities(config.profile);
             Self::validate_capabilities(&caps).map_err(|e| {
-                anyhow::anyhow!("Capability validation failed in external execution path: {}", e)
+                anyhow::anyhow!(
+                    "Capability validation failed in external execution path: {}",
+                    e
+                )
             })?;
         }
 
@@ -1179,7 +1212,12 @@ impl EngineDispatcher {
             {
                 // Use native execution when engine feature is enabled
                 tracing::info!("Using native franken_engine execution instead of external process");
-                Self::run_engine_native_with_error_handling(app_path, config, policy_mode, telemetry_handle)
+                Self::run_engine_native_with_error_handling(
+                    app_path,
+                    config,
+                    policy_mode,
+                    telemetry_handle,
+                )
             }
             #[cfg(not(feature = "engine"))]
             {
@@ -1192,7 +1230,9 @@ impl EngineDispatcher {
                     return Err(dispatch_error.to_actionable().into());
                 }
                 // Fall back to external process when engine feature is disabled
-                tracing::warn!("Engine feature disabled; falling back to external process execution");
+                tracing::warn!(
+                    "Engine feature disabled; falling back to external process execution"
+                );
                 Self::run_engine_process(&mut cmd, telemetry_handle)
                     .map_err(|err| anyhow::anyhow!("{err}"))
             }
@@ -1307,23 +1347,21 @@ impl EngineDispatcher {
 
             // Check for completion
             if let Ok(result) = result_rx.try_recv() {
-                break result.map_err(|err| {
-                    match err {
-                        EngineProcessError::Spawn { message, .. } => {
-                            let dispatch_error = EngineDispatchError::EngineExecutionError {
-                                app_path: app_path_buf.clone(),
-                                error_message: message,
-                                phase: "execution".to_string(),
-                            };
-                            dispatch_error.to_actionable().into()
-                        },
-                        EngineProcessError::TelemetryDrain(message) => {
-                            let dispatch_error = EngineDispatchError::TelemetryError {
-                                app_path: app_path_buf.clone(),
-                                telemetry_error: message,
-                            };
-                            dispatch_error.to_actionable().into()
-                        },
+                break result.map_err(|err| match err {
+                    EngineProcessError::Spawn { message, .. } => {
+                        let dispatch_error = EngineDispatchError::EngineExecutionError {
+                            app_path: app_path_buf.clone(),
+                            error_message: message,
+                            phase: "execution".to_string(),
+                        };
+                        dispatch_error.to_actionable().into()
+                    }
+                    EngineProcessError::TelemetryDrain(message) => {
+                        let dispatch_error = EngineDispatchError::TelemetryError {
+                            app_path: app_path_buf.clone(),
+                            telemetry_error: message,
+                        };
+                        dispatch_error.to_actionable().into()
                     }
                 });
             }
@@ -1378,23 +1416,23 @@ impl EngineDispatcher {
         // Based on frankenengine_engine::capability::RuntimeCapability::from_tag_str mapping.
         match profile {
             Profile::Strict => vec![
-                "fs_read".to_string(),     // Maps to RuntimeCapability::FsRead
-                "timer".to_string(),       // Maps to RuntimeCapability::Timer (for timeout functionality)
+                "fs_read".to_string(), // Maps to RuntimeCapability::FsRead
+                "timer".to_string(), // Maps to RuntimeCapability::Timer (for timeout functionality)
             ],
             Profile::Balanced => vec![
-                "fs_read".to_string(),     // Maps to RuntimeCapability::FsRead
+                "fs_read".to_string(),        // Maps to RuntimeCapability::FsRead
                 "network_egress".to_string(), // Maps to RuntimeCapability::NetworkEgress
-                "builtin".to_string(),     // Maps to RuntimeCapability::Builtin (for crypto builtins)
-                "timer".to_string(),       // Maps to RuntimeCapability::Timer
+                "builtin".to_string(), // Maps to RuntimeCapability::Builtin (for crypto builtins)
+                "timer".to_string(),   // Maps to RuntimeCapability::Timer
             ],
             Profile::LegacyRisky => vec![
-                "fs_read".to_string(),     // Maps to RuntimeCapability::FsRead
-                "fs_write".to_string(),    // Maps to RuntimeCapability::FsWrite
+                "fs_read".to_string(),        // Maps to RuntimeCapability::FsRead
+                "fs_write".to_string(),       // Maps to RuntimeCapability::FsWrite
                 "network_egress".to_string(), // Maps to RuntimeCapability::NetworkEgress
-                "builtin".to_string(),     // Maps to RuntimeCapability::Builtin (includes crypto)
-                "env_read".to_string(),    // Maps to RuntimeCapability::EnvRead
+                "builtin".to_string(), // Maps to RuntimeCapability::Builtin (includes crypto)
+                "env_read".to_string(), // Maps to RuntimeCapability::EnvRead
                 "process_spawn".to_string(), // Maps to RuntimeCapability::ProcessSpawn
-                "timer".to_string(),       // Maps to RuntimeCapability::Timer
+                "timer".to_string(),   // Maps to RuntimeCapability::Timer
             ],
         }
     }
@@ -1425,14 +1463,28 @@ impl EngineDispatcher {
         // Add known aliases that franken-engine accepts (from RuntimeCapability::from_tag_str)
         valid_capabilities.extend(
             [
-            // Network aliases
-            "network", "net", "net:connect", "net:fetch", "net:outbound", "net.write", "network.write",
-            // Filesystem aliases
-            "fs", "fs:read", "fs.read", "fs:write", "fs.write",
-            // Module loading aliases
-            "module:require", "module:import", "module.import",
-            // Additional capabilities that may not be in RuntimeCapability enum but are valid
-            "console", "timer", "builtin",
+                // Network aliases
+                "network",
+                "net",
+                "net:connect",
+                "net:fetch",
+                "net:outbound",
+                "net.write",
+                "network.write",
+                // Filesystem aliases
+                "fs",
+                "fs:read",
+                "fs.read",
+                "fs:write",
+                "fs.write",
+                // Module loading aliases
+                "module:require",
+                "module:import",
+                "module.import",
+                // Additional capabilities that may not be in RuntimeCapability enum but are valid
+                "console",
+                "timer",
+                "builtin",
             ]
             .into_iter()
             .map(str::to_string),
@@ -1457,10 +1509,12 @@ impl EngineDispatcher {
             // Check hostcall prefixes that are dynamically valid
             // Note: starts_with is not constant-time but these are administrative capabilities
             // and the timing difference is minimal compared to the main validation loop
-            if !is_valid && (capability.starts_with("console:") ||
-                           capability.starts_with("timer:") ||
-                           capability.starts_with("builtin:") ||
-                           capability.starts_with("number:")) {
+            if !is_valid
+                && (capability.starts_with("console:")
+                    || capability.starts_with("timer:")
+                    || capability.starts_with("builtin:")
+                    || capability.starts_with("number:"))
+            {
                 is_valid = true;
             }
 
@@ -1476,8 +1530,9 @@ impl EngineDispatcher {
             Err(ActionableError::new(
                 "Invalid capability detected in profile configuration. \
                  Supported capabilities: fs_read, fs_write, network_egress, env_read, \
-                 process_spawn, timer, builtin, console, module_load, etc.".to_string(),
-                "Check your profile configuration and ensure only supported capabilities are used"
+                 process_spawn, timer, builtin, console, module_load, etc."
+                    .to_string(),
+                "Check your profile configuration and ensure only supported capabilities are used",
             ))
         } else {
             Ok(())
@@ -1500,35 +1555,36 @@ impl EngineDispatcher {
     #[cfg(feature = "engine")]
     fn map_config_to_runtime_config(config: &Config) -> EngineRuntimeConfig {
         use frankenengine_engine::runtime_config::{
-            ExecutionConfig, GuardplaneConfig, GovernanceConfig, GatesConfig,
-            OptimizationConfig, ExtensionHostConfig, DecisionThresholdsConfig, ContainmentConfig,
-            OrchestratorConfig as RuntimeOrchestratorConfig
+            ContainmentConfig, DecisionThresholdsConfig, ExecutionConfig, ExtensionHostConfig,
+            GatesConfig, GovernanceConfig, GuardplaneConfig, OptimizationConfig,
+            OrchestratorConfig as RuntimeOrchestratorConfig,
         };
 
         // Map profile to execution budgets and limits
         let execution = match config.profile {
             Profile::Strict => ExecutionConfig {
-                deterministic_budget: 50_000,      // Conservative budget for strict mode
-                throughput_budget: 100_000,        // Lower throughput budget
-                deterministic_max_registers: 128,  // Reduced register count
-                throughput_max_registers: 256,     // Conservative register limit
-                max_call_depth: 32,                // Shallow call stack for safety
-                max_prototype_chain_depth: 8,      // Limited prototype depth
+                deterministic_budget: 50_000,     // Conservative budget for strict mode
+                throughput_budget: 100_000,       // Lower throughput budget
+                deterministic_max_registers: 128, // Reduced register count
+                throughput_max_registers: 256,    // Conservative register limit
+                max_call_depth: 32,               // Shallow call stack for safety
+                max_prototype_chain_depth: 8,     // Limited prototype depth
             },
             Profile::Balanced => ExecutionConfig::default(), // Use standard defaults
             Profile::LegacyRisky => ExecutionConfig {
-                deterministic_budget: 1_000_000,   // Higher budget for legacy compatibility
-                throughput_budget: 10_000_000,     // Maximum throughput for legacy apps
+                deterministic_budget: 1_000_000, // Higher budget for legacy compatibility
+                throughput_budget: 10_000_000,   // Maximum throughput for legacy apps
                 deterministic_max_registers: 8192, // Generous register allocation
-                throughput_max_registers: 16384,   // High register limit
-                max_call_depth: 128,               // Deep call stacks allowed
-                max_prototype_chain_depth: 64,     // Extended prototype chains
+                throughput_max_registers: 16384, // High register limit
+                max_call_depth: 128,             // Deep call stacks allowed
+                max_prototype_chain_depth: 64,   // Extended prototype chains
             },
         };
 
         // Map observability settings to governance config
         let governance = GovernanceConfig {
-            min_supremacy_coverage_millionths: if config.observability.emit_structured_audit_events {
+            min_supremacy_coverage_millionths: if config.observability.emit_structured_audit_events
+            {
                 850_000 // 85% coverage when structured events enabled
             } else {
                 750_000 // 75% coverage for basic observability
@@ -1540,26 +1596,26 @@ impl EngineDispatcher {
         let guardplane = match config.profile {
             Profile::Strict => GuardplaneConfig {
                 thresholds: DecisionThresholdsConfig {
-                    tail_confidence_millionths: 950_000,   // 95% confidence - strict
-                    critical_pvalue_millionths: 25_000,    // 2.5% critical p-value
+                    tail_confidence_millionths: 950_000, // 95% confidence - strict
+                    critical_pvalue_millionths: 25_000,  // 2.5% critical p-value
                     ..DecisionThresholdsConfig::default()
                 },
                 containment: ContainmentConfig {
-                    grace_period_ns: 1_000_000_000,        // 1s grace period
-                    challenge_timeout_ns: 2_000_000_000,   // 2s challenge timeout
+                    grace_period_ns: 1_000_000_000,      // 1s grace period
+                    challenge_timeout_ns: 2_000_000_000, // 2s challenge timeout
                 },
                 ..GuardplaneConfig::default()
             },
             Profile::Balanced => GuardplaneConfig::default(), // Standard security settings
             Profile::LegacyRisky => GuardplaneConfig {
                 thresholds: DecisionThresholdsConfig {
-                    tail_confidence_millionths: 700_000,   // 70% confidence - relaxed
-                    critical_pvalue_millionths: 100_000,   // 10% critical p-value
+                    tail_confidence_millionths: 700_000, // 70% confidence - relaxed
+                    critical_pvalue_millionths: 100_000, // 10% critical p-value
                     ..DecisionThresholdsConfig::default()
                 },
                 containment: ContainmentConfig {
-                    grace_period_ns: 5_000_000_000,        // 5s grace period
-                    challenge_timeout_ns: 10_000_000_000,  // 10s challenge timeout
+                    grace_period_ns: 5_000_000_000,       // 5s grace period
+                    challenge_timeout_ns: 10_000_000_000, // 10s challenge timeout
                 },
                 ..GuardplaneConfig::default()
             },
@@ -1660,24 +1716,22 @@ impl EngineDispatcher {
     /// These operate on different phases and dimensions - no conflicts possible.
     #[cfg(feature = "engine")]
     fn map_config_to_orchestrator_config(config: &Config) -> OrchestratorConfig {
-        use frankenengine_engine::execution_orchestrator::{
-            LossMatrixPreset, OrchestratorConfig,
-        };
+        use frankenengine_engine::ast::ParseGoal;
+        use frankenengine_engine::execution_orchestrator::{LossMatrixPreset, OrchestratorConfig};
         use frankenengine_engine::parser::ParserOptions;
         use frankenengine_engine::security_epoch::SecurityEpoch;
-        use frankenengine_engine::ast::ParseGoal;
 
         // Map profile to loss matrix preset (risk management strategy)
         let loss_matrix_preset = match config.profile {
-            Profile::Strict => LossMatrixPreset::Conservative,   // Prioritize safety over performance
-            Profile::Balanced => LossMatrixPreset::Balanced,    // Balance safety and performance
+            Profile::Strict => LossMatrixPreset::Conservative, // Prioritize safety over performance
+            Profile::Balanced => LossMatrixPreset::Balanced,   // Balance safety and performance
             Profile::LegacyRisky => LossMatrixPreset::Permissive, // Prioritize performance/compatibility
         };
 
         // Map profile to security epoch (versioning for security policies)
         // NOTE: Higher epoch numbers = newer/more secure policies (monotonic counter)
         let epoch = match config.profile {
-            Profile::Strict => SecurityEpoch::from_raw(CURRENT_SECURITY_EPOCH),   // Latest security epoch
+            Profile::Strict => SecurityEpoch::from_raw(CURRENT_SECURITY_EPOCH), // Latest security epoch
             Profile::Balanced => SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH), // Standard security epoch
             Profile::LegacyRisky => SecurityEpoch::from_raw(LEGACY_SECURITY_EPOCH), // Legacy security epoch for compatibility
         };
@@ -1690,26 +1744,26 @@ impl EngineDispatcher {
         // - ParserOptions.budget: source code parsing limits (bytes, tokens, recursion)
         // These are complementary constraints that do not conflict.
         // bd-1lmtm: Absolute hard caps to prevent DoS via profile manipulation
-        const ABSOLUTE_MAX_SOURCE_BYTES: u64 = 2_097_152;  // 2MB absolute limit - prevents 4MB LegacyRisky DoS
-        const ABSOLUTE_MAX_TOKEN_COUNT: u64 = 131_072;     // 128K tokens absolute limit - prevents 256K DoS
-        const ABSOLUTE_MAX_RECURSION_DEPTH: u32 = 384;     // 384 depth absolute limit - prevents 512 DoS
+        const ABSOLUTE_MAX_SOURCE_BYTES: u64 = 2_097_152; // 2MB absolute limit - prevents 4MB LegacyRisky DoS
+        const ABSOLUTE_MAX_TOKEN_COUNT: u64 = 131_072; // 128K tokens absolute limit - prevents 256K DoS
+        const ABSOLUTE_MAX_RECURSION_DEPTH: u32 = 384; // 384 depth absolute limit - prevents 512 DoS
 
         let parser_options = ParserOptions {
             mode: frankenengine_engine::parser::ParserMode::ScalarReference,
             budget: frankenengine_engine::parser::ParserBudget {
                 max_source_bytes: match config.profile {
-                    Profile::Strict => 256_000,      // 256KB source limit
-                    Profile::Balanced => 1_048_576,  // 1MB source limit (default)
+                    Profile::Strict => 256_000,     // 256KB source limit
+                    Profile::Balanced => 1_048_576, // 1MB source limit (default)
                     Profile::LegacyRisky => ABSOLUTE_MAX_SOURCE_BYTES.min(4_194_304), // Capped at 2MB absolute max
                 },
                 max_token_count: match config.profile {
-                    Profile::Strict => 32_768,       // 32K tokens
-                    Profile::Balanced => 65_536,     // 64K tokens (default)
+                    Profile::Strict => 32_768,   // 32K tokens
+                    Profile::Balanced => 65_536, // 64K tokens (default)
                     Profile::LegacyRisky => ABSOLUTE_MAX_TOKEN_COUNT.min(262_144), // Capped at 128K absolute max
                 },
                 max_recursion_depth: match config.profile {
-                    Profile::Strict => 128u64,       // Shallow recursion for safety
-                    Profile::Balanced => 256u64,     // Standard recursion depth (default)
+                    Profile::Strict => 128u64,   // Shallow recursion for safety
+                    Profile::Balanced => 256u64, // Standard recursion depth (default)
                     Profile::LegacyRisky => u64::from(ABSOLUTE_MAX_RECURSION_DEPTH), // Capped at 384 absolute max
                 },
             },
@@ -1720,19 +1774,19 @@ impl EngineDispatcher {
             loss_matrix_preset,
             force_lane: None, // Allow dynamic lane selection based on code analysis
             drain_deadline_ticks: match config.profile {
-                Profile::Strict => 1000,        // Quick drain for strict safety
-                Profile::Balanced => 3000,      // Moderate drain timeout
-                Profile::LegacyRisky => 10000,   // Extended drain for complex cleanup
+                Profile::Strict => 1000,       // Quick drain for strict safety
+                Profile::Balanced => 3000,     // Moderate drain timeout
+                Profile::LegacyRisky => 10000, // Extended drain for complex cleanup
             },
             cell_close_budget_ms: match config.profile {
-                Profile::Strict => 500,         // Quick cell close
-                Profile::Balanced => 1000,      // Standard cell close budget
-                Profile::LegacyRisky => 3000,    // Extended cell close for compatibility
+                Profile::Strict => 500,       // Quick cell close
+                Profile::Balanced => 1000,    // Standard cell close budget
+                Profile::LegacyRisky => 3000, // Extended cell close for compatibility
             },
             max_concurrent_sagas: match config.profile {
-                Profile::Strict => 8,           // Limited concurrency for safety
-                Profile::Balanced => 16,        // Standard concurrency
-                Profile::LegacyRisky => 32,      // High concurrency for performance
+                Profile::Strict => 8,       // Limited concurrency for safety
+                Profile::Balanced => 16,    // Standard concurrency
+                Profile::LegacyRisky => 32, // High concurrency for performance
             },
             epoch,
             parse_goal: ParseGoal::Script, // Default to script parsing (most common)
@@ -1757,22 +1811,27 @@ impl EngineDispatcher {
             "engine_execution",
             execution_mode = "native",
             phase = "setup"
-        ).entered();
+        )
+        .entered();
 
         let setup_start = Instant::now();
 
         // Read the application source code
-        let source_code = fs::read_to_string(app_path).map_err(|e| {
-            EngineProcessError::Spawn {
-                message: format!("Failed to read application source at {}: {}", app_path.display(), e),
-                telemetry_report: None,
-            }
+        let source_code = fs::read_to_string(app_path).map_err(|e| EngineProcessError::Spawn {
+            message: format!(
+                "Failed to read application source at {}: {}",
+                app_path.display(),
+                e
+            ),
+            telemetry_report: None,
         })?;
 
         // Create extension package from source
         let package = ExtensionPackage {
-            extension_id: format!("franken_node_app_{}",
-                app_path.file_name()
+            extension_id: format!(
+                "franken_node_app_{}",
+                app_path
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown")
             ),
@@ -1780,11 +1839,9 @@ impl EngineDispatcher {
             source_file: Some(app_path.to_string_lossy().to_string()),
             capabilities: {
                 let caps = Self::map_profile_to_capabilities(config.profile);
-                Self::validate_capabilities(&caps).map_err(|e| {
-                    EngineProcessError::Spawn {
-                        message: e.to_string(),
-                        telemetry_report: None,
-                    }
+                Self::validate_capabilities(&caps).map_err(|e| EngineProcessError::Spawn {
+                    message: e.to_string(),
+                    telemetry_report: None,
                 })?; // Validate against franken-engine's supported set
                 caps
             }, // Profile-based capability mapping
@@ -1794,13 +1851,12 @@ impl EngineDispatcher {
 
         // Configure orchestrator with policy settings
         let mut orchestrator_config = Self::map_config_to_orchestrator_config(config); // bd-wlkks: Map from franken-node config
-        orchestrator_config.policy_id = Self::generate_opaque_policy_id(config.profile, Some(policy_mode)); // bd-3rlp8: Opaque policy ID with policy_mode
+        orchestrator_config.policy_id =
+            Self::generate_opaque_policy_id(config.profile, Some(policy_mode)); // bd-3rlp8: Opaque policy ID with policy_mode
         let runtime_config = Self::map_config_to_runtime_config(config); // bd-1nkf8: Map from franken-node config
 
-        let mut orchestrator = ExecutionOrchestrator::new_with_runtime_config(
-            orchestrator_config,
-            runtime_config,
-        );
+        let mut orchestrator =
+            ExecutionOrchestrator::new_with_runtime_config(orchestrator_config, runtime_config);
 
         let setup_duration = setup_start.elapsed();
         tracing::info!(
@@ -1817,14 +1873,15 @@ impl EngineDispatcher {
                 "engine_execution",
                 execution_mode = "native",
                 phase = "execution"
-            ).entered();
+            )
+            .entered();
 
-            orchestrator.execute(&package).map_err(|e| {
-                EngineProcessError::Spawn {
+            orchestrator
+                .execute(&package)
+                .map_err(|e| EngineProcessError::Spawn {
                     message: format!("Native execution failed: {}", e),
                     telemetry_report: None,
-                }
-            })
+                })
         }?;
 
         let exec_duration = exec_start.elapsed();
@@ -1839,12 +1896,13 @@ impl EngineDispatcher {
         let stdout = format!("Native execution completed: {:?}", execution_result);
 
         // Create a synthetic success status - we'll use a helper command for this
-        let synthetic_output = std::process::Command::new("true").output().map_err(|e| {
-            EngineProcessError::Spawn {
-                message: format!("Failed to create synthetic exit status: {}", e),
-                telemetry_report: None,
-            }
-        })?;
+        let synthetic_output =
+            std::process::Command::new("true")
+                .output()
+                .map_err(|e| EngineProcessError::Spawn {
+                    message: format!("Failed to create synthetic exit status: {}", e),
+                    telemetry_report: None,
+                })?;
 
         let output = Output {
             status: synthetic_output.status,
@@ -1868,7 +1926,8 @@ impl EngineDispatcher {
             "engine_execution",
             execution_mode = "external",
             phase = "execution"
-        ).entered();
+        )
+        .entered();
 
         let exec_start = Instant::now();
 
@@ -1955,16 +2014,19 @@ impl EngineDispatcher {
     /// bd-kkqz3: Combined helper that ensures all capability access goes through validation.
     /// Prefer this over separate map + validate calls to prevent trust boundary bypass.
     #[cfg(feature = "engine")]
-    pub fn get_validated_capabilities_for_tests(profile: Profile) -> Result<Vec<String>, crate::ActionableError> {
+    pub fn get_validated_capabilities_for_tests(
+        profile: Profile,
+    ) -> Result<Vec<String>, crate::ActionableError> {
         let caps = Self::map_profile_to_capabilities(profile);
         Self::validate_capabilities(&caps)?;
         Ok(caps)
     }
 
-
     /// Test helper: expose validate_capabilities for conformance testing
     #[cfg(feature = "engine")]
-    pub fn validate_capabilities_for_tests(capabilities: &[String]) -> Result<(), crate::ActionableError> {
+    pub fn validate_capabilities_for_tests(
+        capabilities: &[String],
+    ) -> Result<(), crate::ActionableError> {
         Self::validate_capabilities(capabilities)
     }
 }
@@ -2316,7 +2378,10 @@ mod tests {
         let _telemetry_bridge = TelemetryBridge::null();
         let result = dispatcher.dispatch_run(&app, &config, "strict");
 
-        assert!(result.is_err(), "Strict profile should reject external process fallback when engine feature is disabled");
+        assert!(
+            result.is_err(),
+            "Strict profile should reject external process fallback when engine feature is disabled"
+        );
         let error = result.unwrap_err().to_string();
         assert!(
             error.contains("Native engine required for strict profile"),
@@ -3625,7 +3690,8 @@ mod tests {
                     finished_at_utc: (report_inputs.started_at
                         + chrono::Duration::from_std(report_inputs.duration).unwrap())
                     .to_rfc3339(),
-                    duration_ms: u64::try_from(report_inputs.duration.as_millis()).unwrap_or(u64::MAX),
+                    duration_ms: u64::try_from(report_inputs.duration.as_millis())
+                        .unwrap_or(u64::MAX),
                     exit_code: report_inputs.output.status.code(),
                     terminated_by_signal: !report_inputs.output.status.success(),
                     telemetry: report_inputs.telemetry.clone(),
@@ -5181,21 +5247,20 @@ mod tests {
     fn performance_telemetry_emitted_for_external_execution() {
         // Test that external engine execution emits structured performance telemetry
         use std::sync::mpsc;
-        use tracing::{subscriber::with_default, Level};
+        use tracing::{Level, subscriber::with_default};
         use tracing_subscriber::{fmt::TestWriter, layer::SubscriberExt, util::SubscriberInitExt};
 
         // Set up tracing capture
         let (tx, rx) = mpsc::channel();
         let test_writer = TestWriter::new();
-        let subscriber = tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_writer(test_writer.clone())
-                    .with_level(true)
-                    .with_target(false)
-                    .with_ansi(false)
-                    .compact()
-            );
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(test_writer.clone())
+                .with_level(true)
+                .with_target(false)
+                .with_ansi(false)
+                .compact(),
+        );
 
         with_default(subscriber, || {
             // Create a mock telemetry handle
@@ -5222,20 +5287,24 @@ mod tests {
         // Should contain telemetry events with correct structure
         assert!(
             logs.contains("execution_mode=\"external\""),
-            "Logs should contain external execution mode: {}", logs
+            "Logs should contain external execution mode: {}",
+            logs
         );
         assert!(
             logs.contains("phase=\"execution\""),
-            "Logs should contain execution phase: {}", logs
+            "Logs should contain execution phase: {}",
+            logs
         );
         assert!(
             logs.contains("duration_ms="),
-            "Logs should contain duration measurement: {}", logs
+            "Logs should contain duration measurement: {}",
+            logs
         );
         assert!(
-            logs.contains("External engine process completed") ||
-            logs.contains("Starting external engine process"),
-            "Logs should contain process lifecycle events: {}", logs
+            logs.contains("External engine process completed")
+                || logs.contains("Starting external engine process"),
+            "Logs should contain process lifecycle events: {}",
+            logs
         );
     }
 
@@ -5244,21 +5313,20 @@ mod tests {
     fn performance_telemetry_emitted_for_native_execution() {
         // Test that native engine execution emits structured performance telemetry
         use std::sync::mpsc;
-        use tracing::{subscriber::with_default, Level};
+        use tracing::{Level, subscriber::with_default};
         use tracing_subscriber::{fmt::TestWriter, layer::SubscriberExt, util::SubscriberInitExt};
 
         // Set up tracing capture
         let (tx, rx) = mpsc::channel();
         let test_writer = TestWriter::new();
-        let subscriber = tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_writer(test_writer.clone())
-                    .with_level(true)
-                    .with_target(false)
-                    .with_ansi(false)
-                    .compact()
-            );
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(test_writer.clone())
+                .with_level(true)
+                .with_target(false)
+                .with_ansi(false)
+                .compact(),
+        );
 
         with_default(subscriber, || {
             // Create a test JS file
@@ -5288,19 +5356,25 @@ mod tests {
         // Should contain telemetry events with correct structure
         assert!(
             logs.contains("execution_mode=\"native\""),
-            "Logs should contain native execution mode: {}", logs
+            "Logs should contain native execution mode: {}",
+            logs
         );
         assert!(
             logs.contains("phase=\"setup\"") || logs.contains("phase=\"execution\""),
-            "Logs should contain setup or execution phase: {}", logs
+            "Logs should contain setup or execution phase: {}",
+            logs
         );
         assert!(
             logs.contains("duration_ms="),
-            "Logs should contain duration measurement: {}", logs
+            "Logs should contain duration measurement: {}",
+            logs
         );
         assert!(
-            logs.contains("Native engine") || logs.contains("setup completed") || logs.contains("execution"),
-            "Logs should contain native engine lifecycle events: {}", logs
+            logs.contains("Native engine")
+                || logs.contains("setup completed")
+                || logs.contains("execution"),
+            "Logs should contain native engine lifecycle events: {}",
+            logs
         );
     }
 
@@ -5350,35 +5424,71 @@ mod tests {
         use frankenengine_engine::security_epoch::SecurityEpoch;
 
         // Create SecurityEpoch values for each profile mapping using module constants
-        let legacy_epoch = SecurityEpoch::from_raw(LEGACY_SECURITY_EPOCH);    // LegacyRisky profile
-        let standard_epoch = SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH);  // Balanced profile
-        let current_epoch = SecurityEpoch::from_raw(CURRENT_SECURITY_EPOCH);   // Strict profile
+        let legacy_epoch = SecurityEpoch::from_raw(LEGACY_SECURITY_EPOCH); // LegacyRisky profile
+        let standard_epoch = SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH); // Balanced profile
+        let current_epoch = SecurityEpoch::from_raw(CURRENT_SECURITY_EPOCH); // Strict profile
 
         // Test Display implementation uses opaque labels
         let legacy_display = format!("{}", legacy_epoch);
         let standard_display = format!("{}", standard_epoch);
         let current_display = format!("{}", current_epoch);
 
-        assert_eq!(legacy_display, "epoch:generation-legacy", "Legacy epoch should use opaque label");
-        assert_eq!(standard_display, "epoch:generation-standard", "Standard epoch should use opaque label");
-        assert_eq!(current_display, "epoch:generation-current", "Current epoch should use opaque label");
+        assert_eq!(
+            legacy_display, "epoch:generation-legacy",
+            "Legacy epoch should use opaque label"
+        );
+        assert_eq!(
+            standard_display, "epoch:generation-standard",
+            "Standard epoch should use opaque label"
+        );
+        assert_eq!(
+            current_display, "epoch:generation-current",
+            "Current epoch should use opaque label"
+        );
 
         // Test Debug implementation uses opaque labels
         let legacy_debug = format!("{:?}", legacy_epoch);
         let standard_debug = format!("{:?}", standard_epoch);
         let current_debug = format!("{:?}", current_epoch);
 
-        assert_eq!(legacy_debug, "SecurityEpoch(\"generation-legacy\")", "Legacy epoch debug should use opaque label");
-        assert_eq!(standard_debug, "SecurityEpoch(\"generation-standard\")", "Standard epoch debug should use opaque label");
-        assert_eq!(current_debug, "SecurityEpoch(\"generation-current\")", "Current epoch debug should use opaque label");
+        assert_eq!(
+            legacy_debug, "SecurityEpoch(\"generation-legacy\")",
+            "Legacy epoch debug should use opaque label"
+        );
+        assert_eq!(
+            standard_debug, "SecurityEpoch(\"generation-standard\")",
+            "Standard epoch debug should use opaque label"
+        );
+        assert_eq!(
+            current_debug, "SecurityEpoch(\"generation-current\")",
+            "Current epoch debug should use opaque label"
+        );
 
         // Verify raw numbers are NOT exposed
-        assert!(!legacy_display.contains("1"), "Display output should not contain raw epoch number");
-        assert!(!standard_display.contains("2"), "Display output should not contain raw epoch number");
-        assert!(!current_display.contains("3"), "Display output should not contain raw epoch number");
+        assert!(
+            !legacy_display.contains("1"),
+            "Display output should not contain raw epoch number"
+        );
+        assert!(
+            !standard_display.contains("2"),
+            "Display output should not contain raw epoch number"
+        );
+        assert!(
+            !current_display.contains("3"),
+            "Display output should not contain raw epoch number"
+        );
 
-        assert!(!legacy_debug.contains("1"), "Debug output should not contain raw epoch number");
-        assert!(!standard_debug.contains("2"), "Debug output should not contain raw epoch number");
-        assert!(!current_debug.contains("3"), "Debug output should not contain raw epoch number");
+        assert!(
+            !legacy_debug.contains("1"),
+            "Debug output should not contain raw epoch number"
+        );
+        assert!(
+            !standard_debug.contains("2"),
+            "Debug output should not contain raw epoch number"
+        );
+        assert!(
+            !current_debug.contains("3"),
+            "Debug output should not contain raw epoch number"
+        );
     }
 }

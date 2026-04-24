@@ -1,9 +1,9 @@
 //! Test to verify canonical encoding optimization preserves exact output
 
 use super::trust_card::canonicalize_value;
-use sha2::Digest;
 use hex;
 use serde_json::{Map, Value};
+use sha2::Digest;
 use std::collections::BTreeSet;
 
 // Optimized implementation for testing
@@ -21,7 +21,12 @@ fn canonicalize_value_optimized(value: Value) -> Value {
             }
             Value::Object(out)
         }
-        Value::Array(items) => Value::Array(items.into_iter().map(canonicalize_value_optimized).collect()),
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(canonicalize_value_optimized)
+                .collect(),
+        ),
         _ => value,
     }
 }
@@ -55,7 +60,7 @@ mod optimization_tests {
                     "publisher_id": "acme-corp",
                     "display_name": "ACME Corporation"
                 }
-            })
+            }),
         ];
 
         for (i, test_case) in test_cases.into_iter().enumerate() {
@@ -67,7 +72,8 @@ mod optimization_tests {
 
             assert_eq!(
                 current_json, optimized_json,
-                "JSON output must be identical for case {}", i
+                "JSON output must be identical for case {}",
+                i
             );
 
             // Verify hash equivalence
@@ -87,7 +93,8 @@ mod optimization_tests {
 
             assert_eq!(
                 current_hash, optimized_hash,
-                "Hash must be identical for case {}", i
+                "Hash must be identical for case {}",
+                i
             );
         }
     }

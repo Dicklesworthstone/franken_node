@@ -137,97 +137,102 @@ impl TaskPhase {
 
 #[cfg(test)]
 mod phase_transition_negative_tests {
-        use super::*;
+    use super::*;
 
-        #[test]
-        fn running_cannot_skip_to_draining() {
-            assert!(!TaskPhase::Running.can_transition_to(&TaskPhase::Draining));
+    #[test]
+    fn running_cannot_skip_to_draining() {
+        assert!(!TaskPhase::Running.can_transition_to(&TaskPhase::Draining));
+    }
+
+    #[test]
+    fn running_cannot_skip_to_drain_complete() {
+        assert!(!TaskPhase::Running.can_transition_to(&TaskPhase::DrainComplete));
+    }
+
+    #[test]
+    fn running_cannot_skip_to_finalizing() {
+        assert!(!TaskPhase::Running.can_transition_to(&TaskPhase::Finalizing));
+    }
+
+    #[test]
+    fn running_cannot_skip_to_finalized() {
+        assert!(!TaskPhase::Running.can_transition_to(&TaskPhase::Finalized));
+    }
+
+    #[test]
+    fn cancel_requested_cannot_skip_to_drain_complete() {
+        assert!(!TaskPhase::CancelRequested.can_transition_to(&TaskPhase::DrainComplete));
+    }
+
+    #[test]
+    fn cancel_requested_cannot_skip_to_finalizing() {
+        assert!(!TaskPhase::CancelRequested.can_transition_to(&TaskPhase::Finalizing));
+    }
+
+    #[test]
+    fn cancel_requested_cannot_skip_to_finalized() {
+        assert!(!TaskPhase::CancelRequested.can_transition_to(&TaskPhase::Finalized));
+    }
+
+    #[test]
+    fn cancel_requested_cannot_rewind_to_running() {
+        assert!(!TaskPhase::CancelRequested.can_transition_to(&TaskPhase::Running));
+    }
+
+    #[test]
+    fn draining_cannot_rewind_to_running() {
+        assert!(!TaskPhase::Draining.can_transition_to(&TaskPhase::Running));
+    }
+
+    #[test]
+    fn draining_cannot_rewind_to_cancel_requested() {
+        assert!(!TaskPhase::Draining.can_transition_to(&TaskPhase::CancelRequested));
+    }
+
+    #[test]
+    fn draining_cannot_skip_to_finalizing() {
+        assert!(!TaskPhase::Draining.can_transition_to(&TaskPhase::Finalizing));
+    }
+
+    #[test]
+    fn draining_cannot_skip_to_finalized() {
+        assert!(!TaskPhase::Draining.can_transition_to(&TaskPhase::Finalized));
+    }
+
+    #[test]
+    fn drain_complete_cannot_rewind_to_any_earlier_phase() {
+        assert!(!TaskPhase::DrainComplete.can_transition_to(&TaskPhase::Running));
+        assert!(!TaskPhase::DrainComplete.can_transition_to(&TaskPhase::CancelRequested));
+        assert!(!TaskPhase::DrainComplete.can_transition_to(&TaskPhase::Draining));
+    }
+
+    #[test]
+    fn drain_complete_cannot_skip_to_finalized() {
+        assert!(!TaskPhase::DrainComplete.can_transition_to(&TaskPhase::Finalized));
+    }
+
+    #[test]
+    fn finalizing_cannot_rewind_to_any_earlier_phase() {
+        for &phase in &[
+            TaskPhase::Running,
+            TaskPhase::CancelRequested,
+            TaskPhase::Draining,
+            TaskPhase::DrainComplete,
+        ] {
+            assert!(!TaskPhase::Finalizing.can_transition_to(&phase));
         }
+    }
 
-        #[test]
-        fn running_cannot_skip_to_drain_complete() {
-            assert!(!TaskPhase::Running.can_transition_to(&TaskPhase::DrainComplete));
-        }
-
-        #[test]
-        fn running_cannot_skip_to_finalizing() {
-            assert!(!TaskPhase::Running.can_transition_to(&TaskPhase::Finalizing));
-        }
-
-        #[test]
-        fn running_cannot_skip_to_finalized() {
-            assert!(!TaskPhase::Running.can_transition_to(&TaskPhase::Finalized));
-        }
-
-        #[test]
-        fn cancel_requested_cannot_skip_to_drain_complete() {
-            assert!(!TaskPhase::CancelRequested.can_transition_to(&TaskPhase::DrainComplete));
-        }
-
-        #[test]
-        fn cancel_requested_cannot_skip_to_finalizing() {
-            assert!(!TaskPhase::CancelRequested.can_transition_to(&TaskPhase::Finalizing));
-        }
-
-        #[test]
-        fn cancel_requested_cannot_skip_to_finalized() {
-            assert!(!TaskPhase::CancelRequested.can_transition_to(&TaskPhase::Finalized));
-        }
-
-        #[test]
-        fn cancel_requested_cannot_rewind_to_running() {
-            assert!(!TaskPhase::CancelRequested.can_transition_to(&TaskPhase::Running));
-        }
-
-        #[test]
-        fn draining_cannot_rewind_to_running() {
-            assert!(!TaskPhase::Draining.can_transition_to(&TaskPhase::Running));
-        }
-
-        #[test]
-        fn draining_cannot_rewind_to_cancel_requested() {
-            assert!(!TaskPhase::Draining.can_transition_to(&TaskPhase::CancelRequested));
-        }
-
-        #[test]
-        fn draining_cannot_skip_to_finalizing() {
-            assert!(!TaskPhase::Draining.can_transition_to(&TaskPhase::Finalizing));
-        }
-
-        #[test]
-        fn draining_cannot_skip_to_finalized() {
-            assert!(!TaskPhase::Draining.can_transition_to(&TaskPhase::Finalized));
-        }
-
-        #[test]
-        fn drain_complete_cannot_rewind_to_any_earlier_phase() {
-            assert!(!TaskPhase::DrainComplete.can_transition_to(&TaskPhase::Running));
-            assert!(!TaskPhase::DrainComplete.can_transition_to(&TaskPhase::CancelRequested));
-            assert!(!TaskPhase::DrainComplete.can_transition_to(&TaskPhase::Draining));
-        }
-
-        #[test]
-        fn drain_complete_cannot_skip_to_finalized() {
-            assert!(!TaskPhase::DrainComplete.can_transition_to(&TaskPhase::Finalized));
-        }
-
-        #[test]
-        fn finalizing_cannot_rewind_to_any_earlier_phase() {
-            for &phase in &[TaskPhase::Running, TaskPhase::CancelRequested, TaskPhase::Draining, TaskPhase::DrainComplete] {
-                assert!(!TaskPhase::Finalizing.can_transition_to(&phase));
+    #[test]
+    fn finalized_is_truly_terminal_no_transitions_allowed() {
+        for &phase in &TaskPhase::ALL {
+            if phase != TaskPhase::Finalized {
+                assert!(!TaskPhase::Finalized.can_transition_to(&phase));
             }
         }
-
-        #[test]
-        fn finalized_is_truly_terminal_no_transitions_allowed() {
-            for &phase in &TaskPhase::ALL {
-                if phase != TaskPhase::Finalized {
-                    assert!(!TaskPhase::Finalized.can_transition_to(&phase));
-                }
-            }
-            // Even self-transition is not allowed according to legal_targets()
-            assert!(!TaskPhase::Finalized.can_transition_to(&TaskPhase::Finalized));
-        }
+        // Even self-transition is not allowed according to legal_targets()
+        assert!(!TaskPhase::Finalized.can_transition_to(&TaskPhase::Finalized));
+    }
 }
 
 impl TaskPhase {
@@ -312,114 +317,108 @@ impl ObligationClosureProof {
 
 #[cfg(test)]
 mod obligation_closure_negative_tests {
-        use super::*;
+    use super::*;
 
-        #[test]
-        fn single_pending_obligation_marks_not_closed() {
-            let proof = ObligationClosureProof::new(vec![
-                ObligationTerminal {
-                    obligation_id: "pending-obligation".to_string(),
-                    terminal_state: "pending".to_string(),
-                }
-            ]);
-            assert!(!proof.all_closed);
-            assert_eq!(proof.obligations.len(), 1);
-        }
+    #[test]
+    fn single_pending_obligation_marks_not_closed() {
+        let proof = ObligationClosureProof::new(vec![ObligationTerminal {
+            obligation_id: "pending-obligation".to_string(),
+            terminal_state: "pending".to_string(),
+        }]);
+        assert!(!proof.all_closed);
+        assert_eq!(proof.obligations.len(), 1);
+    }
 
-        #[test]
-        fn mixed_obligations_with_any_pending_marks_not_closed() {
-            let proof = ObligationClosureProof::new(vec![
-                ObligationTerminal {
-                    obligation_id: "completed".to_string(),
-                    terminal_state: "completed".to_string(),
-                },
-                ObligationTerminal {
-                    obligation_id: "failed".to_string(),
-                    terminal_state: "failed".to_string(),
-                },
-                ObligationTerminal {
-                    obligation_id: "pending".to_string(),
-                    terminal_state: "pending".to_string(),
-                },
-            ]);
-            assert!(!proof.all_closed);
-            assert_eq!(proof.obligations.len(), 3);
-        }
+    #[test]
+    fn mixed_obligations_with_any_pending_marks_not_closed() {
+        let proof = ObligationClosureProof::new(vec![
+            ObligationTerminal {
+                obligation_id: "completed".to_string(),
+                terminal_state: "completed".to_string(),
+            },
+            ObligationTerminal {
+                obligation_id: "failed".to_string(),
+                terminal_state: "failed".to_string(),
+            },
+            ObligationTerminal {
+                obligation_id: "pending".to_string(),
+                terminal_state: "pending".to_string(),
+            },
+        ]);
+        assert!(!proof.all_closed);
+        assert_eq!(proof.obligations.len(), 3);
+    }
 
-        #[test]
-        fn empty_string_terminal_state_is_not_pending() {
-            let proof = ObligationClosureProof::new(vec![
-                ObligationTerminal {
-                    obligation_id: "empty-state".to_string(),
-                    terminal_state: "".to_string(),
-                }
-            ]);
-            assert!(proof.all_closed);
-        }
+    #[test]
+    fn empty_string_terminal_state_is_not_pending() {
+        let proof = ObligationClosureProof::new(vec![ObligationTerminal {
+            obligation_id: "empty-state".to_string(),
+            terminal_state: "".to_string(),
+        }]);
+        assert!(proof.all_closed);
+    }
 
-        #[test]
-        fn case_sensitive_pending_detection() {
-            let proof = ObligationClosureProof::new(vec![
-                ObligationTerminal {
-                    obligation_id: "uppercase".to_string(),
-                    terminal_state: "PENDING".to_string(),
-                },
-                ObligationTerminal {
-                    obligation_id: "mixed-case".to_string(),
-                    terminal_state: "Pending".to_string(),
-                },
-            ]);
-            assert!(proof.all_closed); // Only exact "pending" matches
-        }
+    #[test]
+    fn case_sensitive_pending_detection() {
+        let proof = ObligationClosureProof::new(vec![
+            ObligationTerminal {
+                obligation_id: "uppercase".to_string(),
+                terminal_state: "PENDING".to_string(),
+            },
+            ObligationTerminal {
+                obligation_id: "mixed-case".to_string(),
+                terminal_state: "Pending".to_string(),
+            },
+        ]);
+        assert!(proof.all_closed); // Only exact "pending" matches
+    }
 
-        #[test]
-        fn whitespace_around_pending_not_detected() {
-            let proof = ObligationClosureProof::new(vec![
-                ObligationTerminal {
-                    obligation_id: "padded".to_string(),
-                    terminal_state: " pending ".to_string(),
-                }
-            ]);
-            assert!(proof.all_closed); // Whitespace means it's not exactly "pending"
-        }
+    #[test]
+    fn whitespace_around_pending_not_detected() {
+        let proof = ObligationClosureProof::new(vec![ObligationTerminal {
+            obligation_id: "padded".to_string(),
+            terminal_state: " pending ".to_string(),
+        }]);
+        assert!(proof.all_closed); // Whitespace means it's not exactly "pending"
+    }
 
-        #[test]
-        fn all_pending_obligations_marks_not_closed() {
-            let proof = ObligationClosureProof::new(vec![
-                ObligationTerminal {
-                    obligation_id: "pending1".to_string(),
-                    terminal_state: "pending".to_string(),
-                },
-                ObligationTerminal {
-                    obligation_id: "pending2".to_string(),
-                    terminal_state: "pending".to_string(),
-                },
-                ObligationTerminal {
-                    obligation_id: "pending3".to_string(),
-                    terminal_state: "pending".to_string(),
-                },
-            ]);
-            assert!(!proof.all_closed);
-        }
+    #[test]
+    fn all_pending_obligations_marks_not_closed() {
+        let proof = ObligationClosureProof::new(vec![
+            ObligationTerminal {
+                obligation_id: "pending1".to_string(),
+                terminal_state: "pending".to_string(),
+            },
+            ObligationTerminal {
+                obligation_id: "pending2".to_string(),
+                terminal_state: "pending".to_string(),
+            },
+            ObligationTerminal {
+                obligation_id: "pending3".to_string(),
+                terminal_state: "pending".to_string(),
+            },
+        ]);
+        assert!(!proof.all_closed);
+    }
 
-        #[test]
-        fn obligations_with_unusual_but_terminal_states_are_closed() {
-            let proof = ObligationClosureProof::new(vec![
-                ObligationTerminal {
-                    obligation_id: "null-state".to_string(),
-                    terminal_state: "null".to_string(),
-                },
-                ObligationTerminal {
-                    obligation_id: "error-state".to_string(),
-                    terminal_state: "error".to_string(),
-                },
-                ObligationTerminal {
-                    obligation_id: "cancelled-state".to_string(),
-                    terminal_state: "cancelled".to_string(),
-                },
-            ]);
-            assert!(proof.all_closed);
-        }
+    #[test]
+    fn obligations_with_unusual_but_terminal_states_are_closed() {
+        let proof = ObligationClosureProof::new(vec![
+            ObligationTerminal {
+                obligation_id: "null-state".to_string(),
+                terminal_state: "null".to_string(),
+            },
+            ObligationTerminal {
+                obligation_id: "error-state".to_string(),
+                terminal_state: "error".to_string(),
+            },
+            ObligationTerminal {
+                obligation_id: "cancelled-state".to_string(),
+                terminal_state: "cancelled".to_string(),
+            },
+        ]);
+        assert!(proof.all_closed);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -599,49 +598,53 @@ impl DrainConfig {
 
 #[cfg(test)]
 mod drain_config_negative_tests {
-        use super::*;
+    use super::*;
 
-        #[test]
-        fn zero_timeout_enforces_minimum() {
-            let config = DrainConfig::new(0, false);
-            assert_eq!(config.timeout_ms, MIN_DRAIN_TIMEOUT_MS);
-            assert!(!config.force_finalize_on_timeout);
-        }
+    #[test]
+    fn zero_timeout_enforces_minimum() {
+        let config = DrainConfig::new(0, false);
+        assert_eq!(config.timeout_ms, MIN_DRAIN_TIMEOUT_MS);
+        assert!(!config.force_finalize_on_timeout);
+    }
 
-        #[test]
-        fn sub_minimum_timeout_enforces_minimum() {
-            let config = DrainConfig::new(100, true);
-            assert_eq!(config.timeout_ms, MIN_DRAIN_TIMEOUT_MS);
-            assert!(config.force_finalize_on_timeout);
-        }
+    #[test]
+    fn sub_minimum_timeout_enforces_minimum() {
+        let config = DrainConfig::new(100, true);
+        assert_eq!(config.timeout_ms, MIN_DRAIN_TIMEOUT_MS);
+        assert!(config.force_finalize_on_timeout);
+    }
 
-        #[test]
-        fn one_below_minimum_enforces_minimum() {
-            let config = DrainConfig::new(MIN_DRAIN_TIMEOUT_MS.saturating_sub(1), false);
-            assert_eq!(config.timeout_ms, MIN_DRAIN_TIMEOUT_MS);
-        }
+    #[test]
+    fn one_below_minimum_enforces_minimum() {
+        let config = DrainConfig::new(MIN_DRAIN_TIMEOUT_MS.saturating_sub(1), false);
+        assert_eq!(config.timeout_ms, MIN_DRAIN_TIMEOUT_MS);
+    }
 
-        #[test]
-        fn exactly_minimum_timeout_preserved() {
-            let config = DrainConfig::new(MIN_DRAIN_TIMEOUT_MS, true);
-            assert_eq!(config.timeout_ms, MIN_DRAIN_TIMEOUT_MS);
-            assert!(config.force_finalize_on_timeout);
-        }
+    #[test]
+    fn exactly_minimum_timeout_preserved() {
+        let config = DrainConfig::new(MIN_DRAIN_TIMEOUT_MS, true);
+        assert_eq!(config.timeout_ms, MIN_DRAIN_TIMEOUT_MS);
+        assert!(config.force_finalize_on_timeout);
+    }
 
-        #[test]
-        fn u64_max_timeout_preserved_without_overflow() {
-            let config = DrainConfig::new(u64::MAX, false);
-            assert_eq!(config.timeout_ms, u64::MAX);
-            assert!(!config.force_finalize_on_timeout);
-        }
+    #[test]
+    fn u64_max_timeout_preserved_without_overflow() {
+        let config = DrainConfig::new(u64::MAX, false);
+        assert_eq!(config.timeout_ms, u64::MAX);
+        assert!(!config.force_finalize_on_timeout);
+    }
 
-        #[test]
-        fn very_small_timeout_values_below_minimum() {
-            for timeout in [1, 10, 50, 100, 499] {
-                let config = DrainConfig::new(timeout, false);
-                assert_eq!(config.timeout_ms, MIN_DRAIN_TIMEOUT_MS, "timeout {} should be clamped to minimum", timeout);
-            }
+    #[test]
+    fn very_small_timeout_values_below_minimum() {
+        for timeout in [1, 10, 50, 100, 499] {
+            let config = DrainConfig::new(timeout, false);
+            assert_eq!(
+                config.timeout_ms, MIN_DRAIN_TIMEOUT_MS,
+                "timeout {} should be clamped to minimum",
+                timeout
+            );
         }
+    }
 }
 
 impl Default for DrainConfig {
@@ -707,104 +710,102 @@ impl CancellationRuntime {
 
 #[cfg(test)]
 mod emit_audit_negative_tests {
-        use super::*;
+    use super::*;
 
-        #[test]
-        fn emit_audit_overflow_evicts_oldest_events() {
-            let mut rt = CancellationRuntime::default();
+    #[test]
+    fn emit_audit_overflow_evicts_oldest_events() {
+        let mut rt = CancellationRuntime::default();
 
-            // Fill beyond capacity by registering many tasks
-            for i in 0..MAX_AUDIT_LOG_ENTRIES + 10 {
-                let task_id = format!("task-{}", i);
-                let _ = rt.register_task(&task_id, i as u64, "trace");
-            }
-
-            assert_eq!(rt.audit_log().len(), MAX_AUDIT_LOG_ENTRIES);
-
-            // Verify oldest events were evicted - should not contain early task IDs
-            let event_task_ids: Vec<&str> = rt.audit_log()
-                .iter()
-                .map(|e| e.task_id.as_str())
-                .collect();
-            assert!(!event_task_ids.contains(&"task-0"));
-            assert!(!event_task_ids.contains(&"task-5"));
-
-            // Should contain recent task IDs
-            let last_task = format!("task-{}", MAX_AUDIT_LOG_ENTRIES + 9);
-            assert!(event_task_ids.contains(&last_task.as_str()));
+        // Fill beyond capacity by registering many tasks
+        for i in 0..MAX_AUDIT_LOG_ENTRIES + 10 {
+            let task_id = format!("task-{}", i);
+            let _ = rt.register_task(&task_id, i as u64, "trace");
         }
 
-        #[test]
-        fn emit_audit_single_event_beyond_capacity_still_recorded() {
-            let mut rt = CancellationRuntime::default();
+        assert_eq!(rt.audit_log().len(), MAX_AUDIT_LOG_ENTRIES);
 
-            // Pre-fill to capacity
-            for i in 0..MAX_AUDIT_LOG_ENTRIES {
-                rt.emit_audit(CancellableTaskAuditEvent {
-                    event_code: "PREFILL".to_string(),
-                    task_id: format!("prefill-{}", i),
-                    from_phase: TaskPhase::Running,
-                    to_phase: TaskPhase::Running,
-                    timestamp_ms: i as u64,
-                    trace_id: "trace".to_string(),
-                    detail: "prefill event".to_string(),
-                    schema_version: SCHEMA_VERSION.to_string(),
-                });
-            }
+        // Verify oldest events were evicted - should not contain early task IDs
+        let event_task_ids: Vec<&str> = rt.audit_log().iter().map(|e| e.task_id.as_str()).collect();
+        assert!(!event_task_ids.contains(&"task-0"));
+        assert!(!event_task_ids.contains(&"task-5"));
 
-            // Add one more event
+        // Should contain recent task IDs
+        let last_task = format!("task-{}", MAX_AUDIT_LOG_ENTRIES + 9);
+        assert!(event_task_ids.contains(&last_task.as_str()));
+    }
+
+    #[test]
+    fn emit_audit_single_event_beyond_capacity_still_recorded() {
+        let mut rt = CancellationRuntime::default();
+
+        // Pre-fill to capacity
+        for i in 0..MAX_AUDIT_LOG_ENTRIES {
             rt.emit_audit(CancellableTaskAuditEvent {
-                event_code: "OVERFLOW".to_string(),
-                task_id: "overflow-task".to_string(),
+                event_code: "PREFILL".to_string(),
+                task_id: format!("prefill-{}", i),
                 from_phase: TaskPhase::Running,
-                to_phase: TaskPhase::CancelRequested,
-                timestamp_ms: 99999,
-                trace_id: "overflow-trace".to_string(),
-                detail: "overflow event".to_string(),
+                to_phase: TaskPhase::Running,
+                timestamp_ms: i as u64,
+                trace_id: "trace".to_string(),
+                detail: "prefill event".to_string(),
                 schema_version: SCHEMA_VERSION.to_string(),
             });
-
-            assert_eq!(rt.audit_log().len(), MAX_AUDIT_LOG_ENTRIES);
-
-            // Last event should be the overflow event
-            let last_event = rt.audit_log().last().expect("should have events");
-            assert_eq!(last_event.event_code, "OVERFLOW");
-            assert_eq!(last_event.task_id, "overflow-task");
-
-            // First event should no longer be prefill-0
-            let first_event = rt.audit_log().first().expect("should have events");
-            assert_ne!(first_event.task_id, "prefill-0");
         }
 
-        #[test]
-        fn emit_audit_maintains_chronological_order_after_overflow() {
-            let mut rt = CancellationRuntime::default();
+        // Add one more event
+        rt.emit_audit(CancellableTaskAuditEvent {
+            event_code: "OVERFLOW".to_string(),
+            task_id: "overflow-task".to_string(),
+            from_phase: TaskPhase::Running,
+            to_phase: TaskPhase::CancelRequested,
+            timestamp_ms: 99999,
+            trace_id: "overflow-trace".to_string(),
+            detail: "overflow event".to_string(),
+            schema_version: SCHEMA_VERSION.to_string(),
+        });
 
-            // Create events with incrementing timestamps
-            for i in 0..(MAX_AUDIT_LOG_ENTRIES + 5) {
-                rt.emit_audit(CancellableTaskAuditEvent {
-                    event_code: "SEQ".to_string(),
-                    task_id: format!("seq-{}", i),
-                    from_phase: TaskPhase::Running,
-                    to_phase: TaskPhase::Running,
-                    timestamp_ms: i as u64 * 100,
-                    trace_id: "seq-trace".to_string(),
-                    detail: format!("sequence {}", i),
-                    schema_version: SCHEMA_VERSION.to_string(),
-                });
-            }
+        assert_eq!(rt.audit_log().len(), MAX_AUDIT_LOG_ENTRIES);
 
-            // Verify timestamps are still in order
-            let timestamps: Vec<u64> = rt.audit_log()
-                .iter()
-                .map(|e| e.timestamp_ms)
-                .collect();
+        // Last event should be the overflow event
+        let last_event = rt.audit_log().last().expect("should have events");
+        assert_eq!(last_event.event_code, "OVERFLOW");
+        assert_eq!(last_event.task_id, "overflow-task");
 
-            for i in 1..timestamps.len() {
-                assert!(timestamps[i] > timestamps[i-1],
-                    "timestamp {} should be > timestamp {}", timestamps[i], timestamps[i-1]);
-            }
+        // First event should no longer be prefill-0
+        let first_event = rt.audit_log().first().expect("should have events");
+        assert_ne!(first_event.task_id, "prefill-0");
+    }
+
+    #[test]
+    fn emit_audit_maintains_chronological_order_after_overflow() {
+        let mut rt = CancellationRuntime::default();
+
+        // Create events with incrementing timestamps
+        for i in 0..(MAX_AUDIT_LOG_ENTRIES + 5) {
+            rt.emit_audit(CancellableTaskAuditEvent {
+                event_code: "SEQ".to_string(),
+                task_id: format!("seq-{}", i),
+                from_phase: TaskPhase::Running,
+                to_phase: TaskPhase::Running,
+                timestamp_ms: i as u64 * 100,
+                trace_id: "seq-trace".to_string(),
+                detail: format!("sequence {}", i),
+                schema_version: SCHEMA_VERSION.to_string(),
+            });
         }
+
+        // Verify timestamps are still in order
+        let timestamps: Vec<u64> = rt.audit_log().iter().map(|e| e.timestamp_ms).collect();
+
+        for i in 1..timestamps.len() {
+            assert!(
+                timestamps[i] > timestamps[i - 1],
+                "timestamp {} should be > timestamp {}",
+                timestamps[i],
+                timestamps[i - 1]
+            );
+        }
+    }
 }
 
 impl CancellationRuntime {
@@ -916,101 +917,106 @@ impl CancellationRuntime {
 
 #[cfg(test)]
 mod register_child_negative_tests {
-        use super::*;
+    use super::*;
 
-        #[test]
-        fn register_child_beyond_max_capacity_evicts_oldest() {
-            let mut rt = CancellationRuntime::default();
-            rt.register_task("parent", 1000, "t1").unwrap();
+    #[test]
+    fn register_child_beyond_max_capacity_evicts_oldest() {
+        let mut rt = CancellationRuntime::default();
+        rt.register_task("parent", 1000, "t1").unwrap();
 
-            // Register MAX_CHILD_TASKS + 5 children
-            for i in 0..(MAX_CHILD_TASKS + 5) {
-                let child_id = format!("child-{}", i);
-                rt.register_task(&child_id, 1000, "t1").unwrap();
-                rt.register_child("parent", &child_id).unwrap();
-            }
-
-            let parent = rt.get_task("parent").expect("parent should exist");
-            assert_eq!(parent.child_task_ids.len(), MAX_CHILD_TASKS);
-
-            // Should not contain early children (evicted)
-            assert!(!parent.child_task_ids.contains(&"child-0".to_string()));
-            assert!(!parent.child_task_ids.contains(&"child-4".to_string()));
-
-            // Should contain recent children
-            let last_child = format!("child-{}", MAX_CHILD_TASKS + 4);
-            assert!(parent.child_task_ids.contains(&last_child));
+        // Register MAX_CHILD_TASKS + 5 children
+        for i in 0..(MAX_CHILD_TASKS + 5) {
+            let child_id = format!("child-{}", i);
+            rt.register_task(&child_id, 1000, "t1").unwrap();
+            rt.register_child("parent", &child_id).unwrap();
         }
 
-        #[test]
-        fn register_child_capacity_overflow_maintains_propagation() {
-            let mut rt = CancellationRuntime::default();
-            rt.register_task("parent", 1000, "t1").unwrap();
+        let parent = rt.get_task("parent").expect("parent should exist");
+        assert_eq!(parent.child_task_ids.len(), MAX_CHILD_TASKS);
 
-            // Fill to capacity + overflow
-            for i in 0..(MAX_CHILD_TASKS + 2) {
-                let child_id = format!("child-{}", i);
-                rt.register_task(&child_id, 1000, "t1").unwrap();
-                rt.register_child("parent", &child_id).unwrap();
-            }
+        // Should not contain early children (evicted)
+        assert!(!parent.child_task_ids.contains(&"child-0".to_string()));
+        assert!(!parent.child_task_ids.contains(&"child-4".to_string()));
 
-            // Cancel parent - should propagate to remaining children only
-            rt.cancel_task("parent", "shutdown", 2000, "t1").unwrap();
+        // Should contain recent children
+        let last_child = format!("child-{}", MAX_CHILD_TASKS + 4);
+        assert!(parent.child_task_ids.contains(&last_child));
+    }
 
-            // Evicted children should not be cancelled
-            assert_eq!(rt.current_phase("child-0"), Some(TaskPhase::Running));
-            assert_eq!(rt.current_phase("child-1"), Some(TaskPhase::Running));
+    #[test]
+    fn register_child_capacity_overflow_maintains_propagation() {
+        let mut rt = CancellationRuntime::default();
+        rt.register_task("parent", 1000, "t1").unwrap();
 
-            // Remaining children should be cancelled
-            let last_child = format!("child-{}", MAX_CHILD_TASKS + 1);
-            assert_eq!(rt.current_phase(&last_child), Some(TaskPhase::CancelRequested));
+        // Fill to capacity + overflow
+        for i in 0..(MAX_CHILD_TASKS + 2) {
+            let child_id = format!("child-{}", i);
+            rt.register_task(&child_id, 1000, "t1").unwrap();
+            rt.register_child("parent", &child_id).unwrap();
         }
 
-        #[test]
-        fn register_child_duplicate_link_with_capacity_overflow() {
-            let mut rt = CancellationRuntime::default();
-            rt.register_task("parent", 1000, "t1").unwrap();
-            rt.register_task("persistent-child", 1000, "t1").unwrap();
+        // Cancel parent - should propagate to remaining children only
+        rt.cancel_task("parent", "shutdown", 2000, "t1").unwrap();
 
-            // Register persistent child first
-            rt.register_child("parent", "persistent-child").unwrap();
+        // Evicted children should not be cancelled
+        assert_eq!(rt.current_phase("child-0"), Some(TaskPhase::Running));
+        assert_eq!(rt.current_phase("child-1"), Some(TaskPhase::Running));
 
-            // Fill capacity with other children
-            for i in 0..MAX_CHILD_TASKS {
-                let child_id = format!("temp-{}", i);
-                rt.register_task(&child_id, 1000, "t1").unwrap();
-                rt.register_child("parent", &child_id).unwrap();
-            }
+        // Remaining children should be cancelled
+        let last_child = format!("child-{}", MAX_CHILD_TASKS + 1);
+        assert_eq!(
+            rt.current_phase(&last_child),
+            Some(TaskPhase::CancelRequested)
+        );
+    }
 
-            // Try to re-register the persistent child (should be idempotent)
-            rt.register_child("parent", "persistent-child").unwrap();
+    #[test]
+    fn register_child_duplicate_link_with_capacity_overflow() {
+        let mut rt = CancellationRuntime::default();
+        rt.register_task("parent", 1000, "t1").unwrap();
+        rt.register_task("persistent-child", 1000, "t1").unwrap();
 
-            let parent = rt.get_task("parent").expect("parent should exist");
+        // Register persistent child first
+        rt.register_child("parent", "persistent-child").unwrap();
 
-            // Should still be at capacity
-            assert_eq!(parent.child_task_ids.len(), MAX_CHILD_TASKS);
-
-            // Should still contain the persistent child (not duplicated)
-            assert_eq!(
-                parent.child_task_ids.iter()
-                    .filter(|&id| id == "persistent-child")
-                    .count(),
-                1
-            );
+        // Fill capacity with other children
+        for i in 0..MAX_CHILD_TASKS {
+            let child_id = format!("temp-{}", i);
+            rt.register_task(&child_id, 1000, "t1").unwrap();
+            rt.register_child("parent", &child_id).unwrap();
         }
 
-        #[test]
-        fn register_child_self_reference_rejected() {
-            let mut rt = CancellationRuntime::default();
-            rt.register_task("task-1", 1000, "t1").unwrap();
+        // Try to re-register the persistent child (should be idempotent)
+        rt.register_child("parent", "persistent-child").unwrap();
 
-            let err = rt.register_child("task-1", "task-1").unwrap_err();
-            assert_eq!(err.code(), error_codes::ERR_CXT_TASK_NOT_FOUND);
+        let parent = rt.get_task("parent").expect("parent should exist");
 
-            // Parent should not have itself as child
-            let task = rt.get_task("task-1").expect("task should exist");
-            assert!(task.child_task_ids.is_empty());
-        }
+        // Should still be at capacity
+        assert_eq!(parent.child_task_ids.len(), MAX_CHILD_TASKS);
+
+        // Should still contain the persistent child (not duplicated)
+        assert_eq!(
+            parent
+                .child_task_ids
+                .iter()
+                .filter(|&id| id == "persistent-child")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn register_child_self_reference_rejected() {
+        let mut rt = CancellationRuntime::default();
+        rt.register_task("task-1", 1000, "t1").unwrap();
+
+        let err = rt.register_child("task-1", "task-1").unwrap_err();
+        assert_eq!(err.code(), error_codes::ERR_CXT_TASK_NOT_FOUND);
+
+        // Parent should not have itself as child
+        let task = rt.get_task("task-1").expect("task should exist");
+        assert!(task.child_task_ids.is_empty());
+    }
 }
 
 impl CancellationRuntime {
@@ -1490,135 +1496,135 @@ impl CancellationRuntime {
 
 #[cfg(test)]
 mod export_audit_log_negative_tests {
-        use super::*;
+    use super::*;
 
-        #[test]
-        fn export_audit_log_empty_log_produces_empty_string() {
-            let rt = CancellationRuntime::default();
-            let jsonl = rt.export_audit_log_jsonl();
-            assert!(jsonl.is_empty());
+    #[test]
+    fn export_audit_log_empty_log_produces_empty_string() {
+        let rt = CancellationRuntime::default();
+        let jsonl = rt.export_audit_log_jsonl();
+        assert!(jsonl.is_empty());
+    }
+
+    #[test]
+    fn export_audit_log_single_event_no_trailing_newline() {
+        let mut rt = CancellationRuntime::default();
+        rt.register_task("task-1", 1000, "t1").unwrap();
+
+        let jsonl = rt.export_audit_log_jsonl();
+        assert!(!jsonl.is_empty());
+        assert!(!jsonl.ends_with('\n'));
+        assert_eq!(jsonl.lines().count(), 1);
+    }
+
+    #[test]
+    fn export_audit_log_multiple_events_newline_separated() {
+        let mut rt = CancellationRuntime::default();
+        rt.register_task("task-1", 1000, "t1").unwrap();
+        rt.register_task("task-2", 2000, "t2").unwrap();
+
+        let jsonl = rt.export_audit_log_jsonl();
+        let lines: Vec<&str> = jsonl.lines().collect();
+        assert_eq!(lines.len(), 2);
+
+        // Each line should be valid JSON
+        for line in lines {
+            let parsed: serde_json::Value =
+                serde_json::from_str(line).expect("each line should be valid JSON");
+            assert!(parsed.is_object());
+        }
+    }
+
+    #[test]
+    fn export_audit_log_with_extreme_field_values() {
+        let mut rt = CancellationRuntime::default();
+
+        // Create event with extreme values
+        rt.emit_audit(CancellableTaskAuditEvent {
+            event_code: "".to_string(),        // Empty string
+            task_id: "\n\r\t\"\\".to_string(), // Control characters and quotes
+            from_phase: TaskPhase::Running,
+            to_phase: TaskPhase::Finalized,
+            timestamp_ms: u64::MAX,
+            trace_id: "x".repeat(10000), // Very long string
+            detail: "unicode: 🦀 emoji and ñoño".to_string(),
+            schema_version: SCHEMA_VERSION.to_string(),
+        });
+
+        let jsonl = rt.export_audit_log_jsonl();
+        assert!(!jsonl.is_empty());
+
+        // Should still be parseable JSON despite extreme values
+        let parsed: serde_json::Value =
+            serde_json::from_str(&jsonl).expect("should handle extreme field values in JSON");
+        assert_eq!(parsed["timestamp_ms"], u64::MAX);
+        assert_eq!(parsed["event_code"], "");
+    }
+
+    #[test]
+    fn export_audit_log_preserves_task_id_order() {
+        let mut rt = CancellationRuntime::default();
+
+        let task_ids = ["zebra", "alpha", "beta", "gamma"];
+        for &task_id in &task_ids {
+            rt.register_task(task_id, 1000, "t1").unwrap();
         }
 
-        #[test]
-        fn export_audit_log_single_event_no_trailing_newline() {
-            let mut rt = CancellationRuntime::default();
-            rt.register_task("task-1", 1000, "t1").unwrap();
+        let jsonl = rt.export_audit_log_jsonl();
+        let lines: Vec<&str> = jsonl.lines().collect();
+        assert_eq!(lines.len(), task_ids.len());
 
-            let jsonl = rt.export_audit_log_jsonl();
-            assert!(!jsonl.is_empty());
-            assert!(!jsonl.ends_with('\n'));
-            assert_eq!(jsonl.lines().count(), 1);
+        // Should preserve insertion order, not alphabetical
+        for (i, line) in lines.iter().enumerate() {
+            let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(parsed["task_id"], task_ids[i]);
         }
+    }
 
-        #[test]
-        fn export_audit_log_multiple_events_newline_separated() {
-            let mut rt = CancellationRuntime::default();
-            rt.register_task("task-1", 1000, "t1").unwrap();
-            rt.register_task("task-2", 2000, "t2").unwrap();
+    #[test]
+    fn export_audit_log_handles_schema_version_consistency() {
+        let mut rt = CancellationRuntime::default();
+        rt.register_task("task-1", 1000, "t1").unwrap();
 
-            let jsonl = rt.export_audit_log_jsonl();
-            let lines: Vec<&str> = jsonl.lines().collect();
-            assert_eq!(lines.len(), 2);
+        let jsonl = rt.export_audit_log_jsonl();
+        let parsed: serde_json::Value = serde_json::from_str(&jsonl).unwrap();
 
-            // Each line should be valid JSON
-            for line in lines {
-                let parsed: serde_json::Value = serde_json::from_str(line)
-                    .expect("each line should be valid JSON");
-                assert!(parsed.is_object());
-            }
-        }
+        assert_eq!(parsed["schema_version"], SCHEMA_VERSION);
+        assert_eq!(parsed["schema_version"], "cxt-v1.0");
+    }
 
-        #[test]
-        fn export_audit_log_with_extreme_field_values() {
-            let mut rt = CancellationRuntime::default();
+    #[test]
+    fn export_audit_log_with_zero_timestamp() {
+        let mut rt = CancellationRuntime::default();
+        rt.register_task("task-1", 0, "t1").unwrap(); // Zero timestamp
 
-            // Create event with extreme values
-            rt.emit_audit(CancellableTaskAuditEvent {
-                event_code: "".to_string(), // Empty string
-                task_id: "\n\r\t\"\\".to_string(), // Control characters and quotes
-                from_phase: TaskPhase::Running,
-                to_phase: TaskPhase::Finalized,
-                timestamp_ms: u64::MAX,
-                trace_id: "x".repeat(10000), // Very long string
-                detail: "unicode: 🦀 emoji and ñoño".to_string(),
-                schema_version: SCHEMA_VERSION.to_string(),
-            });
+        let jsonl = rt.export_audit_log_jsonl();
+        let parsed: serde_json::Value = serde_json::from_str(&jsonl).unwrap();
 
-            let jsonl = rt.export_audit_log_jsonl();
-            assert!(!jsonl.is_empty());
+        assert_eq!(parsed["timestamp_ms"], 0);
+    }
 
-            // Should still be parseable JSON despite extreme values
-            let parsed: serde_json::Value = serde_json::from_str(&jsonl)
-                .expect("should handle extreme field values in JSON");
-            assert_eq!(parsed["timestamp_ms"], u64::MAX);
-            assert_eq!(parsed["event_code"], "");
-        }
+    #[test]
+    fn export_audit_log_very_long_detail_field() {
+        let mut rt = CancellationRuntime::default();
+        let very_long_detail = "x".repeat(100_000); // 100KB string
 
-        #[test]
-        fn export_audit_log_preserves_task_id_order() {
-            let mut rt = CancellationRuntime::default();
+        rt.emit_audit(CancellableTaskAuditEvent {
+            event_code: event_codes::FN_CX_001.to_string(),
+            task_id: "task-1".to_string(),
+            from_phase: TaskPhase::Running,
+            to_phase: TaskPhase::Running,
+            timestamp_ms: 1000,
+            trace_id: "t1".to_string(),
+            detail: very_long_detail.clone(),
+            schema_version: SCHEMA_VERSION.to_string(),
+        });
 
-            let task_ids = ["zebra", "alpha", "beta", "gamma"];
-            for &task_id in &task_ids {
-                rt.register_task(task_id, 1000, "t1").unwrap();
-            }
+        let jsonl = rt.export_audit_log_jsonl();
+        assert!(jsonl.len() > 100_000); // Should include the long detail
 
-            let jsonl = rt.export_audit_log_jsonl();
-            let lines: Vec<&str> = jsonl.lines().collect();
-            assert_eq!(lines.len(), task_ids.len());
-
-            // Should preserve insertion order, not alphabetical
-            for (i, line) in lines.iter().enumerate() {
-                let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
-                assert_eq!(parsed["task_id"], task_ids[i]);
-            }
-        }
-
-        #[test]
-        fn export_audit_log_handles_schema_version_consistency() {
-            let mut rt = CancellationRuntime::default();
-            rt.register_task("task-1", 1000, "t1").unwrap();
-
-            let jsonl = rt.export_audit_log_jsonl();
-            let parsed: serde_json::Value = serde_json::from_str(&jsonl).unwrap();
-
-            assert_eq!(parsed["schema_version"], SCHEMA_VERSION);
-            assert_eq!(parsed["schema_version"], "cxt-v1.0");
-        }
-
-        #[test]
-        fn export_audit_log_with_zero_timestamp() {
-            let mut rt = CancellationRuntime::default();
-            rt.register_task("task-1", 0, "t1").unwrap(); // Zero timestamp
-
-            let jsonl = rt.export_audit_log_jsonl();
-            let parsed: serde_json::Value = serde_json::from_str(&jsonl).unwrap();
-
-            assert_eq!(parsed["timestamp_ms"], 0);
-        }
-
-        #[test]
-        fn export_audit_log_very_long_detail_field() {
-            let mut rt = CancellationRuntime::default();
-            let very_long_detail = "x".repeat(100_000); // 100KB string
-
-            rt.emit_audit(CancellableTaskAuditEvent {
-                event_code: event_codes::FN_CX_001.to_string(),
-                task_id: "task-1".to_string(),
-                from_phase: TaskPhase::Running,
-                to_phase: TaskPhase::Running,
-                timestamp_ms: 1000,
-                trace_id: "t1".to_string(),
-                detail: very_long_detail.clone(),
-                schema_version: SCHEMA_VERSION.to_string(),
-            });
-
-            let jsonl = rt.export_audit_log_jsonl();
-            assert!(jsonl.len() > 100_000); // Should include the long detail
-
-            let parsed: serde_json::Value = serde_json::from_str(&jsonl).unwrap();
-            assert_eq!(parsed["detail"], very_long_detail);
-        }
+        let parsed: serde_json::Value = serde_json::from_str(&jsonl).unwrap();
+        assert_eq!(parsed["detail"], very_long_detail);
+    }
 }
 
 impl Default for CancellationRuntime {
