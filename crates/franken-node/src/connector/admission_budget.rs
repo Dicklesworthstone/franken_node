@@ -267,7 +267,8 @@ impl AdmissionBudgetTracker {
     pub fn record_failed_auth(&mut self, peer_id: &str) -> Result<(), AdmissionError> {
         let usage = self.peers.entry(peer_id.to_string()).or_default();
         usage.failed_auth_count = usage.failed_auth_count.saturating_add(1);
-        if usage.failed_auth_count >= self.budget.max_failed_auth {
+        // bd-rltwu fix: Change >= to > so configured maximum is ALLOWED, rejection starts at max+1
+        if usage.failed_auth_count > self.budget.max_failed_auth {
             return Err(AdmissionError::AuthExceeded {
                 peer_id: peer_id.to_string(),
                 count: usage.failed_auth_count,
@@ -281,7 +282,8 @@ impl AdmissionBudgetTracker {
     pub fn record_decode_start(&mut self, peer_id: &str) -> Result<(), AdmissionError> {
         let usage = self.peers.entry(peer_id.to_string()).or_default();
         let attempted_count = usage.inflight_decode_count.saturating_add(1);
-        if attempted_count >= self.budget.max_inflight_decode {
+        // bd-rltwu fix: Change >= to > so configured maximum is ALLOWED, rejection starts at max+1
+        if attempted_count > self.budget.max_inflight_decode {
             return Err(AdmissionError::InflightExceeded {
                 peer_id: peer_id.to_string(),
                 count: attempted_count,
@@ -1483,5 +1485,62 @@ mod tests {
                 && record.limit == 800
                 && record.verdict.as_str() == "FAIL"
         }));
+    }
+
+    #[test]
+    fn bd_rltwu_regression_failed_auth_boundary() {
+        // Regression test for bd-rltwu: configured maximum should be ALLOWED, rejection at max+1
+        let mut tracker = AdmissionBudgetTracker::new(budget()).unwrap();
+
+        // max_failed_auth=3, so attempts 1, 2, 3 should succeed
+        tracker.record_failed_auth("p1").unwrap();
+        tracker.record_failed_auth("p1").unwrap();
+        tracker.record_failed_auth("p1").unwrap();
+        assert_eq!(tracker.get_usage("p1").failed_auth_count, 3);
+
+        // 4th attempt should be rejected
+        let err = tracker.record_failed_auth("p1").unwrap_err();
+        assert!(matches!(err, AdmissionError::AuthExceeded { count: 4, limit: 3, .. }));
+    }
+
+    #[test]
+    fn bd_rltwu_regression_inflight_decode_boundary() {
+        // Regression test for bd-rltwu: configured maximum should be ALLOWED, rejection at max+1
+        let mut tracker = AdmissionBudgetTracker::new(budget()).unwrap();
+
+        // max_inflight_decode=5, so decode starts 1, 2, 3, 4, 5 should succeed
+        for i in 1..=5 {
+            tracker.record_decode_start("p1").unwrap();
+            assert_eq!(tracker.get_usage("p1").inflight_decode_count, i);
+        }
+
+        // 6th decode start should be rejected
+        let err = tracker.record_decode_start("p1").unwrap_err();
+        assert!(matches!(err, AdmissionError::InflightExceeded { count: 6, limit: 5, .. }));
+        // Count should not have been incremented on failure
+        assert_eq!(tracker.get_usage("p1").inflight_decode_count, 5);
+    }
+
+    #[test]
+    fn bd_rltwu_regression_boundary_with_max_one() {
+        // Test edge case where max=1 should allow exactly 1, reject 2
+        let mut budget_one = budget();
+        budget_one.max_failed_auth = 1;
+        budget_one.max_inflight_decode = 1;
+
+        let mut tracker = AdmissionBudgetTracker::new(budget_one).unwrap();
+
+        // Failed auth: max=1, first should succeed, second should fail
+        tracker.record_failed_auth("p1").unwrap();
+        assert_eq!(tracker.get_usage("p1").failed_auth_count, 1);
+        let err = tracker.record_failed_auth("p1").unwrap_err();
+        assert!(matches!(err, AdmissionError::AuthExceeded { count: 2, limit: 1, .. }));
+
+        // Inflight decode: max=1, first should succeed, second should fail
+        tracker.record_decode_start("p2").unwrap();
+        assert_eq!(tracker.get_usage("p2").inflight_decode_count, 1);
+        let err = tracker.record_decode_start("p2").unwrap_err();
+        assert!(matches!(err, AdmissionError::InflightExceeded { count: 2, limit: 1, .. }));
+        assert_eq!(tracker.get_usage("p2").inflight_decode_count, 1);
     }
 }
