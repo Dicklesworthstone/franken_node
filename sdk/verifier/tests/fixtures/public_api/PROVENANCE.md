@@ -1,95 +1,96 @@
 # Public API Fixtures Provenance
 
-## Generation Method
+## Source of Truth
 
-These fixtures are checked-in golden artifacts for the verifier SDK public API
-conformance harness in `sdk/verifier/tests/public_api_contract.rs`.
-They use deterministic but live-shape values so the harness can freeze JSON
-contracts without teaching stale mock-only formats.
+These files are checked-in contract fixtures for the verifier SDK public API.
+They are not historical mock examples. The authoritative behavior comes from:
 
-## Deterministic Live Values Used
+- `sdk/verifier/tests/public_api_contract.rs`
+- `sdk/verifier/tests/conformance_harness.rs`
+- `sdk/verifier/src/lib.rs`
+- `sdk/verifier/src/bundle.rs`
 
-- **Timestamps**: Fixed RFC 3339 / RFC 3339-like UTC strings such as
-  `2026-04-21T12:00:00.000000Z`, `2026-04-21T12:00:00Z`, and the
-  bundle timeline sequence rooted at `2026-04-21T00:00:00.000000Z`
-- **Digests**: Bare lowercase 64-nybble SHA-256 hex values with no
-  `sha256:` prefix
-- **Signatures**: Bare lowercase 64-nybble hex fixture values matching the
-  current public JSON contract for `verifier_signature`, `step_signature`,
-  and `signature.signature_hex`
-- **Verifier Identity**: Stable verifier URI `verifier://facade-test`
-- **Bundle / Incident IDs**: Stable live-shape IDs such as
-  `facade-bundle-001`, `facade-incident-001`, and `evt-facade-001`
-- **Counters**: Minimal predictable values such as `step_index: 1`,
-  `leaf_index: 0`, and `tree_size: 1`
+If this document disagrees with those files, the code and tests win.
 
-## Fixture Files
+## Live Contract Shape
 
-### facade_result.json
-- **Source**: Frozen `VerificationResult` JSON shape
-- **Purpose**: Golden reference for the main verifier facade result contract
-- **Key Fields**: Bare 64-hex `artifact_binding_hash`, bare 64-hex
-  `verifier_signature`, `verifier://facade-test`, and the current
-  `vsdk-v1.0` SDK version
+The fixtures use stable values, but they must stay in the same wire format that
+the live verifier surfaces enforce:
 
-### session_step.json
-- **Source**: Frozen `SessionStep` JSON shape
-- **Purpose**: Golden reference for session step format
-- **Key Fields**: `step_index`, operation/verdict enums, bare 64-hex
-  `artifact_binding_hash`, RFC 3339 timestamp, and bare 64-hex `step_signature`
+- **Digests**: bare lowercase 64-hex strings with no `sha256:` prefix
+- **Signatures**: bare lowercase 64-hex strings for
+  `verifier_signature`, `step_signature`, and `signature.signature_hex`
+- **Verifier identity**: URI form such as `verifier://facade-test`
+- **Timestamps**: RFC 3339 UTC strings
+- **Merkle proof entries**:
+  `root:<digest>`, `leaf_index:<usize>`, `tree_size:<usize>`, then optional
+  `left:<digest>` / `right:<digest>` siblings
+- **Bundle signature metadata**: `signature.algorithm` currently matches the
+  bundle hash algorithm and is serialized as `"sha256"`
 
-### transparency_entry.json
-- **Source**: Frozen `TransparencyLogEntry` JSON shape
-- **Purpose**: Golden reference for transparency log format
-- **Key Fields**: Bare 64-hex `result_hash`, `verifier://facade-test`, and
-  a Merkle proof array shaped as `root:<digest>`, `leaf_index:<usize>`,
-  `tree_size:<usize>`, then optional `left:<digest>` / `right:<digest>` steps
+Do not reintroduce obsolete placeholder contracts such as:
 
-### bundle_canonical.json
-- **Source**: Frozen canonical `ReplayBundle` JSON from `bundle.rs`
-- **Purpose**: Golden reference for canonical bundle format
-- **Key Fields**: `facade-bundle-001`, `facade-incident-001`,
-  `verifier://facade-test`, canonical artifact/chunk digests, and sealed
-  `integrity_hash` / `signature.signature_hex`
+- `sha256:<digest>` prefixes
+- fixed fake Ed25519 blobs
+- verifier IDs like `test-verifier-deterministic`
+- dummy filler values such as `deadbeef...`
 
-### error_matrix.json
-- **Source**: Frozen expected display strings for public bundle / SDK errors
-- **Purpose**: Expected error display format testing
-- **Structure**: Organized by error category (bundle_errors, sdk_errors)
+## Fixture Roles
 
-### api_manifest.json
-- **Source**: Frozen extraction of the public verifier SDK surface
-- **Purpose**: API contract metadata and breaking change policies
-- **Structure**: Constants, enums, structures, functions, and breaking-change
-  policy with `frozen_at` metadata
+### `facade_result.json`
 
-## Regeneration Instructions
+Frozen `VerificationResult` JSON used by `public_api_contract.rs` to assert the
+serde contract and digest/signature field format for the verifier facade.
 
-To regenerate these fixtures if the API changes:
+### `session_step.json`
 
-1. **Constants / manifest**: Refresh `api_manifest.json` from
-   `sdk/verifier/src/lib.rs` and `sdk/verifier/src/bundle.rs`
-2. **Enums / structures**: Keep serde field names and required fields aligned
-   with the live public structs
-3. **Fixture values**: Preserve deterministic timestamps and IDs, but keep
-   hashes and signatures in the same live wire format the harness enforces:
-   bare lowercase 64-hex strings with no algorithm prefix
-4. **Transparency proof**: Preserve the proof entry contract
-   `root:/leaf_index:/tree_size:/left:/right:`
-5. **Validation**: Run
+Frozen `SessionStep` JSON used to assert the live session-step wire format,
+including the signed step digest shape.
+
+### `transparency_entry.json`
+
+Frozen `TransparencyLogEntry` JSON used to assert the live transparency-log
+shape, including the current Merkle proof entry prefixes and bare-hex result
+hash contract.
+
+### `bundle_canonical.json`
+
+Canonical `ReplayBundle` fixture aligned with `bundle.rs` serialization and the
+conformance harness. This fixture must remain a valid replay bundle under the
+current bundle parser and validator, not just a documentation sample.
+
+### `error_matrix.json`
+
+Expected display strings for public bundle and SDK errors. Keep this aligned
+with the live `Display` output of the public error types.
+
+### `api_manifest.json`
+
+Frozen extraction of the public SDK surface and compatibility policy metadata.
+
+## Regeneration Rules
+
+When the verifier public contract changes:
+
+1. Refresh fixture contents from the live public structs, serializers, and
+   validation rules in `sdk/verifier/src/lib.rs` and `sdk/verifier/src/bundle.rs`.
+2. Keep fixture values stable where possible, but only in formats the current
+   tests accept.
+3. Rebuild any bundle fixture using the current bundle sealing rules so that
+   `integrity_hash`, artifact digests, and `signature.signature_hex` remain
+   internally consistent.
+4. Preserve the transparency proof entry contract
+   `root:/leaf_index:/tree_size:/left:/right:`.
+5. Re-run the fixture-backed checks:
    `rch exec -- cargo test --manifest-path sdk/verifier/Cargo.toml --test public_api_contract public_api_conformance_suite -- --nocapture`
-   and confirm the fixture-backed API contract cases pass
-
-Do not reintroduce legacy placeholder values such as `sha256:...`,
-`deadbeef...`, or `test-verifier-deterministic`; those no longer describe the
-checked-in public API contract.
 
 ## Last Updated
 
-- 2026-04-21 - Initial fixture set for the verifier public API conformance harness
+- 2026-04-21 - Initial verifier public API fixture set
 - 2026-04-23 - Fixture contracts refreshed to match the live verifier surface
-- 2026-04-24 - Provenance guidance updated to match the enforced live fixture formats (`bd-2w7jg`)
+- 2026-04-24 - Provenance guidance aligned with live wire-format and bundle-validation rules (`bd-3toal`)
 
 ## SDK Version Compatibility
 
-These fixtures are compatible with SDK version `vsdk-v1.0` and replay bundle schema `vsdk-replay-bundle-v1.0`.
+These fixtures currently target SDK version `vsdk-v1.0` and replay bundle
+schema `vsdk-replay-bundle-v1.0`.
