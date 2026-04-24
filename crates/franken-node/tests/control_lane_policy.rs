@@ -1,8 +1,11 @@
 #[path = "../../../tests/conformance/control_lane_policy.rs"]
 mod control_lane_policy;
 
+use frankenengine_node::control_plane::cancellation_protocol::{
+    CancelPhase, CancelProtocolError, CancellationProtocol, DEFAULT_MAX_RECORDS,
+};
 use frankenengine_node::control_plane::control_lane_policy::{
-    ControlLane, ControlLanePolicy, ControlTaskClass, event_codes,
+    event_codes, ControlLane, ControlLanePolicy, ControlTaskClass,
 };
 
 #[test]
@@ -102,4 +105,54 @@ fn deadline_aware_tick_schedules_timed_by_earliest_deadline() {
 
     assert!(early_position < late_position);
     assert!(result.timed_out_task_ids.is_empty());
+}
+
+#[test]
+fn cancellation_records_fail_closed_when_all_active_slots_are_full() {
+    let mut protocol = CancellationProtocol::default();
+
+    for index in 0..DEFAULT_MAX_RECORDS {
+        let workflow_id = format!("active-cancel-{index}");
+        protocol
+            .request_cancel(
+                &workflow_id,
+                1,
+                u64::try_from(index).unwrap(),
+                "trace-capacity",
+            )
+            .expect("active cancellation record should be retained");
+    }
+
+    let err = protocol
+        .request_cancel(
+            "overflow-active-cancel",
+            1,
+            u64::try_from(DEFAULT_MAX_RECORDS).unwrap(),
+            "trace-capacity",
+        )
+        .expect_err("active cancellation capacity must fail closed");
+
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "suite": "control_lane_policy",
+            "surface": "control_plane_cancellation_protocol",
+            "phase": "capacity_guard",
+            "active_records": protocol.records().len(),
+            "error_code": err.code(),
+            "event": "active_cancellation_capacity_fail_closed"
+        })
+    );
+
+    assert_eq!(err.code(), "ERR_CANCEL_INVARIANT");
+    assert!(matches!(
+        err,
+        CancelProtocolError::InvariantViolation { .. }
+    ));
+    assert_eq!(protocol.records().len(), DEFAULT_MAX_RECORDS);
+    assert_eq!(
+        protocol.current_phase("active-cancel-0"),
+        Some(CancelPhase::CancelRequested)
+    );
+    assert_eq!(protocol.current_phase("overflow-active-cancel"), None);
 }

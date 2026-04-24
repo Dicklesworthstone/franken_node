@@ -494,11 +494,15 @@ impl CancellationProtocol {
             self.records
                 .retain(|r| r.current_phase != CancelPhase::Finalized);
 
-            // If we still have too many (i.e. all active), we are forced to drop the oldest active
-            // as a last resort DOS defense to prevent OOM
+            // If we still have too many (i.e. all active), fail closed instead of
+            // evicting a live cancellation. Dropping active state can reopen work
+            // that should remain blocked until drain/finalize completes.
             if self.records.len() >= DEFAULT_MAX_RECORDS {
-                let overflow = self.records.len() - DEFAULT_MAX_RECORDS + 1;
-                self.records.drain(0..overflow);
+                return Err(CancelProtocolError::InvariantViolation {
+                    detail: format!(
+                        "active cancellation record capacity exceeded: max={DEFAULT_MAX_RECORDS}"
+                    ),
+                });
             }
         }
         self.records.push(record);

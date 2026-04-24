@@ -581,10 +581,10 @@ fn publish_root_internal(
     trace_id: &str,
     options: PublishOptions,
 ) -> Result<RootPublishOutcome, RootPointerError> {
+    let _publication_lock = acquire_root_publication_lock(dir, false)?;
     let _guard = publish_lock()
         .lock()
         .map_err(|_| RootPointerError::LockPoisoned)?;
-    let _publication_lock = acquire_root_publication_lock(dir, false)?;
     if let Some(delay) = options.delay_after_lock {
         thread::sleep(delay);
     }
@@ -1122,6 +1122,55 @@ mod tests {
             !publisher.is_finished(),
             "publisher must wait behind externally-held publication lock"
         );
+
+        lock_file
+            .unlock()
+            .expect("release external publication lock");
+        let outcome = publisher
+            .join()
+            .expect("publisher join")
+            .expect("publish after external lock release");
+        assert_eq!(outcome.event.new_epoch, ControlEpoch(2));
+    }
+
+    #[test]
+    fn publish_waiting_on_publication_flock_does_not_hold_process_mutex() {
+        let dir = TempDir::new().expect("tempdir");
+        let k = key();
+
+        publish_root(dir.path(), &root(1, 1, "h1"), &k, "seed").expect("seed publish");
+
+        let lock_path = root_publication_lock_path(dir.path());
+        let lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .expect("open publication lock");
+        lock_file.lock().expect("take external publication lock");
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let dir_path = dir.path().to_path_buf();
+        let key_for_thread = k.clone();
+        let publisher = thread::spawn(move || {
+            started_tx.send(()).expect("signal publisher started");
+            publish_root(
+                &dir_path,
+                &root(2, 2, "h2"),
+                &key_for_thread,
+                "external-lock-order",
+            )
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("publisher must start");
+        thread::sleep(Duration::from_millis(100));
+        let process_guard = publish_lock()
+            .try_lock()
+            .expect("publisher blocked on flock must not hold process mutex");
+        drop(process_guard);
 
         lock_file
             .unlock()
