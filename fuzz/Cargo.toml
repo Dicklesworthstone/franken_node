@@ -168,6 +168,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_migration_rewrite_rules"
+path = "fuzz_targets/fuzz_migration_rewrite_rules.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_incident_bundle_parse"
 path = "fuzz_targets/fuzz_incident_bundle_parse.rs"
 test = false

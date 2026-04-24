@@ -1709,8 +1709,8 @@ mod tests {
     fn bootstrap_rejects_auth_hash_for_different_root_even_with_valid_mac() {
         let dir = TempDir::new().expect("tempdir");
         let k = key();
-        let root = root(54, 540, "real-root");
-        publish_root(dir.path(), &root, &k, "trace-real-root").expect("publish");
+        let real_root = root(54, 540, "real-root");
+        publish_root(dir.path(), &real_root, &k, "trace-real-root").expect("publish");
 
         let other_root = root(54, 541, "other-root");
         let other_payload = serde_json::to_vec_pretty(&other_root).expect("serialize other root");
