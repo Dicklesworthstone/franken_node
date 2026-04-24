@@ -1214,13 +1214,17 @@ fn test_bundle_chunk_ordering() -> TestResult {
 }
 
 fn test_bundle_artifact_integrity() -> TestResult {
+    let digest = hash(b"conformance-artifact");
     let artifact = BundleArtifact {
         media_type: "application/json".to_string(),
-        digest: "sha256:abc123".to_string(),
+        digest: digest.clone(),
         bytes_hex: "deadbeef".to_string(),
     };
 
-    if !artifact.digest.is_empty() && !artifact.bytes_hex.is_empty() {
+    if artifact.digest.len() == 64
+        && artifact.digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && !artifact.bytes_hex.is_empty()
+    {
         TestResult::Pass
     } else {
         TestResult::Fail {
@@ -1230,12 +1234,19 @@ fn test_bundle_artifact_integrity() -> TestResult {
 }
 
 fn test_bundle_signature_format() -> TestResult {
+    let signature_hex = hash(b"conformance-signature");
     let signature = BundleSignature {
-        algorithm: "ed25519".to_string(),
-        signature_hex: "0123456789abcdef".to_string(),
+        algorithm: REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
+        signature_hex,
     };
 
-    if signature.algorithm == "ed25519" && !signature.signature_hex.is_empty() {
+    if signature.algorithm == REPLAY_BUNDLE_HASH_ALGORITHM
+        && signature.signature_hex.len() == 64
+        && signature
+            .signature_hex
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
         TestResult::Pass
     } else {
         TestResult::Fail {
