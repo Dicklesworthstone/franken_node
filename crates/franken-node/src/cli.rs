@@ -239,18 +239,108 @@ pub enum MigrateCommand {
     Validate(MigrateValidateArgs),
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug)]
 pub struct MigrateAuditArgs {
     /// Path to the project to audit.
     pub project_path: PathBuf,
 
     /// Output format: json, text, or sarif.
-    #[arg(long, default_value = "text")]
     pub format: String,
 
     /// Output file path.
-    #[arg(long)]
     pub out: Option<PathBuf>,
+}
+
+impl clap::Args for MigrateAuditArgs {
+    fn augment_args(cmd: clap::Command) -> clap::Command {
+        cmd.arg(
+            clap::Arg::new("project_path")
+                .value_name("PROJECT_PATH")
+                .help("Path to the project to audit.")
+                .value_parser(clap::value_parser!(PathBuf))
+                .required(true),
+        )
+        .arg(
+            clap::Arg::new("format")
+                .long("format")
+                .value_name("FORMAT")
+                .help("Output format: json, text, or sarif.")
+                .default_value("text")
+                .value_parser(["json", "text", "sarif"])
+                .requires_if("sarif", "out"),
+        )
+        .arg(
+            clap::Arg::new("out")
+                .long("out")
+                .value_name("PATH")
+                .help("Output file path.")
+                .value_parser(clap::value_parser!(PathBuf)),
+        )
+    }
+
+    fn augment_args_for_update(cmd: clap::Command) -> clap::Command {
+        Self::augment_args(cmd)
+    }
+}
+
+impl clap::FromArgMatches for MigrateAuditArgs {
+    fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
+        let project_path = matches
+            .get_one::<PathBuf>("project_path")
+            .expect("project_path is required by clap")
+            .clone();
+        let format = matches
+            .get_one::<String>("format")
+            .expect("format has a default value")
+            .clone();
+        let out = matches.get_one::<PathBuf>("out").cloned();
+
+        validate_migrate_audit_output(&format, out.as_ref())?;
+
+        Ok(Self {
+            project_path,
+            format,
+            out,
+        })
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
+        *self = Self::from_arg_matches(matches)?;
+        Ok(())
+    }
+}
+
+fn validate_migrate_audit_output(format: &str, out: Option<&PathBuf>) -> Result<(), clap::Error> {
+    let extension = out
+        .and_then(|path| path.extension())
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+
+    if format == "sarif" {
+        return match extension.as_deref() {
+            Some("sarif") => Ok(()),
+            Some(_) => Err(clap::Error::raw(
+                clap::error::ErrorKind::ValueValidation,
+                "--format=sarif requires --out to end in .sarif",
+            )),
+            None => Err(clap::Error::raw(
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "--format=sarif requires --out <PATH>.sarif",
+            )),
+        };
+    }
+
+    match (format, extension.as_deref()) {
+        ("json", Some("sarif" | "txt" | "text")) => Err(clap::Error::raw(
+            clap::error::ErrorKind::ValueValidation,
+            "--format=json requires a JSON-compatible --out path",
+        )),
+        ("text", Some("json" | "sarif")) => Err(clap::Error::raw(
+            clap::error::ErrorKind::ValueValidation,
+            "--format=text requires a text-compatible --out path",
+        )),
+        _ => Ok(()),
+    }
 }
 
 #[derive(Debug, Parser)]

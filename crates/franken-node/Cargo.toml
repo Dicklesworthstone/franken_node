@@ -121,6 +121,10 @@ name = "incident_cli_e2e"
 path = "tests/incident_cli_e2e.rs"
 
 [[test]]
+name = "cli_arg_validation"
+path = "tests/cli_arg_validation.rs"
+
+[[test]]
 name = "replay_import_anchor"
 path = "tests/replay_import_anchor.rs"
 

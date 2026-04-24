@@ -933,6 +933,7 @@ pub mod atc;
 pub mod capacity_defaults;
 #[cfg(feature = "advanced-features")]
 pub mod claims;
+pub mod cli;
 pub mod config;
 #[cfg(feature = "advanced-features")]
 pub mod conformance;
