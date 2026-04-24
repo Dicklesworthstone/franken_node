@@ -316,7 +316,7 @@ impl Default for ReplayExecutionBounds {
     fn default() -> Self {
         Self {
             max_replay_steps: 100_000,
-            max_wall_clock_millis: 30_000,
+            max_wall_clock_millis: crate::config::timeouts::COUNTERFACTUAL_REPLAY_MAX_WALL_CLOCK_MS,
         }
     }
 }

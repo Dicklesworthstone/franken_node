@@ -17,14 +17,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const PERSIST_QUEUE_CAPACITY: usize = 256;
-const ENQUEUE_TIMEOUT_MS: u64 = timeouts::TELEMETRY_ENQUEUE_TIMEOUT_MS;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_RECENT_EVENTS: usize = 256;
 const MAX_RUNTIME_EVENTS: usize = 256;
 const MAX_ACTIVE_CONNECTIONS: usize = 64;
-const ACCEPT_POLL_INTERVAL_MS: u64 = timeouts::TELEMETRY_ACCEPT_POLL_INTERVAL_MS;
-const CONNECTION_READ_TIMEOUT_MS: u64 = timeouts::TELEMETRY_CONNECTION_READ_TIMEOUT_MS;
-const DEFAULT_DRAIN_TIMEOUT_MS: u64 = timeouts::TELEMETRY_DEFAULT_DRAIN_TIMEOUT_MS;
 
 /// Cross-process file lock guard for socket setup/teardown operations
 struct SocketLockGuard {
@@ -467,7 +463,7 @@ impl TelemetryRuntimeHandle {
         reason: ShutdownReason,
     ) -> Result<TelemetryRuntimeReport, TelemetryJoinError> {
         self.stop(reason);
-        self.join(Duration::from_millis(DEFAULT_DRAIN_TIMEOUT_MS))
+        self.join(timeouts::TELEMETRY_DEFAULT_DRAIN_TIMEOUT)
     }
 
     /// Wait for all workers to finish and return the final report.
@@ -980,7 +976,7 @@ impl TelemetryBridge {
                 }
                 Err(err) if err.kind() == ErrorKind::WouldBlock => {
                     // Non-blocking: no pending connection, sleep briefly
-                    thread::sleep(Duration::from_millis(ACCEPT_POLL_INTERVAL_MS));
+                    thread::sleep(timeouts::TELEMETRY_ACCEPT_POLL_INTERVAL);
                 }
                 Err(err) => {
                     Self::with_state(&state, |metrics| {
@@ -1049,8 +1045,7 @@ impl TelemetryBridge {
         state: Arc<Mutex<TelemetryBridgeState>>,
         stop_flag: Arc<AtomicBool>,
     ) {
-        if let Err(err) =
-            stream.set_read_timeout(Some(Duration::from_millis(CONNECTION_READ_TIMEOUT_MS)))
+        if let Err(err) = stream.set_read_timeout(Some(timeouts::TELEMETRY_CONNECTION_READ_TIMEOUT))
         {
             Self::with_state(&state, |metrics| {
                 metrics.record_event(
@@ -1165,7 +1160,7 @@ impl TelemetryBridge {
                         &sender,
                         envelope,
                         &state,
-                        Duration::from_millis(ENQUEUE_TIMEOUT_MS),
+                        timeouts::TELEMETRY_ENQUEUE_TIMEOUT,
                     );
                     if !admitted {
                         continue;
@@ -1500,12 +1495,16 @@ fn assert_slowloris_partial_fragments_exceed_cap_after_timeout_shed_impl() {
         stream
             .write_all(fragment.as_bytes())
             .expect("write fragment");
-        thread::sleep(Duration::from_millis(CONNECTION_READ_TIMEOUT_MS + 50));
+        thread::sleep(Duration::from_millis(
+            timeouts::TELEMETRY_CONNECTION_READ_TIMEOUT_MS + 50,
+        ));
     }
 
     drop(stream);
 
-    thread::sleep(Duration::from_millis(CONNECTION_READ_TIMEOUT_MS + 50));
+    thread::sleep(Duration::from_millis(
+        timeouts::TELEMETRY_CONNECTION_READ_TIMEOUT_MS + 50,
+    ));
 
     let mut recovery_stream = UnixStream::connect(&sock).expect("connect recovery stream");
     writeln!(recovery_stream, r#"{{"event":"after_attack"}}"#).expect("write valid event");
@@ -2626,7 +2625,9 @@ mod tests {
         stream
             .write_all(br#"{"timestamp":"2026-04-06T00:00:00Z","event_type":"metric","#)
             .expect("write first fragment");
-        thread::sleep(Duration::from_millis(CONNECTION_READ_TIMEOUT_MS + 100));
+        thread::sleep(Duration::from_millis(
+            timeouts::TELEMETRY_CONNECTION_READ_TIMEOUT_MS + 100,
+        ));
         stream
             .write_all(br#""payload":{"seq":7}}"#)
             .expect("write second fragment");
@@ -3360,7 +3361,7 @@ mod tests {
                     payload: br#"{"perf":"latency"}"#.to_vec(),
                 },
                 &state,
-                Duration::from_millis(ENQUEUE_TIMEOUT_MS),
+                timeouts::TELEMETRY_ENQUEUE_TIMEOUT,
             );
             let elapsed = start.elapsed();
             assert!(admitted);
@@ -4120,7 +4121,9 @@ mod tests {
 
         // Clean up remaining handles - they should all join successfully
         for handle in handles {
-            handle.join().expect("all handles should join without panic");
+            handle
+                .join()
+                .expect("all handles should join without panic");
         }
 
         // This test verifies that:

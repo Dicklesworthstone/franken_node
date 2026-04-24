@@ -24,8 +24,6 @@ const MAX_COMBINED_OUTPUT_BYTES: usize = 16_777_216; // 16MB limit per runtime e
 const MAX_LOCKSTEP_CORPUS_CASES: usize = 256;
 const MAX_SANITIZED_STRACE_LINES: usize = 65_536; // 64K syscall lines max
 const MAX_THREAD_HANDLES: usize = 64; // Maximum concurrent runtime threads
-const PIPE_DRAIN_JOIN_TIMEOUT_MS: u64 = 2_000;
-const PIPE_DRAIN_JOIN_POLL_MS: u64 = 10;
 const PIPE_READ_CHUNK_BYTES: usize = 64 * 1024;
 const DIVERGENCE_FIXTURE_LOCK_FILE: &str = ".lockstep-fixtures.lock";
 
@@ -869,7 +867,7 @@ impl LockstepHarness {
             thread::sleep(crate::config::timeouts::LOCKSTEP_RUNTIME_POLL_INTERVAL);
         }
 
-        let drain_timeout = Duration::from_millis(PIPE_DRAIN_JOIN_TIMEOUT_MS);
+        let drain_timeout = crate::config::timeouts::LOCKSTEP_PIPE_DRAIN_JOIN_TIMEOUT;
         let stdout_result = Self::join_pipe_drain(stdout_thread, "stdout", drain_timeout);
         let stderr_result = Self::join_pipe_drain(stderr_thread, "stderr", drain_timeout);
 
@@ -977,24 +975,26 @@ impl LockstepHarness {
         while !handle.is_finished() {
             if Self::has_timed_out(start.elapsed(), timeout) {
                 // Try a final join attempt with a grace period to prevent thread leaks
-                let grace_timeout =
-                    timeout.saturating_add(crate::config::timeouts::LOCKSTEP_PIPE_DRAIN_GRACE_EXTENSION);
+                let grace_timeout = timeout
+                    .saturating_add(crate::config::timeouts::LOCKSTEP_PIPE_DRAIN_GRACE_EXTENSION);
                 let grace_start = Instant::now();
                 while !handle.is_finished() {
                     if Self::has_timed_out(grace_start.elapsed(), grace_timeout) {
                         // Thread is truly stuck - we must leak it but document the issue
-                        eprintln!("Warning: pipe drain thread '{label}' leaked due to blocked read (likely descendant process)");
+                        eprintln!(
+                            "Warning: pipe drain thread '{label}' leaked due to blocked read (likely descendant process)"
+                        );
                         std::mem::forget(handle); // Explicitly leak to avoid panic on drop
                         return PipeDrainResult {
                             bytes: format!("__pipe_drain_leaked:{label}").into_bytes(),
                             cap_reached: false,
                         };
                     }
-                    thread::sleep(Duration::from_millis(PIPE_DRAIN_JOIN_POLL_MS));
+                    thread::sleep(crate::config::timeouts::LOCKSTEP_PIPE_DRAIN_JOIN_POLL);
                 }
                 break; // Thread finished during grace period
             }
-            thread::sleep(Duration::from_millis(PIPE_DRAIN_JOIN_POLL_MS));
+            thread::sleep(crate::config::timeouts::LOCKSTEP_PIPE_DRAIN_JOIN_POLL);
         }
         handle.join().unwrap_or_else(|_| PipeDrainResult {
             bytes: format!("__thread_panic:{label}").into_bytes(),
