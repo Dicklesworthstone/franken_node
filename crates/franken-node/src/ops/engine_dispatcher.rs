@@ -1211,7 +1211,13 @@ impl EngineDispatcher {
             #[cfg(feature = "engine")]
             {
                 // Use native execution when engine feature is enabled
-                tracing::info!("Using native franken_engine execution instead of external process");
+                tracing::info!(
+                    execution_mode = "native",
+                    engine = "franken_engine",
+                    app_path = %app_path.display(),
+                    policy_mode,
+                    "Using native franken_engine execution instead of external process"
+                );
                 Self::run_engine_native_with_error_handling(
                     app_path,
                     config,
