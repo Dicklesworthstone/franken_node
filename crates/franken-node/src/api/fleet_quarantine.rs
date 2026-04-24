@@ -20,7 +20,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock, TryLockError};
 use std::time::Duration;
 
 use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
@@ -1341,10 +1341,32 @@ impl SharedFleetControlOwner {
     }
 
     fn lock(&self, trace: &TraceContext) -> Result<MutexGuard<'_, FleetControlManager>, ApiError> {
-        self.inner.lock().map_err(|_| ApiError::Internal {
-            detail: "fleet control manager lock poisoned".to_string(),
-            trace_id: trace.trace_id.clone(),
-        })
+        self.try_lock_with_timeout(trace, Duration::from_millis(200))
+    }
+
+    fn try_lock_with_timeout(&self, trace: &TraceContext, timeout: Duration) -> Result<MutexGuard<'_, FleetControlManager>, ApiError> {
+        let start = std::time::Instant::now();
+        let mut backoff = Duration::from_millis(1);
+
+        loop {
+            match self.inner.try_lock() {
+                Ok(guard) => return Ok(guard),
+                Err(TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
+                Err(TryLockError::WouldBlock) => {
+                    if start.elapsed() >= timeout {
+                        return Err(ApiError::Internal {
+                            detail: format!(
+                                "fleet control manager lock timeout after {}ms",
+                                timeout.as_millis()
+                            ),
+                            trace_id: trace.trace_id.clone(),
+                        });
+                    }
+                    std::thread::sleep(backoff);
+                    backoff = std::cmp::min(backoff * 2, Duration::from_millis(10));
+                }
+            }
+        }
     }
 
     #[cfg(any(test, feature = "control-plane"))]
@@ -2133,7 +2155,8 @@ impl FleetControlManager {
         }
 
         // Verify receipt is for rollback action
-        if !crate::security::constant_time::ct_eq(&receipt.decision_payload.action_type, "rollback") {
+        if !crate::security::constant_time::ct_eq(&receipt.decision_payload.action_type, "rollback")
+        {
             return Err(FleetControlError::rollback_unverified(
                 incident_id,
                 "receipt is not for rollback action",
@@ -5681,24 +5704,24 @@ mod tests {
 
         // Test first-character difference (timing must be constant regardless of difference position)
         assert!(!constant_time::ct_eq(action_quarantine, "xuarantine")); // q -> x
-        assert!(!constant_time::ct_eq(action_revoke, "xevoke"));          // r -> x
-        assert!(!constant_time::ct_eq(action_rollback, "xollback"));      // r -> x
+        assert!(!constant_time::ct_eq(action_revoke, "xevoke")); // r -> x
+        assert!(!constant_time::ct_eq(action_rollback, "xollback")); // r -> x
 
         // Test last-character difference (timing must be constant regardless of difference position)
         assert!(!constant_time::ct_eq(action_quarantine, "quarantinx")); // e -> x
-        assert!(!constant_time::ct_eq(action_revoke, "revokx"));          // e -> x
-        assert!(!constant_time::ct_eq(action_rollback, "rollbacx"));      // k -> x
+        assert!(!constant_time::ct_eq(action_revoke, "revokx")); // e -> x
+        assert!(!constant_time::ct_eq(action_rollback, "rollbacx")); // k -> x
 
         // Test middle-character difference
         assert!(!constant_time::ct_eq(action_quarantine, "quarxntine")); // a -> x
-        assert!(!constant_time::ct_eq(action_revoke, "rexoke"));          // v -> x
-        assert!(!constant_time::ct_eq(action_rollback, "rollxack"));      // b -> x
+        assert!(!constant_time::ct_eq(action_revoke, "rexoke")); // v -> x
+        assert!(!constant_time::ct_eq(action_rollback, "rollxack")); // b -> x
 
         // Test length differences (should return false immediately but still be timing-safe)
-        assert!(!constant_time::ct_eq(action_quarantine, "quarantin"));  // shorter
+        assert!(!constant_time::ct_eq(action_quarantine, "quarantin")); // shorter
         assert!(!constant_time::ct_eq(action_quarantine, "quarantines")); // longer
-        assert!(!constant_time::ct_eq(action_revoke, "revok"));           // shorter
-        assert!(!constant_time::ct_eq(action_revoke, "revokes"));         // longer
+        assert!(!constant_time::ct_eq(action_revoke, "revok")); // shorter
+        assert!(!constant_time::ct_eq(action_revoke, "revokes")); // longer
 
         // Test completely different strings of same length
         assert!(!constant_time::ct_eq(action_quarantine, "xxxxxxxxxx"));

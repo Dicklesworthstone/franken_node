@@ -10,7 +10,8 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
+use std::time::Duration;
 
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
@@ -714,6 +715,10 @@ pub enum RemoteCapError {
     CryptoEngineUnavailable {
         detail: String,
     },
+    LockTimeout {
+        operation: String,
+        timeout_ms: u64,
+    },
 }
 
 impl RemoteCapError {
@@ -931,6 +936,7 @@ impl CapabilityProvider {
     #[must_use]
     pub fn audit_log(&self) -> Vec<RemoteCapAuditEvent> {
         self.with_audit_log(|audit_log| audit_log.clone())
+            .unwrap_or_else(|_| Vec::new()) // Return empty vec on timeout
     }
 
     fn record_issue_denial(
@@ -955,21 +961,41 @@ impl CapabilityProvider {
     }
 
     fn push_audit(&self, event: RemoteCapAuditEvent) {
-        self.with_audit_log(|audit_log| {
+        let _ = self.with_audit_log(|audit_log| {
             push_bounded(audit_log, event, MAX_AUDIT_LOG_ENTRIES);
-        });
+        }); // Ignore timeout errors for audit logging
     }
 
     fn audit_log_len(&self) -> usize {
         self.with_audit_log(|audit_log| audit_log.len())
+            .unwrap_or(0) // Return 0 on timeout
     }
 
-    fn with_audit_log<R>(&self, action: impl FnOnce(&mut Vec<RemoteCapAuditEvent>) -> R) -> R {
-        let mut audit_log = match self.audit_log.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        action(&mut audit_log)
+    fn with_audit_log<R>(&self, action: impl FnOnce(&mut Vec<RemoteCapAuditEvent>) -> R) -> Result<R, RemoteCapError> {
+        let mut audit_log = self.try_lock_audit_log_with_timeout(Duration::from_millis(100))?;
+        Ok(action(&mut audit_log))
+    }
+
+    fn try_lock_audit_log_with_timeout(&self, timeout: Duration) -> Result<std::sync::MutexGuard<'_, Vec<RemoteCapAuditEvent>>, RemoteCapError> {
+        let start = std::time::Instant::now();
+        let mut backoff = Duration::from_millis(1);
+
+        loop {
+            match self.audit_log.try_lock() {
+                Ok(guard) => return Ok(guard),
+                Err(TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
+                Err(TryLockError::WouldBlock) => {
+                    if start.elapsed() >= timeout {
+                        return Err(RemoteCapError::LockTimeout {
+                            operation: "audit_log_access".to_string(),
+                            timeout_ms: timeout.as_millis() as u64,
+                        });
+                    }
+                    std::thread::sleep(backoff);
+                    backoff = std::cmp::min(backoff * 2, Duration::from_millis(10));
+                }
+            }
+        }
     }
 }
 
@@ -4067,5 +4093,47 @@ mod remote_cap_comprehensive_negative_tests {
             )
             .expect_err("empty signing secret should fail closed");
         assert_eq!(issue_err.code(), "REMOTECAP_CRYPTO_UNAVAILABLE");
+    }
+
+    #[test]
+    fn audit_log_timeout_when_lock_held_by_another_thread() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let provider = CapabilityProvider::new("secret-test-timeout").expect("valid provider");
+        let provider_arc = Arc::new(provider);
+        let barrier = Arc::new(Barrier::new(2));
+
+        // Spawn a thread that holds the audit log lock
+        let provider_clone = Arc::clone(&provider_arc);
+        let barrier_clone = Arc::clone(&barrier);
+
+        let handle = thread::spawn(move || {
+            // Acquire lock and hold it
+            let _guard = provider_clone.try_lock_audit_log_with_timeout(Duration::from_millis(1000))
+                .expect("Should be able to acquire lock initially");
+
+            // Signal that we have the lock
+            barrier_clone.wait();
+
+            // Hold lock for a while to force timeout in main thread
+            thread::sleep(Duration::from_millis(150));
+        });
+
+        // Wait for spawned thread to acquire the lock
+        barrier.wait();
+
+        // Try to access audit log with short timeout - should timeout
+        let result = provider_arc.try_lock_audit_log_with_timeout(Duration::from_millis(50));
+
+        match result {
+            Err(RemoteCapError::LockTimeout { operation, timeout_ms }) => {
+                assert_eq!(operation, "audit_log_access");
+                assert_eq!(timeout_ms, 50);
+            }
+            _ => panic!("Expected LockTimeout error, got: {:?}", result),
+        }
+
+        handle.join().expect("Background thread should complete successfully");
     }
 }

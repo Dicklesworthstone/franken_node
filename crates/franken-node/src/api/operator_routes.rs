@@ -8,11 +8,12 @@
 
 use crate::config::Config as RuntimeConfig;
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::sync::{Mutex, TryLockError};
 use std::sync::atomic::AtomicU8;
 #[cfg(any(test, feature = "control-plane"))]
 use std::sync::OnceLock;
 use std::sync::RwLock;
+use std::time::Duration;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -182,11 +183,32 @@ fn process_start_override_for_tests() -> Option<ProcessStartState> {
 
 #[cfg(any(test, feature = "control-plane"))]
 pub(crate) fn clear_process_start_override_for_tests() {
-    let mut guard = PROCESS_START_OVERRIDE
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+    let mut guard = try_lock_process_start_override_with_timeout(Duration::from_millis(50))
+        .expect("Failed to acquire process start override lock during test cleanup");
     *guard = None;
     drop(guard);
+}
+
+#[cfg(any(test, feature = "control-plane"))]
+fn try_lock_process_start_override_with_timeout(
+    timeout: Duration
+) -> Result<std::sync::MutexGuard<'_, Option<ProcessStartState>>, &'static str> {
+    let start = std::time::Instant::now();
+    let mut backoff = Duration::from_millis(1);
+
+    loop {
+        match PROCESS_START_OVERRIDE.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => {
+                if start.elapsed() >= timeout {
+                    return Err("Process start override lock timeout");
+                }
+                std::thread::sleep(backoff);
+                backoff = std::cmp::min(backoff * 2, Duration::from_millis(5));
+            }
+        }
+    }
 
     PROCESS_START_OFFSET_NANOS.store(0, Ordering::Relaxed);
     PROCESS_START_STATE.store(0, Ordering::Release);
