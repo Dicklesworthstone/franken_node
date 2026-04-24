@@ -2638,28 +2638,131 @@ const DEFAULT_THRESHOLD_MIN_RESILIENCE_SCORE: f64 = 0.7;
 /// back to their compile-time defaults.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ThresholdsConfig {
-    /// Maximum tolerable failure rate.
-    /// When `None`, consumers use `DEFAULT_THRESHOLD_MAX_FAILURE_RATE`.
+    /// Maximum tolerated failed-attempt ratio before a gate, rollout, or
+    /// quality check should report unhealthy behavior.
+    ///
+    /// **Valid range:** finite value in `[0.0, 1.0]`, where `0.0` means no
+    /// failures are tolerated and `1.0` means every attempt may fail before
+    /// this threshold alone rejects the sample.
+    ///
+    /// **Default:** when `None`, consumers use
+    /// `DEFAULT_THRESHOLD_MAX_FAILURE_RATE` (`0.05`, or 5% failures).
+    ///
+    /// **Tuning impact:** lower values make canary, migration, and
+    /// verifier-style gates stricter and surface reliability regressions
+    /// sooner. Higher values reduce false positives for noisy experiments but
+    /// can mask real instability.
+    ///
+    /// **Use cases:** set near `0.0` for strict release validation or
+    /// security-sensitive proof checks; relax toward `0.10` for exploratory
+    /// benchmarks, load tests, or temporary degraded-mode telemetry.
+    ///
+    /// **Relationships:** this is an upper bound and should move opposite to
+    /// `min_quality_score` and `min_resilience_score`. If you raise
+    /// `max_failure_rate`, consider raising the score thresholds or adding
+    /// extra evidence gates so a high failure budget does not also admit
+    /// low-quality results.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_failure_rate: Option<f64>,
 
-    /// Minimum quality score for acceptance.
-    /// When `None`, consumers use `DEFAULT_THRESHOLD_MIN_QUALITY_SCORE`.
+    /// Minimum aggregate quality score required for accepting a candidate
+    /// result, migration output, or policy decision.
+    ///
+    /// **Valid range:** finite value in `[0.0, 1.0]`, where `0.0` accepts any
+    /// quality score and `1.0` requires a perfect quality score.
+    ///
+    /// **Default:** when `None`, consumers use
+    /// `DEFAULT_THRESHOLD_MIN_QUALITY_SCORE` (`0.8`).
+    ///
+    /// **Tuning impact:** higher values force higher correctness, coverage, or
+    /// confidence before acceptance. Lower values improve throughput for early
+    /// experiments but increase the chance that weak evidence passes.
+    ///
+    /// **Use cases:** use `0.90` or higher for release, trust, and replay
+    /// conformance surfaces; use lower values only for local discovery runs or
+    /// workloads that have an independent downstream validation step.
+    ///
+    /// **Relationships:** this is a lower bound. It should usually be at least
+    /// as strict as `min_resilience_score` when quality is the primary safety
+    /// signal, and it should be tightened when `max_failure_rate` or
+    /// `max_variance_pct` is relaxed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_quality_score: Option<f64>,
 
-    /// Maximum acceptable variance percentage.
-    /// When `None`, consumers use `DEFAULT_THRESHOLD_MAX_VARIANCE_PCT`.
+    /// Maximum accepted run-to-run variance percentage before a measurement is
+    /// considered too noisy for a stable decision.
+    ///
+    /// **Valid range:** finite value in `[0.0, 100.0]`, expressed as percent.
+    /// `0.0` requires identical measurements, while `100.0` accepts variance
+    /// equal to the full measured baseline.
+    ///
+    /// **Default:** when `None`, consumers use
+    /// `DEFAULT_THRESHOLD_MAX_VARIANCE_PCT` (`5.0`).
+    ///
+    /// **Tuning impact:** lower values make benchmark and quality gates more
+    /// reproducible but may reject legitimate workloads with natural jitter.
+    /// Higher values keep noisy environments moving but reduce the confidence
+    /// of regression and quality decisions.
+    ///
+    /// **Use cases:** keep low for deterministic replay, proof, and
+    /// performance baselines; relax for heterogeneous fleet measurements,
+    /// cold-cache warmups, or hardware-dependent experiments.
+    ///
+    /// **Relationships:** this is the noise envelope used before interpreting
+    /// `regression_threshold_pct`. In normal profiles it should remain below
+    /// the regression threshold so measurement noise does not consume the
+    /// entire regression budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_variance_pct: Option<f64>,
 
-    /// Regression detection threshold percentage.
-    /// When `None`, consumers use `DEFAULT_THRESHOLD_REGRESSION_THRESHOLD_PCT`.
+    /// Minimum percentage change that should be classified as a regression
+    /// rather than tolerated drift.
+    ///
+    /// **Valid range:** finite value in `[0.0, 100.0]`, expressed as percent.
+    /// `0.0` marks any measurable negative movement as a regression, while
+    /// `100.0` only marks changes as large as the whole baseline.
+    ///
+    /// **Default:** when `None`, consumers use
+    /// `DEFAULT_THRESHOLD_REGRESSION_THRESHOLD_PCT` (`10.0`).
+    ///
+    /// **Tuning impact:** lower values catch small performance, quality, or
+    /// resilience regressions earlier but can be noisy. Higher values suppress
+    /// small regressions and should be reserved for unstable exploratory data.
+    ///
+    /// **Use cases:** use tight values for release gates, replay determinism,
+    /// and proof-service baselines; use wider values for canary exploration or
+    /// workloads where confidence is dominated by external variance.
+    ///
+    /// **Relationships:** this should normally exceed `max_variance_pct` so a
+    /// regression signal is larger than accepted measurement noise. If it is
+    /// set close to or below `max_variance_pct`, require additional evidence
+    /// before automatically blocking a rollout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub regression_threshold_pct: Option<f64>,
 
-    /// Minimum resilience score for healthy status.
-    /// When `None`, consumers use `DEFAULT_THRESHOLD_MIN_RESILIENCE_SCORE`.
+    /// Minimum resilience score required before a system, lane, or fleet
+    /// surface should be treated as healthy under stress or degraded inputs.
+    ///
+    /// **Valid range:** finite value in `[0.0, 1.0]`, where `0.0` accepts any
+    /// resilience score and `1.0` requires perfect resilience evidence.
+    ///
+    /// **Default:** when `None`, consumers use
+    /// `DEFAULT_THRESHOLD_MIN_RESILIENCE_SCORE` (`0.7`).
+    ///
+    /// **Tuning impact:** higher values make failover, quarantine, replay, and
+    /// control-plane checks more conservative. Lower values keep degraded
+    /// systems available longer but increase the risk of masking fragility.
+    ///
+    /// **Use cases:** raise for production fleet health, release decisions,
+    /// and security-sensitive runtime surfaces; lower only for local testing,
+    /// bootstrap scenarios, or explicitly degraded profiles with operator
+    /// visibility.
+    ///
+    /// **Relationships:** this complements `min_quality_score`: quality
+    /// describes correctness of the current result, while resilience describes
+    /// behavior under stress. Tighten this threshold when `max_failure_rate` is
+    /// relaxed, and avoid setting it far below `min_quality_score` for
+    /// production profiles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_resilience_score: Option<f64>,
 }
