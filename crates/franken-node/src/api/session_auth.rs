@@ -250,8 +250,7 @@ pub struct AuthenticatedSession {
 }
 
 fn serialize_mac<S: serde::Serializer>(mac: &[u8; SIGNATURE_LEN], s: S) -> Result<S::Ok, S::Error> {
-    let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
-    s.serialize_str(&hex)
+    s.serialize_str(&hex::encode(mac))
 }
 
 fn deserialize_mac<'de, D: serde::Deserializer<'de>>(

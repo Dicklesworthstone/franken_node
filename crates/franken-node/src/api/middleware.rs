@@ -420,8 +420,8 @@ pub fn enforce_route_contract(
 /// attackers to achieve N×rate_limit throughput by distributing requests across
 /// multiple instances. This is intentional for the current threat model:
 ///
-/// 1. Authentication failures occur BEFORE rate limiting (lines 597-603), so
-///    brute force attacks against credentials are not subject to this bypass
+/// 1. Authentication failures are now rate limited by AuthFailureLimiter BEFORE
+///    authentication attempts to prevent brute force attacks per instance
 /// 2. Rate limits apply to POST-AUTHENTICATION operations for performance
 ///    protection (prevent individual instance overload)
 /// 3. Security-critical operations requiring cluster-wide rate limiting should
@@ -511,6 +511,54 @@ pub fn check_rate_limit(limiter: &mut RateLimiter, trace_id: &str) -> Result<(),
             trace_id: trace_id.to_string(),
             retry_after_ms,
         }),
+    }
+}
+
+/// Authentication failure rate limiter to prevent brute force attacks.
+///
+/// This provides additional security by rate limiting authentication attempts
+/// before they reach the main authentication logic, preventing brute force
+/// attacks against credentials.
+#[cfg(any(test, feature = "control-plane"))]
+#[derive(Debug)]
+pub struct AuthFailureLimiter {
+    rate_limiter: RateLimiter,
+}
+
+#[cfg(any(test, feature = "control-plane"))]
+impl AuthFailureLimiter {
+    /// Create a new authentication failure rate limiter.
+    ///
+    /// Default configuration allows 10 auth attempts per second with burst of 20,
+    /// fail-closed to prevent brute force attacks.
+    pub fn new() -> Self {
+        Self {
+            rate_limiter: RateLimiter::new(RateLimitConfig {
+                sustained_rps: 10,
+                burst_size: 20,
+                fail_closed: true,
+            }),
+        }
+    }
+
+    /// Create with custom configuration.
+    pub fn with_config(config: RateLimitConfig) -> Self {
+        Self {
+            rate_limiter: RateLimiter::new(config),
+        }
+    }
+
+    /// Check if an authentication attempt is allowed.
+    /// Returns Err with retry_after_ms if rate limited.
+    pub fn check_auth_attempt(&mut self, trace_id: &str) -> Result<(), ApiError> {
+        match self.rate_limiter.check() {
+            Ok(()) => Ok(()),
+            Err(retry_after_ms) => Err(ApiError::RateLimited {
+                detail: "Too many authentication attempts. Please try again later.".to_string(),
+                trace_id: trace_id.to_string(),
+                retry_after_ms,
+            }),
+        }
     }
 }
 
@@ -622,12 +670,13 @@ pub type MiddlewareResult<T> = Result<T, ApiError>;
 
 /// Execute the full middleware chain for a request.
 ///
-/// Chain order: trace → auth → authz → rate limit → handler
+/// Chain order: trace → auth failure limit → auth → authz → rate limit → handler
 #[cfg(any(test, feature = "control-plane"))]
 pub fn execute_middleware_chain<F, T>(
     route: &RouteMetadata,
     auth_header: Option<&str>,
     traceparent: Option<&str>,
+    auth_failure_limiter: &mut AuthFailureLimiter,
     rate_limiter: &mut RateLimiter,
     authorized_keys: &std::collections::BTreeSet<String>,
     handler: F,
@@ -644,7 +693,17 @@ where
 
     let trace_id = trace_ctx.trace_id.clone();
 
-    // Step 2: Authentication
+    // Step 2: Authentication failure rate limiting (SECURITY PROTECTION)
+    // Applied before authentication to prevent brute force attacks.
+    // Skip for routes with AuthMethod::None (no credentials to brute force).
+    if !matches!(route.auth_method, AuthMethod::None) {
+        if let Err(err) = auth_failure_limiter.check_auth_attempt(&trace_id) {
+            let log = build_request_log(route, 429, start, &trace_id, "anonymous");
+            return (Err(err), log);
+        }
+    }
+
+    // Step 3: Authentication
     let identity = match authenticate(auth_header, &route.auth_method, &trace_id, authorized_keys) {
         Ok(id) => id,
         Err(err) => {
@@ -653,21 +712,21 @@ where
         }
     };
 
-    // Step 3: Authorization
+    // Step 4: Authorization
     if let Err(err) = enforce_policy(&identity, &route.policy_hook, &trace_id) {
         let log = build_request_log(route, 403, start, &trace_id, &identity.principal);
         return (Err(err), log);
     }
 
-    // Step 4: Rate limiting (PERFORMANCE PROTECTION)
+    // Step 5: Rate limiting (PERFORMANCE PROTECTION)
     // Applied after auth/authz - protects handler from overload on this instance.
-    // NOT security rate limiting - authentication failures occur before this step.
+    // Separate from security rate limiting in step 2.
     if let Err(err) = check_rate_limit(rate_limiter, &trace_id) {
         let log = build_request_log(route, 429, start, &trace_id, &identity.principal);
         return (Err(err), log);
     }
 
-    // Step 5: Handler execution
+    // Step 6: Handler execution
     let result = handler(&identity, &trace_ctx);
 
     let status = match &result {
@@ -1212,10 +1271,13 @@ mod tests {
         let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::Operator));
         let keys = get_test_keys();
 
+        let mut auth_limiter = AuthFailureLimiter::new();
+        let mut auth_limiter = AuthFailureLimiter::new();
         let (result, log) = execute_middleware_chain(
             &route,
             None,
             Some("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"),
+            &mut auth_limiter,
             &mut limiter,
             &keys,
             |_identity, _ctx| Ok("ok".to_string()),
@@ -1244,10 +1306,13 @@ mod tests {
         let keys = get_test_keys();
         let invalid_traceparent = "00-00000000000000000000000000000000-b7ad6b7169203331-01";
 
+        let mut auth_limiter = AuthFailureLimiter::new();
+        let mut auth_limiter = AuthFailureLimiter::new();
         let (result, log) = execute_middleware_chain(
             &route,
             None,
             Some(invalid_traceparent),
+            &mut auth_limiter,
             &mut limiter,
             &keys,
             |_identity, ctx| Ok(ctx.clone()),
@@ -1275,10 +1340,13 @@ mod tests {
         let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::FleetControl));
         let keys = get_test_keys();
 
+        let mut auth_limiter = AuthFailureLimiter::new();
+        let mut auth_limiter = AuthFailureLimiter::new();
         let (result, log) = execute_middleware_chain(
             &route,
             None, // no auth header
             None,
+            &mut auth_limiter,
             &mut limiter,
             &keys,
             |_identity, _ctx| Ok("should not reach"),
@@ -1306,10 +1374,12 @@ mod tests {
         let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::FleetControl));
         let keys = get_test_keys();
 
+        let mut auth_limiter = AuthFailureLimiter::new();
         let (result, log) = execute_middleware_chain(
             &route,
             Some("   "),
             None,
+            &mut auth_limiter,
             &mut limiter,
             &keys,
             |_identity, _ctx| Ok("should not reach"),
@@ -1476,10 +1546,12 @@ mod tests {
         let keys = get_test_keys();
         let mut handler_called = false;
 
+        let mut auth_limiter = AuthFailureLimiter::new();
         let (result, log) = execute_middleware_chain(
             &route,
             None,
             None,
+            &mut auth_limiter,
             &mut limiter,
             &keys,
             |_identity, _ctx| {
@@ -1627,6 +1699,7 @@ mod api_middleware_additional_negative_tests {
         let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::Operator));
         let mut handler_called = false;
 
+        let mut auth_limiter = AuthFailureLimiter::new();
         let (result, log) = execute_middleware_chain(
             &route(AuthMethod::ApiKey, vec![]),
             Some("ApiKey wrong-key"),
@@ -1655,6 +1728,7 @@ mod api_middleware_additional_negative_tests {
         });
         let mut handler_called = false;
 
+        let mut auth_limiter = AuthFailureLimiter::new();
         let (result, log) = execute_middleware_chain(
             &route(AuthMethod::None, vec!["operator"]),
             None,
@@ -1892,6 +1966,7 @@ mod api_middleware_edge_negative_tests {
         let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::Operator));
         let keys = std::collections::BTreeSet::new();
 
+        let mut auth_limiter = AuthFailureLimiter::new();
         let (result, log) = execute_middleware_chain(
             &open_route(),
             None,
@@ -2285,11 +2360,13 @@ mod api_middleware_advanced_security_edge_tests {
         ];
 
         for (auth_header, traceparent) in &request_variations {
-            let (result, log) = execute_middleware_chain(
-                &route,
-                *auth_header,
-                *traceparent,
-                &mut limiter,
+            let mut auth_limiter = AuthFailureLimiter::new();
+        let (result, log) = execute_middleware_chain(
+            &route,
+            *auth_header,
+            *traceparent,
+            &mut auth_limiter,
+            &mut limiter,
                 &keys,
                 |_identity, ctx| {
                     handler_call_count = handler_call_count.saturating_add(1);
