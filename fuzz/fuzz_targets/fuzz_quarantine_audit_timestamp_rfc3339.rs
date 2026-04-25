@@ -6,12 +6,12 @@ use frankenengine_node::supply_chain::quarantine::QuarantineAuditTimestamp;
 use std::str;
 
 fuzz_target!(|data: &[u8]| {
-    // Guard against very large inputs to prevent OOM
-    if data.len() > 1_000_000 {
-        return;
-    }
+    // Test both valid and invalid UTF-8 for parser robustness
 
-    // Only fuzz valid UTF-8 strings since RFC3339 requires valid UTF-8
+    // First test invalid UTF-8 handling
+    let _ = QuarantineAuditTimestamp::try_from(unsafe { std::str::from_utf8_unchecked(data) });
+
+    // Test valid UTF-8 strings with comprehensive edge case testing
     if let Ok(rfc3339_str) = str::from_utf8(data) {
         // Test direct parsing via TryFrom<&str> implementation
         // This is the main RFC3339 parsing path: DateTime::parse_from_rfc3339(value)

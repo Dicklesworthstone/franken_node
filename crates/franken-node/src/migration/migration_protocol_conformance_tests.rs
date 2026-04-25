@@ -616,6 +616,9 @@ impl MigrationProtocolHarness {
 
     /// Helper assertion methods
     fn assert_f64_eq(&mut self, test_id: &str, protocol: &str, description: &str, expected: f64, actual: f64) {
+        if !expected.is_finite() || !actual.is_finite() {
+            panic!("assert_f64_eq: non-finite operand: expected={expected} actual={actual}");
+        }
         const EPSILON: f64 = 1e-10;
         let verdict = if (expected - actual).abs() < EPSILON {
             ConformanceVerdict::Pass
