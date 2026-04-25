@@ -247,6 +247,28 @@ pub fn validate_config(config: &ChannelConfig) -> Result<(), ChannelError> {
     Ok(())
 }
 
+fn validate_message_field(value: &str, field_name: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!("{field_name}_empty"));
+    }
+    if value.trim() != value {
+        return Err(format!("{field_name}_whitespace"));
+    }
+    if value.as_bytes().contains(&0) {
+        return Err(format!("{field_name}_null_byte"));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(format!("{field_name}_control_char"));
+    }
+    Ok(())
+}
+
+fn validate_message_shape(msg: &ChannelMessage) -> Result<(), String> {
+    validate_message_field(&msg.credential.subject_id, "subject_id")?;
+    validate_message_field(&msg.payload_hash, "payload_hash")?;
+    Ok(())
+}
+
 /// Input fields for building a transcript preimage.
 ///
 /// Bundles the parameters that are bound into the HMAC to satisfy clippy's
@@ -524,6 +546,23 @@ impl ControlChannel {
             return Err(ChannelError::ChannelClosed);
         }
 
+        if let Err(reason) = validate_message_shape(msg) {
+            let audit = Self::make_audit(
+                msg,
+                timestamp,
+                false,
+                false,
+                false,
+                "REJECT_AUTH",
+                Some(&reason),
+            );
+            self.push_audit_entry(audit);
+            return Err(ChannelError::AuthFailed {
+                message_id: msg.message_id.clone(),
+                reason,
+            });
+        }
+
         // Step 1: Transcript-bound authentication (INV-ACC-AUTHENTICATED)
         if let Err(reason) = self.verify_transcript_mac(msg) {
             let audit = Self::make_audit(
@@ -671,6 +710,7 @@ fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn test_secret() -> RootSecret {
         RootSecret::from_bytes([0xAB; SIGNATURE_LEN])
@@ -734,6 +774,20 @@ mod tests {
             credential,
             payload_hash: "test-payload-hash".into(),
         }
+    }
+
+    fn valid_message_field() -> impl Strategy<Value = String> {
+        proptest::string::string_regex("[A-Za-z0-9._:-]{1,32}").expect("valid message field regex")
+    }
+
+    fn invalid_message_field() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just(String::new()),
+            valid_message_field().prop_map(|value| format!(" {value}")),
+            valid_message_field().prop_map(|value| format!("{value} ")),
+            valid_message_field().prop_map(|value| format!("{value}\0")),
+            valid_message_field().prop_map(|value| format!("{value}\n")),
+        ]
     }
 
     // ---------------------------------------------------------------
@@ -2178,5 +2232,140 @@ mod tests {
             ChannelError::InvalidConfig { reason }
                 if reason == "replay_window_size must be > 0"
         ));
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        #[test]
+        fn prop_sign_verify_round_trip_for_random_valid_fields(
+            subject_id in valid_message_field(),
+            payload_hash in valid_message_field(),
+            sequence_number in any::<u64>(),
+            send_direction in any::<bool>(),
+            nonce in proptest::array::uniform16(any::<u8>()),
+        ) {
+            let cfg = config();
+            let secret = test_secret();
+            let mut channel = ControlChannel::new(cfg.clone(), secret.clone()).unwrap();
+            let direction = if send_direction {
+                Direction::Send
+            } else {
+                Direction::Receive
+            };
+            let credential = sign_channel_message(
+                &cfg,
+                &subject_id,
+                direction,
+                sequence_number,
+                &payload_hash,
+                ControlEpoch::new(1),
+                nonce,
+                &secret,
+            );
+            let message = ChannelMessage {
+                message_id: "prop-roundtrip".into(),
+                direction,
+                sequence_number,
+                credential,
+                payload_hash: payload_hash.clone(),
+            };
+
+            let (result, audit) = channel.process_message(&message, "ts").unwrap();
+
+            prop_assert!(result.authenticated);
+            prop_assert!(result.sequence_valid);
+            prop_assert!(result.replay_clean);
+            prop_assert_eq!(audit.subject_id, subject_id);
+            prop_assert_eq!(audit.verdict, "ACCEPT");
+        }
+
+        #[test]
+        fn prop_rejects_malformed_subject_ids_even_with_valid_mac(
+            subject_id in invalid_message_field(),
+            payload_hash in valid_message_field(),
+            sequence_number in any::<u64>(),
+            send_direction in any::<bool>(),
+            nonce in proptest::array::uniform16(any::<u8>()),
+        ) {
+            let cfg = config();
+            let secret = test_secret();
+            let mut channel = ControlChannel::new(cfg.clone(), secret.clone()).unwrap();
+            let direction = if send_direction {
+                Direction::Send
+            } else {
+                Direction::Receive
+            };
+            let credential = sign_channel_message(
+                &cfg,
+                &subject_id,
+                direction,
+                sequence_number,
+                &payload_hash,
+                ControlEpoch::new(1),
+                nonce,
+                &secret,
+            );
+            let message = ChannelMessage {
+                message_id: "prop-invalid-subject".into(),
+                direction,
+                sequence_number,
+                credential,
+                payload_hash,
+            };
+
+            let err = channel.process_message(&message, "ts").unwrap_err();
+
+            prop_assert_eq!(err.code(), "ACC_AUTH_FAILED");
+            prop_assert!(matches!(
+                err,
+                ChannelError::AuthFailed { reason, .. }
+                    if reason.starts_with("subject_id_")
+            ));
+        }
+
+        #[test]
+        fn prop_rejects_malformed_payload_hash_even_with_valid_mac(
+            subject_id in valid_message_field(),
+            payload_hash in invalid_message_field(),
+            sequence_number in any::<u64>(),
+            send_direction in any::<bool>(),
+            nonce in proptest::array::uniform16(any::<u8>()),
+        ) {
+            let cfg = config();
+            let secret = test_secret();
+            let mut channel = ControlChannel::new(cfg.clone(), secret.clone()).unwrap();
+            let direction = if send_direction {
+                Direction::Send
+            } else {
+                Direction::Receive
+            };
+            let credential = sign_channel_message(
+                &cfg,
+                &subject_id,
+                direction,
+                sequence_number,
+                &payload_hash,
+                ControlEpoch::new(1),
+                nonce,
+                &secret,
+            );
+            let message = ChannelMessage {
+                message_id: "prop-invalid-payload".into(),
+                direction,
+                sequence_number,
+                credential,
+                payload_hash,
+            };
+
+            let err = channel.process_message(&message, "ts").unwrap_err();
+
+            prop_assert_eq!(err.code(), "ACC_AUTH_FAILED");
+            prop_assert!(matches!(
+                err,
+                ChannelError::AuthFailed { reason, .. }
+                    if reason.starts_with("payload_hash_")
+            ));
+        }
     }
 }
