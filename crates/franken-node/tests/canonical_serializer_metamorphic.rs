@@ -205,6 +205,17 @@ proptest! {
     #[test]
     fn canonical_hex_and_base64_encoding_round_trip(payload in prop::collection::vec(any::<u8>(), 0..=4096)) {
         let hex_encoded = hex::encode(&payload);
+        prop_assert_eq!(
+            hex_encoded.len(),
+            payload.len() * 2,
+            "canonical hex encoding must emit two nybbles per byte"
+        );
+        prop_assert!(
+            hex_encoded
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "canonical hex encoding must be lowercase ASCII hex"
+        );
         let hex_decoded = hex::decode(&hex_encoded)
             .map_err(|err| TestCaseError::fail(format!("hex decode failed after encode: {err}")))?;
         prop_assert_eq!(
@@ -214,6 +225,10 @@ proptest! {
         );
 
         let base64_encoded = STANDARD.encode(&payload);
+        prop_assert!(
+            !base64_encoded.bytes().any(|byte| byte.is_ascii_whitespace()),
+            "canonical base64 encoding must not contain whitespace"
+        );
         let base64_decoded = STANDARD
             .decode(&base64_encoded)
             .map_err(|err| TestCaseError::fail(format!("base64 decode failed after encode: {err}")))?;
