@@ -82,6 +82,9 @@ impl fmt::Display for CounterfactualReceiptError {
 
 impl std::error::Error for CounterfactualReceiptError {}
 
+/// Standard result type returned by counterfactual receipt verification.
+pub type CounterfactualReceiptResult<T> = Result<T, CounterfactualReceiptError>;
+
 /// Verify a signed counterfactual replay receipt.
 ///
 /// `baseline_bundle` may be any serializable baseline bundle shape that carries
@@ -90,12 +93,25 @@ impl std::error::Error for CounterfactualReceiptError {}
 /// output with `results[*].metadata.bundle_hash`. The Ed25519 signature covers
 /// only the deterministic JSON bytes of `counterfactual_output`, matching
 /// `tools::counterfactual_replay::to_canonical_json`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use frankenengine_verifier_sdk::counterfactual::verify_counterfactual_receipt;
+///
+/// verify_counterfactual_receipt(
+///     &baseline_bundle,
+///     &counterfactual_output,
+///     &verifying_key,
+///     &signature_bytes,
+/// )?;
+/// ```
 pub fn verify_counterfactual_receipt<B, O>(
     baseline_bundle: &B,
     counterfactual_output: &O,
     verifying_key: &VerifyingKey,
     signature_bytes: &[u8],
-) -> Result<(), CounterfactualReceiptError>
+) -> CounterfactualReceiptResult<()>
 where
     B: Serialize,
     O: Serialize,

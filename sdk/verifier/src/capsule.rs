@@ -138,6 +138,9 @@ impl std::fmt::Display for CapsuleError {
     }
 }
 
+/// Standard result type returned by replay capsule helpers.
+pub type CapsuleResult<T> = Result<T, CapsuleError>;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -166,6 +169,15 @@ fn is_sha256_hex(value: &str) -> bool {
 /// Compute a deterministic hash (SHA-256, hex-encoded) with domain separator.
 ///
 /// External verifiers may use this for ad-hoc hashing of capsule-related data.
+///
+/// # Examples
+///
+/// ```rust
+/// use frankenengine_verifier_sdk::capsule::deterministic_hash;
+///
+/// let digest = deterministic_hash("payload");
+/// assert_eq!(digest.len(), 64);
+/// ```
 ///
 /// INV-CAPSULE-VERDICT-REPRODUCIBLE: same inputs always yield same output.
 pub fn deterministic_hash(data: &str) -> String {
@@ -244,9 +256,19 @@ fn compute_signing_payload(capsule: &ReplayCapsule) -> String {
 
 /// Validate a capsule manifest for completeness.
 ///
+/// # Examples
+///
+/// ```rust
+/// use frankenengine_verifier_sdk::capsule::{build_reference_capsule, validate_manifest};
+///
+/// let capsule = build_reference_capsule();
+/// validate_manifest(&capsule.manifest)?;
+/// # Ok::<(), frankenengine_verifier_sdk::capsule::CapsuleError>(())
+/// ```
+///
 /// INV-CAPSULE-STABLE-SCHEMA: schema_version must match SDK_VERSION.
 /// INV-CAPSULE-VERSIONED-API: version is checked.
-pub fn validate_manifest(manifest: &CapsuleManifest) -> Result<(), CapsuleError> {
+pub fn validate_manifest(manifest: &CapsuleManifest) -> CapsuleResult<()> {
     if manifest.schema_version.is_empty() {
         return Err(CapsuleError::ManifestIncomplete(
             "schema_version is empty".into(),
@@ -415,6 +437,17 @@ fn validate_creator_identity(creator_identity: &str) -> Result<(), CapsuleError>
 ///
 /// The structural signature digest binds the manifest, payload, and inputs via
 /// length-prefixed SHA-256 hashing.
+///
+/// # Examples
+///
+/// ```rust
+/// use frankenengine_verifier_sdk::capsule::{build_reference_capsule, sign_capsule};
+///
+/// let mut capsule = build_reference_capsule();
+/// capsule.signature.clear();
+/// sign_capsule(&mut capsule);
+/// assert_eq!(capsule.signature.len(), 64);
+/// ```
 pub fn sign_capsule(capsule: &mut ReplayCapsule) {
     capsule.signature = compute_signing_payload(capsule);
 }
@@ -422,7 +455,17 @@ pub fn sign_capsule(capsule: &mut ReplayCapsule) {
 /// Verify a capsule's structural signature digest against the computed signing payload.
 ///
 /// Uses constant-time comparison to prevent timing side-channels.
-pub fn verify_signature(capsule: &ReplayCapsule) -> Result<(), CapsuleError> {
+///
+/// # Examples
+///
+/// ```rust
+/// use frankenengine_verifier_sdk::capsule::{build_reference_capsule, verify_signature};
+///
+/// let capsule = build_reference_capsule();
+/// verify_signature(&capsule)?;
+/// # Ok::<(), frankenengine_verifier_sdk::capsule::CapsuleError>(())
+/// ```
+pub fn verify_signature(capsule: &ReplayCapsule) -> CapsuleResult<()> {
     let expected = compute_signing_payload(capsule);
     if !ct_eq(&capsule.signature, &expected) {
         return Err(CapsuleError::SignatureInvalid(format!(
@@ -435,12 +478,22 @@ pub fn verify_signature(capsule: &ReplayCapsule) -> Result<(), CapsuleError> {
 
 /// Replay a capsule and produce a result.
 ///
+/// # Examples
+///
+/// ```rust
+/// use frankenengine_verifier_sdk::capsule::{build_reference_capsule, replay, CapsuleVerdict};
+///
+/// let result = replay(&build_reference_capsule(), "verifier://docs")?;
+/// assert_eq!(result.verdict, CapsuleVerdict::Pass);
+/// # Ok::<(), frankenengine_verifier_sdk::capsule::CapsuleError>(())
+/// ```
+///
 /// INV-CAPSULE-NO-PRIVILEGED-ACCESS: purely local computation.
 /// INV-CAPSULE-VERDICT-REPRODUCIBLE: deterministic for same inputs.
 pub fn replay(
     capsule: &ReplayCapsule,
     verifier_identity: &str,
-) -> Result<CapsuleReplayResult, CapsuleError> {
+) -> CapsuleResult<CapsuleReplayResult> {
     // Step 1: Validate manifest
     validate_manifest(&capsule.manifest)?;
 
@@ -490,6 +543,16 @@ pub fn replay(
 ///
 /// The capsule is properly signed and has a valid expected_output_hash
 /// so that replay will produce a PASS verdict.
+///
+/// # Examples
+///
+/// ```rust
+/// use frankenengine_verifier_sdk::capsule::{build_reference_capsule, verify_signature};
+///
+/// let capsule = build_reference_capsule();
+/// verify_signature(&capsule)?;
+/// # Ok::<(), frankenengine_verifier_sdk::capsule::CapsuleError>(())
+/// ```
 pub fn build_reference_capsule() -> ReplayCapsule {
     let mut inputs = BTreeMap::new();
     inputs.insert("artifact_a".to_string(), "content_of_a".to_string());

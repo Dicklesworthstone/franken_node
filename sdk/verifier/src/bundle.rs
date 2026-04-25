@@ -332,6 +332,9 @@ impl fmt::Display for BundleError {
 
 impl std::error::Error for BundleError {}
 
+/// Standard result type returned by replay bundle helpers.
+pub type BundleResult<T> = Result<T, BundleError>;
+
 #[derive(Serialize)]
 struct ReplayBundleIntegrityView<'a> {
     header: &'a BundleHeader,
@@ -351,16 +354,41 @@ struct ReplayBundleIntegrityView<'a> {
 }
 
 /// Serialize a replay bundle to canonical JSON bytes.
-pub fn serialize(bundle: &ReplayBundle) -> Result<Vec<u8>, BundleError> {
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use frankenengine_verifier_sdk::bundle;
+///
+/// let bytes = bundle::serialize(&sealed_bundle)?;
+/// ```
+pub fn serialize(bundle: &ReplayBundle) -> BundleResult<Vec<u8>> {
     canonical_bytes(bundle)
 }
 
 /// Deserialize replay bundle bytes without performing integrity verification.
-pub fn deserialize(bytes: &[u8]) -> Result<ReplayBundle, BundleError> {
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use frankenengine_verifier_sdk::bundle;
+///
+/// let bundle = bundle::deserialize(&canonical_bytes)?;
+/// ```
+pub fn deserialize(bytes: &[u8]) -> BundleResult<ReplayBundle> {
     serde_json::from_slice(bytes).map_err(|source| BundleError::Json(source.to_string()))
 }
 
 /// Compute the SDK's domain-separated SHA-256 hash for canonical bytes.
+///
+/// # Examples
+///
+/// ```rust
+/// use frankenengine_verifier_sdk::bundle;
+///
+/// let digest = bundle::hash(b"payload");
+/// assert_eq!(digest.len(), 64);
+/// ```
 #[must_use]
 pub fn hash(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
@@ -371,7 +399,15 @@ pub fn hash(bytes: &[u8]) -> String {
 
 /// Compute the integrity hash over all replay bundle fields except
 /// `integrity_hash`.
-pub fn integrity_hash(bundle: &ReplayBundle) -> Result<String, BundleError> {
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use frankenengine_verifier_sdk::bundle;
+///
+/// let digest = bundle::integrity_hash(&bundle)?;
+/// ```
+pub fn integrity_hash(bundle: &ReplayBundle) -> BundleResult<String> {
     let view = ReplayBundleIntegrityView {
         header: &bundle.header,
         schema_version: &bundle.schema_version,
@@ -392,7 +428,15 @@ pub fn integrity_hash(bundle: &ReplayBundle) -> Result<String, BundleError> {
 }
 
 /// Populate `integrity_hash` from the current replay bundle contents.
-pub fn seal(bundle: &mut ReplayBundle) -> Result<(), BundleError> {
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use frankenengine_verifier_sdk::bundle;
+///
+/// bundle::seal(&mut bundle)?;
+/// ```
+pub fn seal(bundle: &mut ReplayBundle) -> BundleResult<()> {
     bundle.integrity_hash = integrity_hash(bundle)?;
     bundle.signature = BundleSignature {
         algorithm: REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
@@ -408,6 +452,16 @@ pub fn seal(bundle: &mut ReplayBundle) -> Result<(), BundleError> {
 /// structural `integrity_hash`. Callers should `seal` the bundle before
 /// signing; `verify_signed_bundle` enforces that structural seal before
 /// checking the detached Ed25519 signature.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use ed25519_dalek::SigningKey;
+/// use frankenengine_verifier_sdk::bundle;
+///
+/// let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+/// let signature = bundle::sign_bundle(&signing_key, &sealed_bundle);
+/// ```
 #[must_use]
 pub fn sign_bundle(signing_key: &SigningKey, bundle: &ReplayBundle) -> Signature {
     signing_key.sign(&ed25519_bundle_signature_payload(bundle))
@@ -418,11 +472,28 @@ pub fn sign_bundle(signing_key: &SigningKey, bundle: &ReplayBundle) -> Signature
 /// This is intentionally payload-agnostic so downstream verifiers can check
 /// registry entries and other public signed artifacts without depending on
 /// privileged `franken-node` internals.
+///
+/// # Examples
+///
+/// ```rust
+/// use ed25519_dalek::{Signer, SigningKey};
+/// use frankenengine_verifier_sdk::bundle;
+///
+/// let signing_key = SigningKey::from_bytes(&[9_u8; 32]);
+/// let payload = b"registry-entry";
+/// let signature = signing_key.sign(payload);
+/// bundle::verify_ed25519_signature(
+///     &signing_key.verifying_key(),
+///     payload,
+///     &signature.to_bytes(),
+/// )?;
+/// # Ok::<(), frankenengine_verifier_sdk::bundle::BundleError>(())
+/// ```
 pub fn verify_ed25519_signature(
     verifying_key: &VerifyingKey,
     payload: &[u8],
     signature_bytes: &[u8],
-) -> Result<(), BundleError> {
+) -> BundleResult<()> {
     let signature = Signature::from_slice(signature_bytes).map_err(|_| {
         BundleError::Ed25519SignatureMalformed {
             length: signature_bytes.len(),
@@ -434,11 +505,19 @@ pub fn verify_ed25519_signature(
 }
 
 /// Verify a detached Ed25519 signature over a sealed replay bundle.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use frankenengine_verifier_sdk::bundle;
+///
+/// bundle::verify_signed_bundle(&verifying_key, &sealed_bundle, &signature_bytes)?;
+/// ```
 pub fn verify_signed_bundle(
     verifying_key: &VerifyingKey,
     bundle: &ReplayBundle,
     signature_bytes: &[u8],
-) -> Result<(), BundleError> {
+) -> BundleResult<()> {
     let canonical = serialize(bundle)?;
     verify(&canonical)?;
     verify_ed25519_signature(
@@ -449,7 +528,15 @@ pub fn verify_signed_bundle(
 }
 
 /// Verify canonical encoding, schema, artifact hashes, and bundle integrity.
-pub fn verify(bytes: &[u8]) -> Result<ReplayBundle, BundleError> {
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use frankenengine_verifier_sdk::bundle;
+///
+/// let bundle = bundle::verify(&canonical_bytes)?;
+/// ```
+pub fn verify(bytes: &[u8]) -> BundleResult<ReplayBundle> {
     let bundle = deserialize(bytes)?;
     let canonical = serialize(&bundle)?;
     if canonical != bytes {

@@ -123,6 +123,15 @@ pub const INV_CAPSULE_VERDICT_REPRODUCIBLE: &str = "INV-CAPSULE-VERDICT-REPRODUC
 ///
 /// Returns `Ok(())` if supported, or an error string if not.
 ///
+/// # Examples
+///
+/// ```rust
+/// use frankenengine_verifier_sdk::{check_sdk_version, SDK_VERSION};
+///
+/// assert!(check_sdk_version(SDK_VERSION).is_ok());
+/// assert!(check_sdk_version("vsdk-v0.0").is_err());
+/// ```
+///
 /// # INV-CAPSULE-VERSIONED-API
 /// # INV-CAPSULE-STABLE-SCHEMA
 pub fn check_sdk_version(version: &str) -> Result<(), String> {
@@ -144,6 +153,17 @@ pub struct SdkEvent {
 }
 
 impl SdkEvent {
+    /// Create a structured SDK audit event.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_verifier_sdk::{SdkEvent, SDK_VERSION_CHECK};
+    ///
+    /// let event = SdkEvent::new(SDK_VERSION_CHECK, "version accepted");
+    /// assert_eq!(event.event_code, SDK_VERSION_CHECK);
+    /// assert_eq!(event.detail, "version accepted");
+    /// ```
     pub fn new(event_code: &'static str, detail: impl Into<String>) -> Self {
         Self {
             event_code,
@@ -387,13 +407,19 @@ impl fmt::Display for VerifierSdkError {
                 formatter,
                 "verifier SDK result origin mismatch: expected={expected}, actual={actual}"
             ),
-            Self::NonceCounterExhausted => write!(formatter, "nonce counter exhausted - no more unique nonces available"),
+            Self::NonceCounterExhausted => write!(
+                formatter,
+                "nonce counter exhausted - no more unique nonces available"
+            ),
             Self::Json(message) => write!(formatter, "verifier SDK JSON error: {message}"),
         }
     }
 }
 
 impl std::error::Error for VerifierSdkError {}
+
+/// Standard result type returned by fallible verifier facade operations.
+pub type VerifierSdkResult<T> = Result<T, VerifierSdkError>;
 
 impl From<capsule::CapsuleError> for VerifierSdkError {
     fn from(source: capsule::CapsuleError) -> Self {
@@ -433,6 +459,16 @@ pub struct VerifierSdk {
 
 impl VerifierSdk {
     /// Create a new verifier SDK facade instance.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_verifier_sdk::{VerifierSdk, SDK_VERSION};
+    ///
+    /// let sdk = VerifierSdk::new("verifier://docs");
+    /// assert_eq!(sdk.verifier_identity, "verifier://docs");
+    /// assert_eq!(sdk.sdk_version, SDK_VERSION);
+    /// ```
     pub fn new(verifier_identity: impl Into<String>) -> Self {
         let mut config = BTreeMap::new();
         config.insert("schema_version".to_string(), SDK_VERSION.to_string());
@@ -449,10 +485,22 @@ impl VerifierSdk {
     }
 
     /// Verify a claim capsule through the existing capsule replay verifier.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_verifier_sdk::{VerifierSdk, VerificationVerdict};
+    /// use frankenengine_verifier_sdk::capsule::build_reference_capsule;
+    ///
+    /// let sdk = VerifierSdk::new("verifier://docs");
+    /// let result = sdk.verify_claim(&build_reference_capsule())?;
+    /// assert_eq!(result.verdict, VerificationVerdict::Pass);
+    /// # Ok::<(), frankenengine_verifier_sdk::VerifierSdkError>(())
+    /// ```
     pub fn verify_claim(
         &self,
         claim: &capsule::ReplayCapsule,
-    ) -> Result<VerificationResult, VerifierSdkError> {
+    ) -> VerifierSdkResult<VerificationResult> {
         check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
         self.validate_current_verifier_identity()?;
         let replay = capsule::replay(claim, &self.verifier_identity)?;
@@ -478,10 +526,19 @@ impl VerifierSdk {
     }
 
     /// Verify a migration artifact as canonical replay bundle bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_verifier_sdk::VerifierSdk;
+    ///
+    /// let sdk = VerifierSdk::new("verifier://docs");
+    /// assert!(sdk.verify_migration_artifact(b"not-json").is_err());
+    /// ```
     pub fn verify_migration_artifact(
         &self,
         artifact: &[u8],
-    ) -> Result<VerificationResult, VerifierSdkError> {
+    ) -> VerifierSdkResult<VerificationResult> {
         check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
         self.validate_current_verifier_identity()?;
         let verified = bundle::verify(artifact)?;
@@ -493,11 +550,20 @@ impl VerifierSdk {
     }
 
     /// Verify trust-state bundle bytes against an expected trust anchor hash.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_verifier_sdk::VerifierSdk;
+    ///
+    /// let sdk = VerifierSdk::new("verifier://docs");
+    /// assert!(sdk.verify_trust_state(b"not-json", "not-a-sha256").is_err());
+    /// ```
     pub fn verify_trust_state(
         &self,
         state: &[u8],
         anchor_integrity_hash: &str,
-    ) -> Result<VerificationResult, VerifierSdkError> {
+    ) -> VerifierSdkResult<VerificationResult> {
         check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
         self.validate_current_verifier_identity()?;
         if anchor_integrity_hash.trim().is_empty() {
@@ -524,7 +590,16 @@ impl VerifierSdk {
     }
 
     /// Validate canonical replay bundle bytes without producing a facade result.
-    pub fn validate_bundle(&self, bundle: &[u8]) -> Result<(), VerifierSdkError> {
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_verifier_sdk::VerifierSdk;
+    ///
+    /// let sdk = VerifierSdk::new("verifier://docs");
+    /// assert!(sdk.validate_bundle(b"not-json").is_err());
+    /// ```
+    pub fn validate_bundle(&self, bundle: &[u8]) -> VerifierSdkResult<()> {
         check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
         self.validate_current_verifier_identity()?;
         let verified = bundle::verify(bundle)?;
@@ -533,11 +608,25 @@ impl VerifierSdk {
     }
 
     /// Append a signed facade result to an in-memory transparency log.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_verifier_sdk::VerifierSdk;
+    /// use frankenengine_verifier_sdk::capsule::build_reference_capsule;
+    ///
+    /// let sdk = VerifierSdk::new("verifier://docs");
+    /// let result = sdk.verify_claim(&build_reference_capsule())?;
+    /// let mut log = Vec::new();
+    /// let entry = sdk.append_transparency_log(&mut log, &result)?;
+    /// assert_eq!(log, vec![entry]);
+    /// # Ok::<(), frankenengine_verifier_sdk::VerifierSdkError>(())
+    /// ```
     pub fn append_transparency_log(
         &self,
         log: &mut Vec<TransparencyLogEntry>,
         result: &VerificationResult,
-    ) -> Result<TransparencyLogEntry, VerifierSdkError> {
+    ) -> VerifierSdkResult<TransparencyLogEntry> {
         self.validate_current_verifier_identity()?;
         self.verify_result_belongs_to_current_verifier(result)?;
         ensure_bounded_capacity(log.len(), MAX_TRANSPARENCY_LOG_ENTRIES, "transparency_log")?;
@@ -566,11 +655,23 @@ impl VerifierSdk {
     }
 
     /// Execute a documented validation workflow against canonical replay bundle bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_verifier_sdk::{ValidationWorkflow, VerifierSdk};
+    ///
+    /// let sdk = VerifierSdk::new("verifier://docs");
+    /// assert!(
+    ///     sdk.execute_workflow(ValidationWorkflow::ComplianceAudit, b"not-json")
+    ///         .is_err()
+    /// );
+    /// ```
     pub fn execute_workflow(
         &self,
         _workflow: ValidationWorkflow,
         bundle: &[u8],
-    ) -> Result<VerificationResult, VerifierSdkError> {
+    ) -> VerifierSdkResult<VerificationResult> {
         check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
         self.validate_current_verifier_identity()?;
         let verified = bundle::verify(bundle)?;
@@ -582,10 +683,21 @@ impl VerifierSdk {
     }
 
     /// Create a new unsealed verification session.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_verifier_sdk::VerifierSdk;
+    ///
+    /// let sdk = VerifierSdk::new("verifier://docs");
+    /// let session = sdk.create_session("session-docs")?;
+    /// assert!(!session.sealed);
+    /// # Ok::<(), frankenengine_verifier_sdk::VerifierSdkError>(())
+    /// ```
     pub fn create_session(
         &self,
         session_id: impl Into<String>,
-    ) -> Result<VerificationSession, VerifierSdkError> {
+    ) -> VerifierSdkResult<VerificationSession> {
         self.validate_current_verifier_identity()?;
         let session_id = session_id.into();
         validate_session_id(&session_id)?;
@@ -612,11 +724,25 @@ impl VerifierSdk {
     }
 
     /// Append a verification result as the next session step.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_verifier_sdk::VerifierSdk;
+    /// use frankenengine_verifier_sdk::capsule::build_reference_capsule;
+    ///
+    /// let sdk = VerifierSdk::new("verifier://docs");
+    /// let result = sdk.verify_claim(&build_reference_capsule())?;
+    /// let mut session = sdk.create_session("session-docs")?;
+    /// let step = sdk.record_session_step(&mut session, &result)?;
+    /// assert_eq!(step.step_index, 0);
+    /// # Ok::<(), frankenengine_verifier_sdk::VerifierSdkError>(())
+    /// ```
     pub fn record_session_step(
         &self,
         session: &mut VerificationSession,
         result: &VerificationResult,
-    ) -> Result<SessionStep, VerifierSdkError> {
+    ) -> VerifierSdkResult<SessionStep> {
         self.validate_current_verifier_identity()?;
         validate_session_provenance(session)?;
         if session.sealed {
@@ -662,10 +788,23 @@ impl VerifierSdk {
     }
 
     /// Seal a verification session and compute its final verdict.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_verifier_sdk::{VerificationVerdict, VerifierSdk};
+    ///
+    /// let sdk = VerifierSdk::new("verifier://docs");
+    /// let mut session = sdk.create_session("session-docs")?;
+    /// let verdict = sdk.seal_session(&mut session)?;
+    /// assert_eq!(verdict, VerificationVerdict::Inconclusive);
+    /// assert!(session.sealed);
+    /// # Ok::<(), frankenengine_verifier_sdk::VerifierSdkError>(())
+    /// ```
     pub fn seal_session(
         &self,
         session: &mut VerificationSession,
-    ) -> Result<VerificationVerdict, VerifierSdkError> {
+    ) -> VerifierSdkResult<VerificationVerdict> {
         self.validate_current_verifier_identity()?;
         validate_session_provenance(session)?;
         if session.sealed {
@@ -794,12 +933,33 @@ impl VerifierSdk {
 }
 
 impl VerificationSession {
+    /// Borrow the recorded verification steps in append order.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_verifier_sdk::VerifierSdk;
+    ///
+    /// let sdk = VerifierSdk::new("verifier://docs");
+    /// let session = sdk.create_session("session-docs")?;
+    /// assert!(session.steps().is_empty());
+    /// # Ok::<(), frankenengine_verifier_sdk::VerifierSdkError>(())
+    /// ```
     pub fn steps(&self) -> &[SessionStep] {
         &self.steps
     }
 }
 
 /// Create a top-level SDK facade instance.
+///
+/// # Examples
+///
+/// ```rust
+/// use frankenengine_verifier_sdk::create_verifier_sdk;
+///
+/// let sdk = create_verifier_sdk("verifier://docs");
+/// assert_eq!(sdk.verifier_identity, "verifier://docs");
+/// ```
 pub fn create_verifier_sdk(verifier_identity: impl Into<String>) -> VerifierSdk {
     // For testing: if counter is close to MAX, reset it to avoid test failures
     let current = SESSION_NONCE_COUNTER.load(std::sync::atomic::Ordering::Relaxed);
@@ -841,9 +1001,8 @@ fn facade_result_signature(result: &VerificationResult) -> Result<String, Verifi
 fn default_result_origin_nonce() -> String {
     // Serde default function - if nonce counter is exhausted, return a safe default
     // The real protection is in the fallible version used by the constructor
-    default_result_origin_nonce_fallible().unwrap_or_else(|_| {
-        "nonce-exhausted-placeholder".to_string()
-    })
+    default_result_origin_nonce_fallible()
+        .unwrap_or_else(|_| "nonce-exhausted-placeholder".to_string())
 }
 
 fn default_result_origin_nonce_fallible() -> Result<String, VerifierSdkError> {
@@ -867,9 +1026,9 @@ fn next_session_nonce_counter() -> Result<u64, VerifierSdkError> {
 }
 
 fn increment_session_nonce_counter(counter: u64) -> u64 {
-    // Use checked_add to detect overflow - though next_session_nonce_counter
-    // should prevent calling this at u64::MAX
-    counter.checked_add(1).unwrap_or(u64::MAX)
+    // next_session_nonce_counter prevents calling this at u64::MAX; saturating
+    // here keeps the helper fail-closed if it is reused directly.
+    counter.saturating_add(1)
 }
 
 fn current_utc_timestamp() -> String {
@@ -1253,7 +1412,10 @@ mod tests {
 
         // Next call should fail with NonceCounterExhausted error
         let result = next_session_nonce_counter();
-        assert!(matches!(result, Err(VerifierSdkError::NonceCounterExhausted)));
+        assert!(matches!(
+            result,
+            Err(VerifierSdkError::NonceCounterExhausted)
+        ));
 
         // Restore the original counter value to not interfere with other tests
         SESSION_NONCE_COUNTER.store(original_value, std::sync::atomic::Ordering::Relaxed);
