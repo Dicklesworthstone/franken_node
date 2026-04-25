@@ -106,3 +106,22 @@ fn witness_validation_and_audit_are_invariant_under_permutation() {
         "witness kind coverage should be a multiset over witnesses, not insertion order"
     );
 }
+
+#[test]
+fn uniform_nonzero_witness_digests_are_not_dropped() {
+    let entry = evidence("obs-witness-mm-uniform-digest", DecisionKind::Quarantine);
+    let uniform = WitnessRef::new(
+        "obs-witness-mm-uniform-ff",
+        WitnessKind::Telemetry,
+        [0xff; 32],
+    )
+    .with_locator("bundles/obs-witness-mm-uniform-ff.jsonl");
+    let witnesses = set_from(&[uniform]);
+
+    assert_eq!(witnesses.len(), 1);
+    assert_eq!(witnesses.refs()[0].hash_hex(), "ff".repeat(32));
+
+    WitnessValidator::strict()
+        .validate(&entry, &witnesses)
+        .expect("uniform nonzero witness digest should be accepted");
+}

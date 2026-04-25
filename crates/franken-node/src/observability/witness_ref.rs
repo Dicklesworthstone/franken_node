@@ -91,12 +91,6 @@ fn is_valid_witness_structure(witness: &WitnessRef) -> bool {
         return false;
     }
 
-    // Additional check: reject all-same-byte hashes (likely generated garbage)
-    let first_byte = witness.integrity_hash[0];
-    if witness.integrity_hash.iter().all(|&b| b == first_byte) {
-        return false;
-    }
-
     true
 }
 
@@ -548,11 +542,7 @@ impl WitnessValidator {
             total_witnesses,
             coverage_pct: if high_impact_entries > 0 {
                 let pct = (high_impact_with_witnesses as f64 / high_impact_entries as f64) * 100.0;
-                if pct.is_finite() {
-                    pct
-                } else {
-                    0.0
-                }
+                if pct.is_finite() { pct } else { 0.0 }
             } else {
                 100.0
             },
@@ -703,6 +693,19 @@ mod tests {
         set.add(make_witness("WIT-002", WitnessKind::StateSnapshot));
         assert_eq!(set.len(), 2);
         assert!(!set.is_empty());
+    }
+
+    #[test]
+    fn witness_set_accepts_uniform_nonzero_hashes() {
+        let mut set = WitnessSet::new();
+        set.add(WitnessRef::new(
+            "WIT-UNIFORM-FF",
+            WitnessKind::Telemetry,
+            [0xff; 32],
+        ));
+
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.refs()[0].hash_hex(), "ff".repeat(32));
     }
 
     #[test]
@@ -1329,15 +1332,21 @@ mod tests {
             let witnesses_with_locator =
                 locator_set(&[("WIT-A", WitnessKind::Telemetry, "bundles/replay-001.jsonl")]);
 
-            assert!(WitnessValidator::new()
-                .validate(&entry, &witnesses_without_locator)
-                .is_ok());
-            assert!(WitnessValidator::strict()
-                .validate(&entry, &witnesses_without_locator)
-                .is_err());
-            assert!(WitnessValidator::strict()
-                .validate(&entry, &witnesses_with_locator)
-                .is_ok());
+            assert!(
+                WitnessValidator::new()
+                    .validate(&entry, &witnesses_without_locator)
+                    .is_ok()
+            );
+            assert!(
+                WitnessValidator::strict()
+                    .validate(&entry, &witnesses_without_locator)
+                    .is_err()
+            );
+            assert!(
+                WitnessValidator::strict()
+                    .validate(&entry, &witnesses_with_locator)
+                    .is_ok()
+            );
         }
 
         #[test]
@@ -1405,14 +1414,18 @@ mod tests {
             let mut mutated_hash = witness.integrity_hash;
             mutated_hash[7] ^= 0b0000_0001;
 
-            assert!(WitnessValidator::new()
-                .verify_integrity("DEC-001", &witness, &mutated_hash)
-                .is_err());
+            assert!(
+                WitnessValidator::new()
+                    .verify_integrity("DEC-001", &witness, &mutated_hash)
+                    .is_err()
+            );
 
             mutated_hash[7] ^= 0b0000_0001;
-            assert!(WitnessValidator::new()
-                .verify_integrity("DEC-001", &witness, &mutated_hash)
-                .is_ok());
+            assert!(
+                WitnessValidator::new()
+                    .verify_integrity("DEC-001", &witness, &mutated_hash)
+                    .is_ok()
+            );
         }
 
         #[test]
@@ -1563,10 +1576,10 @@ mod tests {
             let zero_hash = WitnessRef::new("WIT-TEST", WitnessKind::Telemetry, [0u8; 32]);
             assert!(!is_valid_witness_structure(&zero_hash));
 
-            // Invalid: all-same-byte hash
+            // Valid: uniform nonzero digests can be legitimate entropy inputs
             let same_byte_hash =
                 WitnessRef::new("WIT-TEST", WitnessKind::StateSnapshot, [0x42; 32]);
-            assert!(!is_valid_witness_structure(&same_byte_hash));
+            assert!(is_valid_witness_structure(&same_byte_hash));
 
             // Invalid: unsafe locator
             let unsafe_locator =

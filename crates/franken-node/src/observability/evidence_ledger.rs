@@ -50,6 +50,8 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use hex;
 use sha2::{Digest, Sha256};
 
+const MIN_SEEN_SIGNATURES: usize = 8192;
+
 // ── Event codes ─────────────────────────────────────────────────────
 
 pub mod event_codes {
@@ -494,6 +496,8 @@ pub struct EvidenceLedger {
     verifying_key: Option<VerifyingKey>,
     /// Track seen timestamp+signature combinations to prevent replay attacks
     seen_signatures: HashSet<(u64, Box<str>)>,
+    /// Insertion order for the bounded replay-prevention window.
+    seen_signature_order: VecDeque<(u64, Box<str>)>,
 }
 
 impl EvidenceLedger {
@@ -585,9 +589,7 @@ impl EvidenceLedger {
         self.current_bytes = self.current_bytes.saturating_add(entry_size);
 
         if self.verifying_key.is_some() {
-            // Track this timestamp+signature combination to prevent replay attacks.
-            let replay_key = (entry.timestamp_ms, Box::from(entry.signature.as_str()));
-            self.seen_signatures.insert(replay_key);
+            self.remember_seen_signature(entry.timestamp_ms, &entry.signature);
         }
 
         eprintln!("{}", format_ledger_append_event(id, &entry, entry_size));
@@ -644,6 +646,21 @@ impl EvidenceLedger {
             current_bytes: 0,
             verifying_key,
             seen_signatures: HashSet::new(),
+            seen_signature_order: VecDeque::new(),
+        }
+    }
+
+    fn remember_seen_signature(&mut self, timestamp_ms: u64, signature: &str) {
+        let replay_key = (timestamp_ms, Box::from(signature));
+        if self.seen_signatures.insert(replay_key.clone()) {
+            self.seen_signature_order.push_back(replay_key);
+        }
+
+        let replay_window = self.capacity.max_entries.max(MIN_SEEN_SIGNATURES);
+        while self.seen_signature_order.len() > replay_window {
+            if let Some(expired_key) = self.seen_signature_order.pop_front() {
+                self.seen_signatures.remove(&expired_key);
+            }
         }
     }
 
@@ -783,15 +800,6 @@ impl EvidenceLedger {
         if let Some((evicted_id, evicted_entry, evicted_size)) = self.entries.pop_front() {
             self.current_bytes = self.current_bytes.saturating_sub(evicted_size);
             self.total_evicted = self.total_evicted.saturating_add(1);
-
-            if self.verifying_key.is_some() {
-                // Remove the evicted entry's timestamp+signature from replay attack prevention.
-                let evicted_replay_key = (
-                    evicted_entry.timestamp_ms,
-                    Box::from(evicted_entry.signature.as_str()),
-                );
-                self.seen_signatures.remove(&evicted_replay_key);
-            }
 
             eprintln!(
                 "{}",
@@ -4921,11 +4929,16 @@ mod tests {
         );
         assert_eq!(ledger.total_evicted(), 1, "Should have evicted 1 entry");
 
-        // Now try to replay entry1 - should succeed because it was evicted from replay tracking
+        // Now try to replay entry1 - should still fail because replay tracking
+        // is independent from retained-entry eviction.
         let result = ledger.append(entry1.clone());
         assert!(
-            result.is_ok(),
-            "Evicted entry replay should succeed (replay tracking was cleared)"
+            result.is_err(),
+            "Evicted entry replay should still be rejected"
+        );
+        assert!(
+            matches!(result, Err(LedgerError::ReplayAttack { .. })),
+            "Evicted replay should return ReplayAttack"
         );
 
         // But replaying entry2 should still fail (it's still in the ledger)

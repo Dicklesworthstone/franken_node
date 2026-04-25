@@ -6,7 +6,7 @@ use frankenengine_node::observability::durability_violation::{
     CausalEvent, CausalEventType, FailedArtifact, ProofContext, ViolationContext, generate_bundle,
 };
 use frankenengine_node::observability::evidence_ledger::{
-    DecisionKind, EvidenceEntry, EvidenceLedger, LabSpillMode, LedgerCapacity,
+    DecisionKind, EvidenceEntry, EvidenceLedger, LabSpillMode, LedgerCapacity, LedgerError,
     SharedEvidenceLedger, sign_evidence_entry, verify_evidence_entry,
 };
 use frankenengine_node::observability::witness_ref::{
@@ -232,6 +232,45 @@ fn signed_ledger_snapshot_remains_verifiable_after_size_normalization() {
     assert_eq!(stored.signature, signature);
     verify_evidence_entry(stored, &signing_key.verifying_key())
         .expect("ledger-normalized stored entry must remain signature-verifiable");
+}
+
+#[test]
+fn signed_ledger_rejects_replay_after_retained_entry_eviction() {
+    let signing_key = SigningKey::from_bytes(&[22; 32]);
+    let verifying_key = signing_key.verifying_key();
+    let mut ledger =
+        EvidenceLedger::with_verifying_key(LedgerCapacity::new(2, 100_000), verifying_key);
+
+    let mut first = misleading_size_entry("signed-replay-evicted-1", 0);
+    first.timestamp_ms = 1_776_816_000_001;
+    sign_evidence_entry(&mut first, &signing_key);
+
+    let mut second = misleading_size_entry("signed-replay-evicted-2", 0);
+    second.timestamp_ms = 1_776_816_000_002;
+    sign_evidence_entry(&mut second, &signing_key);
+
+    let mut third = misleading_size_entry("signed-replay-evicted-3", 0);
+    third.timestamp_ms = 1_776_816_000_003;
+    sign_evidence_entry(&mut third, &signing_key);
+
+    ledger
+        .append(first.clone())
+        .expect("first signed append should succeed");
+    ledger
+        .append(second)
+        .expect("second signed append should succeed");
+    ledger
+        .append(third)
+        .expect("third signed append should evict the first retained entry");
+
+    assert_eq!(ledger.len(), 2);
+    assert_eq!(ledger.total_evicted(), 1);
+
+    let replay = ledger.append(first);
+    assert!(
+        matches!(replay, Err(LedgerError::ReplayAttack { .. })),
+        "replay prevention must outlive retained-entry eviction"
+    );
 }
 
 #[test]
