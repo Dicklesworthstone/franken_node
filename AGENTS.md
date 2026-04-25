@@ -350,7 +350,7 @@ Do **not** assume historical release automation details still apply here. This c
 rch exec -- cargo fmt --check
 rch exec -- cargo clippy --all-targets -- -D warnings
 rch exec -- cargo test -p frankenengine-node <relevant-release-tests>
-franken-node verify release <release-dir> --json
+franken-node verify release <release-dir> --key-dir <trusted-public-keys-dir> --json
 ```
 
 ### Common Release Pitfalls

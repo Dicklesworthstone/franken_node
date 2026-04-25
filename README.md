@@ -67,7 +67,8 @@ franken-node run ./my-app --policy strict
 
 # 8) Export and replay a high-severity incident bundle
 franken-node incident bundle --id INC-2026-0007 --evidence-path ./incidents/INC-2026-0007/evidence.v1.json --verify
-franken-node incident replay --bundle ./INC-2026-0007.fnbundle
+franken-node incident replay --bundle ./INC-2026-0007.fnbundle --trusted-public-key ./keys/replay-trust-anchor.pub
+franken-node incident counterfactual --bundle ./INC-2026-0007.fnbundle --trusted-public-key ./keys/replay-trust-anchor.pub --policy strict
 ```
 
 ## Charter
@@ -180,8 +181,8 @@ franken-node incident list --severity high
 | `franken-node fleet status` | Show policy and quarantine state across nodes | `franken-node fleet status --zone prod-us-east` |
 | `franken-node fleet release` | Lift quarantine/revocation controls with receipts | `franken-node fleet release --incident INC-2026-0007` |
 | `franken-node incident bundle` | Export deterministic incident bundle from authoritative evidence | `franken-node incident bundle --id INC-2026-0007 --evidence-path ./incidents/INC-2026-0007/evidence.v1.json --verify` |
-| `franken-node incident replay` | Replay incident timeline locally | `franken-node incident replay --bundle ./INC-2026-0007.fnbundle` |
-| `franken-node incident counterfactual` | Simulate alternative policy actions | `franken-node incident counterfactual --bundle ./INC-2026-0007.fnbundle --policy strict` |
+| `franken-node incident replay` | Replay incident timeline locally | `franken-node incident replay --bundle ./INC-2026-0007.fnbundle --trusted-public-key ./keys/replay-trust-anchor.pub` |
+| `franken-node incident counterfactual` | Simulate alternative policy actions | `franken-node incident counterfactual --bundle ./INC-2026-0007.fnbundle --trusted-public-key ./keys/replay-trust-anchor.pub --policy strict` |
 | `franken-node registry publish` | Publish signed extension artifact | `franken-node registry publish ./dist/plugin.fnext --signing-key ./keys/publisher.ed25519` |
 | `franken-node registry search` | Query extension registry with trust filters | `franken-node registry search auth --min-assurance 3` |
 | `franken-node bench run` | Run benchmark suite and emit signed report | `franken-node bench run --scenario secure-extension-heavy` |
@@ -191,6 +192,10 @@ franken-node incident list --severity high
 or from
 `<project-root>/.franken-node/state/incidents/<incident-id-slug>/evidence.v1.json`.
 Deterministic fixture timelines remain test-only.
+
+`franken-node incident replay` and `franken-node incident counterfactual` fail
+closed unless you provide `--trusted-public-key <path>` or `--key-dir <dir>`;
+the CLI intentionally accepts no built-in trust roots for bundle verification.
 
 `franken-node registry publish` fails closed unless you provide `--signing-key <path>` with an Ed25519 private key file (raw 32-byte key, hex, base64, or supported JSON wrapper).
 
