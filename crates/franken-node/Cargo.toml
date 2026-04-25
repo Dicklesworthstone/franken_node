@@ -334,6 +334,10 @@ path = "tests/supply_chain_golden_artifacts.rs"
 required-features = ["extended-surfaces"]
 
 [[test]]
+name = "supply_chain_trust_card_golden_bytes"
+path = "tests/supply_chain_trust_card_golden_bytes.rs"
+
+[[test]]
 name = "frankensqlite_adapter_conformance"
 path = "tests/frankensqlite_adapter_conformance.rs"
 
