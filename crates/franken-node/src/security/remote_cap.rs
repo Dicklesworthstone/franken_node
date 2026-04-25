@@ -61,7 +61,7 @@ impl ReplayTokenSet {
     /// Atomically check if token exists and insert it if not. Returns true if successfully inserted (was new).
     /// This prevents TOCTOU race conditions between check and insert operations.
     fn insert_if_new(&self, token_id: String) -> bool {
-        let mut inner = match self.inner.try_lock() {
+        let inner = match self.inner.try_lock() {
             Ok(guard) => guard,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(TryLockError::WouldBlock) => {
@@ -132,7 +132,6 @@ impl ReplayTokenSet {
         }
     }
 
-    #[cfg(test)]
     #[must_use]
     fn len(&self) -> usize {
         match self.inner.try_lock() {
@@ -1416,7 +1415,7 @@ impl fmt::Debug for CapabilityGate {
         f.debug_struct("CapabilityGate")
             .field("verification_secret", &"<redacted>")
             .field("connectivity_mode", &self.connectivity_mode)
-            .field("consumed_token_count", &self.consumed_tokens.ids.len())
+            .field("consumed_token_count", &self.consumed_tokens.len())
             .field("revoked_token_count", &self.revoked_tokens.len())
             .field("replay_store", &self.replay_store)
             .field("audit_log_len", &self.audit_log.len())
