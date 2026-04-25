@@ -142,6 +142,20 @@ fn is_lower_hex(value: &str) -> bool {
         .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
+/// Additional security validation for trace context strings.
+/// Prevents injection attacks through trace IDs in logging and other contexts.
+#[cfg(any(test, feature = "control-plane"))]
+fn is_safe_for_logging(value: &str) -> bool {
+    // Reject any control characters, null bytes, or characters that could
+    // be used for log injection attacks
+    !value.bytes().any(|byte| {
+        byte == 0                   // Null byte
+        || byte < 0x20              // Control characters (including \n, \r, \t)
+        || byte == 0x7F             // DEL character
+        || byte > 0x7F              // Non-ASCII (could contain encoded attacks)
+    })
+}
+
 #[cfg(any(test, feature = "control-plane"))]
 fn has_nonzero_hex_digit(value: &str) -> bool {
     value.bytes().any(|byte| byte != b'0')
@@ -149,12 +163,18 @@ fn has_nonzero_hex_digit(value: &str) -> bool {
 
 #[cfg(any(test, feature = "control-plane"))]
 fn is_valid_trace_id(value: &str) -> bool {
-    value.len() == 32 && is_lower_hex(value) && has_nonzero_hex_digit(value)
+    value.len() == 32
+        && is_lower_hex(value)
+        && has_nonzero_hex_digit(value)
+        && is_safe_for_logging(value)  // SECURITY: Prevent injection attacks
 }
 
 #[cfg(any(test, feature = "control-plane"))]
 fn is_valid_span_id(value: &str) -> bool {
-    value.len() == 16 && is_lower_hex(value) && has_nonzero_hex_digit(value)
+    value.len() == 16
+        && is_lower_hex(value)
+        && has_nonzero_hex_digit(value)
+        && is_safe_for_logging(value)  // SECURITY: Prevent injection attacks
 }
 
 #[cfg(any(test, feature = "control-plane"))]
@@ -2264,6 +2284,68 @@ mod api_middleware_advanced_security_edge_tests {
         let valid_header = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
         let result = TraceContext::from_traceparent(valid_header);
         assert!(result.is_some(), "Valid trace context should still work");
+    }
+
+    #[test]
+    fn security_trace_context_injection_attacks_prevention() {
+        // Test trace context parser against injection attacks
+        // These attacks would pass basic hex validation but could be used for
+        // log injection, control character injection, or other security bypasses
+
+        // Note: These are examples of what would be dangerous if not properly validated
+        // Since our hex validation is strict, these should be rejected at format level,
+        // but we test the security layer as defense-in-depth
+
+        let injection_attack_vectors = [
+            // Log injection through hex-encoded newlines/control chars
+            // (These won't pass hex validation, but test the safety layer)
+            "00-0af7651916cd43dd8448eb211c80319c\n-b7ad6b7169203331-01",  // Literal newline
+            "00-0af7651916cd43dd8448eb211c80319c\r-b7ad6b7169203331-01",  // Literal CR
+            "00-0af7651916cd43dd8448eb211c80319c\t-b7ad6b7169203331-01",  // Literal tab
+            "00-0af7651916cd43dd8448eb211c80319c\0-b7ad6b7169203331-01",  // Null byte
+
+            // Control characters in otherwise valid-looking trace IDs
+            // These would fail hex validation but test our security boundaries
+            "00-0af7651916cd43dd8448eb211c80\x1f\x0c-b7ad6b7169203331-01", // Control chars
+            "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203\x08\x09-01", // Backspace/tab
+
+            // Unicode that could bypass basic validation
+            "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-\u{202e}01", // Right-to-left override
+            "00-\u{200b}0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01", // Zero-width space
+        ];
+
+        for attack_vector in &injection_attack_vectors {
+            let result = TraceContext::from_traceparent(attack_vector);
+
+            // All injection attacks should be rejected by our security validation
+            assert!(
+                result.is_none(),
+                "Injection attack should be rejected: {} (length: {}, bytes: {:?})",
+                attack_vector,
+                attack_vector.len(),
+                attack_vector.bytes().take(20).collect::<Vec<_>>()
+            );
+        }
+
+        // Test the specific security validation function directly
+        assert!(!is_safe_for_logging("trace\ninjection"));
+        assert!(!is_safe_for_logging("trace\rinjection"));
+        assert!(!is_safe_for_logging("trace\tinjection"));
+        assert!(!is_safe_for_logging("trace\0injection"));
+        assert!(!is_safe_for_logging("trace\x08injection"));
+        assert!(!is_safe_for_logging("trace\x1finjection"));
+        assert!(!is_safe_for_logging("trace\x7finjection"));
+        assert!(!is_safe_for_logging("trace\u{200b}injection"));
+
+        // Valid hex strings should pass safety validation
+        assert!(is_safe_for_logging("0af7651916cd43dd8448eb211c80319c"));
+        assert!(is_safe_for_logging("b7ad6b7169203331"));
+        assert!(is_safe_for_logging("01"));
+
+        // Verify normal operation still works after attack attempts
+        let valid_header = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+        let result = TraceContext::from_traceparent(valid_header);
+        assert!(result.is_some(), "Valid trace context should still work after security tests");
     }
 
     #[test]
