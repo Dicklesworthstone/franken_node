@@ -348,6 +348,10 @@ path = "tests/telemetry_bridge_regressions.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "cancellation_protocol_conformance"
+path = "tests/cancellation_protocol_conformance.rs"
+
+[[test]]
 name = "cli_subcommand_goldens"
 path = "tests/cli_subcommand_goldens.rs"
 required-features = ["test-support"]

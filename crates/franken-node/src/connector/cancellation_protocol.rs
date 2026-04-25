@@ -1077,7 +1077,10 @@ impl CancellationProtocol {
     /// ```
     pub fn run_full(&mut self, drain_elapsed_ms: u64) -> Result<PhaseTransitionResult, String> {
         self.request()?;
-        self.drain(drain_elapsed_ms)?;
+        let drain_result = self.drain(drain_elapsed_ms)?;
+        if drain_result.force_finalized || self.is_completed() {
+            return Ok(drain_result);
+        }
         self.finalize()
     }
 
@@ -1219,6 +1222,399 @@ fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
     vec.push(item);
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ConformanceTransitionMethod {
+    Request,
+    Drain { elapsed_ms: u64 },
+    Finalize,
+    RunFull { elapsed_ms: u64 },
+    ForceFinalize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConformanceTransitionExpectation {
+    Ok {
+        to: CancellationPhase,
+        event_code: &'static str,
+        force_finalized: bool,
+        error: Option<&'static str>,
+    },
+    Err {
+        code: &'static str,
+        phase: CancellationPhase,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct ConformanceTransitionCase {
+    id: &'static str,
+    from: CancellationPhase,
+    method: ConformanceTransitionMethod,
+    leak_resource: bool,
+    expected: ConformanceTransitionExpectation,
+}
+
+impl ConformanceTransitionCase {
+    fn must(
+        id: &'static str,
+        from: CancellationPhase,
+        method: ConformanceTransitionMethod,
+        expected: ConformanceTransitionExpectation,
+    ) -> Self {
+        Self {
+            id,
+            from,
+            method,
+            leak_resource: false,
+            expected,
+        }
+    }
+
+    fn must_with_leak(
+        id: &'static str,
+        from: CancellationPhase,
+        method: ConformanceTransitionMethod,
+        expected: ConformanceTransitionExpectation,
+    ) -> Self {
+        Self {
+            id,
+            from,
+            method,
+            leak_resource: true,
+            expected,
+        }
+    }
+}
+
+fn make_conformance_protocol_in_phase(phase: CancellationPhase) -> CancellationProtocol {
+    let mut protocol = CancellationProtocol::new(
+        CancellationBudget::new("conformance", 100),
+        "conformance-trace",
+    );
+    protocol.phase = phase;
+    protocol
+}
+
+fn run_conformance_transition_case(case: &ConformanceTransitionCase) {
+    let mut protocol = make_conformance_protocol_in_phase(case.from);
+    if case.leak_resource {
+        protocol.resource_guard_mut().acquire("conformance-handle");
+    }
+
+    let observed = match case.method {
+        ConformanceTransitionMethod::Request => protocol.request(),
+        ConformanceTransitionMethod::Drain { elapsed_ms } => protocol.drain(elapsed_ms),
+        ConformanceTransitionMethod::Finalize => protocol.finalize(),
+        ConformanceTransitionMethod::RunFull { elapsed_ms } => protocol.run_full(elapsed_ms),
+        ConformanceTransitionMethod::ForceFinalize => Ok(protocol.force_finalize()),
+    };
+
+    match (&case.expected, observed) {
+        (
+            ConformanceTransitionExpectation::Ok {
+                to,
+                event_code,
+                force_finalized,
+                error,
+            },
+            Ok(result),
+        ) => {
+            let expected_from = match case.method {
+                ConformanceTransitionMethod::RunFull { .. } if result.force_finalized => {
+                    CancellationPhase::Requested
+                }
+                ConformanceTransitionMethod::RunFull { .. } => CancellationPhase::Draining,
+                _ => case.from,
+            };
+            assert_eq!(result.from, expected_from, "{}", case.id);
+            assert_eq!(result.to, *to, "{}", case.id);
+            assert_eq!(result.event_code, *event_code, "{}", case.id);
+            assert_eq!(result.force_finalized, *force_finalized, "{}", case.id);
+            assert_eq!(result.error.as_deref(), *error, "{}", case.id);
+            assert_eq!(protocol.phase(), *to, "{}", case.id);
+        }
+        (ConformanceTransitionExpectation::Err { code, phase }, Err(err)) => {
+            assert_eq!(err, *code, "{}", case.id);
+            assert_eq!(protocol.phase(), *phase, "{}", case.id);
+        }
+        (expected, actual) => {
+            let expected_debug = format!("{expected:?}");
+            let actual_debug = format!("{actual:?}");
+            assert_eq!(actual_debug, expected_debug, "{}", case.id);
+        }
+    }
+}
+
+/// Assert the documented cancellation protocol transition matrix.
+///
+/// This helper is kept executable from integration tests because this crate's
+/// library target has `test = false`.
+#[doc(hidden)]
+pub fn assert_cancellation_protocol_conformance_for_tests() {
+    let cases = vec![
+        ConformanceTransitionCase::must(
+            "CAN-CONF-REQUEST-IDLE",
+            CancellationPhase::Idle,
+            ConformanceTransitionMethod::Request,
+            ConformanceTransitionExpectation::Ok {
+                to: CancellationPhase::Requested,
+                event_code: event_codes::CAN_001,
+                force_finalized: false,
+                error: None,
+            },
+        ),
+        ConformanceTransitionCase::must(
+            "CAN-CONF-REQUEST-DUPLICATE",
+            CancellationPhase::Requested,
+            ConformanceTransitionMethod::Request,
+            ConformanceTransitionExpectation::Ok {
+                to: CancellationPhase::Requested,
+                event_code: event_codes::CAN_001,
+                force_finalized: false,
+                error: None,
+            },
+        ),
+        ConformanceTransitionCase::must(
+            "CAN-CONF-REQUEST-DRAINING-REJECTED",
+            CancellationPhase::Draining,
+            ConformanceTransitionMethod::Request,
+            ConformanceTransitionExpectation::Err {
+                code: error_codes::ERR_CANCEL_INVALID_PHASE,
+                phase: CancellationPhase::Draining,
+            },
+        ),
+        ConformanceTransitionCase::must(
+            "CAN-CONF-REQUEST-FINALIZING-REJECTED",
+            CancellationPhase::Finalizing,
+            ConformanceTransitionMethod::Request,
+            ConformanceTransitionExpectation::Err {
+                code: error_codes::ERR_CANCEL_INVALID_PHASE,
+                phase: CancellationPhase::Finalizing,
+            },
+        ),
+        ConformanceTransitionCase::must(
+            "CAN-CONF-REQUEST-COMPLETED-REJECTED",
+            CancellationPhase::Completed,
+            ConformanceTransitionMethod::Request,
+            ConformanceTransitionExpectation::Err {
+                code: error_codes::ERR_CANCEL_ALREADY_FINAL,
+                phase: CancellationPhase::Completed,
+            },
+        ),
+        ConformanceTransitionCase::must(
+            "CAN-CONF-DRAIN-REQUESTED",
+            CancellationPhase::Requested,
+            ConformanceTransitionMethod::Drain { elapsed_ms: 99 },
+            ConformanceTransitionExpectation::Ok {
+                to: CancellationPhase::Draining,
+                event_code: event_codes::CAN_003,
+                force_finalized: false,
+                error: None,
+            },
+        ),
+        ConformanceTransitionCase::must(
+            "CAN-CONF-DRAIN-TIMEOUT",
+            CancellationPhase::Requested,
+            ConformanceTransitionMethod::Drain { elapsed_ms: 100 },
+            ConformanceTransitionExpectation::Ok {
+                to: CancellationPhase::Completed,
+                event_code: event_codes::CAN_004,
+                force_finalized: true,
+                error: Some(error_codes::ERR_CANCEL_DRAIN_TIMEOUT),
+            },
+        ),
+        ConformanceTransitionCase::must(
+            "CAN-CONF-DRAIN-IDLE-REJECTED",
+            CancellationPhase::Idle,
+            ConformanceTransitionMethod::Drain { elapsed_ms: 0 },
+            ConformanceTransitionExpectation::Err {
+                code: error_codes::ERR_CANCEL_INVALID_PHASE,
+                phase: CancellationPhase::Idle,
+            },
+        ),
+        ConformanceTransitionCase::must(
+            "CAN-CONF-DRAIN-DRAINING-REJECTED",
+            CancellationPhase::Draining,
+            ConformanceTransitionMethod::Drain { elapsed_ms: 0 },
+            ConformanceTransitionExpectation::Err {
+                code: error_codes::ERR_CANCEL_INVALID_PHASE,
+                phase: CancellationPhase::Draining,
+            },
+        ),
+        ConformanceTransitionCase::must(
+            "CAN-CONF-DRAIN-FINALIZING-REJECTED",
+            CancellationPhase::Finalizing,
+            ConformanceTransitionMethod::Drain { elapsed_ms: 0 },
+            ConformanceTransitionExpectation::Err {
+                code: error_codes::ERR_CANCEL_INVALID_PHASE,
+                phase: CancellationPhase::Finalizing,
+            },
+        ),
+        ConformanceTransitionCase::must(
+            "CAN-CONF-DRAIN-COMPLETED-REJECTED",
+            CancellationPhase::Completed,
+            ConformanceTransitionMethod::Drain { elapsed_ms: 0 },
+            ConformanceTransitionExpectation::Err {
+                code: error_codes::ERR_CANCEL_ALREADY_FINAL,
+                phase: CancellationPhase::Completed,
+            },
+        ),
+        ConformanceTransitionCase::must(
+            "CAN-CONF-FINALIZE-DRAINING",
+            CancellationPhase::Draining,
+            ConformanceTransitionMethod::Finalize,
+            ConformanceTransitionExpectation::Ok {
+                to: CancellationPhase::Completed,
+                event_code: event_codes::CAN_005,
+                force_finalized: false,
+                error: None,
+            },
+        ),
+        ConformanceTransitionCase::must_with_leak(
+            "CAN-CONF-FINALIZE-DRAINING-LEAK",
+            CancellationPhase::Draining,
+            ConformanceTransitionMethod::Finalize,
+            ConformanceTransitionExpectation::Ok {
+                to: CancellationPhase::Completed,
+                event_code: event_codes::CAN_005,
+                force_finalized: false,
+                error: Some(error_codes::ERR_CANCEL_LEAK),
+            },
+        ),
+        ConformanceTransitionCase::must(
+            "CAN-CONF-FINALIZE-IDLE-REJECTED",
+            CancellationPhase::Idle,
+            ConformanceTransitionMethod::Finalize,
+            ConformanceTransitionExpectation::Err {
+                code: error_codes::ERR_CANCEL_INVALID_PHASE,
+                phase: CancellationPhase::Idle,
+            },
+        ),
+        ConformanceTransitionCase::must(
+            "CAN-CONF-FINALIZE-REQUESTED-REJECTED",
+            CancellationPhase::Requested,
+            ConformanceTransitionMethod::Finalize,
+            ConformanceTransitionExpectation::Err {
+                code: error_codes::ERR_CANCEL_INVALID_PHASE,
+                phase: CancellationPhase::Requested,
+            },
+        ),
+        ConformanceTransitionCase::must(
+            "CAN-CONF-FINALIZE-FINALIZING-REJECTED",
+            CancellationPhase::Finalizing,
+            ConformanceTransitionMethod::Finalize,
+            ConformanceTransitionExpectation::Err {
+                code: error_codes::ERR_CANCEL_INVALID_PHASE,
+                phase: CancellationPhase::Finalizing,
+            },
+        ),
+        ConformanceTransitionCase::must(
+            "CAN-CONF-FINALIZE-COMPLETED-REJECTED",
+            CancellationPhase::Completed,
+            ConformanceTransitionMethod::Finalize,
+            ConformanceTransitionExpectation::Err {
+                code: error_codes::ERR_CANCEL_ALREADY_FINAL,
+                phase: CancellationPhase::Completed,
+            },
+        ),
+        ConformanceTransitionCase::must(
+            "CAN-CONF-RUN-FULL-IDLE",
+            CancellationPhase::Idle,
+            ConformanceTransitionMethod::RunFull { elapsed_ms: 99 },
+            ConformanceTransitionExpectation::Ok {
+                to: CancellationPhase::Completed,
+                event_code: event_codes::CAN_005,
+                force_finalized: false,
+                error: None,
+            },
+        ),
+        ConformanceTransitionCase::must(
+            "CAN-CONF-RUN-FULL-TIMEOUT",
+            CancellationPhase::Idle,
+            ConformanceTransitionMethod::RunFull { elapsed_ms: 100 },
+            ConformanceTransitionExpectation::Ok {
+                to: CancellationPhase::Completed,
+                event_code: event_codes::CAN_004,
+                force_finalized: true,
+                error: Some(error_codes::ERR_CANCEL_DRAIN_TIMEOUT),
+            },
+        ),
+        ConformanceTransitionCase::must(
+            "CAN-CONF-RUN-FULL-COMPLETED-REJECTED",
+            CancellationPhase::Completed,
+            ConformanceTransitionMethod::RunFull { elapsed_ms: 0 },
+            ConformanceTransitionExpectation::Err {
+                code: error_codes::ERR_CANCEL_ALREADY_FINAL,
+                phase: CancellationPhase::Completed,
+            },
+        ),
+        ConformanceTransitionCase::must(
+            "CAN-CONF-FORCE-FINALIZE-IDLE",
+            CancellationPhase::Idle,
+            ConformanceTransitionMethod::ForceFinalize,
+            ConformanceTransitionExpectation::Ok {
+                to: CancellationPhase::Completed,
+                event_code: event_codes::CAN_005,
+                force_finalized: true,
+                error: None,
+            },
+        ),
+        ConformanceTransitionCase::must_with_leak(
+            "CAN-CONF-FORCE-FINALIZE-LEAK",
+            CancellationPhase::Requested,
+            ConformanceTransitionMethod::ForceFinalize,
+            ConformanceTransitionExpectation::Ok {
+                to: CancellationPhase::Completed,
+                event_code: event_codes::CAN_005,
+                force_finalized: true,
+                error: Some(error_codes::ERR_CANCEL_LEAK),
+            },
+        ),
+        ConformanceTransitionCase::must(
+            "CAN-CONF-FORCE-FINALIZE-COMPLETED",
+            CancellationPhase::Completed,
+            ConformanceTransitionMethod::ForceFinalize,
+            ConformanceTransitionExpectation::Ok {
+                to: CancellationPhase::Completed,
+                event_code: event_codes::CAN_005,
+                force_finalized: true,
+                error: None,
+            },
+        ),
+    ];
+
+    for case in &cases {
+        run_conformance_transition_case(case);
+    }
+
+    assert_eq!(cases.len(), 23);
+    assert!(
+        cases
+            .iter()
+            .any(|case| matches!(case.method, ConformanceTransitionMethod::Request))
+    );
+    assert!(
+        cases
+            .iter()
+            .any(|case| matches!(case.method, ConformanceTransitionMethod::Drain { .. }))
+    );
+    assert!(
+        cases
+            .iter()
+            .any(|case| matches!(case.method, ConformanceTransitionMethod::Finalize))
+    );
+    assert!(
+        cases
+            .iter()
+            .any(|case| matches!(case.method, ConformanceTransitionMethod::RunFull { .. }))
+    );
+    assert!(
+        cases
+            .iter()
+            .any(|case| matches!(case.method, ConformanceTransitionMethod::ForceFinalize))
+    );
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1227,6 +1623,392 @@ mod tests {
 
     fn make_protocol(workflow: &str, timeout_ms: u64) -> CancellationProtocol {
         CancellationProtocol::new(CancellationBudget::new(workflow, timeout_ms), "test-trace")
+    }
+
+    fn make_protocol_in_phase(phase: CancellationPhase) -> CancellationProtocol {
+        let mut protocol = make_protocol("conformance", 100);
+        protocol.phase = phase;
+        protocol
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum TransitionMethod {
+        Request,
+        Drain { elapsed_ms: u64 },
+        Finalize,
+        RunFull { elapsed_ms: u64 },
+        ForceFinalize,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum TransitionExpectation {
+        Ok {
+            to: CancellationPhase,
+            event_code: &'static str,
+            force_finalized: bool,
+            error: Option<&'static str>,
+        },
+        Err {
+            code: &'static str,
+            phase: CancellationPhase,
+        },
+    }
+
+    #[derive(Debug, Clone)]
+    struct TransitionCase {
+        id: &'static str,
+        from: CancellationPhase,
+        method: TransitionMethod,
+        leak_resource: bool,
+        expected: TransitionExpectation,
+    }
+
+    impl TransitionCase {
+        fn must(
+            id: &'static str,
+            from: CancellationPhase,
+            method: TransitionMethod,
+            expected: TransitionExpectation,
+        ) -> Self {
+            Self {
+                id,
+                from,
+                method,
+                leak_resource: false,
+                expected,
+            }
+        }
+
+        fn must_with_leak(
+            id: &'static str,
+            from: CancellationPhase,
+            method: TransitionMethod,
+            expected: TransitionExpectation,
+        ) -> Self {
+            Self {
+                id,
+                from,
+                method,
+                leak_resource: true,
+                expected,
+            }
+        }
+    }
+
+    fn run_transition_case(case: &TransitionCase) {
+        let mut protocol = make_protocol_in_phase(case.from);
+        if case.leak_resource {
+            protocol.resource_guard_mut().acquire("conformance-handle");
+        }
+
+        let observed = match case.method {
+            TransitionMethod::Request => protocol.request(),
+            TransitionMethod::Drain { elapsed_ms } => protocol.drain(elapsed_ms),
+            TransitionMethod::Finalize => protocol.finalize(),
+            TransitionMethod::RunFull { elapsed_ms } => protocol.run_full(elapsed_ms),
+            TransitionMethod::ForceFinalize => Ok(protocol.force_finalize()),
+        };
+
+        match (&case.expected, observed) {
+            (
+                TransitionExpectation::Ok {
+                    to,
+                    event_code,
+                    force_finalized,
+                    error,
+                },
+                Ok(result),
+            ) => {
+                let expected_from = match case.method {
+                    TransitionMethod::RunFull { .. } if result.force_finalized => {
+                        CancellationPhase::Requested
+                    }
+                    TransitionMethod::RunFull { .. } => CancellationPhase::Draining,
+                    _ => case.from,
+                };
+                assert_eq!(result.from, expected_from, "{}", case.id);
+                assert_eq!(result.to, *to, "{}", case.id);
+                assert_eq!(result.event_code, *event_code, "{}", case.id);
+                assert_eq!(result.force_finalized, *force_finalized, "{}", case.id);
+                assert_eq!(result.error.as_deref(), *error, "{}", case.id);
+                assert_eq!(protocol.phase(), *to, "{}", case.id);
+            }
+            (TransitionExpectation::Err { code, phase }, Err(err)) => {
+                assert_eq!(err, *code, "{}", case.id);
+                assert_eq!(protocol.phase(), *phase, "{}", case.id);
+            }
+            (expected, actual) => {
+                let expected_debug = format!("{expected:?}");
+                let actual_debug = format!("{actual:?}");
+                assert_eq!(actual_debug, expected_debug, "{}", case.id);
+            }
+        }
+    }
+
+    #[test]
+    fn conformance_three_phase_transition_matrix() {
+        let cases = vec![
+            TransitionCase::must(
+                "CAN-CONF-REQUEST-IDLE",
+                CancellationPhase::Idle,
+                TransitionMethod::Request,
+                TransitionExpectation::Ok {
+                    to: CancellationPhase::Requested,
+                    event_code: event_codes::CAN_001,
+                    force_finalized: false,
+                    error: None,
+                },
+            ),
+            TransitionCase::must(
+                "CAN-CONF-REQUEST-DUPLICATE",
+                CancellationPhase::Requested,
+                TransitionMethod::Request,
+                TransitionExpectation::Ok {
+                    to: CancellationPhase::Requested,
+                    event_code: event_codes::CAN_001,
+                    force_finalized: false,
+                    error: None,
+                },
+            ),
+            TransitionCase::must(
+                "CAN-CONF-REQUEST-DRAINING-REJECTED",
+                CancellationPhase::Draining,
+                TransitionMethod::Request,
+                TransitionExpectation::Err {
+                    code: error_codes::ERR_CANCEL_INVALID_PHASE,
+                    phase: CancellationPhase::Draining,
+                },
+            ),
+            TransitionCase::must(
+                "CAN-CONF-REQUEST-FINALIZING-REJECTED",
+                CancellationPhase::Finalizing,
+                TransitionMethod::Request,
+                TransitionExpectation::Err {
+                    code: error_codes::ERR_CANCEL_INVALID_PHASE,
+                    phase: CancellationPhase::Finalizing,
+                },
+            ),
+            TransitionCase::must(
+                "CAN-CONF-REQUEST-COMPLETED-REJECTED",
+                CancellationPhase::Completed,
+                TransitionMethod::Request,
+                TransitionExpectation::Err {
+                    code: error_codes::ERR_CANCEL_ALREADY_FINAL,
+                    phase: CancellationPhase::Completed,
+                },
+            ),
+            TransitionCase::must(
+                "CAN-CONF-DRAIN-REQUESTED",
+                CancellationPhase::Requested,
+                TransitionMethod::Drain { elapsed_ms: 99 },
+                TransitionExpectation::Ok {
+                    to: CancellationPhase::Draining,
+                    event_code: event_codes::CAN_003,
+                    force_finalized: false,
+                    error: None,
+                },
+            ),
+            TransitionCase::must(
+                "CAN-CONF-DRAIN-TIMEOUT",
+                CancellationPhase::Requested,
+                TransitionMethod::Drain { elapsed_ms: 100 },
+                TransitionExpectation::Ok {
+                    to: CancellationPhase::Completed,
+                    event_code: event_codes::CAN_004,
+                    force_finalized: true,
+                    error: Some(error_codes::ERR_CANCEL_DRAIN_TIMEOUT),
+                },
+            ),
+            TransitionCase::must(
+                "CAN-CONF-DRAIN-IDLE-REJECTED",
+                CancellationPhase::Idle,
+                TransitionMethod::Drain { elapsed_ms: 0 },
+                TransitionExpectation::Err {
+                    code: error_codes::ERR_CANCEL_INVALID_PHASE,
+                    phase: CancellationPhase::Idle,
+                },
+            ),
+            TransitionCase::must(
+                "CAN-CONF-DRAIN-DRAINING-REJECTED",
+                CancellationPhase::Draining,
+                TransitionMethod::Drain { elapsed_ms: 0 },
+                TransitionExpectation::Err {
+                    code: error_codes::ERR_CANCEL_INVALID_PHASE,
+                    phase: CancellationPhase::Draining,
+                },
+            ),
+            TransitionCase::must(
+                "CAN-CONF-DRAIN-FINALIZING-REJECTED",
+                CancellationPhase::Finalizing,
+                TransitionMethod::Drain { elapsed_ms: 0 },
+                TransitionExpectation::Err {
+                    code: error_codes::ERR_CANCEL_INVALID_PHASE,
+                    phase: CancellationPhase::Finalizing,
+                },
+            ),
+            TransitionCase::must(
+                "CAN-CONF-DRAIN-COMPLETED-REJECTED",
+                CancellationPhase::Completed,
+                TransitionMethod::Drain { elapsed_ms: 0 },
+                TransitionExpectation::Err {
+                    code: error_codes::ERR_CANCEL_ALREADY_FINAL,
+                    phase: CancellationPhase::Completed,
+                },
+            ),
+            TransitionCase::must(
+                "CAN-CONF-FINALIZE-DRAINING",
+                CancellationPhase::Draining,
+                TransitionMethod::Finalize,
+                TransitionExpectation::Ok {
+                    to: CancellationPhase::Completed,
+                    event_code: event_codes::CAN_005,
+                    force_finalized: false,
+                    error: None,
+                },
+            ),
+            TransitionCase::must_with_leak(
+                "CAN-CONF-FINALIZE-DRAINING-LEAK",
+                CancellationPhase::Draining,
+                TransitionMethod::Finalize,
+                TransitionExpectation::Ok {
+                    to: CancellationPhase::Completed,
+                    event_code: event_codes::CAN_005,
+                    force_finalized: false,
+                    error: Some(error_codes::ERR_CANCEL_LEAK),
+                },
+            ),
+            TransitionCase::must(
+                "CAN-CONF-FINALIZE-IDLE-REJECTED",
+                CancellationPhase::Idle,
+                TransitionMethod::Finalize,
+                TransitionExpectation::Err {
+                    code: error_codes::ERR_CANCEL_INVALID_PHASE,
+                    phase: CancellationPhase::Idle,
+                },
+            ),
+            TransitionCase::must(
+                "CAN-CONF-FINALIZE-REQUESTED-REJECTED",
+                CancellationPhase::Requested,
+                TransitionMethod::Finalize,
+                TransitionExpectation::Err {
+                    code: error_codes::ERR_CANCEL_INVALID_PHASE,
+                    phase: CancellationPhase::Requested,
+                },
+            ),
+            TransitionCase::must(
+                "CAN-CONF-FINALIZE-FINALIZING-REJECTED",
+                CancellationPhase::Finalizing,
+                TransitionMethod::Finalize,
+                TransitionExpectation::Err {
+                    code: error_codes::ERR_CANCEL_INVALID_PHASE,
+                    phase: CancellationPhase::Finalizing,
+                },
+            ),
+            TransitionCase::must(
+                "CAN-CONF-FINALIZE-COMPLETED-REJECTED",
+                CancellationPhase::Completed,
+                TransitionMethod::Finalize,
+                TransitionExpectation::Err {
+                    code: error_codes::ERR_CANCEL_ALREADY_FINAL,
+                    phase: CancellationPhase::Completed,
+                },
+            ),
+            TransitionCase::must(
+                "CAN-CONF-RUN-FULL-IDLE",
+                CancellationPhase::Idle,
+                TransitionMethod::RunFull { elapsed_ms: 99 },
+                TransitionExpectation::Ok {
+                    to: CancellationPhase::Completed,
+                    event_code: event_codes::CAN_005,
+                    force_finalized: false,
+                    error: None,
+                },
+            ),
+            TransitionCase::must(
+                "CAN-CONF-RUN-FULL-TIMEOUT",
+                CancellationPhase::Idle,
+                TransitionMethod::RunFull { elapsed_ms: 100 },
+                TransitionExpectation::Ok {
+                    to: CancellationPhase::Completed,
+                    event_code: event_codes::CAN_004,
+                    force_finalized: true,
+                    error: Some(error_codes::ERR_CANCEL_DRAIN_TIMEOUT),
+                },
+            ),
+            TransitionCase::must(
+                "CAN-CONF-RUN-FULL-COMPLETED-REJECTED",
+                CancellationPhase::Completed,
+                TransitionMethod::RunFull { elapsed_ms: 0 },
+                TransitionExpectation::Err {
+                    code: error_codes::ERR_CANCEL_ALREADY_FINAL,
+                    phase: CancellationPhase::Completed,
+                },
+            ),
+            TransitionCase::must(
+                "CAN-CONF-FORCE-FINALIZE-IDLE",
+                CancellationPhase::Idle,
+                TransitionMethod::ForceFinalize,
+                TransitionExpectation::Ok {
+                    to: CancellationPhase::Completed,
+                    event_code: event_codes::CAN_005,
+                    force_finalized: true,
+                    error: None,
+                },
+            ),
+            TransitionCase::must_with_leak(
+                "CAN-CONF-FORCE-FINALIZE-LEAK",
+                CancellationPhase::Requested,
+                TransitionMethod::ForceFinalize,
+                TransitionExpectation::Ok {
+                    to: CancellationPhase::Completed,
+                    event_code: event_codes::CAN_005,
+                    force_finalized: true,
+                    error: Some(error_codes::ERR_CANCEL_LEAK),
+                },
+            ),
+            TransitionCase::must(
+                "CAN-CONF-FORCE-FINALIZE-COMPLETED",
+                CancellationPhase::Completed,
+                TransitionMethod::ForceFinalize,
+                TransitionExpectation::Ok {
+                    to: CancellationPhase::Completed,
+                    event_code: event_codes::CAN_005,
+                    force_finalized: true,
+                    error: None,
+                },
+            ),
+        ];
+
+        for case in &cases {
+            run_transition_case(case);
+        }
+
+        assert_eq!(cases.len(), 23);
+        assert!(
+            cases
+                .iter()
+                .any(|case| matches!(case.method, TransitionMethod::Request))
+        );
+        assert!(
+            cases
+                .iter()
+                .any(|case| matches!(case.method, TransitionMethod::Drain { .. }))
+        );
+        assert!(
+            cases
+                .iter()
+                .any(|case| matches!(case.method, TransitionMethod::Finalize))
+        );
+        assert!(
+            cases
+                .iter()
+                .any(|case| matches!(case.method, TransitionMethod::RunFull { .. }))
+        );
+        assert!(
+            cases
+                .iter()
+                .any(|case| matches!(case.method, TransitionMethod::ForceFinalize))
+        );
     }
 
     // ── Phase enum ───────────────────────────────────────────────────────
@@ -1536,12 +2318,18 @@ mod tests {
     }
 
     #[test]
-    fn run_full_timeout_force_finalizes_then_reports_already_final() {
+    fn run_full_timeout_returns_force_finalize_result() {
         let mut proto = make_protocol("test", 100);
 
-        let err = proto.run_full(100).unwrap_err();
+        let result = proto.run_full(100).unwrap();
 
-        assert_eq!(err, "ERR_CANCEL_ALREADY_FINAL");
+        assert_eq!(result.to, CancellationPhase::Completed);
+        assert!(result.force_finalized);
+        assert_eq!(result.event_code, event_codes::CAN_004);
+        assert_eq!(
+            result.error.as_deref(),
+            Some(error_codes::ERR_CANCEL_DRAIN_TIMEOUT)
+        );
         assert!(proto.was_force_finalized());
         assert_eq!(proto.phase(), CancellationPhase::Completed);
     }
