@@ -510,6 +510,7 @@ name = "franken-node-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
+ "clap",
  "ed25519-dalek",
  "frankenengine-node",
  "frankenengine-verifier-sdk",

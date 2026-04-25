@@ -1,8 +1,10 @@
 #![allow(clippy::doc_markdown)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
+use serde::{Deserialize, Serialize};
 
 /// franken-node: trust-native JavaScript/TypeScript runtime platform.
 ///
@@ -1101,6 +1103,79 @@ pub struct DoctorArgs {
     pub verbose: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DoctorPolicyMemoryTailRiskInput {
+    pub sample_count: u64,
+    pub mean_utilization: f64,
+    pub variance_utilization: f64,
+    pub peak_utilization: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DoctorPolicyReliabilityTelemetryInput {
+    pub sample_count: u64,
+    pub nonconforming_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DoctorPolicySystemStateInput {
+    pub memory_used_bytes: u64,
+    pub memory_budget_bytes: u64,
+    pub durability_level: f64,
+    pub hardening_level: String,
+    #[serde(default)]
+    pub proposed_hardening_level: Option<String>,
+    #[serde(default = "doctor_policy_default_evidence_emission_active")]
+    pub evidence_emission_active: bool,
+    #[serde(default)]
+    pub memory_tail_risk: Option<DoctorPolicyMemoryTailRiskInput>,
+    #[serde(default)]
+    pub reliability_telemetry: Option<DoctorPolicyReliabilityTelemetryInput>,
+    #[serde(default)]
+    pub epoch_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DoctorPolicyObservationInput {
+    pub candidate: String,
+    pub success: bool,
+    #[serde(default)]
+    pub epoch_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DoctorPolicyActivationInput {
+    #[serde(default)]
+    pub epoch_id: Option<u64>,
+    pub system_state: DoctorPolicySystemStateInput,
+    pub candidates: Vec<String>,
+    #[serde(default)]
+    pub prefiltered_candidates: Vec<String>,
+    #[serde(default)]
+    pub observations: Vec<DoctorPolicyObservationInput>,
+}
+
+const fn doctor_policy_default_evidence_emission_active() -> bool {
+    true
+}
+
+pub fn parse_doctor_policy_activation_input_bytes(
+    raw: &[u8],
+    source: &str,
+) -> anyhow::Result<DoctorPolicyActivationInput> {
+    serde_json::from_slice::<DoctorPolicyActivationInput>(raw)
+        .with_context(|| format!("failed parsing policy activation input {source} as JSON"))
+}
+
+pub fn load_doctor_policy_activation_input(
+    path: &Path,
+) -> anyhow::Result<DoctorPolicyActivationInput> {
+    let raw = std::fs::read(path)
+        .with_context(|| format!("failed reading policy activation input {}", path.display()))?;
+    let source = path.display().to_string();
+    parse_doctor_policy_activation_input_bytes(&raw, &source)
+}
+
 #[cfg(test)]
 mod parser_contract_extra_tests {
     use super::*;
@@ -1109,6 +1184,47 @@ mod parser_contract_extra_tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(args)
+    }
+
+    #[test]
+    fn doctor_policy_activation_parser_accepts_minimal_valid_json() {
+        let parsed = parse_doctor_policy_activation_input_bytes(
+            br#"{
+                "epoch_id": 7,
+                "system_state": {
+                    "memory_used_bytes": 1024,
+                    "memory_budget_bytes": 2048,
+                    "durability_level": 0.75,
+                    "hardening_level": "standard"
+                },
+                "candidates": ["candidate-a"]
+            }"#,
+            "inline-doctor-policy.json",
+        )
+        .expect("minimal doctor policy activation input should parse");
+
+        assert_eq!(parsed.epoch_id, Some(7));
+        assert_eq!(parsed.candidates, vec!["candidate-a".to_string()]);
+        assert!(parsed.system_state.evidence_emission_active);
+        assert!(parsed.prefiltered_candidates.is_empty());
+        assert!(parsed.observations.is_empty());
+    }
+
+    #[test]
+    fn doctor_policy_activation_parser_returns_contextual_error() {
+        let err = parse_doctor_policy_activation_input_bytes(
+            br#"{"system_state":"bad","candidates":"also-bad"}"#,
+            "inline-doctor-policy.json",
+        )
+        .expect_err("invalid doctor policy activation input should fail cleanly");
+        let rendered = format!("{err:#}");
+
+        assert!(
+            rendered.contains(
+                "failed parsing policy activation input inline-doctor-policy.json as JSON"
+            )
+        );
+        assert!(!rendered.trim().is_empty());
     }
 
     #[test]

@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1.3", features = ["derive"] }
+clap = "4.5.32"
 # Remove rand_core feature to avoid randomness dependencies for deterministic fuzzing
 ed25519-dalek = { version = "2.1.1" }
 hex = "0.4.3"
@@ -240,7 +241,19 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_counterfactual_receipt_verify"
+path = "fuzz_targets/fuzz_counterfactual_receipt_verify.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_engine_dispatcher_capability_validation"
 path = "fuzz_targets/fuzz_engine_dispatcher_capability_validation.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_doctor_input_parsing"
+path = "fuzz_targets/fuzz_doctor_input_parsing.rs"
 test = false
 doc = false

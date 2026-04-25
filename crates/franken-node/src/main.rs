@@ -56,11 +56,12 @@ use crate::api::{
     },
 };
 use crate::cli::{
-    BenchCommand, Cli, Command, DoctorCloseConditionArgs, DoctorCommand, FleetAgentArgs,
-    FleetCommand, IncidentCommand, MigrateCommand, RegistryCommand, RemoteCapCommand,
-    RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand,
-    RuntimeLaneCommand, TrustCardCommand, TrustCommand, VerifyCommand, VerifyCompatibilityArgs,
-    VerifyCorpusArgs, VerifyMigrationArgs, VerifyModuleArgs, VerifyReleaseArgs,
+    BenchCommand, Cli, Command, DoctorCloseConditionArgs, DoctorCommand,
+    DoctorPolicyActivationInput, FleetAgentArgs, FleetCommand, IncidentCommand, MigrateCommand,
+    RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs,
+    RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand, TrustCardCommand, TrustCommand,
+    VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
+    VerifyModuleArgs, VerifyReleaseArgs, load_doctor_policy_activation_input,
 };
 use crate::policy::{
     bayesian_diagnostics::{BayesianDiagnostics, CandidateRef, Observation},
@@ -6392,62 +6393,6 @@ struct DoctorPolicyActivationReport {
     wording_validation: WordingValidation,
 }
 
-#[derive(Debug, Deserialize)]
-struct DoctorPolicyMemoryTailRiskInput {
-    sample_count: u64,
-    mean_utilization: f64,
-    variance_utilization: f64,
-    peak_utilization: f64,
-}
-
-#[derive(Debug, Deserialize)]
-struct DoctorPolicyReliabilityTelemetryInput {
-    sample_count: u64,
-    nonconforming_count: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct DoctorPolicySystemStateInput {
-    memory_used_bytes: u64,
-    memory_budget_bytes: u64,
-    durability_level: f64,
-    hardening_level: String,
-    #[serde(default)]
-    proposed_hardening_level: Option<String>,
-    #[serde(default = "doctor_policy_default_evidence_emission_active")]
-    evidence_emission_active: bool,
-    #[serde(default)]
-    memory_tail_risk: Option<DoctorPolicyMemoryTailRiskInput>,
-    #[serde(default)]
-    reliability_telemetry: Option<DoctorPolicyReliabilityTelemetryInput>,
-    #[serde(default)]
-    epoch_id: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DoctorPolicyObservationInput {
-    candidate: String,
-    success: bool,
-    #[serde(default)]
-    epoch_id: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DoctorPolicyActivationInput {
-    #[serde(default)]
-    epoch_id: Option<u64>,
-    system_state: DoctorPolicySystemStateInput,
-    candidates: Vec<String>,
-    #[serde(default)]
-    prefiltered_candidates: Vec<String>,
-    #[serde(default)]
-    observations: Vec<DoctorPolicyObservationInput>,
-}
-
-const fn doctor_policy_default_evidence_emission_active() -> bool {
-    true
-}
-
 fn parse_hardening_level(label: &str, field: &str) -> Result<HardeningLevel> {
     let normalized = label.trim().to_ascii_lowercase();
     HardeningLevel::from_label(&normalized).ok_or_else(|| {
@@ -6503,18 +6448,6 @@ fn map_guardrail_certificate(
             .map(|id| id.as_str().to_string())
             .collect(),
     }
-}
-
-fn load_doctor_policy_activation_input(path: &Path) -> Result<DoctorPolicyActivationInput> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("failed reading policy activation input {}", path.display()))?;
-    let input = serde_json::from_str::<DoctorPolicyActivationInput>(&raw).with_context(|| {
-        format!(
-            "failed parsing policy activation input {} as JSON",
-            path.display()
-        )
-    })?;
-    Ok(input)
 }
 
 fn build_system_state(input: &DoctorPolicyActivationInput) -> Result<SystemState> {

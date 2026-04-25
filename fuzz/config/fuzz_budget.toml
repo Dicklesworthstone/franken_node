@@ -8,3 +8,7 @@ targets = ["directory_scan", "package_parse", "dependency_resolve"]
 [shim]
 min_seconds_per_target = 60
 targets = ["api_translation", "type_coercion"]
+
+[doctor]
+min_seconds_per_target = 60
+targets = ["doctor_input_parsing"]
