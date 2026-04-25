@@ -1506,6 +1506,7 @@ fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
 mod tests {
     use super::*;
     use crate::security::constant_time;
+    use proptest::prelude::*;
 
     // ── Event codes ──────────────────────────────────────────────────
 
@@ -3171,5 +3172,55 @@ mod tests {
         push_bounded(&mut values, "new".to_string(), 0);
 
         assert!(values.is_empty());
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        #[test]
+        fn prop_random_admitted_capability_scopes_allow_declared_usage_and_reject_drift(
+            declared in proptest::collection::btree_set(
+                proptest::sample::select(ALLOWED_CAPABILITIES.iter().copied().collect::<Vec<_>>()),
+                1..=4
+            ),
+        ) {
+            let identity = ArtifactIdentity::new("ext-prop", "author", "2026-02-21T00:00:00Z");
+            let capabilities: Vec<CapabilityRequirement> = declared
+                .iter()
+                .enumerate()
+                .map(|(index, capability)| {
+                    CapabilityRequirement::new(
+                        (*capability).to_string(),
+                        format!("justification-{index}"),
+                        index % 2 == 0,
+                    )
+                })
+                .collect();
+            let source_digest = format!("sha256:{:064x}", declared.len());
+            let signature = compute_artifact_provenance_signature(
+                &identity,
+                &capabilities,
+                "author",
+                &source_digest,
+            ).unwrap();
+            let artifact = build_extension_artifact(ExtensionArtifactInput::new(
+                identity,
+                capabilities,
+                ArtifactProvenance::new("author", source_digest, signature),
+            )).unwrap();
+            let envelope = artifact.envelope.as_ref().unwrap();
+            let mut declared_enforcer = EnvelopeEnforcer::from_envelope("ext-prop", envelope);
+
+            for capability in &declared {
+                prop_assert!(declared_enforcer.check_capability(capability, "ts").is_ok());
+            }
+
+            let mut drift_enforcer = EnvelopeEnforcer::from_envelope("ext-prop", envelope);
+            let err = drift_enforcer
+                .check_capability("cap:forbidden:undeclared", "ts")
+                .unwrap_err();
+
+            prop_assert_eq!(err.code(), error_codes::ERR_CART_DRIFT_DETECTED);
+        }
     }
 }
