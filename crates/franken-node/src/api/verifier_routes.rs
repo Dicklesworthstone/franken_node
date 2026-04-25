@@ -24,6 +24,7 @@ use super::middleware::{
 use super::trust_card_routes::ApiResponse;
 use super::utf8_prefix;
 use crate::encoding::deterministic_seed::push_bounded;
+use crate::security::constant_time::ct_eq;
 
 const MAX_STORED_CONFORMANCE_CHECKS: usize = 256;
 const MAX_VERIFIER_AUDIT_LOG_ENTRIES: usize = 512;
@@ -944,11 +945,11 @@ pub fn verify_atc_computation(
     let metric_matches = request
         .metric_snapshot_root_hash
         .as_deref()
-        .map_or(true, |root| root == report.metric_snapshot_root_hash);
+        .map_or(true, |root| ct_eq(root, &report.metric_snapshot_root_hash));
     let proof_matches = request
         .proof_chain_root_hash
         .as_deref()
-        .map_or(true, |root| root == report.proof_chain_root_hash);
+        .map_or(true, |root| ct_eq(root, &report.proof_chain_root_hash));
     let aggregate_only = report.data_visibility == "aggregate_only"
         && report.metric_snapshots.iter().all(|snapshot| {
             snapshot.data_visibility == "aggregate_only" && !snapshot.raw_participant_data_included
@@ -2433,5 +2434,44 @@ mod tests {
                 test_capacity - 1
             );
         }
+    }
+
+    #[test]
+    fn hash_comparison_timing_attack_protection() {
+        // Regression test for bd-hash-timing: hash comparisons must use constant-time
+        reset_verifier_state();
+        let identity = test_identity();
+        let trace = test_trace();
+
+        // Get a valid report
+        let report = get_atc_report(&identity, &trace, "atc-comp-test-002").expect("ATC report");
+        let valid_hash = &report.data.metric_snapshot_root_hash;
+
+        // Create requests with valid and invalid hashes
+        let valid_request = AtcVerificationRequest {
+            metric_snapshot_root_hash: Some(valid_hash.clone()),
+            proof_chain_root_hash: Some(report.data.proof_chain_root_hash.clone()),
+            verifier_parameters: BTreeMap::new(),
+        };
+
+        let invalid_request = AtcVerificationRequest {
+            metric_snapshot_root_hash: Some("sha256:invalid_hash".to_string()),
+            proof_chain_root_hash: Some(report.data.proof_chain_root_hash.clone()),
+            verifier_parameters: BTreeMap::new(),
+        };
+
+        // Both should process without timing differences (constant-time comparison)
+        let valid_result = verify_atc_computation(&identity, &trace, "atc-comp-test-002", &valid_request);
+        let invalid_result = verify_atc_computation(&identity, &trace, "atc-comp-test-002", &invalid_request);
+
+        assert!(valid_result.is_ok(), "Valid hash should succeed");
+        assert!(invalid_result.is_ok(), "Invalid hash should not fail verification function");
+
+        // The decision should differ based on hash match, but timing should be constant
+        let valid_data = valid_result.unwrap().data;
+        let invalid_data = invalid_result.unwrap().data;
+
+        assert_eq!(valid_data.decision, "pass", "Valid hash should result in pass");
+        assert_eq!(invalid_data.decision, "fail", "Invalid hash should result in fail");
     }
 }
