@@ -113,6 +113,15 @@ impl fmt::Display for CancellationPhase {
 
 impl CancellationPhase {
     /// Returns all phase variants in protocol order.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::CancellationPhase;
+    ///
+    /// assert_eq!(CancellationPhase::all()[0], CancellationPhase::Idle);
+    /// assert_eq!(CancellationPhase::all().last(), Some(&CancellationPhase::Completed));
+    /// ```
     pub fn all() -> &'static [CancellationPhase] {
         &[
             Self::Idle,
@@ -124,6 +133,15 @@ impl CancellationPhase {
     }
 
     /// Whether the phase is terminal.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::CancellationPhase;
+    ///
+    /// assert!(!CancellationPhase::Draining.is_terminal());
+    /// assert!(CancellationPhase::Completed.is_terminal());
+    /// ```
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Completed)
     }
@@ -144,6 +162,16 @@ pub enum WorkflowKind {
 }
 
 impl WorkflowKind {
+    /// Return the stable string identifier for this workflow kind.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::WorkflowKind;
+    ///
+    /// assert_eq!(WorkflowKind::Publish.as_str(), "publish");
+    /// assert_eq!(WorkflowKind::Custom("import".to_string()).as_str(), "import");
+    /// ```
     pub fn as_str(&self) -> &str {
         match self {
             Self::Lifecycle => "lifecycle",
@@ -157,6 +185,15 @@ impl WorkflowKind {
     }
 
     /// Default cleanup budget for this workflow kind.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::WorkflowKind;
+    ///
+    /// assert_eq!(WorkflowKind::Lifecycle.default_budget_ms(), 5000);
+    /// assert_eq!(WorkflowKind::Custom("custom".to_string()).default_budget_ms(), 3000);
+    /// ```
     pub fn default_budget_ms(&self) -> u64 {
         match self {
             Self::Lifecycle => 5000,
@@ -170,6 +207,15 @@ impl WorkflowKind {
     }
 
     /// Returns all standard (non-custom) workflow kinds.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::WorkflowKind;
+    ///
+    /// assert!(WorkflowKind::standard_kinds().contains(&WorkflowKind::Rollout));
+    /// assert!(!WorkflowKind::standard_kinds().contains(&WorkflowKind::Custom("x".to_string())));
+    /// ```
     pub fn standard_kinds() -> &'static [WorkflowKind] {
         &[
             Self::Lifecycle,
@@ -202,6 +248,16 @@ pub struct CancellationBudget {
 
 impl CancellationBudget {
     /// Create a new budget with the given timeout.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::CancellationBudget;
+    ///
+    /// let budget = CancellationBudget::new("rollout", 3000);
+    /// assert_eq!(budget.workflow, "rollout");
+    /// assert_eq!(budget.timeout_ms, 3000);
+    /// ```
     pub fn new(workflow: &str, timeout_ms: u64) -> Self {
         Self {
             workflow: workflow.to_string(),
@@ -210,6 +266,18 @@ impl CancellationBudget {
     }
 
     /// Create a budget from a WorkflowKind using its default timeout.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::{
+    ///     CancellationBudget, WorkflowKind,
+    /// };
+    ///
+    /// let budget = CancellationBudget::from_kind(&WorkflowKind::Quarantine);
+    /// assert_eq!(budget.workflow, "quarantine");
+    /// assert_eq!(budget.timeout_ms, WorkflowKind::Quarantine.default_budget_ms());
+    /// ```
     pub fn from_kind(kind: &WorkflowKind) -> Self {
         Self {
             workflow: kind.as_str().to_string(),
@@ -218,11 +286,31 @@ impl CancellationBudget {
     }
 
     /// Return the timeout as a Duration.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::CancellationBudget;
+    /// use std::time::Duration;
+    ///
+    /// let budget = CancellationBudget::new("publish", 2000);
+    /// assert_eq!(budget.timeout_duration(), Duration::from_millis(2000));
+    /// ```
     pub fn timeout_duration(&self) -> Duration {
         Duration::from_millis(self.timeout_ms)
     }
 
     /// Check whether a given elapsed duration exceeds the budget.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::CancellationBudget;
+    ///
+    /// let budget = CancellationBudget::new("publish", 2000);
+    /// assert!(!budget.is_exceeded(1999));
+    /// assert!(budget.is_exceeded(2000));
+    /// ```
     pub fn is_exceeded(&self, elapsed_ms: u64) -> bool {
         elapsed_ms >= self.timeout_ms
     }
@@ -257,6 +345,17 @@ pub struct ResourceTracker {
 }
 
 impl ResourceTracker {
+    /// Create an empty resource tracker.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::ResourceTracker;
+    ///
+    /// let tracker = ResourceTracker::new();
+    /// assert_eq!(tracker.held_count(), 0);
+    /// assert!(!tracker.has_leaks());
+    /// ```
     pub fn new() -> Self {
         Self {
             held: std::collections::BTreeMap::new(),
@@ -264,12 +363,34 @@ impl ResourceTracker {
     }
 
     /// Acquire a resource.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::ResourceTracker;
+    ///
+    /// let mut tracker = ResourceTracker::new();
+    /// tracker.acquire("socket");
+    /// tracker.acquire("socket");
+    /// assert_eq!(tracker.held_count(), 2);
+    /// ```
     pub fn acquire(&mut self, name: &str) {
         let counter = self.held.entry(name.to_string()).or_insert(0);
         *counter = counter.saturating_add(1);
     }
 
     /// Release a resource.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::ResourceTracker;
+    ///
+    /// let mut tracker = ResourceTracker::new();
+    /// tracker.acquire("socket");
+    /// assert!(tracker.release("socket"));
+    /// assert!(!tracker.release("socket"));
+    /// ```
     pub fn release(&mut self, name: &str) -> bool {
         let should_remove = if let Some(count) = self.held.get_mut(name) {
             if *count > 0 {
@@ -289,11 +410,33 @@ impl ResourceTracker {
     }
 
     /// Check if any resources are still held (potential leak).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::ResourceTracker;
+    ///
+    /// let mut tracker = ResourceTracker::new();
+    /// assert!(!tracker.has_leaks());
+    /// tracker.acquire("lock");
+    /// assert!(tracker.has_leaks());
+    /// ```
     pub fn has_leaks(&self) -> bool {
         self.held.values().any(|&c| c > 0)
     }
 
     /// Number of held resources.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::ResourceTracker;
+    ///
+    /// let mut tracker = ResourceTracker::new();
+    /// tracker.acquire("lock");
+    /// tracker.acquire("file");
+    /// assert_eq!(tracker.held_count(), 2);
+    /// ```
     pub fn held_count(&self) -> usize {
         self.held
             .values()
@@ -301,6 +444,18 @@ impl ResourceTracker {
     }
 
     /// Release all resources, returning the count released.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::ResourceTracker;
+    ///
+    /// let mut tracker = ResourceTracker::new();
+    /// tracker.acquire("lock");
+    /// tracker.acquire("file");
+    /// assert_eq!(tracker.release_all(), 2);
+    /// assert_eq!(tracker.held_count(), 0);
+    /// ```
     pub fn release_all(&mut self) -> usize {
         let count = self.held_count();
         self.held.clear();
@@ -326,6 +481,16 @@ pub struct ResourceGuard {
 
 impl ResourceGuard {
     /// Create a new resource guard for the given workflow.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::ResourceGuard;
+    ///
+    /// let guard = ResourceGuard::new("rollout");
+    /// assert_eq!(guard.workflow(), "rollout");
+    /// assert!(!guard.is_finalized());
+    /// ```
     pub fn new(workflow: &str) -> Self {
         Self {
             workflow: workflow.to_string(),
@@ -335,16 +500,48 @@ impl ResourceGuard {
     }
 
     /// Acquire a resource under this guard.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::ResourceGuard;
+    ///
+    /// let mut guard = ResourceGuard::new("rollout");
+    /// guard.acquire("socket");
+    /// assert!(guard.has_leaks());
+    /// ```
     pub fn acquire(&mut self, name: &str) {
         self.resources.acquire(name);
     }
 
     /// Release a specific resource.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::ResourceGuard;
+    ///
+    /// let mut guard = ResourceGuard::new("rollout");
+    /// guard.acquire("socket");
+    /// assert!(guard.release("socket"));
+    /// assert!(!guard.has_leaks());
+    /// ```
     pub fn release(&mut self, name: &str) -> bool {
         self.resources.release(name)
     }
 
     /// Explicitly release all resources and mark as finalized.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::ResourceGuard;
+    ///
+    /// let mut guard = ResourceGuard::new("rollout");
+    /// guard.acquire("socket");
+    /// assert_eq!(guard.finalize(), 1);
+    /// assert!(guard.is_finalized());
+    /// ```
     pub fn finalize(&mut self) -> usize {
         let count = self.resources.release_all();
         self.released = true;
@@ -352,16 +549,48 @@ impl ResourceGuard {
     }
 
     /// Whether the guard has been explicitly finalized.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::ResourceGuard;
+    ///
+    /// let mut guard = ResourceGuard::new("rollout");
+    /// assert!(!guard.is_finalized());
+    /// guard.finalize();
+    /// assert!(guard.is_finalized());
+    /// ```
     pub fn is_finalized(&self) -> bool {
         self.released
     }
 
     /// Whether any resources remain unreleased.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::ResourceGuard;
+    ///
+    /// let mut guard = ResourceGuard::new("rollout");
+    /// guard.acquire("socket");
+    /// assert!(guard.has_leaks());
+    /// guard.finalize();
+    /// assert!(!guard.has_leaks());
+    /// ```
     pub fn has_leaks(&self) -> bool {
         self.resources.has_leaks()
     }
 
     /// The workflow this guard protects.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::ResourceGuard;
+    ///
+    /// let guard = ResourceGuard::new("rollout");
+    /// assert_eq!(guard.workflow(), "rollout");
+    /// ```
     pub fn workflow(&self) -> &str {
         &self.workflow
     }
@@ -426,6 +655,18 @@ pub struct CancellationProtocol {
 
 impl CancellationProtocol {
     /// Create a new protocol instance for the given workflow and budget.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::{
+    ///     CancellationBudget, CancellationPhase, CancellationProtocol,
+    /// };
+    ///
+    /// let protocol = CancellationProtocol::new(CancellationBudget::new("rollout", 3000), "trace-1");
+    /// assert_eq!(protocol.phase(), CancellationPhase::Idle);
+    /// assert_eq!(protocol.budget().workflow, "rollout");
+    /// ```
     pub fn new(budget: CancellationBudget, trace_id: &str) -> Self {
         Self {
             phase: CancellationPhase::Idle,
@@ -439,61 +680,208 @@ impl CancellationProtocol {
     }
 
     /// Create a protocol for a WorkflowKind with default budget.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::{
+    ///     CancellationProtocol, WorkflowKind,
+    /// };
+    ///
+    /// let protocol = CancellationProtocol::for_workflow(&WorkflowKind::Publish, "trace-1");
+    /// assert_eq!(protocol.budget().workflow, "publish");
+    /// assert_eq!(protocol.budget().timeout_ms, WorkflowKind::Publish.default_budget_ms());
+    /// ```
     pub fn for_workflow(kind: &WorkflowKind, trace_id: &str) -> Self {
         Self::new(CancellationBudget::from_kind(kind), trace_id)
     }
 
     /// Current phase.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::{
+    ///     CancellationPhase, CancellationProtocol, WorkflowKind,
+    /// };
+    ///
+    /// let protocol = CancellationProtocol::for_workflow(&WorkflowKind::Publish, "trace-1");
+    /// assert_eq!(protocol.phase(), CancellationPhase::Idle);
+    /// ```
     pub fn phase(&self) -> CancellationPhase {
         self.phase
     }
 
     /// Whether the protocol is in a terminal state.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::{
+    ///     CancellationProtocol, WorkflowKind,
+    /// };
+    ///
+    /// let mut protocol = CancellationProtocol::for_workflow(&WorkflowKind::Publish, "trace-1");
+    /// assert!(!protocol.is_completed());
+    /// let _ = protocol.force_finalize();
+    /// assert!(protocol.is_completed());
+    /// ```
     pub fn is_completed(&self) -> bool {
         self.phase == CancellationPhase::Completed
     }
 
     /// Whether force-finalize was triggered.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::{
+    ///     CancellationProtocol, WorkflowKind,
+    /// };
+    ///
+    /// let mut protocol = CancellationProtocol::for_workflow(&WorkflowKind::Publish, "trace-1");
+    /// assert!(!protocol.was_force_finalized());
+    /// let _ = protocol.force_finalize();
+    /// assert!(protocol.was_force_finalized());
+    /// ```
     pub fn was_force_finalized(&self) -> bool {
         self.force_finalized
     }
 
     /// The budget for this protocol.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::{
+    ///     CancellationProtocol, WorkflowKind,
+    /// };
+    ///
+    /// let protocol = CancellationProtocol::for_workflow(&WorkflowKind::Migration, "trace-1");
+    /// assert_eq!(protocol.budget().workflow, "migration");
+    /// ```
     pub fn budget(&self) -> &CancellationBudget {
         &self.budget
     }
 
     /// Access the resource guard.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::{
+    ///     CancellationProtocol, WorkflowKind,
+    /// };
+    ///
+    /// let protocol = CancellationProtocol::for_workflow(&WorkflowKind::Rollout, "trace-1");
+    /// assert_eq!(protocol.resource_guard().workflow(), "rollout");
+    /// ```
     pub fn resource_guard(&self) -> &ResourceGuard {
         &self.resource_guard
     }
 
     /// Mutably access the resource guard.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::{
+    ///     CancellationProtocol, WorkflowKind,
+    /// };
+    ///
+    /// let mut protocol = CancellationProtocol::for_workflow(&WorkflowKind::Rollout, "trace-1");
+    /// protocol.resource_guard_mut().acquire("socket");
+    /// assert!(protocol.resource_guard().has_leaks());
+    /// ```
     pub fn resource_guard_mut(&mut self) -> &mut ResourceGuard {
         &mut self.resource_guard
     }
 
     /// Register an in-flight child operation. INV-CAN-PROPAGATION.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::{
+    ///     CancellationProtocol, WorkflowKind,
+    /// };
+    ///
+    /// let mut protocol = CancellationProtocol::for_workflow(&WorkflowKind::Rollout, "trace-1");
+    /// protocol.register_child();
+    /// assert_eq!(protocol.inflight_children(), 1);
+    /// ```
     pub fn register_child(&mut self) {
         self.inflight_children = self.inflight_children.saturating_add(1);
     }
 
     /// Mark a child operation as completed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::{
+    ///     CancellationProtocol, WorkflowKind,
+    /// };
+    ///
+    /// let mut protocol = CancellationProtocol::for_workflow(&WorkflowKind::Rollout, "trace-1");
+    /// protocol.register_child();
+    /// protocol.complete_child();
+    /// assert_eq!(protocol.inflight_children(), 0);
+    /// ```
     pub fn complete_child(&mut self) {
         self.inflight_children = self.inflight_children.saturating_sub(1);
     }
 
     /// Number of in-flight children.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::{
+    ///     CancellationProtocol, WorkflowKind,
+    /// };
+    ///
+    /// let mut protocol = CancellationProtocol::for_workflow(&WorkflowKind::Rollout, "trace-1");
+    /// protocol.register_child();
+    /// protocol.register_child();
+    /// assert_eq!(protocol.inflight_children(), 2);
+    /// ```
     pub fn inflight_children(&self) -> usize {
         self.inflight_children
     }
 
     /// The audit log.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::{
+    ///     CancellationProtocol, WorkflowKind,
+    /// };
+    ///
+    /// let mut protocol = CancellationProtocol::for_workflow(&WorkflowKind::Publish, "trace-1");
+    /// assert!(protocol.audit_log().is_empty());
+    /// let _ = protocol.request();
+    /// assert_eq!(protocol.audit_log().len(), 1);
+    /// ```
     pub fn audit_log(&self) -> &[CancellationAuditEvent] {
         &self.audit_log
     }
 
     /// Export audit log as JSONL.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::{
+    ///     CancellationProtocol, WorkflowKind,
+    /// };
+    ///
+    /// let mut protocol = CancellationProtocol::for_workflow(&WorkflowKind::Publish, "trace-1");
+    /// let _ = protocol.request();
+    /// let jsonl = protocol.export_audit_log_jsonl();
+    /// assert!(jsonl.contains("CAN-001"));
+    /// ```
     pub fn export_audit_log_jsonl(&self) -> String {
         self.audit_log
             .iter()
@@ -507,6 +895,19 @@ impl CancellationProtocol {
     /// Phase 1: REQUEST cancellation.
     /// Transitions from Idle to Requested. Idempotent if already Requested.
     /// Emits CAN-001.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::{
+    ///     CancellationPhase, CancellationProtocol, WorkflowKind,
+    /// };
+    ///
+    /// let mut protocol = CancellationProtocol::for_workflow(&WorkflowKind::Publish, "trace-1");
+    /// let result = protocol.request().expect("request should be valid from idle");
+    /// assert_eq!(result.to, CancellationPhase::Requested);
+    /// assert_eq!(protocol.phase(), CancellationPhase::Requested);
+    /// ```
     pub fn request(&mut self) -> Result<PhaseTransitionResult, String> {
         match self.phase {
             CancellationPhase::Idle => {
@@ -541,6 +942,20 @@ impl CancellationProtocol {
     /// Transitions from Requested to Draining. If elapsed_ms exceeds budget,
     /// triggers force-finalize. Emits CAN-002 on start, CAN-003 on complete,
     /// CAN-004 on timeout.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::{
+    ///     CancellationPhase, CancellationProtocol, WorkflowKind,
+    /// };
+    ///
+    /// let mut protocol = CancellationProtocol::for_workflow(&WorkflowKind::Publish, "trace-1");
+    /// protocol.request().expect("request should succeed");
+    /// let result = protocol.drain(100).expect("drain should stay within budget");
+    /// assert_eq!(result.to, CancellationPhase::Draining);
+    /// assert!(!result.force_finalized);
+    /// ```
     pub fn drain(&mut self, elapsed_ms: u64) -> Result<PhaseTransitionResult, String> {
         match self.phase {
             CancellationPhase::Requested => {
@@ -589,6 +1004,20 @@ impl CancellationProtocol {
     /// Phase 3: FINALIZE -- release resources and commit terminal state.
     /// Transitions from Draining to Finalizing then Completed.
     /// Emits CAN-005 on success, CAN-006 if resource leaks detected.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::{
+    ///     CancellationPhase, CancellationProtocol, WorkflowKind,
+    /// };
+    ///
+    /// let mut protocol = CancellationProtocol::for_workflow(&WorkflowKind::Publish, "trace-1");
+    /// protocol.request().expect("request should succeed");
+    /// protocol.drain(100).expect("drain should succeed");
+    /// let result = protocol.finalize().expect("finalize should succeed after drain");
+    /// assert_eq!(result.to, CancellationPhase::Completed);
+    /// ```
     pub fn finalize(&mut self) -> Result<PhaseTransitionResult, String> {
         match self.phase {
             CancellationPhase::Draining => {
@@ -633,6 +1062,19 @@ impl CancellationProtocol {
 
     /// Execute the full three-phase protocol in one call.
     /// Useful for workflows that can drain synchronously.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::{
+    ///     CancellationPhase, CancellationProtocol, WorkflowKind,
+    /// };
+    ///
+    /// let mut protocol = CancellationProtocol::for_workflow(&WorkflowKind::Publish, "trace-1");
+    /// let result = protocol.run_full(100).expect("full protocol should succeed");
+    /// assert_eq!(result.to, CancellationPhase::Completed);
+    /// assert!(protocol.is_completed());
+    /// ```
     pub fn run_full(&mut self, drain_elapsed_ms: u64) -> Result<PhaseTransitionResult, String> {
         self.request()?;
         self.drain(drain_elapsed_ms)?;
@@ -641,6 +1083,19 @@ impl CancellationProtocol {
 
     /// Force-finalize: skip directly to Completed, releasing all resources.
     /// Used when drain timeout is exceeded. INV-CAN-BUDGET-BOUNDED.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::cancellation_protocol::{
+    ///     CancellationPhase, CancellationProtocol, WorkflowKind,
+    /// };
+    ///
+    /// let mut protocol = CancellationProtocol::for_workflow(&WorkflowKind::Publish, "trace-1");
+    /// let result = protocol.force_finalize();
+    /// assert_eq!(result.to, CancellationPhase::Completed);
+    /// assert!(protocol.was_force_finalized());
+    /// ```
     pub fn force_finalize(&mut self) -> PhaseTransitionResult {
         self.force_finalize_internal()
     }
@@ -714,6 +1169,26 @@ pub struct TimingRow {
 }
 
 /// Generate a timing report from protocol execution results.
+///
+/// # Examples
+///
+/// ```
+/// use frankenengine_node::connector::cancellation_protocol::{
+///     TimingRow, generate_timing_csv,
+/// };
+///
+/// let csv = generate_timing_csv(&[TimingRow {
+///     workflow_id: "rollout-1".to_string(),
+///     phase: "finalize".to_string(),
+///     budget_ms: 3000,
+///     actual_ms: 1500,
+///     within_budget: true,
+///     resources_released: 2,
+/// }]);
+///
+/// assert!(csv.starts_with("workflow_id,phase,budget_ms"));
+/// assert!(csv.contains("rollout-1,finalize,3000,1500,true,2"));
+/// ```
 pub fn generate_timing_csv(rows: &[TimingRow]) -> String {
     let mut csv =
         String::from("workflow_id,phase,budget_ms,actual_ms,within_budget,resources_released\n");
