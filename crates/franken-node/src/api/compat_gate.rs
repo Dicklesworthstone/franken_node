@@ -35,19 +35,29 @@ use std::fmt;
 // Event codes
 // ---------------------------------------------------------------------------
 
+/// Event code constants for compatibility gate operations.
 pub mod event_codes {
+    /// Event code for gate check passed.
     pub const PCG_001_GATE_PASSED: &str = "PCG-001";
+    /// Event code for gate check failed.
     pub const PCG_002_GATE_FAILED: &str = "PCG-002";
+    /// Event code for mode transition approved.
     pub const PCG_003_TRANSITION_APPROVED: &str = "PCG-003";
+    /// Event code for divergence receipt issued.
     pub const PCG_004_RECEIPT_ISSUED: &str = "PCG-004";
 }
 
 use event_codes::*;
 
+/// Error code constants for compatibility gate failures.
 pub mod error_codes {
+    /// Error code for shim capacity exceeded.
     pub const ERR_COMPAT_SHIM_CAPACITY: &str = "ERR_COMPAT_SHIM_CAPACITY";
+    /// Error code for predicate capacity exceeded.
     pub const ERR_COMPAT_PREDICATE_CAPACITY: &str = "ERR_COMPAT_PREDICATE_CAPACITY";
+    /// Error code for trace ID exhausted.
     pub const ERR_COMPAT_TRACE_ID_EXHAUSTED: &str = "ERR_COMPAT_TRACE_ID_EXHAUSTED";
+    /// Error code for receipt ID exhausted.
     pub const ERR_COMPAT_RECEIPT_ID_EXHAUSTED: &str = "ERR_COMPAT_RECEIPT_ID_EXHAUSTED";
 }
 
@@ -57,9 +67,13 @@ pub mod error_codes {
 
 use crate::capacity_defaults::aliases::{MAX_EVENTS, MAX_PREDICATES, MAX_RECEIPTS, MAX_SHIMS};
 
+/// Invariant: all gate decisions visible via structured API responses.
 pub const INV_PCG_VISIBLE: &str = "INV-PCG-VISIBLE";
+/// Invariant: every gate decision produces structured audit events.
 pub const INV_PCG_AUDITABLE: &str = "INV-PCG-AUDITABLE";
+/// Invariant: every divergence/transition produces signed receipts.
 pub const INV_PCG_RECEIPT: &str = "INV-PCG-RECEIPT";
+/// Invariant: mode transitions are policy-gated.
 pub const INV_PCG_TRANSITION: &str = "INV-PCG-TRANSITION";
 
 // ---------------------------------------------------------------------------
@@ -160,15 +174,20 @@ impl fmt::Display for CompatMode {
 // Gate decision
 // ---------------------------------------------------------------------------
 
+/// Decision result for compatibility gate checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GateDecision {
+    /// Allow the operation to proceed.
     Allow,
+    /// Deny the operation.
     Deny,
+    /// Allow but log for audit.
     Audit,
 }
 
 impl GateDecision {
+    /// Returns the string label for this gate decision.
     pub fn label(&self) -> &'static str {
         match self {
             Self::Allow => "allow",
@@ -188,6 +207,7 @@ impl fmt::Display for GateDecision {
 // Shim metadata
 // ---------------------------------------------------------------------------
 
+/// Metadata for registered compatibility shims.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShimMetadata {
     pub shim_id: String,
