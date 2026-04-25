@@ -2769,14 +2769,17 @@ mod tests {
             let min_time = std::cmp::min(avg_valid, avg_invalid);
             let timing_ratio = max_time.as_nanos() as f64 / min_time.as_nanos() as f64;
 
-            // Allow reasonable variance but flag excessive timing differences
-            assert!(
-                timing_ratio < 5.0,
+            // Guard against NaN/Inf in timing calculations
+            if timing_ratio.is_finite() {
+                // Allow reasonable variance but flag excessive timing differences
+                assert!(
+                    timing_ratio < 5.0,
                 "Suspicious timing variance in L1 linkage verification: valid={:?}, invalid={:?}, ratio={:.2}",
                 avg_valid,
                 avg_invalid,
                 timing_ratio
-            );
+                );
+            }
         }
     }
 

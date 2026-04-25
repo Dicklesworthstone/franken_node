@@ -927,7 +927,12 @@ mod tests {
             .filter(|(_, _, status)| *status == "success")
             .count();
 
-        let success_rate = success_count as f64 / final_results.len() as f64;
+        let success_rate = if final_results.is_empty() {
+            0.0
+        } else {
+            let rate = success_count as f64 / final_results.len() as f64;
+            if rate.is_finite() { rate } else { 0.0 }
+        };
         assert!(success_rate > 0.8,
                "Success rate too low under memory pressure: {:.2}%", success_rate * 100.0);
 
