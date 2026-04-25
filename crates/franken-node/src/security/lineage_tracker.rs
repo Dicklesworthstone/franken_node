@@ -155,30 +155,102 @@ pub struct TaintSet {
 }
 
 impl TaintSet {
+    /// Create an empty taint set.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::TaintSet;
+    ///
+    /// let taints = TaintSet::new();
+    /// assert!(taints.is_empty());
+    /// ```
     pub fn new() -> Self {
         Self {
             labels: BTreeSet::new(),
         }
     }
 
+    /// Add a label id to the set.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::TaintSet;
+    ///
+    /// let mut taints = TaintSet::new();
+    /// taints.insert("PII");
+    /// assert!(taints.contains("PII"));
+    /// ```
     pub fn insert(&mut self, label_id: &str) {
         self.labels.insert(label_id.to_string());
     }
 
+    /// Check whether the set contains a specific label id.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::TaintSet;
+    ///
+    /// let mut taints = TaintSet::new();
+    /// taints.insert("SECRET");
+    /// assert!(taints.contains("SECRET"));
+    /// ```
     pub fn contains(&self, label_id: &str) -> bool {
         self.labels.contains(label_id)
     }
 
+    /// Merge labels from another set into this one.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::TaintSet;
+    ///
+    /// let mut left = TaintSet::new();
+    /// left.insert("PII");
+    /// let mut right = TaintSet::new();
+    /// right.insert("SECRET");
+    ///
+    /// left.merge(&right);
+    /// assert!(left.contains("PII"));
+    /// assert!(left.contains("SECRET"));
+    /// ```
     pub fn merge(&mut self, other: &TaintSet) {
         for label in &other.labels {
             self.labels.insert(label.clone());
         }
     }
 
+    /// Return whether the set contains no labels.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::TaintSet;
+    ///
+    /// let mut taints = TaintSet::new();
+    /// assert!(taints.is_empty());
+    /// taints.insert("INTERNAL");
+    /// assert!(!taints.is_empty());
+    /// ```
     pub fn is_empty(&self) -> bool {
         self.labels.is_empty()
     }
 
+    /// Return the number of active labels in the set.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::TaintSet;
+    ///
+    /// let mut taints = TaintSet::new();
+    /// taints.insert("PII");
+    /// taints.insert("SECRET");
+    /// assert_eq!(taints.len(), 2);
+    /// ```
     pub fn len(&self) -> usize {
         self.labels.len()
     }
@@ -216,6 +288,26 @@ pub struct TaintBoundary {
 
 impl TaintBoundary {
     /// Check if a given taint set crosses this boundary.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::collections::BTreeSet;
+    ///
+    /// use frankenengine_node::security::lineage_tracker::{TaintBoundary, TaintSet};
+    ///
+    /// let boundary = TaintBoundary {
+    ///     boundary_id: "b-1".to_string(),
+    ///     from_zone: "internal".to_string(),
+    ///     to_zone: "external".to_string(),
+    ///     denied_labels: BTreeSet::from(["SECRET".to_string()]),
+    ///     deny_all: false,
+    /// };
+    /// let mut taints = TaintSet::new();
+    /// taints.insert("SECRET");
+    ///
+    /// assert!(boundary.is_violated_by(&taints));
+    /// ```
     pub fn is_violated_by(&self, taint_set: &TaintSet) -> bool {
         if self.deny_all && !taint_set.is_empty() {
             return true;
@@ -227,6 +319,24 @@ impl TaintBoundary {
     }
 
     /// Validate that the boundary rule is well-formed.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::collections::BTreeSet;
+    ///
+    /// use frankenengine_node::security::lineage_tracker::TaintBoundary;
+    ///
+    /// let boundary = TaintBoundary {
+    ///     boundary_id: "b-1".to_string(),
+    ///     from_zone: "internal".to_string(),
+    ///     to_zone: "external".to_string(),
+    ///     denied_labels: BTreeSet::new(),
+    ///     deny_all: true,
+    /// };
+    ///
+    /// assert!(boundary.validate().is_ok());
+    /// ```
     pub fn validate(&self) -> Result<(), LineageError> {
         if self.boundary_id.is_empty() || self.from_zone.is_empty() || self.to_zone.is_empty() {
             return Err(LineageError::BoundaryInvalid {
@@ -326,6 +436,15 @@ impl Default for SentinelConfig {
 
 impl SentinelConfig {
     /// Validate the configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::SentinelConfig;
+    ///
+    /// let config = SentinelConfig::default();
+    /// assert!(config.validate().is_ok());
+    /// ```
     pub fn validate(&self) -> Result<(), LineageError> {
         if self.max_graph_edges == 0 || self.max_graph_depth == 0 {
             return Err(LineageError::ConfigRejected {
@@ -369,6 +488,21 @@ pub struct LineageQuery {
 }
 
 impl LineageQuery {
+    /// Validate query filters before running a graph lookup.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::LineageQuery;
+    ///
+    /// let query = LineageQuery {
+    ///     from_timestamp_ms: Some(10),
+    ///     to_timestamp_ms: Some(20),
+    ///     ..LineageQuery::default()
+    /// };
+    ///
+    /// assert!(query.validate().is_ok());
+    /// ```
     pub fn validate(&self) -> Result<(), LineageError> {
         if let (Some(from), Some(to)) = (self.from_timestamp_ms, self.to_timestamp_ms)
             && from > to
@@ -450,6 +584,16 @@ pub struct LineageGraph {
 }
 
 impl LineageGraph {
+    /// Create a new lineage graph with the provided sentinel configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{LineageGraph, SentinelConfig};
+    ///
+    /// let graph = LineageGraph::new(SentinelConfig::default());
+    /// assert_eq!(graph.edge_count(), 0);
+    /// ```
     pub fn new(config: SentinelConfig) -> Self {
         Self {
             edges: BTreeMap::new(),
@@ -461,6 +605,23 @@ impl LineageGraph {
     }
 
     /// Register a taint label. Event: FN-IFL-001.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{
+    ///     LineageGraph, SentinelConfig, TaintLabel,
+    /// };
+    ///
+    /// let mut graph = LineageGraph::new(SentinelConfig::default());
+    /// let label_id = graph.register_label(TaintLabel {
+    ///     id: "PII".to_string(),
+    ///     description: "Personally identifiable information".to_string(),
+    ///     severity: 80,
+    /// });
+    ///
+    /// assert_eq!(label_id, "PII");
+    /// ```
     pub fn register_label(&mut self, label: TaintLabel) -> String {
         let _event = EVENT_TAINT_ASSIGNED;
         let id = label.id.clone();
@@ -470,6 +631,24 @@ impl LineageGraph {
 
     /// Assign a taint label to a datum. Event: FN-IFL-001.
     /// INV-IFL-LABEL-PERSIST: labels are never removed from a taint set.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{
+    ///     LineageGraph, SentinelConfig, TaintLabel,
+    /// };
+    ///
+    /// let mut graph = LineageGraph::new(SentinelConfig::default());
+    /// graph.register_label(TaintLabel {
+    ///     id: "SECRET".to_string(),
+    ///     description: "Sensitive data".to_string(),
+    ///     severity: 100,
+    /// });
+    ///
+    /// graph.assign_taint("datum-1", "SECRET").unwrap();
+    /// assert!(graph.get_taint_set("datum-1").unwrap().contains("SECRET"));
+    /// ```
     pub fn assign_taint(&mut self, datum_id: &str, label_id: &str) -> Result<(), LineageError> {
         let _inv = INV_LABEL_PERSIST;
         if !self.labels.contains_key(label_id) {
@@ -486,12 +665,52 @@ impl LineageGraph {
     }
 
     /// Get the taint set for a datum.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{
+    ///     LineageGraph, SentinelConfig, TaintLabel,
+    /// };
+    ///
+    /// let mut graph = LineageGraph::new(SentinelConfig::default());
+    /// graph.register_label(TaintLabel {
+    ///     id: "INTERNAL".to_string(),
+    ///     description: "Internal-only".to_string(),
+    ///     severity: 20,
+    /// });
+    /// graph.assign_taint("datum-1", "INTERNAL").unwrap();
+    ///
+    /// let taints = graph.get_taint_set("datum-1").unwrap();
+    /// assert!(taints.contains("INTERNAL"));
+    /// ```
     pub fn get_taint_set(&self, datum_id: &str) -> Option<&TaintSet> {
         self.datum_taints.get(datum_id)
     }
 
     /// Append a flow edge. Event: FN-IFL-002.
     /// INV-IFL-EDGE-APPEND-ONLY: edges are never deleted.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{
+    ///     FlowEdge, LineageGraph, SentinelConfig, TaintSet,
+    /// };
+    ///
+    /// let mut graph = LineageGraph::new(SentinelConfig::default());
+    /// let edge_id = graph.append_edge(FlowEdge {
+    ///     edge_id: String::new(),
+    ///     source: "internal:db".to_string(),
+    ///     sink: "internal:cache".to_string(),
+    ///     operation: "replicate".to_string(),
+    ///     taint_set: TaintSet::new(),
+    ///     timestamp_ms: 42,
+    ///     quarantined: false,
+    /// }).unwrap();
+    ///
+    /// assert!(graph.get_edge(&edge_id).is_some());
+    /// ```
     pub fn append_edge(&mut self, mut edge: FlowEdge) -> Result<String, LineageError> {
         let _inv = INV_EDGE_APPEND_ONLY;
 
@@ -528,6 +747,29 @@ impl LineageGraph {
 
     /// Propagate taint from source to sink datum through an operation.
     /// Event: FN-IFL-003, FN-IFL-011 (on merge).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{
+    ///     LineageGraph, SentinelConfig, TaintLabel,
+    /// };
+    ///
+    /// let mut graph = LineageGraph::new(SentinelConfig::default());
+    /// graph.register_label(TaintLabel {
+    ///     id: "PII".to_string(),
+    ///     description: "Personally identifiable information".to_string(),
+    ///     severity: 80,
+    /// });
+    /// graph.assign_taint("internal:source", "PII").unwrap();
+    ///
+    /// let edge_id = graph
+    ///     .propagate_taint("internal:source", "internal:sink", "copy", 100)
+    ///     .unwrap();
+    ///
+    /// assert!(graph.get_edge(&edge_id).is_some());
+    /// assert!(graph.get_taint_set("internal:sink").unwrap().contains("PII"));
+    /// ```
     pub fn propagate_taint(
         &mut self,
         source_datum: &str,
@@ -565,6 +807,32 @@ impl LineageGraph {
     }
 
     /// Query the lineage graph.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{
+    ///     LineageGraph, LineageQuery, SentinelConfig, TaintLabel,
+    /// };
+    ///
+    /// let mut graph = LineageGraph::new(SentinelConfig::default());
+    /// graph.register_label(TaintLabel {
+    ///     id: "PII".to_string(),
+    ///     description: "Personally identifiable information".to_string(),
+    ///     severity: 80,
+    /// });
+    /// graph.assign_taint("internal:source", "PII").unwrap();
+    /// graph
+    ///     .propagate_taint("internal:source", "internal:sink", "copy", 100)
+    ///     .unwrap();
+    ///
+    /// let query = LineageQuery {
+    ///     source: Some("internal:source".to_string()),
+    ///     ..LineageQuery::default()
+    /// };
+    /// let matches = graph.query(&query).unwrap();
+    /// assert_eq!(matches.len(), 1);
+    /// ```
     pub fn query(&self, q: &LineageQuery) -> Result<Vec<&FlowEdge>, LineageError> {
         q.validate()?;
 
@@ -610,6 +878,18 @@ impl LineageGraph {
 
     /// Export a snapshot. Event: FN-IFL-008.
     /// INV-IFL-SNAPSHOT-FAITHFUL.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{LineageGraph, SentinelConfig};
+    ///
+    /// let graph = LineageGraph::new(SentinelConfig::default());
+    /// let snapshot = graph.snapshot("snap-1", 500);
+    ///
+    /// assert_eq!(snapshot.snapshot_id, "snap-1");
+    /// assert_eq!(snapshot.edge_count, 0);
+    /// ```
     pub fn snapshot(&self, snapshot_id: &str, timestamp_ms: u64) -> LineageSnapshot {
         let _inv = INV_SNAPSHOT_FAITHFUL;
         let _event = EVENT_SNAPSHOT_EXPORTED;
@@ -625,16 +905,63 @@ impl LineageGraph {
     }
 
     /// Get the total number of edges.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{LineageGraph, SentinelConfig};
+    ///
+    /// let graph = LineageGraph::new(SentinelConfig::default());
+    /// assert_eq!(graph.edge_count(), 0);
+    /// ```
     pub fn edge_count(&self) -> usize {
         self.edges.len()
     }
 
     /// Get the total number of registered labels.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{
+    ///     LineageGraph, SentinelConfig, TaintLabel,
+    /// };
+    ///
+    /// let mut graph = LineageGraph::new(SentinelConfig::default());
+    /// graph.register_label(TaintLabel {
+    ///     id: "SECRET".to_string(),
+    ///     description: "Sensitive".to_string(),
+    ///     severity: 100,
+    /// });
+    ///
+    /// assert_eq!(graph.label_count(), 1);
+    /// ```
     pub fn label_count(&self) -> usize {
         self.labels.len()
     }
 
     /// Get an edge by ID.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{
+    ///     FlowEdge, LineageGraph, SentinelConfig, TaintSet,
+    /// };
+    ///
+    /// let mut graph = LineageGraph::new(SentinelConfig::default());
+    /// let edge_id = graph.append_edge(FlowEdge {
+    ///     edge_id: "edge-1".to_string(),
+    ///     source: "internal:a".to_string(),
+    ///     sink: "internal:b".to_string(),
+    ///     operation: "copy".to_string(),
+    ///     taint_set: TaintSet::new(),
+    ///     timestamp_ms: 1,
+    ///     quarantined: false,
+    /// }).unwrap();
+    ///
+    /// assert_eq!(graph.get_edge(&edge_id).unwrap().operation, "copy");
+    /// ```
     pub fn get_edge(&self, edge_id: &str) -> Option<&FlowEdge> {
         self.edges.get(edge_id)
     }
@@ -684,6 +1011,16 @@ pub struct ExfiltrationSentinel {
 }
 
 impl ExfiltrationSentinel {
+    /// Create a new sentinel with deterministic policy state.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{ExfiltrationSentinel, SentinelConfig};
+    ///
+    /// let sentinel = ExfiltrationSentinel::new(SentinelConfig::default());
+    /// assert!(sentinel.health_check());
+    /// ```
     pub fn new(config: SentinelConfig) -> Self {
         Self {
             boundaries: BTreeMap::new(),
@@ -696,6 +1033,27 @@ impl ExfiltrationSentinel {
     }
 
     /// Register a taint boundary.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::collections::BTreeSet;
+    ///
+    /// use frankenengine_node::security::lineage_tracker::{
+    ///     ExfiltrationSentinel, SentinelConfig, TaintBoundary,
+    /// };
+    ///
+    /// let mut sentinel = ExfiltrationSentinel::new(SentinelConfig::default());
+    /// sentinel.add_boundary(TaintBoundary {
+    ///     boundary_id: "b-1".to_string(),
+    ///     from_zone: "internal".to_string(),
+    ///     to_zone: "external".to_string(),
+    ///     denied_labels: BTreeSet::from(["SECRET".to_string()]),
+    ///     deny_all: false,
+    /// }).unwrap();
+    ///
+    /// assert_eq!(sentinel.alert_count(), 0);
+    /// ```
     pub fn add_boundary(&mut self, boundary: TaintBoundary) -> Result<(), LineageError> {
         boundary.validate()?;
         if self.boundaries.contains_key(&boundary.boundary_id) {
@@ -714,6 +1072,48 @@ impl ExfiltrationSentinel {
     /// Evaluate a flow edge against all boundaries.
     /// Returns the verdict and any alerts raised.
     /// INV-IFL-BOUNDARY-ENFORCED, INV-IFL-DETERMINISTIC.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::collections::BTreeSet;
+    ///
+    /// use frankenengine_node::security::lineage_tracker::{
+    ///     ExfiltrationSentinel, FlowEdge, FlowVerdict, LineageGraph, SentinelConfig, TaintBoundary,
+    ///     TaintLabel, TaintSet,
+    /// };
+    ///
+    /// let mut graph = LineageGraph::new(SentinelConfig::default());
+    /// graph.register_label(TaintLabel {
+    ///     id: "SECRET".to_string(),
+    ///     description: "Sensitive".to_string(),
+    ///     severity: 100,
+    /// });
+    /// let mut taints = TaintSet::new();
+    /// taints.insert("SECRET");
+    /// let edge_id = graph.append_edge(FlowEdge {
+    ///     edge_id: String::new(),
+    ///     source: "internal:db".to_string(),
+    ///     sink: "external:api".to_string(),
+    ///     operation: "export".to_string(),
+    ///     taint_set: taints,
+    ///     timestamp_ms: 7,
+    ///     quarantined: false,
+    /// }).unwrap();
+    /// let edge = graph.get_edge(&edge_id).unwrap().clone();
+    ///
+    /// let mut sentinel = ExfiltrationSentinel::new(SentinelConfig::default());
+    /// sentinel.add_boundary(TaintBoundary {
+    ///     boundary_id: "b-1".to_string(),
+    ///     from_zone: "internal".to_string(),
+    ///     to_zone: "external".to_string(),
+    ///     denied_labels: BTreeSet::from(["SECRET".to_string()]),
+    ///     deny_all: false,
+    /// }).unwrap();
+    ///
+    /// let verdict = sentinel.evaluate_edge(&edge, &mut graph).unwrap();
+    /// assert_eq!(verdict, FlowVerdict::Quarantine);
+    /// ```
     pub fn evaluate_edge(
         &mut self,
         edge: &FlowEdge,
@@ -802,32 +1202,90 @@ impl ExfiltrationSentinel {
     }
 
     /// Get all alerts.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{ExfiltrationSentinel, SentinelConfig};
+    ///
+    /// let sentinel = ExfiltrationSentinel::new(SentinelConfig::default());
+    /// assert!(sentinel.alerts().is_empty());
+    /// ```
     pub fn alerts(&self) -> &BTreeMap<String, ExfiltrationAlert> {
         &self.alerts
     }
 
     /// Get all containment receipts.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{ExfiltrationSentinel, SentinelConfig};
+    ///
+    /// let sentinel = ExfiltrationSentinel::new(SentinelConfig::default());
+    /// assert!(sentinel.receipts().is_empty());
+    /// ```
     pub fn receipts(&self) -> &BTreeMap<String, ContainmentReceipt> {
         &self.receipts
     }
 
     /// Get alert count.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{ExfiltrationSentinel, SentinelConfig};
+    ///
+    /// let sentinel = ExfiltrationSentinel::new(SentinelConfig::default());
+    /// assert_eq!(sentinel.alert_count(), 0);
+    /// ```
     pub fn alert_count(&self) -> usize {
         self.alerts.len()
     }
 
     /// Get receipt count.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{ExfiltrationSentinel, SentinelConfig};
+    ///
+    /// let sentinel = ExfiltrationSentinel::new(SentinelConfig::default());
+    /// assert_eq!(sentinel.receipt_count(), 0);
+    /// ```
     pub fn receipt_count(&self) -> usize {
         self.receipts.len()
     }
 
     /// Health check. Event: FN-IFL-012.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{ExfiltrationSentinel, SentinelConfig};
+    ///
+    /// let sentinel = ExfiltrationSentinel::new(SentinelConfig::default());
+    /// assert!(sentinel.health_check());
+    /// ```
     pub fn health_check(&self) -> bool {
         let _event = EVENT_HEALTH_CHECK;
         self.config.validate().is_ok()
     }
 
     /// Reload configuration. Event: FN-IFL-009.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{ExfiltrationSentinel, SentinelConfig};
+    ///
+    /// let mut sentinel = ExfiltrationSentinel::new(SentinelConfig::default());
+    /// let mut config = SentinelConfig::default();
+    /// config.max_graph_depth = 512;
+    ///
+    /// sentinel.reload_config(config).unwrap();
+    /// assert!(sentinel.health_check());
+    /// ```
     pub fn reload_config(&mut self, new_config: SentinelConfig) -> Result<(), LineageError> {
         let _event = EVENT_CONFIG_RELOADED;
         new_config.validate()?;
@@ -836,6 +1294,19 @@ impl ExfiltrationSentinel {
     }
 
     /// Check graph depth limit. Event: FN-IFL-010.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{
+    ///     ExfiltrationSentinel, LineageGraph, SentinelConfig,
+    /// };
+    ///
+    /// let sentinel = ExfiltrationSentinel::new(SentinelConfig::default());
+    /// let graph = LineageGraph::new(SentinelConfig::default());
+    ///
+    /// assert!(sentinel.check_depth_limit(&graph));
+    /// ```
     pub fn check_depth_limit(&self, graph: &LineageGraph) -> bool {
         let _event = EVENT_DEPTH_LIMIT;
         graph.edge_count() <= self.config.max_graph_depth
@@ -844,6 +1315,39 @@ impl ExfiltrationSentinel {
     /// Run a sentinel scan across all edges in the graph.
     /// Event: SENTINEL_SCAN_START, SENTINEL_EXFIL_DETECTED, SENTINEL_CONTAINMENT_TRIGGERED.
     /// INV-SENTINEL-AUTO-CONTAIN: detected exfiltrations are auto-contained.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::collections::BTreeSet;
+    ///
+    /// use frankenengine_node::security::lineage_tracker::{
+    ///     ExfiltrationSentinel, LineageGraph, SentinelConfig, TaintBoundary, TaintLabel,
+    /// };
+    ///
+    /// let mut graph = LineageGraph::new(SentinelConfig::default());
+    /// graph.register_label(TaintLabel {
+    ///     id: "SECRET".to_string(),
+    ///     description: "Sensitive".to_string(),
+    ///     severity: 100,
+    /// });
+    /// graph.assign_taint("internal:db", "SECRET").unwrap();
+    /// graph
+    ///     .propagate_taint("internal:db", "external:api", "export", 10)
+    ///     .unwrap();
+    ///
+    /// let mut sentinel = ExfiltrationSentinel::new(SentinelConfig::default());
+    /// sentinel.add_boundary(TaintBoundary {
+    ///     boundary_id: "b-1".to_string(),
+    ///     from_zone: "internal".to_string(),
+    ///     to_zone: "external".to_string(),
+    ///     denied_labels: BTreeSet::from(["SECRET".to_string()]),
+    ///     deny_all: false,
+    /// }).unwrap();
+    ///
+    /// let scan = sentinel.scan_graph(&mut graph).unwrap();
+    /// assert_eq!(scan.exfiltrations_detected, 1);
+    /// ```
     pub fn scan_graph(
         &mut self,
         graph: &mut LineageGraph,
@@ -894,6 +1398,18 @@ impl ExfiltrationSentinel {
 
     /// Evaluate recall and precision against ground-truth labels.
     /// INV-SENTINEL-RECALL-THRESHOLD, INV-SENTINEL-PRECISION-THRESHOLD.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{ExfiltrationSentinel, SentinelConfig};
+    ///
+    /// let sentinel = ExfiltrationSentinel::new(SentinelConfig::default());
+    /// let metrics = sentinel.evaluate_metrics(95, 5, 10).unwrap();
+    ///
+    /// assert!(metrics.recall_ok);
+    /// assert!(metrics.precision_ok);
+    /// ```
     pub fn evaluate_metrics(
         &self,
         true_positives: u64,
@@ -942,6 +1458,31 @@ impl ExfiltrationSentinel {
 
     /// Detect covert-channel exfiltration patterns (e.g. timing, steganographic).
     /// Returns the number of detected covert channels.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{
+    ///     ExfiltrationSentinel, LineageGraph, SentinelConfig, TaintLabel,
+    /// };
+    ///
+    /// let mut graph = LineageGraph::new(SentinelConfig::default());
+    /// graph.register_label(TaintLabel {
+    ///     id: "SECRET".to_string(),
+    ///     description: "Sensitive".to_string(),
+    ///     severity: 100,
+    /// });
+    /// graph.assign_taint("internal:db", "SECRET").unwrap();
+    /// for ts in 1..=3 {
+    ///     graph
+    ///         .propagate_taint("internal:db", "external:api", "export", ts)
+    ///         .unwrap();
+    /// }
+    ///
+    /// let sentinel = ExfiltrationSentinel::new(SentinelConfig::default());
+    /// let detections = sentinel.detect_covert_channels(&graph);
+    /// assert_eq!(detections.len(), 1);
+    /// ```
     pub fn detect_covert_channels(&self, graph: &LineageGraph) -> Vec<CovertChannelDetection> {
         let _err_code = ERR_SENTINEL_COVERT_CHANNEL;
         let mut detections = Vec::new();
@@ -983,6 +1524,25 @@ impl ExfiltrationSentinel {
 
     /// Attach a lineage tag to a datum in the graph.
     /// Event: LINEAGE_TAG_ATTACHED.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{
+    ///     ExfiltrationSentinel, LineageGraph, SentinelConfig, TaintLabel,
+    /// };
+    ///
+    /// let mut graph = LineageGraph::new(SentinelConfig::default());
+    /// graph.register_label(TaintLabel {
+    ///     id: "PII".to_string(),
+    ///     description: "Personally identifiable information".to_string(),
+    ///     severity: 80,
+    /// });
+    /// let sentinel = ExfiltrationSentinel::new(SentinelConfig::default());
+    ///
+    /// sentinel.attach_lineage_tag(&mut graph, "datum-1", "PII").unwrap();
+    /// assert!(graph.get_taint_set("datum-1").unwrap().contains("PII"));
+    /// ```
     pub fn attach_lineage_tag(
         &self,
         graph: &mut LineageGraph,
@@ -1004,6 +1564,39 @@ impl ExfiltrationSentinel {
 
     /// Track a flow edge with sentinel evaluation.
     /// Event: LINEAGE_FLOW_TRACKED.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::collections::BTreeSet;
+    ///
+    /// use frankenengine_node::security::lineage_tracker::{
+    ///     ExfiltrationSentinel, FlowVerdict, LineageGraph, SentinelConfig, TaintBoundary,
+    ///     TaintLabel,
+    /// };
+    ///
+    /// let mut graph = LineageGraph::new(SentinelConfig::default());
+    /// graph.register_label(TaintLabel {
+    ///     id: "SECRET".to_string(),
+    ///     description: "Sensitive".to_string(),
+    ///     severity: 100,
+    /// });
+    /// graph.assign_taint("internal:db", "SECRET").unwrap();
+    ///
+    /// let mut sentinel = ExfiltrationSentinel::new(SentinelConfig::default());
+    /// sentinel.add_boundary(TaintBoundary {
+    ///     boundary_id: "b-1".to_string(),
+    ///     from_zone: "internal".to_string(),
+    ///     to_zone: "external".to_string(),
+    ///     denied_labels: BTreeSet::from(["SECRET".to_string()]),
+    ///     deny_all: false,
+    /// }).unwrap();
+    ///
+    /// let verdict = sentinel
+    ///     .track_flow(&mut graph, "internal:db", "external:api", "export", 100)
+    ///     .unwrap();
+    /// assert_eq!(verdict, FlowVerdict::Quarantine);
+    /// ```
     pub fn track_flow(
         &mut self,
         graph: &mut LineageGraph,
@@ -1067,6 +1660,25 @@ pub mod invariants {
     use super::*;
 
     /// Verify INV-IFL-LABEL-PERSIST: no labels were removed from datum taint sets.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::collections::BTreeMap;
+    ///
+    /// use frankenengine_node::security::lineage_tracker::{invariants, TaintSet};
+    ///
+    /// let mut before_set = TaintSet::new();
+    /// before_set.insert("PII");
+    /// let mut after_set = TaintSet::new();
+    /// after_set.insert("PII");
+    /// after_set.insert("SECRET");
+    ///
+    /// let before = BTreeMap::from([("datum-1".to_string(), before_set)]);
+    /// let after = BTreeMap::from([("datum-1".to_string(), after_set)]);
+    ///
+    /// assert!(invariants::verify_label_persist(&before, &after));
+    /// ```
     pub fn verify_label_persist(
         before: &BTreeMap<String, TaintSet>,
         after: &BTreeMap<String, TaintSet>,
@@ -1087,11 +1699,53 @@ pub mod invariants {
     }
 
     /// Verify INV-IFL-EDGE-APPEND-ONLY: no edges were removed.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::invariants;
+    ///
+    /// assert!(invariants::verify_edge_append_only(2, 3));
+    /// ```
     pub fn verify_edge_append_only(before_count: usize, after_count: usize) -> bool {
         after_count >= before_count
     }
 
     /// Verify INV-IFL-QUARANTINE-RECEIPT: quarantined edges have receipts.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::collections::BTreeSet;
+    ///
+    /// use frankenengine_node::security::lineage_tracker::{
+    ///     invariants, ExfiltrationSentinel, LineageGraph, SentinelConfig, TaintBoundary,
+    ///     TaintLabel,
+    /// };
+    ///
+    /// let mut graph = LineageGraph::new(SentinelConfig::default());
+    /// graph.register_label(TaintLabel {
+    ///     id: "SECRET".to_string(),
+    ///     description: "Sensitive".to_string(),
+    ///     severity: 100,
+    /// });
+    /// graph.assign_taint("internal:db", "SECRET").unwrap();
+    /// graph
+    ///     .propagate_taint("internal:db", "external:api", "export", 1)
+    ///     .unwrap();
+    ///
+    /// let mut sentinel = ExfiltrationSentinel::new(SentinelConfig::default());
+    /// sentinel.add_boundary(TaintBoundary {
+    ///     boundary_id: "b-1".to_string(),
+    ///     from_zone: "internal".to_string(),
+    ///     to_zone: "external".to_string(),
+    ///     denied_labels: BTreeSet::from(["SECRET".to_string()]),
+    ///     deny_all: false,
+    /// }).unwrap();
+    /// sentinel.scan_graph(&mut graph).unwrap();
+    ///
+    /// assert!(invariants::verify_quarantine_receipt(&graph, &sentinel));
+    /// ```
     pub fn verify_quarantine_receipt(
         graph: &LineageGraph,
         sentinel: &ExfiltrationSentinel,
@@ -1114,6 +1768,41 @@ pub mod invariants {
     }
 
     /// Verify INV-IFL-DETERMINISTIC: evaluating the same edge twice yields same result.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::collections::BTreeMap;
+    /// use std::collections::BTreeSet;
+    ///
+    /// use frankenengine_node::security::lineage_tracker::{
+    ///     invariants, FlowEdge, TaintBoundary, TaintSet,
+    /// };
+    ///
+    /// let mut taints = TaintSet::new();
+    /// taints.insert("SECRET");
+    /// let edge = FlowEdge {
+    ///     edge_id: "edge-1".to_string(),
+    ///     source: "internal:db".to_string(),
+    ///     sink: "external:api".to_string(),
+    ///     operation: "export".to_string(),
+    ///     taint_set: taints,
+    ///     timestamp_ms: 1,
+    ///     quarantined: false,
+    /// };
+    /// let boundaries = BTreeMap::from([(
+    ///     "b-1".to_string(),
+    ///     TaintBoundary {
+    ///         boundary_id: "b-1".to_string(),
+    ///         from_zone: "internal".to_string(),
+    ///         to_zone: "external".to_string(),
+    ///         denied_labels: BTreeSet::from(["SECRET".to_string()]),
+    ///         deny_all: false,
+    ///     },
+    /// )]);
+    ///
+    /// assert!(invariants::verify_deterministic(&edge, &boundaries));
+    /// ```
     pub fn verify_deterministic(
         edge: &FlowEdge,
         boundaries: &BTreeMap<String, TaintBoundary>,
@@ -1138,6 +1827,17 @@ pub mod invariants {
     }
 
     /// Verify INV-IFL-SNAPSHOT-FAITHFUL: snapshot edge count matches graph.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::security::lineage_tracker::{invariants, LineageGraph, SentinelConfig};
+    ///
+    /// let graph = LineageGraph::new(SentinelConfig::default());
+    /// let snapshot = graph.snapshot("snap-1", 50);
+    ///
+    /// assert!(invariants::verify_snapshot_faithful(&graph, &snapshot));
+    /// ```
     pub fn verify_snapshot_faithful(graph: &LineageGraph, snapshot: &LineageSnapshot) -> bool {
         snapshot.edge_count == graph.edge_count()
             && snapshot.label_count == graph.label_count()
@@ -1145,6 +1845,43 @@ pub mod invariants {
     }
 
     /// Verify INV-IFL-BOUNDARY-ENFORCED: all violating edges are quarantined.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::collections::BTreeMap;
+    /// use std::collections::BTreeSet;
+    ///
+    /// use frankenengine_node::security::lineage_tracker::{
+    ///     invariants, ExfiltrationSentinel, LineageGraph, SentinelConfig, TaintBoundary,
+    ///     TaintLabel,
+    /// };
+    ///
+    /// let mut graph = LineageGraph::new(SentinelConfig::default());
+    /// graph.register_label(TaintLabel {
+    ///     id: "SECRET".to_string(),
+    ///     description: "Sensitive".to_string(),
+    ///     severity: 100,
+    /// });
+    /// graph.assign_taint("internal:db", "SECRET").unwrap();
+    /// graph
+    ///     .propagate_taint("internal:db", "external:api", "export", 1)
+    ///     .unwrap();
+    ///
+    /// let mut sentinel = ExfiltrationSentinel::new(SentinelConfig::default());
+    /// let boundary = TaintBoundary {
+    ///     boundary_id: "b-1".to_string(),
+    ///     from_zone: "internal".to_string(),
+    ///     to_zone: "external".to_string(),
+    ///     denied_labels: BTreeSet::from(["SECRET".to_string()]),
+    ///     deny_all: false,
+    /// };
+    /// sentinel.add_boundary(boundary.clone()).unwrap();
+    /// sentinel.scan_graph(&mut graph).unwrap();
+    ///
+    /// let boundaries = BTreeMap::from([(boundary.boundary_id.clone(), boundary)]);
+    /// assert!(invariants::verify_boundary_enforced(&graph, &boundaries));
+    /// ```
     pub fn verify_boundary_enforced(
         graph: &LineageGraph,
         boundaries: &BTreeMap<String, TaintBoundary>,
