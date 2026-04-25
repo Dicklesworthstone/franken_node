@@ -138,11 +138,47 @@ pub struct SchemaRegistry {
 }
 
 impl SchemaRegistry {
+    /// Creates a new empty schema registry.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::golden_vectors::SchemaRegistry;
+    ///
+    /// let registry = SchemaRegistry::new();
+    /// ```
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Register a schema spec.
+    /// Register a schema specification for a given category.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The schema specification to register
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` if the schema was successfully registered
+    /// * `Err(SchemaError)` if the schema has invalid version (0) or missing changelog
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::golden_vectors::{
+    ///     SchemaRegistry, SchemaSpec, SchemaCategory
+    /// };
+    ///
+    /// let mut registry = SchemaRegistry::new();
+    /// let spec = SchemaSpec {
+    ///     category: SchemaCategory::Connector,
+    ///     version: 1,
+    ///     changelog: "Initial version".to_string(),
+    ///     canonical_example: vec![1, 2, 3],
+    /// };
+    ///
+    /// registry.register_schema(spec).unwrap();
+    /// ```
     pub fn register_schema(&mut self, spec: SchemaSpec) -> Result<(), SchemaError> {
         if spec.version == 0 {
             return Err(SchemaError::InvalidVersion(spec.category.to_string()));
@@ -154,7 +190,45 @@ impl SchemaRegistry {
         Ok(())
     }
 
-    /// Add a golden vector.
+    /// Add a golden vector to the registry.
+    ///
+    /// The vector's category must have a corresponding schema registered first.
+    ///
+    /// # Arguments
+    ///
+    /// * `vector` - The golden vector to add
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` if the vector was successfully added
+    /// * `Err(SchemaError::UnknownCategory)` if no schema is registered for the vector's category
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::connector::golden_vectors::{
+    ///     SchemaRegistry, SchemaSpec, GoldenVector, SchemaCategory
+    /// };
+    ///
+    /// let mut registry = SchemaRegistry::new();
+    ///
+    /// // Register schema first
+    /// let spec = SchemaSpec {
+    ///     category: SchemaCategory::Connector,
+    ///     version: 1,
+    ///     changelog: "Initial version".to_string(),
+    ///     canonical_example: vec![1, 2, 3],
+    /// };
+    /// registry.register_schema(spec).unwrap();
+    ///
+    /// // Add golden vector
+    /// let vector = GoldenVector {
+    ///     category: SchemaCategory::Connector,
+    ///     input: vec![4, 5, 6],
+    ///     expected_output: vec![7, 8, 9],
+    /// };
+    /// registry.add_vector(vector).unwrap();
+    /// ```
     pub fn add_vector(&mut self, vector: GoldenVector) -> Result<(), SchemaError> {
         if !self.schemas.contains_key(&vector.category) {
             return Err(SchemaError::MissingSchema(vector.category.to_string()));
