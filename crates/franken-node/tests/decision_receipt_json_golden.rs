@@ -10,30 +10,44 @@ use frankenengine_node::security::decision_receipt::{Receipt, Decision};
 
 /// Create a deterministic decision receipt for golden testing
 fn create_deterministic_receipt() -> Receipt {
-    // Create a receipt with fixed values to ensure deterministic output
-    Receipt {
-        receipt_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(), // Fixed UUID
-        action_name: "quarantine_extension".to_string(),
-        actor_identity: "security-admin@franken-node.prod".to_string(),
-        timestamp: "2026-01-01T00:00:00Z".to_string(), // Fixed timestamp
-        input_hash: "a1b2c3d4e5f6789a1b2c3d4e5f6789a1b2c3d4e5f6789a1b2c3d4e5f6789a1b2c3d4".to_string(),
-        output_hash: "f6e5d4c3b2a19876f6e5d4c3b2a19876f6e5d4c3b2a19876f6e5d4c3b2a19876f6e5".to_string(),
-        decision: Decision::Approved,
-        rationale: "Extension exhibits suspicious network behavior patterns consistent with data exfiltration".to_string(),
-        evidence_refs: vec![
+    // Use production constructor with deterministic inputs
+    let input_data = json!({
+        "extension_id": "npm:@malware/data-stealer",
+        "action": "quarantine"
+    });
+
+    let output_data = json!({
+        "status": "quarantined",
+        "affected_nodes": 42
+    });
+
+    let mut receipt = Receipt::new(
+        "quarantine_extension",
+        "security-admin@franken-node.prod",
+        &input_data,
+        &output_data,
+        Decision::Approved,
+        "Extension exhibits suspicious network behavior patterns consistent with data exfiltration",
+        vec![
             "evidence:network-anomaly-detector:2026-001".to_string(),
             "evidence:behavioral-analysis:ext-scan-001".to_string(),
             "evidence:reputation-feed:threat-intel-db".to_string()
         ],
-        policy_rule_chain: vec![
+        vec![
             "policy:network-egress-monitoring".to_string(),
             "policy:behavioral-reputation-gate".to_string(),
             "policy:quarantine-on-threat-match".to_string()
         ],
-        confidence: 0.85,
-        rollback_command: "franken-node trust release --extension npm:@malware/data-stealer --audit-id AUD-2026-001".to_string(),
-        previous_receipt_hash: Some("previous-receipt-hash-abc123def456".to_string()),
-    }
+        0.85,
+        "franken-node trust release --extension npm:@malware/data-stealer --audit-id AUD-2026-001",
+    ).expect("Receipt creation should succeed");
+
+    // Override non-deterministic fields for golden test stability
+    receipt.receipt_id = "01234567-89ab-cdef-0123-456789abcdef".to_string();
+    receipt.timestamp = "2026-01-01T00:00:00Z".to_string();
+    receipt.previous_receipt_hash = Some("previous-receipt-hash-abc123def456".to_string());
+
+    receipt
 }
 
 #[test]

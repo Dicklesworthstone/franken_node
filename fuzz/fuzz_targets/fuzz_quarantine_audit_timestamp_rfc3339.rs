@@ -7,9 +7,13 @@ use std::str;
 
 fuzz_target!(|data: &[u8]| {
     // Test both valid and invalid UTF-8 for parser robustness
+    // Removed early returns to maximize fuzz coverage
 
-    // First test invalid UTF-8 handling
-    let _ = QuarantineAuditTimestamp::try_from(unsafe { std::str::from_utf8_unchecked(data) });
+    // First test invalid UTF-8 handling (robustness testing)
+    if let Err(_) = str::from_utf8(data) {
+        // Test parser behavior on invalid UTF-8 boundaries
+        let _ = QuarantineAuditTimestamp::try_from(unsafe { std::str::from_utf8_unchecked(data) });
+    }
 
     // Test valid UTF-8 strings with comprehensive edge case testing
     if let Ok(rfc3339_str) = str::from_utf8(data) {

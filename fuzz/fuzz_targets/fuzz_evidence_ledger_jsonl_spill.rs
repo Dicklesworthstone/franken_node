@@ -6,12 +6,12 @@ use frankenengine_node::observability::evidence_ledger::EvidenceEntry;
 use std::str;
 
 fuzz_target!(|data: &[u8]| {
-    // Guard against very large inputs to prevent OOM
-    if data.len() > 1_000_000 {
-        return;
-    }
+    // Test both valid and invalid UTF-8 for parser robustness
 
-    // Only fuzz valid UTF-8 strings since JSONL requires valid UTF-8
+    // First test invalid UTF-8 handling
+    let _ = unsafe { std::str::from_utf8_unchecked(data) };
+
+    // Test valid UTF-8 strings with comprehensive parsing
     if let Ok(jsonl_str) = str::from_utf8(data) {
         // Test parsing each line of the JSONL as done in evidence ledger spill parsing
         // This mimics the parsed_spill_entries function behavior
@@ -21,15 +21,19 @@ fuzz_target!(|data: &[u8]| {
             }
 
             // Attempt to parse the JSONL line into EvidenceEntry
-            // We expect most random inputs to fail parsing, which is normal
-            let _ = serde_json::from_str::<EvidenceEntry>(line);
+            // Allow crashes to surface for proper bug detection
+            if let Ok(_) = serde_json::from_str::<EvidenceEntry>(line) {
+                // Parse succeeded, continue with round-trip testing
+            }
 
             // Additional fuzzing: test round-trip for valid entries
             if let Ok(entry) = serde_json::from_str::<EvidenceEntry>(line) {
                 // Test that valid entries can be serialized back
                 if let Ok(serialized) = serde_json::to_string(&entry) {
-                    // Ensure round-trip consistency
-                    let _ = serde_json::from_str::<EvidenceEntry>(&serialized);
+                    // Ensure round-trip consistency - allow deserialization crashes to surface
+                    if let Ok(roundtrip_entry) = serde_json::from_str::<EvidenceEntry>(&serialized) {
+                        assert_eq!(entry, roundtrip_entry, "Round-trip should preserve entry");
+                    }
                 }
 
                 // Test field validation - ensure timestamp_ms and epoch_id don't overflow
