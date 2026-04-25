@@ -42,6 +42,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::io::Write;
+use std::path::Path;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::security::constant_time;
@@ -60,6 +61,9 @@ pub mod event_codes {
     pub const LEDGER_SPILL: &str = "EVD-LEDGER-003";
     pub const LEDGER_CAPACITY_WARN: &str = "EVD-LEDGER-004";
     pub const LEDGER_LOCK_POISON_RECOVERED: &str = "EVD-LEDGER-005";
+    pub const LEDGER_CIRCUIT_BREAKER_OPEN: &str = "EVD-LEDGER-006";
+    pub const LEDGER_CIRCUIT_BREAKER_CLOSED: &str = "EVD-LEDGER-007";
+    pub const LEDGER_EMERGENCY_HALT: &str = "EVD-LEDGER-008";
 }
 
 // ── EntryId ─────────────────────────────────────────────────────────
@@ -135,6 +139,10 @@ pub struct EvidenceEntry {
     /// Required by ledgers constructed with a verifying key.
     #[serde(default)]
     pub signature: String,
+    /// SHA-256 hash of the previous entry for hash chain integrity.
+    /// Empty for the first entry in the ledger.
+    #[serde(default)]
+    pub prev_entry_hash: String,
 }
 
 impl EvidenceEntry {
@@ -498,6 +506,8 @@ pub struct EvidenceLedger {
     seen_signatures: HashSet<(u64, Box<str>)>,
     /// Insertion order for the bounded replay-prevention window.
     seen_signature_order: VecDeque<(u64, Box<str>)>,
+    /// Hash of the last appended entry for hash chain integrity
+    last_entry_hash: Option<String>,
 }
 
 impl EvidenceLedger {
@@ -583,6 +593,9 @@ impl EvidenceLedger {
             self.evict_oldest();
         }
 
+        // SECURITY: Set hash chain linkage to prevent ordering manipulation
+        entry.prev_entry_hash = self.last_entry_hash.clone().unwrap_or_default();
+
         let id = EntryId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
         self.total_appended = self.total_appended.saturating_add(1);
@@ -594,8 +607,45 @@ impl EvidenceLedger {
 
         eprintln!("{}", format_ledger_append_event(id, &entry, entry_size));
 
+        // Compute hash of the entry for next entry's chain linkage
+        let entry_hash = self.compute_entry_hash(&entry);
+        self.last_entry_hash = Some(entry_hash);
+
         self.entries.push_back((id, entry, entry_size));
         id
+    }
+
+    /// Compute SHA-256 hash of an entry for hash chain integrity.
+    fn compute_entry_hash(&self, entry: &EvidenceEntry) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"evidence_entry_v1:");
+        hasher.update(&entry.schema_version.len().to_le_bytes());
+        hasher.update(entry.schema_version.as_bytes());
+        if let Some(entry_id) = &entry.entry_id {
+            hasher.update(&[1]);
+            hasher.update(&entry_id.len().to_le_bytes());
+            hasher.update(entry_id.as_bytes());
+        } else {
+            hasher.update(&[0]);
+        }
+        hasher.update(&entry.decision_id.len().to_le_bytes());
+        hasher.update(entry.decision_id.as_bytes());
+        hasher.update(&entry.timestamp_ms.to_le_bytes());
+        hasher.update(&entry.trace_id.len().to_le_bytes());
+        hasher.update(entry.trace_id.as_bytes());
+        hasher.update(&entry.epoch_id.to_le_bytes());
+
+        // Hash the serialized payload for deterministic content representation
+        let payload_bytes = serde_json::to_vec(&entry.payload).unwrap_or_default();
+        hasher.update(&payload_bytes.len().to_le_bytes());
+        hasher.update(&payload_bytes);
+
+        hasher.update(&entry.size_bytes.to_le_bytes());
+        hasher.update(&entry.signature.len().to_le_bytes());
+        hasher.update(entry.signature.as_bytes());
+
+        // NOTE: prev_entry_hash is intentionally excluded to prevent circular dependency
+        hex::encode(hasher.finalize())
     }
 
     /// Create a new evidence ledger with the given capacity.
@@ -1037,9 +1087,125 @@ const _: () = {
 // ── LabSpillMode ────────────────────────────────────────────────────
 
 /// Lab/test mode wrapper that spills every entry to a JSONL file.
+/// Includes emergency circuit breaker for disk exhaustion protection.
 pub struct LabSpillMode {
     ledger: EvidenceLedger,
     spill_writer: SpillWriter,
+    /// Circuit breaker configuration
+    circuit_breaker: CircuitBreakerState,
+}
+
+/// Circuit breaker state for emergency disk exhaustion protection
+#[derive(Debug, Clone)]
+struct CircuitBreakerState {
+    /// When true, spill writes are disabled (memory-only mode)
+    is_open: bool,
+    /// Disk usage threshold (0.0-1.0) to trigger circuit breaker
+    disk_threshold: f64,
+    /// Manual emergency halt flag (admin override)
+    emergency_halt: bool,
+    /// Path for disk space monitoring (None for generic writers)
+    monitor_path: Option<std::path::PathBuf>,
+}
+
+/// Circuit breaker status for monitoring/admin interface
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CircuitBreakerStatus {
+    /// Whether the circuit breaker is currently open (spill writes disabled)
+    pub is_open: bool,
+    /// Whether emergency halt is active
+    pub emergency_halt: bool,
+    /// Current disk usage threshold (0.0-1.0)
+    pub disk_threshold: f64,
+    /// Current disk usage if available (0.0-1.0)
+    pub disk_usage: Option<f64>,
+    /// Path being monitored for disk space
+    pub monitor_path: Option<std::path::PathBuf>,
+}
+
+impl CircuitBreakerState {
+    /// Create default circuit breaker state for generic writers (no disk monitoring)
+    fn new_generic() -> Self {
+        Self {
+            is_open: false,
+            disk_threshold: 0.95, // 95% disk usage triggers circuit breaker
+            emergency_halt: false,
+            monitor_path: None,
+        }
+    }
+
+    /// Create circuit breaker state for file writers with disk monitoring
+    fn new_with_path(path: &Path) -> Self {
+        Self {
+            is_open: false,
+            disk_threshold: 0.95, // 95% disk usage triggers circuit breaker
+            emergency_halt: false,
+            monitor_path: Some(path.parent().unwrap_or(path).to_path_buf()),
+        }
+    }
+
+    /// Check if circuit breaker should open due to disk exhaustion or emergency halt
+    fn should_open(&self) -> Result<bool, String> {
+        // Manual emergency halt overrides everything
+        if self.emergency_halt {
+            return Ok(true);
+        }
+
+        // No disk monitoring for generic writers
+        let Some(ref monitor_path) = self.monitor_path else {
+            return Ok(false);
+        };
+
+        // Check disk usage
+        match get_disk_usage(monitor_path) {
+            Ok(usage) if usage > self.disk_threshold => {
+                Ok(true)
+            }
+            Ok(_) => Ok(false),
+            Err(e) => {
+                // On monitoring error, stay conservative but don't fail
+                eprintln!("WARN: disk monitoring error for {}: {}", monitor_path.display(), e);
+                Ok(false)
+            }
+        }
+    }
+}
+
+/// Get disk usage as a percentage (0.0 to 1.0) for the filesystem containing the given path
+fn get_disk_usage(path: &Path) -> Result<f64, String> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::mem;
+        use std::os::unix::ffi::OsStrExt;
+
+        let path_c = CString::new(path.as_os_str().as_bytes())
+            .map_err(|e| format!("invalid path: {}", e))?;
+
+        let mut statvfs: libc::statvfs = unsafe { mem::zeroed() };
+        let result = unsafe { libc::statvfs(path_c.as_ptr(), &mut statvfs) };
+
+        if result != 0 {
+            return Err(format!("statvfs failed: {}", std::io::Error::last_os_error()));
+        }
+
+        let total_blocks = statvfs.f_blocks;
+        let available_blocks = statvfs.f_bavail;
+
+        if total_blocks == 0 {
+            return Err("invalid filesystem: zero total blocks".to_string());
+        }
+
+        let used_blocks = total_blocks.saturating_sub(available_blocks);
+        let usage = used_blocks as f64 / total_blocks as f64;
+        Ok(usage)
+    }
+
+    #[cfg(not(unix))]
+    {
+        // Fallback for non-Unix systems - disable disk monitoring
+        Ok(0.0)
+    }
 }
 
 enum SpillWriter {
@@ -1096,6 +1262,7 @@ impl LabSpillMode {
         Self {
             ledger: EvidenceLedger::new(capacity),
             spill_writer: SpillWriter::Generic(writer),
+            circuit_breaker: CircuitBreakerState::new_generic(),
         }
     }
 
@@ -1151,6 +1318,7 @@ impl LabSpillMode {
         Ok(Self {
             ledger: EvidenceLedger::new(capacity),
             spill_writer: SpillWriter::File(file),
+            circuit_breaker: CircuitBreakerState::new_with_path(path),
         })
     }
 
@@ -1186,6 +1354,7 @@ impl LabSpillMode {
         Ok(Self {
             ledger: EvidenceLedger::with_verifying_key(capacity, verifying_key),
             spill_writer: SpillWriter::File(file),
+            circuit_breaker: CircuitBreakerState::new_with_path(path),
         })
     }
 
@@ -1206,11 +1375,80 @@ impl LabSpillMode {
             reason: format!("JSON error: {e}"),
         })?;
 
-        self.spill_writer.append_json_line(&json_line)?;
+        // CIRCUIT BREAKER: Check disk exhaustion and emergency halt
+        let should_open = self.circuit_breaker.should_open().unwrap_or(false);
+        let was_open = self.circuit_breaker.is_open;
+
+        if should_open && !was_open {
+            // Circuit breaker opening - log event and switch to memory-only mode
+            self.circuit_breaker.is_open = true;
+            eprintln!("{}: disk exhaustion detected, switching to memory-only mode", event_codes::LEDGER_CIRCUIT_BREAKER_OPEN);
+        } else if !should_open && was_open {
+            // Circuit breaker closing - resume spill writes
+            self.circuit_breaker.is_open = false;
+            eprintln!("{}: disk space recovered, resuming spill writes", event_codes::LEDGER_CIRCUIT_BREAKER_CLOSED);
+        }
+
+        // Always append to memory ledger regardless of circuit breaker state
         let id = self.ledger.append_prevalidated(entry, entry_size);
 
-        eprintln!("{}", format_ledger_spill_event(id, json_line.len()));
+        // Only attempt spill write if circuit breaker is closed
+        if !self.circuit_breaker.is_open {
+            self.spill_writer.append_json_line(&json_line)?;
+            eprintln!("{}", format_ledger_spill_event(id, json_line.len()));
+        } else {
+            // Circuit breaker open - memory-only mode
+            eprintln!("{}: spill write skipped for entry={}, circuit breaker open (memory-only mode)", event_codes::LEDGER_CIRCUIT_BREAKER_OPEN, id);
+        }
+
         Ok(id)
+    }
+
+    /// Emergency admin command: halt all evidence ledger spill writes
+    ///
+    /// Use during incidents to prevent disk exhaustion. Evidence continues
+    /// to be stored in memory but will not be written to disk until resumed.
+    pub fn emergency_halt(&mut self) {
+        if !self.circuit_breaker.emergency_halt {
+            self.circuit_breaker.emergency_halt = true;
+            self.circuit_breaker.is_open = true;
+            eprintln!("{}: admin emergency halt activated - spill writes disabled", event_codes::LEDGER_EMERGENCY_HALT);
+        }
+    }
+
+    /// Admin command: resume evidence ledger spill writes after emergency halt
+    pub fn emergency_resume(&mut self) {
+        if self.circuit_breaker.emergency_halt {
+            self.circuit_breaker.emergency_halt = false;
+            // Note: circuit breaker state will be re-evaluated on next append()
+            eprintln!("{}: admin emergency halt cleared - spill writes will resume if disk space available", event_codes::LEDGER_EMERGENCY_HALT);
+        }
+    }
+
+    /// Get circuit breaker status for monitoring/debugging
+    pub fn circuit_breaker_status(&self) -> CircuitBreakerStatus {
+        let disk_usage = if let Some(ref path) = self.circuit_breaker.monitor_path {
+            get_disk_usage(path).ok()
+        } else {
+            None
+        };
+
+        CircuitBreakerStatus {
+            is_open: self.circuit_breaker.is_open,
+            emergency_halt: self.circuit_breaker.emergency_halt,
+            disk_threshold: self.circuit_breaker.disk_threshold,
+            disk_usage,
+            monitor_path: self.circuit_breaker.monitor_path.clone(),
+        }
+    }
+
+    /// Update disk usage threshold (admin command)
+    pub fn set_disk_threshold(&mut self, threshold: f64) -> Result<(), String> {
+        if !(0.0..=1.0).contains(&threshold) {
+            return Err("threshold must be between 0.0 and 1.0".to_string());
+        }
+        self.circuit_breaker.disk_threshold = threshold;
+        Ok(())
     }
 
     /// Sync all accumulated evidence entries to durable storage.
