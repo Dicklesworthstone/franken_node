@@ -544,6 +544,7 @@ fn revocation_severity_tag(severity: RevocationSeverity) -> &'static str {
     }
 }
 
+/// Computes canonical hash of fleet decision receipt payload for tamper detection.
 #[must_use]
 pub fn canonical_decision_receipt_payload_hash(
     operation_id: &str,
@@ -1570,11 +1571,13 @@ fn shared_fleet_control_manager() -> &'static SharedFleetControlOwner {
     SHARED_FLEET_CONTROL_MANAGER.get_or_init(SharedFleetControlOwner::new)
 }
 
+/// Resets the global fleet control manager state for testing isolation.
 #[cfg(any(test, feature = "control-plane"))]
 pub fn reset_shared_fleet_control_manager_for_tests() {
     shared_fleet_control_manager().reset_for_tests();
 }
 
+/// Activates the global fleet control manager for testing scenarios.
 #[cfg(any(test, feature = "control-plane"))]
 pub fn activate_shared_fleet_control_manager_for_tests() {
     let mut guard = match shared_fleet_control_manager().inner.lock() {
