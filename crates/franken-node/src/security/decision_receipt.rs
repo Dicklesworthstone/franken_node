@@ -150,10 +150,21 @@ pub enum ReceiptError {
     MissingHighImpactReceipt { action_name: String },
     #[error("hash-chain mismatch: expected {expected}, got {actual}")]
     HashChainMismatch { expected: String, actual: String },
-    #[error("failed to write receipt export to {path}: {source}")]
+    /// Failed to write receipt file to filesystem.
+    ///
+    /// This error occurs during atomic receipt persistence operations including:
+    /// - Temporary file creation/writing
+    /// - Directory creation for receipt storage
+    /// - Atomic rename to final path
+    /// - Lock acquisition for concurrent write safety
+    #[error("failed to write receipt to {path}: {source}. {remediation_hint}")]
     WriteFailed {
+        /// Filesystem path where the write operation failed
         path: String,
+        /// Underlying I/O error from the filesystem operation
         source: std::io::Error,
+        /// Specific remediation guidance for operators
+        remediation_hint: String,
     },
     #[error("unsafe path '{path}': {reason}")]
     UnsafePath { path: String, reason: String },
@@ -527,6 +538,7 @@ fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> Result<(), ReceiptError>
     let _guard = PERSIST_LOCK.lock().map_err(|_| ReceiptError::WriteFailed {
         path: path.display().to_string(),
         source: std::io::Error::other("receipt persist lock poisoned"),
+        remediation_hint: "Check for concurrent receipt operations or restart process".to_string(),
     })?;
     let mut temp = TempFileGuard::new(path);
     {
@@ -537,12 +549,14 @@ fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> Result<(), ReceiptError>
             .map_err(|source| ReceiptError::WriteFailed {
                 path: path.display().to_string(),
                 source,
+                remediation_hint: "Check directory permissions and available disk space".to_string(),
             })?;
         file.write_all(bytes)
             .and_then(|()| file.sync_all())
             .map_err(|source| ReceiptError::WriteFailed {
                 path: path.display().to_string(),
                 source,
+                remediation_hint: "Check available disk space and filesystem integrity".to_string(),
             })?;
     }
     temp.persist(path)
@@ -583,6 +597,7 @@ impl TempFileGuard {
         std::fs::rename(&self.path, target).map_err(|source| ReceiptError::WriteFailed {
             path: target.display().to_string(),
             source,
+            remediation_hint: "Check target directory permissions and filesystem consistency".to_string(),
         })?;
         self.persisted = true;
         Ok(())
@@ -738,6 +753,7 @@ fn ensure_parent_dir(path: &Path) -> Result<(), ReceiptError> {
         std::fs::create_dir_all(parent).map_err(|source| ReceiptError::WriteFailed {
             path: path.display().to_string(),
             source,
+            remediation_hint: "Check parent directory permissions and available inodes".to_string(),
         })?;
     }
     Ok(())
