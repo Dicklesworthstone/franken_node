@@ -242,6 +242,13 @@ impl ReceiptChain {
                 "chain capacity exhausted ({MAX_CHAIN_ENTRIES} entries)"
             )));
         }
+        if self.would_checkpoint_after_append(appended_at_millis)
+            && self.checkpoints.len() >= MAX_CHECKPOINTS
+        {
+            return Err(ChainError::checkpoint(format!(
+                "checkpoint capacity exhausted ({MAX_CHECKPOINTS} checkpoints)"
+            )));
+        }
         let trace_id = trace_id.into();
         let receipt_hash = receipt_hash_sha256(&receipt)
             .map_err(|err| ChainError::internal(format!("receipt hash failed: {err}")))?;
@@ -463,6 +470,23 @@ impl ReceiptChain {
             .entries
             .len()
             .saturating_sub(self.last_checkpoint_entry);
+        self.should_checkpoint_for_entries_since_last(entries_since_last, now_millis)
+    }
+
+    fn would_checkpoint_after_append(&self, now_millis: u64) -> bool {
+        let entries_since_last = self
+            .entries
+            .len()
+            .saturating_add(1)
+            .saturating_sub(self.last_checkpoint_entry);
+        self.should_checkpoint_for_entries_since_last(entries_since_last, now_millis)
+    }
+
+    fn should_checkpoint_for_entries_since_last(
+        &self,
+        entries_since_last: usize,
+        now_millis: u64,
+    ) -> bool {
         if entries_since_last == 0 {
             return false;
         }
@@ -489,6 +513,11 @@ impl ReceiptChain {
         now_millis: u64,
         trace_id: String,
     ) -> Result<ReceiptCheckpoint, ChainError> {
+        if self.checkpoints.len() >= MAX_CHECKPOINTS {
+            return Err(ChainError::checkpoint(format!(
+                "checkpoint capacity exhausted ({MAX_CHECKPOINTS} checkpoints)"
+            )));
+        }
         let start_index = u64::try_from(self.last_checkpoint_entry).unwrap_or(u64::MAX);
         let end_entry_index = self
             .entries
@@ -511,7 +540,7 @@ impl ReceiptChain {
             trace_id,
         };
         self.next_checkpoint_id = self.next_checkpoint_id.saturating_add(1);
-        push_bounded(&mut self.checkpoints, checkpoint.clone(), MAX_CHECKPOINTS);
+        self.checkpoints.push(checkpoint.clone());
         self.last_checkpoint_entry = self.entries.len();
         Ok(checkpoint)
     }
@@ -1308,6 +1337,48 @@ mod tests {
         push_bounded(&mut entries, replacement, 0);
 
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn checkpoint_capacity_exhaustion_fails_without_evicting_or_appending() {
+        let mut chain = ReceiptChain::new(ReceiptChainConfig {
+            checkpoint_every_entries: 1,
+            checkpoint_every_millis: 0,
+        });
+
+        for seq in 0..MAX_CHECKPOINTS {
+            let seq_u64 = u64::try_from(seq).unwrap_or(u64::MAX);
+            chain
+                .append(
+                    make_receipt(ExecutionActionType::NetworkAccess, seq_u64),
+                    1_700_001_950_000_u64.saturating_add(seq_u64),
+                    "trace-checkpoint-cap",
+                )
+                .unwrap();
+        }
+        chain.verify_integrity().unwrap();
+        assert_eq!(chain.entries().len(), MAX_CHECKPOINTS);
+        assert_eq!(chain.checkpoints().len(), MAX_CHECKPOINTS);
+        assert_eq!(chain.checkpoints()[0].checkpoint_id, 0);
+        assert_eq!(
+            chain.checkpoints()[MAX_CHECKPOINTS - 1].checkpoint_id,
+            u64::try_from(MAX_CHECKPOINTS - 1).unwrap_or(u64::MAX)
+        );
+
+        let err = chain
+            .append(
+                make_receipt(ExecutionActionType::SecretAccess, 9_999),
+                1_700_001_960_000,
+                "trace-checkpoint-cap-overflow",
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VEF_CHAIN_CHECKPOINT);
+        assert!(err.message.contains("checkpoint capacity exhausted"));
+        assert_eq!(chain.entries().len(), MAX_CHECKPOINTS);
+        assert_eq!(chain.checkpoints().len(), MAX_CHECKPOINTS);
+        assert_eq!(chain.checkpoints()[0].checkpoint_id, 0);
+        chain.verify_integrity().unwrap();
     }
 
     #[test]
