@@ -562,6 +562,7 @@ pub fn test_replay_entry(decision_id: &str, kind: DecisionKind, epoch_id: u64) -
         payload: serde_json::json!({}),
         size_bytes: 0,
         signature: String::new(),
+        prev_entry_hash: String::new(),
     }
 }
 

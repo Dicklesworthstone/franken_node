@@ -723,6 +723,7 @@ impl EvidenceLedger {
             verifying_key,
             seen_signatures: HashSet::new(),
             seen_signature_order: VecDeque::new(),
+            last_entry_hash: None,
         }
     }
 

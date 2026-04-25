@@ -92,6 +92,7 @@ pub fn to_ledger_entry(entry: &ControlEvidenceEntry) -> EvidenceEntry {
         }),
         size_bytes: 0,
         signature: String::new(),
+        prev_entry_hash: String::new(),
     }
 }
 
