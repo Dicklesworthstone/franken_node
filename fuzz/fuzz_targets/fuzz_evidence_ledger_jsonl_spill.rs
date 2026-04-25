@@ -36,9 +36,8 @@ fuzz_target!(|data: &[u8]| {
                     }
                 }
 
-                // Test field validation - ensure timestamp_ms and epoch_id don't overflow
-                assert!(entry.timestamp_ms <= u64::MAX, "timestamp_ms must not overflow");
-                assert!(entry.epoch_id <= u64::MAX, "epoch_id must not overflow");
+                // Test field validation - ensure fields are reasonable
+                assert!(entry.timestamp_ms > 1_600_000_000_000, "timestamp_ms should be recent epoch time");
 
                 // Test size estimation doesn't panic
                 let _ = entry.estimated_size();
@@ -64,7 +63,6 @@ fuzz_target!(|data: &[u8]| {
 
             // If we successfully parsed entries, ensure they maintain consistency
             for entry in &parsed_entries {
-                assert!(entry.timestamp_ms > 0 || entry.timestamp_ms == 0, "timestamp_ms should be valid");
                 assert!(entry.size_bytes <= 10_000_000, "size_bytes should be reasonable");
             }
         }

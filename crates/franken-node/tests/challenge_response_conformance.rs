@@ -78,13 +78,11 @@ fn create_valid_message(
     secret: &RootSecret,
 ) -> ChannelMessage {
     let nonce = {
+        use sha2::{Sha256, Digest};
+        let input = format!("{}:{}", id, seq);
+        let hash = Sha256::digest(input.as_bytes());
         let mut n = [0u8; 16];
-        let bytes = format!("{}:{}", id, seq);
-        for (i, b) in bytes.as_bytes().iter().enumerate() {
-            if i < 16 {
-                n[i] = *b;
-            }
-        }
+        n.copy_from_slice(&hash[..16]);
         n
     };
 
