@@ -88,6 +88,15 @@ pub enum DecisionKind {
 }
 
 impl DecisionKind {
+    /// Return the stable lowercase label used in canonical entry encoding.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::DecisionKind;
+    ///
+    /// assert_eq!(DecisionKind::Quarantine.label(), "quarantine");
+    /// ```
     pub fn label(&self) -> &'static str {
         match self {
             Self::Admit => "admit",
@@ -128,6 +137,15 @@ pub struct EvidenceEntry {
 
 impl EvidenceEntry {
     /// Estimate serialized byte size of this entry.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::test_entry;
+    ///
+    /// let entry = test_entry("DEC-001", 1);
+    /// assert!(entry.estimated_size() > 0);
+    /// ```
     pub fn estimated_size(&self) -> usize {
         serde_json::to_string(self).map(|s| s.len()).unwrap_or(256)
     }
@@ -199,6 +217,19 @@ fn update_hash_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
 }
 
 /// Sign an evidence entry using an Ed25519 signing key.
+///
+/// # Examples
+///
+/// ```rust
+/// use ed25519_dalek::SigningKey;
+/// use frankenengine_node::observability::evidence_ledger::{sign_evidence_entry, test_entry};
+///
+/// let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+/// let mut entry = test_entry("DEC-001", 1);
+/// sign_evidence_entry(&mut entry, &signing_key);
+///
+/// assert!(!entry.signature.is_empty());
+/// ```
 pub fn sign_evidence_entry(entry: &mut EvidenceEntry, signing_key: &SigningKey) {
     let canonical_bytes = canonical_entry_bytes(entry);
     let signature_bytes = sign_bytes(signing_key, &canonical_bytes);
@@ -206,6 +237,21 @@ pub fn sign_evidence_entry(entry: &mut EvidenceEntry, signing_key: &SigningKey) 
 }
 
 /// Verify the signature on an evidence entry using an Ed25519 verifying key.
+///
+/// # Examples
+///
+/// ```rust
+/// use ed25519_dalek::SigningKey;
+/// use frankenengine_node::observability::evidence_ledger::{
+///     sign_evidence_entry, test_entry, verify_evidence_entry,
+/// };
+///
+/// let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+/// let mut entry = test_entry("DEC-001", 1);
+/// sign_evidence_entry(&mut entry, &signing_key);
+///
+/// verify_evidence_entry(&entry, &signing_key.verifying_key()).unwrap();
+/// ```
 pub fn verify_evidence_entry(
     entry: &EvidenceEntry,
     verifying_key: &VerifyingKey,
@@ -338,6 +384,17 @@ pub struct LedgerCapacity {
 }
 
 impl LedgerCapacity {
+    /// Construct a bounded capacity configuration for an evidence ledger.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::LedgerCapacity;
+    ///
+    /// let capacity = LedgerCapacity::new(128, 4096);
+    /// assert_eq!(capacity.max_entries, 128);
+    /// assert_eq!(capacity.max_bytes, 4096);
+    /// ```
     pub fn new(max_entries: usize, max_bytes: usize) -> Self {
         Self {
             max_entries,
@@ -497,10 +554,12 @@ impl EvidenceLedger {
             let seen_timestamp_bytes = seen_timestamp.to_le_bytes();
 
             // Constant-time timestamp comparison (no branching on timestamp match)
-            let timestamp_match = constant_time::ct_eq_bytes(&timestamp_bytes, &seen_timestamp_bytes);
+            let timestamp_match =
+                constant_time::ct_eq_bytes(&timestamp_bytes, &seen_timestamp_bytes);
 
             // Constant-time signature comparison
-            let signature_match = constant_time::ct_eq_bytes(signature_bytes, seen_signature.as_bytes());
+            let signature_match =
+                constant_time::ct_eq_bytes(signature_bytes, seen_signature.as_bytes());
 
             // Accumulate result: replay detected if BOTH timestamp AND signature match
             found_replay = found_replay || (timestamp_match && signature_match);
@@ -538,6 +597,15 @@ impl EvidenceLedger {
     }
 
     /// Create a new evidence ledger with the given capacity.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{EvidenceLedger, LedgerCapacity};
+    ///
+    /// let ledger = EvidenceLedger::new(LedgerCapacity::new(16, 4096));
+    /// assert!(ledger.is_empty());
+    /// ```
     pub fn new<C>(capacity: C) -> Self
     where
         C: Into<LedgerCapacity>,
@@ -546,6 +614,18 @@ impl EvidenceLedger {
     }
 
     /// Create a new evidence ledger with signature verification enabled.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use ed25519_dalek::SigningKey;
+    /// use frankenengine_node::observability::evidence_ledger::{EvidenceLedger, LedgerCapacity};
+    ///
+    /// let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+    /// let ledger =
+    ///     EvidenceLedger::with_verifying_key(LedgerCapacity::new(16, 4096), signing_key.verifying_key());
+    /// assert!(ledger.is_empty());
+    /// ```
     pub fn with_verifying_key(capacity: LedgerCapacity, verifying_key: VerifyingKey) -> Self {
         Self::with_optional_verifying_key(capacity, Some(verifying_key))
     }
@@ -568,36 +648,106 @@ impl EvidenceLedger {
     }
 
     /// Return the capacity configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{EvidenceLedger, LedgerCapacity};
+    ///
+    /// let ledger = EvidenceLedger::new(LedgerCapacity::new(4, 1024));
+    /// assert_eq!(ledger.capacity().max_entries, 4);
+    /// ```
     pub fn capacity(&self) -> &LedgerCapacity {
         &self.capacity
     }
 
     /// Return the current number of entries.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{EvidenceLedger, LedgerCapacity, test_entry};
+    ///
+    /// let mut ledger = EvidenceLedger::new(LedgerCapacity::new(4, 4096));
+    /// ledger.append(test_entry("DEC-001", 1)).unwrap();
+    /// assert_eq!(ledger.len(), 1);
+    /// ```
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Return whether the ledger is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{EvidenceLedger, LedgerCapacity};
+    ///
+    /// let ledger = EvidenceLedger::new(LedgerCapacity::new(4, 4096));
+    /// assert!(ledger.is_empty());
+    /// ```
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// Return the current byte usage.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{EvidenceLedger, LedgerCapacity, test_entry};
+    ///
+    /// let mut ledger = EvidenceLedger::new(LedgerCapacity::new(4, 4096));
+    /// ledger.append(test_entry("DEC-001", 1)).unwrap();
+    /// assert!(ledger.current_bytes() > 0);
+    /// ```
     pub fn current_bytes(&self) -> usize {
         self.current_bytes
     }
 
     /// Return total entries ever appended.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{EvidenceLedger, LedgerCapacity, test_entry};
+    ///
+    /// let mut ledger = EvidenceLedger::new(LedgerCapacity::new(4, 4096));
+    /// ledger.append(test_entry("DEC-001", 1)).unwrap();
+    /// assert_eq!(ledger.total_appended(), 1);
+    /// ```
     pub fn total_appended(&self) -> u64 {
         self.total_appended
     }
 
     /// Return total entries evicted.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{EvidenceLedger, LedgerCapacity, test_entry};
+    ///
+    /// let mut ledger = EvidenceLedger::new(LedgerCapacity::new(1, 4096));
+    /// ledger.append(test_entry("DEC-001", 1)).unwrap();
+    /// ledger.append(test_entry("DEC-002", 2)).unwrap();
+    /// assert_eq!(ledger.total_evicted(), 1);
+    /// ```
     pub fn total_evicted(&self) -> u64 {
         self.total_evicted
     }
 
     /// Return counters suitable for metrics export.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{EvidenceLedger, LedgerCapacity, test_entry};
+    ///
+    /// let mut ledger = EvidenceLedger::new(LedgerCapacity::new(4, 4096));
+    /// ledger.append(test_entry("DEC-001", 1)).unwrap();
+    /// let metrics = ledger.metrics();
+    /// assert_eq!(metrics.retained_entries, 1);
+    /// ```
     pub fn metrics(&self) -> LedgerMetrics {
         LedgerMetrics {
             retained_entries: self.entries.len(),
@@ -613,6 +763,16 @@ impl EvidenceLedger {
     ///
     /// Evicts oldest entries as needed to stay within capacity bounds.
     /// Returns the assigned EntryId on success.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{EvidenceLedger, EntryId, LedgerCapacity, test_entry};
+    ///
+    /// let mut ledger = EvidenceLedger::new(LedgerCapacity::new(4, 4096));
+    /// let entry_id = ledger.append(test_entry("DEC-001", 1)).unwrap();
+    /// assert_eq!(entry_id, EntryId(1));
+    /// ```
     pub fn append(&mut self, entry: EvidenceEntry) -> Result<EntryId, LedgerError> {
         let (entry, entry_size) = self.validate_append(&entry)?;
         Ok(self.append_prevalidated(entry, entry_size))
@@ -626,8 +786,10 @@ impl EvidenceLedger {
 
             if self.verifying_key.is_some() {
                 // Remove the evicted entry's timestamp+signature from replay attack prevention.
-                let evicted_replay_key =
-                    (evicted_entry.timestamp_ms, Box::from(evicted_entry.signature.as_str()));
+                let evicted_replay_key = (
+                    evicted_entry.timestamp_ms,
+                    Box::from(evicted_entry.signature.as_str()),
+                );
                 self.seen_signatures.remove(&evicted_replay_key);
             }
 
@@ -639,17 +801,51 @@ impl EvidenceLedger {
     }
 
     /// Iterate over the most recent N entries (newest last).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{EvidenceLedger, LedgerCapacity, test_entry};
+    ///
+    /// let mut ledger = EvidenceLedger::new(LedgerCapacity::new(4, 4096));
+    /// ledger.append(test_entry("DEC-001", 1)).unwrap();
+    /// ledger.append(test_entry("DEC-002", 2)).unwrap();
+    /// let recent: Vec<_> = ledger.iter_recent(1).collect();
+    /// assert_eq!(recent[0].1.decision_id, "DEC-002");
+    /// ```
     pub fn iter_recent(&self, n: usize) -> impl Iterator<Item = &(EntryId, EvidenceEntry, usize)> {
         let start = self.entries.len().saturating_sub(n);
         self.entries.iter().skip(start)
     }
 
     /// Iterate over all entries in order (oldest first).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{EvidenceLedger, LedgerCapacity, test_entry};
+    ///
+    /// let mut ledger = EvidenceLedger::new(LedgerCapacity::new(4, 4096));
+    /// ledger.append(test_entry("DEC-001", 1)).unwrap();
+    /// let all: Vec<_> = ledger.iter_all().collect();
+    /// assert_eq!(all.len(), 1);
+    /// ```
     pub fn iter_all(&self) -> impl Iterator<Item = &(EntryId, EvidenceEntry, usize)> {
         self.entries.iter()
     }
 
     /// Return a consistent, cloneable snapshot for export.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{EvidenceLedger, LedgerCapacity, test_entry};
+    ///
+    /// let mut ledger = EvidenceLedger::new(LedgerCapacity::new(4, 4096));
+    /// ledger.append(test_entry("DEC-001", 1)).unwrap();
+    /// let snapshot = ledger.snapshot();
+    /// assert_eq!(snapshot.entries.len(), 1);
+    /// ```
     pub fn snapshot(&self) -> LedgerSnapshot {
         LedgerSnapshot {
             entries: self
@@ -679,6 +875,16 @@ pub struct SharedEvidenceLedger {
 }
 
 impl SharedEvidenceLedger {
+    /// Create a thread-safe ledger with the provided capacity.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{LedgerCapacity, SharedEvidenceLedger};
+    ///
+    /// let ledger = SharedEvidenceLedger::new(LedgerCapacity::new(4, 4096));
+    /// assert!(ledger.is_empty());
+    /// ```
     pub fn new<C>(capacity: C) -> Self
     where
         C: Into<LedgerCapacity>,
@@ -688,6 +894,21 @@ impl SharedEvidenceLedger {
         }
     }
 
+    /// Create a thread-safe ledger with signature verification enabled.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use ed25519_dalek::SigningKey;
+    /// use frankenengine_node::observability::evidence_ledger::{LedgerCapacity, SharedEvidenceLedger};
+    ///
+    /// let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+    /// let ledger = SharedEvidenceLedger::with_verifying_key(
+    ///     LedgerCapacity::new(4, 4096),
+    ///     signing_key.verifying_key(),
+    /// );
+    /// assert!(ledger.is_empty());
+    /// ```
     pub fn with_verifying_key(capacity: LedgerCapacity, verifying_key: VerifyingKey) -> Self {
         Self {
             inner: Arc::new(RwLock::new(EvidenceLedger::with_verifying_key(
@@ -697,23 +918,79 @@ impl SharedEvidenceLedger {
         }
     }
 
+    /// Append a single entry through the shared wrapper.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{LedgerCapacity, SharedEvidenceLedger, test_entry};
+    ///
+    /// let ledger = SharedEvidenceLedger::new(LedgerCapacity::new(4, 4096));
+    /// ledger.append(test_entry("DEC-001", 1)).unwrap();
+    /// assert_eq!(ledger.len(), 1);
+    /// ```
     pub fn append(&self, entry: EvidenceEntry) -> Result<EntryId, LedgerError> {
         let mut ledger = self.write_recover();
         ledger.append(entry)
     }
 
+    /// Return the number of retained entries in the shared ledger.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{LedgerCapacity, SharedEvidenceLedger, test_entry};
+    ///
+    /// let ledger = SharedEvidenceLedger::new(LedgerCapacity::new(4, 4096));
+    /// ledger.append(test_entry("DEC-001", 1)).unwrap();
+    /// assert_eq!(ledger.len(), 1);
+    /// ```
     pub fn len(&self) -> usize {
         self.read_recover().len()
     }
 
+    /// Return whether the shared ledger has no retained entries.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{LedgerCapacity, SharedEvidenceLedger};
+    ///
+    /// let ledger = SharedEvidenceLedger::new(LedgerCapacity::new(4, 4096));
+    /// assert!(ledger.is_empty());
+    /// ```
     pub fn is_empty(&self) -> bool {
         self.read_recover().is_empty()
     }
 
+    /// Clone the current shared ledger state into an exportable snapshot.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{LedgerCapacity, SharedEvidenceLedger, test_entry};
+    ///
+    /// let ledger = SharedEvidenceLedger::new(LedgerCapacity::new(4, 4096));
+    /// ledger.append(test_entry("DEC-001", 1)).unwrap();
+    /// let snapshot = ledger.snapshot();
+    /// assert_eq!(snapshot.entries.len(), 1);
+    /// ```
     pub fn snapshot(&self) -> LedgerSnapshot {
         self.read_recover().snapshot()
     }
 
+    /// Return counters for the shared ledger state.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{LedgerCapacity, SharedEvidenceLedger, test_entry};
+    ///
+    /// let ledger = SharedEvidenceLedger::new(LedgerCapacity::new(4, 4096));
+    /// ledger.append(test_entry("DEC-001", 1)).unwrap();
+    /// let metrics = ledger.metrics();
+    /// assert_eq!(metrics.retained_entries, 1);
+    /// ```
     pub fn metrics(&self) -> LedgerMetrics {
         self.read_recover().metrics()
     }
@@ -789,17 +1066,24 @@ impl SpillWriter {
     fn sync_durability(&mut self) -> Result<(), LedgerError> {
         match self {
             Self::Generic(_) => Ok(()), // No-op for generic writers
-            Self::File(file) => {
-                file.sync_all().map_err(|e| LedgerError::SpillError {
-                    reason: format!("sync: {e}"),
-                })
-            }
+            Self::File(file) => file.sync_all().map_err(|e| LedgerError::SpillError {
+                reason: format!("sync: {e}"),
+            }),
         }
     }
 }
 
 impl LabSpillMode {
     /// Create a lab-mode ledger that spills to the given writer.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{LabSpillMode, LedgerCapacity};
+    ///
+    /// let spill = LabSpillMode::new(LedgerCapacity::new(4, 4096), Box::new(Vec::<u8>::new()));
+    /// assert!(spill.is_empty());
+    /// ```
     pub fn new(capacity: LedgerCapacity, writer: Box<dyn Write + Send>) -> Self {
         Self {
             ledger: EvidenceLedger::new(capacity),
@@ -808,6 +1092,21 @@ impl LabSpillMode {
     }
 
     /// Create a lab-mode ledger with signature verification enabled.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use ed25519_dalek::SigningKey;
+    /// use frankenengine_node::observability::evidence_ledger::{LabSpillMode, LedgerCapacity};
+    ///
+    /// let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+    /// let spill = LabSpillMode::with_verifying_key(
+    ///     LedgerCapacity::new(4, 4096),
+    ///     signing_key.verifying_key(),
+    ///     Box::new(Vec::<u8>::new()),
+    /// );
+    /// assert!(spill.is_empty());
+    /// ```
     pub fn with_verifying_key(
         capacity: LedgerCapacity,
         verifying_key: VerifyingKey,
@@ -820,6 +1119,16 @@ impl LabSpillMode {
     }
 
     /// Create a lab-mode ledger that spills to a file path.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{LabSpillMode, LedgerCapacity};
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let spill = LabSpillMode::with_file(LedgerCapacity::new(4, 4096), &dir.path().join("spill.jsonl")).unwrap();
+    /// assert!(spill.is_empty());
+    /// ```
     pub fn with_file(
         capacity: LedgerCapacity,
         path: &std::path::Path,
@@ -838,6 +1147,22 @@ impl LabSpillMode {
     }
 
     /// Create a lab-mode ledger with signature verification enabled that spills to a file path.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use ed25519_dalek::SigningKey;
+    /// use frankenengine_node::observability::evidence_ledger::{LabSpillMode, LedgerCapacity};
+    ///
+    /// let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let spill = LabSpillMode::with_file_and_verifying_key(
+    ///     LedgerCapacity::new(4, 4096),
+    ///     signing_key.verifying_key(),
+    ///     &dir.path().join("spill.jsonl"),
+    /// ).unwrap();
+    /// assert!(spill.is_empty());
+    /// ```
     pub fn with_file_and_verifying_key(
         capacity: LedgerCapacity,
         verifying_key: VerifyingKey,
@@ -857,6 +1182,16 @@ impl LabSpillMode {
     }
 
     /// Append an entry, also writing it to the spill file.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{LabSpillMode, LedgerCapacity, test_entry};
+    ///
+    /// let mut spill = LabSpillMode::new(LedgerCapacity::new(4, 4096), Box::new(Vec::<u8>::new()));
+    /// spill.append(test_entry("DEC-001", 1)).unwrap();
+    /// assert_eq!(spill.len(), 1);
+    /// ```
     pub fn append(&mut self, entry: EvidenceEntry) -> Result<EntryId, LedgerError> {
         let (entry, entry_size) = self.ledger.validate_append(&entry)?;
         let json_line = serde_json::to_string(&entry).map_err(|e| LedgerError::SpillError {
@@ -874,22 +1209,91 @@ impl LabSpillMode {
     ///
     /// Call this after batches of critical evidence entries to ensure durability.
     /// Individual append() calls are buffered for performance.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{LabSpillMode, LedgerCapacity, test_entry};
+    ///
+    /// let mut spill = LabSpillMode::new(LedgerCapacity::new(4, 4096), Box::new(Vec::<u8>::new()));
+    /// spill.append(test_entry("DEC-001", 1)).unwrap();
+    /// spill.sync_evidence_durability().unwrap();
+    /// ```
     pub fn sync_evidence_durability(&mut self) -> Result<(), LedgerError> {
         self.spill_writer.sync_durability()
     }
 
+    /// Borrow the underlying bounded ledger.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{LabSpillMode, LedgerCapacity};
+    ///
+    /// let spill = LabSpillMode::new(LedgerCapacity::new(4, 4096), Box::new(Vec::<u8>::new()));
+    /// assert_eq!(spill.ledger().capacity().max_entries, 4);
+    /// ```
     pub fn ledger(&self) -> &EvidenceLedger {
         &self.ledger
     }
+
+    /// Return the number of retained entries in lab mode.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{LabSpillMode, LedgerCapacity, test_entry};
+    ///
+    /// let mut spill = LabSpillMode::new(LedgerCapacity::new(4, 4096), Box::new(Vec::<u8>::new()));
+    /// spill.append(test_entry("DEC-001", 1)).unwrap();
+    /// assert_eq!(spill.len(), 1);
+    /// ```
     pub fn len(&self) -> usize {
         self.ledger.len()
     }
+
+    /// Return whether the lab-mode ledger has no retained entries.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{LabSpillMode, LedgerCapacity};
+    ///
+    /// let spill = LabSpillMode::new(LedgerCapacity::new(4, 4096), Box::new(Vec::<u8>::new()));
+    /// assert!(spill.is_empty());
+    /// ```
     pub fn is_empty(&self) -> bool {
         self.ledger.is_empty()
     }
+
+    /// Snapshot the retained lab-mode ledger entries.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{LabSpillMode, LedgerCapacity, test_entry};
+    ///
+    /// let mut spill = LabSpillMode::new(LedgerCapacity::new(4, 4096), Box::new(Vec::<u8>::new()));
+    /// spill.append(test_entry("DEC-001", 1)).unwrap();
+    /// let snapshot = spill.snapshot();
+    /// assert_eq!(snapshot.entries.len(), 1);
+    /// ```
     pub fn snapshot(&self) -> LedgerSnapshot {
         self.ledger.snapshot()
     }
+
+    /// Return counters from the retained lab-mode ledger.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_node::observability::evidence_ledger::{LabSpillMode, LedgerCapacity, test_entry};
+    ///
+    /// let mut spill = LabSpillMode::new(LedgerCapacity::new(4, 4096), Box::new(Vec::<u8>::new()));
+    /// spill.append(test_entry("DEC-001", 1)).unwrap();
+    /// let metrics = spill.metrics();
+    /// assert_eq!(metrics.retained_entries, 1);
+    /// ```
     pub fn metrics(&self) -> LedgerMetrics {
         self.ledger.metrics()
     }
@@ -899,6 +1303,16 @@ impl LabSpillMode {
 
 /// Create a minimal test evidence entry without signature.
 /// Use `sign_evidence_entry` to add a signature before appending to ledger.
+///
+/// # Examples
+///
+/// ```rust
+/// use frankenengine_node::observability::evidence_ledger::test_entry;
+///
+/// let entry = test_entry("DEC-001", 7);
+/// assert_eq!(entry.decision_id, "DEC-001");
+/// assert_eq!(entry.epoch_id, 7);
+/// ```
 pub fn test_entry(decision_id: &str, epoch_id: u64) -> EvidenceEntry {
     EvidenceEntry {
         schema_version: "1.0".to_string(),
@@ -5086,7 +5500,10 @@ mod tests {
         entry.signature = "00".repeat(64); // 64 bytes of zeros
 
         let result = ledger.append(entry);
-        assert!(result.is_err(), "Invalid Ed25519 signature should be rejected");
+        assert!(
+            result.is_err(),
+            "Invalid Ed25519 signature should be rejected"
+        );
 
         if let Err(LedgerError::SignatureInvalid { reason }) = result {
             assert!(reason.contains("signature verification failed"));
@@ -5106,7 +5523,10 @@ mod tests {
         entry.signature = entry.signature.to_uppercase();
 
         let result = ledger.append(entry);
-        assert!(result.is_err(), "Uppercase signature hex should be rejected");
+        assert!(
+            result.is_err(),
+            "Uppercase signature hex should be rejected"
+        );
 
         if let Err(LedgerError::SignatureInvalid { reason }) = result {
             assert!(reason.contains("canonical lowercase hex"));
@@ -5130,9 +5550,9 @@ mod tests {
 
         if let Err(LedgerError::SignatureInvalid { reason }) = result {
             assert!(
-                reason.contains("invalid hex") ||
-                reason.contains("Odd number") ||
-                reason.contains("Invalid length")
+                reason.contains("invalid hex")
+                    || reason.contains("Odd number")
+                    || reason.contains("Invalid length")
             );
         } else {
             panic!("Should return SignatureInvalid error for odd-length hex");
@@ -5173,7 +5593,10 @@ mod tests {
         if let Err(LedgerError::ReplayAttackDetected { .. }) = result2 {
             // Expected error type
         } else {
-            panic!("Should return ReplayAttackDetected error, got: {:?}", result2);
+            panic!(
+                "Should return ReplayAttackDetected error, got: {:?}",
+                result2
+            );
         }
     }
 
@@ -5190,7 +5613,10 @@ mod tests {
 
         // Verify with wrong key should fail
         let result = ledger.append(entry);
-        assert!(result.is_err(), "Wrong verifying key should reject signature");
+        assert!(
+            result.is_err(),
+            "Wrong verifying key should reject signature"
+        );
 
         if let Err(LedgerError::SignatureInvalid { reason }) = result {
             assert!(reason.contains("signature verification failed"));
@@ -5268,15 +5694,24 @@ mod tests {
         let result1 = ledger.append(malformed_entry1);
         let result2 = ledger.append(malformed_entry2);
 
-        assert!(result1.is_ok(), "Entry with different timestamp should be accepted");
-        assert!(result2.is_ok(), "Entry with matching timestamp but different signature should be accepted");
+        assert!(
+            result1.is_ok(),
+            "Entry with different timestamp should be accepted"
+        );
+        assert!(
+            result2.is_ok(),
+            "Entry with matching timestamp but different signature should be accepted"
+        );
 
         // Test case 3: Exact replay (both timestamp and signature match)
         let mut replay_entry = test_entry("VALID-2", 2000); // Exact match of 2nd entry
         sign_evidence_entry(&mut replay_entry, &signing_key);
 
         let replay_result = ledger.append(replay_entry);
-        assert!(replay_result.is_err(), "Exact replay should be detected and rejected");
+        assert!(
+            replay_result.is_err(),
+            "Exact replay should be detected and rejected"
+        );
 
         if let Err(LedgerError::DuplicateSignature { .. }) = replay_result {
             // Expected - replay detected
@@ -5301,7 +5736,9 @@ mod tests {
         ];
 
         for entry in test_entries {
-            let _ = ledger1.append(entry.clone()).expect("append should succeed");
+            let _ = ledger1
+                .append(entry.clone())
+                .expect("append should succeed");
             let _ = ledger2.append(entry).expect("append should succeed");
         }
 
@@ -5310,33 +5747,59 @@ mod tests {
         let snapshot2 = ledger2.snapshot();
 
         // Assert snapshots are identical
-        assert_eq!(snapshot1.entries.len(), snapshot2.entries.len(),
-                   "Snapshot entry counts must be identical");
-        assert_eq!(snapshot1.total_appended, snapshot2.total_appended,
-                   "Total appended counts must be identical");
-        assert_eq!(snapshot1.total_evicted, snapshot2.total_evicted,
-                   "Total evicted counts must be identical");
-        assert_eq!(snapshot1.current_bytes, snapshot2.current_bytes,
-                   "Current byte counts must be identical");
-        assert_eq!(snapshot1.capacity, snapshot2.capacity,
-                   "Capacities must be identical");
+        assert_eq!(
+            snapshot1.entries.len(),
+            snapshot2.entries.len(),
+            "Snapshot entry counts must be identical"
+        );
+        assert_eq!(
+            snapshot1.total_appended, snapshot2.total_appended,
+            "Total appended counts must be identical"
+        );
+        assert_eq!(
+            snapshot1.total_evicted, snapshot2.total_evicted,
+            "Total evicted counts must be identical"
+        );
+        assert_eq!(
+            snapshot1.current_bytes, snapshot2.current_bytes,
+            "Current byte counts must be identical"
+        );
+        assert_eq!(
+            snapshot1.capacity, snapshot2.capacity,
+            "Capacities must be identical"
+        );
 
         // Verify each entry matches exactly (including entry IDs)
-        for (i, ((id1, entry1), (id2, entry2))) in snapshot1.entries.iter()
-            .zip(snapshot2.entries.iter()).enumerate() {
+        for (i, ((id1, entry1), (id2, entry2))) in snapshot1
+            .entries
+            .iter()
+            .zip(snapshot2.entries.iter())
+            .enumerate()
+        {
             assert_eq!(id1, id2, "Entry IDs must be identical at position {}", i);
-            assert_eq!(entry1.decision_id, entry2.decision_id,
-                       "Decision IDs must be identical at position {}", i);
-            assert_eq!(entry1.epoch_id, entry2.epoch_id,
-                       "Epoch IDs must be identical at position {}", i);
-            assert_eq!(entry1.payload, entry2.payload,
-                       "Payloads must be identical at position {}", i);
+            assert_eq!(
+                entry1.decision_id, entry2.decision_id,
+                "Decision IDs must be identical at position {}",
+                i
+            );
+            assert_eq!(
+                entry1.epoch_id, entry2.epoch_id,
+                "Epoch IDs must be identical at position {}",
+                i
+            );
+            assert_eq!(
+                entry1.payload, entry2.payload,
+                "Payloads must be identical at position {}",
+                i
+            );
         }
 
         // Verify serialized snapshots are byte-for-byte identical
         let serialized1 = serde_json::to_string(&snapshot1).expect("serialization should succeed");
         let serialized2 = serde_json::to_string(&snapshot2).expect("serialization should succeed");
-        assert_eq!(serialized1, serialized2,
-                   "Serialized snapshots must be byte-for-byte identical");
+        assert_eq!(
+            serialized1, serialized2,
+            "Serialized snapshots must be byte-for-byte identical"
+        );
     }
 }
