@@ -75,6 +75,13 @@ pub enum CompatMode {
 }
 
 impl CompatMode {
+    /// Returns the human-readable risk level associated with this compatibility mode.
+    ///
+    /// # Returns
+    ///
+    /// - `"low"` for `Strict` mode (safest, most restrictive)
+    /// - `"medium"` for `Balanced` mode (moderate risk, balanced trade-offs)
+    /// - `"high"` for `LegacyRisky` mode (highest risk, maximum compatibility)
     pub fn risk_level(&self) -> &'static str {
         match self {
             Self::Strict => "low",
@@ -83,6 +90,15 @@ impl CompatMode {
         }
     }
 
+    /// Returns the canonical string label for this compatibility mode.
+    ///
+    /// Used for serialization, configuration files, and API responses.
+    ///
+    /// # Returns
+    ///
+    /// - `"strict"` for `Strict` mode
+    /// - `"balanced"` for `Balanced` mode
+    /// - `"legacy_risky"` for `LegacyRisky` mode
     pub fn label(&self) -> &'static str {
         match self {
             Self::Strict => "strict",
@@ -91,6 +107,16 @@ impl CompatMode {
         }
     }
 
+    /// Returns a numeric ordering value for risk comparison.
+    ///
+    /// Lower values indicate stricter/safer modes, higher values indicate
+    /// more permissive/riskier modes. Used internally for escalation detection.
+    ///
+    /// # Returns
+    ///
+    /// - `0` for `Strict` mode (lowest risk)
+    /// - `1` for `Balanced` mode (medium risk)
+    /// - `2` for `LegacyRisky` mode (highest risk)
     pub fn risk_ordinal(&self) -> u8 {
         match self {
             Self::Strict => 0,
@@ -99,6 +125,26 @@ impl CompatMode {
         }
     }
 
+    /// Checks if transitioning to the target mode would increase risk level.
+    ///
+    /// An escalation occurs when moving from a stricter mode to a more permissive one,
+    /// which may require additional authorization or audit trail.
+    ///
+    /// # Parameters
+    ///
+    /// - `to`: The target compatibility mode for the transition
+    ///
+    /// # Returns
+    ///
+    /// `true` if the transition increases risk (escalation), `false` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let current = CompatMode::Strict;
+    /// assert!(current.is_escalation(CompatMode::Balanced)); // true - escalation
+    /// assert!(!current.is_escalation(CompatMode::Strict)); // false - no change
+    /// ```
     pub fn is_escalation(&self, to: CompatMode) -> bool {
         to.risk_ordinal() > self.risk_ordinal()
     }
@@ -440,7 +486,10 @@ impl CompatGateService {
             Some(s) => self
                 .shims
                 .iter()
-                .filter(|shim| crate::security::constant_time::ct_eq(&shim.scope, s) || crate::security::constant_time::ct_eq(&shim.scope, "*"))
+                .filter(|shim| {
+                    crate::security::constant_time::ct_eq(&shim.scope, s)
+                        || crate::security::constant_time::ct_eq(&shim.scope, "*")
+                })
                 .collect(),
             None => self.shims.iter().collect(),
         }
@@ -2243,7 +2292,7 @@ mod compat_gate_malformed_payload_tests {
                             // Receipt operations
                             let result = svc.issue_divergence_receipt(
                                 &format!("scope-{}", thread_id),
-                                &format!("severity-{}", i % 3)
+                                &format!("severity-{}", i % 3),
                             );
                             results.push(("receipt", result.is_ok()));
                         }
@@ -2302,13 +2351,13 @@ mod compat_gate_malformed_payload_tests {
 
         // Test trace ID generation at boundary conditions
         let trace_boundary_tests = [
-            (0, 0),              // Initial state
-            (u64::MAX - 1, 0),   // Near overflow, no epoch
-            (u64::MAX, 0),       // At overflow boundary
-            (0, 1),              // After epoch rollover
-            (u64::MAX - 1, u64::MAX - 1),  // Near both limits
-            (u64::MAX, u64::MAX - 1),      // Trace at max, epoch near max
-            (u64::MAX - 1, u64::MAX),      // Trace near max, epoch at max
+            (0, 0),                       // Initial state
+            (u64::MAX - 1, 0),            // Near overflow, no epoch
+            (u64::MAX, 0),                // At overflow boundary
+            (0, 1),                       // After epoch rollover
+            (u64::MAX - 1, u64::MAX - 1), // Near both limits
+            (u64::MAX, u64::MAX - 1),     // Trace at max, epoch near max
+            (u64::MAX - 1, u64::MAX),     // Trace near max, epoch at max
         ];
 
         for (counter, epoch) in trace_boundary_tests {
@@ -2320,7 +2369,10 @@ mod compat_gate_malformed_payload_tests {
             if counter == u64::MAX && epoch == u64::MAX {
                 // Should fail at absolute limit
                 assert!(result.is_err());
-                assert_eq!(result.unwrap_err(), CompatGateOperationError::TraceIdSpaceExhausted);
+                assert_eq!(
+                    result.unwrap_err(),
+                    CompatGateOperationError::TraceIdSpaceExhausted
+                );
             } else {
                 // Should succeed with valid ID
                 let trace_id = result.unwrap();
@@ -2362,41 +2414,33 @@ mod compat_gate_malformed_payload_tests {
             // LDAP injection
             "pkg*)(uid=*",
             "pkg))(|(password=*",
-
             // SQL injection patterns
             "pkg'; DROP TABLE scopes; --",
             "pkg' OR '1'='1",
             "pkg' UNION SELECT * FROM secrets --",
-
             // NoSQL injection
             "pkg'; return {sensitive: true}; //",
             "pkg\"; this.sensitive = true; //",
-
             // Command injection
             "pkg; rm -rf /; echo",
             "pkg`cat /etc/passwd`",
             "pkg$(whoami)",
-
             // Path traversal
             "../../../etc/passwd",
             "..\\..\\..\\windows\\system32\\config\\sam",
-
             // XSS payloads
             "<script>alert('xss')</script>",
             "javascript:alert('xss')",
             "\"><script>alert('xss')</script>",
-
             // YAML/JSON injection
             "pkg\": {\"evil\": true}, \"dummy\": \"",
             "pkg\\n---\\nevil: true",
-
             // Regex DoS patterns
             "pkg" + &"a?".repeat(10000) + "a".repeat(10000),
-
             // Unicode attacks
-            "\u{202E}reverse\u{202D}normal",  // BiDi override
-            "\u{FEFF}bom",                    // Byte Order Mark
-            "\u{00AD}soft-hyphen",            // Soft hyphen
+            "\u{202E}reverse\u{202D}normal", // BiDi override
+            "\u{FEFF}bom",                   // Byte Order Mark
+            "\u{00AD}soft-hyphen",           // Soft hyphen
         ];
 
         for malicious_input in injection_patterns {
@@ -2445,7 +2489,8 @@ mod compat_gate_malformed_payload_tests {
         let mut svc = CompatGateService::new();
 
         // Attempt to exhaust shim capacity with rapid registrations
-        for i in 0..MAX_SHIMS * 2 {  // Try to register more than capacity
+        for i in 0..MAX_SHIMS * 2 {
+            // Try to register more than capacity
             let shim = ShimMetadata {
                 shim_id: format!("attack-shim-{}", i),
                 description: format!("Capacity exhaustion attempt {}", i),
@@ -2509,7 +2554,10 @@ mod compat_gate_malformed_payload_tests {
         });
 
         assert!(gate_result.is_err());
-        assert_eq!(gate_result.unwrap_err(), CompatGateOperationError::TraceIdSpaceExhausted);
+        assert_eq!(
+            gate_result.unwrap_err(),
+            CompatGateOperationError::TraceIdSpaceExhausted
+        );
 
         // Service should remain functional for reads
         assert_eq!(svc.shims.len(), MAX_SHIMS);
@@ -2619,7 +2667,10 @@ mod compat_gate_malformed_payload_tests {
             let target_mode = svc.query_mode(target_scope).unwrap().mode;
 
             // Modes should remain independent
-            assert!(svc.check_non_interference(source_scope, target_scope) || source_scope == target_scope);
+            assert!(
+                svc.check_non_interference(source_scope, target_scope)
+                    || source_scope == target_scope
+            );
 
             // Operations in one scope shouldn't change another scope's mode
             if source_scope != target_scope {
@@ -2648,7 +2699,8 @@ mod compat_gate_malformed_payload_tests {
             }
 
             // Should not see receipts from other scopes
-            let other_scope_count = svc.query_receipts(None, None)
+            let other_scope_count = svc
+                .query_receipts(None, None)
                 .iter()
                 .filter(|r| r.scope != scope)
                 .count();
@@ -2707,11 +2759,12 @@ mod compat_gate_malformed_payload_tests {
             assert!(!event.scope.is_empty());
 
             // Event codes should be from known set
-            assert!(matches!(event.code.as_str(),
-                event_codes::PCG_001_GATE_PASSED |
-                event_codes::PCG_002_GATE_FAILED |
-                event_codes::PCG_003_TRANSITION_APPROVED |
-                event_codes::PCG_004_RECEIPT_ISSUED
+            assert!(matches!(
+                event.code.as_str(),
+                event_codes::PCG_001_GATE_PASSED
+                    | event_codes::PCG_002_GATE_FAILED
+                    | event_codes::PCG_003_TRANSITION_APPROVED
+                    | event_codes::PCG_004_RECEIPT_ISSUED
             ));
         }
 
@@ -2760,7 +2813,7 @@ mod compat_gate_malformed_payload_tests {
         push_bounded(&mut items, 10001, 5);
         assert_eq!(items.len(), 5);
         assert_eq!(items[4], 10001); // New item should be at end
-        assert!(items[0] > 9995);    // Should have kept recent items
+        assert!(items[0] > 9995); // Should have kept recent items
 
         // Test overflow protection in drain calculation
         let mut items = vec![1];
@@ -2773,7 +2826,7 @@ mod compat_gate_malformed_payload_tests {
         push_bounded(&mut items, 1001, 500);
         assert_eq!(items.len(), 500);
         assert_eq!(items[499], 1001); // New item at end
-        assert!(items[0] >= 502);      // Should have drained from beginning
+        assert!(items[0] >= 502); // Should have drained from beginning
 
         // Test edge case where capacity equals current length
         let mut items = vec![1, 2, 3];
@@ -2792,18 +2845,28 @@ mod compat_gate_malformed_payload_tests {
         // Test risk escalation detection with boundary conditions
 
         // Test all mode combinations
-        let modes = [CompatMode::Strict, CompatMode::Balanced, CompatMode::LegacyRisky];
+        let modes = [
+            CompatMode::Strict,
+            CompatMode::Balanced,
+            CompatMode::LegacyRisky,
+        ];
 
         for (i, from_mode) in modes.iter().enumerate() {
             for (j, to_mode) in modes.iter().enumerate() {
                 let is_escalation = from_mode.is_escalation(*to_mode);
                 let expected_escalation = j > i; // Higher index = higher risk
 
-                assert_eq!(is_escalation, expected_escalation,
-                          "Escalation detection wrong for {:?} -> {:?}", from_mode, to_mode);
+                assert_eq!(
+                    is_escalation, expected_escalation,
+                    "Escalation detection wrong for {:?} -> {:?}",
+                    from_mode, to_mode
+                );
 
                 // Test risk ordinals are consistent
-                assert_eq!(from_mode.risk_ordinal() < to_mode.risk_ordinal(), expected_escalation);
+                assert_eq!(
+                    from_mode.risk_ordinal() < to_mode.risk_ordinal(),
+                    expected_escalation
+                );
             }
         }
 
@@ -2912,24 +2975,24 @@ mod compat_gate_malformed_payload_tests {
         assert!(constant_time::ct_eq(scope_pypi, "pypi"));
 
         // Test first-character difference (timing must be constant regardless of difference position)
-        assert!(!constant_time::ct_eq(scope_global, "x"));        // * -> x
-        assert!(!constant_time::ct_eq(scope_npm, "xpm"));         // n -> x
-        assert!(!constant_time::ct_eq(scope_cargo, "xargo"));     // c -> x
-        assert!(!constant_time::ct_eq(scope_pypi, "xypi"));       // p -> x
+        assert!(!constant_time::ct_eq(scope_global, "x")); // * -> x
+        assert!(!constant_time::ct_eq(scope_npm, "xpm")); // n -> x
+        assert!(!constant_time::ct_eq(scope_cargo, "xargo")); // c -> x
+        assert!(!constant_time::ct_eq(scope_pypi, "xypi")); // p -> x
 
         // Test last-character difference (timing must be constant regardless of difference position)
-        assert!(!constant_time::ct_eq(scope_npm, "npx"));         // m -> x
-        assert!(!constant_time::ct_eq(scope_cargo, "carx"));      // o -> x (shorter test)
-        assert!(!constant_time::ct_eq(scope_pypi, "pypx"));       // i -> x
+        assert!(!constant_time::ct_eq(scope_npm, "npx")); // m -> x
+        assert!(!constant_time::ct_eq(scope_cargo, "carx")); // o -> x (shorter test)
+        assert!(!constant_time::ct_eq(scope_pypi, "pypx")); // i -> x
 
         // Test middle-character difference
-        assert!(!constant_time::ct_eq(scope_cargo, "cxrgo"));     // a -> x
-        assert!(!constant_time::ct_eq(scope_pypi, "pxpi"));       // y -> x
+        assert!(!constant_time::ct_eq(scope_cargo, "cxrgo")); // a -> x
+        assert!(!constant_time::ct_eq(scope_pypi, "pxpi")); // y -> x
 
         // Test scope wildcard pattern matching (security-critical)
-        assert!(constant_time::ct_eq("*", "*"));                  // global wildcard
-        assert!(!constant_time::ct_eq("*", "npm"));               // wildcard vs specific scope
-        assert!(!constant_time::ct_eq("npm", "*"));               // specific scope vs wildcard
+        assert!(constant_time::ct_eq("*", "*")); // global wildcard
+        assert!(!constant_time::ct_eq("*", "npm")); // wildcard vs specific scope
+        assert!(!constant_time::ct_eq("npm", "*")); // specific scope vs wildcard
 
         // Test scoped package patterns
         let scope_scoped = "@company/package";
@@ -2939,9 +3002,9 @@ mod compat_gate_malformed_payload_tests {
         assert!(!constant_time::ct_eq(scope_scoped, "xcompany/package")); // start diff
 
         // Test length differences
-        assert!(!constant_time::ct_eq("npm", "npmx"));            // longer
-        assert!(!constant_time::ct_eq("cargo", "carg"));          // shorter
-        assert!(!constant_time::ct_eq("@scope/pkg", "@scope"));   // different lengths
+        assert!(!constant_time::ct_eq("npm", "npmx")); // longer
+        assert!(!constant_time::ct_eq("cargo", "carg")); // shorter
+        assert!(!constant_time::ct_eq("@scope/pkg", "@scope")); // different lengths
 
         // Test empty string edge cases
         assert!(!constant_time::ct_eq("*", ""));
