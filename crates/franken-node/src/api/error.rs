@@ -14,6 +14,23 @@ use crate::connector::error_code_registry::{ErrorCodeEntry, Severity};
 ///
 /// All control-plane API error responses use this format with
 /// `Content-Type: application/problem+json`.
+/// RFC 7807 Problem Detail for HTTP APIs error response format.
+///
+/// # Examples
+///
+/// ```
+/// use frankenengine_node::api::error::ProblemDetail;
+///
+/// let problem = ProblemDetail {
+///     problem_type: "https://example.com/errors/resource-not-found".to_string(),
+///     title: "Resource Not Found".to_string(),
+///     status: 404,
+///     detail: "The requested session 'sess-123' does not exist".to_string(),
+///     instance: Some("/sessions/sess-123".to_string()),
+/// };
+/// assert_eq!(problem.status, 404);
+/// assert_eq!(problem.title, "Resource Not Found");
+/// ```
 #[cfg(any(test, feature = "control-plane"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProblemDetail {
@@ -172,6 +189,27 @@ impl ProblemDetail {
 }
 
 /// Control-plane API error type aggregating all possible failure modes.
+///
+/// # Examples
+///
+/// ```
+/// use frankenengine_node::api::error::ApiError;
+///
+/// let auth_error = ApiError::AuthFailed {
+///     detail: "Invalid API key".to_string(),
+///     trace_id: "trace-123".to_string(),
+/// };
+///
+/// match auth_error {
+///     ApiError::AuthFailed { detail, trace_id } => {
+///         println!("Authentication failed: {} (trace: {})", detail, trace_id);
+///     }
+///     ApiError::ValidationFailed { field, detail, .. } => {
+///         println!("Validation error in {}: {}", field, detail);
+///     }
+///     _ => println!("Other error"),
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiError {
     /// Authentication failed (401).
