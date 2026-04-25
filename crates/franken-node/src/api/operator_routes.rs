@@ -1371,7 +1371,7 @@ mod tests {
 
             // Test with process start time in the future (invalid scenario)
             let future_time = chrono::Utc::now() + chrono::Duration::seconds(3600);
-            let future_offset = now_epoch_nanos() + 3600_000_000_000; // 1 hour in nanos
+            let future_offset = now_epoch_nanos().saturating_add(3600_000_000_000); // 1 hour in nanos
 
             install_process_start(future_offset, future_time.to_rfc3339());
 
