@@ -416,6 +416,10 @@ name = "fleet_quarantine_rollback_receipt"
 path = "tests/fleet_quarantine_rollback_receipt.rs"
 
 [[test]]
+name = "fleet_quarantine_state_machine_conformance"
+path = "tests/fleet_quarantine_state_machine_conformance.rs"
+
+[[test]]
 name = "fleet_quarantine_serde_fuzz_harness"
 path = "tests/fleet_quarantine_serde_fuzz_harness.rs"
 

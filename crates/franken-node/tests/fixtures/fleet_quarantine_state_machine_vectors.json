@@ -1,0 +1,157 @@
+{
+  "schema_version": "franken-node/fleet-quarantine-state-machine-conformance/v1",
+  "coverage": [
+    {
+      "spec_section": "quarantine_transition",
+      "level": "must",
+      "tested": true
+    },
+    {
+      "spec_section": "reconcile_transition",
+      "level": "must",
+      "tested": true
+    },
+    {
+      "spec_section": "release_transition",
+      "level": "must",
+      "tested": true
+    },
+    {
+      "spec_section": "expired_rollback_receipt_boundary",
+      "level": "must",
+      "tested": true
+    },
+    {
+      "spec_section": "emergency_revocation_escalation",
+      "level": "must",
+      "tested": true
+    },
+    {
+      "spec_section": "escalated_release_transition",
+      "level": "must",
+      "tested": true
+    }
+  ],
+  "vectors": [
+    {
+      "name": "healthy_quarantine_enters_propagating_quarantine",
+      "current_state": "healthy",
+      "event": "quarantine",
+      "expected_next_state": "quarantined_propagating",
+      "expected_side_effects": {
+        "success": true,
+        "event_code": "FLEET-001",
+        "error_code": null,
+        "action_type": "quarantine",
+        "receipt_action_type": "quarantine",
+        "convergence_phase": "propagating",
+        "incident_count_delta": 1,
+        "active_incidents_delta": 1,
+        "active_quarantines_delta": 1,
+        "active_revocations_delta": 0,
+        "pending_convergences_delta": 1,
+        "event_count_delta": 1
+      }
+    },
+    {
+      "name": "quarantine_reconcile_converges_pending_state",
+      "current_state": "quarantined_propagating",
+      "event": "reconcile",
+      "expected_next_state": "quarantined_converged",
+      "expected_side_effects": {
+        "success": true,
+        "event_code": "FLEET-005",
+        "error_code": null,
+        "action_type": "reconcile",
+        "receipt_action_type": "reconcile",
+        "convergence_phase": "converged",
+        "incident_count_delta": 0,
+        "active_incidents_delta": 0,
+        "active_quarantines_delta": 0,
+        "active_revocations_delta": 0,
+        "pending_convergences_delta": -1,
+        "event_count_delta": 1
+      }
+    },
+    {
+      "name": "converged_quarantine_release_restores_healthy_state",
+      "current_state": "quarantined_converged",
+      "event": "release_with_valid_rollback",
+      "expected_next_state": "healthy",
+      "expected_side_effects": {
+        "success": true,
+        "event_code": "FLEET-004",
+        "error_code": null,
+        "action_type": "release",
+        "receipt_action_type": "release",
+        "convergence_phase": null,
+        "incident_count_delta": -1,
+        "active_incidents_delta": -1,
+        "active_quarantines_delta": -1,
+        "active_revocations_delta": 0,
+        "pending_convergences_delta": 0,
+        "event_count_delta": 1
+      }
+    },
+    {
+      "name": "expired_rollback_receipt_fails_closed_without_state_drift",
+      "current_state": "quarantined_converged",
+      "event": "release_with_expired_rollback",
+      "expected_next_state": "quarantined_converged",
+      "expected_side_effects": {
+        "success": false,
+        "event_code": null,
+        "error_code": "FLEET_ROLLBACK_UNVERIFIED",
+        "action_type": null,
+        "receipt_action_type": null,
+        "convergence_phase": null,
+        "incident_count_delta": 0,
+        "active_incidents_delta": 0,
+        "active_quarantines_delta": 0,
+        "active_revocations_delta": 0,
+        "pending_convergences_delta": 0,
+        "event_count_delta": 0
+      }
+    },
+    {
+      "name": "healthy_emergency_revocation_escalates_into_active_incident",
+      "current_state": "healthy",
+      "event": "emergency_revoke",
+      "expected_next_state": "escalated_revocation",
+      "expected_side_effects": {
+        "success": true,
+        "event_code": "FLEET-002",
+        "error_code": null,
+        "action_type": "revoke",
+        "receipt_action_type": "revoke",
+        "convergence_phase": null,
+        "incident_count_delta": 1,
+        "active_incidents_delta": 1,
+        "active_quarantines_delta": 0,
+        "active_revocations_delta": 1,
+        "pending_convergences_delta": 0,
+        "event_count_delta": 1
+      }
+    },
+    {
+      "name": "escalated_revocation_release_clears_active_revocation",
+      "current_state": "escalated_revocation",
+      "event": "release_with_valid_rollback",
+      "expected_next_state": "healthy",
+      "expected_side_effects": {
+        "success": true,
+        "event_code": "FLEET-004",
+        "error_code": null,
+        "action_type": "release",
+        "receipt_action_type": "release",
+        "convergence_phase": null,
+        "incident_count_delta": -1,
+        "active_incidents_delta": -1,
+        "active_quarantines_delta": 0,
+        "active_revocations_delta": -1,
+        "pending_convergences_delta": 0,
+        "event_count_delta": 1
+      }
+    }
+  ]
+}
