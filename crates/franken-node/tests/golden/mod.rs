@@ -153,3 +153,6 @@ mod tests {
 
 // Include incident golden tests module
 pub mod incident_golden_tests;
+
+// Include canonical serializer golden tests module
+pub mod canonical_serializer_golden_tests;

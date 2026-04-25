@@ -328,6 +328,11 @@ pub enum LedgerError {
         timestamp_ms: u64,
         signature: String,
     },
+    /// Hash chain validation failed - entry's prev_entry_hash doesn't match ledger state.
+    HashChainBroken {
+        expected_hash: String,
+        provided_hash: String,
+    },
 }
 
 impl fmt::Display for LedgerError {
@@ -353,6 +358,16 @@ impl fmt::Display for LedgerError {
                     f,
                     "replay attack: timestamp {} signature {} already seen",
                     timestamp_ms, signature
+                )
+            }
+            Self::HashChainBroken {
+                expected_hash,
+                provided_hash,
+            } => {
+                write!(
+                    f,
+                    "hash chain broken: expected {} got {}",
+                    expected_hash, provided_hash
                 )
             }
         }
@@ -549,6 +564,17 @@ impl EvidenceLedger {
                 entry_size,
                 max_bytes: self.capacity.max_bytes,
             });
+        }
+
+        // SECURITY: Validate hash chain integrity if client provided prev_entry_hash
+        if !normalized_entry.prev_entry_hash.is_empty() {
+            let expected_hash = self.last_entry_hash.as_deref().unwrap_or("");
+            if !crate::security::constant_time::ct_eq(expected_hash, &normalized_entry.prev_entry_hash) {
+                return Err(LedgerError::HashChainBroken {
+                    expected_hash: expected_hash.to_string(),
+                    provided_hash: normalized_entry.prev_entry_hash.clone(),
+                });
+            }
         }
 
         Ok((normalized_entry, entry_size))
