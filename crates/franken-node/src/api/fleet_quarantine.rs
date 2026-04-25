@@ -2422,6 +2422,7 @@ pub fn quarantine_route_metadata() -> Vec<RouteMetadata> {
 
 // ── API Handlers ──────────────────────────────────────────────────────────
 
+/// Processes fleet quarantine requests to isolate problematic extensions.
 #[cfg(any(test, feature = "control-plane"))]
 pub fn handle_quarantine(
     identity: &AuthIdentity,
@@ -2436,6 +2437,7 @@ pub fn handle_quarantine(
     })
 }
 
+/// Processes fleet revocation requests to disable compromised extensions.
 #[cfg(any(test, feature = "control-plane"))]
 pub fn handle_revoke(
     identity: &AuthIdentity,
@@ -2450,6 +2452,7 @@ pub fn handle_revoke(
     })
 }
 
+/// Processes fleet release requests to restore quarantined extensions.
 pub fn handle_release(
     identity: &AuthIdentity,
     trace: &TraceContext,
