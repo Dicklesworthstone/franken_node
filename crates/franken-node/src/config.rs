@@ -2204,6 +2204,7 @@ impl std::str::FromStr for Profile {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         // bd-83lv0: Explicit allowlist to prevent profile manipulation attacks
         const VALID_PROFILES: &[&str] = &["strict", "balanced", "legacy-risky"];
+        const PACKAGING_PROFILES: &[&str] = &["local", "dev", "enterprise"];
 
         let normalized = normalize_profile_key(s);
         match normalized.as_str() {
@@ -2211,12 +2212,24 @@ impl std::str::FromStr for Profile {
             "balanced" => Ok(Self::Balanced),
             "legacy-risky" => Ok(Self::LegacyRisky),
             _ => {
-                // bd-83lv0: Hard error with explicit allowlist - no silent fallback
-                Err(ConfigError::InvalidProfile(format!(
-                    "Invalid profile '{}'. Must be one of: {}. No fallback will be applied.",
-                    s,
-                    VALID_PROFILES.join(", ")
-                )))
+                // bd-2zped: Detect packaging profile confusion and provide helpful error
+                if PACKAGING_PROFILES.contains(&normalized.as_str()) {
+                    Err(ConfigError::InvalidProfile(format!(
+                        "Invalid runtime profile '{}'. This appears to be a packaging profile name. \
+                        Runtime profiles (--profile) control security/compatibility behavior and must be one of: {}. \
+                        Packaging profiles ({}) are used during build/release and are defined in packaging/profiles.toml.",
+                        s,
+                        VALID_PROFILES.join(", "),
+                        PACKAGING_PROFILES.join(", ")
+                    )))
+                } else {
+                    // bd-83lv0: Hard error with explicit allowlist - no silent fallback
+                    Err(ConfigError::InvalidProfile(format!(
+                        "Invalid runtime profile '{}'. Must be one of: {}. No fallback will be applied.",
+                        s,
+                        VALID_PROFILES.join(", ")
+                    )))
+                }
             }
         }
     }

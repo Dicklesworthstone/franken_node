@@ -80,6 +80,7 @@ pub enum Command {
 #[derive(Debug, Parser)]
 pub struct InitArgs {
     /// Runtime profile override: strict, balanced, or legacy-risky.
+    /// Controls security/compatibility behavior (not packaging profiles like local/dev/enterprise).
     #[arg(long)]
     pub profile: Option<String>,
 
@@ -1079,6 +1080,7 @@ pub struct DoctorArgs {
     pub config: Option<PathBuf>,
 
     /// Runtime profile override: strict, balanced, or legacy-risky.
+    /// Controls security/compatibility behavior (not packaging profiles like local/dev/enterprise).
     #[arg(long)]
     pub profile: Option<String>,
 
