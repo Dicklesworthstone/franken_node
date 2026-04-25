@@ -282,11 +282,13 @@ mod tests {
     }
 
     #[test]
+    #[test]
     fn standard_always_passes() {
         let d = evaluate_freshness(&policy(), &check_action(SafetyTier::Standard, 999999), None)
             .expect("should succeed");
         assert!(d.allowed);
         assert!(d.max_age_secs.is_none());
+        assert!(d.reason.contains("no freshness requirement"));
     }
 
     #[test]
