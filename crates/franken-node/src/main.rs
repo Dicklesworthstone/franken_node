@@ -5346,11 +5346,11 @@ fn resolve_remotecap_signing_key() -> Result<String> {
     match std::env::var("FRANKEN_NODE_REMOTECAP_KEY") {
         Ok(key) if !key.trim().is_empty() => Ok(key),
         Ok(_) => {
-            #[cfg(any(test, feature = "dev-keys"))]
+            #[cfg(test)]
             {
                 Ok(["franken-node", "dev", "remotecap", "key"].join("-"))
             }
-            #[cfg(not(any(test, feature = "dev-keys")))]
+            #[cfg(not(test))]
             {
                 anyhow::bail!(
                     "FRANKEN_NODE_REMOTECAP_KEY environment variable is empty - production deployments require an explicit signing key"
@@ -5358,11 +5358,11 @@ fn resolve_remotecap_signing_key() -> Result<String> {
             }
         }
         Err(_) => {
-            #[cfg(any(test, feature = "dev-keys"))]
+            #[cfg(test)]
             {
                 Ok(["franken-node", "dev", "remotecap", "key"].join("-"))
             }
-            #[cfg(not(any(test, feature = "dev-keys")))]
+            #[cfg(not(test))]
             {
                 anyhow::bail!(
                     "FRANKEN_NODE_REMOTECAP_KEY environment variable is not set - production deployments require an explicit signing key"
@@ -11352,13 +11352,11 @@ fn fetch_trust_scan_dependent_count(
         "{TRUST_SCAN_DEPS_DEV_BASE_URL}/systems/npm/packages/{package_name}/versions/{version}:dependents"
     );
     remote_cap.authorize_egress(&url)?;
-    let mut response = ureq::get(&url)
-        .header("User-Agent", &trust_scan_user_agent())
-        .call()
-        .map_err(|err| anyhow::anyhow!("dependents query failed for {dependency_name}: {err}"))?;
-    let body = response.body_mut().read_to_string().map_err(|err| {
-        anyhow::anyhow!("failed reading dependents response for {dependency_name}: {err}")
-    })?;
+    let body = trust_scan_http_get_body(
+        &url,
+        &format!("dependents query failed for {dependency_name}"),
+        &format!("failed reading dependents response for {dependency_name}"),
+    )?;
     let payload = serde_json::from_str::<serde_json::Value>(&body).with_context(|| {
         format!("invalid deps.dev JSON while scanning dependents for {dependency_name}")
     })?;
@@ -11437,13 +11435,11 @@ fn fetch_trust_scan_npm_metadata(
     let package_name = percent_encode_path_component(dependency_name);
     let url = format!("{TRUST_SCAN_NPM_REGISTRY_BASE_URL}/{package_name}");
     remote_cap.authorize_egress(&url)?;
-    let mut response = ureq::get(&url)
-        .header("User-Agent", &trust_scan_user_agent())
-        .call()
-        .map_err(|err| anyhow::anyhow!("npm registry query failed for {dependency_name}: {err}"))?;
-    let body = response.body_mut().read_to_string().map_err(|err| {
-        anyhow::anyhow!("failed reading npm registry response for {dependency_name}: {err}")
-    })?;
+    let body = trust_scan_http_get_body(
+        &url,
+        &format!("npm registry query failed for {dependency_name}"),
+        &format!("failed reading npm registry response for {dependency_name}"),
+    )?;
     let payload = serde_json::from_str::<serde_json::Value>(&body)
         .with_context(|| format!("invalid npm registry JSON for {dependency_name}"))?;
     let mut metadata = parse_trust_scan_npm_metadata(&payload, dependency_name, preferred_version);
@@ -11492,14 +11488,12 @@ fn fetch_trust_scan_audit_metadata_with_remote_cap(
 
     let query_config = trust_scan_osv_query_config();
     remote_cap.authorize_egress(&query_config.url)?;
-    let mut response = ureq::post(&query_config.url)
-        .header("User-Agent", &trust_scan_user_agent())
-        .header("Content-Type", "application/json")
-        .send(body.to_string())
-        .map_err(|err| anyhow::anyhow!("OSV query failed for {dependency_name}: {err}"))?;
-    let payload = response.body_mut().read_to_string().map_err(|err| {
-        anyhow::anyhow!("failed reading OSV response for {dependency_name}: {err}")
-    })?;
+    let payload = trust_scan_http_post_json_body(
+        &query_config.url,
+        body.to_string(),
+        &format!("OSV query failed for {dependency_name}"),
+        &format!("failed reading OSV response for {dependency_name}"),
+    )?;
     let payload = serde_json::from_str::<serde_json::Value>(&payload)
         .with_context(|| format!("invalid OSV JSON for {dependency_name}"))?;
     Ok(TrustScanAuditMetadata {
@@ -11536,6 +11530,51 @@ fn trust_scan_osv_query_config() -> TrustScanOsvQueryConfig {
         risk_lowering_authenticated: url == TRUST_SCAN_OSV_QUERY_URL,
         url,
     }
+}
+
+#[cfg(feature = "http-client")]
+fn trust_scan_http_get_body(url: &str, request_error: &str, read_error: &str) -> Result<String> {
+    let mut response = ureq::get(url)
+        .header("User-Agent", &trust_scan_user_agent())
+        .call()
+        .map_err(|err| anyhow::anyhow!("{request_error}: {err}"))?;
+    response
+        .body_mut()
+        .read_to_string()
+        .map_err(|err| anyhow::anyhow!("{read_error}: {err}"))
+}
+
+#[cfg(not(feature = "http-client"))]
+fn trust_scan_http_get_body(url: &str, _request_error: &str, _read_error: &str) -> Result<String> {
+    anyhow::bail!("trust-scan HTTP fetch requires the `http-client` feature; cannot query {url}")
+}
+
+#[cfg(feature = "http-client")]
+fn trust_scan_http_post_json_body(
+    url: &str,
+    body: String,
+    request_error: &str,
+    read_error: &str,
+) -> Result<String> {
+    let mut response = ureq::post(url)
+        .header("User-Agent", &trust_scan_user_agent())
+        .header("Content-Type", "application/json")
+        .send(body)
+        .map_err(|err| anyhow::anyhow!("{request_error}: {err}"))?;
+    response
+        .body_mut()
+        .read_to_string()
+        .map_err(|err| anyhow::anyhow!("{read_error}: {err}"))
+}
+
+#[cfg(not(feature = "http-client"))]
+fn trust_scan_http_post_json_body(
+    url: &str,
+    _body: String,
+    _request_error: &str,
+    _read_error: &str,
+) -> Result<String> {
+    anyhow::bail!("trust-scan HTTP fetch requires the `http-client` feature; cannot query {url}")
 }
 
 fn default_trust_scan_publisher(dependency_name: &str) -> PublisherIdentity {
@@ -15824,6 +15863,7 @@ fn resolve_fleet_agent_args(args: &FleetAgentArgs) -> Result<ResolvedFleetAgentA
     })
 }
 
+#[cfg(feature = "external-commands")]
 fn install_fleet_agent_shutdown_flag() -> Result<std::sync::Arc<std::sync::atomic::AtomicBool>> {
     use std::sync::{
         Arc,
@@ -15837,6 +15877,13 @@ fn install_fleet_agent_shutdown_flag() -> Result<std::sync::Arc<std::sync::atomi
     })
     .map_err(|err| anyhow::anyhow!("failed installing fleet agent signal handler: {err}"))?;
     Ok(shutdown_requested)
+}
+
+#[cfg(not(feature = "external-commands"))]
+fn install_fleet_agent_shutdown_flag() -> Result<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    Ok(Arc::new(AtomicBool::new(false)))
 }
 
 fn sleep_until_next_fleet_poll(
@@ -18254,12 +18301,21 @@ fn normalize_compatibility_runtime(raw: &str) -> Option<&'static str> {
 
 fn resolve_compatibility_runtime_binary(runtime: &str) -> Result<PathBuf> {
     match runtime {
-        "node" | "bun" => which::which(runtime)
-            .with_context(|| format!("runtime `{runtime}` was not found on PATH")),
+        "node" | "bun" => resolve_external_runtime_binary(runtime),
         "franken-node" => std::env::current_exe()
             .with_context(|| "failed resolving current franken-node binary".to_string()),
         _ => anyhow::bail!("unsupported runtime target `{runtime}`"),
     }
+}
+
+#[cfg(feature = "external-commands")]
+fn resolve_external_runtime_binary(runtime: &str) -> Result<PathBuf> {
+    which::which(runtime).with_context(|| format!("runtime `{runtime}` was not found on PATH"))
+}
+
+#[cfg(not(feature = "external-commands"))]
+fn resolve_external_runtime_binary(runtime: &str) -> Result<PathBuf> {
+    anyhow::bail!("runtime `{runtime}` resolution requires the `external-commands` feature")
 }
 
 fn run_runtime_probe(binary: &Path, runtime: &str, args: &[&str], context: &str) -> Result<String> {

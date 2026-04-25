@@ -17,13 +17,7 @@ USE=$(command df --output=pcent "$PROJECT_DIR" | tail -1 | tr -dc 0-9)
 AVAIL_G=$(command df -BG --output=avail "$PROJECT_DIR" | tail -1 | tr -dc 0-9)
 echo "DISK: used=${USE}% avail=${AVAIL_G}G"
 
-# --- 2. Bead summary ---------------------------------------------------------
-OPEN=$(br list --status=open --limit 500 2>/dev/null | command grep -cE '^[○●■⏳]' || true)
-IP=$(br list --status=in_progress --limit 500 2>/dev/null | command grep -cE '^[○●■⏳]' || true)
-BLOCKED=$(br list --status=blocked --limit 500 2>/dev/null | command grep -cE '^[○●■⏳]' || true)
-echo "BEADS: open=$OPEN in_progress=$IP blocked=$BLOCKED"
-
-# --- 3. Ready work -----------------------------------------------------------
+# --- 2+3. Bead summary + Ready work (single br ready call) ------------------
 echo "READY:"
 br ready 2>/dev/null | command grep -E '^[0-9]+\. \[' | head -8 | sed 's/^/  /'
 
@@ -53,18 +47,8 @@ for D in "$PROJECT_DIR"/.rch-target-*; do
     echo "  dir=$NAME idle_min=$MTIME_MIN"
 done
 
-# --- 6. Stalled in-progress beads (>STALE_BEAD_MIN since Updated) -----------
-echo "STALLED_IN_PROGRESS:"
-br list --status=in_progress --limit 500 2>/dev/null | command grep -oE 'bd-[a-z0-9]+' | sort -u | while read ID; do
-    UPD=$(br show "$ID" 2>/dev/null | command grep -oE 'Updated: [0-9-]+' | head -1 | cut -d' ' -f2)
-    [ -z "$UPD" ] && continue
-    NOW_MIN=$(( $(date +%s) / 60 ))
-    UPD_MIN=$(( $(date -d "$UPD" +%s) / 60 ))
-    DELTA=$(( NOW_MIN - UPD_MIN ))
-    if [ "$DELTA" -gt "$STALE_BEAD_MIN" ]; then
-        echo "  stalled $ID updated=$UPD minutes_since=$DELTA"
-    fi
-done
+# --- 6. Stalled in-progress beads — DISABLED (br DB lock contention) --------
+echo "STALLED_IN_PROGRESS: (skipped to avoid br DB lock contention)"
 
 # --- 7. Git activity ---------------------------------------------------------
 echo "COMMITS_LAST_HOUR:"

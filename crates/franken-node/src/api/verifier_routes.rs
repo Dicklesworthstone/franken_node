@@ -595,6 +595,26 @@ fn build_atc_report(trace_id: &str, computation_id: &str) -> Result<AtcVerifierR
 
 // ── Route Metadata ─────────────────────────────────────────────────────────
 
+/// Returns route metadata for all verifier endpoints.
+///
+/// Provides structured metadata for the 7 verifier API endpoints, including:
+///
+/// ## Endpoints
+/// - `POST /v1/verifier/conformance` - Trigger verifier conformance checks
+/// - `GET /v1/verifier/evidence/{check_id}` - Retrieve verification evidence by check ID
+/// - `GET /v1/verifier/audit-log` - Access verifier audit log entries
+/// - `GET /api/v1/atc/verifier/metrics/{metric_id}` - Fetch verifier metrics
+/// - `POST /api/v1/atc/verifier/computations/{computation_id}/verify` - Verify computation results
+/// - `GET /api/v1/atc/verifier/computations/{computation_id}/proof-chain` - Get proof chain for computation
+/// - `GET /api/v1/atc/verifier/reports/{computation_id}` - Retrieve verification reports
+///
+/// ## Authentication
+/// All endpoints require Bearer token authentication with `verifier` or `operator` roles.
+///
+/// ## Used By
+/// - API middleware for route registration and policy enforcement
+/// - Fleet control systems for endpoint discovery
+/// - Monitoring systems for endpoint health checks
 pub fn route_metadata() -> Vec<RouteMetadata> {
     vec![
         RouteMetadata {
@@ -2461,17 +2481,28 @@ mod tests {
         };
 
         // Both should process without timing differences (constant-time comparison)
-        let valid_result = verify_atc_computation(&identity, &trace, "atc-comp-test-002", &valid_request);
-        let invalid_result = verify_atc_computation(&identity, &trace, "atc-comp-test-002", &invalid_request);
+        let valid_result =
+            verify_atc_computation(&identity, &trace, "atc-comp-test-002", &valid_request);
+        let invalid_result =
+            verify_atc_computation(&identity, &trace, "atc-comp-test-002", &invalid_request);
 
         assert!(valid_result.is_ok(), "Valid hash should succeed");
-        assert!(invalid_result.is_ok(), "Invalid hash should not fail verification function");
+        assert!(
+            invalid_result.is_ok(),
+            "Invalid hash should not fail verification function"
+        );
 
         // The decision should differ based on hash match, but timing should be constant
         let valid_data = valid_result.unwrap().data;
         let invalid_data = invalid_result.unwrap().data;
 
-        assert_eq!(valid_data.decision, "pass", "Valid hash should result in pass");
-        assert_eq!(invalid_data.decision, "fail", "Invalid hash should result in fail");
+        assert_eq!(
+            valid_data.decision, "pass",
+            "Valid hash should result in pass"
+        );
+        assert_eq!(
+            invalid_data.decision, "fail",
+            "Invalid hash should result in fail"
+        );
     }
 }

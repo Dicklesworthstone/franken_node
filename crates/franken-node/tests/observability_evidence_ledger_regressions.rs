@@ -1,11 +1,13 @@
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
+use ed25519_dalek::SigningKey;
 use frankenengine_node::observability::durability_violation::{
     CausalEvent, CausalEventType, FailedArtifact, ProofContext, ViolationContext, generate_bundle,
 };
 use frankenengine_node::observability::evidence_ledger::{
-    DecisionKind, EvidenceEntry, EvidenceLedger, LabSpillMode, LedgerCapacity, SharedEvidenceLedger,
+    DecisionKind, EvidenceEntry, EvidenceLedger, LabSpillMode, LedgerCapacity,
+    SharedEvidenceLedger, sign_evidence_entry, verify_evidence_entry,
 };
 use frankenengine_node::observability::witness_ref::{
     WitnessKind, WitnessRef, WitnessSet, WitnessValidator,
@@ -200,6 +202,36 @@ fn observability_ledger_uses_server_computed_size_for_snapshot_and_spill() {
     );
     assert_eq!(retained.size_bytes, spilled.size_bytes);
     assert_eq!(spilled_snapshot.current_bytes, spilled.size_bytes);
+}
+
+#[test]
+fn signed_ledger_snapshot_remains_verifiable_after_size_normalization() {
+    let signing_key = SigningKey::from_bytes(&[11; 32]);
+    let verifying_key = signing_key.verifying_key();
+    let attacker_claimed_size = 1_000_000;
+    let mut entry = misleading_size_entry("signed-size-normalization", attacker_claimed_size);
+    entry.payload = serde_json::json!({
+        "large_field": "x".repeat(512),
+        "nested": {"value": 42}
+    });
+    sign_evidence_entry(&mut entry, &signing_key);
+    let signature = entry.signature.clone();
+
+    verify_evidence_entry(&entry, &verifying_key)
+        .expect("freshly signed entry should verify before append");
+
+    let mut ledger =
+        EvidenceLedger::with_verifying_key(LedgerCapacity::new(10, 10_000), verifying_key);
+    ledger
+        .append(entry)
+        .expect("valid signed entry should append");
+
+    let snapshot = ledger.snapshot();
+    let stored = &snapshot.entries[0].1;
+    assert_ne!(stored.size_bytes, attacker_claimed_size);
+    assert_eq!(stored.signature, signature);
+    verify_evidence_entry(stored, &signing_key.verifying_key())
+        .expect("ledger-normalized stored entry must remain signature-verifiable");
 }
 
 #[test]

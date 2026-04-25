@@ -182,8 +182,7 @@ pub mod error_codes {
 // ---------------------------------------------------------------------------
 
 /// Errors that can occur during time-travel capture or replay.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "fuzz", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, arbitrary::Arbitrary)]
 pub enum TimeTravelError {
     /// The trace has no steps.
     EmptyTrace { trace_id: String },
@@ -304,8 +303,7 @@ impl fmt::Display for TimeTravelError {
 // ---------------------------------------------------------------------------
 
 /// A structured audit-log entry emitted on capture/replay events.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "fuzz", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, Serialize, Deserialize, arbitrary::Arbitrary)]
 pub struct AuditEntry {
     pub event_code: String,
     pub trace_id: String,
@@ -329,8 +327,7 @@ impl AuditEntry {
 // ---------------------------------------------------------------------------
 
 /// Describes a single side-effect produced during a trace step.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "fuzz", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, arbitrary::Arbitrary)]
 pub struct SideEffect {
     /// Human-readable kind of side-effect (e.g., "file_write", "network_call").
     pub kind: String,
@@ -349,8 +346,7 @@ impl SideEffect {
 
 /// A snapshot of the execution environment at trace capture time.
 /// INV-TTR-ENV-SEALED: immutable once captured.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "fuzz", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, arbitrary::Arbitrary)]
 pub struct EnvironmentSnapshot {
     /// Schema version.
     pub schema_version: String,
@@ -422,8 +418,7 @@ fn validate_environment_field(
 
 /// A single step in a workflow trace.
 /// INV-TTR-STEP-ORDER: steps are strictly ordered by `seq`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "fuzz", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, arbitrary::Arbitrary)]
 pub struct TraceStep {
     /// Monotonically increasing sequence number (0-based).
     pub seq: u64,
@@ -481,8 +476,7 @@ impl TraceStep {
 
 /// A complete workflow trace capturing all steps and the environment.
 /// INV-TTR-TRACE-COMPLETE: includes all data necessary for faithful replay.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "fuzz", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, arbitrary::Arbitrary)]
 pub struct WorkflowTrace {
     /// Unique trace identifier.
     pub trace_id: String,
@@ -752,8 +746,7 @@ impl TraceBuilder {
 // ---------------------------------------------------------------------------
 
 /// Describes a single divergence between original and replayed step outputs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "fuzz", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, arbitrary::Arbitrary)]
 pub struct Divergence {
     /// Step sequence number where divergence occurred.
     pub step_seq: u64,
@@ -768,8 +761,7 @@ pub struct Divergence {
 }
 
 /// The kind of divergence detected.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "fuzz", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, arbitrary::Arbitrary)]
 #[serde(rename_all = "snake_case")]
 pub enum DivergenceKind {
     /// Output bytes differ.
@@ -791,8 +783,7 @@ impl fmt::Display for DivergenceKind {
 }
 
 /// The verdict of a replay comparison.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "fuzz", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, arbitrary::Arbitrary)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplayVerdict {
     /// All steps produced identical outputs and side-effects.
@@ -811,8 +802,7 @@ impl fmt::Display for ReplayVerdict {
 }
 
 /// The result of replaying a workflow trace.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "fuzz", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, Serialize, Deserialize, arbitrary::Arbitrary)]
 pub struct ReplayResult {
     /// ID of the trace that was replayed.
     pub trace_id: String,

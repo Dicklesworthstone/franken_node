@@ -41,18 +41,14 @@ verifier-tools = ["control-plane"]     # Verifier-specific tooling, economy, SDK
 advanced-features = ["verifier-tools"]  # Claims, conformance, encoding, extensions, federation, perf, repair
 
 test-support = []
-dev-keys = []
-fuzz = ["arbitrary"]
 # Heavy compilation dependencies - optional for fuzz builds
-parsing = ["dep:tree-sitter", "dep:tree-sitter-javascript"]
 http-client = ["dep:ureq", "dep:url"]
 external-commands = ["dep:which", "dep:ctrlc"]
 compression = ["dep:flate2"]
 cbor-serialization = ["dep:serde_cbor"]
-ui = ["dep:frankentui"]
 engine = ["dep:frankenengine-engine", "dep:frankenengine-extension-host"]
 blake3 = ["dep:blake3"]
-default = ["extended-surfaces", "parsing", "http-client", "external-commands", "compression", "cbor-serialization", "ui", "engine"]
+default = ["extended-surfaces", "http-client", "external-commands", "compression", "cbor-serialization", "engine"]
 
 [dependencies]
 anyhow.workspace = true
@@ -74,20 +70,20 @@ serde_cbor = { version = "0.11.2", optional = true }
 flate2 = { version = "1.0.35", optional = true }
 rand = "0.8.5"
 asupersync = { version = "0.3.1", optional = true }
-frankentui = { workspace = true, optional = true }
+frankentui.workspace = true
 frankenengine-engine = { path = "../../../franken_engine/crates/franken-engine", optional = true }
 frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-extension-host", optional = true }
 tracing = { workspace = true }
 subtle = "2.6.1"
 tempfile = "3.15"
-arbitrary = { version = "1.3", optional = true, features = ["derive"] }
+arbitrary = { version = "1.3", features = ["derive"] }
 # Heavy compilation dependencies made optional for faster fuzz builds
 ureq = { version = "3", optional = true }
 url = { version = "2.5", optional = true }
 which = { version = "8.0.2", optional = true }
 ctrlc = { version = "3", optional = true, features = ["termination"] }
-tree-sitter = { version = "0.26.8", optional = true }
-tree-sitter-javascript = { version = "0.25.0", optional = true }
+tree-sitter = "0.26.8"
+tree-sitter-javascript = "0.25.0"
 blake3 = { version = "1.5", optional = true }
 
 [dev-dependencies]
@@ -103,7 +99,6 @@ sqlmodel-schema = { path = "/dp/sqlmodel_rust/crates/sqlmodel-schema" }
 syn = { version = "2.0", features = ["full"] }
 tracing-subscriber = { workspace = true }
 insta = { version = "1.40", features = ["json", "filters"] }
-arbitrary = { version = "1.3", features = ["derive"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1.6"
 

@@ -30,7 +30,7 @@ use crate::connector::control_channel::Direction;
 use crate::control_plane::control_epoch::ControlEpoch;
 use crate::control_plane::key_role_separation::{KeyRole, KeyRoleRegistry, KeyRoleSeparationError};
 use crate::security::constant_time;
-use crate::security::epoch_scoped_keys::{derive_epoch_key, RootSecret, SIGNATURE_LEN};
+use crate::security::epoch_scoped_keys::{RootSecret, SIGNATURE_LEN, derive_epoch_key};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -2247,9 +2247,10 @@ mod tests {
         establish_test_session(&mut mgr, "s1");
 
         let mac0 = sign_msg(&mgr, "s1", MessageDirection::Send, 0, "h0");
-        assert!(mgr
-            .process_message("s1", MessageDirection::Send, 0, "h0", &mac0, 2_000, "t")
-            .is_ok());
+        assert!(
+            mgr.process_message("s1", MessageDirection::Send, 0, "h0", &mac0, 2_000, "t")
+                .is_ok()
+        );
 
         let rs = test_root_secret();
         let epoch = test_epoch();
@@ -2274,13 +2275,14 @@ mod tests {
         assert_eq!(mgr.get_session("s1").unwrap().send_seq, 1);
 
         let mac1 = sign_msg(&mgr, "s1", MessageDirection::Send, 1, "h1");
-        assert!(mgr
-            .process_message("s1", MessageDirection::Send, 1, "h1", &mac1, 4_000, "t")
-            .is_ok());
+        assert!(
+            mgr.process_message("s1", MessageDirection::Send, 1, "h1", &mac1, 4_000, "t")
+                .is_ok()
+        );
 
         let stale_mac0 = sign_msg(&mgr, "s1", MessageDirection::Send, 0, "h0");
-        assert!(mgr
-            .process_message(
+        assert!(
+            mgr.process_message(
                 "s1",
                 MessageDirection::Send,
                 0,
@@ -2289,7 +2291,8 @@ mod tests {
                 5_000,
                 "t"
             )
-            .is_err());
+            .is_err()
+        );
     }
 
     #[test]
@@ -2585,20 +2588,23 @@ mod tests {
         establish_test_session(&mut mgr, "s1");
 
         let mac0 = sign_msg(&mgr, "s1", MessageDirection::Send, 0, "h0");
-        assert!(mgr
-            .process_message("s1", MessageDirection::Send, 0, "h0", &mac0, 2000, "t")
-            .is_ok());
+        assert!(
+            mgr.process_message("s1", MessageDirection::Send, 0, "h0", &mac0, 2000, "t")
+                .is_ok()
+        );
 
         let mac1 = sign_msg(&mgr, "s1", MessageDirection::Send, 1, "h1");
-        assert!(mgr
-            .process_message("s1", MessageDirection::Send, 1, "h1", &mac1, 3000, "t")
-            .is_ok());
+        assert!(
+            mgr.process_message("s1", MessageDirection::Send, 1, "h1", &mac1, 3000, "t")
+                .is_ok()
+        );
 
         // seq 1 again should fail (expected 2) — even with valid MAC for seq 1
         let mac1_dup = sign_msg(&mgr, "s1", MessageDirection::Send, 1, "h1");
-        assert!(mgr
-            .process_message("s1", MessageDirection::Send, 1, "h1", &mac1_dup, 4000, "t")
-            .is_err());
+        assert!(
+            mgr.process_message("s1", MessageDirection::Send, 1, "h1", &mac1_dup, 4000, "t")
+                .is_err()
+        );
     }
 
     #[test]
@@ -2607,15 +2613,17 @@ mod tests {
         establish_test_session(&mut mgr, "s1");
 
         let mac0 = sign_msg(&mgr, "s1", MessageDirection::Receive, 0, "h0");
-        assert!(mgr
-            .process_message("s1", MessageDirection::Receive, 0, "h0", &mac0, 2000, "t")
-            .is_ok());
+        assert!(
+            mgr.process_message("s1", MessageDirection::Receive, 0, "h0", &mac0, 2000, "t")
+                .is_ok()
+        );
 
         // Skip seq 1 — should fail
         let mac2 = sign_msg(&mgr, "s1", MessageDirection::Receive, 2, "h2");
-        assert!(mgr
-            .process_message("s1", MessageDirection::Receive, 2, "h2", &mac2, 3000, "t")
-            .is_err());
+        assert!(
+            mgr.process_message("s1", MessageDirection::Receive, 2, "h2", &mac2, 3000, "t")
+                .is_err()
+        );
     }
 
     #[test]
@@ -2624,24 +2632,28 @@ mod tests {
         establish_test_session(&mut mgr, "s1");
 
         let mac_s0 = sign_msg(&mgr, "s1", MessageDirection::Send, 0, "h");
-        assert!(mgr
-            .process_message("s1", MessageDirection::Send, 0, "h", &mac_s0, 1, "t")
-            .is_ok());
+        assert!(
+            mgr.process_message("s1", MessageDirection::Send, 0, "h", &mac_s0, 1, "t")
+                .is_ok()
+        );
 
         let mac_r0 = sign_msg(&mgr, "s1", MessageDirection::Receive, 0, "h");
-        assert!(mgr
-            .process_message("s1", MessageDirection::Receive, 0, "h", &mac_r0, 2, "t")
-            .is_ok());
+        assert!(
+            mgr.process_message("s1", MessageDirection::Receive, 0, "h", &mac_r0, 2, "t")
+                .is_ok()
+        );
 
         let mac_s1 = sign_msg(&mgr, "s1", MessageDirection::Send, 1, "h");
-        assert!(mgr
-            .process_message("s1", MessageDirection::Send, 1, "h", &mac_s1, 3, "t")
-            .is_ok());
+        assert!(
+            mgr.process_message("s1", MessageDirection::Send, 1, "h", &mac_s1, 3, "t")
+                .is_ok()
+        );
 
         let mac_r1 = sign_msg(&mgr, "s1", MessageDirection::Receive, 1, "h");
-        assert!(mgr
-            .process_message("s1", MessageDirection::Receive, 1, "h", &mac_r1, 4, "t")
-            .is_ok());
+        assert!(
+            mgr.process_message("s1", MessageDirection::Receive, 1, "h", &mac_r1, 4, "t")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2651,8 +2663,8 @@ mod tests {
         mgr.sessions.get_mut("s1").unwrap().send_seq = u64::MAX - 1;
 
         let final_mac = sign_msg(&mgr, "s1", MessageDirection::Send, u64::MAX - 1, "h-final");
-        assert!(mgr
-            .process_message(
+        assert!(
+            mgr.process_message(
                 "s1",
                 MessageDirection::Send,
                 u64::MAX - 1,
@@ -2661,13 +2673,14 @@ mod tests {
                 2_000,
                 "t"
             )
-            .is_ok());
+            .is_ok()
+        );
         assert_eq!(mgr.get_session("s1").unwrap().send_seq, u64::MAX);
         assert!(!mgr.get_session("s1").unwrap().send_seq_exhausted);
 
         let terminal_mac = sign_msg(&mgr, "s1", MessageDirection::Send, u64::MAX, "h-terminal");
-        assert!(mgr
-            .process_message(
+        assert!(
+            mgr.process_message(
                 "s1",
                 MessageDirection::Send,
                 u64::MAX,
@@ -2676,7 +2689,8 @@ mod tests {
                 3_000,
                 "t",
             )
-            .is_ok());
+            .is_ok()
+        );
         assert_eq!(mgr.get_session("s1").unwrap().send_seq, u64::MAX);
         assert!(mgr.get_session("s1").unwrap().send_seq_exhausted);
 
@@ -2723,8 +2737,8 @@ mod tests {
             u64::MAX - 1,
             "h-final",
         );
-        assert!(mgr
-            .process_message(
+        assert!(
+            mgr.process_message(
                 "s1",
                 MessageDirection::Receive,
                 u64::MAX - 1,
@@ -2733,7 +2747,8 @@ mod tests {
                 2_000,
                 "t"
             )
-            .is_ok());
+            .is_ok()
+        );
         assert_eq!(mgr.get_session("s1").unwrap().recv_seq, u64::MAX);
         assert!(!mgr.get_session("s1").unwrap().recv_seq_exhausted);
 
@@ -2744,8 +2759,8 @@ mod tests {
             u64::MAX,
             "h-terminal",
         );
-        assert!(mgr
-            .process_message(
+        assert!(
+            mgr.process_message(
                 "s1",
                 MessageDirection::Receive,
                 u64::MAX,
@@ -2754,7 +2769,8 @@ mod tests {
                 3_000,
                 "t",
             )
-            .is_ok());
+            .is_ok()
+        );
         assert_eq!(mgr.get_session("s1").unwrap().recv_seq, u64::MAX);
         assert!(mgr.get_session("s1").unwrap().recv_seq_exhausted);
 
@@ -2916,19 +2932,22 @@ mod tests {
         establish_test_session(&mut mgr, "s1");
 
         let mac0 = sign_msg(&mgr, "s1", MessageDirection::Send, 0, "h");
-        assert!(mgr
-            .process_message("s1", MessageDirection::Send, 0, "h", &mac0, 1, "t")
-            .is_ok());
+        assert!(
+            mgr.process_message("s1", MessageDirection::Send, 0, "h", &mac0, 1, "t")
+                .is_ok()
+        );
 
         let mac2 = sign_msg(&mgr, "s1", MessageDirection::Send, 2, "h");
-        assert!(mgr
-            .process_message("s1", MessageDirection::Send, 2, "h", &mac2, 2, "t")
-            .is_ok());
+        assert!(
+            mgr.process_message("s1", MessageDirection::Send, 2, "h", &mac2, 2, "t")
+                .is_ok()
+        );
 
         let mac1 = sign_msg(&mgr, "s1", MessageDirection::Send, 1, "h");
-        assert!(mgr
-            .process_message("s1", MessageDirection::Send, 1, "h", &mac1, 3, "t")
-            .is_ok());
+        assert!(
+            mgr.process_message("s1", MessageDirection::Send, 1, "h", &mac1, 3, "t")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2944,9 +2963,10 @@ mod tests {
         establish_test_session(&mut mgr, "s1");
 
         let mac0 = sign_msg(&mgr, "s1", MessageDirection::Send, 0, "h");
-        assert!(mgr
-            .process_message("s1", MessageDirection::Send, 0, "h", &mac0, 1, "t")
-            .is_ok());
+        assert!(
+            mgr.process_message("s1", MessageDirection::Send, 0, "h", &mac0, 1, "t")
+                .is_ok()
+        );
 
         // Replay seq 0
         let mac0_dup = sign_msg(&mgr, "s1", MessageDirection::Send, 0, "h");
@@ -2973,16 +2993,18 @@ mod tests {
         for seq in 0..6 {
             let ph = format!("h{seq}");
             let mac = sign_msg(&mgr, "s1", MessageDirection::Send, seq, &ph);
-            assert!(mgr
-                .process_message("s1", MessageDirection::Send, seq, &ph, &mac, 100 + seq, "t")
-                .is_ok());
+            assert!(
+                mgr.process_message("s1", MessageDirection::Send, seq, &ph, &mac, 100 + seq, "t")
+                    .is_ok()
+            );
         }
 
         // Seq 2 should be rejected (below floor)
         let mac_old = sign_msg(&mgr, "s1", MessageDirection::Send, 2, "h2");
-        assert!(mgr
-            .process_message("s1", MessageDirection::Send, 2, "h2", &mac_old, 200, "t")
-            .is_err());
+        assert!(
+            mgr.process_message("s1", MessageDirection::Send, 2, "h2", &mac_old, 200, "t")
+                .is_err()
+        );
     }
 
     #[test]
@@ -3007,8 +3029,8 @@ mod tests {
         mgr.sessions.get_mut("s1").expect("session exists").send_seq = sequence;
 
         let mac = sign_msg(&mgr, "s1", MessageDirection::Send, sequence, "h-cap");
-        assert!(mgr
-            .process_message(
+        assert!(
+            mgr.process_message(
                 "s1",
                 MessageDirection::Send,
                 sequence,
@@ -3017,7 +3039,8 @@ mod tests {
                 300,
                 "trace-cap"
             )
-            .is_ok());
+            .is_ok()
+        );
 
         let window_size = mgr
             .replay_windows
@@ -3129,21 +3152,24 @@ mod tests {
         establish_test_session(&mut mgr, "s2");
 
         let mac_s1 = sign_msg(&mgr, "s1", MessageDirection::Send, 0, "h");
-        assert!(mgr
-            .process_message("s1", MessageDirection::Send, 0, "h", &mac_s1, 1, "t")
-            .is_ok());
+        assert!(
+            mgr.process_message("s1", MessageDirection::Send, 0, "h", &mac_s1, 1, "t")
+                .is_ok()
+        );
 
         let mac_s2 = sign_msg(&mgr, "s2", MessageDirection::Send, 0, "h");
-        assert!(mgr
-            .process_message("s2", MessageDirection::Send, 0, "h", &mac_s2, 2, "t")
-            .is_ok());
+        assert!(
+            mgr.process_message("s2", MessageDirection::Send, 0, "h", &mac_s2, 2, "t")
+                .is_ok()
+        );
 
         mgr.terminate_session("s1", 100, "t").unwrap();
 
         let mac_s2b = sign_msg(&mgr, "s2", MessageDirection::Send, 1, "h");
-        assert!(mgr
-            .process_message("s2", MessageDirection::Send, 1, "h", &mac_s2b, 3, "t")
-            .is_ok());
+        assert!(
+            mgr.process_message("s2", MessageDirection::Send, 1, "h", &mac_s2b, 3, "t")
+                .is_ok()
+        );
     }
 
     // ── AuthenticatedMessage fields ─────────────────────────────────
@@ -6211,7 +6237,9 @@ mod session_auth_boundary_negative_tests {
 
         // Should check if result is finite before using
         if !avg.is_finite() {
-            println!("SECURITY NOTE: Extreme timing values produce non-finite averages without is_finite guards");
+            println!(
+                "SECURITY NOTE: Extreme timing values produce non-finite averages without is_finite guards"
+            );
         } else {
             assert!(
                 avg > 0.0,
@@ -6417,6 +6445,8 @@ mod session_auth_boundary_negative_tests {
         }
 
         // Any sequence arithmetic in the implementation should use saturating operations
-        println!("SECURITY NOTE: All sequence number arithmetic should use saturating_add to prevent overflow");
+        println!(
+            "SECURITY NOTE: All sequence number arithmetic should use saturating_add to prevent overflow"
+        );
     }
 }

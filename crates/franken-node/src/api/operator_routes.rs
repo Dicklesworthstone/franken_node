@@ -8,15 +8,15 @@
 
 use crate::config::Config as RuntimeConfig;
 use serde::{Deserialize, Serialize};
-use std::sync::{Mutex, TryLockError};
-use std::sync::atomic::AtomicU8;
 #[cfg(any(test, feature = "control-plane"))]
 use std::sync::OnceLock;
 use std::sync::RwLock;
-use std::time::Duration;
+use std::sync::atomic::AtomicU8;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, TryLockError};
+use std::time::Duration;
 use std::time::Instant;
 
 use super::error::ApiError;
@@ -191,7 +191,7 @@ pub(crate) fn clear_process_start_override_for_tests() {
 
 #[cfg(any(test, feature = "control-plane"))]
 fn try_lock_process_start_override_with_timeout(
-    timeout: Duration
+    timeout: Duration,
 ) -> Result<std::sync::MutexGuard<'static, Option<ProcessStartState>>, &'static str> {
     let start = std::time::Instant::now();
     let mut backoff = Duration::from_millis(1);
@@ -283,7 +283,6 @@ fn assert_process_start_cleanup_waits_for_init_lock() {
             .unwrap_or_else(|poison| poison.into_inner());
         wall_clock.push_str("probe");
     }
-
 }
 
 #[cfg(any(test, feature = "control-plane"))]
@@ -370,7 +369,25 @@ pub struct RolloutState {
 
 // ── Route Metadata ─────────────────────────────────────────────────────────
 
-/// Route metadata for the operator endpoint group.
+/// Returns route metadata for all operator management endpoints.
+///
+/// Provides structured metadata for the 4 operator API endpoints, including:
+///
+/// ## Endpoints
+/// - `GET /v1/operator/status` - Get node status and health information (API key required)
+/// - `GET /v1/operator/health` - Health check endpoint (public, no auth required)
+/// - `GET /v1/operator/config` - Retrieve operator configuration (operator role required)
+/// - `GET /v1/operator/rollout` - Get rollout status and progress (operator role required)
+///
+/// ## Authentication
+/// - `/health` endpoint is public (no authentication)
+/// - Other endpoints require API key authentication with appropriate roles
+///
+/// ## Used By
+/// - Load balancers for health checking
+/// - Monitoring systems for status collection
+/// - Administrative dashboards for configuration management
+/// - CI/CD systems for rollout monitoring
 pub fn route_metadata() -> Vec<RouteMetadata> {
     vec![
         RouteMetadata {
@@ -1040,7 +1057,10 @@ mod tests {
 
         let result: Result<NodeStatus, _> = serde_json::from_value(raw);
 
-        assert!(result.is_err(), "control_epoch must not accept negative values");
+        assert!(
+            result.is_err(),
+            "control_epoch must not accept negative values"
+        );
     }
 
     #[test]
@@ -1201,16 +1221,28 @@ mod tests {
 
                     // All endpoint handlers should process gracefully without panics/crashes
                     let status_result = get_status(&identity, &trace);
-                    assert!(status_result.is_ok(), "Status should handle malicious identity");
+                    assert!(
+                        status_result.is_ok(),
+                        "Status should handle malicious identity"
+                    );
 
                     let health_result = get_health(&identity, &trace);
-                    assert!(health_result.is_ok(), "Health should handle malicious identity");
+                    assert!(
+                        health_result.is_ok(),
+                        "Health should handle malicious identity"
+                    );
 
                     let config_result = get_config(&identity, &trace);
-                    assert!(config_result.is_ok(), "Config should handle malicious identity");
+                    assert!(
+                        config_result.is_ok(),
+                        "Config should handle malicious identity"
+                    );
 
                     let rollout_result = get_rollout(&identity, &trace);
-                    assert!(rollout_result.is_ok(), "Rollout should handle malicious identity");
+                    assert!(
+                        rollout_result.is_ok(),
+                        "Rollout should handle malicious identity"
+                    );
                 }
             }
         }
@@ -1221,11 +1253,7 @@ mod tests {
             clear_process_start_override_for_tests();
 
             // Test near u64::MAX boundaries for timing calculations
-            let extreme_offsets = vec![
-                u64::MAX - 1000,
-                u64::MAX - 1,
-                u64::MAX,
-            ];
+            let extreme_offsets = vec![u64::MAX - 1000, u64::MAX - 1, u64::MAX];
 
             for &extreme_offset in &extreme_offsets {
                 // Install extreme process start offset
@@ -1239,8 +1267,8 @@ mod tests {
                 assert!(status.data.uptime_seconds <= u64::MAX);
 
                 // Test rollout endpoint timing calculations
-                let rollout = get_rollout(&identity, &trace)
-                    .expect("Rollout should handle extreme timing");
+                let rollout =
+                    get_rollout(&identity, &trace).expect("Rollout should handle extreme timing");
                 assert!(!rollout.data.last_transition.is_empty());
             }
         }
@@ -1277,8 +1305,8 @@ mod tests {
                 .expect("Should serialize massive health check");
 
             // Deserialization should handle large payloads
-            let deserialized: HealthCheck = serde_json::from_str(&serialized)
-                .expect("Should deserialize massive health check");
+            let deserialized: HealthCheck =
+                serde_json::from_str(&serialized).expect("Should deserialize massive health check");
             assert_eq!(deserialized.checks.len(), massive_component_count);
         }
 
@@ -1324,7 +1352,10 @@ mod tests {
             }
 
             // All operations should succeed despite "concurrent" access
-            assert!(results.iter().all(|(_, success)| *success), "All concurrent operations should succeed");
+            assert!(
+                results.iter().all(|(_, success)| *success),
+                "All concurrent operations should succeed"
+            );
             assert_eq!(results.len(), 50);
 
             // Verify state consistency
@@ -1348,7 +1379,8 @@ mod tests {
 
             // Test serialization/deserialization with extreme values
             let serialized = serde_json::to_string(&config_view).expect("serialize extreme config");
-            let deserialized: ConfigView = serde_json::from_str(&serialized).expect("deserialize extreme config");
+            let deserialized: ConfigView =
+                serde_json::from_str(&serialized).expect("deserialize extreme config");
             assert_eq!(deserialized.fleet_convergence_timeout_seconds, u32::MAX);
 
             // Test with extreme string lengths
@@ -1375,29 +1407,25 @@ mod tests {
 
             install_process_start(future_offset, future_time.to_rfc3339());
 
-            let status = get_status(&identity, &trace)
-                .expect("Should handle future process start time");
+            let status =
+                get_status(&identity, &trace).expect("Should handle future process start time");
             // Uptime should saturate to 0 for future timestamps
             assert_eq!(status.data.uptime_seconds, 0);
 
-            let rollout = get_rollout(&identity, &trace)
-                .expect("Rollout should handle future process start");
+            let rollout =
+                get_rollout(&identity, &trace).expect("Rollout should handle future process start");
             assert_eq!(rollout.data.last_transition, future_time.to_rfc3339());
 
             // Test with process start at epoch boundaries
-            let epoch_boundaries = vec![
-                0u64,
-                1u64,
-                u64::MAX / 2,
-                u64::MAX - 1,
-                u64::MAX,
-            ];
+            let epoch_boundaries = vec![0u64, 1u64, u64::MAX / 2, u64::MAX - 1, u64::MAX];
 
             for &boundary_offset in &epoch_boundaries {
                 install_process_start(boundary_offset, "2000-01-01T00:00:00Z".to_string());
 
-                let boundary_result = get_status(&identity, &trace)
-                    .expect(&format!("Should handle boundary offset: {}", boundary_offset));
+                let boundary_result = get_status(&identity, &trace).expect(&format!(
+                    "Should handle boundary offset: {}",
+                    boundary_offset
+                ));
                 assert!(boundary_result.data.uptime_seconds <= u64::MAX);
             }
         }
@@ -1421,11 +1449,14 @@ mod tests {
             // Should serialize safely without breaking JSON structure
             let serialized = serde_json::to_string(&malicious_node_status)
                 .expect("Should serialize malicious node status safely");
-            assert!(!serialized.contains("\"malicious\":\"payload\""), "Should escape injection attempts");
+            assert!(
+                !serialized.contains("\"malicious\":\"payload\""),
+                "Should escape injection attempts"
+            );
 
             // Verify round-trip integrity
-            let deserialized: NodeStatus = serde_json::from_str(&serialized)
-                .expect("Should deserialize safely");
+            let deserialized: NodeStatus =
+                serde_json::from_str(&serialized).expect("Should deserialize safely");
             assert_eq!(deserialized.node_id, malicious_node_status.node_id);
             assert_eq!(deserialized.version, malicious_node_status.version);
         }
@@ -1439,46 +1470,96 @@ mod tests {
 
             for route in &routes {
                 // Path validation
-                assert!(route.path.starts_with("/v1/operator/"), "All paths should start with operator prefix");
+                assert!(
+                    route.path.starts_with("/v1/operator/"),
+                    "All paths should start with operator prefix"
+                );
                 assert!(route.path.len() < 1000, "Paths should be reasonable length");
 
                 // Method validation
                 assert_eq!(route.method, "GET", "All operator routes should be GET");
 
                 // Group validation
-                assert_eq!(route.group, EndpointGroup::Operator, "All should be operator group");
+                assert_eq!(
+                    route.group,
+                    EndpointGroup::Operator,
+                    "All should be operator group"
+                );
 
                 // Lifecycle validation
-                assert_eq!(route.lifecycle, EndpointLifecycle::Stable, "All should be stable");
+                assert_eq!(
+                    route.lifecycle,
+                    EndpointLifecycle::Stable,
+                    "All should be stable"
+                );
 
                 // Auth validation
                 if route.path.contains("health") {
-                    assert_eq!(route.auth_method, AuthMethod::None, "Health endpoint should not require auth");
+                    assert_eq!(
+                        route.auth_method,
+                        AuthMethod::None,
+                        "Health endpoint should not require auth"
+                    );
                 } else {
-                    assert_eq!(route.auth_method, AuthMethod::ApiKey, "Non-health endpoints should require API key");
+                    assert_eq!(
+                        route.auth_method,
+                        AuthMethod::ApiKey,
+                        "Non-health endpoints should require API key"
+                    );
                 }
 
                 // Policy validation
-                assert!(route.policy_hook.hook_id.starts_with("operator."), "Hook IDs should start with operator prefix");
-                assert!(route.policy_hook.hook_id.len() < 100, "Hook IDs should be reasonable length");
+                assert!(
+                    route.policy_hook.hook_id.starts_with("operator."),
+                    "Hook IDs should start with operator prefix"
+                );
+                assert!(
+                    route.policy_hook.hook_id.len() < 100,
+                    "Hook IDs should be reasonable length"
+                );
 
                 if route.path.contains("health") {
-                    assert!(route.policy_hook.required_roles.is_empty(), "Health endpoint should not require roles");
+                    assert!(
+                        route.policy_hook.required_roles.is_empty(),
+                        "Health endpoint should not require roles"
+                    );
                 } else {
-                    assert!(!route.policy_hook.required_roles.is_empty(), "Non-health endpoints should require roles");
-                    assert!(route.policy_hook.required_roles.contains(&"operator".to_string()), "Should require operator role");
+                    assert!(
+                        !route.policy_hook.required_roles.is_empty(),
+                        "Non-health endpoints should require roles"
+                    );
+                    assert!(
+                        route
+                            .policy_hook
+                            .required_roles
+                            .contains(&"operator".to_string()),
+                        "Should require operator role"
+                    );
                 }
 
                 // Trace propagation
-                assert!(route.trace_propagation, "All routes should support trace propagation");
+                assert!(
+                    route.trace_propagation,
+                    "All routes should support trace propagation"
+                );
             }
 
             // Test uniqueness
-            let unique_paths: std::collections::BTreeSet<_> = routes.iter().map(|r| &r.path).collect();
-            assert_eq!(unique_paths.len(), routes.len(), "All paths should be unique");
+            let unique_paths: std::collections::BTreeSet<_> =
+                routes.iter().map(|r| &r.path).collect();
+            assert_eq!(
+                unique_paths.len(),
+                routes.len(),
+                "All paths should be unique"
+            );
 
-            let unique_hook_ids: std::collections::BTreeSet<_> = routes.iter().map(|r| &r.policy_hook.hook_id).collect();
-            assert_eq!(unique_hook_ids.len(), routes.len(), "All hook IDs should be unique");
+            let unique_hook_ids: std::collections::BTreeSet<_> =
+                routes.iter().map(|r| &r.policy_hook.hook_id).collect();
+            assert_eq!(
+                unique_hook_ids.len(),
+                routes.len(),
+                "All hook IDs should be unique"
+            );
         }
     }
 }

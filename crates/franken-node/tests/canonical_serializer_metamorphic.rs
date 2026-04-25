@@ -6,13 +6,15 @@
 //! canonical form, which would break deterministic serialization requirements.
 
 use arbitrary::Arbitrary;
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use frankenengine_node::connector::canonical_serializer::{CanonicalSerializer, TrustObjectType};
 use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
 use frankenengine_node::supply_chain::trust_card::{
-    BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
-    DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
-    ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCard, TrustCardInput,
-    to_canonical_json,
+    to_canonical_json, BehavioralProfile, CapabilityDeclaration, CapabilityRisk,
+    CertificationLevel, DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary,
+    PublisherIdentity, ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCard,
+    TrustCardInput,
 };
 use proptest::prelude::*;
 use serde_json::{Map, Value};
@@ -194,6 +196,32 @@ impl ArbitraryTrustCardData {
             card_hash: self.card_hash.clone(),
             registry_signature: self.registry_signature.clone(),
         }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn canonical_hex_and_base64_encoding_round_trip(payload in prop::collection::vec(any::<u8>(), 0..=4096)) {
+        let hex_encoded = hex::encode(&payload);
+        let hex_decoded = hex::decode(&hex_encoded)
+            .map_err(|err| TestCaseError::fail(format!("hex decode failed after encode: {err}")))?;
+        prop_assert_eq!(
+            hex_decoded.as_slice(),
+            payload.as_slice(),
+            "hex decode(encode(payload)) changed bytes"
+        );
+
+        let base64_encoded = STANDARD.encode(&payload);
+        let base64_decoded = STANDARD
+            .decode(&base64_encoded)
+            .map_err(|err| TestCaseError::fail(format!("base64 decode failed after encode: {err}")))?;
+        prop_assert_eq!(
+            base64_decoded.as_slice(),
+            payload.as_slice(),
+            "base64 decode(encode(payload)) changed bytes"
+        );
     }
 }
 

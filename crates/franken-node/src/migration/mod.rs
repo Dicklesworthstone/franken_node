@@ -54,6 +54,16 @@ fn push_bounded<T>(vec: &mut Vec<T>, item: T, max_cap: usize) {
     vec.push(item);
 }
 
+#[cfg(feature = "external-commands")]
+fn resolve_runtime_on_path(runtime: &str) -> Option<PathBuf> {
+    which::which(runtime).ok()
+}
+
+#[cfg(not(feature = "external-commands"))]
+fn resolve_runtime_on_path(_runtime: &str) -> Option<PathBuf> {
+    None
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuditOutputFormat {
     Json,
@@ -1313,10 +1323,10 @@ fn resolve_migration_runtime_targets() -> anyhow::Result<Vec<MigrationRuntimeTar
         runtimes.push(MigrationRuntimeTarget::FrankenNode(exe_path));
     }
 
-    if let Ok(path) = which::which("node") {
+    if let Some(path) = resolve_runtime_on_path("node") {
         runtimes.push(MigrationRuntimeTarget::Node(path));
     }
-    if let Ok(path) = which::which("bun") {
+    if let Some(path) = resolve_runtime_on_path("bun") {
         runtimes.push(MigrationRuntimeTarget::Bun(path));
     }
 

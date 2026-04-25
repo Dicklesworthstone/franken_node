@@ -1344,7 +1344,11 @@ impl SharedFleetControlOwner {
         self.try_lock_with_timeout(trace, Duration::from_millis(200))
     }
 
-    fn try_lock_with_timeout(&self, trace: &TraceContext, timeout: Duration) -> Result<MutexGuard<'_, FleetControlManager>, ApiError> {
+    fn try_lock_with_timeout(
+        &self,
+        trace: &TraceContext,
+        timeout: Duration,
+    ) -> Result<MutexGuard<'_, FleetControlManager>, ApiError> {
         let start = std::time::Instant::now();
         let mut backoff = Duration::from_millis(1);
 

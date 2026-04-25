@@ -1,18 +1,21 @@
-#[cfg(feature = "control-plane")]
+//! Library-facing API route modules.
+//!
+//! Gating rule: the public `crate::api` namespace is enabled at the crate root
+//! in `lib.rs`. Once that namespace is on, every `api/*` module is declared
+//! here unconditionally so the surface does not drift via per-module
+//! `cfg(feature = ...)` toggles in this file. Keep narrower `cfg(...)` gates on
+//! individual items inside each module when a helper is test-only or tied to a
+//! lower-level feature such as `control-plane`.
+
 pub mod compat_gate;
 pub mod error;
-#[cfg(feature = "control-plane")]
 pub mod fleet_control_routes;
 pub mod fleet_quarantine;
 pub mod middleware;
-#[cfg(any(test, feature = "control-plane"))]
 pub mod operator_routes;
-#[cfg(feature = "control-plane")]
 pub mod service;
-#[cfg(any(test, feature = "control-plane"))]
 pub mod session_auth;
 pub mod trust_card_routes;
-#[cfg(feature = "control-plane")]
 pub mod verifier_routes;
 
 /// Return at most `max_chars` Unicode scalar values from `input` without
@@ -196,7 +199,10 @@ mod tests {
         // Multiple replacement characters in sequence
         let multiple_replacements = "a\u{FFFD}\u{FFFD}\u{FFFD}b";
         assert_eq!(utf8_prefix(multiple_replacements, 3), "a\u{FFFD}\u{FFFD}");
-        assert_eq!(utf8_prefix(multiple_replacements, 4), "a\u{FFFD}\u{FFFD}\u{FFFD}");
+        assert_eq!(
+            utf8_prefix(multiple_replacements, 4),
+            "a\u{FFFD}\u{FFFD}\u{FFFD}"
+        );
 
         // Only replacement characters
         let only_replacements = "\u{FFFD}\u{FFFD}\u{FFFD}";
@@ -206,11 +212,18 @@ mod tests {
     #[test]
     fn negative_utf8_prefix_with_extreme_unicode_codepoints() {
         // Test with Unicode codepoints at various boundaries
-        let extreme_unicode = "\u{0001}\u{007F}\u{0080}\u{07FF}\u{0800}\u{FFFF}\u{10000}\u{10FFFF}end";
+        let extreme_unicode =
+            "\u{0001}\u{007F}\u{0080}\u{07FF}\u{0800}\u{FFFF}\u{10000}\u{10FFFF}end";
 
         // Should handle all extreme codepoints correctly
-        assert_eq!(utf8_prefix(extreme_unicode, 4), "\u{0001}\u{007F}\u{0080}\u{07FF}");
-        assert_eq!(utf8_prefix(extreme_unicode, 8), "\u{0001}\u{007F}\u{0080}\u{07FF}\u{0800}\u{FFFF}\u{10000}\u{10FFFF}");
+        assert_eq!(
+            utf8_prefix(extreme_unicode, 4),
+            "\u{0001}\u{007F}\u{0080}\u{07FF}"
+        );
+        assert_eq!(
+            utf8_prefix(extreme_unicode, 8),
+            "\u{0001}\u{007F}\u{0080}\u{07FF}\u{0800}\u{FFFF}\u{10000}\u{10FFFF}"
+        );
 
         // Test maximum Unicode codepoint
         let max_unicode = "\u{10FFFF}text";
@@ -225,10 +238,10 @@ mod tests {
     fn negative_utf8_prefix_with_bidirectional_override_sequences() {
         // Test with BiDi override characters that could cause display confusion
         let bidi_attacks = vec![
-            "safe\u{202E}evil\u{202D}text", // RLE/LRO override
+            "safe\u{202E}evil\u{202D}text",        // RLE/LRO override
             "normal\u{2066}hidden\u{2069}visible", // FSI/PDI isolate
-            "\u{200F}rtl\u{200E}ltr", // RLM/LRM marks
-            "text\u{061C}arabic\u{200C}joiner", // ALM and ZWNJ
+            "\u{200F}rtl\u{200E}ltr",              // RLM/LRM marks
+            "text\u{061C}arabic\u{200C}joiner",    // ALM and ZWNJ
         ];
 
         for bidi_text in bidi_attacks {
@@ -272,10 +285,10 @@ mod tests {
     fn negative_utf8_prefix_with_normalization_edge_cases() {
         // Test characters that have multiple Unicode representations
         let denormalized_cases = vec![
-            ("e\u{0301}", "é"), // e + combining acute vs precomposed é
-            ("A\u{030A}", "Å"), // A + combining ring vs precomposed Å
+            ("e\u{0301}", "é"),                       // e + combining acute vs precomposed é
+            ("A\u{030A}", "Å"),                       // A + combining ring vs precomposed Å
             ("\u{1E9B}\u{0323}", "\u{1E9B}\u{0323}"), // Complex combining sequence
-            ("가\u{0300}", "가\u{0300}"), // Korean + combining grave
+            ("가\u{0300}", "가\u{0300}"),             // Korean + combining grave
         ];
 
         for (unnormalized, _normalized) in denormalized_cases {
@@ -297,11 +310,11 @@ mod tests {
     fn negative_utf8_prefix_with_control_character_sequences() {
         // Test various control characters that could cause issues
         let control_sequences = vec![
-            "text\x00\x01\x02end", // Null and SOH/STX
-            "line1\r\nline2\r\nline3", // CRLF sequences
+            "text\x00\x01\x02end",         // Null and SOH/STX
+            "line1\r\nline2\r\nline3",     // CRLF sequences
             "data\x1B[31mred\x1B[0mreset", // ANSI escape sequences
-            "bell\x07tab\ttab", // Bell and tab characters
-            "form\x0Cfeed\x0Bvtab", // Form feed and vertical tab
+            "bell\x07tab\ttab",            // Bell and tab characters
+            "form\x0Cfeed\x0Bvtab",        // Form feed and vertical tab
         ];
 
         for control_text in control_sequences {
@@ -350,8 +363,8 @@ mod tests {
 
         // Strings with unusual byte patterns
         let unusual_patterns = vec![
-            "\u{00FF}\u{00FE}\u{00FD}", // High code points encoded as valid UTF-8
-            "normal\u{FEFF}bom", // BOM in middle of string
+            "\u{00FF}\u{00FE}\u{00FD}",     // High code points encoded as valid UTF-8
+            "normal\u{FEFF}bom",            // BOM in middle of string
             "emoji\u{1F4A9}\u{1F525}combo", // Multi-byte emoji sequence
             "\u{FFFD}", // Replacement character for invalid byte decoding boundaries
         ];
@@ -381,8 +394,8 @@ mod tests {
         let mut long_string = String::new();
         for i in 0..10000 {
             match i % 4 {
-                0 => long_string.push('a'), // 1-byte UTF-8
-                1 => long_string.push('ñ'), // 2-byte UTF-8
+                0 => long_string.push('a'),  // 1-byte UTF-8
+                1 => long_string.push('ñ'),  // 2-byte UTF-8
                 2 => long_string.push('語'), // 3-byte UTF-8
                 3 => long_string.push('🙂'), // 4-byte UTF-8
                 _ => unreachable!(),
@@ -408,8 +421,11 @@ mod tests {
         let duration = start_time.elapsed();
 
         // Should complete efficiently (within reasonable time)
-        assert!(duration < std::time::Duration::from_millis(100),
-                "utf8_prefix took too long: {:?}", duration);
+        assert!(
+            duration < std::time::Duration::from_millis(100),
+            "utf8_prefix took too long: {:?}",
+            duration
+        );
     }
 
     #[test]
@@ -471,12 +487,8 @@ mod tests {
 
     #[test]
     fn negative_utf8_prefix_invalid_raw_bytes_are_rejected_before_prefixing() {
-        let invalid_inputs: &[&[u8]] = &[
-            b"\xff",
-            b"\xe2\x82",
-            b"\xf0\x9f\x99",
-            b"safe\xc3(payload",
-        ];
+        let invalid_inputs: &[&[u8]] =
+            &[b"\xff", b"\xe2\x82", b"\xf0\x9f\x99", b"safe\xc3(payload"];
 
         for bytes in invalid_inputs {
             assert!(std::str::from_utf8(bytes).is_err());
@@ -525,8 +537,12 @@ mod tests {
     fn negative_utf8_prefix_cuts_between_regional_indicators_without_tail() {
         let value = "🇺🇸secret";
         let mut chars = value.chars();
-        let first = chars.next().expect("UTF-8 value should have at least one character");
-        let second = chars.next().expect("UTF-8 value should have at least two characters");
+        let first = chars
+            .next()
+            .expect("UTF-8 value should have at least one character");
+        let second = chars
+            .next()
+            .expect("UTF-8 value should have at least two characters");
         let prefix = utf8_prefix(value, 1);
 
         assert_eq!(prefix, first.to_string());

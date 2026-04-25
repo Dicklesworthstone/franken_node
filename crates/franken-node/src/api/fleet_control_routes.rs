@@ -252,6 +252,26 @@ fn validate_coordination_targets(
 
 // ── Route Metadata ─────────────────────────────────────────────────────────
 
+/// Returns route metadata for all fleet control endpoints.
+///
+/// Provides structured metadata for the 5 fleet control API endpoints, including:
+///
+/// ## Endpoints
+/// - `GET /v1/fleet/leases` - List active fleet leases (operator/fleet-admin roles)
+/// - `POST /v1/fleet/leases` - Acquire new fleet lease (fleet-admin role)
+/// - `DELETE /v1/fleet/leases/{lease_id}` - Release specific lease (fleet-admin role)
+/// - `POST /v1/fleet/fence` - Execute fleet fencing operation (mTLS + fleet-admin role)
+/// - `POST /v1/fleet/coordinate` - Fleet coordination operation (experimental, mTLS + fleet-admin role)
+///
+/// ## Authentication
+/// - Lease operations: Bearer token with `operator` or `fleet-admin` roles
+/// - Fence/coordinate operations: mTLS client certificate with `fleet-admin` role
+///
+/// ## Used By
+/// - Fleet management systems for distributed coordination
+/// - Control plane operations for lease management
+/// - Fencing mechanisms for split-brain prevention
+/// - Fleet administration dashboards
 pub fn route_metadata() -> Vec<RouteMetadata> {
     vec![
         RouteMetadata {

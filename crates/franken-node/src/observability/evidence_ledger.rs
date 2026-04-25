@@ -134,78 +134,34 @@ impl EvidenceEntry {
 }
 
 fn entry_with_server_computed_size(entry: &EvidenceEntry) -> (EvidenceEntry, usize) {
-    // Optimize: compute size without cloning initially
-    let base_size = estimate_entry_size_without_size_field(entry);
+    let mut normalized = entry.clone();
+    normalized.size_bytes = 0;
 
-    // Find the fixed point for size_bytes convergence
-    let mut candidate_size = 0;
+    let mut candidate_size = serialized_entry_size(&normalized);
     for _ in 0..24 {
-        let size_field_len = candidate_size.to_string().len();
-        let total_size = base_size.saturating_add(size_field_len);
-        if candidate_size == total_size {
+        if normalized.size_bytes == candidate_size {
             break;
         }
-        candidate_size = total_size;
+        normalized.size_bytes = candidate_size;
+        let next_size = serialized_entry_size(&normalized);
+        if next_size == candidate_size {
+            break;
+        }
+        candidate_size = next_size;
     }
 
-    // Only clone when we've determined the final size
-    let mut normalized = entry.clone();
     normalized.size_bytes = candidate_size;
     (normalized, candidate_size)
 }
 
-/// Estimate the serialized size of an entry without the size_bytes field contribution.
-/// This avoids repeated JSON serialization of the full struct.
-fn estimate_entry_size_without_size_field(entry: &EvidenceEntry) -> usize {
-    // Base JSON overhead: braces, quotes, commas, colons, field names
-    let mut size: usize = 200; // Conservative estimate for JSON structure
-
-    size = size.saturating_add(entry.schema_version.len());
-    if let Some(ref entry_id) = entry.entry_id {
-        size = size.saturating_add(entry_id.len());
-    }
-    size = size.saturating_add(entry.decision_id.len());
-    size = size.saturating_add(entry.decision_time.len());
-    size = size.saturating_add(entry.trace_id.len());
-    size = size.saturating_add(entry.signature.len());
-
-    // Add estimated payload size
-    size = size.saturating_add(estimate_json_value_size(&entry.payload));
-
-    // Add numeric field contributions (timestamp_ms, epoch_id have fixed max lengths)
-    size = size.saturating_add(32); // Conservative estimate for numeric fields
-
-    size
-}
-
-/// Estimate the serialized size of a JSON value without full serialization.
-fn estimate_json_value_size(value: &serde_json::Value) -> usize {
-    match value {
-        serde_json::Value::Null => 4,
-        serde_json::Value::Bool(_) => 5,
-        serde_json::Value::Number(_) => 20,
-        serde_json::Value::String(s) => s.len().saturating_add(2), // Add quotes
-        serde_json::Value::Array(arr) => {
-            let mut size: usize = 2; // brackets
-            for item in arr {
-                size = size.saturating_add(estimate_json_value_size(item)).saturating_add(1); // comma
-            }
-            size
-        }
-        serde_json::Value::Object(obj) => {
-            let mut size: usize = 2; // braces
-            for (key, val) in obj {
-                size = size.saturating_add(key.len())
-                    .saturating_add(estimate_json_value_size(val))
-                    .saturating_add(4); // quotes and colon
-            }
-            size
-        }
-    }
+fn serialized_entry_size(entry: &EvidenceEntry) -> usize {
+    serde_json::to_string(entry)
+        .map(|entry_json| entry_json.len())
+        .unwrap_or(usize::MAX)
 }
 
 /// Create a canonical representation of an EvidenceEntry for signature verification.
-/// Excludes the signature field itself to prevent circular dependency.
+/// Excludes the signature and server-derived size fields to prevent circular dependency.
 fn canonical_entry_bytes(entry: &EvidenceEntry) -> Vec<u8> {
     let mut hasher = Sha256::new();
 
@@ -232,7 +188,6 @@ fn canonical_entry_bytes(entry: &EvidenceEntry) -> Vec<u8> {
     if let Ok(payload_str) = serde_json::to_string(&entry.payload) {
         update_hash_len_prefixed(&mut hasher, payload_str.as_bytes());
     }
-    hasher.update(entry.size_bytes.to_le_bytes());
 
     hasher.finalize().to_vec()
 }

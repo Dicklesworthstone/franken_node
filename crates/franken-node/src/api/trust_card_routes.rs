@@ -16,8 +16,7 @@ use crate::supply_chain::trust_card::{
 #[cfg(any(test, feature = "control-plane"))]
 use crate::supply_chain::trust_card::{TrustCardInput, TrustCardMutation};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "fuzz", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, arbitrary::Arbitrary)]
 pub struct Pagination {
     pub page: usize,
     pub per_page: usize,
@@ -32,8 +31,7 @@ impl Default for Pagination {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "fuzz", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, arbitrary::Arbitrary)]
 pub struct PageMeta {
     pub page: usize,
     pub per_page: usize,
@@ -41,8 +39,7 @@ pub struct PageMeta {
     pub total_pages: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "fuzz", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, arbitrary::Arbitrary)]
 pub struct ApiResponse<T> {
     pub ok: bool,
     pub data: T,

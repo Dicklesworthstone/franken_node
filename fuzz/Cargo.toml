@@ -24,16 +24,13 @@ zeroize = { version = "1.8.2" }
 path = "../crates/franken-node"
 default-features = false
 # Exclude heavy compilation dependencies for faster fuzz builds:
-# - parsing: tree-sitter (~3-4min savings)
 # - http-client: ureq/url (~1-2min savings)
 # - external-commands: which/ctrlc (~30s savings)
 features = [
-    "fuzz",
     "test-support",
     "cbor-serialization",
     "extended-surfaces",
     "http-client",
-    "parsing",
     "external-commands",
 ]
 
