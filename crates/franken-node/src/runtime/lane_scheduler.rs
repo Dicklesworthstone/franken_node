@@ -611,6 +611,155 @@ pub struct LaneTelemetrySnapshot {
 
 /// The lane-aware scheduler.
 #[derive(Debug)]
+/// Multi-lane task scheduler with policy-based lane assignment and starvation detection.
+///
+/// The `LaneScheduler` manages concurrent task execution across multiple scheduler lanes,
+/// each with its own concurrency limits and priorities. Tasks are mapped to lanes based
+/// on declarative [`LaneMappingPolicy`] rules, with automatic starvation detection and
+/// comprehensive telemetry tracking.
+///
+/// # Core Features
+///
+/// - **Policy-based lane assignment**: Task classes are mapped to specific lanes via configurable rules
+/// - **Starvation detection**: Monitors lane execution and alerts when lanes are starved of resources
+/// - **Capacity enforcement**: Per-lane concurrency limits prevent resource exhaustion
+/// - **FIFO queuing**: Queued tasks within each lane maintain strict first-in-first-out ordering
+/// - **Audit logging**: Complete task lifecycle tracking for debugging and observability
+/// - **Hot reload**: Policy changes take effect without scheduler restart
+///
+/// # Invariants
+///
+/// - **INV-LANE-EXACT-MAP**: Every task class maps to exactly one lane
+/// - **INV-LANE-STARVATION-DETECT**: Starved lanes trigger alerts within 2× detection window
+/// - **INV-LANE-MISCLASS-REJECT**: Unrecognized task classes are rejected immediately
+/// - **INV-LANE-CAP-ENFORCE**: Lane active task count never exceeds concurrency capacity
+/// - **INV-LANE-TELEMETRY-ACCURATE**: Counters precisely match actual task lifecycle events
+///
+/// # Example: Basic Usage
+///
+/// ```rust
+/// use crate::runtime::lane_scheduler::*;
+///
+/// // Create a policy with two lanes: high-priority and batch processing
+/// let mut policy = LaneMappingPolicy::new();
+/// policy.add_mapping(TaskClass::new("api_request"), SchedulerLane::HighPriority)?;
+/// policy.add_mapping(TaskClass::new("batch_job"), SchedulerLane::Batch)?;
+///
+/// // Set up lane configurations
+/// let mut high_config = LaneConfig::new();
+/// high_config.set_max_concurrent_tasks(10);
+/// high_config.set_starvation_window_ms(2000);
+/// policy.set_lane_config(SchedulerLane::HighPriority, high_config);
+///
+/// let mut batch_config = LaneConfig::new();
+/// batch_config.set_max_concurrent_tasks(3);
+/// batch_config.set_starvation_window_ms(10000);
+/// policy.set_lane_config(SchedulerLane::Batch, batch_config);
+///
+/// // Create the scheduler
+/// let mut scheduler = LaneScheduler::new(policy)?;
+///
+/// // Schedule tasks
+/// let api_task = scheduler.schedule_task(
+///     TaskClass::new("api_request"),
+///     "handle_user_login",
+///     "trace-001"
+/// )?;
+///
+/// let batch_task = scheduler.schedule_task(
+///     TaskClass::new("batch_job"),
+///     "process_analytics",
+///     "trace-002"
+/// )?;
+///
+/// // Check lane status
+/// let telemetry = scheduler.snapshot_telemetry()?;
+/// println!("High priority lane: {} active, {} queued",
+///          telemetry.lane_snapshots[&"high_priority".to_string()].active_count,
+///          telemetry.lane_snapshots[&"high_priority".to_string()].queued_count);
+/// # Ok::<(), LaneSchedulerError>(())
+/// ```
+///
+/// # Example: Task Lifecycle Management
+///
+/// ```rust
+/// use crate::runtime::lane_scheduler::*;
+/// # use std::collections::BTreeMap;
+///
+/// # let mut policy = LaneMappingPolicy::new();
+/// # policy.add_mapping(TaskClass::new("worker"), SchedulerLane::Standard)?;
+/// let mut scheduler = LaneScheduler::new(policy)?;
+///
+/// // Schedule a task
+/// let assignment = scheduler.schedule_task(
+///     TaskClass::new("worker"),
+///     "process_document",
+///     "trace-123"
+/// )?;
+///
+/// match assignment {
+///     TaskAssignment::Assigned { task_id, lane, .. } => {
+///         println!("Task {} assigned to lane {:?}", task_id, lane);
+///
+///         // Simulate task completion
+///         scheduler.complete_task(&task_id, "trace-456")?;
+///         println!("Task {} completed successfully", task_id);
+///     }
+///     TaskAssignment::Queued { position, .. } => {
+///         println!("Task queued at position {}", position);
+///     }
+/// }
+///
+/// // Monitor for starvation
+/// let telemetry = scheduler.snapshot_telemetry()?;
+/// for (lane_name, snapshot) in &telemetry.lane_snapshots {
+///     if snapshot.starvation_detected {
+///         eprintln!("WARNING: Lane {} is starved!", lane_name);
+///     }
+/// }
+/// # Ok::<(), LaneSchedulerError>(())
+/// ```
+///
+/// # Example: Policy Hot Reload
+///
+/// ```rust
+/// use crate::runtime::lane_scheduler::*;
+///
+/// # let policy = LaneMappingPolicy::new();
+/// let mut scheduler = LaneScheduler::new(policy)?;
+///
+/// // Update policy at runtime
+/// let mut new_policy = LaneMappingPolicy::new();
+/// new_policy.add_mapping(TaskClass::new("priority"), SchedulerLane::HighPriority)?;
+/// new_policy.add_mapping(TaskClass::new("normal"), SchedulerLane::Standard)?;
+///
+/// // Hot reload - existing tasks continue, new tasks use updated policy
+/// scheduler.update_policy(new_policy, "policy-reload-001")?;
+///
+/// // Verify the policy change
+/// let updated_policy = scheduler.get_current_policy();
+/// assert!(updated_policy.has_mapping(&TaskClass::new("priority")));
+/// # Ok::<(), LaneSchedulerError>(())
+/// ```
+///
+/// # Performance Characteristics
+///
+/// - **Task scheduling**: O(1) for direct assignment, O(1) for queue insertion
+/// - **Task completion**: O(1) for active task removal, O(1) for queue promotion
+/// - **Starvation detection**: O(lanes) per detection cycle
+/// - **Memory usage**: Bounded by `max_audit_log_entries` and `max_queued_tasks_per_lane`
+///
+/// # Thread Safety
+///
+/// `LaneScheduler` is **not** thread-safe. Use external synchronization if accessing
+/// from multiple threads concurrently.
+///
+/// # See Also
+///
+/// - [`LaneMappingPolicy`]: Configures task-to-lane assignment rules
+/// - [`TaskClass`]: Identifies the category/type of work being scheduled
+/// - [`SchedulerLane`]: Enumeration of available scheduler lanes
+/// - [`LaneConfig`]: Per-lane configuration (concurrency, starvation thresholds)
 pub struct LaneScheduler {
     policy: LaneMappingPolicy,
     counters: BTreeMap<String, LaneCounters>,
