@@ -919,6 +919,15 @@ pub struct ModelMeta {
 }
 
 /// Returns metadata for all 21 typed models in canonical order.
+///
+/// # Examples
+///
+/// ```
+/// use frankenengine_node::storage::models::all_model_metadata;
+/// let metadata = all_model_metadata();
+/// assert_eq!(metadata.len(), 21);
+/// assert_eq!(metadata[0].name, "FencingLeaseRecord");
+/// ```
 pub fn all_model_metadata() -> Vec<ModelMeta> {
     vec![
         // Mandatory (12)
