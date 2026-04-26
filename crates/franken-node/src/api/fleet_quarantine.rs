@@ -27,6 +27,8 @@ use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::control_plane::fleet_transport::{FileFleetTransport, FleetAction as PersistedFleetAction, FleetActionRecord, FleetTargetKind, FleetTransport, FleetTransportError};
+
 /// Maximum fleet control events before oldest are evicted.
 const MAX_FLEET_EVENTS: usize = 4096;
 
@@ -1749,6 +1751,8 @@ pub struct FleetControlManager {
     decision_trust_roots: Vec<FleetDecisionTrustRoot>,
     /// Convergence rollback receipts keyed by incident_id for release verification.
     rollback_receipts: BTreeMap<String, DecisionReceipt>,
+    /// File-based fleet transport for persistence (real channel + on-disk storage).
+    fleet_transport: Option<FileFleetTransport>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1982,7 +1986,48 @@ impl FleetControlManager {
             decision_signing_material,
             decision_trust_roots,
             rollback_receipts: BTreeMap::new(),
+            fleet_transport: None,
         }
+    }
+
+    /// Create a manager with file-based transport for real persistence.
+    ///
+    /// Replaces mock/in-memory transport with real file-based channel + on-disk persistence.
+    ///
+    /// # Arguments
+    ///
+    /// * `transport` - FileFleetTransport for persistence to disk
+    /// * `signing_material` - Optional decision signing material for receipts
+    ///
+    /// # Examples
+    /// ```ignore
+    /// let transport = FileFleetTransport::new("/tmp/fleet".into())?;
+    /// let manager = FleetControlManager::with_file_transport(transport, None);
+    /// ```
+    pub fn with_file_transport(
+        mut transport: FileFleetTransport,
+        signing_material: Option<FleetDecisionSigningMaterial>,
+    ) -> Result<Self, FleetTransportError> {
+        transport.initialize()?;
+        let decision_trust_roots = signing_material
+            .as_ref()
+            .map(FleetDecisionSigningMaterial::trust_root)
+            .into_iter()
+            .collect();
+        Ok(Self {
+            activated: false,
+            incidents: BTreeMap::new(),
+            incident_convergences: BTreeMap::new(),
+            zone_status: BTreeMap::new(),
+            events: Vec::new(),
+            next_op_id: 1,
+            op_epoch: 0,
+            operation_ids_exhausted: false,
+            decision_signing_material: signing_material,
+            decision_trust_roots,
+            rollback_receipts: BTreeMap::new(),
+            fleet_transport: Some(transport),
+        })
     }
 
     /// Create a manager without decision-receipt signing material for fail-closed tests.
@@ -2195,6 +2240,24 @@ impl FleetControlManager {
         let event = FleetControlEvent::quarantine_initiated(&trace.trace_id, zone_id, extension_id);
         push_bounded(&mut self.events, event, MAX_FLEET_EVENTS);
 
+        // Persist to file-based transport (real channel + on-disk persistence)
+        if let Some(ref mut transport) = self.fleet_transport {
+            let action_record = FleetActionRecord {
+                action_id: op_id.clone(),
+                emitted_at: chrono::Utc::now(),
+                action: PersistedFleetAction::Quarantine {
+                    zone_id: zone_id.to_string(),
+                    incident_id: incident_id.clone(),
+                    target_id: extension_id.to_string(),
+                    target_kind: FleetTargetKind::Extension,
+                    reason: scope.reason.clone(),
+                    quarantine_version: 1,
+                },
+            };
+            transport.publish_action(&action_record)
+                .map_err(|e| FleetControlError::internal(format!("Transport persistence failed: {}", e)))?;
+        }
+
         Ok(FleetActionResult {
             operation_id: op_id,
             action_type: "quarantine".to_string(),
@@ -2381,6 +2444,21 @@ impl FleetControlManager {
 
         let event = FleetControlEvent::fleet_released(&trace.trace_id, &zone_id, incident_id);
         push_bounded(&mut self.events, event, MAX_FLEET_EVENTS);
+
+        // Persist to file-based transport (real channel + on-disk persistence)
+        if let Some(ref mut transport) = self.fleet_transport {
+            let action_record = FleetActionRecord {
+                action_id: op_id.clone(),
+                emitted_at: chrono::Utc::now(),
+                action: PersistedFleetAction::Release {
+                    zone_id: zone_id.clone(),
+                    incident_id: incident_id.to_string(),
+                    reason: Some("Fleet quarantine release".to_string()),
+                },
+            };
+            transport.publish_action(&action_record)
+                .map_err(|e| FleetControlError::internal(format!("Transport persistence failed: {}", e)))?;
+        }
 
         Ok(FleetActionResult {
             operation_id: op_id,
