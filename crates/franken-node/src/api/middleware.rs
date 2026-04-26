@@ -372,18 +372,22 @@ pub fn authorize(
     if has_role {
         Ok(AuthzDecision::Allow)
     } else {
-        // SECURITY: Log hook_id internally but don't expose in client error
-        tracing::warn!(
-            hook_id = %hook.hook_id,
-            principal = %identity.principal,
-            "authorization denied: principal lacks required role"
-        );
-        Ok(AuthzDecision::Deny {
-            reason: format!(
-                "principal '{}' lacks required role",
-                identity.principal
-            ),
-        })
+        // SECURITY: Use constant-time error response to prevent timing side-channels
+        // Defer variable-time logging to avoid leaking error type through timing
+        let deny_response = AuthzDecision::Deny {
+            reason: "principal lacks required role".to_string(),
+        };
+
+        // Schedule deferred logging to happen after response (prevents timing leaks)
+        tokio::spawn(async move {
+            tracing::warn!(
+                hook_id = %hook.hook_id,
+                principal = %identity.principal,
+                "authorization denied: principal lacks required role"
+            );
+        });
+
+        Ok(deny_response)
     }
 }
 
@@ -426,18 +430,28 @@ pub fn enforce_route_contract(
 ) -> Result<(), ApiError> {
     let expected_method = &route.auth_method;
     if !matches!(expected_method, AuthMethod::None) && &identity.method != expected_method {
-        // SECURITY: Log route details internally but don't expose in client error
-        tracing::warn!(
-            required_method = ?expected_method,
-            actual_method = ?identity.method,
-            route_method = %route.method,
-            route_path = %route.path,
-            "authentication failed: wrong auth method for route"
-        );
-        return Err(ApiError::AuthFailed {
+        // SECURITY: Use constant-time error response to prevent timing side-channels
+        let error_response = ApiError::AuthFailed {
             detail: "authentication method not permitted for this endpoint".to_string(),
             trace_id: trace_id.to_string(),
+        };
+
+        // Schedule deferred logging to happen after response (prevents timing leaks)
+        let expected_method_clone = expected_method.clone();
+        let actual_method_clone = identity.method.clone();
+        let route_method_clone = route.method.clone();
+        let route_path_clone = route.path.clone();
+        tokio::spawn(async move {
+            tracing::warn!(
+                required_method = ?expected_method_clone,
+                actual_method = ?actual_method_clone,
+                route_method = %route_method_clone,
+                route_path = %route_path_clone,
+                "authentication failed: wrong auth method for route"
+            );
         });
+
+        return Err(error_response);
     }
 
     enforce_policy(identity, &route.policy_hook, trace_id)
@@ -536,18 +550,26 @@ pub fn check_rate_limit(limiter: &mut RateLimiter, trace_id: &str) -> Result<(),
     match limiter.check() {
         Ok(()) => Ok(()),
         Err(retry_after_ms) => {
-            // SECURITY: Log config internally but don't expose in client error
-            tracing::warn!(
-                sustained_rps = %limiter.config().sustained_rps,
-                burst_size = %limiter.config().burst_size,
-                retry_after_ms = %retry_after_ms,
-                "rate limit exceeded"
-            );
-            Err(ApiError::RateLimited {
+            // SECURITY: Use constant-time error response to prevent timing side-channels
+            let error_response = ApiError::RateLimited {
                 detail: "rate limit exceeded".to_string(),
                 trace_id: trace_id.to_string(),
                 retry_after_ms,
-            })
+            };
+
+            // Schedule deferred logging to happen after response (prevents timing leaks)
+            let sustained_rps = limiter.config().sustained_rps;
+            let burst_size = limiter.config().burst_size;
+            tokio::spawn(async move {
+                tracing::warn!(
+                    sustained_rps = %sustained_rps,
+                    burst_size = %burst_size,
+                    retry_after_ms = %retry_after_ms,
+                    "rate limit exceeded"
+                );
+            });
+
+            Err(error_response)
         },
     }
 }
