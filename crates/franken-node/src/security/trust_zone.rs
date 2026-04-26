@@ -310,30 +310,47 @@ impl ZoneSegmentationEngine {
     /// Set freshness to an expired state (for testing stale conditions).
     pub fn set_freshness_stale(&mut self) {
         // Set timestamp to old value that exceeds max_age
-        let old_time = chrono::Utc::now() - chrono::Duration::seconds((self.freshness_max_age_seconds + 1) as i64);
+        let stale_offset = self.freshness_max_age_seconds.saturating_add(1);
+        let stale_offset = i64::try_from(stale_offset).unwrap_or(i64::MAX);
+        let old_time = chrono::Utc::now() - chrono::Duration::seconds(stale_offset);
         self.freshness_timestamp = old_time.to_rfc3339();
     }
 
-    /// Legacy compatibility method for testing (use refresh_freshness/set_freshness_stale instead).
-    pub fn set_freshness_valid(&mut self, valid: bool) {
-        if valid {
-            self.refresh_freshness();
-        } else {
-            self.set_freshness_stale();
-        }
+    #[cfg(test)]
+    fn set_freshness_window_for_test(
+        &mut self,
+        checked_at: chrono::DateTime<chrono::Utc>,
+        max_age_seconds: u64,
+    ) {
+        self.freshness_timestamp = checked_at.to_rfc3339();
+        self.freshness_max_age_seconds = max_age_seconds;
     }
 
     /// Check if current freshness is still valid based on timestamp and max_age.
+    ///
+    /// Fail-closed semantics:
+    /// - malformed timestamps are stale
+    /// - future timestamps are stale
+    /// - `now >= checked_at + max_age` is stale
+    /// - overflow while computing `checked_at + max_age` is stale
     fn is_freshness_valid(&self) -> bool {
         let now = chrono::Utc::now();
-        if let Ok(freshness_time) = chrono::DateTime::parse_from_rfc3339(&self.freshness_timestamp) {
-            let age_seconds = now.signed_duration_since(freshness_time.with_timezone(&chrono::Utc)).num_seconds();
-            // Fail-closed: if age calculation fails or exceeds max_age, consider stale
-            age_seconds >= 0 && (age_seconds as u64) < self.freshness_max_age_seconds
-        } else {
-            // Fail-closed: invalid timestamp format means stale
-            false
+        let freshness_time = match chrono::DateTime::parse_from_rfc3339(&self.freshness_timestamp) {
+            Ok(parsed) => parsed.with_timezone(&chrono::Utc),
+            Err(_) => return false,
+        };
+        if freshness_time > now {
+            return false;
         }
+        let max_age_seconds = match i64::try_from(self.freshness_max_age_seconds) {
+            Ok(seconds) => seconds,
+            Err(_) => return false,
+        };
+        let max_age = chrono::Duration::seconds(max_age_seconds);
+        let Some(expires_at) = freshness_time.checked_add_signed(max_age) else {
+            return false;
+        };
+        now < expires_at
     }
 
     // -- Zone lifecycle -----------------------------------------------------
@@ -984,7 +1001,7 @@ mod tests {
         engine
             .register_zone(make_zone("staging", 70, 3, IsolationLevel::Permissive))
             .unwrap();
-        engine.set_freshness_valid(false);
+        engine.set_freshness_stale();
         let result = engine.delete_zone("staging");
         assert_eq!(result, Err(SegmentationError::FreshnessStale));
         assert_eq!(engine.list_zones(), vec!["staging"]);
@@ -1062,7 +1079,7 @@ mod tests {
             .unwrap();
         engine.bind_key_to_zone("key-staging", "staging");
         engine.register_resource("artifact-staging", "staging");
-        engine.set_freshness_valid(false);
+        engine.set_freshness_stale();
 
         assert_eq!(
             engine.delete_zone("staging"),
@@ -2597,7 +2614,7 @@ mod tests {
             .unwrap();
 
         // Disable freshness and attempt delete - should preserve all state
-        engine.set_freshness_valid(false);
+        engine.set_freshness_stale();
         let delete_result = engine.delete_zone("temp-zone");
         assert_eq!(delete_result, Err(SegmentationError::FreshnessStale));
 
@@ -2606,7 +2623,7 @@ mod tests {
         assert!(engine.get_tenant_binding("valid-tenant").is_some());
 
         // Cross-zone operations should still work on existing zone
-        engine.set_freshness_valid(true);
+        engine.refresh_freshness();
         let same_zone_result =
             engine.validate_zone_action("temp-zone", "temp-zone", "internal-action", "user", "");
         assert!(same_zone_result.is_ok()); // Same zone operations don't need proof
@@ -2751,47 +2768,25 @@ mod tests {
     }
 
     #[test]
-    fn negative_freshness_validity_without_timestamp_based_expiry() {
-        // Test freshness gate with missing timestamp-based expiry logic
-        // Current implementation uses simple boolean, not actual time-based freshness
+    fn freshness_gate_uses_timestamp_and_max_age_fail_closed_at_boundary() {
         let mut engine = ZoneSegmentationEngine::new();
-
-        // Register zone when freshness is valid
-        engine.set_freshness_valid(true);
         engine
             .register_zone(ZonePolicy::new("fresh-zone", 80, 5, IsolationLevel::Strict))
             .unwrap();
 
-        // Delete should work when freshness is valid
-        let delete_success = engine.delete_zone("fresh-zone");
-        assert!(delete_success.is_ok());
+        let now = chrono::Utc::now();
+        engine.set_freshness_window_for_test(now - chrono::Duration::seconds(59), 60);
+        assert!(engine.delete_zone("fresh-zone").is_ok());
 
-        // Re-register zone
         engine
             .register_zone(ZonePolicy::new("stale-zone", 80, 5, IsolationLevel::Strict))
             .unwrap();
-
-        // Set freshness invalid (simulating expired timestamp)
-        engine.set_freshness_valid(false);
-
-        // Delete should fail when freshness is stale
-        let delete_fail = engine.delete_zone("stale-zone");
-        assert_eq!(delete_fail, Err(SegmentationError::FreshnessStale));
-
-        // Zone should still exist after failed delete
+        engine.set_freshness_window_for_test(now - chrono::Duration::seconds(60), 60);
+        assert_eq!(
+            engine.delete_zone("stale-zone"),
+            Err(SegmentationError::FreshnessStale)
+        );
         assert!(engine.get_zone("stale-zone").is_some());
-
-        // The current implementation lacks actual timestamp comparison logic
-        // A real freshness check should use:
-        // - now >= expires_at for fail-closed semantics
-        // - Domain-separated timestamp hash verification
-        // - Saturating arithmetic for timestamp calculations
-
-        // Test that freshness validity can flip without any time passing
-        engine.set_freshness_valid(true);
-        assert!(engine.delete_zone("stale-zone").is_ok());
-
-        // This reveals that freshness is not actually time-based - hardening gap
     }
 
     #[test]
@@ -2834,7 +2829,7 @@ mod tests {
                 assert!(engine.is_key_bound_to_zone("test-key", zone_id));
 
                 // Clean up for next iteration
-                engine.set_freshness_valid(true);
+                engine.refresh_freshness();
                 let _ = engine.delete_zone(zone_id);
             }
         }
