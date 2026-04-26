@@ -4,6 +4,7 @@
 //! cross-domain and transcript-boundary collisions. Invalid hashes block admission.
 //! Telemetry tracks rejection code distribution.
 
+use franken_security_macros::secure_hash;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::BTreeMap;
@@ -19,16 +20,7 @@ const MAX_TELEMETRY_FIELD_BYTES: usize = 4 * 1024;
 ///
 /// Uses full-width SHA-256 output to preserve collision resistance.
 pub fn compute_hash(domain: &str, data: &[u8]) -> InterfaceHash {
-    let mut hasher = sha2::Sha256::new();
-    // Domain separation: hash domain tag first, then length-prefixed fields.
-    sha2::Digest::update(&mut hasher, b"interface_hash_v1:");
-    let domain_len = u64::try_from(domain.len()).unwrap_or(u64::MAX);
-    sha2::Digest::update(&mut hasher, domain_len.to_le_bytes());
-    sha2::Digest::update(&mut hasher, domain.as_bytes());
-    let data_len = u64::try_from(data.len()).unwrap_or(u64::MAX);
-    sha2::Digest::update(&mut hasher, data_len.to_le_bytes());
-    sha2::Digest::update(&mut hasher, data);
-    let hash_hex = hex::encode(sha2::Digest::finalize(hasher));
+    let hash_hex = secure_hash!("interface_hash_v1:", domain.as_bytes(), data);
 
     InterfaceHash {
         domain: domain.to_string(),

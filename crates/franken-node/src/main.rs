@@ -21770,6 +21770,17 @@ fn main() -> Result<()> {
                 let report = ops_health_check_report(Path::new("."))?;
                 emit_ops_health_check_report(&report, args.json)?;
             }
+            OpsCommand::ConfigAudit(args) => {
+                let report = ops_config_audit_report(&args)?;
+                if args.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    emit_operator_surface_output(
+                        "ops-config-audit",
+                        &render_ops_config_audit_report_human(&report),
+                    )?;
+                }
+            }
             OpsCommand::Metrics(args) => {
                 let report = ops_metrics_report(Path::new("."))?;
                 emit_ops_metrics_report(&report, args.format)?;
