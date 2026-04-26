@@ -55,6 +55,7 @@ mod policy {
     pub mod policy_explainer;
 }
 
+use crate::api::session_auth::{SessionConfig, SessionManager};
 use crate::api::{
     fleet_quarantine::{
         ConvergencePhase, ConvergenceState, DecisionReceipt, DecisionReceiptPayload,
@@ -68,17 +69,15 @@ use crate::api::{
     },
 };
 use crate::cli::{
-    BenchCommand, Cli, Command, DebugCommand, DebugExplainArgs, DebugTraceArgs, DoctorCloseConditionArgs, DoctorCommand,
-    DoctorPolicyActivationInput, FleetAgentArgs, FleetCommand, IncidentCommand, MigrateCommand,
-    OpsCommand, OpsConfigAuditArgs, OpsMetricsFormat, OpsRotateKeyArgs, RegistryCommand,
-    RemoteCapCommand, RemoteCapIssueArgs,
-    RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand,
-    RuntimeLaneCommand, TrustCardCommand, TrustCommand, VerifyCommand,
-    VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs, VerifyModuleArgs,
-    VerifyReleaseArgs, VerifyTransparencyLogArgs, load_doctor_policy_activation_input,
+    BenchCommand, Cli, Command, DebugCommand, DebugExplainArgs, DebugTraceArgs,
+    DoctorCloseConditionArgs, DoctorCommand, DoctorPolicyActivationInput, FleetAgentArgs,
+    FleetCommand, IncidentCommand, MigrateCommand, OpsCommand, OpsConfigAuditArgs,
+    OpsMetricsFormat, OpsRotateKeyArgs, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs,
+    RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand,
+    TrustCardCommand, TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs,
+    VerifyMigrationArgs, VerifyModuleArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
+    load_doctor_policy_activation_input,
 };
-use crate::api::session_auth::{SessionConfig, SessionManager};
-use frankenengine_node::control_plane::control_epoch::ControlEpoch;
 use crate::policy::{
     bayesian_diagnostics::{BayesianDiagnostics, CandidateRef, Observation},
     decision_engine::{DecisionEngine, DecisionOutcome, DecisionReason},
@@ -94,11 +93,11 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::{DateTime, Utc};
 use clap::Parser;
+use frankenengine_node::control_plane::control_epoch::ControlEpoch;
 use frankenengine_node::control_plane::fleet_transport::{
-    FileFleetTransport, FleetAction as PersistedFleetAction,
+    FLEET_ACTION_LOG_FILE, FLEET_NODE_DIR, FileFleetTransport, FleetAction as PersistedFleetAction,
     FleetActionRecord as PersistedFleetActionRecord, FleetConvergenceReceiptSignature,
-    FleetSharedState, FleetTargetKind as PersistedFleetTargetKind, FLEET_ACTION_LOG_FILE,
-    FLEET_NODE_DIR,
+    FleetSharedState, FleetTargetKind as PersistedFleetTargetKind,
     FleetTransport as PersistedFleetTransport, FleetTransportError,
     NodeHealth as PersistedNodeHealth, NodeStatus as PersistedNodeStatus,
     fleet_convergence_receipt_verdict, sign_fleet_convergence_receipt_payload,
@@ -224,8 +223,11 @@ const TRUST_SCAN_NPM_REGISTRY_BASE_URL: &str = "https://registry.npmjs.org";
 const TRUST_SCAN_OSV_QUERY_URL: &str = "https://api.osv.dev/v1/query";
 const TRUST_SCAN_DEPS_DEV_BASE_URL: &str = "https://api.deps.dev/v3alpha";
 const TRUST_SCAN_REMOTECAP_TOKEN_ENV: &str = "FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN";
-const OPS_HEALTH_LEDGER_FILE_CANDIDATES: &[&str] =
-    &["evidence_spill.jsonl", "durable_evidence_spill.jsonl", "spill.jsonl"];
+const OPS_HEALTH_LEDGER_FILE_CANDIDATES: &[&str] = &[
+    "evidence_spill.jsonl",
+    "durable_evidence_spill.jsonl",
+    "spill.jsonl",
+];
 
 static OPS_HEALTH_CHECK_PROCESS_START: std::sync::LazyLock<Instant> =
     std::sync::LazyLock::new(Instant::now);
@@ -6295,10 +6297,7 @@ fn latest_evidence_ledger_flush_timestamp(project_root: &Path) -> Result<Option<
     Ok(newest.map(|timestamp| DateTime::<Utc>::from(timestamp).to_rfc3339()))
 }
 
-fn update_newest_modified_from_path(
-    newest: &mut Option<SystemTime>,
-    path: &Path,
-) -> Result<()> {
+fn update_newest_modified_from_path(newest: &mut Option<SystemTime>, path: &Path) -> Result<()> {
     if !path.is_file() {
         return Ok(());
     }
@@ -6471,7 +6470,10 @@ fn build_ops_config_dependency_impact(
         let changes = diff_ops_config_states(active_state, &candidate_state);
         let mut changed_domains = Vec::new();
         for change in &changes {
-            if !changed_domains.iter().any(|domain| domain == &change.domain) {
+            if !changed_domains
+                .iter()
+                .any(|domain| domain == &change.domain)
+            {
                 changed_domains.push(change.domain.clone());
             }
         }
@@ -6490,13 +6492,8 @@ fn build_ops_config_dependency_impact(
 }
 
 fn ops_config_field_impact(decision: &config::MergeDecision) -> Option<OpsConfigFieldImpact> {
-    const PROFILE_DOMAINS: &[&str] = &[
-        "compatibility",
-        "trust",
-        "fleet",
-        "replay",
-        "observability",
-    ];
+    const PROFILE_DOMAINS: &[&str] =
+        &["compatibility", "trust", "fleet", "replay", "observability"];
     const COMPATIBILITY_DOMAINS: &[&str] = &["compatibility"];
     const TRUST_DOMAINS: &[&str] = &["trust"];
     const FLEET_DOMAINS: &[&str] = &["fleet"];
@@ -6631,14 +6628,8 @@ fn diff_ops_config_states(
         &mut changes,
         "trust",
         "risky_requires_fresh_revocation",
-        current
-            .trust
-            .risky_requires_fresh_revocation
-            .to_string(),
-        candidate
-            .trust
-            .risky_requires_fresh_revocation
-            .to_string(),
+        current.trust.risky_requires_fresh_revocation.to_string(),
+        candidate.trust.risky_requires_fresh_revocation.to_string(),
         "Changes whether risky trust actions require fresh revocation evidence.",
     );
     push_ops_config_change(
@@ -6781,10 +6772,7 @@ fn diff_ops_config_states(
         &mut changes,
         "replay",
         "max_replay_capsule_freshness_secs",
-        current
-            .replay
-            .max_replay_capsule_freshness_secs
-            .to_string(),
+        current.replay.max_replay_capsule_freshness_secs.to_string(),
         candidate
             .replay
             .max_replay_capsule_freshness_secs
@@ -6884,11 +6872,17 @@ fn render_ops_config_audit_report_human(report: &OpsConfigAuditReport) -> String
                 .clone()
                 .unwrap_or_else(|| "<defaults>".to_string())
         ),
-        format!("compatibility_mode={}", report.active_state.compatibility_mode),
+        format!(
+            "compatibility_mode={}",
+            report.active_state.compatibility_mode
+        ),
         format!(
             "trust: risky_requires_fresh_revocation={} dangerous_requires_fresh_revocation={} quarantine_on_high_risk={} min_trust_score={} minimum_assurance_level={}",
             report.active_state.trust.risky_requires_fresh_revocation,
-            report.active_state.trust.dangerous_requires_fresh_revocation,
+            report
+                .active_state
+                .trust
+                .dangerous_requires_fresh_revocation,
             report.active_state.trust.quarantine_on_high_risk,
             format_optional(report.active_state.trust.min_trust_score),
             report.active_state.trust.minimum_assurance_level,
@@ -6909,7 +6903,10 @@ fn render_ops_config_audit_report_human(report: &OpsConfigAuditReport) -> String
         format!(
             "observability: namespace={} emit_structured_audit_events={} max_receipts={}",
             report.active_state.observability.namespace,
-            report.active_state.observability.emit_structured_audit_events,
+            report
+                .active_state
+                .observability
+                .emit_structured_audit_events,
             format_optional(report.active_state.observability.max_receipts),
         ),
     ];
@@ -6968,10 +6965,14 @@ fn ops_metrics_report(project_root: &Path) -> Result<OpsPrometheusMetricsReport>
         evidence_ledger_spill_entries: count_evidence_ledger_spill_entries(&state_dir)?,
         incident_evidence_files: count_matching_files(
             &project_root.join(INCIDENT_EVIDENCE_RELATIVE_DIR),
-            |path| path.file_name().and_then(|name| name.to_str()) == Some(INCIDENT_EVIDENCE_FILE_NAME),
+            |path| {
+                path.file_name().and_then(|name| name.to_str()) == Some(INCIDENT_EVIDENCE_FILE_NAME)
+            },
         )?,
-        execution_receipts: u64::try_from(list_active_run_receipts(&execution_receipts_root)?.len())
-            .unwrap_or(u64::MAX),
+        execution_receipts: u64::try_from(
+            list_active_run_receipts(&execution_receipts_root)?.len(),
+        )
+        .unwrap_or(u64::MAX),
         fleet_active_quarantines: count_active_fleet_quarantines(&fleet_state_dir)?,
         fleet_node_records: count_matching_files(&fleet_state_dir.join(FLEET_NODE_DIR), |_| true)?,
         health,
@@ -7049,13 +7050,14 @@ fn count_active_fleet_quarantines(fleet_state_dir: &Path) -> Result<u64> {
         if line.trim().is_empty() {
             continue;
         }
-        let record: PersistedFleetActionRecord = serde_json::from_str(&line).with_context(|| {
-            format!(
-                "failed parsing fleet action log {} line {}",
-                actions_path.display(),
-                line_index + 1
-            )
-        })?;
+        let record: PersistedFleetActionRecord =
+            serde_json::from_str(&line).with_context(|| {
+                format!(
+                    "failed parsing fleet action log {} line {}",
+                    actions_path.display(),
+                    line_index + 1
+                )
+            })?;
         match record.action {
             PersistedFleetAction::Quarantine { incident_id, .. } => {
                 active_incidents.insert(incident_id);
@@ -7104,7 +7106,10 @@ where
     Ok(total)
 }
 
-fn emit_ops_metrics_report(report: &OpsPrometheusMetricsReport, format: OpsMetricsFormat) -> Result<()> {
+fn emit_ops_metrics_report(
+    report: &OpsPrometheusMetricsReport,
+    format: OpsMetricsFormat,
+) -> Result<()> {
     match format {
         OpsMetricsFormat::Prometheus => {
             println!("{}", render_ops_metrics_prometheus(report));
@@ -7263,9 +7268,9 @@ fn render_ops_metrics_prometheus(report: &OpsPrometheusMetricsReport) -> String 
 /// running this command. Do not rely on this for actual key rotation.
 fn handle_ops_rotate_key(args: &OpsRotateKeyArgs) -> Result<OpsRotateKeyResult> {
     use crate::cli::validate_user_content_pathbuf;
-    use ed25519_dalek::SigningKey;
-    use crate::observability::evidence_ledger::{EvidenceEntry, DecisionKind, EntryId};
+    use crate::observability::evidence_ledger::{DecisionKind, EntryId, EvidenceEntry};
     use crate::security::decision_receipt::signing_key_id;
+    use ed25519_dalek::SigningKey;
     use std::fs;
 
     // Validate the new key path
@@ -7277,7 +7282,10 @@ fn handle_ops_rotate_key(args: &OpsRotateKeyArgs) -> Result<OpsRotateKeyResult> 
         .with_context(|| format!("Failed to read key from {:?}", validated_path))?;
 
     if key_bytes.len() != 32 {
-        anyhow::bail!("Invalid ed25519 key length: expected 32 bytes, got {}", key_bytes.len());
+        anyhow::bail!(
+            "Invalid ed25519 key length: expected 32 bytes, got {}",
+            key_bytes.len()
+        );
     }
 
     let mut key_array = [0u8; 32];
@@ -7293,7 +7301,9 @@ fn handle_ops_rotate_key(args: &OpsRotateKeyArgs) -> Result<OpsRotateKeyResult> 
     let old_key_fingerprint = match load_receipt_signing_material(None)? {
         Some(current_material) => signing_key_id(&current_material.signing_key.verifying_key()),
         None => {
-            anyhow::bail!("Cannot determine current key fingerprint. Phase 1 rotate-key requires existing receipt signing key configuration.")
+            anyhow::bail!(
+                "Cannot determine current key fingerprint. Phase 1 rotate-key requires existing receipt signing key configuration."
+            )
         }
     };
 
@@ -7320,8 +7330,8 @@ fn handle_ops_rotate_key(args: &OpsRotateKeyArgs) -> Result<OpsRotateKeyResult> 
             "key_path": validated_path.display().to_string(),
             "reason": "manual key rotation via ops rotate-key command"
         }),
-        size_bytes: 0, // Will be computed by evidence ledger
-        signature: String::new(), // Phase 1 doesn't sign evidence entries
+        size_bytes: 0,                  // Will be computed by evidence ledger
+        signature: String::new(),       // Phase 1 doesn't sign evidence entries
         prev_entry_hash: String::new(), // Will be computed by evidence ledger
     };
 
@@ -7361,7 +7371,10 @@ fn emit_ops_rotate_key_result(result: &OpsRotateKeyResult, json: bool) -> Result
         println!("Key rotation PREVIEW completed:");
         println!("  rotation_event_id: {}", result.rotation_event_id);
         println!("  new_key_fingerprint: {}", result.new_key_fingerprint);
-        println!("  old_key_fingerprint: {} (placeholder)", result.old_key_fingerprint);
+        println!(
+            "  old_key_fingerprint: {} (placeholder)",
+            result.old_key_fingerprint
+        );
         println!("  reason: {}", result.reason);
         println!();
         println!("⚠️  SECURITY NOTICE: If you're responding to a key compromise,");
@@ -16923,9 +16936,7 @@ fn fleet_describe_report(
                 .into_iter()
                 .collect::<Vec<_>>()
                 .join(", ");
-            anyhow::bail!(
-                "node `{node_id}` is ambiguous across zones: {zones}; rerun with --zone"
-            );
+            anyhow::bail!("node `{node_id}` is ambiguous across zones: {zones}; rerun with --zone");
         }
     };
     let stale = loaded
@@ -19184,18 +19195,14 @@ fn sanitize_crypto_failure_reason(detailed_reason: &Option<String>) -> Option<St
         Some(reason) if reason.contains("checksum mismatch") => {
             Some("verification failed".to_string())
         }
-        Some(reason) if reason.contains("size mismatch") => {
-            Some("verification failed".to_string())
-        }
+        Some(reason) if reason.contains("size mismatch") => Some("verification failed".to_string()),
         Some(reason) if reason.contains("signature invalid") => {
             Some("verification failed".to_string())
         }
         Some(reason) if reason.contains("signature missing") => {
             Some("verification failed".to_string())
         }
-        Some(reason) if reason.contains("key not found") => {
-            Some("verification failed".to_string())
-        }
+        Some(reason) if reason.contains("key not found") => Some("verification failed".to_string()),
         Some(reason) if reason.contains("threshold not met") => {
             Some("verification failed".to_string())
         }
@@ -19307,11 +19314,7 @@ fn handle_verify_release(args: &VerifyReleaseArgs) -> Result<()> {
                 let sanitized_reason = sanitize_crypto_failure_reason(&row.failure_reason)
                     .unwrap_or_else(|| "verification failed".to_string());
 
-                println!(
-                    "  [fail] {}: {}",
-                    row.artifact_name,
-                    sanitized_reason
-                );
+                println!("  [fail] {}: {}", row.artifact_name, sanitized_reason);
             }
         }
     }
@@ -19412,10 +19415,7 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
                 ));
             }
         } else if index > 0 && entry.prev_entry_hash.is_empty() {
-            hash_chain_errors.push(format!(
-                "Entry {} missing prev_entry_hash",
-                index
-            ));
+            hash_chain_errors.push(format!("Entry {} missing prev_entry_hash", index));
         }
 
         expected_prev_hash = Some(evidence_entry_hash_hex(entry));
@@ -20948,8 +20948,8 @@ fn handle_trust_card_command(command: TrustCardCommand) -> Result<()> {
 /// Handle debug trace command for policy evaluation.
 fn handle_debug_trace(args: &DebugTraceArgs) -> Result<()> {
     use crate::cli::validate_user_content_pathbuf;
-    use std::fs;
     use serde_json::Value;
+    use std::fs;
 
     // Validate paths
     let policy_path = validate_user_content_pathbuf(&args.policy)
@@ -21030,26 +21030,38 @@ fn handle_debug_trace(args: &DebugTraceArgs) -> Result<()> {
         println!("📊 Step 1: Policy Loading");
         println!("  ✅ Loaded policy file ({} bytes)", policy_content.len());
         if args.verbose {
-            println!("  📝 Policy preview: {}...",
-                policy_content.chars().take(100).collect::<String>()
-                    .replace('\n', "\\n"));
+            println!(
+                "  📝 Policy preview: {}...",
+                policy_content
+                    .chars()
+                    .take(100)
+                    .collect::<String>()
+                    .replace('\n', "\\n")
+            );
         }
         println!();
 
         println!("📊 Step 2: Input Parsing");
         println!("  ✅ Parsed input JSON ({} bytes)", input_content.len());
-        println!("  📋 Input type: {}", match input_data {
-            Value::Object(_) => "Object",
-            Value::Array(_) => "Array",
-            Value::String(_) => "String",
-            Value::Number(_) => "Number",
-            Value::Bool(_) => "Boolean",
-            Value::Null => "Null"
-        });
+        println!(
+            "  📋 Input type: {}",
+            match input_data {
+                Value::Object(_) => "Object",
+                Value::Array(_) => "Array",
+                Value::String(_) => "String",
+                Value::Number(_) => "Number",
+                Value::Bool(_) => "Boolean",
+                Value::Null => "Null",
+            }
+        );
         if args.verbose {
-            println!("  📝 Input preview: {}",
+            println!(
+                "  📝 Input preview: {}",
                 serde_json::to_string(&input_data)?
-                    .chars().take(200).collect::<String>());
+                    .chars()
+                    .take(200)
+                    .collect::<String>()
+            );
         }
         println!();
 
@@ -21072,6 +21084,393 @@ fn handle_debug_trace(args: &DebugTraceArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Walk a signed decision-receipt artifact through every verification step
+/// and emit the per-step status to stdout.
+///
+/// SECURITY: this is an operator-only debugging surface. It deliberately
+/// surfaces `expected` / `actual` values that the external API redacts for
+/// oracle-prevention reasons — by the time the operator is running this
+/// command, they already have the receipt file on disk and need detailed
+/// diagnostics to act on the failure. Do NOT expose this command behind a
+/// network listener; that would re-create the oracle the redaction was
+/// designed to prevent.
+fn handle_debug_explain(args: &DebugExplainArgs) -> Result<()> {
+    use crate::cli::validate_user_content_pathbuf;
+    use ed25519_dalek::{Signature as Ed25519Signature, Verifier, VerifyingKey};
+    use frankenengine_node::security::decision_receipt::{Receipt, signing_key_id};
+    use serde::{Deserialize, Serialize};
+    use sha2::{Digest, Sha256};
+    use std::fs;
+
+    #[derive(Debug, Clone, Serialize)]
+    struct ExplainStep {
+        step: &'static str,
+        status: &'static str,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expected: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        actual: Option<String>,
+    }
+
+    impl ExplainStep {
+        fn ok(step: &'static str, message: impl Into<String>) -> Self {
+            Self {
+                step,
+                status: "ok",
+                message: message.into(),
+                expected: None,
+                actual: None,
+            }
+        }
+        fn fail(step: &'static str, message: impl Into<String>) -> Self {
+            Self {
+                step,
+                status: "fail",
+                message: message.into(),
+                expected: None,
+                actual: None,
+            }
+        }
+        fn fail_with(
+            step: &'static str,
+            message: impl Into<String>,
+            expected: impl Into<String>,
+            actual: impl Into<String>,
+        ) -> Self {
+            Self {
+                step,
+                status: "fail",
+                message: message.into(),
+                expected: Some(expected.into()),
+                actual: Some(actual.into()),
+            }
+        }
+        fn skipped(step: &'static str, message: impl Into<String>) -> Self {
+            Self {
+                step,
+                status: "skipped",
+                message: message.into(),
+                expected: None,
+                actual: None,
+            }
+        }
+    }
+
+    // Mirrors `decision_receipt::SignedReceipt` for parsing (Receipt is
+    // `#[serde(flatten)]` on the wire, so this matches the production layout).
+    #[derive(Debug, Deserialize)]
+    struct ParsedSignedReceipt {
+        #[serde(flatten)]
+        receipt: Receipt,
+        signer_key_id: String,
+        chain_hash: String,
+        signature: String,
+    }
+
+    let mut steps: Vec<ExplainStep> = Vec::new();
+    let mut overall_ok = true;
+
+    // Step 1: validate path + read file.
+    let receipt_path = match validate_user_content_pathbuf(&args.receipt) {
+        Ok(p) => p,
+        Err(err) => {
+            steps.push(ExplainStep::fail(
+                "read",
+                format!("receipt path failed validation: {err}"),
+            ));
+            return emit_explain_steps(&steps, args.json, false);
+        }
+    };
+    let receipt_bytes = match fs::read(receipt_path) {
+        Ok(b) => {
+            steps.push(ExplainStep::ok(
+                "read",
+                format!("read {} bytes from {}", b.len(), receipt_path.display()),
+            ));
+            b
+        }
+        Err(err) => {
+            steps.push(ExplainStep::fail(
+                "read",
+                format!("failed to read {}: {err}", receipt_path.display()),
+            ));
+            return emit_explain_steps(&steps, args.json, false);
+        }
+    };
+
+    // Step 2: parse JSON → SignedReceipt.
+    let signed: ParsedSignedReceipt = match serde_json::from_slice(&receipt_bytes) {
+        Ok(s) => {
+            steps.push(ExplainStep::ok(
+                "parse",
+                "decoded SignedReceipt JSON envelope",
+            ));
+            s
+        }
+        Err(err) => {
+            steps.push(ExplainStep::fail(
+                "parse",
+                format!("invalid SignedReceipt JSON: {err}"),
+            ));
+            return emit_explain_steps(&steps, args.json, false);
+        }
+    };
+
+    // Step 3: structural validation.
+    if !(signed.receipt.confidence.is_finite() && (0.0..=1.0).contains(&signed.receipt.confidence))
+    {
+        steps.push(ExplainStep::fail_with(
+            "structure",
+            "confidence outside [0.0, 1.0] or non-finite",
+            "finite f64 in [0.0, 1.0]",
+            format!("{}", signed.receipt.confidence),
+        ));
+        overall_ok = false;
+    } else if signed.receipt.signature_version.is_empty() {
+        steps.push(ExplainStep::fail_with(
+            "structure",
+            "signature_version is empty",
+            "non-empty signature_version (e.g., \"ed25519:v1\")",
+            String::new(),
+        ));
+        overall_ok = false;
+    } else {
+        steps.push(ExplainStep::ok(
+            "structure",
+            format!(
+                "confidence={:.4}, signature_version={}, decision={:?}",
+                signed.receipt.confidence,
+                signed.receipt.signature_version,
+                signed.receipt.decision
+            ),
+        ));
+    }
+
+    // Steps 4-7: signing-material dependent.
+    let public_key_bytes = match args.public_key_hex.as_deref() {
+        Some(hex_str) => match hex::decode(hex_str.trim()) {
+            Ok(bytes) if bytes.len() == 32 => Some(bytes),
+            Ok(bytes) => {
+                steps.push(ExplainStep::fail_with(
+                    "signer_key",
+                    "--public-key-hex must decode to exactly 32 bytes",
+                    "32 bytes (64 hex chars)",
+                    format!("{} bytes", bytes.len()),
+                ));
+                overall_ok = false;
+                None
+            }
+            Err(err) => {
+                steps.push(ExplainStep::fail(
+                    "signer_key",
+                    format!("--public-key-hex failed hex decode: {err}"),
+                ));
+                overall_ok = false;
+                None
+            }
+        },
+        None => {
+            for step in [
+                "signer_key",
+                "canonical",
+                "signature_decode",
+                "signature_verify",
+            ] {
+                steps.push(ExplainStep::skipped(
+                    step,
+                    "no --public-key-hex supplied; skipping signing-material steps",
+                ));
+            }
+            None
+        }
+    };
+
+    if let Some(public_key_bytes) = public_key_bytes {
+        let mut key_array = [0u8; 32];
+        key_array.copy_from_slice(&public_key_bytes);
+        let public_key = match VerifyingKey::from_bytes(&key_array) {
+            Ok(k) => k,
+            Err(err) => {
+                steps.push(ExplainStep::fail(
+                    "signer_key",
+                    format!("public key bytes did not decode as ed25519 VerifyingKey: {err}"),
+                ));
+                return emit_explain_steps(&steps, args.json, false);
+            }
+        };
+
+        let expected_key_id = signing_key_id(&public_key);
+        if signed.signer_key_id == expected_key_id {
+            steps.push(ExplainStep::ok(
+                "signer_key",
+                format!("signer_key_id matches public key fingerprint {expected_key_id}"),
+            ));
+        } else {
+            steps.push(ExplainStep::fail_with(
+                "signer_key",
+                "signer_key_id does not match supplied public key fingerprint",
+                expected_key_id,
+                signed.signer_key_id.clone(),
+            ));
+            overall_ok = false;
+        }
+
+        let canonical_payload = match serde_json::to_string(&signed.receipt) {
+            Ok(s) => s,
+            Err(err) => {
+                steps.push(ExplainStep::fail(
+                    "canonical",
+                    format!("failed to canonicalize Receipt: {err}"),
+                ));
+                return emit_explain_steps(&steps, args.json, false);
+            }
+        };
+        steps.push(ExplainStep::ok(
+            "canonical",
+            format!(
+                "canonical Receipt payload is {} bytes",
+                canonical_payload.len()
+            ),
+        ));
+
+        let sig_bytes = match BASE64_STANDARD.decode(signed.signature.as_bytes()) {
+            Ok(b) if b.len() == 64 => b,
+            Ok(b) => {
+                steps.push(ExplainStep::fail_with(
+                    "signature_decode",
+                    "ed25519 signature must decode to exactly 64 bytes",
+                    "64 bytes",
+                    format!("{} bytes", b.len()),
+                ));
+                steps.push(ExplainStep::skipped(
+                    "signature_verify",
+                    "skipped because signature_decode failed",
+                ));
+                return emit_explain_steps(&steps, args.json, false);
+            }
+            Err(err) => {
+                steps.push(ExplainStep::fail(
+                    "signature_decode",
+                    format!("base64 decode failed: {err}"),
+                ));
+                steps.push(ExplainStep::skipped(
+                    "signature_verify",
+                    "skipped because signature_decode failed",
+                ));
+                return emit_explain_steps(&steps, args.json, false);
+            }
+        };
+        steps.push(ExplainStep::ok(
+            "signature_decode",
+            "signature decoded to 64 bytes",
+        ));
+
+        let mut sig_array = [0u8; 64];
+        sig_array.copy_from_slice(&sig_bytes);
+        let signature = Ed25519Signature::from_bytes(&sig_array);
+        match public_key.verify(canonical_payload.as_bytes(), &signature) {
+            Ok(()) => steps.push(ExplainStep::ok(
+                "signature_verify",
+                "ed25519 signature verifies against canonical Receipt payload",
+            )),
+            Err(err) => {
+                steps.push(ExplainStep::fail(
+                    "signature_verify",
+                    format!("ed25519 verify rejected the signature: {err}"),
+                ));
+                overall_ok = false;
+            }
+        }
+    }
+
+    // Step 8: chain hash recomputation. Best-effort domain separator —
+    // production sign_receipt may use a different scheme; surface this so
+    // the operator knows when this step is informational vs authoritative.
+    let canonical_for_chain = match serde_json::to_string(&signed.receipt) {
+        Ok(s) => s,
+        Err(err) => {
+            steps.push(ExplainStep::fail(
+                "chain_hash",
+                format!("failed to canonicalize Receipt for chain-hash recompute: {err}"),
+            ));
+            return emit_explain_steps(&steps, args.json, false);
+        }
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(b"decision_receipt_chain_hash_v1:");
+    if let Some(prev) = &signed.receipt.previous_receipt_hash {
+        hasher.update((prev.len() as u64).to_le_bytes());
+        hasher.update(prev.as_bytes());
+    } else {
+        hasher.update(0u64.to_le_bytes());
+    }
+    hasher.update((canonical_for_chain.len() as u64).to_le_bytes());
+    hasher.update(canonical_for_chain.as_bytes());
+    let recomputed = hex::encode(hasher.finalize());
+    if recomputed == signed.chain_hash {
+        steps.push(ExplainStep::ok(
+            "chain_hash",
+            format!("chain_hash matches recomputed digest {recomputed}"),
+        ));
+    } else {
+        steps.push(ExplainStep::fail_with(
+            "chain_hash",
+            "chain_hash does not match recomputed digest \
+             (NOTE: this step uses a best-effort domain-separator scheme; \
+              if production sign_receipt uses a different scheme, treat this \
+              as informational and cross-check decision_receipt.rs::compute_chain_hash)",
+            recomputed,
+            signed.chain_hash.clone(),
+        ));
+        overall_ok = false;
+    }
+
+    emit_explain_steps(&steps, args.json, overall_ok)
+}
+
+fn emit_explain_steps<S: serde::Serialize>(
+    steps: &[S],
+    json: bool,
+    overall_ok: bool,
+) -> Result<()> {
+    if json {
+        #[derive(serde::Serialize)]
+        struct ExplainReport<'a, T> {
+            ok: bool,
+            steps: &'a [T],
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&ExplainReport {
+                ok: overall_ok,
+                steps
+            })?
+        );
+    } else {
+        for step in steps {
+            let value = serde_json::to_value(step)?;
+            let step_name = value.get("step").and_then(|v| v.as_str()).unwrap_or("?");
+            let status = value.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+            let message = value.get("message").and_then(|v| v.as_str()).unwrap_or("");
+            print!("step={step_name} status={status} message={message:?}");
+            if let Some(expected) = value.get("expected").and_then(|v| v.as_str()) {
+                print!(" expected={expected:?}");
+            }
+            if let Some(actual) = value.get("actual").and_then(|v| v.as_str()) {
+                print!(" actual={actual:?}");
+            }
+            println!();
+        }
+        println!("explain={}", if overall_ok { "ok" } else { "fail" });
+    }
+    if overall_ok {
+        Ok(())
+    } else {
+        anyhow::bail!("debug explain reported one or more failed verification steps");
+    }
 }
 
 fn main() -> Result<()> {
@@ -22037,8 +22436,11 @@ mod ops_metrics_tests {
         std::fs::create_dir_all(&archived_receipt_dir).expect("create archived receipt dir");
         std::fs::create_dir_all(&fleet_nodes_dir).expect("create fleet node dir");
 
-        std::fs::write(state_dir.join("spill.jsonl"), "{\"entry\":1}\n{\"entry\":2}\n")
-            .expect("write spill file");
+        std::fs::write(
+            state_dir.join("spill.jsonl"),
+            "{\"entry\":1}\n{\"entry\":2}\n",
+        )
+        .expect("write spill file");
         std::fs::write(
             state_dir.join("durable_evidence_spill.jsonl"),
             "{\"entry\":3}\n",
@@ -22064,10 +22466,16 @@ mod ops_metrics_tests {
             "{\"schema_version\":\"receipt-archived\"}\n",
         )
         .expect("write archived execution receipt");
-        std::fs::write(fleet_nodes_dir.join("node-a.json"), "{\"node_id\":\"node-a\"}\n")
-            .expect("write first fleet node");
-        std::fs::write(fleet_nodes_dir.join("node-b.json"), "{\"node_id\":\"node-b\"}\n")
-            .expect("write second fleet node");
+        std::fs::write(
+            fleet_nodes_dir.join("node-a.json"),
+            "{\"node_id\":\"node-a\"}\n",
+        )
+        .expect("write first fleet node");
+        std::fs::write(
+            fleet_nodes_dir.join("node-b.json"),
+            "{\"node_id\":\"node-b\"}\n",
+        )
+        .expect("write second fleet node");
 
         let actions = [
             PersistedFleetActionRecord {
@@ -23080,7 +23488,8 @@ mod run_trust_gate_tests {
             let serialization_result = serde_json::to_string(&contract_output);
             assert!(serialization_result.is_ok(), "Serialization should succeed");
 
-            let json_str = serialization_result.expect("test struct should serialize to JSON without error");
+            let json_str =
+                serialization_result.expect("test struct should serialize to JSON without error");
 
             // Verify JSON injection is properly escaped
             assert!(
@@ -23110,7 +23519,8 @@ mod run_trust_gate_tests {
                 "Malicious dependency should serialize safely"
             );
 
-            let dep_json = dep_serialization.expect("dependency struct should serialize to JSON without error");
+            let dep_json = dep_serialization
+                .expect("dependency struct should serialize to JSON without error");
 
             // Verify malicious content is preserved but escaped
             assert!(
@@ -23168,7 +23578,8 @@ mod run_trust_gate_tests {
                 "Extreme values should serialize"
             );
 
-            let extreme_json = extreme_serialization.expect("extreme boundary test struct should serialize to JSON without error");
+            let extreme_json = extreme_serialization
+                .expect("extreme boundary test struct should serialize to JSON without error");
             assert!(
                 !extreme_json.is_empty(),
                 "Extreme serialization should produce output"
@@ -23274,7 +23685,8 @@ mod run_trust_gate_tests {
                     status
                 );
 
-                let json_str = serialization_result.expect("trust status enum should serialize to JSON without error");
+                let json_str = serialization_result
+                    .expect("trust status enum should serialize to JSON without error");
                 let deserialization_result: Result<RunDependencyTrustStatus, _> =
                     serde_json::from_str(&json_str);
                 assert!(
@@ -23282,7 +23694,8 @@ mod run_trust_gate_tests {
                     "Trust status should round-trip serialize/deserialize"
                 );
 
-                let deserialized = deserialization_result.expect("trust status JSON should deserialize back to enum without error");
+                let deserialized = deserialization_result
+                    .expect("trust status JSON should deserialize back to enum without error");
                 assert_eq!(
                     status, deserialized,
                     "Round-trip should preserve trust status"
@@ -23304,7 +23717,8 @@ mod run_trust_gate_tests {
                 );
 
                 // Verify snake_case serialization
-                let json_str = serialization_result.expect("scan status enum should serialize to JSON without error");
+                let json_str = serialization_result
+                    .expect("scan status enum should serialize to JSON without error");
                 match status {
                     TrustScanItemStatus::Created => {
                         assert!(
@@ -23396,7 +23810,8 @@ mod run_trust_gate_tests {
                     i
                 );
 
-                let json_str = serialization_result.expect("boundary test item should serialize to JSON without error");
+                let json_str = serialization_result
+                    .expect("boundary test item should serialize to JSON without error");
                 let deserialization_result: Result<TrustScanItem, _> =
                     serde_json::from_str(&json_str);
                 assert!(
@@ -23405,7 +23820,8 @@ mod run_trust_gate_tests {
                     i
                 );
 
-                let deserialized = deserialization_result.expect("boundary test item JSON should deserialize without error");
+                let deserialized = deserialization_result
+                    .expect("boundary test item JSON should deserialize without error");
                 assert_eq!(
                     item.status, deserialized.status,
                     "Enum status should be preserved in boundary test {}",
@@ -23435,12 +23851,15 @@ mod run_trust_gate_tests {
 
             // Simulate rapid serialization/deserialization
             for (i, (trust_status, scan_status)) in concurrent_operations.iter().enumerate() {
-                let trust_json = serde_json::to_string(trust_status).expect("trust status enum should serialize to JSON in concurrent test");
-                let scan_json = serde_json::to_string(scan_status).expect("scan status enum should serialize to JSON in concurrent test");
+                let trust_json = serde_json::to_string(trust_status)
+                    .expect("trust status enum should serialize to JSON in concurrent test");
+                let scan_json = serde_json::to_string(scan_status)
+                    .expect("scan status enum should serialize to JSON in concurrent test");
 
-                let trust_parsed: RunDependencyTrustStatus =
-                    serde_json::from_str(&trust_json).expect("trust status JSON should deserialize in concurrent test");
-                let scan_parsed: TrustScanItemStatus = serde_json::from_str(&scan_json).expect("scan status JSON should deserialize in concurrent test");
+                let trust_parsed: RunDependencyTrustStatus = serde_json::from_str(&trust_json)
+                    .expect("trust status JSON should deserialize in concurrent test");
+                let scan_parsed: TrustScanItemStatus = serde_json::from_str(&scan_json)
+                    .expect("scan status JSON should deserialize in concurrent test");
 
                 assert_eq!(
                     *trust_status, trust_parsed,

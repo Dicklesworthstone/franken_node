@@ -60,7 +60,7 @@ fn validate_system_binary_path(path: &str) -> Result<&Path> {
 }
 
 /// Convert validated PathBuf to safe Path, applying user content validation.
-fn validate_user_content_pathbuf(pathbuf: &PathBuf) -> Result<&Path> {
+pub(crate) fn validate_user_content_pathbuf(pathbuf: &PathBuf) -> Result<&Path> {
     let path_str = pathbuf
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8: {:?}", pathbuf))?;
