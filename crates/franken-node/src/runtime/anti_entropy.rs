@@ -334,6 +334,12 @@ impl ReconciliationConfig {
                 "max_delta_batch must be > 0".into(),
             ));
         }
+        // SECURITY: Prevent memory exhaustion DoS via excessive batch size
+        if self.max_delta_batch > 100_000 {
+            return Err(ReconciliationError::InvalidConfig(
+                format!("max_delta_batch ({}) exceeds maximum allowed (100,000)", self.max_delta_batch),
+            ));
+        }
         Ok(())
     }
 }
