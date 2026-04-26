@@ -50,6 +50,7 @@ use std::{
 };
 
 use chrono::{SecondsFormat, Utc};
+use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
@@ -584,12 +585,14 @@ impl VerifierSdk {
     /// # Examples
     ///
     /// ```rust
+    /// # #[cfg(feature = "test-support")] {
     /// use frankenengine_verifier_sdk::{VerifierSdk, VerificationVerdict};
     /// use frankenengine_verifier_sdk::capsule::build_reference_capsule;
     ///
     /// let sdk = VerifierSdk::new("verifier://docs");
     /// let result = sdk.verify_claim(&build_reference_capsule())?;
     /// assert_eq!(result.verdict, VerificationVerdict::Pass);
+    /// # }
     /// # Ok::<(), frankenengine_verifier_sdk::VerifierSdkError>(())
     /// ```
     pub fn verify_claim(
@@ -733,6 +736,7 @@ impl VerifierSdk {
     /// # Examples
     ///
     /// ```rust
+    /// # #[cfg(feature = "test-support")] {
     /// use frankenengine_verifier_sdk::VerifierSdk;
     /// use frankenengine_verifier_sdk::capsule::build_reference_capsule;
     ///
@@ -741,6 +745,7 @@ impl VerifierSdk {
     /// let mut log = Vec::new();
     /// let entry = sdk.append_transparency_log(&mut log, &result)?;
     /// assert_eq!(log, vec![entry]);
+    /// # }
     /// # Ok::<(), frankenengine_verifier_sdk::VerifierSdkError>(())
     /// ```
     pub fn append_transparency_log(
@@ -849,6 +854,7 @@ impl VerifierSdk {
     /// # Examples
     ///
     /// ```rust
+    /// # #[cfg(feature = "test-support")] {
     /// use frankenengine_verifier_sdk::VerifierSdk;
     /// use frankenengine_verifier_sdk::capsule::build_reference_capsule;
     ///
@@ -857,6 +863,7 @@ impl VerifierSdk {
     /// let mut session = sdk.create_session("session-docs")?;
     /// let step = sdk.record_session_step(&mut session, &result)?;
     /// assert_eq!(step.step_index, 0);
+    /// # }
     /// # Ok::<(), frankenengine_verifier_sdk::VerifierSdkError>(())
     /// ```
     pub fn record_session_step(
@@ -1126,10 +1133,8 @@ fn facade_result_signature(result: &VerificationResult) -> Result<String, Verifi
 }
 
 fn default_result_origin_nonce() -> String {
-    // Serde default function - if nonce counter is exhausted, return a safe default
-    // The real protection is in the fallible version used by the constructor
     default_result_origin_nonce_fallible()
-        .unwrap_or_else(|_| "nonce-exhausted-placeholder".to_string())
+        .unwrap_or_else(|_| random_result_origin_nonce())
 }
 
 fn default_result_origin_nonce_fallible() -> Result<String, VerifierSdkError> {
@@ -1150,6 +1155,12 @@ fn next_session_nonce_counter() -> Result<u64, VerifierSdkError> {
             }
         })
         .map_err(|_| VerifierSdkError::NonceCounterExhausted)
+}
+
+fn random_result_origin_nonce() -> String {
+    let mut nonce = [0u8; 32];
+    OsRng.fill_bytes(&mut nonce);
+    hex::encode(nonce)
 }
 
 fn increment_session_nonce_counter(counter: u64) -> u64 {
@@ -1546,6 +1557,45 @@ mod tests {
 
         // Restore the original counter value to not interfere with other tests
         SESSION_NONCE_COUNTER.store(original_value, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[test]
+    fn serde_default_nonce_fallback_uses_random_hex_when_counter_is_exhausted() {
+        struct CounterReset(u64);
+
+        impl Drop for CounterReset {
+            fn drop(&mut self) {
+                SESSION_NONCE_COUNTER.store(self.0, Ordering::Relaxed);
+            }
+        }
+
+        let _reset = CounterReset(SESSION_NONCE_COUNTER.load(Ordering::Relaxed));
+        SESSION_NONCE_COUNTER.store(u64::MAX, Ordering::Relaxed);
+
+        let raw = json!({
+            "verifier_identity": "verifier://alpha",
+            "sdk_version": SDK_VERSION,
+            "config": {
+                "schema_version": SDK_VERSION,
+                "security_posture": STRUCTURAL_ONLY_SECURITY_POSTURE,
+            },
+        });
+
+        let first: VerifierSdk =
+            serde_json::from_value(raw.clone()).expect("public JSON should still deserialize");
+        let second: VerifierSdk =
+            serde_json::from_value(raw).expect("fallback should remain reusable");
+
+        for sdk in [&first, &second] {
+            assert_eq!(sdk.result_origin_nonce.len(), 64);
+            assert!(
+                sdk.result_origin_nonce
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            );
+            assert_ne!(sdk.result_origin_nonce, "nonce-exhausted-placeholder");
+        }
+        assert_ne!(first.result_origin_nonce, second.result_origin_nonce);
     }
 
     #[test]

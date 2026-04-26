@@ -1,3 +1,5 @@
+#![cfg(feature = "test-support")]
+
 //! Verifier SDK Conformance Harness
 //!
 //! Validates all verifier SDK outputs against the frozen vsdk-v1.0 specification.

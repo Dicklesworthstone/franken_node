@@ -1,3 +1,5 @@
+#![cfg(feature = "test-support")]
+
 //! Public API Conformance Harness for Verifier SDK
 //!
 //! Tests the stability of the public API contract to prevent downstream breakage.

@@ -1,3 +1,5 @@
+#![cfg(feature = "test-support")]
+
 use std::collections::BTreeMap;
 
 use frankenengine_verifier_sdk::SDK_VERSION;

@@ -259,10 +259,12 @@ fn compute_signing_payload(capsule: &ReplayCapsule) -> String {
 /// # Examples
 ///
 /// ```rust
+/// # #[cfg(feature = "test-support")] {
 /// use frankenengine_verifier_sdk::capsule::{build_reference_capsule, validate_manifest};
 ///
 /// let capsule = build_reference_capsule();
 /// validate_manifest(&capsule.manifest)?;
+/// # }
 /// # Ok::<(), frankenengine_verifier_sdk::capsule::CapsuleError>(())
 /// ```
 ///
@@ -441,12 +443,14 @@ fn validate_creator_identity(creator_identity: &str) -> Result<(), CapsuleError>
 /// # Examples
 ///
 /// ```rust
+/// # #[cfg(feature = "test-support")] {
 /// use frankenengine_verifier_sdk::capsule::{build_reference_capsule, sign_capsule};
 ///
 /// let mut capsule = build_reference_capsule();
 /// capsule.signature.clear();
 /// sign_capsule(&mut capsule);
 /// assert_eq!(capsule.signature.len(), 64);
+/// # }
 /// ```
 pub fn sign_capsule(capsule: &mut ReplayCapsule) {
     capsule.signature = compute_signing_payload(capsule);
@@ -459,10 +463,12 @@ pub fn sign_capsule(capsule: &mut ReplayCapsule) {
 /// # Examples
 ///
 /// ```rust
+/// # #[cfg(feature = "test-support")] {
 /// use frankenengine_verifier_sdk::capsule::{build_reference_capsule, verify_signature};
 ///
 /// let capsule = build_reference_capsule();
 /// verify_signature(&capsule)?;
+/// # }
 /// # Ok::<(), frankenengine_verifier_sdk::capsule::CapsuleError>(())
 /// ```
 pub fn verify_signature(capsule: &ReplayCapsule) -> CapsuleResult<()> {
@@ -481,10 +487,12 @@ pub fn verify_signature(capsule: &ReplayCapsule) -> CapsuleResult<()> {
 /// # Examples
 ///
 /// ```rust
+/// # #[cfg(feature = "test-support")] {
 /// use frankenengine_verifier_sdk::capsule::{build_reference_capsule, replay, CapsuleVerdict};
 ///
 /// let result = replay(&build_reference_capsule(), "verifier://docs")?;
 /// assert_eq!(result.verdict, CapsuleVerdict::Pass);
+/// # }
 /// # Ok::<(), frankenengine_verifier_sdk::capsule::CapsuleError>(())
 /// ```
 ///
@@ -553,6 +561,7 @@ pub fn replay(
 /// verify_signature(&capsule)?;
 /// # Ok::<(), frankenengine_verifier_sdk::capsule::CapsuleError>(())
 /// ```
+#[cfg(any(test, feature = "test-support"))]
 pub fn build_reference_capsule() -> ReplayCapsule {
     let mut inputs = BTreeMap::new();
     inputs.insert("artifact_a".to_string(), "content_of_a".to_string());
