@@ -119,6 +119,8 @@ pub struct Receipt {
     pub signature_version: String,
     /// Unique nonce for replay protection (prevents receipt reuse attacks).
     pub nonce: String,
+    /// Audience binding to prevent cross-context receipt abuse.
+    pub audience: String,
     pub input_hash: String,
     pub output_hash: String,
     pub decision: Decision,
@@ -242,6 +244,8 @@ pub enum ReceiptError {
     TimestampNotMonotonic { current: String, previous: String },
     #[error("receipt replay attack detected: nonce '{nonce}' already used")]
     ReplayAttack { nonce: String },
+    #[error("audience binding mismatch: expected '{expected}', got '{actual}'")]
+    AudienceMismatch { expected: String, actual: String },
     /// Failed to write receipt file to filesystem.
     ///
     /// This error occurs during atomic receipt persistence operations including:
@@ -270,6 +274,7 @@ impl Receipt {
     pub fn new(
         action_name: &str,
         actor_identity: &str,
+        audience: &str,
         input: &impl Serialize,
         output: &impl Serialize,
         decision: Decision,
@@ -287,6 +292,7 @@ impl Receipt {
             timestamp: clock::wall_now().to_rfc3339(),
             signature_version: DECISION_RECEIPT_SIGNATURE_VERSION.to_string(),
             nonce: Uuid::now_v7().simple().to_string(),
+            audience: audience.to_string(),
             input_hash: hash_canonical_json(input)?,
             output_hash: hash_canonical_json(output)?,
             decision,
@@ -350,6 +356,7 @@ impl Receipt {
     pub fn new_with_monotonic_timestamp(
         action_name: &str,
         actor_identity: &str,
+        audience: &str,
         input: &impl Serialize,
         output: &impl Serialize,
         decision: Decision,
@@ -363,6 +370,7 @@ impl Receipt {
         let mut receipt = Self::new(
             action_name,
             actor_identity,
+            audience,
             input,
             output,
             decision,
@@ -476,8 +484,28 @@ pub fn verify_receipt_with_replay_protection(
     public_key: &Ed25519PublicKey,
     replay_tracker: Option<&ReplayTracker>,
 ) -> Result<bool, ReceiptError> {
+    verify_receipt_with_audience(signed, public_key, replay_tracker, None)
+}
+
+/// Verify signature and hash-chain material with audience binding and replay protection.
+pub fn verify_receipt_with_audience(
+    signed: &SignedReceipt,
+    public_key: &Ed25519PublicKey,
+    replay_tracker: Option<&ReplayTracker>,
+    expected_audience: Option<&str>,
+) -> Result<bool, ReceiptError> {
     validate_confidence(signed.receipt.confidence)?;
     validate_signature_version(&signed.receipt.signature_version)?;
+
+    // Check audience binding to prevent cross-context abuse (fail-closed)
+    if let Some(expected_aud) = expected_audience {
+        if !crate::security::constant_time::ct_eq(&signed.receipt.audience, expected_aud) {
+            return Err(ReceiptError::AudienceMismatch {
+                expected: expected_aud.to_string(),
+                actual: signed.receipt.audience.clone(),
+            });
+        }
+    }
 
     // Check replay protection first to fail fast on replays
     if let Some(tracker) = replay_tracker {
@@ -989,6 +1017,7 @@ mod tests {
         Receipt::new(
             action_name,
             "control-plane@prod",
+            "franken-node-control-plane",
             &json!({"z": 1, "a": 2}),
             &json!({"result": "ok"}),
             decision,
@@ -1626,6 +1655,59 @@ mod tests {
         push_bounded(&mut values, 4, 0);
 
         assert!(values.is_empty());
+    }
+
+    #[test]
+    fn verify_receipt_with_audience_rejects_cross_context_abuse() {
+        let receipt = Receipt::new(
+            "quarantine",
+            "control-plane@prod",
+            "franken-node-control-plane", // correct audience
+            &json!({"action": "quarantine"}),
+            &json!({"result": "approved"}),
+            Decision::Approved,
+            "policy gate evaluated",
+            vec!["ledger-001".to_string()],
+            vec!["rule-A".to_string()],
+            0.95,
+            "franken-node trust release --incident INC-001",
+        )
+        .expect("receipt construction");
+
+        let signed = sign_receipt(&receipt, &demo_signing_key()).expect("sign receipt");
+
+        // Correct audience should pass
+        let result = verify_receipt_with_audience(
+            &signed,
+            &demo_verifying_key(),
+            None,
+            Some("franken-node-control-plane"),
+        );
+        assert!(result.is_ok() && result.unwrap());
+
+        // Wrong audience should fail with AudienceMismatch error
+        let err = verify_receipt_with_audience(
+            &signed,
+            &demo_verifying_key(),
+            None,
+            Some("different-context"),
+        )
+        .expect_err("cross-context receipt abuse must be rejected");
+
+        assert!(matches!(
+            err,
+            ReceiptError::AudienceMismatch { expected, actual }
+                if expected == "different-context" && actual == "franken-node-control-plane"
+        ));
+
+        // No expected audience (legacy mode) should pass
+        let result = verify_receipt_with_audience(
+            &signed,
+            &demo_verifying_key(),
+            None,
+            None,
+        );
+        assert!(result.is_ok() && result.unwrap());
     }
 
     #[test]
