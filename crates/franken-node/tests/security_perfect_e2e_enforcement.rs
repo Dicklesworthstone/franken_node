@@ -9,8 +9,7 @@
 //! This differs from the existing remote capability test by emphasizing
 //! the Perfect E2E testing patterns rather than concurrent/timing behavior.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, Once, OnceLock};
+use std::sync::{Mutex, Once, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -19,7 +18,7 @@ use frankenengine_node::security::remote_cap::{
     CapabilityGate, CapabilityProvider, RemoteOperation, RemoteScope,
 };
 use frankenengine_node::supply_chain::certification::{
-    CertificationLevel, DerivationMetadata, EvidenceType, VerifiedEvidenceRef,
+    DerivationMetadata, EvidenceType, VerifiedEvidenceRef,
 };
 use frankenengine_node::supply_chain::trust_card::TrustCardRegistry;
 
@@ -28,8 +27,12 @@ use frankenengine_node::supply_chain::trust_card::TrustCardRegistry;
 // ---------------------------------------------------------------------------
 
 static LOGGER_INIT: Once = Once::new();
-static TEST_COUNT: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
 static NODE_ENV_OVERRIDE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static TEST_COUNT: OnceLock<Mutex<u32>> = OnceLock::new();
+
+fn test_count() -> &'static Mutex<u32> {
+    TEST_COUNT.get_or_init(|| Mutex::new(0))
+}
 
 fn node_env_override() -> &'static Mutex<Option<String>> {
     NODE_ENV_OVERRIDE.get_or_init(|| Mutex::new(None))
@@ -65,7 +68,7 @@ impl TestLogger {
             );
         });
 
-        let mut count = TEST_COUNT.lock().unwrap();
+        let mut count = test_count().lock().unwrap();
         *count += 1;
         let test_id = *count;
 
@@ -134,8 +137,8 @@ impl RealEnforcementHarness {
         Self::validate_test_environment()?;
 
         // Initialize real enforcement components
-        let gate = CapabilityGate::new("test-security-secret-key");
-        let provider = CapabilityProvider::new("test-security-secret-key");
+        let gate = CapabilityGate::new("test-security-secret-key")?;
+        let provider = CapabilityProvider::new("test-security-secret-key")?;
         let trust_registry = TrustCardRegistry::default();
 
         Ok(Self {
@@ -280,7 +283,7 @@ impl TrustCardFactory {
 fn test_remote_cap_enforcement_no_mocks() {
     let mut logger = TestLogger::new("remote_cap_enforcement_no_mocks".to_string());
 
-    let harness = match RealEnforcementHarness::new() {
+    let mut harness = match RealEnforcementHarness::new() {
         Ok(h) => h,
         Err(e) => {
             logger.test_end("skipped");
@@ -343,10 +346,10 @@ fn test_remote_cap_enforcement_no_mocks() {
     logger.phase("assert");
     assert!(result.is_err(), "Operation not in scope should fail");
     let err = result.unwrap_err();
-    assert_eq!(err.code(), "REMOTECAP_OPERATION_DENIED");
+    assert_eq!(err.code(), "REMOTECAP_SCOPE_DENIED");
     logger.assert_match(
         "scope_violation_detected",
-        &json!("REMOTECAP_OPERATION_DENIED"),
+        &json!("REMOTECAP_SCOPE_DENIED"),
         &json!(err.code()),
     );
 
@@ -363,10 +366,10 @@ fn test_remote_cap_enforcement_no_mocks() {
     logger.phase("assert");
     assert!(result.is_err(), "Endpoint not in scope should fail");
     let err = result.unwrap_err();
-    assert_eq!(err.code(), "REMOTECAP_ENDPOINT_DENIED");
+    assert_eq!(err.code(), "REMOTECAP_SCOPE_DENIED");
     logger.assert_match(
         "endpoint_violation_detected",
-        &json!("REMOTECAP_ENDPOINT_DENIED"),
+        &json!("REMOTECAP_SCOPE_DENIED"),
         &json!(err.code()),
     );
 
@@ -395,7 +398,10 @@ fn test_trust_card_registry_validation_no_mocks() {
     logger.phase("act");
 
     // Test 1: Registry snapshot should be consistent
-    let initial_snapshot = harness.trust_registry.snapshot();
+    let initial_snapshot = harness
+        .trust_registry
+        .snapshot()
+        .expect("snapshot should succeed");
 
     logger.phase("assert");
     assert!(
@@ -438,7 +444,7 @@ fn test_trust_card_registry_validation_no_mocks() {
 fn test_remote_cap_expiry_enforcement_no_mocks() {
     let mut logger = TestLogger::new("remote_cap_expiry_no_mocks".to_string());
 
-    let harness = match RealEnforcementHarness::new() {
+    let mut harness = match RealEnforcementHarness::new() {
         Ok(h) => h,
         Err(e) => {
             logger.test_end("skipped");
@@ -508,7 +514,7 @@ fn test_remote_cap_expiry_enforcement_no_mocks() {
 fn test_single_use_capability_consumption_no_mocks() {
     let mut logger = TestLogger::new("single_use_cap_consumption_no_mocks".to_string());
 
-    let harness = match RealEnforcementHarness::new() {
+    let mut harness = match RealEnforcementHarness::new() {
         Ok(h) => h,
         Err(e) => {
             logger.test_end("skipped");
@@ -567,10 +573,10 @@ fn test_single_use_capability_consumption_no_mocks() {
         "Second use of single-use capability should fail"
     );
     let err = second_result.unwrap_err();
-    assert_eq!(err.code(), "REMOTECAP_ALREADY_CONSUMED");
+    assert_eq!(err.code(), "REMOTECAP_REPLAY");
     logger.assert_match(
         "single_use_enforcement",
-        &json!("REMOTECAP_ALREADY_CONSUMED"),
+        &json!("REMOTECAP_REPLAY"),
         &json!(err.code()),
     );
 
@@ -625,7 +631,7 @@ fn test_production_safety_guard() {
 fn test_no_token_enforcement() {
     let mut logger = TestLogger::new("no_token_enforcement".to_string());
 
-    let harness = match RealEnforcementHarness::new() {
+    let mut harness = match RealEnforcementHarness::new() {
         Ok(h) => h,
         Err(e) => {
             logger.test_end("skipped");

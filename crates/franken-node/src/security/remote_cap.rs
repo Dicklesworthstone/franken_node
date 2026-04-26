@@ -69,14 +69,17 @@ impl ReplayTokenSet {
                 return match self.inner.lock() {
                     Ok(guard) => Self::insert_into_inner(guard, token_id),
                     Err(poisoned) => Self::insert_into_inner(poisoned.into_inner(), token_id),
-                }
+                };
             }
         };
 
         Self::insert_into_inner(inner, token_id)
     }
 
-    fn insert_into_inner(mut inner: std::sync::MutexGuard<ReplayTokenSetInner>, token_id: String) -> bool {
+    fn insert_into_inner(
+        mut inner: std::sync::MutexGuard<ReplayTokenSetInner>,
+        token_id: String,
+    ) -> bool {
         if !inner.ids.insert(token_id.clone()) {
             return false;
         }
@@ -382,6 +385,10 @@ impl ReplayStoreBackend {
                 detail: detail.clone(),
             }),
         }
+    }
+
+    fn is_memory_only(&self) -> bool {
+        matches!(self, Self::MemoryOnly)
     }
 }
 
@@ -1980,6 +1987,27 @@ impl CapabilityGate {
         }
 
         if cap.single_use && consume_single_use {
+            if self.replay_store.is_memory_only()
+                && !self.consumed_tokens.insert_if_new(cap.token_id.clone())
+            {
+                let err = RemoteCapError::ReplayDetected {
+                    token_id: cap.token_id.clone(),
+                };
+                self.push_audit(build_audit_event(
+                    "REMOTECAP_DENIED",
+                    "RC_CHECK_DENIED",
+                    Some(cap.token_id.clone()),
+                    Some(cap.issuer_identity.clone()),
+                    Some(operation),
+                    Some(endpoint.to_string()),
+                    trace_id.to_string(),
+                    now_epoch_secs,
+                    false,
+                    Some(err.code().to_string()),
+                ));
+                return Err(err);
+            }
+
             if let Some(replay_key) = replay_key.as_deref() {
                 match self.replay_store.consume(cap, replay_key) {
                     Ok(true) => {}
@@ -2018,7 +2046,10 @@ impl CapabilityGate {
                     }
                 }
             }
-            self.consumed_tokens.insert(cap.token_id.clone());
+
+            if !self.replay_store.is_memory_only() {
+                self.consumed_tokens.insert(cap.token_id.clone());
+            }
         }
 
         let (event_code, legacy_event_code) = if consume_single_use {
@@ -2727,6 +2758,74 @@ mod tests {
     }
 
     #[test]
+    fn memory_replay_store_allows_only_one_concurrent_single_use_consume() {
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider");
+        let (cap, _) = provider
+            .issue(
+                "operator",
+                scope(),
+                1_700_000_000,
+                300,
+                true,
+                true,
+                "trace-memory-race",
+            )
+            .expect("issue");
+        let gate = CapabilityGate::new("secret-a").expect("valid gate");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let spawn_attempt = |trace_id: &'static str,
+                             barrier: std::sync::Arc<std::sync::Barrier>,
+                             cap: RemoteCap,
+                             mut gate: CapabilityGate| {
+            std::thread::spawn(move || {
+                barrier.wait();
+                gate.authorize_network(
+                    Some(&cap),
+                    RemoteOperation::TelemetryExport,
+                    "https://telemetry.example.com/v1",
+                    1_700_000_010,
+                    trace_id,
+                )
+                .map_err(|err| err.code().to_string())
+            })
+        };
+
+        let first = spawn_attempt(
+            "trace-memory-race-first",
+            barrier.clone(),
+            cap.clone(),
+            gate.clone(),
+        );
+        let second = spawn_attempt(
+            "trace-memory-race-second",
+            barrier.clone(),
+            cap.clone(),
+            gate.clone(),
+        );
+
+        let first_result = first.join().expect("first thread joins");
+        let second_result = second.join().expect("second thread joins");
+        let success_count = [first_result.as_ref(), second_result.as_ref()]
+            .iter()
+            .filter(|result| result.is_ok())
+            .count();
+        let replay_count = [first_result.as_ref(), second_result.as_ref()]
+            .iter()
+            .filter(|result| matches!(result, Err(code) if *code == "REMOTECAP_REPLAY"))
+            .count();
+
+        assert_eq!(
+            success_count, 1,
+            "exactly one concurrent consume should succeed"
+        );
+        assert_eq!(
+            replay_count, 1,
+            "losing concurrent consume must be treated as replay"
+        );
+    }
+
+    #[test]
     fn env_replay_store_outage_denies_single_use_without_memory_fallback() {
         let _env_lock = REMOTE_CAP_ENV_LOCK.lock().expect("env lock");
         let provider = CapabilityProvider::new("secret-a").expect("valid provider");
@@ -2813,11 +2912,10 @@ mod tests {
             )
             .expect_err("second real use must fail");
         assert_eq!(err.code(), "REMOTECAP_REPLAY");
-        assert!(
-            gate.audit_log()
-                .iter()
-                .any(|event| event.event_code == "REMOTECAP_RECHECK_PASSED")
-        );
+        assert!(gate
+            .audit_log()
+            .iter()
+            .any(|event| event.event_code == "REMOTECAP_RECHECK_PASSED"));
     }
 
     #[test]
@@ -4655,12 +4753,10 @@ mod remote_cap_comprehensive_negative_tests {
 
         // Normalization should deduplicate and clean up endpoints
         assert!(unnormalized_scope.endpoint_prefixes.len() <= 2); // At most 2 unique endpoints after normalization
-        assert!(
-            !unnormalized_scope
-                .endpoint_prefixes
-                .iter()
-                .any(|e| e.trim().is_empty())
-        ); // No empty entries
+        assert!(!unnormalized_scope
+            .endpoint_prefixes
+            .iter()
+            .any(|e| e.trim().is_empty())); // No empty entries
     }
 
     /// Negative test: Advanced cryptographic attack scenarios
@@ -4944,10 +5040,9 @@ mod remote_cap_comprehensive_negative_tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.code(), "REMOTECAP_CRYPTO_UNAVAILABLE");
-        assert!(
-            err.to_string()
-                .contains("verification material is unavailable")
-        );
+        assert!(err
+            .to_string()
+            .contains("verification material is unavailable"));
     }
 
     #[test]
@@ -4956,10 +5051,9 @@ mod remote_cap_comprehensive_negative_tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.code(), "REMOTECAP_CRYPTO_UNAVAILABLE");
-        assert!(
-            err.to_string()
-                .contains("verification material is unavailable")
-        );
+        assert!(err
+            .to_string()
+            .contains("verification material is unavailable"));
     }
 
     #[test]

@@ -18,14 +18,8 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 use insta::{assert_json_snapshot, with_settings};
 
-use frankenengine_node::api::error::{ApiError, ApiErrorCode};
-use frankenengine_node::api::service::{ServiceConfig, build_endpoint_catalog};
-use frankenengine_node::api::session_auth::{SessionManager, SessionState};
-use frankenengine_node::security::epoch_scoped_keys::RootSecret;
-use frankenengine_node::security::remote_cap::{
-    CapabilityGate, CapabilityProvider, ConnectivityMode, RemoteCap, RemoteCapAuditEvent,
-    RemoteOperation, RemoteScope,
-};
+use frankenengine_node::api::service::build_endpoint_catalog;
+use frankenengine_node::security::remote_cap::{CapabilityProvider, RemoteOperation, RemoteScope};
 
 // ---------------------------------------------------------------------------
 // API Contract Version Constants
@@ -703,7 +697,8 @@ fn test_remote_api_conformance_matrix() {
 
 #[test]
 fn test_remote_capability_protocol_versions() {
-    let provider = CapabilityProvider::new("conformance-test-secret".to_string());
+    let provider = CapabilityProvider::new("conformance-test-secret")
+        .expect("protocol conformance provider should initialize");
 
     // Test capability issuance across different protocol versions
     let protocol_versions = [
@@ -730,13 +725,14 @@ fn test_remote_capability_protocol_versions() {
             _ => vec![],
         };
 
-        let capability_result = provider.issue_capability(
-            "conformance-test-token",
+        let capability_result = provider.issue(
             "conformance-issuer",
-            1234567890,
-            1234654890,
             scope.clone(),
+            1_234_567_890,
+            86_400,
+            true,
             false,
+            "trace-conformance-remote-cap",
         );
 
         let result = json!({
@@ -757,9 +753,6 @@ fn test_remote_capability_protocol_versions() {
 
 #[test]
 fn test_session_auth_backward_compatibility() {
-    let root_secret = RootSecret::generate_test_key();
-    let session_manager = SessionManager::new(root_secret);
-
     // Test session compatibility scenarios
     let auth_scenarios = [
         ("legacy_basic", LEGACY_SESSION_VERSION, "basic_session"),
