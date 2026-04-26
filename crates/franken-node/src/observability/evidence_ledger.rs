@@ -666,7 +666,7 @@ impl EvidenceLedger {
     fn validate_append(
         &self,
         mut entry: EvidenceEntry,
-    ) -> Result<(EvidenceEntry, usize, Option<ReplaySignature>), LedgerError> {
+    ) -> Result<(EvidenceEntry, usize, EntryHash, Option<ReplaySignature>), LedgerError> {
         if self.capacity.max_entries == 0 {
             eprintln!("{}", format_ledger_zero_capacity_event(&entry));
             return Err(LedgerError::ZeroEntryCapacity);
@@ -722,7 +722,9 @@ impl EvidenceLedger {
             });
         }
 
-        Ok((normalized_entry, entry_size, replay_signature))
+        let entry_hash = self.compute_entry_hash(&normalized_entry);
+
+        Ok((normalized_entry, entry_size, entry_hash, replay_signature))
     }
 
     /// Check for replay attacks using constant-time comparison to prevent timing side-channels.
@@ -757,8 +759,9 @@ impl EvidenceLedger {
 
     fn append_prevalidated(
         &mut self,
-        mut entry: EvidenceEntry,
+        entry: EvidenceEntry,
         entry_size: usize,
+        entry_hash: EntryHash,
         replay_signature: Option<ReplaySignature>,
     ) -> EntryId {
         // Evict oldest entries to make room
@@ -782,8 +785,6 @@ impl EvidenceLedger {
 
         eprintln!("{}", format_ledger_append_event(id, &entry, entry_size));
 
-        // Compute hash of the entry for next entry's chain linkage
-        let entry_hash = self.compute_entry_hash(&entry);
         self.last_entry_hash = Some(entry_hash);
 
         self.entries.push_back((id, entry, entry_size));
@@ -1017,8 +1018,8 @@ impl EvidenceLedger {
     /// assert_eq!(entry_id, EntryId(1));
     /// ```
     pub fn append(&mut self, entry: EvidenceEntry) -> Result<EntryId, LedgerError> {
-        let (entry, entry_size, replay_signature) = self.validate_append(entry)?;
-        Ok(self.append_prevalidated(entry, entry_size, replay_signature))
+        let (entry, entry_size, entry_hash, replay_signature) = self.validate_append(entry)?;
+        Ok(self.append_prevalidated(entry, entry_size, entry_hash, replay_signature))
     }
 
     /// Evict the oldest entry from the ring buffer.
@@ -1552,7 +1553,8 @@ impl LabSpillMode {
     /// assert_eq!(spill.len(), 1);
     /// ```
     pub fn append(&mut self, entry: EvidenceEntry) -> Result<EntryId, LedgerError> {
-        let (entry, entry_size, replay_signature) = self.ledger.validate_append(entry)?;
+        let (entry, entry_size, entry_hash, replay_signature) =
+            self.ledger.validate_append(entry)?;
         // CIRCUIT BREAKER: Check manual halt state and any available disk monitoring
         let should_open = self.circuit_breaker.should_open().unwrap_or(false);
         let was_open = self.circuit_breaker.is_open;
@@ -1576,16 +1578,16 @@ impl LabSpillMode {
         // Only attempt spill write if circuit breaker is closed
         if !self.circuit_breaker.is_open {
             let json_bytes = self.spill_writer.append_json_entry(&entry)?;
-            let id = self
-                .ledger
-                .append_prevalidated(entry, entry_size, replay_signature);
+            let id =
+                self.ledger
+                    .append_prevalidated(entry, entry_size, entry_hash, replay_signature);
             eprintln!("{}", format_ledger_spill_event(id, json_bytes));
             Ok(id)
         } else {
             // Circuit breaker open - memory-only mode
-            let id = self
-                .ledger
-                .append_prevalidated(entry, entry_size, replay_signature);
+            let id =
+                self.ledger
+                    .append_prevalidated(entry, entry_size, entry_hash, replay_signature);
             eprintln!(
                 "{}: spill write skipped for entry={}, circuit breaker open (memory-only mode)",
                 event_codes::LEDGER_CIRCUIT_BREAKER_OPEN,
@@ -2613,13 +2615,17 @@ mod tests {
         });
         let expected_payload = entry.payload.clone();
 
-        let (normalized_entry, _entry_size, replay_signature) = ledger
+        let (normalized_entry, _entry_size, precomputed_hash, replay_signature) = ledger
             .validate_append(entry)
             .expect("validation should succeed");
 
         assert!(replay_signature.is_none());
         assert_eq!(normalized_entry.prev_entry_hash, expected_prev_hash);
         assert_eq!(normalized_entry.payload, expected_payload);
+        assert_eq!(
+            precomputed_hash,
+            ledger.compute_entry_hash(&normalized_entry)
+        );
     }
 
     #[test]
