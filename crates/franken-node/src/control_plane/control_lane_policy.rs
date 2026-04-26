@@ -601,7 +601,11 @@ impl ControlLanePolicy {
             self.max_audit_log_entries,
         );
 
-        self.deadline_queue.push(task.clone());
+        Self::push_bounded(
+            &mut self.deadline_queue,
+            task.clone(),
+            self.max_deadline_queue_entries,
+        );
         Ok(task)
     }
 
