@@ -569,7 +569,10 @@ impl EvidenceLedger {
         // SECURITY: Validate hash chain integrity if client provided prev_entry_hash
         if !normalized_entry.prev_entry_hash.is_empty() {
             let expected_hash = self.last_entry_hash.as_deref().unwrap_or("");
-            if !crate::security::constant_time::ct_eq(expected_hash, &normalized_entry.prev_entry_hash) {
+            if !crate::security::constant_time::ct_eq(
+                expected_hash,
+                &normalized_entry.prev_entry_hash,
+            ) {
                 return Err(LedgerError::HashChainBroken {
                     expected_hash: expected_hash.to_string(),
                     provided_hash: normalized_entry.prev_entry_hash.clone(),
@@ -1114,7 +1117,8 @@ const _: () = {
 // ── LabSpillMode ────────────────────────────────────────────────────
 
 /// Lab/test mode wrapper that spills every entry to a JSONL file.
-/// Includes emergency circuit breaker for disk exhaustion protection.
+/// Includes a manual emergency circuit breaker and a disk-monitoring hook for
+/// spill protection.
 pub struct LabSpillMode {
     ledger: EvidenceLedger,
     spill_writer: SpillWriter,
@@ -1122,12 +1126,12 @@ pub struct LabSpillMode {
     circuit_breaker: CircuitBreakerState,
 }
 
-/// Circuit breaker state for emergency disk exhaustion protection
+/// Circuit breaker state for spill protection.
 #[derive(Debug, Clone)]
 struct CircuitBreakerState {
     /// When true, spill writes are disabled (memory-only mode)
     is_open: bool,
-    /// Disk usage threshold (0.0-1.0) to trigger circuit breaker
+    /// Disk usage threshold (0.0-1.0) when a filesystem usage provider is available
     disk_threshold: f64,
     /// Manual emergency halt flag (admin override)
     emergency_halt: bool,
@@ -1144,14 +1148,14 @@ pub struct CircuitBreakerStatus {
     pub emergency_halt: bool,
     /// Current disk usage threshold (0.0-1.0)
     pub disk_threshold: f64,
-    /// Current disk usage if available (0.0-1.0)
+    /// Current disk usage if available from the monitoring hook (0.0-1.0)
     pub disk_usage: Option<f64>,
     /// Path being monitored for disk space
     pub monitor_path: Option<std::path::PathBuf>,
 }
 
 impl CircuitBreakerState {
-    /// Create default circuit breaker state for generic writers (no disk monitoring)
+    /// Create default circuit breaker state for generic writers (no disk monitoring hook)
     fn new_generic() -> Self {
         Self {
             is_open: false,
@@ -1161,7 +1165,7 @@ impl CircuitBreakerState {
         }
     }
 
-    /// Create circuit breaker state for file writers with disk monitoring
+    /// Create circuit breaker state for file writers with a disk-monitoring hook
     fn new_with_path(path: &Path) -> Self {
         Self {
             is_open: false,
@@ -1171,7 +1175,7 @@ impl CircuitBreakerState {
         }
     }
 
-    /// Check if circuit breaker should open due to disk exhaustion or emergency halt
+    /// Check if the circuit breaker should open due to emergency halt or available disk monitoring
     fn should_open(&self) -> Result<bool, String> {
         // Manual emergency halt overrides everything
         if self.emergency_halt {
@@ -1185,20 +1189,26 @@ impl CircuitBreakerState {
 
         // Check disk usage
         match get_disk_usage(monitor_path) {
-            Ok(usage) if usage > self.disk_threshold => {
-                Ok(true)
-            }
+            Ok(usage) if usage > self.disk_threshold => Ok(true),
             Ok(_) => Ok(false),
             Err(e) => {
                 // On monitoring error, stay conservative but don't fail
-                eprintln!("WARN: disk monitoring error for {}: {}", monitor_path.display(), e);
+                eprintln!(
+                    "WARN: disk monitoring error for {}: {}",
+                    monitor_path.display(),
+                    e
+                );
                 Ok(false)
             }
         }
     }
 }
 
-/// Get disk usage as a percentage (0.0 to 1.0) for the filesystem containing the given path
+/// Best-effort disk usage hook for the filesystem containing the given path.
+///
+/// This currently returns a conservative placeholder until a safe filesystem
+/// usage provider is wired in. Manual `emergency_halt()` remains the
+/// authoritative way to force memory-only mode.
 fn get_disk_usage(path: &Path) -> Result<f64, String> {
     // SAFETY: This codebase forbids unsafe code, so we can't use libc::statvfs.
     // For production use, consider using a safe wrapper crate like `fs2` or `sysinfo`
@@ -1378,18 +1388,24 @@ impl LabSpillMode {
             reason: format!("JSON error: {e}"),
         })?;
 
-        // CIRCUIT BREAKER: Check disk exhaustion and emergency halt
+        // CIRCUIT BREAKER: Check manual halt state and any available disk monitoring
         let should_open = self.circuit_breaker.should_open().unwrap_or(false);
         let was_open = self.circuit_breaker.is_open;
 
         if should_open && !was_open {
             // Circuit breaker opening - log event and switch to memory-only mode
             self.circuit_breaker.is_open = true;
-            eprintln!("{}: disk exhaustion detected, switching to memory-only mode", event_codes::LEDGER_CIRCUIT_BREAKER_OPEN);
+            eprintln!(
+                "{}: circuit breaker opened, switching to memory-only mode",
+                event_codes::LEDGER_CIRCUIT_BREAKER_OPEN
+            );
         } else if !should_open && was_open {
             // Circuit breaker closing - resume spill writes
             self.circuit_breaker.is_open = false;
-            eprintln!("{}: disk space recovered, resuming spill writes", event_codes::LEDGER_CIRCUIT_BREAKER_CLOSED);
+            eprintln!(
+                "{}: circuit breaker closed, resuming spill writes",
+                event_codes::LEDGER_CIRCUIT_BREAKER_CLOSED
+            );
         }
 
         // Always append to memory ledger regardless of circuit breaker state
@@ -1401,7 +1417,11 @@ impl LabSpillMode {
             eprintln!("{}", format_ledger_spill_event(id, json_line.len()));
         } else {
             // Circuit breaker open - memory-only mode
-            eprintln!("{}: spill write skipped for entry={}, circuit breaker open (memory-only mode)", event_codes::LEDGER_CIRCUIT_BREAKER_OPEN, id);
+            eprintln!(
+                "{}: spill write skipped for entry={}, circuit breaker open (memory-only mode)",
+                event_codes::LEDGER_CIRCUIT_BREAKER_OPEN,
+                id
+            );
         }
 
         Ok(id)
@@ -1415,7 +1435,10 @@ impl LabSpillMode {
         if !self.circuit_breaker.emergency_halt {
             self.circuit_breaker.emergency_halt = true;
             self.circuit_breaker.is_open = true;
-            eprintln!("{}: admin emergency halt activated - spill writes disabled", event_codes::LEDGER_EMERGENCY_HALT);
+            eprintln!(
+                "{}: admin emergency halt activated - spill writes disabled",
+                event_codes::LEDGER_EMERGENCY_HALT
+            );
         }
     }
 
@@ -4181,11 +4204,9 @@ mod tests {
                 nested
             },
             // Array with many elements
-            serde_json::json!(
-                (0..100_000)
-                    .map(|i| format!("element_{}", i))
-                    .collect::<Vec<_>>()
-            ),
+            serde_json::json!((0..100_000)
+                .map(|i| format!("element_{}", i))
+                .collect::<Vec<_>>()),
         ];
 
         for (i, large_payload) in exhaustion_attempts.iter().enumerate() {
