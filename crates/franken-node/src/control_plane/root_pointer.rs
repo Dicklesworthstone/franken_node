@@ -9,11 +9,12 @@
 //! The canonical root pointer is always either the previous durable value or the
 //! new durable value, never a partial intermediate.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -339,9 +340,22 @@ struct PublishOptions {
     delay_after_lock: Option<Duration>,
 }
 
-fn publish_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn publish_lock_registry() -> &'static Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>> {
+    static LOCKS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    LOCKS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn publish_lock(dir: &Path) -> Result<Arc<Mutex<()>>, RootPointerError> {
+    let lock_path = root_publication_lock_path(dir);
+    let lock_key = lock_path.canonicalize().unwrap_or(lock_path);
+    let mut registry = publish_lock_registry()
+        .lock()
+        .map_err(|_| RootPointerError::LockPoisoned)?;
+    Ok(Arc::clone(
+        registry
+            .entry(lock_key)
+            .or_insert_with(|| Arc::new(Mutex::new(()))),
+    ))
 }
 
 /// Compute stable cross-process publication lock path for a root directory.
@@ -582,7 +596,8 @@ fn publish_root_internal(
     options: PublishOptions,
 ) -> Result<RootPublishOutcome, RootPointerError> {
     let _publication_lock = acquire_root_publication_lock(dir, false)?;
-    let _guard = publish_lock()
+    let publication_mutex = publish_lock(dir)?;
+    let _guard = publication_mutex
         .lock()
         .map_err(|_| RootPointerError::LockPoisoned)?;
     if let Some(delay) = options.delay_after_lock {
@@ -1175,7 +1190,8 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("publisher must start");
         thread::sleep(Duration::from_millis(100));
-        let process_guard = publish_lock()
+        let publication_mutex = publish_lock(dir.path()).expect("directory-scoped process mutex");
+        let process_guard = publication_mutex
             .try_lock()
             .expect("publisher blocked on flock must not hold process mutex");
         drop(process_guard);
@@ -1188,6 +1204,57 @@ mod tests {
             .expect("publisher join")
             .expect("publish after external lock release");
         assert_eq!(outcome.event.new_epoch, ControlEpoch(2));
+    }
+
+    #[test]
+    fn publish_in_other_directory_does_not_wait_for_unrelated_process_mutex() {
+        let dir_a = TempDir::new().expect("tempdir a");
+        let dir_b = TempDir::new().expect("tempdir b");
+        let k = key();
+
+        publish_root(dir_a.path(), &root(1, 1, "h1"), &k, "seed-a").expect("seed publish a");
+        publish_root(dir_b.path(), &root(1, 1, "h1"), &k, "seed-b").expect("seed publish b");
+
+        let dir_a_process_lock =
+            publish_lock(dir_a.path()).expect("directory-scoped process mutex for dir a");
+        let held_guard = dir_a_process_lock
+            .lock()
+            .expect("hold directory-scoped process mutex");
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let dir_a_path = dir_a.path().to_path_buf();
+        let key_for_thread = k.clone();
+        let publisher_a = thread::spawn(move || {
+            started_tx.send(()).expect("signal publisher a started");
+            publish_root(&dir_a_path, &root(2, 2, "h2-a"), &key_for_thread, "dir-a")
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("publisher a must start");
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            !publisher_a.is_finished(),
+            "dir_a publisher must still be waiting on the held dir_a process mutex"
+        );
+
+        let start = Instant::now();
+        let outcome_b =
+            publish_root(dir_b.path(), &root(2, 2, "h2-b"), &k, "dir-b").expect("dir_b publish");
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "dir_b publish must not wait behind dir_a process mutex (elapsed: {elapsed:?})"
+        );
+        assert_eq!(outcome_b.event.new_epoch, ControlEpoch(2));
+
+        drop(held_guard);
+        let outcome_a = publisher_a
+            .join()
+            .expect("publisher a join")
+            .expect("dir_a publish after releasing dir_a process mutex");
+        assert_eq!(outcome_a.event.new_epoch, ControlEpoch(2));
     }
 
     #[test]
