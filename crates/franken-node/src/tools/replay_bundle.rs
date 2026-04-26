@@ -9,6 +9,7 @@
 //! - INV-RB-CHUNKING: bundles larger than 10 MiB are split into indexed chunks
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::Path;
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -1013,8 +1014,29 @@ fn ensure_parent_dir(path: &Path) -> Result<(), ReplayBundleError> {
     Ok(())
 }
 
+fn sync_directory(path: &Path) -> Result<(), ReplayBundleError> {
+    std::fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|err| {
+            std::io::Error::new(
+                err.kind(),
+                format!("failed syncing directory {}: {err}", path.display()),
+            )
+        })?;
+    Ok(())
+}
+
+fn normalized_directory(path: &Path) -> &Path {
+    if path.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        path
+    }
+}
+
 fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> Result<(), ReplayBundleError> {
     ensure_parent_dir(path)?;
+    let parent = normalized_directory(path.parent().unwrap_or_else(|| Path::new(".")));
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -1023,12 +1045,30 @@ fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> Result<(), ReplayBundleE
         })?;
     let temp_path = path.with_file_name(format!("{file_name}.tmp-{}", Uuid::now_v7()));
     let mut temp_guard = TempFileGuard::new(temp_path.clone());
-    std::fs::write(&temp_path, bytes).map_err(|err| {
-        std::io::Error::new(
-            err.kind(),
-            format!("failed writing {}: {err}", temp_path.display()),
-        )
-    })?;
+    {
+        let mut temp_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .map_err(|err| {
+                std::io::Error::new(
+                    err.kind(),
+                    format!("failed opening {}: {err}", temp_path.display()),
+                )
+            })?;
+        temp_file.write_all(bytes).map_err(|err| {
+            std::io::Error::new(
+                err.kind(),
+                format!("failed writing {}: {err}", temp_path.display()),
+            )
+        })?;
+        temp_file.sync_all().map_err(|err| {
+            std::io::Error::new(
+                err.kind(),
+                format!("failed syncing {}: {err}", temp_path.display()),
+            )
+        })?;
+    }
     std::fs::rename(&temp_path, path).map_err(|err| {
         std::io::Error::new(
             err.kind(),
@@ -1040,6 +1080,13 @@ fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> Result<(), ReplayBundleE
         )
     })?;
     temp_guard.defuse();
+    sync_directory(parent)?;
+    if let Some(ancestor) = parent.parent() {
+        let ancestor = normalized_directory(ancestor);
+        if ancestor != parent {
+            sync_directory(ancestor)?;
+        }
+    }
     Ok(())
 }
 
