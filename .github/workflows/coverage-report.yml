@@ -11,6 +11,7 @@ on:
 jobs:
   coverage-report:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -19,6 +20,16 @@ jobs:
 
       - name: Install llvm-tools-preview
         run: rustup component add llvm-tools-preview
+
+      - name: Cache Cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            /tmp/rch_target_pane4
+          key: ${{ runner.os }}-coverage-report-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-coverage-report-
 
       - name: Install rch
         run: |
