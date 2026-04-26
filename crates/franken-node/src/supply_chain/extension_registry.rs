@@ -310,12 +310,22 @@ pub fn parse_signed_registration_manifest(
     manifest_bytes: &[u8],
 ) -> Result<ExtensionRegistrationManifest, String> {
     let manifest = serde_json::from_slice::<ExtensionRegistrationManifest>(manifest_bytes)
-        .map_err(|err| format!("invalid signed extension registration manifest: {err}"))?;
+        .map_err(|err| {
+            // SECURITY: Log deserialization error internally but don't expose in client error
+            tracing::warn!(
+                error = %err,
+                "extension registration manifest deserialization failed"
+            );
+            "invalid signed extension registration manifest".to_string()
+        })?;
     if manifest.schema_version != EXTENSION_REGISTRATION_MANIFEST_SCHEMA {
-        return Err(format!(
-            "unsupported signed extension registration manifest schema `{}`",
-            manifest.schema_version
-        ));
+        // SECURITY: Log schema version internally but don't expose in client error
+        tracing::warn!(
+            expected_version = %EXTENSION_REGISTRATION_MANIFEST_SCHEMA,
+            actual_version = %manifest.schema_version,
+            "unsupported extension registration manifest schema version"
+        );
+        return Err("unsupported signed extension registration manifest schema".to_string());
     }
     Ok(manifest)
 }
@@ -325,12 +335,22 @@ fn parse_signed_registration_manifest(
     manifest_bytes: &[u8],
 ) -> Result<ExtensionRegistrationManifest, String> {
     let manifest = serde_json::from_slice::<ExtensionRegistrationManifest>(manifest_bytes)
-        .map_err(|err| format!("invalid signed extension registration manifest: {err}"))?;
+        .map_err(|err| {
+            // SECURITY: Log deserialization error internally but don't expose in client error
+            tracing::warn!(
+                error = %err,
+                "extension registration manifest deserialization failed"
+            );
+            "invalid signed extension registration manifest".to_string()
+        })?;
     if manifest.schema_version != EXTENSION_REGISTRATION_MANIFEST_SCHEMA {
-        return Err(format!(
-            "unsupported signed extension registration manifest schema `{}`",
-            manifest.schema_version
-        ));
+        // SECURITY: Log schema version internally but don't expose in client error
+        tracing::warn!(
+            expected_version = %EXTENSION_REGISTRATION_MANIFEST_SCHEMA,
+            actual_version = %manifest.schema_version,
+            "unsupported extension registration manifest schema version"
+        );
+        return Err("unsupported signed extension registration manifest schema".to_string());
     }
     Ok(manifest)
 }
@@ -490,7 +510,14 @@ impl AdmissionKernel {
                 admitted: false,
                 witness: Some(NegativeWitness {
                     rejection_code: event_codes::SER_ERR_INVALID_SIGNATURE.to_string(),
-                    rejection_reason: format!("Ed25519 signature verification failed: {}", e),
+                    rejection_reason: {
+                        // SECURITY: Log signature error internally but don't expose in client response
+                        tracing::warn!(
+                            error = %e,
+                            "Ed25519 signature verification failed for extension registration"
+                        );
+                        "Ed25519 signature verification failed".to_string()
+                    },
                     checked_fields: vec![
                         "signature.signature_bytes".to_string(),
                         "manifest_bytes".to_string(),
