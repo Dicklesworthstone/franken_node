@@ -50,8 +50,11 @@ use crate::supply_chain::artifact_signing::{sign_bytes, verify_signature};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use hex;
 use sha2::{Digest, Sha256};
+use std::convert::TryInto;
 
 const MIN_SEEN_SIGNATURES: usize = 8192;
+const ED25519_SIGNATURE_BYTES: usize = 64;
+type ReplaySignature = [u8; ED25519_SIGNATURE_BYTES];
 
 // ── Event codes ─────────────────────────────────────────────────────
 
@@ -276,41 +279,63 @@ pub fn verify_evidence_entry(
     entry: &EvidenceEntry,
     verifying_key: &VerifyingKey,
 ) -> Result<(), LedgerError> {
+    verify_evidence_entry_bytes(entry, verifying_key).map(|_| ())
+}
+
+fn verify_evidence_entry_bytes(
+    entry: &EvidenceEntry,
+    verifying_key: &VerifyingKey,
+) -> Result<ReplaySignature, LedgerError> {
     let canonical_bytes = canonical_entry_bytes(entry);
-
-    // SECURITY: Cap signature hex length to prevent memory DoS attacks
-    // Ed25519 signatures are 64 bytes = 128 hex chars. Allow up to 256 hex chars (128 raw bytes).
-    if entry.signature.len() > 256 {
-        return Err(LedgerError::SignatureInvalid {
-            reason: format!(
-                "signature hex too long: {} chars (max 256)",
-                entry.signature.len()
-            ),
-        });
-    }
-
-    if entry.signature.is_empty() {
-        return Err(LedgerError::SignatureInvalid {
-            reason: "signature cannot be empty".to_string(),
-        });
-    }
-
-    if !is_canonical_lower_hex(&entry.signature) {
-        return Err(LedgerError::SignatureInvalid {
-            reason: "signature must use canonical lowercase hex".to_string(),
-        });
-    }
-
-    let signature_bytes =
-        hex::decode(&entry.signature).map_err(|e| LedgerError::SignatureInvalid {
-            reason: format!("invalid hex signature: {}", e),
-        })?;
+    let signature_bytes = decode_replay_signature(&entry.signature)?;
 
     verify_signature(verifying_key, &canonical_bytes, &signature_bytes).map_err(|e| {
         LedgerError::SignatureInvalid {
             reason: format!("signature verification failed: {:?}", e),
         }
-    })
+    })?;
+
+    Ok(signature_bytes)
+}
+
+fn decode_replay_signature(signature: &str) -> Result<ReplaySignature, LedgerError> {
+    // SECURITY: Cap signature hex length to prevent memory DoS attacks
+    // Ed25519 signatures are 64 bytes = 128 hex chars. Allow up to 256 hex chars (128 raw bytes).
+    if signature.len() > 256 {
+        return Err(LedgerError::SignatureInvalid {
+            reason: format!(
+                "signature hex too long: {} chars (max 256)",
+                signature.len()
+            ),
+        });
+    }
+
+    if signature.is_empty() {
+        return Err(LedgerError::SignatureInvalid {
+            reason: "signature cannot be empty".to_string(),
+        });
+    }
+
+    if !is_canonical_lower_hex(signature) {
+        return Err(LedgerError::SignatureInvalid {
+            reason: "signature must use canonical lowercase hex".to_string(),
+        });
+    }
+
+    let signature_bytes = hex::decode(signature).map_err(|e| LedgerError::SignatureInvalid {
+        reason: format!("invalid hex signature: {}", e),
+    })?;
+
+    signature_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| LedgerError::SignatureInvalid {
+            reason: format!(
+                "signature must decode to exactly {} bytes (got {})",
+                ED25519_SIGNATURE_BYTES,
+                signature_bytes.len()
+            ),
+        })
 }
 
 fn is_canonical_lower_hex(value: &str) -> bool {
@@ -528,9 +553,9 @@ pub struct EvidenceLedger {
     /// Verifying key for signature verification of evidence entries
     verifying_key: Option<VerifyingKey>,
     /// Track seen timestamp+signature combinations to prevent replay attacks
-    seen_signatures: HashSet<(u64, Box<str>)>,
+    seen_signatures: HashSet<(u64, ReplaySignature)>,
     /// Insertion order for the bounded replay-prevention window.
-    seen_signature_order: VecDeque<(u64, Box<str>)>,
+    seen_signature_order: VecDeque<(u64, ReplaySignature)>,
     /// Hash of the last appended entry for hash chain integrity
     last_entry_hash: Option<String>,
 }
@@ -539,24 +564,26 @@ impl EvidenceLedger {
     fn validate_append(
         &self,
         entry: &EvidenceEntry,
-    ) -> Result<(EvidenceEntry, usize), LedgerError> {
+    ) -> Result<(EvidenceEntry, usize, Option<ReplaySignature>), LedgerError> {
         if self.capacity.max_entries == 0 {
             eprintln!("{}", format_ledger_zero_capacity_event(entry));
             return Err(LedgerError::ZeroEntryCapacity);
         }
 
+        let mut replay_signature = None;
         if let Some(verifying_key) = &self.verifying_key {
             // SECURITY: Verify signature first to prevent injection attacks.
-            verify_evidence_entry(entry, verifying_key)?;
+            let signature_bytes = verify_evidence_entry_bytes(entry, verifying_key)?;
 
             // SECURITY: Check for replay attacks - reject duplicate timestamp+signature combinations.
             // Use constant-time comparison to prevent timing side-channel attacks.
-            if self.is_replay_attack_ct(entry.timestamp_ms, &entry.signature) {
+            if self.is_replay_attack_ct_bytes(entry.timestamp_ms, &signature_bytes) {
                 return Err(LedgerError::ReplayAttack {
                     timestamp_ms: entry.timestamp_ms,
                     signature: entry.signature.clone(),
                 });
             }
+            replay_signature = Some(signature_bytes);
         }
 
         // SECURITY: Validate hash chain integrity if client provided prev_entry_hash
@@ -589,16 +616,22 @@ impl EvidenceLedger {
             });
         }
 
-        Ok((normalized_entry, entry_size))
+        Ok((normalized_entry, entry_size, replay_signature))
     }
 
     /// Check for replay attacks using constant-time comparison to prevent timing side-channels.
     /// This prevents attackers from distinguishing known vs unknown signatures via response timing.
     fn is_replay_attack_ct(&self, timestamp_ms: u64, signature: &str) -> bool {
+        let Ok(signature_bytes) = decode_replay_signature(signature) else {
+            return false;
+        };
+        self.is_replay_attack_ct_bytes(timestamp_ms, &signature_bytes)
+    }
+
+    fn is_replay_attack_ct_bytes(&self, timestamp_ms: u64, signature: &ReplaySignature) -> bool {
         // bd-3ml3u fix: Remove early-return to prevent timing leaks about timestamp presence
         // and signature position. Use constant-time comparison for both timestamp and signature.
         let timestamp_bytes = timestamp_ms.to_le_bytes();
-        let signature_bytes = signature.as_bytes();
         let mut found_replay = false;
 
         // Scan ALL entries without early return to prevent position/timestamp timing leaks
@@ -610,8 +643,7 @@ impl EvidenceLedger {
                 constant_time::ct_eq_bytes(&timestamp_bytes, &seen_timestamp_bytes);
 
             // Constant-time signature comparison
-            let signature_match =
-                constant_time::ct_eq_bytes(signature_bytes, seen_signature.as_bytes());
+            let signature_match = constant_time::ct_eq_bytes(signature, seen_signature);
 
             // Accumulate result: replay detected if BOTH timestamp AND signature match
             found_replay = found_replay || (timestamp_match && signature_match);
@@ -619,7 +651,12 @@ impl EvidenceLedger {
         found_replay
     }
 
-    fn append_prevalidated(&mut self, mut entry: EvidenceEntry, entry_size: usize) -> EntryId {
+    fn append_prevalidated(
+        &mut self,
+        mut entry: EvidenceEntry,
+        entry_size: usize,
+        replay_signature: Option<ReplaySignature>,
+    ) -> EntryId {
         // Evict oldest entries to make room
         while self.entries.len() >= self.capacity.max_entries && !self.entries.is_empty() {
             self.evict_oldest();
@@ -635,8 +672,8 @@ impl EvidenceLedger {
         self.total_appended = self.total_appended.saturating_add(1);
         self.current_bytes = self.current_bytes.saturating_add(entry_size);
 
-        if self.verifying_key.is_some() {
-            self.remember_seen_signature(entry.timestamp_ms, &entry.signature);
+        if let Some(signature) = replay_signature {
+            self.remember_seen_signature(entry.timestamp_ms, signature);
         }
 
         eprintln!("{}", format_ledger_append_event(id, &entry, entry_size));
@@ -740,8 +777,8 @@ impl EvidenceLedger {
         }
     }
 
-    fn remember_seen_signature(&mut self, timestamp_ms: u64, signature: &str) {
-        let replay_key = (timestamp_ms, Box::from(signature));
+    fn remember_seen_signature(&mut self, timestamp_ms: u64, signature: ReplaySignature) {
+        let replay_key = (timestamp_ms, signature);
         if self.seen_signatures.insert(replay_key.clone()) {
             self.seen_signature_order.push_back(replay_key);
         }
@@ -881,8 +918,8 @@ impl EvidenceLedger {
     /// assert_eq!(entry_id, EntryId(1));
     /// ```
     pub fn append(&mut self, entry: EvidenceEntry) -> Result<EntryId, LedgerError> {
-        let (entry, entry_size) = self.validate_append(&entry)?;
-        Ok(self.append_prevalidated(entry, entry_size))
+        let (entry, entry_size, replay_signature) = self.validate_append(&entry)?;
+        Ok(self.append_prevalidated(entry, entry_size, replay_signature))
     }
 
     /// Evict the oldest entry from the ring buffer.
@@ -1393,7 +1430,7 @@ impl LabSpillMode {
     /// assert_eq!(spill.len(), 1);
     /// ```
     pub fn append(&mut self, entry: EvidenceEntry) -> Result<EntryId, LedgerError> {
-        let (entry, entry_size) = self.ledger.validate_append(&entry)?;
+        let (entry, entry_size, replay_signature) = self.ledger.validate_append(&entry)?;
         // CIRCUIT BREAKER: Check manual halt state and any available disk monitoring
         let should_open = self.circuit_breaker.should_open().unwrap_or(false);
         let was_open = self.circuit_breaker.is_open;
@@ -1420,12 +1457,16 @@ impl LabSpillMode {
                 reason: format!("JSON error: {e}"),
             })?;
             self.spill_writer.append_json_line(&json_line)?;
-            let id = self.ledger.append_prevalidated(entry, entry_size);
+            let id = self
+                .ledger
+                .append_prevalidated(entry, entry_size, replay_signature);
             eprintln!("{}", format_ledger_spill_event(id, json_line.len()));
             Ok(id)
         } else {
             // Circuit breaker open - memory-only mode
-            let id = self.ledger.append_prevalidated(entry, entry_size);
+            let id = self
+                .ledger
+                .append_prevalidated(entry, entry_size, replay_signature);
             eprintln!(
                 "{}: spill write skipped for entry={}, circuit breaker open (memory-only mode)",
                 event_codes::LEDGER_CIRCUIT_BREAKER_OPEN,
