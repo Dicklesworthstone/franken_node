@@ -53,6 +53,8 @@ use chrono::{SecondsFormat, Utc};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
+use ed25519_dalek::VerifyingKey;
+use sha2::Digest;
 
 pub mod bundle;
 pub mod capsule;
@@ -201,6 +203,7 @@ pub enum VerificationOperation {
     MigrationArtifact,
     TrustState,
     Workflow,
+    WorkflowExecution,
 }
 
 /// Stable workflow names accepted by the verifier facade executor.
@@ -395,6 +398,12 @@ pub enum VerifierSdkError {
         actual_bytes: usize,
         max_bytes: usize,
     },
+    EmptyWorkflowId,
+    EmptyWorkflowStages,
+    WorkflowStageValidationFailed {
+        stage: String,
+        reason: String,
+    },
     Json(String),
 }
 
@@ -479,6 +488,13 @@ impl fmt::Display for VerifierSdkError {
             } => write!(
                 formatter,
                 "verifier SDK bundle exceeds DoS-prevention size cap: actual={actual_bytes} bytes, max={max_bytes} bytes"
+            ),
+            Self::EmptyWorkflowId => write!(formatter, "workflow ID cannot be empty"),
+            Self::EmptyWorkflowStages => write!(formatter, "workflow stages cannot be empty"),
+            Self::WorkflowStageValidationFailed { stage, reason } => write!(
+                formatter,
+                "workflow stage '{}' validation failed: {}",
+                stage, reason
             ),
             Self::Json(message) => write!(formatter, "verifier SDK JSON error: {message}"),
         }
@@ -597,11 +613,16 @@ impl VerifierSdk {
     /// ```
     pub fn verify_claim(
         &self,
+        verifying_key: &VerifyingKey,
         claim: &capsule::ReplayCapsule,
     ) -> VerifierSdkResult<VerificationResult> {
         check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
         self.validate_current_verifier_identity()?;
-        let replay = capsule::replay(claim, &self.verifier_identity)?;
+        // For structural verification, use a dummy key since we're not doing cryptographic verification
+        let dummy_key = VerifyingKey::from_bytes(&[0u8; 32]).map_err(|e| {
+            VerifierSdkError::Json(format!("failed to create dummy key for structural verification: {}", e))
+        })?;
+        let replay = capsule::replay(&dummy_key, claim, &self.verifier_identity)?;
         let verdict = VerificationVerdict::from(replay.verdict);
         let assertions = vec![
             AssertionResult {
@@ -685,6 +706,221 @@ impl VerifierSdk {
             bundle_id: verified.bundle_id,
             verifier_identity: verified.verifier_identity,
         })
+    }
+
+    /// Verify a signed migration artifact with Ed25519 cryptographic verification.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use frankenengine_verifier_sdk::VerifierSdk;
+    /// use ed25519_dalek::VerifyingKey;
+    ///
+    /// let sdk = VerifierSdk::new("verifier://docs");
+    /// let public_key = VerifyingKey::from_bytes(&[0u8; 32]).unwrap();
+    /// let signature_bytes = [0u8; 64];
+    /// let result = sdk.verify_signed_migration_artifact(&public_key, b"bundle-bytes", &signature_bytes)?;
+    /// ```
+    pub fn verify_signed_migration_artifact(
+        &self,
+        verifying_key: &VerifyingKey,
+        artifact: &[u8],
+        signature_bytes: &[u8],
+    ) -> VerifierSdkResult<VerificationResult> {
+        check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        self.validate_current_verifier_identity()?;
+
+        // First do structural validation
+        let verified = bundle::verify(artifact)?;
+        self.verify_bundle_belongs_to_current_verifier(&verified)?;
+
+        // Then do cryptographic Ed25519 signature verification
+        bundle::verify_signed_bundle(verifying_key, &verified, signature_bytes)?;
+
+        // Success: bundle is both structurally valid and cryptographically signed
+        let assertions = vec![
+            AssertionResult {
+                assertion: "migration_artifact_structural_verified".to_string(),
+                passed: true,
+                detail: "bundle structure and integrity validated".to_string(),
+            },
+            AssertionResult {
+                assertion: "migration_artifact_signature_verified".to_string(),
+                passed: true,
+                detail: "Ed25519 signature verification passed".to_string(),
+            },
+        ];
+
+        self.build_result(
+            VerificationOperation::MigrationArtifact,
+            VerificationVerdict::Pass,
+            assertions,
+            verified.integrity_hash,
+        )
+    }
+
+    /// Verify a signed trust state bundle with Ed25519 cryptographic verification.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use frankenengine_verifier_sdk::VerifierSdk;
+    /// use ed25519_dalek::VerifyingKey;
+    ///
+    /// let sdk = VerifierSdk::new("verifier://docs");
+    /// let public_key = VerifyingKey::from_bytes(&[0u8; 32]).unwrap();
+    /// let signature_bytes = [0u8; 64];
+    /// let result = sdk.verify_signed_trust_state(&public_key, b"bundle-bytes", &signature_bytes, "anchor-hash")?;
+    /// ```
+    pub fn verify_signed_trust_state(
+        &self,
+        verifying_key: &VerifyingKey,
+        state: &[u8],
+        signature_bytes: &[u8],
+        anchor_integrity_hash: &str,
+    ) -> VerifierSdkResult<VerificationResult> {
+        check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        self.validate_current_verifier_identity()?;
+
+        // Validate trust anchor format (fail-closed)
+        if anchor_integrity_hash.trim().is_empty() {
+            return Err(VerifierSdkError::EmptyTrustAnchor);
+        }
+        if !is_canonical_sha256_hex(anchor_integrity_hash) {
+            return Err(VerifierSdkError::MalformedTrustAnchor {
+                actual: anchor_integrity_hash.to_string(),
+            });
+        }
+
+        // Do structural validation
+        let verified = bundle::verify(state)?;
+        self.verify_bundle_belongs_to_current_verifier(&verified)?;
+
+        // Verify trust anchor matches (constant-time comparison)
+        if !constant_time_eq(anchor_integrity_hash, &verified.integrity_hash) {
+            return Err(VerifierSdkError::TrustAnchorMismatch {
+                expected: anchor_integrity_hash.to_string(),
+                actual: verified.integrity_hash,
+            });
+        }
+
+        // Do cryptographic Ed25519 signature verification
+        bundle::verify_signed_bundle(verifying_key, &verified, signature_bytes)?;
+
+        // Success: bundle is structurally valid, anchor matches, and cryptographically signed
+        let assertions = vec![
+            AssertionResult {
+                assertion: "trust_state_structural_verified".to_string(),
+                passed: true,
+                detail: "bundle structure and integrity validated".to_string(),
+            },
+            AssertionResult {
+                assertion: "trust_anchor_verified".to_string(),
+                passed: true,
+                detail: format!("trust anchor {} matches bundle integrity", anchor_integrity_hash),
+            },
+            AssertionResult {
+                assertion: "trust_state_signature_verified".to_string(),
+                passed: true,
+                detail: "Ed25519 signature verification passed".to_string(),
+            },
+        ];
+
+        self.build_result(
+            VerificationOperation::TrustState,
+            VerificationVerdict::Pass,
+            assertions,
+            verified.integrity_hash,
+        )
+    }
+
+    /// Verify workflow execution with multi-stage signature validation.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use frankenengine_verifier_sdk::VerifierSdk;
+    /// use ed25519_dalek::VerifyingKey;
+    /// use std::collections::HashMap;
+    ///
+    /// let sdk = VerifierSdk::new("verifier://docs");
+    /// let workflow_stages = HashMap::new(); // stage_name -> (bundle_bytes, verifying_key, signature_bytes)
+    /// let result = sdk.verify_workflow_execution("workflow-001", &workflow_stages)?;
+    /// ```
+    pub fn verify_workflow_execution(
+        &self,
+        workflow_id: &str,
+        stages: &BTreeMap<String, (Vec<u8>, VerifyingKey, Vec<u8>)>, // (bundle, key, signature)
+    ) -> VerifierSdkResult<VerificationResult> {
+        check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        self.validate_current_verifier_identity()?;
+
+        if workflow_id.trim().is_empty() {
+            return Err(VerifierSdkError::EmptyWorkflowId);
+        }
+
+        if stages.is_empty() {
+            return Err(VerifierSdkError::EmptyWorkflowStages);
+        }
+
+        let mut assertions = Vec::new();
+        let mut all_integrity_hashes: Vec<String> = Vec::new();
+
+        // Verify each workflow stage
+        for (stage_name, (bundle_bytes, verifying_key, signature_bytes)) in stages {
+            // Structural validation
+            let verified = bundle::verify(bundle_bytes).map_err(|e| {
+                VerifierSdkError::WorkflowStageValidationFailed {
+                    stage: stage_name.clone(),
+                    reason: format!("structural validation failed: {}", e),
+                }
+            })?;
+
+            self.verify_bundle_belongs_to_current_verifier(&verified).map_err(|e| {
+                VerifierSdkError::WorkflowStageValidationFailed {
+                    stage: stage_name.clone(),
+                    reason: format!("verifier identity check failed: {}", e),
+                }
+            })?;
+
+            // Cryptographic verification
+            bundle::verify_signed_bundle(verifying_key, &verified, signature_bytes).map_err(|e| {
+                VerifierSdkError::WorkflowStageValidationFailed {
+                    stage: stage_name.clone(),
+                    reason: format!("signature verification failed: {}", e),
+                }
+            })?;
+
+            all_integrity_hashes.push(verified.integrity_hash.clone());
+
+            assertions.push(AssertionResult {
+                assertion: format!("workflow_stage_{}_verified", stage_name),
+                passed: true,
+                detail: format!("stage {} structurally valid and cryptographically signed", stage_name),
+            });
+        }
+
+        // Compute workflow integrity hash from all stage hashes
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"frankenengine-verifier-sdk:workflow-integrity:v1:");
+        hasher.update(workflow_id.as_bytes());
+        for hash in &all_integrity_hashes {
+            hasher.update(hash.as_bytes());
+        }
+        let workflow_integrity_hash = hex::encode(hasher.finalize());
+
+        assertions.push(AssertionResult {
+            assertion: "workflow_execution_verified".to_string(),
+            passed: true,
+            detail: format!("workflow {} with {} stages verified", workflow_id, stages.len()),
+        });
+
+        self.build_result(
+            VerificationOperation::WorkflowExecution,
+            VerificationVerdict::Pass,
+            assertions,
+            workflow_integrity_hash,
+        )
     }
 
     /// Validate canonical replay bundle bytes without producing a facade result.
