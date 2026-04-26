@@ -1,7 +1,9 @@
 use frankenengine_node::connector::vef_execution_receipt::{
     ExecutionReceipt, RECEIPT_SCHEMA_VERSION, validate_receipt,
 };
-use frankenengine_node::security::decision_receipt::Receipt;
+use frankenengine_node::security::decision_receipt::{
+    DECISION_RECEIPT_SIGNATURE_VERSION, Receipt,
+};
 use frankenengine_node::supply_chain::manifest::SignedExtensionManifest;
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -112,6 +114,10 @@ fn published_conformance_vectors_remain_parseable() -> TestResult {
                 let receipt: Receipt = serde_json::from_slice(&bytes)
                     .map_err(|err| format!("decision receipt vector must parse: {err}"))?;
                 assert_eq!(receipt.action_name, "quarantine_extension");
+                assert_eq!(
+                    receipt.signature_version,
+                    DECISION_RECEIPT_SIGNATURE_VERSION
+                );
                 assert!(receipt.confidence.is_finite());
             }
             "supply_chain_attestation_manifest" => {

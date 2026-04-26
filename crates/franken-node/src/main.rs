@@ -18547,11 +18547,31 @@ fn handle_verify_release(args: &VerifyReleaseArgs) -> Result<()> {
         .results
         .iter()
         .map(|row| {
+            // Log detailed error for internal audit trail
+            if let Some(detailed_reason) = &row.failure_reason {
+                if !row.passed {
+                    tracing::warn!(
+                        event_code = ASV_003_VERIFICATION_FAILED,
+                        artifact = row.artifact_name,
+                        key_id = row.key_id,
+                        detailed_failure = detailed_reason,
+                        "Release verification failed with detailed error"
+                    );
+                }
+            }
+
+            // Use sanitized error for external output
+            let sanitized_reason = if row.passed {
+                row.failure_reason.clone()
+            } else {
+                sanitize_crypto_failure_reason(&row.failure_reason)
+            };
+
             serde_json::json!({
                 "artifact_name": row.artifact_name,
                 "passed": row.passed,
                 "key_id": row.key_id,
-                "failure_reason": row.failure_reason,
+                "failure_reason": sanitized_reason,
             })
         })
         .collect::<Vec<_>>();
@@ -18577,12 +18597,14 @@ fn handle_verify_release(args: &VerifyReleaseArgs) -> Result<()> {
             if row.passed {
                 println!("  [ok] {}", row.artifact_name);
             } else {
+                // Use sanitized error message for text output
+                let sanitized_reason = sanitize_crypto_failure_reason(&row.failure_reason)
+                    .unwrap_or_else(|| "verification failed".to_string());
+
                 println!(
                     "  [fail] {}: {}",
                     row.artifact_name,
-                    row.failure_reason
-                        .clone()
-                        .unwrap_or_else(|| "verification failed".to_string())
+                    sanitized_reason
                 );
             }
         }

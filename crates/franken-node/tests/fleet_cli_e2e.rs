@@ -3,14 +3,14 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use chrono::{TimeDelta, Utc};
+use frankenengine_node::control_plane::fleet_transport::{
+    canonical_fleet_convergence_receipt_payload, fleet_convergence_receipt_verdict,
+    FileFleetTransport, FleetAction, FleetActionRecord, FleetTargetKind, FleetTransport,
+    NodeHealth, NodeStatus,
+};
 #[cfg(feature = "asupersync-transport")]
 use frankenengine_node::control_plane::fleet_transport::{
-    AsupersyncFleetNetwork, AsupersyncFleetTransport, wait_until_fleet_converged_or_timeout,
-};
-use frankenengine_node::control_plane::fleet_transport::{
-    FileFleetTransport, FleetAction, FleetActionRecord, FleetTargetKind, FleetTransport,
-    NodeHealth, NodeStatus, canonical_fleet_convergence_receipt_payload,
-    fleet_convergence_receipt_verdict,
+    wait_until_fleet_converged_or_timeout, AsupersyncFleetNetwork, AsupersyncFleetTransport,
 };
 use frankenengine_node::supply_chain::trust_card::{
     ReputationTrend, RiskAssessment, RiskLevel, TrustCardMutation, TrustCardRegistry,
@@ -192,21 +192,44 @@ fn seed_fleet_quarantine(
 }
 
 /// Seed realistic multi-node fleet with 5+ nodes across geographic zones
-fn seed_realistic_multi_zone_fleet(transport: &mut FileFleetTransport, base_time: chrono::DateTime<Utc>) {
+fn seed_realistic_multi_zone_fleet(
+    transport: &mut FileFleetTransport,
+    base_time: chrono::DateTime<Utc>,
+) {
     let _zones = [
         "us-east-1-production",
         "eu-west-1-production",
         "ap-southeast-1-production",
         "us-west-2-staging",
-        "eu-central-1-staging"
+        "eu-central-1-staging",
     ];
 
     // Production nodes - healthy, up to date
     let prod_nodes = [
-        ("web-prod-us-east-1a", "us-east-1-production", 0, NodeHealth::Healthy),
-        ("web-prod-us-east-1b", "us-east-1-production", 0, NodeHealth::Healthy),
-        ("api-prod-eu-west-1a", "eu-west-1-production", 0, NodeHealth::Healthy),
-        ("worker-prod-ap-southeast-1a", "ap-southeast-1-production", 0, NodeHealth::Healthy),
+        (
+            "web-prod-us-east-1a",
+            "us-east-1-production",
+            0,
+            NodeHealth::Healthy,
+        ),
+        (
+            "web-prod-us-east-1b",
+            "us-east-1-production",
+            0,
+            NodeHealth::Healthy,
+        ),
+        (
+            "api-prod-eu-west-1a",
+            "eu-west-1-production",
+            0,
+            NodeHealth::Healthy,
+        ),
+        (
+            "worker-prod-ap-southeast-1a",
+            "ap-southeast-1-production",
+            0,
+            NodeHealth::Healthy,
+        ),
         (
             "cache-prod-ap-southeast-1b",
             "ap-southeast-1-production",
@@ -229,18 +252,24 @@ fn seed_realistic_multi_zone_fleet(transport: &mut FileFleetTransport, base_time
             3600,
             NodeHealth::Stale,
         ), // 1hr stale
-        ("worker-staging-us-west-2b", "us-west-2-staging", 0, NodeHealth::Healthy),
+        (
+            "worker-staging-us-west-2b",
+            "us-west-2-staging",
+            0,
+            NodeHealth::Healthy,
+        ),
     ];
 
     for (node_id, zone_id, stale_seconds, health) in prod_nodes.iter().chain(staging_nodes.iter()) {
-        transport.upsert_node_status(&NodeStatus {
-            zone_id: zone_id.to_string(),
-            node_id: node_id.to_string(),
-            last_seen: base_time - TimeDelta::seconds(*stale_seconds),
-            quarantine_version: 3, // Current baseline
-            health: *health,
-        })
-        .expect("upsert node status");
+        transport
+            .upsert_node_status(&NodeStatus {
+                zone_id: zone_id.to_string(),
+                node_id: node_id.to_string(),
+                last_seen: base_time - TimeDelta::seconds(*stale_seconds),
+                quarantine_version: 3, // Current baseline
+                health: *health,
+            })
+            .expect("upsert node status");
     }
 }
 
@@ -252,17 +281,40 @@ fn seed_realistic_security_quarantine(
     base_time: chrono::DateTime<Utc>,
 ) {
     let realistic_incidents = [
-        ("CVE-2024-45678-openssl", "artifact", "Critical OpenSSL vulnerability CVE-2024-45678 detected in runtime dependencies"),
-        ("MALWARE-2024-0234-npm", "artifact", "Suspicious npm package 'evil-package' v1.2.3 flagged by security scanner"),
-        ("COMPLIANCE-SOC2-2024-Q1", "zone", "SOC2 compliance violation: unauthorized access patterns detected"),
-        ("PCI-DSS-BREACH-2024-03", "zone", "PCI-DSS compliance breach: credit card data exposure risk"),
-        ("INSIDER-THREAT-2024-007", "artifact", "Insider threat detection: anomalous code injection patterns"),
-        ("SUPPLY-CHAIN-2024-015", "artifact", "Supply chain compromise: tampered build artifacts detected"),
+        (
+            "CVE-2024-45678-openssl",
+            "artifact",
+            "Critical OpenSSL vulnerability CVE-2024-45678 detected in runtime dependencies",
+        ),
+        (
+            "MALWARE-2024-0234-npm",
+            "artifact",
+            "Suspicious npm package 'evil-package' v1.2.3 flagged by security scanner",
+        ),
+        (
+            "COMPLIANCE-SOC2-2024-Q1",
+            "zone",
+            "SOC2 compliance violation: unauthorized access patterns detected",
+        ),
+        (
+            "PCI-DSS-BREACH-2024-03",
+            "zone",
+            "PCI-DSS compliance breach: credit card data exposure risk",
+        ),
+        (
+            "INSIDER-THREAT-2024-007",
+            "artifact",
+            "Insider threat detection: anomalous code injection patterns",
+        ),
+        (
+            "SUPPLY-CHAIN-2024-015",
+            "artifact",
+            "Supply chain compromise: tampered build artifacts detected",
+        ),
     ];
 
-    let (target_suffix, target_kind_str, reason) = realistic_incidents[
-        incident_id.chars().map(|c| c as usize).sum::<usize>() % realistic_incidents.len()
-    ];
+    let (target_suffix, target_kind_str, reason) = realistic_incidents
+        [incident_id.chars().map(|c| c as usize).sum::<usize>() % realistic_incidents.len()];
 
     let target_kind = match target_kind_str {
         "artifact" => FleetTargetKind::Artifact,
@@ -270,78 +322,130 @@ fn seed_realistic_security_quarantine(
         _ => FleetTargetKind::Artifact,
     };
 
-    transport.publish_action(&FleetActionRecord {
-        action_id: format!("security-response-{incident_id}"),
-        emitted_at: base_time - TimeDelta::minutes(15), // Quarantine issued 15min ago
-        action: FleetAction::Quarantine {
-            zone_id: "us-east-1-production".to_string(),
-            incident_id: incident_id.to_string(),
-            target_id: format!("sha256:security-{target_suffix}"),
-            target_kind,
-            reason: reason.to_string(),
-            quarantine_version,
-        },
-    }).expect("publish security quarantine");
+    transport
+        .publish_action(&FleetActionRecord {
+            action_id: format!("security-response-{incident_id}"),
+            emitted_at: base_time - TimeDelta::minutes(15), // Quarantine issued 15min ago
+            action: FleetAction::Quarantine {
+                zone_id: "us-east-1-production".to_string(),
+                incident_id: incident_id.to_string(),
+                target_id: format!("sha256:security-{target_suffix}"),
+                target_kind,
+                reason: reason.to_string(),
+                quarantine_version,
+            },
+        })
+        .expect("publish security quarantine");
 }
 
 /// Seed partial reconcile scenario with mixed node states
-fn seed_partial_reconcile_scenario(transport: &mut FileFleetTransport, base_time: chrono::DateTime<Utc>) {
+fn seed_partial_reconcile_scenario(
+    transport: &mut FileFleetTransport,
+    base_time: chrono::DateTime<Utc>,
+) {
     // Some nodes reconciled to v4, others still on v2/v3
     let mixed_reconcile_nodes = [
-        ("web-prod-reconciled-1", "us-east-1-production", 4, 0, NodeHealth::Healthy),
-        ("web-prod-reconciled-2", "us-east-1-production", 4, 60, NodeHealth::Healthy),
-        ("api-prod-partial-1", "us-east-1-production", 3, 300, NodeHealth::Degraded),   // Stuck on v3
-        ("api-prod-partial-2", "us-east-1-production", 2, 900, NodeHealth::Stale), // Still on v2
-        ("worker-prod-failed", "us-east-1-production", 1, 1800, NodeHealth::Stale), // Failed reconcile
+        (
+            "web-prod-reconciled-1",
+            "us-east-1-production",
+            4,
+            0,
+            NodeHealth::Healthy,
+        ),
+        (
+            "web-prod-reconciled-2",
+            "us-east-1-production",
+            4,
+            60,
+            NodeHealth::Healthy,
+        ),
+        (
+            "api-prod-partial-1",
+            "us-east-1-production",
+            3,
+            300,
+            NodeHealth::Degraded,
+        ), // Stuck on v3
+        (
+            "api-prod-partial-2",
+            "us-east-1-production",
+            2,
+            900,
+            NodeHealth::Stale,
+        ), // Still on v2
+        (
+            "worker-prod-failed",
+            "us-east-1-production",
+            1,
+            1800,
+            NodeHealth::Stale,
+        ), // Failed reconcile
     ];
 
     for (node_id, zone_id, quarantine_version, stale_seconds, health) in mixed_reconcile_nodes {
-        transport.upsert_node_status(&NodeStatus {
-            zone_id: zone_id.to_string(),
-            node_id: node_id.to_string(),
-            last_seen: base_time - TimeDelta::seconds(stale_seconds),
-            quarantine_version,
-            health,
-        }).expect("upsert mixed reconcile node");
+        transport
+            .upsert_node_status(&NodeStatus {
+                zone_id: zone_id.to_string(),
+                node_id: node_id.to_string(),
+                last_seen: base_time - TimeDelta::seconds(stale_seconds),
+                quarantine_version,
+                health,
+            })
+            .expect("upsert mixed reconcile node");
     }
 }
 
 /// Seed partial release scenario where only some incidents are released
-fn seed_partial_release_scenario(transport: &mut FileFleetTransport, base_time: chrono::DateTime<Utc>) {
+fn seed_partial_release_scenario(
+    transport: &mut FileFleetTransport,
+    base_time: chrono::DateTime<Utc>,
+) {
     // Multiple overlapping incidents - some resolved, others still active
     let incidents = [
-        ("CVE-2024-45678-resolved", 5, Some(base_time - TimeDelta::hours(2))), // Released 2hrs ago
-        ("MALWARE-2024-0234-active", 6, None),                                  // Still active
-        ("COMPLIANCE-SOC2-resolved", 5, Some(base_time - TimeDelta::minutes(30))), // Released 30min ago
-        ("PCI-DSS-BREACH-active", 7, None),                                     // Still active
+        (
+            "CVE-2024-45678-resolved",
+            5,
+            Some(base_time - TimeDelta::hours(2)),
+        ), // Released 2hrs ago
+        ("MALWARE-2024-0234-active", 6, None), // Still active
+        (
+            "COMPLIANCE-SOC2-resolved",
+            5,
+            Some(base_time - TimeDelta::minutes(30)),
+        ), // Released 30min ago
+        ("PCI-DSS-BREACH-active", 7, None),    // Still active
     ];
 
     for (incident_id, quarantine_version, release_time) in incidents {
         // Publish initial quarantine
-        transport.publish_action(&FleetActionRecord {
-            action_id: format!("incident-{incident_id}"),
-            emitted_at: base_time - TimeDelta::hours(6), // All incidents started 6hrs ago
-            action: FleetAction::Quarantine {
-                zone_id: "us-east-1-production".to_string(),
-                incident_id: incident_id.to_string(),
-                target_id: format!("sha256:incident-{incident_id}"),
-                target_kind: FleetTargetKind::Artifact,
-                reason: format!("Security incident: {incident_id}"),
-                quarantine_version,
-            },
-        }).expect("publish incident quarantine");
+        transport
+            .publish_action(&FleetActionRecord {
+                action_id: format!("incident-{incident_id}"),
+                emitted_at: base_time - TimeDelta::hours(6), // All incidents started 6hrs ago
+                action: FleetAction::Quarantine {
+                    zone_id: "us-east-1-production".to_string(),
+                    incident_id: incident_id.to_string(),
+                    target_id: format!("sha256:incident-{incident_id}"),
+                    target_kind: FleetTargetKind::Artifact,
+                    reason: format!("Security incident: {incident_id}"),
+                    quarantine_version,
+                },
+            })
+            .expect("publish incident quarantine");
 
         // Publish release if resolved
         if let Some(release_time) = release_time {
-            transport.publish_action(&FleetActionRecord {
-                action_id: format!("release-{incident_id}"),
-                emitted_at: release_time,
-                action: FleetAction::Release {
-                    zone_id: "us-east-1-production".to_string(),
-                    incident_id: incident_id.to_string(),
-                    reason: Some("automated release from realistic fleet seed".to_string()),
-                },
-            }).expect("publish incident release");
+            transport
+                .publish_action(&FleetActionRecord {
+                    action_id: format!("release-{incident_id}"),
+                    emitted_at: release_time,
+                    action: FleetAction::Release {
+                        zone_id: "us-east-1-production".to_string(),
+                        incident_id: incident_id.to_string(),
+                        reason: Some("automated release from realistic fleet seed".to_string()),
+                    },
+                })
+                .expect("publish incident release");
         }
     }
 }
@@ -645,7 +749,13 @@ fn fleet_status_uses_transport_shared_state_counts_realistic_multi_node() {
     seed_realistic_security_quarantine(&mut transport, "CVE-2024-45678-critical", 4, now);
 
     let output = run_cli_with_fleet_state(
-        &["fleet", "status", "--zone", "us-east-1-production", "--json"],
+        &[
+            "fleet",
+            "status",
+            "--zone",
+            "us-east-1-production",
+            "--json",
+        ],
         &fleet_state_dir,
     );
     assert!(
@@ -663,10 +773,19 @@ fn fleet_status_uses_transport_shared_state_counts_realistic_multi_node() {
     assert_eq!(payload["status"]["total_nodes"], 2);
     // Test realistic convergence behavior across multiple nodes
     if payload["status"]["pending_convergences"].is_array()
-        && !payload["status"]["pending_convergences"].as_array().unwrap().is_empty() {
+        && !payload["status"]["pending_convergences"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    {
         // Convergence percentage depends on node reconciliation status
-        let progress = payload["status"]["pending_convergences"][0]["progress_pct"].as_u64().unwrap();
-        assert!(progress <= 100, "Progress percentage should be valid: {progress}");
+        let progress = payload["status"]["pending_convergences"][0]["progress_pct"]
+            .as_u64()
+            .unwrap();
+        assert!(
+            progress <= 100,
+            "Progress percentage should be valid: {progress}"
+        );
     }
 }
 
@@ -2142,7 +2261,10 @@ fn fleet_describe_json_reports_node_state_and_zone_context() {
     assert_eq!(payload["stale"], false);
     assert_eq!(payload["zone_status"]["zone_id"], "zone-describe");
     assert_eq!(payload["zone_status"]["active_quarantines"], 1);
-    assert_eq!(payload["zone_active_incidents"][0]["incident_id"], "inc-describe");
+    assert_eq!(
+        payload["zone_active_incidents"][0]["incident_id"],
+        "inc-describe"
+    );
 }
 
 #[test]
@@ -2160,14 +2282,13 @@ fn ops_health_check_json_reports_local_state_and_build_metadata() {
     std::fs::write(&evidence_path, "{\"schema_version\":\"fixture\"}\n")
         .expect("write incident evidence");
 
-    let expected_flush_timestamp =
-        chrono::DateTime::<Utc>::from(
-            std::fs::metadata(&evidence_path)
-                .expect("incident evidence metadata")
-                .modified()
-                .expect("incident evidence mtime"),
-        )
-        .to_rfc3339();
+    let expected_flush_timestamp = chrono::DateTime::<Utc>::from(
+        std::fs::metadata(&evidence_path)
+            .expect("incident evidence metadata")
+            .modified()
+            .expect("incident evidence mtime"),
+    )
+    .to_rfc3339();
 
     let output = run_cli_in_dir_with_env(workspace.path(), &["ops", "health-check", "--json"], &[]);
     assert!(
@@ -2261,12 +2382,10 @@ fn fleet_reconcile_json_output_shape_is_stable() {
     assert_eq!(payload["action"]["action_type"], "reconcile");
     assert_eq!(payload["action"]["success"], true);
     assert_eq!(payload["action"]["event_code"], "FLEET-005");
-    assert!(
-        payload["action"]["operation_id"]
-            .as_str()
-            .expect("operation id")
-            .starts_with("fleet-op-reconcile-")
-    );
+    assert!(payload["action"]["operation_id"]
+        .as_str()
+        .expect("operation id")
+        .starts_with("fleet-op-reconcile-"));
     assert_eq!(payload["action"]["receipt"]["issuer"], "cli-fleet-operator");
     assert_convergence_receipt_signature_round_trips(&payload["convergence_receipt"], &signing_key);
     assert_eq!(payload["status"]["zone_id"], "all");
@@ -2313,7 +2432,10 @@ fn fleet_reconcile_bootstrap_signing_key_on_first_run() {
     // Ensure no signing key exists - the system should bootstrap one automatically
     let key_dir = fleet_state.path().join(".franken-node/keys");
     let key_path = key_dir.join("receipt-signing.key");
-    assert!(!key_path.exists(), "signing key should not exist before bootstrap");
+    assert!(
+        !key_path.exists(),
+        "signing key should not exist before bootstrap"
+    );
 
     // Run fleet reconcile WITHOUT setting FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH
     // This should trigger the bootstrap path
@@ -2334,8 +2456,15 @@ fn fleet_reconcile_bootstrap_signing_key_on_first_run() {
 
     // Verify the key is valid by reading it
     let key_content = std::fs::read_to_string(&key_path).expect("read bootstrapped key");
-    assert_eq!(key_content.len(), 64, "key should be 32 bytes as hex (64 chars)");
-    assert!(key_content.chars().all(|c| c.is_ascii_hexdigit()), "key should be valid hex");
+    assert_eq!(
+        key_content.len(),
+        64,
+        "key should be 32 bytes as hex (64 chars)"
+    );
+    assert!(
+        key_content.chars().all(|c| c.is_ascii_hexdigit()),
+        "key should be valid hex"
+    );
 
     // Verify CLI output indicates success
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2344,7 +2473,10 @@ fn fleet_reconcile_bootstrap_signing_key_on_first_run() {
 
     // Verify stderr shows bootstrap message
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Generated fleet signing key"), "should show bootstrap message");
+    assert!(
+        stderr.contains("Generated fleet signing key"),
+        "should show bootstrap message"
+    );
 }
 
 #[test]
@@ -2745,93 +2877,122 @@ impl TestLogger {
             phase_start: None,
             logs: Vec::new(),
         };
-        eprintln!("{}", serde_json::to_string(&json!({
-            "ts": chrono::Utc::now().to_rfc3339(),
-            "suite": suite_name,
-            "test": test_name,
-            "event": "test_start",
-            "data": {}
-        })).unwrap());
+        eprintln!(
+            "{}",
+            serde_json::to_string(&json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "suite": suite_name,
+                "test": test_name,
+                "event": "test_start",
+                "data": {}
+            }))
+            .unwrap()
+        );
         logger
     }
 
     pub fn phase(&mut self, phase: &str) {
         if let Some(previous_start) = self.phase_start {
             let duration_ms = previous_start.elapsed().as_millis() as u64;
-            eprintln!("{}", serde_json::to_string(&json!({
-                "ts": chrono::Utc::now().to_rfc3339(),
-                "suite": self.suite_name,
-                "test": self.test_name,
-                "event": "phase_end",
-                "data": {"duration_ms": duration_ms}
-            })).unwrap());
+            eprintln!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "suite": self.suite_name,
+                    "test": self.test_name,
+                    "event": "phase_end",
+                    "data": {"duration_ms": duration_ms}
+                }))
+                .unwrap()
+            );
         }
 
         self.phase_start = Some(Instant::now());
-        eprintln!("{}", serde_json::to_string(&json!({
-            "ts": chrono::Utc::now().to_rfc3339(),
-            "suite": self.suite_name,
-            "test": self.test_name,
-            "phase": phase,
-            "event": "phase_start",
-            "data": {}
-        })).unwrap());
+        eprintln!(
+            "{}",
+            serde_json::to_string(&json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "suite": self.suite_name,
+                "test": self.test_name,
+                "phase": phase,
+                "event": "phase_start",
+                "data": {}
+            }))
+            .unwrap()
+        );
     }
 
     pub fn transport_snapshot(&self, transport: &FileFleetTransport, label: &str) {
         let actions = transport.list_actions().unwrap_or_default();
         let node_statuses = transport.list_node_statuses().unwrap_or_default();
 
-        eprintln!("{}", serde_json::to_string(&json!({
-            "ts": chrono::Utc::now().to_rfc3339(),
-            "suite": self.suite_name,
-            "test": self.test_name,
-            "event": "transport_snapshot",
-            "data": {
-                "label": label,
-                "action_count": actions.len(),
-                "node_count": node_statuses.len(),
-                "latest_action_id": actions.last().map(|a| &a.action_id),
-                "latest_action_type": actions.last().map(|a| match &a.action {
-                    FleetAction::Quarantine { .. } => "quarantine",
-                    FleetAction::Release { .. } => "release",
-                    FleetAction::PolicyUpdate { .. } => "policy_update",
-                }),
-                "node_ids": node_statuses.iter().map(|n| &n.node_id).collect::<Vec<_>>()
-            }
-        })).unwrap());
+        eprintln!(
+            "{}",
+            serde_json::to_string(&json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "suite": self.suite_name,
+                "test": self.test_name,
+                "event": "transport_snapshot",
+                "data": {
+                    "label": label,
+                    "action_count": actions.len(),
+                    "node_count": node_statuses.len(),
+                    "latest_action_id": actions.last().map(|a| &a.action_id),
+                    "latest_action_type": actions.last().map(|a| match &a.action {
+                        FleetAction::Quarantine { .. } => "quarantine",
+                        FleetAction::Release { .. } => "release",
+                        FleetAction::PolicyUpdate { .. } => "policy_update",
+                    }),
+                    "node_ids": node_statuses.iter().map(|n| &n.node_id).collect::<Vec<_>>()
+                }
+            }))
+            .unwrap()
+        );
     }
 
-    pub fn assertion(&self, field: &str, expected: &serde_json::Value, actual: &serde_json::Value) -> bool {
+    pub fn assertion(
+        &self,
+        field: &str,
+        expected: &serde_json::Value,
+        actual: &serde_json::Value,
+    ) -> bool {
         let matches = expected == actual;
-        eprintln!("{}", serde_json::to_string(&json!({
-            "ts": chrono::Utc::now().to_rfc3339(),
-            "suite": self.suite_name,
-            "test": self.test_name,
-            "event": "assertion",
-            "data": {
-                "field": field,
-                "expected": expected,
-                "actual": actual,
-                "match": matches
-            }
-        })).unwrap());
+        eprintln!(
+            "{}",
+            serde_json::to_string(&json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "suite": self.suite_name,
+                "test": self.test_name,
+                "event": "assertion",
+                "data": {
+                    "field": field,
+                    "expected": expected,
+                    "actual": actual,
+                    "match": matches
+                }
+            }))
+            .unwrap()
+        );
         matches
     }
 
     pub fn test_end(&self, result: &str) {
         let duration_ms = self.start_time.elapsed().as_millis() as u64;
-        eprintln!("{}", serde_json::to_string(&json!({
-            "ts": chrono::Utc::now().to_rfc3339(),
-            "suite": self.suite_name,
-            "test": self.test_name,
-            "event": "test_end",
-            "data": {
-                "result": result,
-                "duration_ms": duration_ms,
-                "log_count": self.logs.len()
-            }
-        })).unwrap());
+        eprintln!(
+            "{}",
+            serde_json::to_string(&json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "suite": self.suite_name,
+                "test": self.test_name,
+                "event": "test_end",
+                "data": {
+                    "result": result,
+                    "duration_ms": duration_ms,
+                    "log_count": self.logs.len()
+                }
+            }))
+            .unwrap()
+        );
     }
 }
 
@@ -2879,18 +3040,22 @@ fn fleet_release_with_structured_logging_and_real_pipeline() {
     );
     let act_duration = start_act.elapsed().as_millis() as u64;
 
-    eprintln!("{}", serde_json::to_string(&json!({
-        "ts": chrono::Utc::now().to_rfc3339(),
-        "suite": "fleet-cli-e2e",
-        "test": "release_with_structured_logging",
-        "event": "cli_execution_complete",
-        "data": {
-            "exit_code": output.status.code(),
-            "duration_ms": act_duration,
-            "stdout_size": output.stdout.len(),
-            "stderr_size": output.stderr.len()
-        }
-    })).unwrap());
+    eprintln!(
+        "{}",
+        serde_json::to_string(&json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "suite": "fleet-cli-e2e",
+            "test": "release_with_structured_logging",
+            "event": "cli_execution_complete",
+            "data": {
+                "exit_code": output.status.code(),
+                "duration_ms": act_duration,
+                "stdout_size": output.stdout.len(),
+                "stderr_size": output.stderr.len()
+            }
+        }))
+        .unwrap()
+    );
 
     log.phase("assert");
 
@@ -2905,10 +3070,26 @@ fn fleet_release_with_structured_logging_and_real_pipeline() {
     let payload: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("fleet release json");
 
-    log.assertion("action_type", &json!("release"), &payload["action"]["action_type"]);
-    log.assertion("event_code", &json!("FLEET-004"), &payload["action"]["event_code"]);
-    log.assertion("convergence_phase", &json!("Converged"), &payload["action"]["convergence"]["phase"]);
-    log.assertion("receipt_event_code", &json!("FLEET-004"), &payload["convergence_receipt"]["event_code"]);
+    log.assertion(
+        "action_type",
+        &json!("release"),
+        &payload["action"]["action_type"],
+    );
+    log.assertion(
+        "event_code",
+        &json!("FLEET-004"),
+        &payload["action"]["event_code"],
+    );
+    log.assertion(
+        "convergence_phase",
+        &json!("Converged"),
+        &payload["action"]["convergence"]["phase"],
+    );
+    log.assertion(
+        "receipt_event_code",
+        &json!("FLEET-004"),
+        &payload["convergence_receipt"]["event_code"],
+    );
 
     // Verify signature round-trip
     assert_convergence_receipt_signature_round_trips(&payload["convergence_receipt"], &signing_key);
@@ -2926,9 +3107,21 @@ fn fleet_release_with_structured_logging_and_real_pipeline() {
             incident_id,
             reason: Some(reason),
         } => {
-            log.assertion("release_zone_id", &json!("zone-structured"), &json!(zone_id));
-            log.assertion("release_incident_id", &json!("inc-structured"), &json!(incident_id));
-            log.assertion("release_reason", &json!("manual release via fleet CLI"), &json!(reason));
+            log.assertion(
+                "release_zone_id",
+                &json!("zone-structured"),
+                &json!(zone_id),
+            );
+            log.assertion(
+                "release_incident_id",
+                &json!("inc-structured"),
+                &json!(incident_id),
+            );
+            log.assertion(
+                "release_reason",
+                &json!("manual release via fleet CLI"),
+                &json!(reason),
+            );
         }
         _ => panic!("Expected release action, got: {:?}", release_action.action),
     }
@@ -2958,7 +3151,13 @@ fn fleet_release_handles_realistic_partial_release_scenarios_across_multi_incide
     // Test releasing one resolved incident while others remain active
     let output = run_cli_in_dir_with_fleet_state_and_env(
         &repo_root(),
-        &["fleet", "release", "--incident", "CVE-2024-45678-resolved", "--json"],
+        &[
+            "fleet",
+            "release",
+            "--incident",
+            "CVE-2024-45678-resolved",
+            "--json",
+        ],
         &fleet_state_dir,
         &[
             ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "5"),
@@ -2984,12 +3183,23 @@ fn fleet_release_handles_realistic_partial_release_scenarios_across_multi_incide
 
     // Verify convergence across realistic multi-node fleet
     assert_eq!(payload["convergence_receipt"]["verdict"], "converged");
-    assert!(payload["convergence_receipt"]["elapsed_ms"].as_u64().unwrap() < 5000);
+    assert!(
+        payload["convergence_receipt"]["elapsed_ms"]
+            .as_u64()
+            .unwrap()
+            < 5000
+    );
 
     // Now test attempting to release an active incident (should succeed but with different behavior)
     let output_active = run_cli_in_dir_with_fleet_state_and_env(
         &repo_root(),
-        &["fleet", "release", "--incident", "MALWARE-2024-0234-active", "--json"],
+        &[
+            "fleet",
+            "release",
+            "--incident",
+            "MALWARE-2024-0234-active",
+            "--json",
+        ],
         &fleet_state_dir,
         &[
             ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "5"),
@@ -3010,7 +3220,10 @@ fn fleet_release_handles_realistic_partial_release_scenarios_across_multi_incide
         serde_json::from_slice(&output_active.stdout).expect("fleet release active json");
 
     assert_eq!(payload_active["action"]["action_type"], "release");
-    assert_eq!(payload_active["action"]["incident_id"], "MALWARE-2024-0234-active");
+    assert_eq!(
+        payload_active["action"]["incident_id"],
+        "MALWARE-2024-0234-active"
+    );
 
     // Verify transport state shows realistic partial release scenario
     let actions = transport.list_actions().expect("list actions");
@@ -3057,7 +3270,11 @@ fn fleet_reconcile_with_complete_transport_verification() {
     let initial_actions = transport.list_actions().expect("list initial actions");
     let initial_nodes = transport.list_node_statuses().expect("list initial nodes");
 
-    log.assertion("initial_action_count", &json!(0), &json!(initial_actions.len()));
+    log.assertion(
+        "initial_action_count",
+        &json!(0),
+        &json!(initial_actions.len()),
+    );
     log.assertion("initial_node_count", &json!(0), &json!(initial_nodes.len()));
 
     // PHASE: Setup quarantine (pre-reconcile state)
@@ -3082,24 +3299,36 @@ fn fleet_reconcile_with_complete_transport_verification() {
             zone_id: "zone-reconcile-verify".to_string(),
             node_id: "node-stale-verify".to_string(),
             last_seen: now - TimeDelta::seconds(300), // 5 minutes stale
-            quarantine_version: 8, // Behind by 1 version
+            quarantine_version: 8,                    // Behind by 1 version
             health: NodeHealth::Healthy,
         })
         .expect("upsert stale node");
 
     log.transport_snapshot(&transport, "after_setup_quarantine_and_stale_node");
     let post_setup_actions = transport.list_actions().expect("list post-setup actions");
-    let post_setup_nodes = transport.list_node_statuses().expect("list post-setup nodes");
+    let post_setup_nodes = transport
+        .list_node_statuses()
+        .expect("list post-setup nodes");
 
     // Verify setup state with detailed transport state checks
-    log.assertion("post_setup_action_count", &json!(1), &json!(post_setup_actions.len()));
-    log.assertion("post_setup_node_count", &json!(1), &json!(post_setup_nodes.len()));
-    log.assertion("setup_action_type", &json!("quarantine"), &json!(
-        match &post_setup_actions[0].action {
+    log.assertion(
+        "post_setup_action_count",
+        &json!(1),
+        &json!(post_setup_actions.len()),
+    );
+    log.assertion(
+        "post_setup_node_count",
+        &json!(1),
+        &json!(post_setup_nodes.len()),
+    );
+    log.assertion(
+        "setup_action_type",
+        &json!("quarantine"),
+        &json!(match &post_setup_actions[0].action {
             FleetAction::Quarantine { .. } => "quarantine",
-            _ => "other"
-        }
-    ));
+            _ => "other",
+        }),
+    );
 
     log.phase("act");
     let start_reconcile = Instant::now();
@@ -3114,18 +3343,22 @@ fn fleet_reconcile_with_complete_transport_verification() {
     );
     let reconcile_duration = start_reconcile.elapsed().as_millis() as u64;
 
-    eprintln!("{}", serde_json::to_string(&json!({
-        "ts": chrono::Utc::now().to_rfc3339(),
-        "suite": "fleet-cli-e2e",
-        "test": "reconcile_with_transport_verification",
-        "event": "reconcile_execution_complete",
-        "data": {
-            "exit_code": output.status.code(),
-            "duration_ms": reconcile_duration,
-            "stdout_size": output.stdout.len(),
-            "stderr_size": output.stderr.len()
-        }
-    })).unwrap());
+    eprintln!(
+        "{}",
+        serde_json::to_string(&json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "suite": "fleet-cli-e2e",
+            "test": "reconcile_with_transport_verification",
+            "event": "reconcile_execution_complete",
+            "data": {
+                "exit_code": output.status.code(),
+                "duration_ms": reconcile_duration,
+                "stdout_size": output.stdout.len(),
+                "stderr_size": output.stderr.len()
+            }
+        }))
+        .unwrap()
+    );
 
     log.phase("assert");
 
@@ -3140,12 +3373,22 @@ fn fleet_reconcile_with_complete_transport_verification() {
     let payload: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("fleet reconcile json");
 
-    log.assertion("reconcile_action_type", &json!("reconcile"), &payload["action"]["action_type"]);
-    log.assertion("reconcile_event_code", &json!("FLEET-005"), &payload["action"]["event_code"]);
+    log.assertion(
+        "reconcile_action_type",
+        &json!("reconcile"),
+        &payload["action"]["action_type"],
+    );
+    log.assertion(
+        "reconcile_event_code",
+        &json!("FLEET-005"),
+        &payload["action"]["event_code"],
+    );
 
     // CRITICAL: Transport state verification BETWEEN phases
     log.transport_snapshot(&transport, "after_reconcile_execution");
-    let post_reconcile_actions = transport.list_actions().expect("list post-reconcile actions");
+    let post_reconcile_actions = transport
+        .list_actions()
+        .expect("list post-reconcile actions");
     let post_reconcile_nodes = transport
         .list_node_statuses()
         .expect("list post-reconcile nodes");

@@ -96,6 +96,8 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 
 pub type Ed25519PrivateKey = SigningKey;
 pub type Ed25519PublicKey = VerifyingKey;
+/// Canonical signature algorithm/version bound into every decision receipt payload.
+pub const DECISION_RECEIPT_SIGNATURE_VERSION: &str = "ed25519-v1";
 
 /// High-impact decision classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +115,8 @@ pub struct Receipt {
     pub action_name: String,
     pub actor_identity: String,
     pub timestamp: String,
+    /// Signature algorithm/version committed into the canonical payload.
+    pub signature_version: String,
     pub input_hash: String,
     pub output_hash: String,
     pub decision: Decision,
@@ -174,6 +178,11 @@ pub enum ReceiptError {
     },
     #[error("receipt confidence must be finite and within [0.0, 1.0], got {value}")]
     InvalidConfidence { value: f64 },
+    #[error("unsupported decision receipt signature_version '{found}', expected '{expected}'")]
+    UnsupportedSignatureVersion {
+        expected: &'static str,
+        found: String,
+    },
     #[error("high-impact action '{action_name}' requires a signed receipt")]
     MissingHighImpactReceipt { action_name: String },
     #[error("hash-chain mismatch: expected {expected}, got {actual}")]
@@ -223,6 +232,7 @@ impl Receipt {
             action_name: action_name.to_string(),
             actor_identity: actor_identity.to_string(),
             timestamp: clock::wall_now().to_rfc3339(),
+            signature_version: DECISION_RECEIPT_SIGNATURE_VERSION.to_string(),
             input_hash: hash_canonical_json(input)?,
             output_hash: hash_canonical_json(output)?,
             decision,
@@ -383,6 +393,7 @@ pub fn sign_receipt(
     signing_key: &Ed25519PrivateKey,
 ) -> Result<SignedReceipt, ReceiptError> {
     validate_confidence(receipt.confidence)?;
+    validate_signature_version(&receipt.signature_version)?;
     let payload = canonical_json(receipt)?;
     let signature = signing_key.sign(payload.as_bytes());
     let signature_b64 = BASE64_STANDARD.encode(signature.to_bytes());
@@ -403,6 +414,7 @@ pub fn verify_receipt(
     public_key: &Ed25519PublicKey,
 ) -> Result<bool, ReceiptError> {
     validate_confidence(signed.receipt.confidence)?;
+    validate_signature_version(&signed.receipt.signature_version)?;
     let expected_key_id = signing_key_id(public_key);
     if !crate::security::constant_time::ct_eq(&signed.signer_key_id, &expected_key_id) {
         return Ok(false);
@@ -454,6 +466,7 @@ pub fn append_signed_receipt(
 /// Verify append-only hash-chain linkage and deterministic hash material.
 pub fn verify_hash_chain(receipts: &[SignedReceipt]) -> Result<(), ReceiptError> {
     for (idx, signed) in receipts.iter().enumerate() {
+        validate_signature_version(&signed.receipt.signature_version)?;
         let expected_previous = if idx == 0 {
             None
         } else {
@@ -773,6 +786,17 @@ fn validate_confidence(confidence: f64) -> Result<(), ReceiptError> {
     Ok(())
 }
 
+fn validate_signature_version(signature_version: &str) -> Result<(), ReceiptError> {
+    if signature_version == DECISION_RECEIPT_SIGNATURE_VERSION {
+        return Ok(());
+    }
+
+    Err(ReceiptError::UnsupportedSignatureVersion {
+        expected: DECISION_RECEIPT_SIGNATURE_VERSION,
+        found: signature_version.to_string(),
+    })
+}
+
 fn hash_canonical_json(value: &impl Serialize) -> Result<String, ReceiptError> {
     let canonical = canonical_json(value)?;
     Ok(sha256_hex(canonical.as_bytes()))
@@ -926,6 +950,15 @@ mod tests {
     }
 
     #[test]
+    fn receipt_new_sets_signature_version() {
+        let receipt = make_receipt("quarantine", Decision::Approved);
+        assert_eq!(
+            receipt.signature_version,
+            DECISION_RECEIPT_SIGNATURE_VERSION
+        );
+    }
+
+    #[test]
     fn demo_signing_key_is_test_support_fixture_only() {
         let first = demo_signing_key();
         let second = demo_signing_key();
@@ -1029,6 +1062,40 @@ mod tests {
         let err = verify_receipt(&signed, &public_key)
             .expect_err("non-finite confidence must fail verification");
         assert!(matches!(err, ReceiptError::InvalidConfidence { value } if value.is_nan()));
+    }
+
+    #[test]
+    fn verify_receipt_rejects_unknown_signature_version() {
+        let key = demo_signing_key();
+        let public_key = key.verifying_key();
+        let mut signed =
+            sign_receipt(&make_receipt("quarantine", Decision::Approved), &key).expect("sign");
+        signed.receipt.signature_version = "ed25519-v2".to_string();
+
+        let err = verify_receipt(&signed, &public_key)
+            .expect_err("unknown signature version must fail verification");
+
+        assert!(matches!(
+            err,
+            ReceiptError::UnsupportedSignatureVersion { ref found, .. } if found == "ed25519-v2"
+        ));
+    }
+
+    #[test]
+    fn unversioned_signed_receipt_json_fails_before_verification() {
+        let key = demo_signing_key();
+        let signed =
+            sign_receipt(&make_receipt("quarantine", Decision::Approved), &key).expect("sign");
+        let mut legacy_json = serde_json::to_value(&signed).expect("signed receipt to JSON");
+        legacy_json
+            .as_object_mut()
+            .expect("signed receipt JSON object")
+            .remove("signature_version");
+
+        let err = serde_json::from_value::<SignedReceipt>(legacy_json)
+            .expect_err("missing signature_version must fail deserialization");
+
+        assert!(err.to_string().contains("signature_version"));
     }
 
     #[test]

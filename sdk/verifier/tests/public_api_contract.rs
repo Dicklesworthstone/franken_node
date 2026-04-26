@@ -368,12 +368,6 @@ fn sdk_error_display_from_fixture(entry: &ErrorMatrixEntry) -> Result<String, St
         "ResultOriginMismatch" => format!(
             "{}",
             VerifierSdkError::ResultOriginMismatch {
-                expected: fixture_object_string(
-                    &entry.error_data,
-                    "expected",
-                    "sdk ResultOriginMismatch.error_data",
-                )?
-                .to_string(),
                 actual: fixture_object_string(
                     &entry.error_data,
                     "actual",
@@ -806,7 +800,6 @@ fn test_verifier_sdk_error_display() -> Result<(), String> {
         actual: "actual_sig".to_string(),
     };
     let result_origin_mismatch = VerifierSdkError::ResultOriginMismatch {
-        expected: "origin-a".to_string(),
         actual: "origin-b".to_string(),
     };
     let json_error = VerifierSdkError::Json("json parse error".to_string());

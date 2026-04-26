@@ -4,7 +4,9 @@
 //! Decision receipts are cryptographically signed audit records and any format
 //! change would break signature validation and compliance tooling.
 
-use frankenengine_node::security::decision_receipt::{Decision, Receipt};
+use frankenengine_node::security::decision_receipt::{
+    DECISION_RECEIPT_SIGNATURE_VERSION, Decision, Receipt,
+};
 use serde_json::{Value, json};
 use std::{fs, path::Path};
 
@@ -107,6 +109,7 @@ fn decision_receipt_json_schema_stability() {
     assert!(json_value.get("action_name").unwrap().is_string());
     assert!(json_value.get("actor_identity").unwrap().is_string());
     assert!(json_value.get("timestamp").unwrap().is_string());
+    assert!(json_value.get("signature_version").unwrap().is_string());
     assert!(json_value.get("input_hash").unwrap().is_string());
     assert!(json_value.get("output_hash").unwrap().is_string());
     assert!(json_value.get("decision").unwrap().is_string());
@@ -121,6 +124,14 @@ fn decision_receipt_json_schema_stability() {
     assert_eq!(
         json_value.get("decision").unwrap().as_str().unwrap(),
         "approved"
+    );
+    assert_eq!(
+        json_value
+            .get("signature_version")
+            .unwrap()
+            .as_str()
+            .unwrap(),
+        DECISION_RECEIPT_SIGNATURE_VERSION
     );
 
     // Verify confidence is serialized as integer (canonical_f64 serialization)

@@ -105,10 +105,9 @@
     {
       "error_type": "ResultOriginMismatch",
       "error_data": {
-        "expected": "origin-a",
         "actual": "origin-b"
       },
-      "expected_display": "verifier SDK result origin mismatch: expected=origin-a, actual=origin-b"
+      "expected_display": "verifier SDK result origin mismatch: submitted=origin-b (expected nonce redacted to prevent oracle leakage of the server-side per-instance result_origin_nonce)"
     },
     {
       "error_type": "Json",

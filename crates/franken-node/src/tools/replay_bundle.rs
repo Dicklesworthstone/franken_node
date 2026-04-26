@@ -105,6 +105,8 @@ pub enum ReplayBundleError {
     CreatedAtMismatch,
     #[error("bundle id does not match canonical incident/timeline derivation")]
     BundleIdMismatch,
+    #[error("replay bundle format error: {0}")]
+    FormatError(String),
     #[error("replay bundle json contains trailing garbage")]
     TrailingGarbage,
     #[error("replay bundle json is truncated before the final chunk is complete")]

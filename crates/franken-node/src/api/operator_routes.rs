@@ -155,7 +155,7 @@ fn process_started_at_rfc3339() -> String {
 }
 
 fn operator_config_view() -> ConfigView {
-    if OPERATOR_CONFIG_STATE.load(Ordering::Acquire) == 0 {
+    if OPERATOR_CONFIG_STATE.load(Ordering::Acquire) != 2 {
         init_operator_config(&RuntimeConfig::default());
     }
 
@@ -163,6 +163,205 @@ fn operator_config_view() -> ConfigView {
         .read()
         .unwrap_or_else(|poison| poison.into_inner())
         .clone()
+}
+
+#[cfg(loom)]
+#[doc(hidden)]
+pub fn process_start_initialization_loom_model() {
+    use loom::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+    use loom::sync::{Arc, Mutex};
+    use loom::thread;
+
+    #[derive(Debug)]
+    struct ProcessStartCell {
+        state: AtomicU8,
+        offset_nanos: AtomicU64,
+        wall_clock: Mutex<Option<&'static str>>,
+    }
+
+    impl ProcessStartCell {
+        fn new() -> Self {
+            Self {
+                state: AtomicU8::new(0),
+                offset_nanos: AtomicU64::new(0),
+                wall_clock: Mutex::new(None),
+            }
+        }
+
+        fn install(&self, offset_nanos: u64, wall_clock_rfc3339: &'static str) {
+            {
+                let mut wall_clock = self.wall_clock.lock().expect("loom wall clock lock");
+                *wall_clock = Some(wall_clock_rfc3339);
+            }
+            thread::yield_now();
+            self.offset_nanos.store(offset_nanos, Ordering::Relaxed);
+            thread::yield_now();
+            self.state.store(2, Ordering::Release);
+        }
+
+        fn init(&self, offset_nanos: u64, wall_clock_rfc3339: &'static str) {
+            if self.state.load(Ordering::Acquire) == 2 {
+                return;
+            }
+
+            if self
+                .state
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                self.install(offset_nanos, wall_clock_rfc3339);
+            } else {
+                while self.state.load(Ordering::Acquire) != 2 {
+                    thread::yield_now();
+                }
+            }
+        }
+
+        fn read_snapshot(
+            &self,
+            offset_nanos: u64,
+            wall_clock_rfc3339: &'static str,
+        ) -> (u64, &'static str) {
+            if self.state.load(Ordering::Acquire) != 2 {
+                self.init(offset_nanos, wall_clock_rfc3339);
+            }
+
+            let installed_wall_clock = (*self.wall_clock.lock().expect("loom wall clock lock"))
+                .expect("wall clock should be installed");
+            let installed_offset = self.offset_nanos.load(Ordering::Relaxed);
+            (installed_offset, installed_wall_clock)
+        }
+    }
+
+    loom::model(|| {
+        let state = Arc::new(ProcessStartCell::new());
+
+        let process_a = Arc::clone(&state);
+        let process_b = Arc::clone(&state);
+        let process_c = Arc::clone(&state);
+
+        let process_a = thread::spawn(move || process_a.read_snapshot(11, "2026-04-26T00:00:11Z"));
+        let process_b = thread::spawn(move || process_b.read_snapshot(22, "2026-04-26T00:00:22Z"));
+        let process_c = thread::spawn(move || process_c.read_snapshot(33, "2026-04-26T00:00:33Z"));
+
+        let installed = [
+            process_a.join().expect("join process A"),
+            process_b.join().expect("join process B"),
+            process_c.join().expect("join process C"),
+        ];
+
+        assert_eq!(installed[0], installed[1]);
+        assert_eq!(installed[1], installed[2]);
+        assert!(matches!(
+            installed[0],
+            (11, "2026-04-26T00:00:11Z")
+                | (22, "2026-04-26T00:00:22Z")
+                | (33, "2026-04-26T00:00:33Z")
+        ));
+        assert_eq!(state.state.load(Ordering::Acquire), 2);
+    });
+}
+
+#[cfg(loom)]
+#[doc(hidden)]
+pub fn operator_config_initialization_loom_model() {
+    use loom::sync::atomic::{AtomicU8, Ordering};
+    use loom::sync::{Arc, Mutex};
+    use loom::thread;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct ConfigSeed {
+        profile: &'static str,
+        compatibility_mode: &'static str,
+        fleet_timeout_seconds: u32,
+    }
+
+    #[derive(Debug)]
+    struct ConfigCell {
+        state: AtomicU8,
+        view: Mutex<ConfigSeed>,
+    }
+
+    impl ConfigCell {
+        const DEFAULT: ConfigSeed = ConfigSeed {
+            profile: "balanced",
+            compatibility_mode: "balanced",
+            fleet_timeout_seconds: 120,
+        };
+
+        const BOOTSTRAPPED: ConfigSeed = ConfigSeed {
+            profile: "legacy-risky",
+            compatibility_mode: "legacy-risky",
+            fleet_timeout_seconds: 300,
+        };
+
+        fn new() -> Self {
+            Self {
+                state: AtomicU8::new(0),
+                view: Mutex::new(Self::DEFAULT),
+            }
+        }
+
+        fn install(&self, seed: ConfigSeed) {
+            {
+                let mut view = self.view.lock().expect("loom config view lock");
+                *view = seed;
+            }
+            thread::yield_now();
+            self.state.store(2, Ordering::Release);
+        }
+
+        fn init(&self, seed: ConfigSeed) {
+            if self
+                .state
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                self.install(seed);
+            } else {
+                while self.state.load(Ordering::Acquire) != 2 {
+                    thread::yield_now();
+                }
+            }
+        }
+
+        fn read_view(&self) -> ConfigSeed {
+            if self.state.load(Ordering::Acquire) != 2 {
+                self.init(Self::DEFAULT);
+            }
+
+            *self.view.lock().expect("loom config view lock")
+        }
+    }
+
+    loom::model(|| {
+        let state = Arc::new(ConfigCell::new());
+
+        let bootstrap = Arc::clone(&state);
+        let reader_a = Arc::clone(&state);
+        let reader_b = Arc::clone(&state);
+
+        let bootstrap = thread::spawn(move || {
+            bootstrap.init(ConfigCell::BOOTSTRAPPED);
+            bootstrap.read_view()
+        });
+        let reader_a = thread::spawn(move || reader_a.read_view());
+        let reader_b = thread::spawn(move || reader_b.read_view());
+
+        let installed = [
+            bootstrap.join().expect("join bootstrap"),
+            reader_a.join().expect("join reader A"),
+            reader_b.join().expect("join reader B"),
+        ];
+
+        assert_eq!(installed[0], installed[1]);
+        assert_eq!(installed[1], installed[2]);
+        assert!(
+            installed[0] == ConfigCell::DEFAULT || installed[0] == ConfigCell::BOOTSTRAPPED,
+            "installed view must match exactly one initialization winner"
+        );
+        assert_eq!(state.state.load(Ordering::Acquire), 2);
+    });
 }
 
 #[cfg(any(test, feature = "control-plane"))]

@@ -374,10 +374,20 @@ pub enum VerifierSdkError {
         expected: String,
         actual: String,
     },
-    ResultOriginMismatch {
-        expected: String,
-        actual: String,
-    },
+    /// The submitted `result_origin_nonce` did not match the SDK instance's
+    /// origin nonce.
+    ///
+    /// The server-side `expected` value is intentionally NOT included on this
+    /// variant: `result_origin_nonce` is a per-instance secret (random,
+    /// `#[serde(skip)]` on `VerifierSdk`) used to authenticate that a
+    /// `VerificationResult` was produced locally. Surfacing the expected nonce
+    /// in an error returned to a caller who submitted a forged result would
+    /// hand them the very secret they need to make the next attempt pass —
+    /// turning the error into a single-shot oracle for forging origin
+    /// authentication. Operators who need the expected value for diagnostics
+    /// can read it from `VerifierSdk::result_origin_nonce` (in-process) or
+    /// from internal trace logs that include the SDK identity.
+    ResultOriginMismatch { actual: String },
     NonceCounterExhausted,
     /// Inbound bundle bytes exceeded the configured DoS-prevention cap.
     BundleTooLarge {
@@ -452,9 +462,11 @@ impl fmt::Display for VerifierSdkError {
                 formatter,
                 "verifier SDK result signature mismatch: expected={expected}, actual={actual}"
             ),
-            Self::ResultOriginMismatch { expected, actual } => write!(
+            Self::ResultOriginMismatch { actual } => write!(
                 formatter,
-                "verifier SDK result origin mismatch: expected={expected}, actual={actual}"
+                "verifier SDK result origin mismatch: submitted={actual} \
+                 (expected nonce redacted to prevent oracle leakage of the \
+                 server-side per-instance result_origin_nonce)"
             ),
             Self::NonceCounterExhausted => write!(
                 formatter,
@@ -982,8 +994,14 @@ impl VerifierSdk {
     ) -> Result<(), VerifierSdkError> {
         self.validate_current_verifier_identity()?;
         if !constant_time_eq(&result.result_origin_nonce, &self.result_origin_nonce) {
+            // SECURITY: do not return the SDK's `result_origin_nonce` to the
+            // caller — it is a per-instance secret (`#[serde(skip)]` on
+            // `VerifierSdk`) and surfacing it as `expected=...` would let any
+            // forged-result probe read the nonce out of one error and replay
+            // it as a valid origin tag on the next attempt. Caller only sees
+            // the value they themselves submitted, plus a generic mismatch
+            // signal.
             return Err(VerifierSdkError::ResultOriginMismatch {
-                expected: self.result_origin_nonce.clone(),
                 actual: result.result_origin_nonce.clone(),
             });
         }
