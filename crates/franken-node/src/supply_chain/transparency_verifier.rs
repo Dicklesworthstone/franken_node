@@ -366,6 +366,7 @@ impl std::error::Error for TransparencyError {}
 
 // ── Test helpers ────────────────────────────────────────────────────
 
+#[cfg(test)]
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
         items.clear();
@@ -383,7 +384,12 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 }
 
 /// Build a small Merkle tree from leaves and return (root, proofs).
-pub fn build_test_tree(leaves: &[&str]) -> (String, Vec<InclusionProof>) {
+///
+/// Gated behind `cfg(test)` (bd-2nrre): the helper is a deterministic
+/// proof generator used only by inline tests; the operator-facing supply-chain
+/// surface must not ship a public test-tree constructor.
+#[cfg(test)]
+fn build_test_tree(leaves: &[&str]) -> (String, Vec<InclusionProof>) {
     let n = leaves.len();
     if n == 0 {
         return ("".into(), vec![]);
@@ -446,6 +452,7 @@ pub fn build_test_tree(leaves: &[&str]) -> (String, Vec<InclusionProof>) {
 mod tests {
     use super::{
         InclusionProof, LogRoot, ProofFailure, ProofReceipt, TransparencyError, TransparencyPolicy,
+        build_test_tree, hash_pair, leaf_hash, recompute_root, verify_inclusion,
         verify_inclusion_proof,
     };
 

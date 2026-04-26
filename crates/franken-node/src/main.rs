@@ -38,8 +38,12 @@ mod observability {
 }
 #[allow(dead_code)]
 mod security {
+    #[path = "constant_time.rs"]
+    pub mod constant_time;
     #[path = "decision_receipt.rs"]
     pub mod decision_receipt;
+    #[path = "epoch_scoped_keys.rs"]
+    pub mod epoch_scoped_keys;
 }
 #[allow(dead_code)]
 mod policy {
@@ -114,7 +118,6 @@ use frankenengine_node::{
             DECISION_RECEIPT_SIGNATURE_VERSION, Decision, Receipt, ReceiptQuery,
             append_signed_receipt, export_receipts_to_path, sign_receipt, write_receipts_markdown,
         },
-        epoch_scoped_keys::RootSecret,
         remote_cap::{
             CapabilityGate, CapabilityProvider, RemoteCap, RemoteCapError, RemoteOperation,
             RemoteScope,
@@ -156,9 +159,7 @@ use frankenengine_node::{
         },
     },
 };
-pub use frankenengine_node::{
-    capacity_defaults, connector, control_plane, observability, security, supply_chain,
-};
+pub use frankenengine_node::{capacity_defaults, connector, control_plane, supply_chain};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
@@ -6264,7 +6265,7 @@ fn ops_health_check_report(project_root: &Path) -> Result<OpsHealthCheckReport> 
 fn ops_active_session_count() -> usize {
     SessionManager::new(
         SessionConfig::default(),
-        RootSecret::from_bytes([0x5A; 32]),
+        crate::security::epoch_scoped_keys::RootSecret::from_bytes([0x5A; 32]),
         ControlEpoch::GENESIS,
     )
     .active_session_count()
@@ -7308,7 +7309,7 @@ fn handle_ops_rotate_key(args: &OpsRotateKeyArgs) -> Result<OpsRotateKeyResult> 
     };
 
     // Generate rotation event ID
-    let rotation_event_id = format!("rotate-{}", Uuid::new_v4());
+    let rotation_event_id = format!("rotate-{}", Uuid::now_v7());
 
     // Record the rotation event in evidence ledger
     let evidence_entry = EvidenceEntry {
@@ -14164,6 +14165,7 @@ fn sign_incident_counterfactual_contract_receipt(
         actor_identity: operator_id.to_string(),
         timestamp: timestamp.to_string(),
         signature_version: DECISION_RECEIPT_SIGNATURE_VERSION.to_string(),
+        nonce: Uuid::now_v7().simple().to_string(),
         input_hash: input_hash.to_string(),
         output_hash: output_hash.to_string(),
         decision: Decision::Approved,
@@ -19207,7 +19209,7 @@ fn sanitize_crypto_failure_reason(detailed_reason: &Option<String>) -> Option<St
             Some("verification failed".to_string())
         }
         // Pass through non-crypto errors unchanged
-        other => other.cloned(),
+        other => other.map(str::to_string),
     }
 }
 
@@ -22185,7 +22187,7 @@ fn main() -> Result<()> {
                 emit_ops_metrics_report(&report, args.format)?;
             }
             OpsCommand::RotateKey(args) => {
-                let result = handle_ops_rotate_key(args)?;
+                let result = handle_ops_rotate_key(&args)?;
                 emit_ops_rotate_key_result(&result, args.json)?;
             }
         },
@@ -22213,7 +22215,7 @@ fn main() -> Result<()> {
 
         Command::Debug(debug_command) => match debug_command {
             DebugCommand::Trace(args) => {
-                handle_debug_trace(args)?;
+                handle_debug_trace(&args)?;
             }
             DebugCommand::Explain(args) => {
                 handle_debug_explain(&args)?;

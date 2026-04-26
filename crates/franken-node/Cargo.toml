@@ -211,6 +211,10 @@ name = "sdk_verifier_public_api_fuzz_harness"
 path = "tests/sdk_verifier_public_api_fuzz_harness.rs"
 
 [[test]]
+name = "sdk_verifier_public_api_golden_conformance"
+path = "tests/sdk_verifier_public_api_golden_conformance.rs"
+
+[[test]]
 name = "idempotency_key_derivation"
 path = "../../tests/conformance/idempotency_key_derivation.rs"
 required-features = ["extended-surfaces"]
