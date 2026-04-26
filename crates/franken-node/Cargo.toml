@@ -417,6 +417,10 @@ name = "observability_evidence_ledger_regressions"
 path = "tests/observability_evidence_ledger_regressions.rs"
 
 [[test]]
+name = "evidence_ledger_chain_order_metamorphic"
+path = "tests/evidence_ledger_chain_order_metamorphic.rs"
+
+[[test]]
 name = "sync_durability_regression"
 path = "tests/sync_durability_regression.rs"
 

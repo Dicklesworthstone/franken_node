@@ -756,15 +756,15 @@ fn summarize_claim_text(normalised_text: &str) -> String {
 fn compute_compilation_digest(normalised_text: &str, evidence_links: &[EvidenceLink]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"claim_text_hash_v1:");
-    hasher.update((normalised_text.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(normalised_text.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(normalised_text.as_bytes());
-    hasher.update((evidence_links.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(evidence_links.len()).unwrap_or(u64::MAX).to_le_bytes());
     for link in evidence_links {
-        hasher.update((link.label.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(link.label.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(link.label.as_bytes());
-        hasher.update((link.uri.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(link.uri.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(link.uri.as_bytes());
-        hasher.update((link.content_digest.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(link.content_digest.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(link.content_digest.as_bytes());
     }
     hex::encode(hasher.finalize())
@@ -775,20 +775,20 @@ fn compute_scoreboard_digest(entries: &BTreeMap<String, ScoreEntry>) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"claim_evidence_hash_v1:");
     // BTreeMap iteration is deterministic (INV-CLMC-DETERMINISTIC)
-    hasher.update((entries.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(entries.len()).unwrap_or(u64::MAX).to_le_bytes());
     for (claim_id, entry) in entries {
-        hasher.update((claim_id.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(claim_id.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(claim_id.as_bytes());
-        hasher.update((entry.submitter_id.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(entry.submitter_id.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(entry.submitter_id.as_bytes());
-        hasher.update((entry.claim_summary.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(entry.claim_summary.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(entry.claim_summary.as_bytes());
         hasher.update((entry.evidence_count as u64).to_le_bytes());
-        hasher.update((entry.compilation_digest.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(entry.compilation_digest.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(entry.compilation_digest.as_bytes());
-        hasher.update((entry.evidence_uris.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(entry.evidence_uris.len()).unwrap_or(u64::MAX).to_le_bytes());
         for uri in &entry.evidence_uris {
-            hasher.update((uri.len() as u64).to_le_bytes());
+            hasher.update(u64::try_from(uri.len()).unwrap_or(u64::MAX).to_le_bytes());
             hasher.update(uri.as_bytes());
         }
     }
