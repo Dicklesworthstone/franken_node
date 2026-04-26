@@ -622,6 +622,10 @@ required-features = ["control-plane"]
 name = "e2e_trust_card_lifecycle"
 path = "tests/e2e_trust_card_lifecycle.rs"
 
+[[test]]
+name = "e2e_control_epoch_lifecycle"
+path = "tests/e2e_control_epoch_lifecycle.rs"
+
 [[bench]]
 name = "cuckoo_revocation_bench"
 harness = false
