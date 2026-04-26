@@ -444,6 +444,10 @@ impl AdmissionKernel {
         let timestamp = Utc::now().to_rfc3339();
 
         if signature.algorithm != "ed25519" {
+            tracing::warn!(
+                algorithm = %signature.algorithm,
+                "unsupported extension registration signature algorithm"
+            );
             return AdmissionReceipt {
                 receipt_id: Uuid::now_v7().to_string(),
                 extension_name: extension_name.to_string(),
@@ -453,10 +457,7 @@ impl AdmissionKernel {
                 admitted: false,
                 witness: Some(NegativeWitness {
                     rejection_code: event_codes::SER_ERR_INVALID_SIGNATURE.to_string(),
-                    rejection_reason: format!(
-                        "unsupported signature algorithm: {}",
-                        signature.algorithm
-                    ),
+                    rejection_reason: "unsupported signature algorithm".to_string(),
                     checked_fields: vec!["signature.algorithm".to_string()],
                     remediation: "Use canonical ed25519 signatures over the manifest bytes."
                         .to_string(),
@@ -471,6 +472,10 @@ impl AdmissionKernel {
         let verifying_key = match self.key_ring.get_key(&key_id) {
             Some(vk) => vk,
             None => {
+                tracing::warn!(
+                    key_id = %signature.key_id,
+                    "publisher key missing from extension registry key ring"
+                );
                 return AdmissionReceipt {
                     receipt_id: Uuid::now_v7().to_string(),
                     extension_name: extension_name.to_string(),
@@ -480,10 +485,7 @@ impl AdmissionKernel {
                     admitted: false,
                     witness: Some(NegativeWitness {
                         rejection_code: event_codes::SER_ERR_KEY_NOT_FOUND.to_string(),
-                        rejection_reason: format!(
-                            "publisher key {} not found in key ring",
-                            signature.key_id
-                        ),
+                        rejection_reason: "publisher key not found".to_string(),
                         checked_fields: vec!["signature.key_id".to_string()],
                         remediation: "Register the publisher's public key in the admission \
                                       kernel's key ring before registration."
@@ -544,6 +546,11 @@ impl AdmissionKernel {
                 .iter()
                 .map(|i| i.message.clone())
                 .collect();
+            tracing::warn!(
+                provenance_level = ?chain_report.provenance_level,
+                issues = ?issues,
+                "extension registration provenance verification failed"
+            );
             return AdmissionReceipt {
                 receipt_id: Uuid::now_v7().to_string(),
                 extension_name: extension_name.to_string(),
@@ -553,10 +560,7 @@ impl AdmissionKernel {
                 admitted: false,
                 witness: Some(NegativeWitness {
                     rejection_code: event_codes::SER_ERR_PROVENANCE_CHAIN_INVALID.to_string(),
-                    rejection_reason: format!(
-                        "provenance chain verification failed: {}",
-                        issues.join("; ")
-                    ),
+                    rejection_reason: "provenance chain verification failed".to_string(),
                     checked_fields: vec![
                         "provenance.links".to_string(),
                         "provenance.output_hash".to_string(),
@@ -584,6 +588,10 @@ impl AdmissionKernel {
         if !proof_receipt.verified
             && let Some(ref failure) = proof_receipt.failure_reason
         {
+            tracing::warn!(
+                failure_reason = %failure,
+                "extension registration transparency verification failed"
+            );
             return AdmissionReceipt {
                 receipt_id: Uuid::now_v7().to_string(),
                 extension_name: extension_name.to_string(),
@@ -593,7 +601,7 @@ impl AdmissionKernel {
                 admitted: false,
                 witness: Some(NegativeWitness {
                     rejection_code: event_codes::SER_ERR_TRANSPARENCY_FAILED.to_string(),
-                    rejection_reason: format!("transparency verification failed: {}", failure),
+                    rejection_reason: "transparency verification failed".to_string(),
                     checked_fields: vec!["transparency_proof".to_string()],
                     remediation: "Submit a valid Merkle inclusion proof from a pinned \
                                   transparency log."
@@ -982,10 +990,8 @@ impl SignedExtensionRegistry {
                 success: false,
                 extension_id: None,
                 error_code: Some(event_codes::SER_ERR_DUPLICATE_NAME.to_string()),
-                detail: format!(
-                    "Extension name '{}' already exists (ID: {}). Extension names must be unique.",
-                    signed_manifest.name, existing_extension_id
-                ),
+                detail: "Extension name already exists. Extension names must be unique."
+                    .to_string(),
             };
         }
 
@@ -1531,6 +1537,38 @@ mod tests {
     }
 
     #[test]
+    fn register_duplicate_name_sanitizes_existing_extension_id() {
+        let (sk, vk) = test_keypair();
+        let mut reg = test_registry(&vk);
+        let first = reg.register(
+            valid_request("ext-a", &sk, now_epoch()),
+            &make_trace(),
+            now_epoch(),
+        );
+        let existing_id = first
+            .extension_id
+            .clone()
+            .expect("first registration should return an extension id");
+
+        let duplicate = reg.register(
+            valid_request("ext-a", &sk, now_epoch()),
+            &make_trace(),
+            now_epoch(),
+        );
+
+        assert!(!duplicate.success);
+        assert_eq!(
+            duplicate.error_code.as_deref(),
+            Some(event_codes::SER_ERR_DUPLICATE_NAME)
+        );
+        assert_eq!(
+            duplicate.detail,
+            "Extension name already exists. Extension names must be unique."
+        );
+        assert!(!duplicate.detail.contains(&existing_id));
+    }
+
+    #[test]
     fn register_produces_admission_receipt() {
         let (sk, vk) = test_keypair();
         let mut reg = test_registry(&vk);
@@ -1627,16 +1665,16 @@ mod tests {
         let (_sk2, vk2) = test_keypair_2();
         // Registry only trusts vk2, but request is signed with sk (vk)
         let mut reg = test_registry(&vk2);
-        let result = reg.register(
-            valid_request("ext-a", &sk, now_epoch()),
-            &make_trace(),
-            now_epoch(),
-        );
+        let request = valid_request("ext-a", &sk, now_epoch());
+        let leaked_key_id = request.signature.key_id.clone();
+        let result = reg.register(request, &make_trace(), now_epoch());
         assert!(!result.success);
         assert_eq!(
             result.error_code.as_deref(),
             Some(event_codes::SER_ERR_KEY_NOT_FOUND)
         );
+        assert_eq!(result.detail, "publisher key not found");
+        assert!(!result.detail.contains(&leaked_key_id));
     }
 
     #[test]
@@ -1686,6 +1724,9 @@ mod tests {
             .witness
             .as_ref()
             .expect("negative witness");
+        assert_eq!(result.detail, "unsupported signature algorithm");
+        assert_eq!(witness.rejection_reason, "unsupported signature algorithm");
+        assert!(!result.detail.contains("ed25519ph"));
         assert!(
             witness
                 .checked_fields
@@ -1730,6 +1771,8 @@ mod tests {
             .witness
             .as_ref()
             .expect("witness");
+        assert_eq!(result.detail, "transparency verification failed");
+        assert_eq!(witness.rejection_reason, "transparency verification failed");
         assert!(
             witness
                 .checked_fields
@@ -1770,6 +1813,15 @@ mod tests {
         assert_eq!(
             result.error_code.as_deref(),
             Some(event_codes::SER_ERR_PROVENANCE_CHAIN_INVALID)
+        );
+        let witness = reg.admission_receipts()[0]
+            .witness
+            .as_ref()
+            .expect("witness");
+        assert_eq!(result.detail, "provenance chain verification failed");
+        assert_eq!(
+            witness.rejection_reason,
+            "provenance chain verification failed"
         );
     }
 
