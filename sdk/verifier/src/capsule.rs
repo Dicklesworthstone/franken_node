@@ -22,6 +22,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::DateTime;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use hex;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
@@ -38,6 +40,10 @@ pub const STRUCTURAL_ONLY_RULE_ID: &str = "VERIFIER_SHORTCUT_GUARD::WORKSPACE_RE
 
 const MAX_VERIFIER_IDENTITY_NAME_LEN: usize = 255;
 const MAX_CREATOR_IDENTITY_NAME_LEN: usize = 255;
+
+/// Domain separator for Ed25519 capsule signatures.
+const ED25519_CAPSULE_SIGNATURE_DOMAIN: &[u8] =
+    b"frankenengine-verifier-sdk:ed25519-capsule-signature:v1:";
 
 // ---------------------------------------------------------------------------
 // Capsule types
@@ -94,6 +100,8 @@ pub struct CapsuleReplayResult {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CapsuleError {
     SignatureInvalid(String),
+    Ed25519SignatureMalformed { length: usize },
+    Ed25519SignatureInvalid,
     SchemaMismatch(String),
     ReplayDiverged { expected: String, actual: String },
     VerdictMismatch { expected: String, actual: String },
@@ -107,6 +115,16 @@ impl std::fmt::Display for CapsuleError {
         match self {
             Self::SignatureInvalid(msg) => {
                 write!(f, "{}: {msg}", ERR_CAPSULE_SIGNATURE_INVALID)
+            }
+            Self::Ed25519SignatureMalformed { length } => write!(
+                f,
+                "replay capsule Ed25519 signature has invalid length {length}"
+            ),
+            Self::Ed25519SignatureInvalid => {
+                write!(
+                    f,
+                    "replay capsule Ed25519 signature verification failed"
+                )
             }
             Self::SchemaMismatch(msg) => {
                 write!(f, "{}: {msg}", ERR_CAPSULE_SCHEMA_MISMATCH)
@@ -248,6 +266,47 @@ fn compute_signing_payload(capsule: &ReplayCapsule) -> String {
         push_length_prefixed(&mut hasher, v);
     }
     hex::encode(hasher.finalize())
+}
+
+/// Compute the Ed25519 signing payload for a capsule.
+///
+/// Creates domain-separated payload with length-prefixed encoding for all
+/// capsule fields to prevent field injection attacks.
+fn ed25519_capsule_signature_payload(capsule: &ReplayCapsule) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(ED25519_CAPSULE_SIGNATURE_DOMAIN);
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"verifier_sdk_capsule_signing_v1:");
+    for field in [
+        capsule.manifest.capsule_id.as_str(),
+        capsule.manifest.schema_version.as_str(),
+        capsule.manifest.description.as_str(),
+        capsule.manifest.claim_type.as_str(),
+        capsule.manifest.expected_output_hash.as_str(),
+        capsule.manifest.created_at.as_str(),
+        capsule.manifest.creator_identity.as_str(),
+        capsule.payload.as_str(),
+    ] {
+        push_length_prefixed(&mut hasher, field);
+    }
+    hasher.update(u64::try_from(capsule.manifest.input_refs.len()).unwrap_or(u64::MAX).to_le_bytes());
+    for input_ref in &capsule.manifest.input_refs {
+        push_length_prefixed(&mut hasher, input_ref);
+    }
+    hasher.update(u64::try_from(capsule.manifest.metadata.len()).unwrap_or(u64::MAX).to_le_bytes());
+    for (key, value) in &capsule.manifest.metadata {
+        push_length_prefixed(&mut hasher, key);
+        push_length_prefixed(&mut hasher, value);
+    }
+    hasher.update(u64::try_from(capsule.inputs.len()).unwrap_or(u64::MAX).to_le_bytes());
+    for (k, v) in &capsule.inputs {
+        push_length_prefixed(&mut hasher, k);
+        push_length_prefixed(&mut hasher, v);
+    }
+
+    payload.extend_from_slice(&hasher.finalize());
+    payload
 }
 
 // ---------------------------------------------------------------------------
@@ -435,51 +494,71 @@ fn validate_creator_identity(creator_identity: &str) -> Result<(), CapsuleError>
     Ok(())
 }
 
-/// Sign a capsule by computing its structural signature digest.
+/// Sign a capsule with Ed25519 cryptographic signature.
 ///
-/// The structural signature digest binds the manifest, payload, and inputs via
-/// length-prefixed SHA-256 hashing.
+/// The signature binds the manifest, payload, and inputs via domain-separated
+/// Ed25519 signing over length-prefixed SHA-256 canonical encoding.
 ///
 /// # Examples
 ///
 /// ```rust
 /// # #[cfg(feature = "test-support")] {
+/// use ed25519_dalek::SigningKey;
 /// use frankenengine_verifier_sdk::capsule::{build_reference_capsule, sign_capsule};
 ///
+/// let signing_key = SigningKey::from_bytes(&[1_u8; 32]);
 /// let mut capsule = build_reference_capsule();
 /// capsule.signature.clear();
-/// sign_capsule(&mut capsule);
-/// assert_eq!(capsule.signature.len(), 64);
+/// sign_capsule(&signing_key, &mut capsule);
+/// assert_eq!(capsule.signature.len(), 128); // hex-encoded 64-byte signature
 /// # }
 /// ```
-pub fn sign_capsule(capsule: &mut ReplayCapsule) {
-    capsule.signature = compute_signing_payload(capsule);
+pub fn sign_capsule(signing_key: &SigningKey, capsule: &mut ReplayCapsule) {
+    let payload = ed25519_capsule_signature_payload(capsule);
+    let signature = signing_key.sign(&payload);
+    capsule.signature = hex::encode(signature.to_bytes());
 }
 
-/// Verify a capsule's structural signature digest against the computed signing payload.
+/// Verify a capsule's Ed25519 cryptographic signature.
 ///
-/// Uses constant-time comparison to prevent timing side-channels.
+/// Verifies the Ed25519 signature against the canonical payload using the
+/// provided public key. Prevents timing side-channel attacks.
 ///
 /// # Examples
 ///
 /// ```rust
 /// # #[cfg(feature = "test-support")] {
-/// use frankenengine_verifier_sdk::capsule::{build_reference_capsule, verify_signature};
+/// use ed25519_dalek::{SigningKey, VerifyingKey};
+/// use frankenengine_verifier_sdk::capsule::{build_reference_capsule, sign_capsule, verify_signature};
 ///
-/// let capsule = build_reference_capsule();
-/// verify_signature(&capsule)?;
+/// let signing_key = SigningKey::from_bytes(&[1_u8; 32]);
+/// let verifying_key = VerifyingKey::from(&signing_key);
+/// let mut capsule = build_reference_capsule();
+/// sign_capsule(&signing_key, &mut capsule);
+/// verify_signature(&verifying_key, &capsule)?;
 /// # }
 /// # Ok::<(), frankenengine_verifier_sdk::capsule::CapsuleError>(())
 /// ```
-pub fn verify_signature(capsule: &ReplayCapsule) -> CapsuleResult<()> {
-    let expected = compute_signing_payload(capsule);
-    if !ct_eq(&capsule.signature, &expected) {
-        return Err(CapsuleError::SignatureInvalid(format!(
-            "expected={expected}, actual={}",
-            capsule.signature
-        )));
+pub fn verify_signature(verifying_key: &VerifyingKey, capsule: &ReplayCapsule) -> CapsuleResult<()> {
+    // Decode hex signature
+    let signature_bytes = hex::decode(&capsule.signature).map_err(|_| {
+        CapsuleError::Ed25519SignatureMalformed {
+            length: capsule.signature.len(),
+        }
+    })?;
+
+    if signature_bytes.len() != 64 {
+        return Err(CapsuleError::Ed25519SignatureMalformed {
+            length: signature_bytes.len(),
+        });
     }
-    Ok(())
+
+    let signature = Signature::from_bytes(&signature_bytes.try_into().unwrap());
+    let payload = ed25519_capsule_signature_payload(capsule);
+
+    verifying_key
+        .verify(&payload, &signature)
+        .map_err(|_| CapsuleError::Ed25519SignatureInvalid)
 }
 
 /// Replay a capsule and produce a result.
@@ -499,6 +578,7 @@ pub fn verify_signature(capsule: &ReplayCapsule) -> CapsuleResult<()> {
 /// INV-CAPSULE-NO-PRIVILEGED-ACCESS: purely local computation.
 /// INV-CAPSULE-VERDICT-REPRODUCIBLE: deterministic for same inputs.
 pub fn replay(
+    verifying_key: &VerifyingKey,
     capsule: &ReplayCapsule,
     verifier_identity: &str,
 ) -> CapsuleResult<CapsuleReplayResult> {
@@ -509,7 +589,7 @@ pub fn replay(
     validate_verifier_identity(verifier_identity)?;
 
     // Step 3: Verify signature
-    verify_signature(capsule)?;
+    verify_signature(verifying_key, capsule)?;
 
     // Step 4: Bind the declared input inventory to the replayed inputs.
     validate_declared_input_refs(capsule)?;
@@ -555,10 +635,13 @@ pub fn replay(
 /// # Examples
 ///
 /// ```rust
+/// use ed25519_dalek::{SigningKey, VerifyingKey};
 /// use frankenengine_verifier_sdk::capsule::{build_reference_capsule, verify_signature};
 ///
+/// let signing_key = SigningKey::from_bytes(&[1_u8; 32]);
+/// let verifying_key = VerifyingKey::from(&signing_key);
 /// let capsule = build_reference_capsule();
-/// verify_signature(&capsule)?;
+/// verify_signature(&verifying_key, &capsule)?;
 /// # Ok::<(), frankenengine_verifier_sdk::capsule::CapsuleError>(())
 /// ```
 #[cfg(any(test, feature = "test-support"))]
@@ -590,7 +673,8 @@ pub fn build_reference_capsule() -> ReplayCapsule {
         inputs,
         signature: String::new(),
     };
-    sign_capsule(&mut capsule);
+    let test_signing_key = SigningKey::from_bytes(&[1_u8; 32]);
+    sign_capsule(&test_signing_key, &mut capsule);
     capsule
 }
 
@@ -602,11 +686,22 @@ pub fn build_reference_capsule() -> ReplayCapsule {
 mod tests {
     use super::*;
 
+    /// Test signing key for consistent test signatures.
+    fn test_signing_key() -> SigningKey {
+        SigningKey::from_bytes(&[1_u8; 32])
+    }
+
+    /// Test verifying key matching the test signing key.
+    fn test_verifying_key() -> VerifyingKey {
+        VerifyingKey::from(&test_signing_key())
+    }
+
     fn assert_manifest_tamper_rejected(case: &str, mutate: impl FnOnce(&mut ReplayCapsule)) {
         let capsule = build_reference_capsule();
         let mut tampered = capsule.clone();
         mutate(&mut tampered);
-        match verify_signature(&tampered) {
+        let verifying_key = test_verifying_key();
+        match verify_signature(&verifying_key, &tampered) {
             Err(CapsuleError::SignatureInvalid(_)) => {}
             other => panic!("expected SignatureInvalid for {case} tamper, got {other:?}"),
         }
@@ -696,17 +791,50 @@ mod tests {
     #[test]
     fn test_verify_signature_pass() {
         let capsule = build_reference_capsule();
-        assert!(verify_signature(&capsule).is_ok());
+        let verifying_key = test_verifying_key();
+        assert!(verify_signature(&verifying_key, &capsule).is_ok());
     }
 
     #[test]
     fn test_verify_signature_tampered() {
         let mut capsule = build_reference_capsule();
         capsule.signature = "tampered".to_string();
-        match verify_signature(&capsule) {
-            Err(CapsuleError::SignatureInvalid(_)) => {}
-            other => panic!("expected SignatureInvalid, got {other:?}"),
+        let verifying_key = test_verifying_key();
+        match verify_signature(&verifying_key, &capsule) {
+            Err(CapsuleError::Ed25519SignatureMalformed { .. }) => {}
+            other => panic!("expected Ed25519SignatureMalformed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_verify_signature_invalid_signature() {
+        let mut capsule = build_reference_capsule();
+        // Valid hex length (128 chars = 64 bytes) but wrong signature
+        capsule.signature = "a".repeat(128);
+        let verifying_key = test_verifying_key();
+        match verify_signature(&verifying_key, &capsule) {
+            Err(CapsuleError::Ed25519SignatureInvalid) => {}
+            other => panic!("expected Ed25519SignatureInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_tampered_capsule_rejection() {
+        let mut capsule = build_reference_capsule();
+        let original_payload = capsule.payload.clone();
+
+        // Tamper with payload after signing
+        capsule.payload = "tampered_payload_data".to_string();
+
+        // Verification should fail due to tampered content
+        let verifying_key = test_verifying_key();
+        match verify_signature(&verifying_key, &capsule) {
+            Err(CapsuleError::Ed25519SignatureInvalid) => {}
+            other => panic!("expected Ed25519SignatureInvalid for tampered capsule, got {other:?}"),
+        }
+
+        // Ensure payload was actually different
+        assert_ne!(capsule.payload, original_payload);
     }
 
     #[test]
@@ -731,7 +859,7 @@ mod tests {
     fn test_replay_diverged() {
         let mut capsule = build_reference_capsule();
         capsule.manifest.expected_output_hash = "f".repeat(64);
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
         let result = replay(&capsule, "verifier://v1").unwrap();
         assert_eq!(result.verdict, CapsuleVerdict::Fail);
     }
@@ -740,7 +868,7 @@ mod tests {
     fn test_replay_rejects_malformed_expected_hash() {
         let mut capsule = build_reference_capsule();
         capsule.manifest.expected_output_hash = "wrong_hash".to_string();
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
         match replay(&capsule, "verifier://v1") {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("expected_output_hash"));
@@ -755,7 +883,7 @@ mod tests {
         let mut capsule = build_reference_capsule();
         capsule.manifest.expected_output_hash =
             capsule.manifest.expected_output_hash.to_uppercase();
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
         match replay(&capsule, "verifier://v1") {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("expected_output_hash"));
@@ -769,7 +897,7 @@ mod tests {
     fn test_replay_rejects_empty_created_at() {
         let mut capsule = build_reference_capsule();
         capsule.manifest.created_at = String::new();
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
         match replay(&capsule, "verifier://v1") {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("created_at"));
@@ -782,7 +910,7 @@ mod tests {
     fn test_replay_rejects_malformed_created_at() {
         let mut capsule = build_reference_capsule();
         capsule.manifest.created_at = "2026-13-01T00:00:00Z".to_string();
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
         match replay(&capsule, "verifier://v1") {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("created_at"));
@@ -796,7 +924,7 @@ mod tests {
     fn test_replay_empty_payload() {
         let mut capsule = build_reference_capsule();
         capsule.payload = String::new();
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
         match replay(&capsule, "verifier://v1") {
             Err(CapsuleError::EmptyPayload(_)) => {}
             other => panic!("expected EmptyPayload, got {other:?}"),
@@ -817,7 +945,7 @@ mod tests {
     fn test_replay_rejects_missing_declared_input() {
         let mut capsule = build_reference_capsule();
         capsule.inputs.remove("artifact_b");
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
         match replay(&capsule, "verifier://v1") {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("input_refs"));
@@ -833,7 +961,7 @@ mod tests {
         capsule
             .inputs
             .insert("artifact_c".to_string(), "content_of_c".to_string());
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
         match replay(&capsule, "verifier://v1") {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("input_refs"));
@@ -847,7 +975,7 @@ mod tests {
     fn test_replay_rejects_duplicate_declared_input_refs() {
         let mut capsule = build_reference_capsule();
         capsule.manifest.input_refs.push("artifact_a".to_string());
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
         match replay(&capsule, "verifier://v1") {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("input_refs"));
@@ -864,7 +992,7 @@ mod tests {
         capsule.inputs = BTreeMap::from([(" artifact_a".to_string(), "content_of_a".to_string())]);
         capsule.manifest.expected_output_hash =
             compute_replay_hash(&capsule.payload, &capsule.inputs);
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
         match replay(&capsule, "verifier://v1") {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("input_refs"));
@@ -882,7 +1010,7 @@ mod tests {
             BTreeMap::from([("artifact_a\0shadow".to_string(), "content_of_a".to_string())]);
         capsule.manifest.expected_output_hash =
             compute_replay_hash(&capsule.payload, &capsule.inputs);
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
         match replay(&capsule, "verifier://v1") {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("identifier must include only ASCII letters"));
@@ -1000,7 +1128,7 @@ mod tests {
     fn test_replay_rejects_malformed_creator_identity() {
         let mut capsule = build_reference_capsule();
         capsule.manifest.creator_identity = " creator://test@example.com".to_string();
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
 
         match replay(&capsule, "verifier://v1") {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
@@ -1071,12 +1199,12 @@ mod tests {
         let mut capsule_a = build_reference_capsule();
         capsule_a.manifest.capsule_id = "id-a|vsdk-v1.0".to_string();
         capsule_a.manifest.schema_version = SDK_VERSION.to_string();
-        sign_capsule(&mut capsule_a);
+        sign_capsule(&test_signing_key(), &mut capsule_a);
 
         let mut capsule_b = build_reference_capsule();
         capsule_b.manifest.capsule_id = "id-a".to_string();
         capsule_b.manifest.schema_version = SDK_VERSION.to_string();
-        sign_capsule(&mut capsule_b);
+        sign_capsule(&test_signing_key(), &mut capsule_b);
 
         assert_ne!(
             capsule_a.signature, capsule_b.signature,
@@ -1200,7 +1328,7 @@ mod tests {
         let mut capsule = build_reference_capsule();
         // Inject null byte and other control characters into capsule_id
         capsule.manifest.capsule_id = "capsule\0with\x01control\x1fchars".to_string();
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
 
         match validate_manifest(&capsule.manifest) {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
@@ -1224,7 +1352,7 @@ mod tests {
         capsule.payload = "x".repeat(1_000_000);
         capsule.manifest.expected_output_hash =
             compute_replay_hash(&capsule.payload, &capsule.inputs);
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
 
         // Should handle large payloads without panicking or excessive memory usage
         let result = replay(&capsule, "verifier://large-test").unwrap();
@@ -1371,7 +1499,7 @@ mod tests {
     fn test_replay_rejects_whitespace_padded_capsule_id() {
         let mut capsule = build_reference_capsule();
         capsule.manifest.capsule_id = " capsule-ref-001 ".to_string();
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
 
         match replay(&capsule, "verifier://v1") {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
@@ -1385,7 +1513,7 @@ mod tests {
     fn test_replay_rejects_path_traversal_capsule_id() {
         let mut capsule = build_reference_capsule();
         capsule.manifest.capsule_id = "../../../etc/passwd".to_string();
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
 
         match replay(&capsule, "verifier://v1") {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
@@ -1399,7 +1527,7 @@ mod tests {
     fn test_replay_rejects_whitespace_padded_claim_type() {
         let mut capsule = build_reference_capsule();
         capsule.manifest.claim_type = " compatibility_check ".to_string();
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
 
         match replay(&capsule, "verifier://v1") {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
@@ -1413,7 +1541,7 @@ mod tests {
     fn test_replay_rejects_whitespace_padded_created_at() {
         let mut capsule = build_reference_capsule();
         capsule.manifest.created_at = " 2026-04-01T00:00:00Z ".to_string();
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
 
         match replay(&capsule, "verifier://v1") {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
@@ -1488,7 +1616,7 @@ mod tests {
 
         capsule.manifest.expected_output_hash =
             compute_replay_hash(&capsule.payload, &capsule.inputs);
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
 
         // Should handle large input maps without excessive memory consumption
         let start = std::time::Instant::now();
@@ -1866,7 +1994,7 @@ mod tests {
         capsule.manifest.input_refs.push("deep_nested".to_string());
         capsule.manifest.expected_output_hash =
             compute_replay_hash(&capsule.payload, &capsule.inputs);
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
 
         // Should handle deep nesting without stack overflow or excessive processing time
         let start = std::time::Instant::now();
@@ -1890,7 +2018,7 @@ mod tests {
 
         for invalid_sequence in invalid_utf8_attempts {
             capsule.manifest.description = invalid_sequence.clone();
-            sign_capsule(&mut capsule);
+            sign_capsule(&test_signing_key(), &mut capsule);
 
             // Should handle gracefully without crashing
             assert!(validate_manifest(&capsule.manifest).is_ok());
@@ -1935,9 +2063,10 @@ mod tests {
         capsule.signature = original_signature;
 
         // Should detect that signature no longer matches modified content
-        match verify_signature(&capsule) {
-            Err(CapsuleError::SignatureInvalid(_)) => {} // Expected
-            other => panic!("Expected SignatureInvalid for modified capsule, got {other:?}"),
+        let verifying_key = test_verifying_key();
+        match verify_signature(&verifying_key, &capsule) {
+            Err(CapsuleError::Ed25519SignatureInvalid) => {} // Expected
+            other => panic!("Expected Ed25519SignatureInvalid for modified capsule, got {other:?}"),
         }
 
         // Verify that the current payload is indeed different
@@ -1982,7 +2111,7 @@ mod tests {
         );
 
         capsule.manifest.expected_output_hash = hash1;
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
 
         let result = replay(&capsule, "verifier://ordering-complex").unwrap();
         assert_eq!(result.verdict, CapsuleVerdict::Pass);
@@ -2035,7 +2164,7 @@ mod tests {
                 .manifest
                 .metadata
                 .insert("potentially_malicious".to_string(), pattern.clone());
-            sign_capsule(&mut capsule);
+            sign_capsule(&test_signing_key(), &mut capsule);
 
             // Should handle injection patterns without breaking verification
             assert!(validate_manifest(&capsule.manifest).is_ok());
@@ -2140,7 +2269,7 @@ mod tests {
                 .metadata
                 .insert(malicious_key, malicious_value);
         }
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
 
         // Should handle massive metadata pollution without crashing or timeout
         let start = std::time::Instant::now();
@@ -2419,7 +2548,7 @@ mod tests {
         // This test intentionally uses invalid input_refs with non-ASCII characters
         // The validation should reject these and return an appropriate error
         capsule.manifest.expected_output_hash = hash_attempts[0].clone();
-        sign_capsule(&mut capsule);
+        sign_capsule(&test_signing_key(), &mut capsule);
 
         match replay(&capsule, "verifier://adversarial-keys") {
             Err(CapsuleError::ManifestIncomplete(msg)) => {
@@ -2575,9 +2704,10 @@ mod tests {
             let mut timings = Vec::new();
 
             // Collect timing samples for each attack case
+            let verifying_key = test_verifying_key();
             for _ in 0..sample_count {
                 let start = Instant::now();
-                let _result = verify_signature(&attack_capsule);
+                let _result = verify_signature(&verifying_key, &attack_capsule);
                 let duration = start.elapsed();
                 timings.push(duration.as_nanos());
             }
@@ -2908,7 +3038,7 @@ mod tests {
         unicode_capsule.manifest.input_refs = vec!["unicode_key_é".to_string()];
         unicode_capsule.manifest.expected_output_hash =
             compute_replay_hash(&unicode_capsule.payload, &unicode_capsule.inputs);
-        sign_capsule(&mut unicode_capsule);
+        sign_capsule(&test_signing_key(), &mut unicode_capsule);
 
         // Unicode input_refs are no longer valid - should be rejected
         let unicode_start = Instant::now();
@@ -2962,14 +3092,16 @@ mod tests {
 
         // Signing should work under memory pressure
         stress_capsule.manifest.expected_output_hash = stress_hash;
-        sign_capsule(&mut stress_capsule);
+        let test_signing_key = test_signing_key();
+        sign_capsule(&test_signing_key, &mut stress_capsule);
 
         let signing_time = stress_start.elapsed();
         assert!(signing_time < std::time::Duration::from_secs(10)); // Should complete within 10s
 
         // Verification should work under memory pressure
         let verification_start = std::time::Instant::now();
-        assert!(verify_signature(&stress_capsule).is_ok());
+        let verifying_key = test_verifying_key();
+        assert!(verify_signature(&verifying_key, &stress_capsule).is_ok());
         let verification_time = verification_start.elapsed();
         assert!(verification_time < std::time::Duration::from_secs(5));
 

@@ -604,9 +604,12 @@ impl VerifierSdk {
     /// # #[cfg(feature = "test-support")] {
     /// use frankenengine_verifier_sdk::{VerifierSdk, VerificationVerdict};
     /// use frankenengine_verifier_sdk::capsule::build_reference_capsule;
+    /// use ed25519_dalek::{SigningKey, VerifyingKey};
     ///
     /// let sdk = VerifierSdk::new("verifier://docs");
-    /// let result = sdk.verify_claim(&build_reference_capsule())?;
+    /// let signing_key = SigningKey::from_bytes(&[1_u8; 32]);
+    /// let verifying_key = VerifyingKey::from(&signing_key);
+    /// let result = sdk.verify_claim(&verifying_key, &build_reference_capsule())?;
     /// assert_eq!(result.verdict, VerificationVerdict::Pass);
     /// # }
     /// # Ok::<(), frankenengine_verifier_sdk::VerifierSdkError>(())
@@ -618,11 +621,7 @@ impl VerifierSdk {
     ) -> VerifierSdkResult<VerificationResult> {
         check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
         self.validate_current_verifier_identity()?;
-        // For structural verification, use a dummy key since we're not doing cryptographic verification
-        let dummy_key = VerifyingKey::from_bytes(&[0u8; 32]).map_err(|e| {
-            VerifierSdkError::Json(format!("failed to create dummy key for structural verification: {}", e))
-        })?;
-        let replay = capsule::replay(&dummy_key, claim, &self.verifier_identity)?;
+        let replay = capsule::replay(verifying_key, claim, &self.verifier_identity)?;
         let verdict = VerificationVerdict::from(replay.verdict);
         let assertions = vec![
             AssertionResult {
