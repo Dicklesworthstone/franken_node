@@ -41,13 +41,12 @@
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fmt;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::security::constant_time;
-use crate::supply_chain::artifact_signing::verify_signature;
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hex;
 use sha2::{Digest, Sha256};
 use std::convert::TryInto;
@@ -284,7 +283,7 @@ fn entry_with_server_computed_size(mut normalized: EvidenceEntry) -> (EvidenceEn
 
 fn decimal_digit_count(value: usize) -> usize {
     let mut remaining = value;
-    let mut digits = 1;
+    let mut digits: usize = 1;
     while remaining >= 10 {
         digits = digits.saturating_add(1);
         remaining /= 10;
@@ -385,12 +384,13 @@ fn verify_evidence_entry_bytes(
 ) -> Result<ReplaySignature, LedgerError> {
     let canonical_bytes = canonical_entry_bytes(entry);
     let signature_bytes = decode_replay_signature(&entry.signature)?;
+    let signature = Signature::from_bytes(&signature_bytes);
 
-    verify_signature(verifying_key, &canonical_bytes, &signature_bytes).map_err(|e| {
-        LedgerError::SignatureInvalid {
-            reason: format!("signature verification failed: {:?}", e),
-        }
-    })?;
+    verifying_key
+        .verify(&canonical_bytes, &signature)
+        .map_err(|_| LedgerError::SignatureInvalid {
+            reason: "signature verification failed: ManifestSignatureInvalid".to_string(),
+        })?;
 
     Ok(signature_bytes)
 }
@@ -573,8 +573,8 @@ impl LedgerCapacity {
 /// Type alias for configuration-style usage.
 pub type LedgerConfig = LedgerCapacity;
 
-fn format_ledger_init_event(capacity: &LedgerCapacity) -> impl fmt::Display + '_ {
-    format_args!(
+fn format_ledger_init_event(capacity: &LedgerCapacity) -> String {
+    format!(
         "{}: evidence ledger initialized: max_entries={}, max_bytes={}",
         event_codes::LEDGER_CAPACITY_WARN,
         capacity.max_entries,
@@ -582,8 +582,8 @@ fn format_ledger_init_event(capacity: &LedgerCapacity) -> impl fmt::Display + '_
     )
 }
 
-fn format_ledger_zero_capacity_event(entry: &EvidenceEntry) -> impl fmt::Display + '_ {
-    format_args!(
+fn format_ledger_zero_capacity_event(entry: &EvidenceEntry) -> String {
+    format!(
         "{}: append rejected because max_entries=0, epoch={}",
         event_codes::LEDGER_CAPACITY_WARN,
         entry.epoch_id,
@@ -594,8 +594,8 @@ fn format_ledger_entry_too_large_event(
     entry_size: usize,
     max_bytes: usize,
     epoch_id: u64,
-) -> impl fmt::Display {
-    format_args!(
+) -> String {
+    format!(
         "{}: entry size {} exceeds max_bytes {}, epoch={}",
         event_codes::LEDGER_CAPACITY_WARN,
         entry_size,
@@ -604,12 +604,8 @@ fn format_ledger_entry_too_large_event(
     )
 }
 
-fn format_ledger_append_event(
-    id: EntryId,
-    entry: &EvidenceEntry,
-    entry_size: usize,
-) -> impl fmt::Display + '_ {
-    format_args!(
+fn format_ledger_append_event(id: EntryId, entry: &EvidenceEntry, entry_size: usize) -> String {
+    format!(
         "{}: entry={}, decision={}, epoch={}, size={}",
         event_codes::LEDGER_APPEND,
         id,
@@ -623,8 +619,8 @@ fn format_ledger_eviction_event(
     evicted_id: EntryId,
     evicted_entry: &EvidenceEntry,
     evicted_size: usize,
-) -> impl fmt::Display + '_ {
-    format_args!(
+) -> String {
+    format!(
         "{}: evicted entry={}, decision={}, epoch={}, freed_bytes={}",
         event_codes::LEDGER_EVICTION,
         evicted_id,
@@ -634,8 +630,8 @@ fn format_ledger_eviction_event(
     )
 }
 
-fn format_ledger_spill_event(id: EntryId, bytes: usize) -> impl fmt::Display {
-    format_args!(
+fn format_ledger_spill_event(id: EntryId, bytes: usize) -> String {
+    format!(
         "{}: spill wrote entry={}, bytes={}",
         event_codes::LEDGER_SPILL,
         id,
@@ -1370,7 +1366,7 @@ fn get_disk_usage(path: &Path) -> Result<f64, String> {
 
 enum SpillWriter {
     Generic(Box<dyn Write + Send>),
-    File(std::fs::File),
+    File(BufWriter<std::fs::File>),
 }
 
 impl SpillWriter {
@@ -1410,11 +1406,9 @@ impl SpillWriter {
                     .map_err(|e| LedgerError::SpillError {
                         reason: format!("write: {e}"),
                     })?;
-                counting.flush().map_err(|e| LedgerError::SpillError {
-                    reason: format!("flush: {e}"),
-                })?;
                 Ok(json_bytes)
-                // NOTE: Removed per-record sync_all - use sync_durability() for batch sync
+                // NOTE: File-backed spill intentionally leaves data buffered between appends.
+                // Use sync_durability() or drop/close the writer to flush buffered bytes.
             }
         }
     }
@@ -1423,9 +1417,16 @@ impl SpillWriter {
     fn sync_durability(&mut self) -> Result<(), LedgerError> {
         match self {
             Self::Generic(_) => Ok(()), // No-op for generic writers
-            Self::File(file) => file.sync_all().map_err(|e| LedgerError::SpillError {
-                reason: format!("sync: {e}"),
-            }),
+            Self::File(file) => {
+                file.flush().map_err(|e| LedgerError::SpillError {
+                    reason: format!("flush: {e}"),
+                })?;
+                file.get_ref()
+                    .sync_all()
+                    .map_err(|e| LedgerError::SpillError {
+                        reason: format!("sync: {e}"),
+                    })
+            }
         }
     }
 }
@@ -1501,7 +1502,7 @@ impl LabSpillMode {
             })?;
         Ok(Self {
             ledger: EvidenceLedger::new(capacity),
-            spill_writer: SpillWriter::File(file),
+            spill_writer: SpillWriter::File(BufWriter::new(file)),
             circuit_breaker: CircuitBreakerState::new_with_path(path),
         })
     }
@@ -1537,7 +1538,7 @@ impl LabSpillMode {
             })?;
         Ok(Self {
             ledger: EvidenceLedger::with_verifying_key(capacity, verifying_key),
-            spill_writer: SpillWriter::File(file),
+            spill_writer: SpillWriter::File(BufWriter::new(file)),
             circuit_breaker: CircuitBreakerState::new_with_path(path),
         })
     }
@@ -2470,6 +2471,37 @@ mod tests {
     }
 
     #[test]
+    fn spill_writer_file_buffers_jsonl_without_changing_bytes() {
+        let dir = tempfile::tempdir().expect("should succeed");
+        let spill_path = dir.path().join("buffered_spill.jsonl");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&spill_path)
+            .expect("spill file should open");
+        let mut spill_writer = SpillWriter::File(BufWriter::new(file));
+        let entry = make_entry("DEC-SPILL-FILE", 10);
+
+        let json_bytes = spill_writer
+            .append_json_entry(&entry)
+            .expect("spill writer should serialize directly");
+        spill_writer
+            .sync_durability()
+            .expect("buffered file writer should flush and sync");
+        drop(spill_writer);
+
+        let captured = std::fs::read_to_string(&spill_path).expect("spill file should be readable");
+        let line = captured
+            .strip_suffix('\n')
+            .expect("spill output should end with newline");
+        let expected_line =
+            serde_json::to_string(&entry).expect("entry serialization should succeed");
+
+        assert_eq!(json_bytes, expected_line.len());
+        assert_eq!(line, expected_line);
+    }
+
+    #[test]
     fn lab_spill_to_tempfile() {
         let dir = tempfile::tempdir().expect("should succeed");
         let spill_path = dir.path().join("evidence_spill.jsonl");
@@ -2505,7 +2537,7 @@ mod tests {
                 .expect("spill file should open");
             let id = spill
                 .append(make_entry("DEC-DURABLE", 7))
-                .expect("file-backed spill append should sync before ack");
+                .expect("file-backed spill append should acknowledge buffered write");
             assert_eq!(spill.len(), 1);
             drop(spill);
             id
@@ -5518,6 +5550,44 @@ mod tests {
             hex::encode(expected_signature),
             "sign_evidence_entry must preserve the legacy signature byte contract"
         );
+    }
+
+    #[test]
+    fn verify_evidence_entry_matches_legacy_artifact_signing_verifier_contract() {
+        let (signing_key, verifying_key) = test_keys();
+        let mut entry = test_entry("TEST-VERIFY-PARITY", 1);
+        sign_evidence_entry(&mut entry, &signing_key);
+
+        let signature_bytes =
+            decode_replay_signature(&entry.signature).expect("signed test entry should decode");
+        let canonical_bytes = canonical_entry_bytes(&entry);
+
+        assert!(
+            crate::supply_chain::artifact_signing::verify_signature(
+                &verifying_key,
+                &canonical_bytes,
+                &signature_bytes,
+            )
+            .is_ok()
+        );
+        verify_evidence_entry(&entry, &verifying_key).expect("optimized verifier should accept");
+
+        let mut tampered = entry.clone();
+        tampered.decision_id.push_str("-TAMPERED");
+        let tampered_canonical_bytes = canonical_entry_bytes(&tampered);
+
+        assert!(
+            crate::supply_chain::artifact_signing::verify_signature(
+                &verifying_key,
+                &tampered_canonical_bytes,
+                &signature_bytes,
+            )
+            .is_err()
+        );
+
+        let err = verify_evidence_entry(&tampered, &verifying_key)
+            .expect_err("optimized verifier should reject tampered entry");
+        assert!(err.to_string().contains("signature verification failed"));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use franken_node::observability::evidence_ledger::{DecisionKind, EvidenceEntry};
+use frankenengine_node::observability::evidence_ledger::{DecisionKind, EvidenceEntry};
 use serde_json::json;
 
 fn create_large_evidence_entry() -> EvidenceEntry {
@@ -30,6 +30,7 @@ fn create_large_evidence_entry() -> EvidenceEntry {
         }),
         size_bytes: 0,
         signature: "benchmark-signature-placeholder-that-would-be-real-ed25519-signature".to_string(),
+        prev_entry_hash: String::new(),
     }
 }
 

@@ -12,6 +12,8 @@ mod api {
     pub mod fleet_quarantine;
     #[path = "middleware.rs"]
     pub mod middleware;
+    #[path = "session_auth.rs"]
+    pub mod session_auth;
     #[path = "trust_card_routes.rs"]
     pub mod trust_card_routes;
 
@@ -64,8 +66,8 @@ use crate::cli::{
     VerifyMigrationArgs, VerifyModuleArgs, VerifyReleaseArgs,
     load_doctor_policy_activation_input,
 };
-use frankenengine_node::api::session_auth::{SessionConfig, SessionManager};
-use frankenengine_node::control_plane::ControlEpoch;
+use crate::api::session_auth::{SessionConfig, SessionManager};
+use frankenengine_node::control_plane::control_epoch::ControlEpoch;
 use crate::policy::{
     bayesian_diagnostics::{BayesianDiagnostics, CandidateRef, Observation},
     decision_engine::{DecisionEngine, DecisionOutcome, DecisionReason},
@@ -143,7 +145,9 @@ use frankenengine_node::{
         },
     },
 };
-pub use frankenengine_node::{connector, control_plane, observability, security, supply_chain};
+pub use frankenengine_node::{
+    capacity_defaults, connector, control_plane, observability, security, supply_chain,
+};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};

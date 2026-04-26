@@ -1,9 +1,11 @@
 use std::error::Error;
 
 use frankenengine_node::security::decision_receipt::{
-    Decision, Receipt, ReceiptError, ReceiptQuery, export_receipts_cbor, export_receipts_to_path,
-    import_receipts_cbor, sign_receipt, verify_receipt,
+    Decision, Receipt, ReceiptError, ReceiptQuery, export_receipts_to_path, sign_receipt,
+    verify_receipt,
 };
+#[cfg(feature = "cbor-serialization")]
+use frankenengine_node::security::decision_receipt::{export_receipts_cbor, import_receipts_cbor};
 use frankenengine_node::supply_chain::artifact_signing::{
     ArtifactSigningError, generate_artifact_signing_key, sign_bytes, signing_key_from_seed_bytes,
     signing_key_from_seed_hex, verify_signature,
@@ -79,6 +81,7 @@ fn decision_receipts_sign_with_configured_key_material() -> Result<(), Box<dyn E
     Ok(())
 }
 
+#[cfg(feature = "cbor-serialization")]
 #[test]
 fn decision_receipt_cbor_preserves_confidence_bit_pattern() -> Result<(), Box<dyn Error>> {
     let signing_key = generate_artifact_signing_key();

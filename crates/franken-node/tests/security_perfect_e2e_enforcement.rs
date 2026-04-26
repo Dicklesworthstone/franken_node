@@ -206,6 +206,7 @@ impl RemoteCapFactory {
                 "test-trace-12345",
             )
             .map(|(cap, _audit)| cap)
+            .map_err(|err| err.to_string())
     }
 
     /// Creates a restricted capability for specific operation.
@@ -232,6 +233,7 @@ impl RemoteCapFactory {
                 "test-restricted-trace",
             )
             .map(|(cap, _audit)| cap)
+            .map_err(|err| err.to_string())
     }
 }
 

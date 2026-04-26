@@ -41,6 +41,12 @@ impl RemoteCapLookup {
     }
 }
 
+impl From<bool> for RemoteCapLookup {
+    fn from(has_cap: bool) -> Self {
+        Self::from_bool(has_cap)
+    }
+}
+
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
         items.clear();

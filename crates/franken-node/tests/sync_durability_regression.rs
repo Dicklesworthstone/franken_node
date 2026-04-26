@@ -4,10 +4,35 @@
 //! and avoid excessive per-record sync operations that degrade performance.
 
 use frankenengine_node::observability::evidence_ledger::{
-    EvidenceEntry, LabSpillMode, LedgerCapacity,
+    DecisionKind, EvidenceEntry, LabSpillMode, LedgerCapacity,
 };
 use std::io::Read;
 use tempfile::NamedTempFile;
+
+fn test_entry(name: &str, hash: &str, epoch_id: u64, chain_position: u64) -> EvidenceEntry {
+    EvidenceEntry {
+        schema_version: "sync-durability-regression-v1".to_string(),
+        entry_id: Some(format!("EVD-{chain_position:03}")),
+        decision_id: name.to_string(),
+        decision_kind: DecisionKind::Admit,
+        decision_time: "2026-04-26T00:00:00Z".to_string(),
+        timestamp_ms: 1_700_000_000_000_u64.saturating_add(chain_position),
+        trace_id: format!("trace-{name}"),
+        epoch_id,
+        payload: serde_json::json!({
+            "evidence_hash": hash,
+            "chain_position": chain_position,
+            "derivation_source": "test",
+        }),
+        size_bytes: 0,
+        signature: format!("sig-{chain_position}"),
+        prev_entry_hash: if chain_position > 0 {
+            format!("prev-hash-{}", chain_position - 1)
+        } else {
+            String::new()
+        },
+    }
+}
 
 #[test]
 fn evidence_ledger_supports_batched_sync() {
@@ -23,20 +48,7 @@ fn evidence_ledger_supports_batched_sync() {
 
     // Append multiple entries without individual syncs
     let entries = (0..5)
-        .map(|i| EvidenceEntry {
-            evidence_id: format!("test-evidence-{i}"),
-            evidence_hash: format!("hash-{i}"),
-            evidence_size_bytes: 100 + i,
-            derived_at_epoch: 1000 + i as u64,
-            derivation_source: "test".to_string(),
-            chain_position: i as u64,
-            previous_evidence_hash: if i > 0 {
-                Some(format!("hash-{}", i - 1))
-            } else {
-                None
-            },
-            signature_envelope: format!("sig-{i}"),
-        })
+        .map(|i| test_entry(&format!("test-evidence-{i}"), &format!("hash-{i}"), 1000 + i as u64, i as u64))
         .collect::<Vec<_>>();
 
     let mut entry_ids = Vec::new();
@@ -109,20 +121,7 @@ fn evidence_ledger_batch_and_sync_preserves_ordering() {
     // Append entries in specific order
     let ordered_evidence = ["alpha", "beta", "gamma", "delta"];
     for (i, name) in ordered_evidence.iter().enumerate() {
-        let entry = EvidenceEntry {
-            evidence_id: name.to_string(),
-            evidence_hash: format!("{name}-hash"),
-            evidence_size_bytes: 100,
-            derived_at_epoch: 2000 + i as u64,
-            derivation_source: "test".to_string(),
-            chain_position: i as u64,
-            previous_evidence_hash: if i > 0 {
-                Some(format!("{}-hash", ordered_evidence[i - 1]))
-            } else {
-                None
-            },
-            signature_envelope: format!("{name}-sig"),
-        };
+        let entry = test_entry(name, &format!("{name}-hash"), 2000 + i as u64, i as u64);
         ledger.append(entry).expect("append entry");
     }
 

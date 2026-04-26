@@ -27,6 +27,36 @@ use sha2::{Digest, Sha256};
 #[cfg(feature = "remote-ops")]
 use crate::remote::eviction_saga::RemoteCapLookup;
 
+#[cfg(not(feature = "remote-ops"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RemoteCapLookup {
+    Granted,
+    Denied,
+    NotPresent,
+}
+
+#[cfg(not(feature = "remote-ops"))]
+impl RemoteCapLookup {
+    fn is_granted(self) -> bool {
+        matches!(self, Self::Granted)
+    }
+
+    fn from_bool(has_cap: bool) -> Self {
+        if has_cap {
+            Self::Granted
+        } else {
+            Self::NotPresent
+        }
+    }
+}
+
+#[cfg(not(feature = "remote-ops"))]
+impl From<bool> for RemoteCapLookup {
+    fn from(has_cap: bool) -> Self {
+        Self::from_bool(has_cap)
+    }
+}
+
 /// Maximum phase transitions before oldest-first eviction.
 const MAX_TRANSITIONS: usize = 4096;
 
@@ -386,8 +416,11 @@ impl EvictionSaga {
 
     /// Begin the upload phase. Requires a validated RemoteCap with
     /// ArtifactUpload scope.
-    #[cfg(feature = "remote-ops")]
-    pub fn begin_upload(&mut self, remote_cap: RemoteCapLookup) -> Result<(), EvictionSagaError> {
+    pub fn begin_upload<C>(&mut self, remote_cap: C) -> Result<(), EvictionSagaError>
+    where
+        C: Into<RemoteCapLookup>,
+    {
+        let remote_cap = remote_cap.into();
         if !remote_cap.is_granted() {
             return Err(EvictionSagaError::new(
                 ERR_ES_REMOTE_CAP_REQUIRED,
@@ -400,22 +433,24 @@ impl EvictionSaga {
     }
 
     /// Mark upload as successful and transition to verification.
-    pub fn upload_complete(
-        &mut self,
-        remote_cap: RemoteCapLookup,
-    ) -> Result<(), EvictionSagaError> {
+    pub fn upload_complete<C>(&mut self, remote_cap: C) -> Result<(), EvictionSagaError>
+    where
+        C: Into<RemoteCapLookup>,
+    {
         self.ensure_transition_allowed(SagaPhase::Verifying)?;
+        let remote_cap = remote_cap.into();
         self.require_remote_cap_recheck(SagaPhase::Uploading, remote_cap, "upload_complete")?;
         self.tier_presence.l3_present = true;
         self.transition(SagaPhase::Verifying, ES_PHASE_VERIFY, "upload_done")
     }
 
     /// Mark verification as successful and transition to retirement.
-    pub fn verify_complete(
-        &mut self,
-        remote_cap: RemoteCapLookup,
-    ) -> Result<(), EvictionSagaError> {
+    pub fn verify_complete<C>(&mut self, remote_cap: C) -> Result<(), EvictionSagaError>
+    where
+        C: Into<RemoteCapLookup>,
+    {
         self.ensure_transition_allowed(SagaPhase::Retiring)?;
+        let remote_cap = remote_cap.into();
         self.require_remote_cap_recheck(SagaPhase::Verifying, remote_cap, "verify_complete")?;
         if !self.tier_presence.l3_present {
             return Err(EvictionSagaError::new(
@@ -428,11 +463,12 @@ impl EvictionSaga {
     }
 
     /// Mark retirement complete; saga is done.
-    pub fn retire_complete(
-        &mut self,
-        remote_cap: RemoteCapLookup,
-    ) -> Result<(), EvictionSagaError> {
+    pub fn retire_complete<C>(&mut self, remote_cap: C) -> Result<(), EvictionSagaError>
+    where
+        C: Into<RemoteCapLookup>,
+    {
         self.ensure_transition_allowed(SagaPhase::Complete)?;
+        let remote_cap = remote_cap.into();
         self.require_remote_cap_recheck(SagaPhase::Retiring, remote_cap, "retire_complete")?;
         if !self.tier_presence.can_retire_l2() {
             return Err(EvictionSagaError::new(
