@@ -1491,7 +1491,7 @@ fn negative_decision_kind_edge_cases_serialization_robustness() {
     // Test snapshot consistency with multiple decision kinds
     let snapshot = ledger.snapshot();
     assert_eq!(snapshot.entries.len(), decision_kinds.len());
-    assert!(snapshot.total_appended == decision_kinds.len() as u64);
+    assert!(snapshot.total_appended == u64::try_from(decision_kinds.len()).unwrap_or(u64::MAX));
 
     // Verify all decision kinds are preserved correctly in snapshot
     let snapshot_kinds: Vec<_> = snapshot.entries.iter()
