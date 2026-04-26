@@ -54,7 +54,9 @@ use std::convert::TryInto;
 
 const MIN_SEEN_SIGNATURES: usize = 8192;
 const ED25519_SIGNATURE_BYTES: usize = 64;
+const SHA256_DIGEST_BYTES: usize = 32;
 type ReplaySignature = [u8; ED25519_SIGNATURE_BYTES];
+type EntryHash = [u8; SHA256_DIGEST_BYTES];
 
 // ── Event codes ─────────────────────────────────────────────────────
 
@@ -160,8 +162,42 @@ impl EvidenceEntry {
     /// assert!(entry.estimated_size() > 0);
     /// ```
     pub fn estimated_size(&self) -> usize {
-        serde_json::to_string(self).map(|s| s.len()).unwrap_or(256)
+        serialized_json_size(self).unwrap_or(256)
     }
+}
+
+struct ByteCountingWriter {
+    bytes_written: usize,
+}
+
+impl ByteCountingWriter {
+    const fn new() -> Self {
+        Self { bytes_written: 0 }
+    }
+
+    const fn bytes_written(&self) -> usize {
+        self.bytes_written
+    }
+}
+
+impl Write for ByteCountingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes_written = self.bytes_written.saturating_add(buf.len());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_json_size<T>(value: &T) -> Result<usize, serde_json::Error>
+where
+    T: Serialize,
+{
+    let mut writer = ByteCountingWriter::new();
+    serde_json::to_writer(&mut writer, value)?;
+    Ok(writer.bytes_written())
 }
 
 fn entry_with_server_computed_size(mut normalized: EvidenceEntry) -> (EvidenceEntry, usize) {
@@ -196,14 +232,12 @@ fn decimal_digit_count(value: usize) -> usize {
 }
 
 fn serialized_entry_size(entry: &EvidenceEntry) -> usize {
-    serde_json::to_string(entry)
-        .map(|entry_json| entry_json.len())
-        .unwrap_or(usize::MAX)
+    serialized_json_size(entry).unwrap_or(usize::MAX)
 }
 
 /// Create a canonical representation of an EvidenceEntry for signature verification.
 /// Excludes the signature and server-derived size fields to prevent circular dependency.
-fn canonical_entry_bytes(entry: &EvidenceEntry) -> Vec<u8> {
+fn canonical_entry_bytes(entry: &EvidenceEntry) -> [u8; SHA256_DIGEST_BYTES] {
     let mut hasher = Sha256::new();
 
     // Domain separator prevents attacks across different signing contexts
@@ -230,13 +264,17 @@ fn canonical_entry_bytes(entry: &EvidenceEntry) -> Vec<u8> {
         update_hash_len_prefixed(&mut hasher, payload_str.as_bytes());
     }
 
-    hasher.finalize().to_vec()
+    hasher.finalize().into()
 }
 
 fn update_hash_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
     let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     hasher.update(len.to_le_bytes());
     hasher.update(bytes);
+}
+
+fn encode_entry_hash(hash: &EntryHash) -> String {
+    hex::encode(hash)
 }
 
 /// Sign an evidence entry using an Ed25519 signing key.
@@ -320,6 +358,16 @@ fn decode_replay_signature(signature: &str) -> Result<ReplaySignature, LedgerErr
         return Err(LedgerError::SignatureInvalid {
             reason: "signature must use canonical lowercase hex".to_string(),
         });
+    }
+
+    if signature.len() == ED25519_SIGNATURE_BYTES * 2 {
+        let mut signature_bytes = [0_u8; ED25519_SIGNATURE_BYTES];
+        hex::decode_to_slice(signature, &mut signature_bytes).map_err(|e| {
+            LedgerError::SignatureInvalid {
+                reason: format!("invalid hex signature: {}", e),
+            }
+        })?;
+        return Ok(signature_bytes);
     }
 
     let signature_bytes = hex::decode(signature).map_err(|e| LedgerError::SignatureInvalid {
@@ -557,7 +605,7 @@ pub struct EvidenceLedger {
     /// Insertion order for the bounded replay-prevention window.
     seen_signature_order: VecDeque<(u64, ReplaySignature)>,
     /// Hash of the last appended entry for hash chain integrity
-    last_entry_hash: Option<String>,
+    last_entry_hash: Option<EntryHash>,
 }
 
 impl EvidenceLedger {
@@ -586,19 +634,27 @@ impl EvidenceLedger {
             replay_signature = Some(signature_bytes);
         }
 
+        let expected_prev_hash = self
+            .last_entry_hash
+            .as_ref()
+            .map(encode_entry_hash)
+            .unwrap_or_default();
+
         // SECURITY: Validate hash chain integrity if client provided prev_entry_hash
         if !entry.prev_entry_hash.is_empty() {
-            let expected_hash = self.last_entry_hash.as_deref().unwrap_or("");
-            if !crate::security::constant_time::ct_eq(expected_hash, &entry.prev_entry_hash) {
+            if !crate::security::constant_time::ct_eq(
+                expected_prev_hash.as_str(),
+                &entry.prev_entry_hash,
+            ) {
                 return Err(LedgerError::HashChainBroken {
-                    expected_hash: expected_hash.to_string(),
+                    expected_hash: expected_prev_hash,
                     provided_hash: entry.prev_entry_hash.clone(),
                 });
             }
         }
 
         let mut normalized_entry = entry.clone();
-        normalized_entry.prev_entry_hash = self.last_entry_hash.clone().unwrap_or_default();
+        normalized_entry.prev_entry_hash = expected_prev_hash;
         let (normalized_entry, entry_size) = entry_with_server_computed_size(normalized_entry);
 
         if entry_size > self.capacity.max_bytes {
@@ -687,7 +743,7 @@ impl EvidenceLedger {
     }
 
     /// Compute SHA-256 hash of an entry for hash chain integrity.
-    fn compute_entry_hash(&self, entry: &EvidenceEntry) -> String {
+    fn compute_entry_hash(&self, entry: &EvidenceEntry) -> EntryHash {
         let mut hasher = Sha256::new();
         hasher.update(b"evidence_entry_v1:");
         hasher.update(&entry.schema_version.len().to_le_bytes());
@@ -721,7 +777,7 @@ impl EvidenceLedger {
         hasher.update(entry.signature.as_bytes());
 
         // NOTE: prev_entry_hash is intentionally excluded to prevent circular dependency
-        hex::encode(hasher.finalize())
+        hasher.finalize().into()
     }
 
     /// Create a new evidence ledger with the given capacity.
@@ -2428,7 +2484,8 @@ mod tests {
 
         let expected_prev_hash = ledger
             .last_entry_hash
-            .clone()
+            .as_ref()
+            .map(encode_entry_hash)
             .expect("first append should establish chain hash");
         let mut second_entry = make_entry("DEC-002", 2);
         second_entry.size_bytes = usize::MAX;
@@ -2445,6 +2502,10 @@ mod tests {
         assert!(
             !appended_entry.prev_entry_hash.is_empty(),
             "hash chain linkage must still be finalized"
+        );
+        assert_eq!(
+            appended_entry.prev_entry_hash, expected_prev_hash,
+            "external prev_entry_hash contract must stay hex-encoded even if the ledger stores raw hash bytes internally"
         );
     }
 
@@ -2482,6 +2543,23 @@ mod tests {
         assert!(
             found_digit_boundary,
             "test should exercise a size_bytes decimal-boundary crossover"
+        );
+    }
+
+    #[test]
+    fn estimated_size_matches_serialized_utf8_length() {
+        let mut entry = test_entry("DEC-UTF8", 1);
+        entry.payload = serde_json::json!({
+            "message": "trust-native runtime",
+            "unicode": "🙂漢字"
+        });
+
+        assert_eq!(
+            entry.estimated_size(),
+            serde_json::to_string(&entry)
+                .expect("entry serialization")
+                .len(),
+            "estimated_size must track exact serialized UTF-8 byte length"
         );
     }
 
@@ -5460,6 +5538,16 @@ mod tests {
         assert_eq!(
             canonical1, canonical2,
             "Canonical bytes should exclude signature field"
+        );
+    }
+
+    #[test]
+    fn test_canonical_entry_bytes_uses_fixed_sha256_digest_width() {
+        let entry = test_entry("TEST-CANONICAL-DIGEST", 1);
+        assert_eq!(
+            canonical_entry_bytes(&entry).len(),
+            SHA256_DIGEST_BYTES,
+            "canonical entry representation should stay a fixed-width SHA-256 digest"
         );
     }
 
