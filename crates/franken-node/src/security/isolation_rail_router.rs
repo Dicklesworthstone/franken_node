@@ -6,6 +6,7 @@
 //!
 //! Schema version: `iso-mesh-v1.0`
 
+use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -644,8 +645,7 @@ impl RailRouter {
     }
 
     fn timestamp(&self) -> String {
-        // Deterministic for testing; in production this would use real time.
-        "2026-02-21T00:00:00Z".to_string()
+        Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true)
     }
 
     fn emit_audit(&mut self, event_code: &str, workload_id: &str, detail: &str) {
@@ -671,6 +671,11 @@ mod tests {
 
     fn default_router() -> RailRouter {
         RailRouter::with_default_policy()
+    }
+
+    fn parse_timestamp(timestamp: &str) -> chrono::DateTime<chrono::FixedOffset> {
+        chrono::DateTime::parse_from_rfc3339(timestamp)
+            .expect("timestamps should be valid RFC3339 values")
     }
 
     // === IsolationRail ordering ===
@@ -1289,9 +1294,9 @@ mod tests {
 
         // Verify audit events are chronologically consistent
         for window in audit_log.windows(2) {
-            assert_eq!(
-                window[0].timestamp, window[1].timestamp,
-                "All timestamps should be equal in test environment"
+            assert!(
+                parse_timestamp(&window[0].timestamp) <= parse_timestamp(&window[1].timestamp),
+                "Audit timestamps should be nondecreasing"
             );
         }
     }
@@ -1597,12 +1602,13 @@ mod tests {
                 );
             }
 
-            // Timestamp should be consistent
-            assert_eq!(
+            // Timestamp should remain parseable and avoid the old placeholder.
+            assert_ne!(
                 entry.timestamp, "2026-02-21T00:00:00Z",
-                "Entry {} should have consistent timestamp",
+                "Entry {} should not use the placeholder timestamp",
                 i
             );
+            let _parsed = parse_timestamp(&entry.timestamp);
 
             // Detail should provide meaningful information
             assert!(
@@ -1652,6 +1658,23 @@ mod tests {
                 "Audit entry should serialize despite extreme workload IDs"
             );
         }
+    }
+
+    #[test]
+    fn audit_timestamps_follow_runtime_clock() {
+        let mut router = default_router();
+        router.classify_workload("w1", 0.2).unwrap();
+        let first_timestamp = parse_timestamp(&router.audit_log().last().unwrap().timestamp);
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        router.classify_workload("w2", 0.7).unwrap();
+        let later_timestamp = parse_timestamp(&router.audit_log().last().unwrap().timestamp);
+
+        assert!(
+            later_timestamp > first_timestamp,
+            "Later audit events should advance with wall-clock time"
+        );
     }
 
     /// Test router removal and cleanup operations with edge cases
