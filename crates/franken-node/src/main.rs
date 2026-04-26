@@ -9041,6 +9041,12 @@ mod trust_command_tests {
 #[cfg(test)]
 mod registry_command_tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn cwd_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn parse_min_assurance_accepts_range() {
@@ -9469,6 +9475,31 @@ mod registry_command_tests {
         assert!(
             leftovers.is_empty(),
             "temporary replacement file should not remain after atomic write: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn write_bytes_atomically_supports_relative_target_in_current_directory() {
+        let _guard = cwd_test_lock().lock().expect("cwd lock");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let previous_cwd = std::env::current_dir().expect("cwd");
+        let target_path = Path::new("artifact.bin");
+
+        std::env::set_current_dir(temp.path()).expect("set cwd");
+        let write_result = write_bytes_atomically(target_path, b"relative payload");
+        let restore_result = std::env::set_current_dir(&previous_cwd);
+
+        write_result.expect("relative write");
+        restore_result.expect("restore cwd");
+        assert_eq!(
+            std::fs::read(temp.path().join("artifact.bin")).expect("read relative payload"),
+            b"relative payload"
+        );
+        let leftovers =
+            temp_name_leftovers(temp.path(), |name| name.starts_with("artifact.bin.tmp"));
+        assert!(
+            leftovers.is_empty(),
+            "temporary file should not remain after relative write: {leftovers:?}"
         );
     }
 
@@ -11086,7 +11117,10 @@ fn validate_package_name(name: &str) -> anyhow::Result<()> {
     // - cannot start with . or _
     // - no URL-unsafe characters
     if name.is_empty() || name.len() > 214 {
-        anyhow::bail!("Package name length must be 1-214 characters, got {}", name.len());
+        anyhow::bail!(
+            "Package name length must be 1-214 characters, got {}",
+            name.len()
+        );
     }
 
     if name.starts_with('.') || name.starts_with('_') {
@@ -11112,7 +11146,10 @@ fn validate_package_name(name: &str) -> anyhow::Result<()> {
 /// Validate that a version string is safe for URL construction.
 fn validate_version_string(version: &str) -> anyhow::Result<()> {
     if version.is_empty() || version.len() > 50 {
-        anyhow::bail!("Version length must be 1-50 characters, got {}", version.len());
+        anyhow::bail!(
+            "Version length must be 1-50 characters, got {}",
+            version.len()
+        );
     }
 
     // Only allow characters commonly used in semantic versions
@@ -11134,26 +11171,31 @@ fn validate_version_string(version: &str) -> anyhow::Result<()> {
 /// Validate that the constructed URL points to a trusted domain.
 fn validate_trust_scan_url(url: &str) -> anyhow::Result<()> {
     // Allowlist of trusted domains for trust scanning
-    const TRUSTED_DOMAINS: &[&str] = &[
-        "api.deps.dev",
-        "registry.npmjs.org",
-    ];
+    const TRUSTED_DOMAINS: &[&str] = &["api.deps.dev", "registry.npmjs.org"];
 
     // Parse URL to validate structure
-    let parsed_url = url::Url::parse(url)
-        .with_context(|| format!("Invalid URL format: {}", url))?;
+    let parsed_url =
+        url::Url::parse(url).with_context(|| format!("Invalid URL format: {}", url))?;
 
     // Ensure HTTPS only
     if parsed_url.scheme() != "https" {
-        anyhow::bail!("Only HTTPS URLs allowed, got scheme: {}", parsed_url.scheme());
+        anyhow::bail!(
+            "Only HTTPS URLs allowed, got scheme: {}",
+            parsed_url.scheme()
+        );
     }
 
     // Check domain allowlist
-    let host = parsed_url.host_str()
+    let host = parsed_url
+        .host_str()
         .ok_or_else(|| anyhow::anyhow!("URL missing host: {}", url))?;
 
     if !TRUSTED_DOMAINS.contains(&host) {
-        anyhow::bail!("Untrusted domain '{}', allowed domains: {:?}", host, TRUSTED_DOMAINS);
+        anyhow::bail!(
+            "Untrusted domain '{}', allowed domains: {:?}",
+            host,
+            TRUSTED_DOMAINS
+        );
     }
 
     // Ensure no credentials in URL
@@ -13455,10 +13497,22 @@ fn registry_artifact_file_name_is_safe(file_name: &str) -> bool {
     }
 }
 
+fn sync_directory(path: &Path) -> Result<()> {
+    std::fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| format!("failed syncing directory {}", path.display()))
+}
+
+fn normalized_directory(path: &Path) -> &Path {
+    if path.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        path
+    }
+}
+
 fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("missing parent directory for {}", path.display()))?;
+    let parent = normalized_directory(path.parent().unwrap_or_else(|| Path::new(".")));
     std::fs::create_dir_all(parent)
         .with_context(|| format!("failed creating {}", parent.display()))?;
 
@@ -13468,8 +13522,18 @@ fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("failed deriving file name for {}", path.display()))?;
     let temp_path = path.with_file_name(format!("{file_name}.tmp-{}", Uuid::now_v7()));
     let mut temp_guard = TempFileGuard::new(temp_path.clone());
-    std::fs::write(&temp_path, bytes)
-        .with_context(|| format!("failed writing {}", temp_path.display()))?;
+    {
+        let mut temp_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .with_context(|| format!("failed opening {}", temp_path.display()))?;
+        use std::io::Write as _;
+        temp_file
+            .write_all(bytes)
+            .and_then(|()| temp_file.sync_all())
+            .with_context(|| format!("failed writing {}", temp_path.display()))?;
+    }
     std::fs::rename(&temp_path, path).with_context(|| {
         format!(
             "failed promoting temporary artifact {} -> {}",
@@ -13478,6 +13542,13 @@ fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
         )
     })?;
     temp_guard.defuse();
+    sync_directory(parent)?;
+    if let Some(ancestor) = parent.parent() {
+        let ancestor = normalized_directory(ancestor);
+        if ancestor != parent {
+            sync_directory(ancestor)?;
+        }
+    }
     Ok(())
 }
 
@@ -13502,6 +13573,9 @@ fn persist_local_registry_artifact(
         .join(normalize_registry_name(&published.name));
     std::fs::create_dir_all(&lineage_root)
         .with_context(|| format!("failed creating {}", lineage_root.display()))?;
+    let lineage_parent =
+        normalized_directory(lineage_root.parent().unwrap_or_else(|| Path::new(".")));
+    sync_directory(lineage_parent)?;
     let entry_dir_name =
         registry_entry_directory_name(&published.registered_at, &published.extension_id);
     let entry_dir = lineage_root.join(&entry_dir_name);
@@ -13548,6 +13622,7 @@ fn persist_local_registry_artifact(
         )
     })?;
     temp_guard.defuse();
+    sync_directory(&lineage_root)?;
     let manifest_path = entry_dir.join(REGISTRY_LOCAL_ARTIFACT_MANIFEST_FILE_NAME);
 
     Ok(StoredRegistryArtifact {
@@ -22219,7 +22294,10 @@ mod run_trust_gate_tests {
         #[test]
         fn validate_trust_scan_url_accepts_trusted_domains() {
             // Valid: trusted domains
-            assert!(validate_trust_scan_url("https://api.deps.dev/v3alpha/systems/npm/packages/test").is_ok());
+            assert!(
+                validate_trust_scan_url("https://api.deps.dev/v3alpha/systems/npm/packages/test")
+                    .is_ok()
+            );
             assert!(validate_trust_scan_url("https://registry.npmjs.org/test").is_ok());
         }
     }
