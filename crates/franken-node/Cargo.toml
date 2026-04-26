@@ -601,6 +601,14 @@ required-features = ["advanced-features"]
 name = "revocation_freshness_regressions"
 path = "tests/revocation_freshness_regressions.rs"
 
+[[test]]
+name = "e2e_transparency_inclusion_real_pipeline"
+path = "tests/e2e_transparency_inclusion_real_pipeline.rs"
+
+[[test]]
+name = "e2e_migration_pipeline_real_cohort"
+path = "tests/e2e_migration_pipeline_real_cohort.rs"
+
 [[bench]]
 name = "cuckoo_revocation_bench"
 harness = false
