@@ -68,9 +68,10 @@ use crate::api::{
     },
 };
 use crate::cli::{
-    BenchCommand, Cli, Command, DoctorCloseConditionArgs, DoctorCommand,
+    BenchCommand, Cli, Command, DebugCommand, DebugExplainArgs, DebugTraceArgs, DoctorCloseConditionArgs, DoctorCommand,
     DoctorPolicyActivationInput, FleetAgentArgs, FleetCommand, IncidentCommand, MigrateCommand,
-    OpsCommand, OpsMetricsFormat, OpsRotateKeyArgs, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs,
+    OpsCommand, OpsConfigAuditArgs, OpsMetricsFormat, OpsRotateKeyArgs, RegistryCommand,
+    RemoteCapCommand, RemoteCapIssueArgs,
     RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand,
     RuntimeLaneCommand, TrustCardCommand, TrustCommand, VerifyCommand,
     VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs, VerifyModuleArgs,
@@ -268,6 +269,95 @@ struct OpsPrometheusMetricsReport {
     execution_receipts: u64,
     fleet_active_quarantines: u64,
     fleet_node_records: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct OpsConfigAuditReport {
+    command: String,
+    trace_id: String,
+    selected_profile: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_path: Option<String>,
+    merge_decisions: Vec<config::MergeDecision>,
+    active_state: OpsConfigAuditState,
+    dependency_impact: OpsConfigDependencyImpactReport,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct OpsConfigAuditState {
+    compatibility_mode: String,
+    trust: OpsConfigTrustState,
+    fleet: OpsConfigFleetState,
+    replay: OpsConfigReplayState,
+    observability: OpsConfigObservabilityState,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct OpsConfigTrustState {
+    risky_requires_fresh_revocation: bool,
+    dangerous_requires_fresh_revocation: bool,
+    quarantine_on_high_risk: bool,
+    card_cache_ttl_secs: Option<u64>,
+    freshness_window_secs: Option<u64>,
+    min_trust_score: Option<f64>,
+    decay_factor: Option<f64>,
+    require_signatures: bool,
+    require_provenance: bool,
+    minimum_assurance_level: u8,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct OpsConfigFleetState {
+    state_dir: Option<String>,
+    node_id: Option<String>,
+    poll_interval_seconds: Option<u64>,
+    convergence_timeout_seconds: u64,
+    barrier_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct OpsConfigReplayState {
+    persist_high_severity: bool,
+    bundle_version: String,
+    max_replay_capsule_freshness_secs: u64,
+    capsule_freshness_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct OpsConfigObservabilityState {
+    namespace: String,
+    emit_structured_audit_events: bool,
+    max_receipts: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct OpsConfigDependencyImpactReport {
+    triggered_by: Vec<OpsConfigFieldImpact>,
+    profile_diffs: Vec<OpsConfigProfileImpact>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct OpsConfigFieldImpact {
+    field: String,
+    stage: config::MergeStage,
+    domains: Vec<String>,
+    effect: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct OpsConfigProfileImpact {
+    profile: String,
+    changed_domains: Vec<String>,
+    changes: Vec<OpsConfigValueChange>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct OpsConfigValueChange {
+    domain: String,
+    field: String,
+    current: String,
+    candidate: String,
+    effect: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -6286,6 +6376,582 @@ fn emit_ops_health_check_report(report: &OpsHealthCheckReport, json: bool) -> Re
     Ok(())
 }
 
+fn ops_config_audit_report(args: &OpsConfigAuditArgs) -> Result<OpsConfigAuditReport> {
+    let profile_override = parse_profile_override(args.profile.as_deref())?;
+    let resolved = config::Config::resolve(
+        args.config.as_deref(),
+        CliOverrides {
+            profile: profile_override,
+        },
+    )
+    .context("failed resolving configuration for ops config-audit")?;
+    let active_state = build_ops_config_audit_state(&resolved.config);
+    let dependency_impact =
+        build_ops_config_dependency_impact(args.config.as_deref(), &resolved, &active_state)?;
+
+    Ok(OpsConfigAuditReport {
+        command: "ops config-audit".to_string(),
+        trace_id: args.trace_id.clone(),
+        selected_profile: resolved.selected_profile.to_string(),
+        source_path: resolved
+            .source_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        merge_decisions: resolved.decisions.clone(),
+        active_state,
+        dependency_impact,
+    })
+}
+
+fn build_ops_config_audit_state(config: &config::Config) -> OpsConfigAuditState {
+    OpsConfigAuditState {
+        compatibility_mode: config.compatibility.mode.to_string(),
+        trust: OpsConfigTrustState {
+            risky_requires_fresh_revocation: config.trust.risky_requires_fresh_revocation,
+            dangerous_requires_fresh_revocation: config.trust.dangerous_requires_fresh_revocation,
+            quarantine_on_high_risk: config.trust.quarantine_on_high_risk,
+            card_cache_ttl_secs: config.trust.card_cache_ttl_secs,
+            freshness_window_secs: config.trust.freshness_window_secs,
+            min_trust_score: config.trust.min_trust_score,
+            decay_factor: config.trust.decay_factor,
+            require_signatures: config.registry.require_signatures,
+            require_provenance: config.registry.require_provenance,
+            minimum_assurance_level: config.registry.minimum_assurance_level,
+        },
+        fleet: OpsConfigFleetState {
+            state_dir: config
+                .fleet
+                .state_dir
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            node_id: config.fleet.node_id.clone(),
+            poll_interval_seconds: config.fleet.poll_interval_seconds,
+            convergence_timeout_seconds: config.fleet.convergence_timeout_seconds,
+            barrier_timeout_ms: config.fleet.barrier_timeout_ms,
+        },
+        replay: OpsConfigReplayState {
+            persist_high_severity: config.replay.persist_high_severity,
+            bundle_version: config.replay.bundle_version.clone(),
+            max_replay_capsule_freshness_secs: config.replay.max_replay_capsule_freshness_secs,
+            capsule_freshness_secs: config.replay.capsule_freshness_secs,
+        },
+        observability: OpsConfigObservabilityState {
+            namespace: config.observability.namespace.clone(),
+            emit_structured_audit_events: config.observability.emit_structured_audit_events,
+            max_receipts: config.observability.max_receipts,
+        },
+    }
+}
+
+fn build_ops_config_dependency_impact(
+    explicit_path: Option<&Path>,
+    resolved: &config::ResolvedConfig,
+    active_state: &OpsConfigAuditState,
+) -> Result<OpsConfigDependencyImpactReport> {
+    let triggered_by = resolved
+        .decisions
+        .iter()
+        .filter_map(ops_config_field_impact)
+        .collect();
+    let mut profile_diffs = Vec::new();
+
+    for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+        if profile == resolved.selected_profile {
+            continue;
+        }
+
+        let candidate = config::Config::resolve(
+            explicit_path,
+            CliOverrides {
+                profile: Some(profile),
+            },
+        )
+        .with_context(|| format!("failed resolving config impact for profile {profile}"))?;
+        let candidate_state = build_ops_config_audit_state(&candidate.config);
+        let changes = diff_ops_config_states(active_state, &candidate_state);
+        let mut changed_domains = Vec::new();
+        for change in &changes {
+            if !changed_domains.iter().any(|domain| domain == &change.domain) {
+                changed_domains.push(change.domain.clone());
+            }
+        }
+
+        profile_diffs.push(OpsConfigProfileImpact {
+            profile: profile.to_string(),
+            changed_domains,
+            changes,
+        });
+    }
+
+    Ok(OpsConfigDependencyImpactReport {
+        triggered_by,
+        profile_diffs,
+    })
+}
+
+fn ops_config_field_impact(decision: &config::MergeDecision) -> Option<OpsConfigFieldImpact> {
+    const PROFILE_DOMAINS: &[&str] = &[
+        "compatibility",
+        "trust",
+        "fleet",
+        "replay",
+        "observability",
+    ];
+    const COMPATIBILITY_DOMAINS: &[&str] = &["compatibility"];
+    const TRUST_DOMAINS: &[&str] = &["trust"];
+    const FLEET_DOMAINS: &[&str] = &["fleet"];
+    const REPLAY_DOMAINS: &[&str] = &["replay"];
+    const OBSERVABILITY_DOMAINS: &[&str] = &["observability"];
+
+    let field = decision.field.as_str();
+    let (domains, effect): (&[&str], &str) = match field {
+        "profile" => (
+            PROFILE_DOMAINS,
+            "Profile-derived defaults and profile blocks shift compatibility, trust, fleet, replay, and observability behavior together.",
+        ),
+        "compatibility.mode" => (
+            COMPATIBILITY_DOMAINS,
+            "Changes migration/runtime API tolerance and the compatibility enforcement posture.",
+        ),
+        "trust.risky_requires_fresh_revocation" => (
+            TRUST_DOMAINS,
+            "Changes whether risky trust actions require fresh revocation evidence.",
+        ),
+        "trust.dangerous_requires_fresh_revocation" => (
+            TRUST_DOMAINS,
+            "Changes whether dangerous trust actions hard-require fresh revocation evidence.",
+        ),
+        "trust.quarantine_on_high_risk" => (
+            TRUST_DOMAINS,
+            "Changes whether high-risk extensions are automatically quarantined.",
+        ),
+        "trust.card_cache_ttl_secs" => (
+            TRUST_DOMAINS,
+            "Changes how long cached trust cards remain reusable before refresh.",
+        ),
+        "trust.freshness_window_secs" => (
+            TRUST_DOMAINS,
+            "Changes the acceptable freshness window for trust metadata.",
+        ),
+        "trust.min_trust_score" => (
+            TRUST_DOMAINS,
+            "Changes the minimum trust score required for admission decisions.",
+        ),
+        "trust.decay_factor" => (
+            TRUST_DOMAINS,
+            "Changes how aggressively trust scores decay over time.",
+        ),
+        "registry.require_signatures" => (
+            TRUST_DOMAINS,
+            "Changes whether unsigned artifacts are rejected during registry admission.",
+        ),
+        "registry.require_provenance" => (
+            TRUST_DOMAINS,
+            "Changes whether provenance metadata is required during registry admission.",
+        ),
+        "registry.minimum_assurance_level" => (
+            TRUST_DOMAINS,
+            "Changes the minimum assurance level required for trusted registry artifacts.",
+        ),
+        "fleet.state_dir" => (
+            FLEET_DOMAINS,
+            "Changes where fleet state is read and written on disk.",
+        ),
+        "fleet.node_id" => (
+            FLEET_DOMAINS,
+            "Changes the stable node identity used by fleet agent mode.",
+        ),
+        "fleet.poll_interval_seconds" => (
+            FLEET_DOMAINS,
+            "Changes how frequently the fleet agent polls for convergence work.",
+        ),
+        "fleet.convergence_timeout_seconds" => (
+            FLEET_DOMAINS,
+            "Changes how long quarantine/release automation waits for fleet convergence.",
+        ),
+        "fleet.barrier_timeout_ms" => (
+            FLEET_DOMAINS,
+            "Changes the timeout budget for fleet barrier coordination.",
+        ),
+        "replay.persist_high_severity" => (
+            REPLAY_DOMAINS,
+            "Changes whether high-severity replay artifacts are persisted automatically.",
+        ),
+        "replay.bundle_version" => (
+            REPLAY_DOMAINS,
+            "Changes the replay bundle wire contract emitted for incident response.",
+        ),
+        "replay.max_replay_capsule_freshness_secs" => (
+            REPLAY_DOMAINS,
+            "Changes the maximum permitted replay capsule freshness window.",
+        ),
+        "replay.capsule_freshness_secs" => (
+            REPLAY_DOMAINS,
+            "Changes the live replay capsule freshness override used by verification tooling.",
+        ),
+        "observability.namespace" => (
+            OBSERVABILITY_DOMAINS,
+            "Changes the metric/event namespace consumed by automation and dashboards.",
+        ),
+        "observability.emit_structured_audit_events" => (
+            OBSERVABILITY_DOMAINS,
+            "Changes whether structured audit events are emitted for operators and automation.",
+        ),
+        "observability.max_receipts" => (
+            OBSERVABILITY_DOMAINS,
+            "Changes on-disk receipt retention and archival pressure.",
+        ),
+        _ => return None,
+    };
+
+    Some(OpsConfigFieldImpact {
+        field: decision.field.clone(),
+        stage: decision.stage.clone(),
+        domains: domains.iter().map(|domain| (*domain).to_string()).collect(),
+        effect: effect.to_string(),
+    })
+}
+
+fn diff_ops_config_states(
+    current: &OpsConfigAuditState,
+    candidate: &OpsConfigAuditState,
+) -> Vec<OpsConfigValueChange> {
+    let mut changes = Vec::new();
+
+    push_ops_config_change(
+        &mut changes,
+        "compatibility",
+        "mode",
+        current.compatibility_mode.clone(),
+        candidate.compatibility_mode.clone(),
+        "Changes migration/runtime API tolerance.",
+    );
+
+    push_ops_config_change(
+        &mut changes,
+        "trust",
+        "risky_requires_fresh_revocation",
+        current
+            .trust
+            .risky_requires_fresh_revocation
+            .to_string(),
+        candidate
+            .trust
+            .risky_requires_fresh_revocation
+            .to_string(),
+        "Changes whether risky trust actions require fresh revocation evidence.",
+    );
+    push_ops_config_change(
+        &mut changes,
+        "trust",
+        "dangerous_requires_fresh_revocation",
+        current
+            .trust
+            .dangerous_requires_fresh_revocation
+            .to_string(),
+        candidate
+            .trust
+            .dangerous_requires_fresh_revocation
+            .to_string(),
+        "Changes whether dangerous trust actions hard-require fresh revocation evidence.",
+    );
+    push_ops_config_change(
+        &mut changes,
+        "trust",
+        "quarantine_on_high_risk",
+        current.trust.quarantine_on_high_risk.to_string(),
+        candidate.trust.quarantine_on_high_risk.to_string(),
+        "Changes whether high-risk extensions auto-quarantine.",
+    );
+    push_ops_config_change(
+        &mut changes,
+        "trust",
+        "card_cache_ttl_secs",
+        format_optional(current.trust.card_cache_ttl_secs),
+        format_optional(candidate.trust.card_cache_ttl_secs),
+        "Changes trust-card cache freshness budget.",
+    );
+    push_ops_config_change(
+        &mut changes,
+        "trust",
+        "freshness_window_secs",
+        format_optional(current.trust.freshness_window_secs),
+        format_optional(candidate.trust.freshness_window_secs),
+        "Changes the acceptable freshness window for trust metadata.",
+    );
+    push_ops_config_change(
+        &mut changes,
+        "trust",
+        "min_trust_score",
+        format_optional(current.trust.min_trust_score),
+        format_optional(candidate.trust.min_trust_score),
+        "Changes the minimum trust score required for admission decisions.",
+    );
+    push_ops_config_change(
+        &mut changes,
+        "trust",
+        "decay_factor",
+        format_optional(current.trust.decay_factor),
+        format_optional(candidate.trust.decay_factor),
+        "Changes how aggressively trust scores decay over time.",
+    );
+    push_ops_config_change(
+        &mut changes,
+        "trust",
+        "require_signatures",
+        current.trust.require_signatures.to_string(),
+        candidate.trust.require_signatures.to_string(),
+        "Changes whether unsigned registry artifacts are rejected.",
+    );
+    push_ops_config_change(
+        &mut changes,
+        "trust",
+        "require_provenance",
+        current.trust.require_provenance.to_string(),
+        candidate.trust.require_provenance.to_string(),
+        "Changes whether provenance metadata is mandatory for registry admission.",
+    );
+    push_ops_config_change(
+        &mut changes,
+        "trust",
+        "minimum_assurance_level",
+        current.trust.minimum_assurance_level.to_string(),
+        candidate.trust.minimum_assurance_level.to_string(),
+        "Changes the minimum assurance level required for trusted registry artifacts.",
+    );
+
+    push_ops_config_change(
+        &mut changes,
+        "fleet",
+        "state_dir",
+        format_optional(current.fleet.state_dir.clone()),
+        format_optional(candidate.fleet.state_dir.clone()),
+        "Changes where fleet state is persisted.",
+    );
+    push_ops_config_change(
+        &mut changes,
+        "fleet",
+        "node_id",
+        format_optional(current.fleet.node_id.clone()),
+        format_optional(candidate.fleet.node_id.clone()),
+        "Changes the stable node identifier used by fleet agent mode.",
+    );
+    push_ops_config_change(
+        &mut changes,
+        "fleet",
+        "poll_interval_seconds",
+        format_optional(current.fleet.poll_interval_seconds),
+        format_optional(candidate.fleet.poll_interval_seconds),
+        "Changes how frequently the fleet agent polls for work.",
+    );
+    push_ops_config_change(
+        &mut changes,
+        "fleet",
+        "convergence_timeout_seconds",
+        current.fleet.convergence_timeout_seconds.to_string(),
+        candidate.fleet.convergence_timeout_seconds.to_string(),
+        "Changes how long fleet automation waits for convergence.",
+    );
+    push_ops_config_change(
+        &mut changes,
+        "fleet",
+        "barrier_timeout_ms",
+        format_optional(current.fleet.barrier_timeout_ms),
+        format_optional(candidate.fleet.barrier_timeout_ms),
+        "Changes the timeout budget for fleet barrier coordination.",
+    );
+
+    push_ops_config_change(
+        &mut changes,
+        "replay",
+        "persist_high_severity",
+        current.replay.persist_high_severity.to_string(),
+        candidate.replay.persist_high_severity.to_string(),
+        "Changes whether high-severity replay artifacts are persisted automatically.",
+    );
+    push_ops_config_change(
+        &mut changes,
+        "replay",
+        "bundle_version",
+        current.replay.bundle_version.clone(),
+        candidate.replay.bundle_version.clone(),
+        "Changes the replay bundle wire contract emitted for incident response.",
+    );
+    push_ops_config_change(
+        &mut changes,
+        "replay",
+        "max_replay_capsule_freshness_secs",
+        current
+            .replay
+            .max_replay_capsule_freshness_secs
+            .to_string(),
+        candidate
+            .replay
+            .max_replay_capsule_freshness_secs
+            .to_string(),
+        "Changes the maximum permitted replay capsule freshness window.",
+    );
+    push_ops_config_change(
+        &mut changes,
+        "replay",
+        "capsule_freshness_secs",
+        format_optional(current.replay.capsule_freshness_secs),
+        format_optional(candidate.replay.capsule_freshness_secs),
+        "Changes the live replay capsule freshness override used by verification tooling.",
+    );
+
+    push_ops_config_change(
+        &mut changes,
+        "observability",
+        "namespace",
+        current.observability.namespace.clone(),
+        candidate.observability.namespace.clone(),
+        "Changes the metric/event namespace consumed by dashboards and automation.",
+    );
+    push_ops_config_change(
+        &mut changes,
+        "observability",
+        "emit_structured_audit_events",
+        current
+            .observability
+            .emit_structured_audit_events
+            .to_string(),
+        candidate
+            .observability
+            .emit_structured_audit_events
+            .to_string(),
+        "Changes whether structured audit events are emitted for operators and automation.",
+    );
+    push_ops_config_change(
+        &mut changes,
+        "observability",
+        "max_receipts",
+        format_optional(current.observability.max_receipts),
+        format_optional(candidate.observability.max_receipts),
+        "Changes on-disk receipt retention and archival pressure.",
+    );
+
+    changes
+}
+
+fn push_ops_config_change(
+    changes: &mut Vec<OpsConfigValueChange>,
+    domain: &str,
+    field: &str,
+    current: String,
+    candidate: String,
+    effect: &str,
+) {
+    if current == candidate {
+        return;
+    }
+
+    changes.push(OpsConfigValueChange {
+        domain: domain.to_string(),
+        field: field.to_string(),
+        current,
+        candidate,
+        effect: effect.to_string(),
+    });
+}
+
+fn format_optional<T: std::fmt::Display>(value: Option<T>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "<default>".to_string())
+}
+
+fn merge_stage_label(stage: &config::MergeStage) -> &'static str {
+    match stage {
+        config::MergeStage::Default => "default",
+        config::MergeStage::Profile => "profile",
+        config::MergeStage::File => "file",
+        config::MergeStage::Env => "env",
+        config::MergeStage::Cli => "cli",
+    }
+}
+
+fn render_ops_config_audit_report_human(report: &OpsConfigAuditReport) -> String {
+    let mut lines = vec![
+        format!(
+            "ops config-audit: profile={} trace_id={}",
+            report.selected_profile, report.trace_id
+        ),
+        format!(
+            "source={}",
+            report
+                .source_path
+                .clone()
+                .unwrap_or_else(|| "<defaults>".to_string())
+        ),
+        format!("compatibility_mode={}", report.active_state.compatibility_mode),
+        format!(
+            "trust: risky_requires_fresh_revocation={} dangerous_requires_fresh_revocation={} quarantine_on_high_risk={} min_trust_score={} minimum_assurance_level={}",
+            report.active_state.trust.risky_requires_fresh_revocation,
+            report.active_state.trust.dangerous_requires_fresh_revocation,
+            report.active_state.trust.quarantine_on_high_risk,
+            format_optional(report.active_state.trust.min_trust_score),
+            report.active_state.trust.minimum_assurance_level,
+        ),
+        format!(
+            "fleet: node_id={} poll_interval_seconds={} convergence_timeout_seconds={} barrier_timeout_ms={}",
+            format_optional(report.active_state.fleet.node_id.clone()),
+            format_optional(report.active_state.fleet.poll_interval_seconds),
+            report.active_state.fleet.convergence_timeout_seconds,
+            format_optional(report.active_state.fleet.barrier_timeout_ms),
+        ),
+        format!(
+            "replay: persist_high_severity={} bundle_version={} capsule_freshness_secs={}",
+            report.active_state.replay.persist_high_severity,
+            report.active_state.replay.bundle_version,
+            format_optional(report.active_state.replay.capsule_freshness_secs),
+        ),
+        format!(
+            "observability: namespace={} emit_structured_audit_events={} max_receipts={}",
+            report.active_state.observability.namespace,
+            report.active_state.observability.emit_structured_audit_events,
+            format_optional(report.active_state.observability.max_receipts),
+        ),
+    ];
+
+    if !report.dependency_impact.triggered_by.is_empty() {
+        lines.push(String::new());
+        lines.push("merge impacts:".to_string());
+        for impact in &report.dependency_impact.triggered_by {
+            lines.push(format!(
+                "  [{}] {} => domains={} effect={}",
+                merge_stage_label(&impact.stage),
+                impact.field,
+                impact.domains.join(","),
+                impact.effect
+            ));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("profile diffs:".to_string());
+    for diff in &report.dependency_impact.profile_diffs {
+        lines.push(format!(
+            "  {}: changed_domains={} change_count={}",
+            diff.profile,
+            if diff.changed_domains.is_empty() {
+                "none".to_string()
+            } else {
+                diff.changed_domains.join(",")
+            },
+            diff.changes.len()
+        ));
+        for change in diff.changes.iter().take(6) {
+            lines.push(format!(
+                "    {}.{}: {} -> {} ({})",
+                change.domain, change.field, change.current, change.candidate, change.effect
+            ));
+        }
+    }
+
+    lines.join("\n")
+}
+
 fn ops_metrics_report(project_root: &Path) -> Result<OpsPrometheusMetricsReport> {
     let health = ops_health_check_report(project_root)?;
     let state_dir = project_root.join(".franken-node/state");
@@ -6581,6 +7247,20 @@ fn render_ops_metrics_prometheus(report: &OpsPrometheusMetricsReport) -> String 
     rendered
 }
 
+/// Handle ops rotate-key command (Phase 1: PREVIEW ONLY).
+///
+/// WARNING: This function validates the new key file but does NOT:
+/// - Update any signer configuration
+/// - Append to the evidence ledger
+/// - Fence the old key from further use
+///
+/// The old signing key remains active and can continue signing after this command.
+/// This is Phase 1 implementation for validation only. See bd-2xya9 Phase 2 for
+/// actual rotation implementation.
+///
+/// # Security Notice
+/// If responding to a key compromise, the compromised key remains active after
+/// running this command. Do not rely on this for actual key rotation.
 fn handle_ops_rotate_key(args: &OpsRotateKeyArgs) -> Result<OpsRotateKeyResult> {
     use crate::cli::validate_user_content_pathbuf;
     use ed25519_dalek::SigningKey;
@@ -6608,9 +7288,14 @@ fn handle_ops_rotate_key(args: &OpsRotateKeyArgs) -> Result<OpsRotateKeyResult> 
     // Generate key fingerprints
     let new_key_fingerprint = signing_key_id(&new_verifying_key);
 
-    // For Phase 1, we'll use a placeholder for old key fingerprint since we don't have
-    // a global key management system yet. In Phase 2, this would read the current key.
-    let old_key_fingerprint = "phase1-placeholder".to_string();
+    // Try to load current signing key fingerprint from default receipt signing key location
+    // If not loadable, return error rather than using placeholder to be honest about capability
+    let old_key_fingerprint = match load_receipt_signing_material(None)? {
+        Some(current_material) => signing_key_id(&current_material.signing_key.verifying_key()),
+        None => {
+            anyhow::bail!("Cannot determine current key fingerprint. Phase 1 rotate-key requires existing receipt signing key configuration.")
+        }
+    };
 
     // Generate rotation event ID
     let rotation_event_id = format!("rotate-{}", Uuid::new_v4());
@@ -6653,13 +7338,34 @@ fn handle_ops_rotate_key(args: &OpsRotateKeyArgs) -> Result<OpsRotateKeyResult> 
 
 fn emit_ops_rotate_key_result(result: &OpsRotateKeyResult, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(result)?);
+        // Add warning field to JSON output to prevent automation from missing the warning
+        let output_with_warning = serde_json::json!({
+            "WARNING": "Phase 1 rotate-key validates key file but does NOT update signer config or evidence ledger. The old key remains active. This is NOT a real rotation.",
+            "rotation_event_id": result.rotation_event_id,
+            "new_key_fingerprint": result.new_key_fingerprint,
+            "old_key_fingerprint": result.old_key_fingerprint,
+            "reason": result.reason,
+            "phase": "preview-only",
+            "actual_rotation_occurred": false
+        });
+        println!("{}", serde_json::to_string_pretty(&output_with_warning)?);
     } else {
-        println!("Key rotation completed successfully");
+        println!("⚠️  WARNING: PHASE 1 KEY ROTATION PREVIEW ONLY");
+        println!("⚠️  This command validates the key file but does NOT:");
+        println!("⚠️    - Update any signer configuration");
+        println!("⚠️    - Append to the evidence ledger");
+        println!("⚠️    - Fence the old key from further use");
+        println!("⚠️  THE OLD KEY REMAINS ACTIVE AND CAN STILL SIGN.");
+        println!("⚠️  See bd-2xya9 Phase 2 for actual rotation implementation.");
+        println!();
+        println!("Key rotation PREVIEW completed:");
         println!("  rotation_event_id: {}", result.rotation_event_id);
         println!("  new_key_fingerprint: {}", result.new_key_fingerprint);
-        println!("  old_key_fingerprint: {}", result.old_key_fingerprint);
+        println!("  old_key_fingerprint: {} (placeholder)", result.old_key_fingerprint);
         println!("  reason: {}", result.reason);
+        println!();
+        println!("⚠️  SECURITY NOTICE: If you're responding to a key compromise,");
+        println!("⚠️  the compromised key is STILL ACTIVE after this command.");
     }
     Ok(())
 }
@@ -20239,6 +20945,135 @@ fn handle_trust_card_command(command: TrustCardCommand) -> Result<()> {
     Ok(())
 }
 
+/// Handle debug trace command for policy evaluation.
+fn handle_debug_trace(args: &DebugTraceArgs) -> Result<()> {
+    use crate::cli::validate_user_content_pathbuf;
+    use std::fs;
+    use serde_json::Value;
+
+    // Validate paths
+    let policy_path = validate_user_content_pathbuf(&args.policy)
+        .with_context(|| format!("Invalid policy path: {:?}", args.policy))?;
+    let input_path = validate_user_content_pathbuf(&args.input)
+        .with_context(|| format!("Invalid input path: {:?}", args.input))?;
+
+    // Load policy file
+    let policy_content = fs::read_to_string(policy_path)
+        .with_context(|| format!("Failed to read policy file: {:?}", policy_path))?;
+
+    // Load input fixture
+    let input_content = fs::read_to_string(input_path)
+        .with_context(|| format!("Failed to read input file: {:?}", input_path))?;
+
+    // Parse input as JSON
+    let input_data: Value = serde_json::from_str(&input_content)
+        .with_context(|| format!("Failed to parse input JSON from: {:?}", input_path))?;
+
+    if args.json {
+        // JSON output mode
+        let output = serde_json::json!({
+            "trace_id": args.trace_id,
+            "policy_file": policy_path.display().to_string(),
+            "input_file": input_path.display().to_string(),
+            "trace_steps": [
+                {
+                    "step": 1,
+                    "type": "policy_load",
+                    "status": "success",
+                    "details": {
+                        "policy_size": policy_content.len(),
+                        "policy_type": "unknown" // TODO: detect policy type
+                    }
+                },
+                {
+                    "step": 2,
+                    "type": "input_load",
+                    "status": "success",
+                    "details": {
+                        "input_size": input_content.len(),
+                        "input_type": match input_data {
+                            Value::Object(_) => "object",
+                            Value::Array(_) => "array",
+                            _ => "primitive"
+                        }
+                    }
+                },
+                {
+                    "step": 3,
+                    "type": "policy_evaluation",
+                    "status": "not_implemented",
+                    "details": {
+                        "message": "Policy evaluation engine not yet implemented",
+                        "phase": "preview"
+                    }
+                }
+            ],
+            "final_verdict": {
+                "status": "not_implemented",
+                "verdict": null,
+                "evidence": []
+            },
+            "implementation_status": "preview",
+            "next_steps": "Implement policy engine integration for bd-1l4cj.2"
+        });
+
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        // Human-readable output mode
+        println!("🔍 Debug Trace: Policy Evaluation");
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!("📋 Trace ID: {}", args.trace_id);
+        println!("📁 Policy: {}", policy_path.display());
+        println!("📄 Input:  {}", input_path.display());
+        println!();
+
+        println!("📊 Step 1: Policy Loading");
+        println!("  ✅ Loaded policy file ({} bytes)", policy_content.len());
+        if args.verbose {
+            println!("  📝 Policy preview: {}...",
+                policy_content.chars().take(100).collect::<String>()
+                    .replace('\n', "\\n"));
+        }
+        println!();
+
+        println!("📊 Step 2: Input Parsing");
+        println!("  ✅ Parsed input JSON ({} bytes)", input_content.len());
+        println!("  📋 Input type: {}", match input_data {
+            Value::Object(_) => "Object",
+            Value::Array(_) => "Array",
+            Value::String(_) => "String",
+            Value::Number(_) => "Number",
+            Value::Bool(_) => "Boolean",
+            Value::Null => "Null"
+        });
+        if args.verbose {
+            println!("  📝 Input preview: {}",
+                serde_json::to_string(&input_data)?
+                    .chars().take(200).collect::<String>());
+        }
+        println!();
+
+        println!("📊 Step 3: Policy Evaluation");
+        println!("  ⚠️  Policy engine not yet implemented (Phase 1)");
+        println!("  📝 This is a preview implementation for bd-1l4cj.2");
+        println!();
+
+        println!("🎯 Final Verdict:");
+        println!("  Status: Not implemented");
+        println!("  Verdict: N/A (preview mode)");
+        println!("  Evidence: N/A");
+        println!();
+
+        println!("📋 Next Steps:");
+        println!("  • Implement policy engine integration");
+        println!("  • Add rule-by-rule tracing");
+        println!("  • Support policy binding evaluation");
+        println!("  • Add evidence trail collection");
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -20963,6 +21798,15 @@ fn main() -> Result<()> {
         Command::Bench(sub) => match sub {
             BenchCommand::Run(args) => {
                 handle_bench_run(&args)?;
+            }
+        },
+
+        Command::Debug(debug_command) => match debug_command {
+            DebugCommand::Trace(args) => {
+                handle_debug_trace(args)?;
+            }
+            DebugCommand::Explain(args) => {
+                handle_debug_explain(&args)?;
             }
         },
 

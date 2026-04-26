@@ -158,6 +158,10 @@ pub enum Command {
     #[command(subcommand)]
     Bench(BenchCommand),
 
+    /// Debug policy evaluation and trace execution steps.
+    #[command(subcommand)]
+    Debug(DebugCommand),
+
     /// Diagnose environment and policy setup.
     Doctor(DoctorArgs),
 }
@@ -1057,9 +1061,12 @@ pub struct FleetAgentArgs {
 pub enum OpsCommand {
     /// Inspect process/runtime health signals.
     HealthCheck(OpsHealthCheckArgs),
+    /// Audit the active config and compare operational impact across profiles.
+    #[command(name = "config-audit")]
+    ConfigAudit(OpsConfigAuditArgs),
     /// Emit operator metrics in a scrape-friendly text format.
     Metrics(OpsMetricsArgs),
-    /// Rotate signing key for cryptographic agility.
+    /// [PHASE 1 ONLY] Validate new signing key (does NOT update signer config or ledger).
     #[command(name = "rotate-key")]
     RotateKey(OpsRotateKeyArgs),
 }
@@ -1069,6 +1076,26 @@ pub struct OpsHealthCheckArgs {
     /// Emit JSON instead of human-readable output.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct OpsConfigAuditArgs {
+    /// Config file override (default discovery is used when omitted).
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub config: Option<PathBuf>,
+
+    /// Runtime profile override: strict, balanced, or legacy-risky.
+    /// Controls security/compatibility behavior (not packaging profiles like local/dev/enterprise).
+    #[arg(long)]
+    pub profile: Option<String>,
+
+    /// Emit JSON instead of human-readable output.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Stable trace ID for correlating config audit output.
+    #[arg(long, default_value = "ops-config-audit")]
+    pub trace_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -1085,7 +1112,7 @@ pub struct OpsMetricsArgs {
 
 #[derive(Debug, Parser)]
 pub struct OpsRotateKeyArgs {
-    /// Path to new ed25519 signing key.
+    /// Path to new ed25519 signing key. WARNING: Phase 1 validates key but does NOT update signer config.
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub new_key: PathBuf,
     /// Emit JSON instead of human-readable output.
@@ -1259,6 +1286,44 @@ pub struct BenchRunArgs {
     pub scenario: Option<String>,
 }
 
+// -- debug --
+
+#[derive(Debug, Subcommand)]
+pub enum DebugCommand {
+    /// Walk a signed decision-receipt artifact through every verification
+    /// step and emit the per-step status (parse → structure → signer key →
+    /// canonical encode → signature decode → signature verify → chain
+    /// hash). Designed for operator-side post-mortem on rejected receipts;
+    /// every step result, including expected/actual values that the
+    /// external API redacts for oracle-prevention reasons, is surfaced
+    /// here.
+    Explain(DebugExplainArgs),
+    /// Trace policy evaluation steps for debugging policy logic.
+    Trace(DebugTraceArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct DebugExplainArgs {
+    /// Path to a signed decision-receipt JSON artifact on the operator's
+    /// local filesystem. Validated against path traversal before being
+    /// read.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub receipt: PathBuf,
+
+    /// Hex-encoded ed25519 public key (32 raw bytes → 64 hex chars) that
+    /// the receipt is expected to verify against. When omitted, the
+    /// signature-verify and signer-key steps are reported as `skipped`
+    /// rather than failed — useful for explaining the structural side of
+    /// a receipt without the signing material.
+    #[arg(long)]
+    pub public_key_hex: Option<String>,
+
+    /// Emit results as machine-readable JSON instead of the
+    /// human-readable line-per-step form.
+    #[arg(long)]
+    pub json: bool,
+}
+
 // -- doctor --
 
 #[derive(Debug, Subcommand)]
@@ -1385,6 +1450,31 @@ pub fn load_doctor_policy_activation_input(
         .with_context(|| format!("failed reading policy activation input {}", path.display()))?;
     let source = path.display().to_string();
     parse_doctor_policy_activation_input_bytes(&raw, &source)
+}
+
+// -- debug --
+
+#[derive(Debug, Parser)]
+pub struct DebugTraceArgs {
+    /// Path to policy file to evaluate.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub policy: PathBuf,
+
+    /// Path to input fixture for policy evaluation.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub input: PathBuf,
+
+    /// Emit JSON output instead of human-readable trace.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Show verbose rule binding and evaluation details.
+    #[arg(long)]
+    pub verbose: bool,
+
+    /// Trace ID for correlating debug output.
+    #[arg(long, default_value = "debug-trace")]
+    pub trace_id: String,
 }
 
 #[cfg(test)]
@@ -1587,6 +1677,31 @@ mod parser_contract_extra_tests {
             panic!("expected ops health-check command");
         };
         assert!(args.json);
+    }
+
+    #[test]
+    fn ops_config_audit_parses_profile_config_and_json() {
+        let cli = parse(&[
+            "franken-node",
+            "ops",
+            "config-audit",
+            "--config",
+            "franken_node.toml",
+            "--profile",
+            "strict",
+            "--json",
+            "--trace-id",
+            "ops-config-audit-test",
+        ])
+        .expect("ops config-audit command should parse");
+
+        let Command::Ops(OpsCommand::ConfigAudit(args)) = cli.command else {
+            panic!("expected ops config-audit command");
+        };
+        assert_eq!(args.config, Some(PathBuf::from("franken_node.toml")));
+        assert_eq!(args.profile.as_deref(), Some("strict"));
+        assert!(args.json);
+        assert_eq!(args.trace_id, "ops-config-audit-test");
     }
 
     #[test]
