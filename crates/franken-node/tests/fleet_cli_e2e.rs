@@ -2311,6 +2311,120 @@ fn ops_health_check_json_reports_local_state_and_build_metadata() {
 }
 
 #[test]
+fn ops_config_audit_json_reports_active_state_and_profile_diffs() {
+    let workspace = tempdir().expect("tempdir");
+    std::fs::write(
+        workspace.path().join("franken_node.toml"),
+        r#"
+profile = "balanced"
+
+[trust]
+quarantine_on_high_risk = false
+
+[fleet]
+convergence_timeout_seconds = 180
+
+[observability]
+namespace = "ops-audit-balanced"
+
+[profiles.strict.trust]
+quarantine_on_high_risk = true
+
+[profiles.strict.replay]
+persist_high_severity = true
+
+[profiles.strict.observability]
+namespace = "ops-audit-strict"
+
+[profiles.legacy-risky.fleet]
+convergence_timeout_seconds = 360
+"#,
+    )
+    .expect("write config fixture");
+
+    let output = run_cli_in_dir_with_env(
+        workspace.path(),
+        &[
+            "ops",
+            "config-audit",
+            "--config",
+            "franken_node.toml",
+            "--json",
+        ],
+        &[],
+    );
+    assert!(
+        output.status.success(),
+        "ops config-audit --json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("ops config-audit json");
+    assert_eq!(payload["command"], "ops config-audit");
+    assert_eq!(payload["selected_profile"], "balanced");
+    assert_eq!(
+        payload["active_state"]["trust"]["quarantine_on_high_risk"],
+        false
+    );
+    assert_eq!(
+        payload["active_state"]["fleet"]["convergence_timeout_seconds"],
+        180
+    );
+    assert_eq!(
+        payload["active_state"]["observability"]["namespace"],
+        "ops-audit-balanced"
+    );
+
+    let impacts = payload["dependency_impact"]["triggered_by"]
+        .as_array()
+        .expect("triggered_by array");
+    assert!(
+        impacts.iter().any(|impact| impact["field"] == "profile"),
+        "expected profile merge decision to be surfaced"
+    );
+
+    let profile_diffs = payload["dependency_impact"]["profile_diffs"]
+        .as_array()
+        .expect("profile_diffs array");
+    let strict = profile_diffs
+        .iter()
+        .find(|diff| diff["profile"] == "strict")
+        .expect("strict profile diff");
+    let strict_changes = strict["changes"].as_array().expect("strict changes");
+    assert!(
+        strict_changes.iter().any(|change| {
+            change["domain"] == "trust"
+                && change["field"] == "quarantine_on_high_risk"
+                && change["candidate"] == "true"
+        }),
+        "expected strict trust override to appear in diff"
+    );
+    assert!(
+        strict_changes.iter().any(|change| {
+            change["domain"] == "observability"
+                && change["field"] == "namespace"
+                && change["candidate"] == "ops-audit-strict"
+        }),
+        "expected strict observability override to appear in diff"
+    );
+
+    let legacy = profile_diffs
+        .iter()
+        .find(|diff| diff["profile"] == "legacy-risky")
+        .expect("legacy-risky profile diff");
+    let legacy_changes = legacy["changes"].as_array().expect("legacy changes");
+    assert!(
+        legacy_changes.iter().any(|change| {
+            change["domain"] == "fleet"
+                && change["field"] == "convergence_timeout_seconds"
+                && change["candidate"] == "360"
+        }),
+        "expected legacy fleet override to appear in diff"
+    );
+}
+
+#[test]
 fn fleet_release_human_output_shape_is_stable() {
     let fleet_state = tempdir().expect("tempdir");
     let fleet_state_dir = fleet_state.path().join("fleet-state");
