@@ -35,7 +35,7 @@ fn reorder_concurrent_events(mut events: Vec<RawEvent>, seed: u64) -> Vec<RawEve
         // Only reorder if there are multiple events with same timestamp
         if group.len() > 1 {
             // Deterministic shuffle based on seed
-            let mut rng_state = seed.wrapping_mul(timestamp.len() as u64);
+            let mut rng_state = seed.wrapping_mul(u64::try_from(timestamp.len()).unwrap_or(u64::MAX));
             for i in (1..group.len()).rev() {
                 rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
                 let j = (rng_state as usize) % (i + 1);

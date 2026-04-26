@@ -296,7 +296,7 @@ fn check_stake_audit_complete() -> TestResult {
     assert_snapshot_counter(
         &ledger,
         "total_audit_entries",
-        ledger.state.audit_log.len() as u64,
+        u64::try_from(ledger.state.audit_log.len()).unwrap_or(u64::MAX),
     )
 }
 

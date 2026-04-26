@@ -483,7 +483,7 @@ fn assert_convergence_receipt_signature_round_trips(
 
     let mut hasher = Sha256::new();
     hasher.update(b"fleet_convergence_receipt_payload_v1:");
-    hasher.update((canonical_payload.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(canonical_payload.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(&canonical_payload);
     assert_eq!(
         signature["signed_payload_sha256"]

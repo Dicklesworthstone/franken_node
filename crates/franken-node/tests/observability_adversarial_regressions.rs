@@ -86,7 +86,7 @@ fn observability_adversarial_regressions_hash_collision_attempts_fail_integrity(
     }
 
     assert_eq!(validator.validated_count(), 0);
-    assert_eq!(validator.rejected_count(), collision_attempts.len() as u64);
+    assert_eq!(validator.rejected_count(), u64::try_from(collision_attempts.len()).unwrap_or(u64::MAX));
 }
 
 #[test]

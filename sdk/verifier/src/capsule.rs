@@ -188,7 +188,7 @@ pub fn deterministic_hash(data: &str) -> String {
 }
 
 fn push_length_prefixed(hasher: &mut Sha256, value: &str) {
-    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(value.as_bytes());
 }
 
@@ -200,13 +200,13 @@ fn push_length_prefixed(hasher: &mut Sha256, value: &str) {
 fn compute_replay_hash(payload: &str, inputs: &BTreeMap<String, String>) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"verifier_sdk_capsule_replay_v1:");
-    hasher.update((payload.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(payload.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(payload.as_bytes());
-    hasher.update((inputs.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(inputs.len()).unwrap_or(u64::MAX).to_le_bytes());
     for (k, v) in inputs {
-        hasher.update((k.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(k.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(k.as_bytes());
-        hasher.update((v.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(v.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(v.as_bytes());
     }
     hex::encode(hasher.finalize())
@@ -233,16 +233,16 @@ fn compute_signing_payload(capsule: &ReplayCapsule) -> String {
     ] {
         push_length_prefixed(&mut hasher, field);
     }
-    hasher.update((capsule.manifest.input_refs.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(capsule.manifest.input_refs.len()).unwrap_or(u64::MAX).to_le_bytes());
     for input_ref in &capsule.manifest.input_refs {
         push_length_prefixed(&mut hasher, input_ref);
     }
-    hasher.update((capsule.manifest.metadata.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(capsule.manifest.metadata.len()).unwrap_or(u64::MAX).to_le_bytes());
     for (key, value) in &capsule.manifest.metadata {
         push_length_prefixed(&mut hasher, key);
         push_length_prefixed(&mut hasher, value);
     }
-    hasher.update((capsule.inputs.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(capsule.inputs.len()).unwrap_or(u64::MAX).to_le_bytes());
     for (k, v) in &capsule.inputs {
         push_length_prefixed(&mut hasher, k);
         push_length_prefixed(&mut hasher, v);
@@ -2756,7 +2756,7 @@ mod tests {
             format!("verifier_sdk_capsule_replay_v1:{}", replay_data_payload),
             format!(
                 "{}payload",
-                (replay_data_payload.len() as u64)
+                u64::try_from(replay_data_payload.len()).unwrap_or(u64::MAX)
                     .to_le_bytes()
                     .iter()
                     .map(|&b| b as char)
@@ -2764,7 +2764,7 @@ mod tests {
             ),
             format!(
                 "verifier_sdk_capsule_replay_v1:{}{}{}{}{}",
-                (replay_data_payload.len() as u64)
+                u64::try_from(replay_data_payload.len()).unwrap_or(u64::MAX)
                     .to_le_bytes()
                     .iter()
                     .map(|&b| b as char)

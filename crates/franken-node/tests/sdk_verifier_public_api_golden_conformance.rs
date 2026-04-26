@@ -31,14 +31,14 @@ fn reference_capsule() -> capsule::ReplayCapsule {
     let payload = "reference_payload_data".to_string();
     let expected_output_hash = {
         let mut payload_bytes = Vec::new();
-        payload_bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        payload_bytes.extend_from_slice(&u64::try_from(payload.len()).unwrap_or(u64::MAX).to_le_bytes());
         payload_bytes.extend_from_slice(payload.as_bytes());
 
         let mut input_bytes = Vec::new();
         for (key, value) in &inputs {
-            input_bytes.extend_from_slice(&(key.len() as u64).to_le_bytes());
+            input_bytes.extend_from_slice(&u64::try_from(key.len()).unwrap_or(u64::MAX).to_le_bytes());
             input_bytes.extend_from_slice(key.as_bytes());
-            input_bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            input_bytes.extend_from_slice(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
             input_bytes.extend_from_slice(value.as_bytes());
         }
 

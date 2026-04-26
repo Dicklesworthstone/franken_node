@@ -517,11 +517,11 @@ fn trust_card_section_10_4_artifacts_are_self_consistent() {
         .expect("self-test checks array");
     assert_eq!(
         report["summary"]["total"].as_u64(),
-        Some(report_checks.len() as u64)
+        Some(u64::try_from(report_checks.len()).unwrap_or(u64::MAX))
     );
     assert_eq!(
         report["summary"]["passing"].as_u64(),
-        Some(report_checks.len() as u64)
+        Some(u64::try_from(report_checks.len()).unwrap_or(u64::MAX))
     );
     assert_eq!(report["summary"]["failing"].as_u64(), Some(0));
     assert_eq!(self_test_checks.len(), report_checks.len());

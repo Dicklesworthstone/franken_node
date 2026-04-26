@@ -884,7 +884,7 @@ fn ed25519_bundle_signature_payload(bundle: &ReplayBundle) -> Vec<u8> {
 }
 
 fn push_length_prefixed(buffer: &mut Vec<u8>, bytes: &[u8]) {
-    buffer.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    buffer.extend_from_slice(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
     buffer.extend_from_slice(bytes);
 }
 

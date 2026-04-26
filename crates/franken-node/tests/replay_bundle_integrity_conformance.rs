@@ -504,7 +504,7 @@ fn test_replay_bundle_file_io_roundtrip_preserves_integrity() {
     let canonical_json = to_canonical_json(&original_bundle)
         .expect("to_canonical_json should succeed");
 
-    let json_size = canonical_json.len() as u64;
+    let json_size = u64::try_from(canonical_json.len()).unwrap_or(u64::MAX);
     fs::write(&bundle_file_path, &canonical_json)
         .expect("writing bundle to file should succeed");
 
@@ -526,7 +526,7 @@ fn test_replay_bundle_file_io_roundtrip_preserves_integrity() {
     let file_contents = fs::read_to_string(&bundle_file_path)
         .expect("reading bundle from file should succeed");
 
-    logger.log_file_operation("read", &bundle_file_path, file_contents.len() as u64);
+    logger.log_file_operation("read", &bundle_file_path, u64::try_from(file_contents.len()).unwrap_or(u64::MAX));
 
     let imported_bundle: ReplayBundle = serde_json::from_str(&file_contents)
         .expect("deserializing bundle from file should succeed");
@@ -632,7 +632,7 @@ fn test_replay_bundle_file_corruption_detection() {
     fs::write(&bundle_file_path, &canonical_json)
         .expect("writing bundle to file should succeed");
 
-    logger.log_file_operation("write", &bundle_file_path, canonical_json.len() as u64);
+    logger.log_file_operation("write", &bundle_file_path, u64::try_from(canonical_json.len()).unwrap_or(u64::MAX));
 
     // Corrupt the file by truncating it
     let corrupted_json = &canonical_json[..canonical_json.len() / 2];
@@ -640,7 +640,7 @@ fn test_replay_bundle_file_corruption_detection() {
     fs::write(&corrupted_path, corrupted_json)
         .expect("writing corrupted bundle should succeed");
 
-    logger.log_file_operation("write_corrupted", &corrupted_path, corrupted_json.len() as u64);
+    logger.log_file_operation("write_corrupted", &corrupted_path, u64::try_from(corrupted_json.len()).unwrap_or(u64::MAX));
 
     // Attempt to import corrupted bundle
     let corrupted_contents = fs::read_to_string(&corrupted_path)

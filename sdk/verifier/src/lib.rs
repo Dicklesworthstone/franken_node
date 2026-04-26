@@ -1335,7 +1335,7 @@ fn session_step_signature(
 }
 
 fn push_length_prefixed(buffer: &mut Vec<u8>, bytes: &[u8]) {
-    buffer.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    buffer.extend_from_slice(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
     buffer.extend_from_slice(bytes);
 }
 
