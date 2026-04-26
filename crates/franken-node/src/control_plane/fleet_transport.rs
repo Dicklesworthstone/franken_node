@@ -4,12 +4,13 @@
 //! and object-safe transport trait used by the fleet-control track.
 
 #[cfg(feature = "asupersync-transport")]
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, MutexGuard};
 use std::{
+    collections::BTreeSet,
     fs::{self, File, OpenOptions, TryLockError},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU8, Ordering},
+    sync::{Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
@@ -963,36 +964,43 @@ impl Drop for TempFileGuard {
     }
 }
 
-// Atomic state machine for fleet action compaction process coordination
-// UNINIT=0, PROCESSING=1, AVAILABLE=2
-static FLEET_ACTION_COMPACTION_STATE: AtomicU8 = AtomicU8::new(2); // Start as AVAILABLE
+fn fleet_action_compaction_registry() -> &'static Mutex<BTreeSet<String>> {
+    static REGISTRY: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+fn fleet_action_compaction_root_key(root_dir: &Path) -> String {
+    root_dir.to_string_lossy().into_owned()
+}
 
 /// RAII guard for fleet action compaction process coordination
-struct FleetActionCompactionGuard;
+struct FleetActionCompactionGuard {
+    root_key: String,
+}
 
 impl Drop for FleetActionCompactionGuard {
     fn drop(&mut self) {
-        // Release: transition from PROCESSING (1) back to AVAILABLE (2)
-        FLEET_ACTION_COMPACTION_STATE.store(2, Ordering::Release);
+        let mut registry = fleet_action_compaction_registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        registry.remove(&self.root_key);
     }
 }
 
-fn lock_fleet_action_compaction_process() -> Result<FleetActionCompactionGuard, FleetTransportError>
-{
-    // Attempt to atomically transition from AVAILABLE (2) to PROCESSING (1)
-    match FLEET_ACTION_COMPACTION_STATE.compare_exchange(2, 1, Ordering::AcqRel, Ordering::Acquire)
-    {
-        Ok(_) => {
-            // Successfully acquired coordination
-            Ok(FleetActionCompactionGuard)
-        }
-        Err(_) => {
-            // Another process is already handling compaction
-            Err(FleetTransportError::lock_contention(
-                "fleet action compaction already in progress by another agent",
-            ))
-        }
+fn lock_fleet_action_compaction_process(
+    root_dir: &Path,
+) -> Result<FleetActionCompactionGuard, FleetTransportError> {
+    let root_key = fleet_action_compaction_root_key(root_dir);
+    let mut registry = fleet_action_compaction_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !registry.insert(root_key.clone()) {
+        return Err(FleetTransportError::lock_contention(format!(
+            "fleet action compaction already in progress for {}",
+            root_dir.display()
+        )));
     }
+    Ok(FleetActionCompactionGuard { root_key })
 }
 
 impl FileFleetTransport {
@@ -1052,7 +1060,7 @@ impl FileFleetTransport {
 
         // DEADLOCK FIX: Acquire compaction lock BEFORE shared_state_lock to establish consistent lock ordering.
         // This prevents AB-BA deadlock where other code paths might acquire shared_state_lock first.
-        let _process_guard = lock_fleet_action_compaction_process()?;
+        let _process_guard = lock_fleet_action_compaction_process(self.layout.root_dir())?;
         let compaction_lock_path = self.action_compaction_lock_path();
         let compaction_lock_file = self.lock_file(&compaction_lock_path)?;
         lock_file_with_backoff(&compaction_lock_file, &compaction_lock_path, false)?;
@@ -1360,7 +1368,7 @@ impl FleetTransport for FileFleetTransport {
 
         // DEADLOCK FIX: Acquire compaction lock BEFORE shared_state_lock to establish consistent lock ordering.
         // This prevents AB-BA deadlock with compact_action_log_if_needed() which takes compaction → shared_state.
-        let _process_guard = lock_fleet_action_compaction_process()?;
+        let _process_guard = lock_fleet_action_compaction_process(self.layout.root_dir())?;
         let compaction_lock_path = self.action_compaction_lock_path();
         let compaction_lock_file = self.lock_file(&compaction_lock_path)?;
         lock_file_with_backoff(&compaction_lock_file, &compaction_lock_path, false)?;
@@ -2773,6 +2781,38 @@ mod tests {
             "expected retry backoff budget to elapse, got {:?}",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn file_transport_compaction_process_guard_is_scoped_per_root() {
+        let tempdir = tempdir().expect("tempdir");
+        let root_a = tempdir.path().join("fleet-a");
+        let root_b = tempdir.path().join("fleet-b");
+        let mut transport_a = FileFleetTransport::new(&root_a);
+        let mut transport_b = FileFleetTransport::new(&root_b);
+        transport_a.initialize().expect("initialize root a");
+        transport_b.initialize().expect("initialize root b");
+
+        let _guard_a = lock_fleet_action_compaction_process(transport_a.layout.root_dir())
+            .expect("first root guard");
+        let same_root_error = lock_fleet_action_compaction_process(transport_a.layout.root_dir())
+            .expect_err("same root must still contend");
+        assert!(matches!(
+            same_root_error,
+            FleetTransportError::LockContention { .. }
+        ));
+
+        transport_b
+            .publish_action(&release_action_record(
+                "fleet-action-independent-root",
+                "2026-04-06T04:10:00Z",
+                "inc-independent",
+            ))
+            .expect("independent root should not share process guard");
+
+        let actions = transport_b.list_actions().expect("list actions");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action_id, "fleet-action-independent-root");
     }
 
     #[test]
