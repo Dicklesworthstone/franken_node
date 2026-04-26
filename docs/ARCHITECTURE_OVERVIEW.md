@@ -178,6 +178,9 @@ Core Commands:
   migrate          Migration analysis and tooling
   trust            Trust and supply chain operations
   fleet            Fleet management and quarantine
+    describe       Fleet status and configuration inspection
+  ops              Runtime operations and health inspection
+    health-check   Process/runtime health signals
   verify           Verification and proof operations
   replay           Replay and incident analysis
   remote           Remote execution capabilities
@@ -266,11 +269,20 @@ Supply Chain Input → Trust Card Validation → Policy Engine → Decision Rece
 | **Fuzz Harnesses** | 10+ | `fuzz/fuzz_targets/*.rs` | Crash detection, round-trip validation |
 | **Benchmarks** | 5+ | `benches/*.rs` | Performance regression detection |
 
+### Cross-Substrate Conformance
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| **Conformance Vectors v1** | `artifacts/conformance_vectors/v1/` | Version-pinned canonical test vectors with machine-readable index |
+| **Test Strategies** | `src/test_strategies/` | Unified proptest generators for consistent fuzz/PBT input distributions |
+| **Vector Consumer Tests** | `tests/*_vector_consumer_conformance.rs` | Validates compatibility with published vectors |
+
 ### Test Features
 - **Mock-free E2E testing** - Real file-based persistence instead of mocks
 - **Real runtime testing** - Tests against actual franken_engine when available
 - **Adversarial testing** - Security-focused attack simulation
 - **Regression coverage** - Historical bug prevention
+- **Cross-substrate conformance vectors** - Versioned canonical test vectors in `artifacts/conformance_vectors/v1/`
+- **Unified test strategies** - Centralized proptest generators in `src/test_strategies/` for consistent input distributions
 
 ## Development Workflow
 
@@ -339,6 +351,7 @@ cd fuzz && cargo fuzz run fuzz_config_toml_parse
    - Use `ct_eq()` for sensitive comparisons
    - Generate golden tests for output stability
    - Write conformance harnesses for protocols
+   - Use `test_strategies::*` for proptest/fuzz generators to ensure consistent input distributions
 
 ## Notes & Gotchas
 
