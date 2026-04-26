@@ -1081,6 +1081,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "franken-security-macros"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "proc-macro2",
+ "quote",
+ "sha2 0.11.0",
+ "syn",
+]
+
+[[package]]
 name = "frankenengine-engine"
 version = "0.1.0"
 dependencies = [
@@ -1136,6 +1147,7 @@ dependencies = [
  "ed25519-dalek",
  "fastapi-rust",
  "flate2",
+ "franken-security-macros",
  "frankenengine-engine",
  "frankenengine-extension-host",
  "frankenengine-verifier-sdk",

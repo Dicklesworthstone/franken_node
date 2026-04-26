@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/franken-node",
+  "crates/franken-security-macros",
   "sdk/verifier",
 ]
 exclude = [

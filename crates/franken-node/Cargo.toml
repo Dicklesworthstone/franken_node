@@ -71,6 +71,7 @@ hkdf = "0.13.0"
 zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
 hex = "0.4.3"
 base64 = "0.22.1"
+franken-security-macros = { path = "../franken-security-macros" }
 ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 serde_cbor = { version = "0.11.2", optional = true }
 flate2 = { version = "1.0.35", optional = true }

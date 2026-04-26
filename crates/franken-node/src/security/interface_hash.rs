@@ -6,7 +6,6 @@
 
 use franken_security_macros::secure_hash;
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -246,6 +245,7 @@ impl std::error::Error for InterfaceHashError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::Digest;
 
     // === compute_hash ===
 

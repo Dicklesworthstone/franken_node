@@ -1,0 +1,17 @@
+[package]
+name = "franken-security-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["parsing", "full"] }
+
+[dev-dependencies]
+hex = "0.4.3"
+sha2 = "0.11.0"
