@@ -146,6 +146,10 @@ pub enum Command {
     #[command(subcommand)]
     Incident(IncidentCommand),
 
+    /// Runtime operations and health inspection.
+    #[command(subcommand)]
+    Ops(OpsCommand),
+
     /// Extension registry operations.
     #[command(subcommand)]
     Registry(RegistryCommand),
@@ -1028,6 +1032,21 @@ pub struct FleetAgentArgs {
     pub json: bool,
 }
 
+// -- ops --
+
+#[derive(Debug, Subcommand)]
+pub enum OpsCommand {
+    /// Inspect process/runtime health signals.
+    HealthCheck(OpsHealthCheckArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct OpsHealthCheckArgs {
+    /// Emit JSON instead of human-readable output.
+    #[arg(long)]
+    pub json: bool,
+}
+
 // -- incident --
 
 #[derive(Debug, Subcommand)]
@@ -1510,6 +1529,17 @@ mod parser_contract_extra_tests {
         };
         assert_eq!(args.node_id, "node-7");
         assert_eq!(args.zone.as_deref(), Some("us-east"));
+        assert!(args.json);
+    }
+
+    #[test]
+    fn ops_health_check_parses_json_flag() {
+        let cli = parse(&["franken-node", "ops", "health-check", "--json"])
+            .expect("ops health-check command should parse");
+
+        let Command::Ops(OpsCommand::HealthCheck(args)) = cli.command else {
+            panic!("expected ops health-check command");
+        };
         assert!(args.json);
     }
 }
