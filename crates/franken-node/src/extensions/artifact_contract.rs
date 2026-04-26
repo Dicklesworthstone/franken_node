@@ -276,9 +276,7 @@ impl AdmissionGate {
 
         if let Some(detail) = invalid_token_detail("schema_version", &contract.schema_version) {
             return AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract {
-                    detail,
-                },
+                reason: AdmissionDenialReason::InvalidContract { detail },
                 event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
             };
         }
@@ -296,9 +294,7 @@ impl AdmissionGate {
 
         if let Some(detail) = invalid_token_detail("contract_id", &contract.contract_id) {
             return AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract {
-                    detail,
-                },
+                reason: AdmissionDenialReason::InvalidContract { detail },
                 event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
             };
         }
@@ -315,22 +311,17 @@ impl AdmissionGate {
             };
         }
 
-        if let Some(detail) =
-            invalid_token_detail("contract extension_id", &contract.extension_id)
+        if let Some(detail) = invalid_token_detail("contract extension_id", &contract.extension_id)
         {
             return AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract {
-                    detail,
-                },
+                reason: AdmissionDenialReason::InvalidContract { detail },
                 event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
             };
         }
 
         if let Some(detail) = invalid_token_detail("signer_id", &contract.signer_id) {
             return AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract {
-                    detail,
-                },
+                reason: AdmissionDenialReason::InvalidContract { detail },
                 event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
             };
         }
@@ -355,9 +346,7 @@ impl AdmissionGate {
 
         if let Some(detail) = invalid_token_detail("artifact_id", &artifact.artifact_id) {
             return AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract {
-                    detail,
-                },
+                reason: AdmissionDenialReason::InvalidContract { detail },
                 event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
             };
         }
@@ -374,13 +363,10 @@ impl AdmissionGate {
             };
         }
 
-        if let Some(detail) =
-            invalid_token_detail("artifact extension_id", &artifact.extension_id)
+        if let Some(detail) = invalid_token_detail("artifact extension_id", &artifact.extension_id)
         {
             return AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract {
-                    detail,
-                },
+                reason: AdmissionDenialReason::InvalidContract { detail },
                 event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
             };
         }
@@ -449,17 +435,13 @@ impl AdmissionGate {
         for cap in &contract.capabilities {
             if let Some(detail) = invalid_token_detail("capability_id", &cap.capability_id) {
                 return AdmissionOutcome::Denied {
-                    reason: AdmissionDenialReason::InvalidCapability {
-                        detail,
-                    },
+                    reason: AdmissionDenialReason::InvalidCapability { detail },
                     event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
                 };
             }
             if let Some(detail) = invalid_token_detail("capability scope", &cap.scope) {
                 return AdmissionOutcome::Denied {
-                    reason: AdmissionDenialReason::InvalidCapability {
-                        detail,
-                    },
+                    reason: AdmissionDenialReason::InvalidCapability { detail },
                     event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
                 };
             }

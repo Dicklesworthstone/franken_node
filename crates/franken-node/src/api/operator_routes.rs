@@ -21,8 +21,8 @@ use std::time::Instant;
 
 use super::error::ApiError;
 use super::middleware::{
-    enforce_route_contract, AuthIdentity, AuthMethod, EndpointGroup, EndpointLifecycle,
-    PolicyHook, RouteMetadata, TraceContext,
+    AuthIdentity, AuthMethod, EndpointGroup, EndpointLifecycle, PolicyHook, RouteMetadata,
+    TraceContext, enforce_route_contract,
 };
 use super::trust_card_routes::ApiResponse;
 

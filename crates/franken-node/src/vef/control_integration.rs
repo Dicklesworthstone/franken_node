@@ -562,10 +562,18 @@ impl ControlTransitionGate {
             // Check verification state.
             match ev.state {
                 VerificationState::Verified => {
-                    push_bounded(&mut valid_evidence_ids, ev.evidence_id.clone(), MAX_EVIDENCE_REFS_PER_REQUEST);
+                    push_bounded(
+                        &mut valid_evidence_ids,
+                        ev.evidence_id.clone(),
+                        MAX_EVIDENCE_REFS_PER_REQUEST,
+                    );
                 }
                 VerificationState::Unverified => {
-                    push_bounded(&mut pending_evidence_ids, ev.evidence_id.clone(), MAX_EVIDENCE_REFS_PER_REQUEST);
+                    push_bounded(
+                        &mut pending_evidence_ids,
+                        ev.evidence_id.clone(),
+                        MAX_EVIDENCE_REFS_PER_REQUEST,
+                    );
                 }
                 VerificationState::Expired => {
                     saw_expired = true;
@@ -1969,7 +1977,12 @@ mod tests {
         let result = gate.authorize_transition(&normal_request);
         assert!(matches!(result, AuthorizationResult::Authorized { .. }));
 
-        if let AuthorizationResult::Authorized { valid_evidence_ids, pending_evidence_ids, .. } = result {
+        if let AuthorizationResult::Authorized {
+            valid_evidence_ids,
+            pending_evidence_ids,
+            ..
+        } = result
+        {
             assert_eq!(valid_evidence_ids.len(), 3);
             assert_eq!(pending_evidence_ids.len(), 0);
         }
@@ -2011,19 +2024,32 @@ mod tests {
         let result = gate.authorize_transition(&large_request);
         assert!(matches!(result, AuthorizationResult::Authorized { .. }));
 
-        if let AuthorizationResult::Authorized { valid_evidence_ids, pending_evidence_ids, .. } = result {
+        if let AuthorizationResult::Authorized {
+            valid_evidence_ids,
+            pending_evidence_ids,
+            ..
+        } = result
+        {
             // Verify collections are bounded to MAX_EVIDENCE_REFS_PER_REQUEST
-            assert!(valid_evidence_ids.len() <= MAX_EVIDENCE_REFS_PER_REQUEST,
+            assert!(
+                valid_evidence_ids.len() <= MAX_EVIDENCE_REFS_PER_REQUEST,
                 "valid_evidence_ids should be bounded to {}, got {}",
-                MAX_EVIDENCE_REFS_PER_REQUEST, valid_evidence_ids.len());
-            assert!(pending_evidence_ids.len() <= MAX_EVIDENCE_REFS_PER_REQUEST,
+                MAX_EVIDENCE_REFS_PER_REQUEST,
+                valid_evidence_ids.len()
+            );
+            assert!(
+                pending_evidence_ids.len() <= MAX_EVIDENCE_REFS_PER_REQUEST,
                 "pending_evidence_ids should be bounded to {}, got {}",
-                MAX_EVIDENCE_REFS_PER_REQUEST, pending_evidence_ids.len());
+                MAX_EVIDENCE_REFS_PER_REQUEST,
+                pending_evidence_ids.len()
+            );
 
             // Verify total doesn't exceed capacity limit due to truncation
             let total_evidence = valid_evidence_ids.len() + pending_evidence_ids.len();
-            assert!(total_evidence <= MAX_EVIDENCE_REFS_PER_REQUEST,
-                "Total evidence IDs should not exceed capacity limit");
+            assert!(
+                total_evidence <= MAX_EVIDENCE_REFS_PER_REQUEST,
+                "Total evidence IDs should not exceed capacity limit"
+            );
         }
     }
 
@@ -2051,10 +2077,15 @@ mod tests {
         let result = gate.authorize_transition(&bulk_request);
         assert!(matches!(result, AuthorizationResult::Authorized { .. }));
 
-        if let AuthorizationResult::Authorized { valid_evidence_ids, .. } = result {
+        if let AuthorizationResult::Authorized {
+            valid_evidence_ids, ..
+        } = result
+        {
             // Result should be bounded regardless of input size
-            assert!(valid_evidence_ids.len() <= MAX_EVIDENCE_REFS_PER_REQUEST,
-                "Memory safety: collections must remain bounded even with huge input");
+            assert!(
+                valid_evidence_ids.len() <= MAX_EVIDENCE_REFS_PER_REQUEST,
+                "Memory safety: collections must remain bounded even with huge input"
+            );
         }
     }
 
@@ -2082,18 +2113,26 @@ mod tests {
         let result = gate.authorize_transition(&truncation_request);
         assert!(matches!(result, AuthorizationResult::Authorized { .. }));
 
-        if let AuthorizationResult::Authorized { valid_evidence_ids, .. } = result {
+        if let AuthorizationResult::Authorized {
+            valid_evidence_ids, ..
+        } = result
+        {
             // Should contain exactly the capacity limit worth of evidence
-            assert_eq!(valid_evidence_ids.len(), MAX_EVIDENCE_REFS_PER_REQUEST,
-                "Truncation should result in exactly the capacity limit");
+            assert_eq!(
+                valid_evidence_ids.len(),
+                MAX_EVIDENCE_REFS_PER_REQUEST,
+                "Truncation should result in exactly the capacity limit"
+            );
 
             // Should contain the LAST MAX_EVIDENCE_REFS_PER_REQUEST items (FIFO eviction)
             // The push_bounded implementation keeps the newest items
             let expected_start = over_limit - MAX_EVIDENCE_REFS_PER_REQUEST;
             for (idx, evidence_id) in valid_evidence_ids.iter().enumerate() {
                 let expected_id = format!("trunc-ev-{}", expected_start + idx);
-                assert_eq!(*evidence_id, expected_id,
-                    "Truncation should keep the most recent evidence refs");
+                assert_eq!(
+                    *evidence_id, expected_id,
+                    "Truncation should keep the most recent evidence refs"
+                );
             }
         }
     }

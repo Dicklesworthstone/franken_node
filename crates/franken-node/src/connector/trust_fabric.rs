@@ -125,7 +125,10 @@ impl std::fmt::Display for TrustFabricError {
             }
             Self::PartitionDetected(msg) => write!(f, "{ERR_TFC_PARTITION_DETECTED}: {msg}"),
             Self::LengthOverflow { field, len } => {
-                write!(f, "{ERR_TFC_LENGTH_OVERFLOW}: {field} length {len} exceeds u64 range")
+                write!(
+                    f,
+                    "{ERR_TFC_LENGTH_OVERFLOW}: {field} length {len} exceeds u64 range"
+                )
             }
         }
     }
@@ -224,7 +227,8 @@ impl TrustStateVector {
             self.policy_epoch,
             &self.anchor_fps,
             &self.revocations,
-        ).expect("trust fabric length overflow: protocol violation");
+        )
+        .expect("trust fabric length overflow: protocol violation");
     }
 
     /// Add a trust card (authorization).

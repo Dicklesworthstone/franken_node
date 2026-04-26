@@ -1110,7 +1110,10 @@ mod tests {
 
         assert_eq!(err.code(), "PRA_REPLAY_MISMATCH");
         assert_eq!(store.total_count(), 1);
-        assert!(constant_time::ct_eq(&stored.payload_hash, "expected-digest"));
+        assert!(constant_time::ct_eq(
+            &stored.payload_hash,
+            "expected-digest"
+        ));
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].artifact_id, "receipt-1");
         assert_eq!(hooks[0].replay_order, 0);

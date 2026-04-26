@@ -1317,8 +1317,7 @@ mod tests {
 
         assert!(!result.valid);
         assert!(result.errors.iter().any(|error| {
-            error.contains(error_codes::ERR_MA_VERSION_UNSUPPORTED)
-                && error.contains("ma-v1.0 ")
+            error.contains(error_codes::ERR_MA_VERSION_UNSUPPORTED) && error.contains("ma-v1.0 ")
         }));
     }
 
@@ -1376,7 +1375,10 @@ mod tests {
         let mut artifact = generate_reference_artifact();
         assert!(verify_artifact_signatures(&artifact));
 
-        artifact.rollback_receipt.original_state_ref.push_str("#tampered");
+        artifact
+            .rollback_receipt
+            .original_state_ref
+            .push_str("#tampered");
 
         assert!(!verify_artifact_signatures(&artifact));
     }

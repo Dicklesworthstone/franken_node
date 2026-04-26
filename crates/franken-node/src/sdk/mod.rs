@@ -431,7 +431,7 @@ mod tests {
         let sdk = VerifierSdk::with_defaults();
 
         let injection_patterns = [
-            "artifact\u{202E}spoofed",    // Right-to-left override
+            "artifact\u{202E}spoofed",   // Right-to-left override
             "artifact\u{200B}invisible", // Zero-width space
             "artifact\u{FEFF}bom",       // Byte order mark
             "artifact\x00null",          // Null byte
@@ -449,16 +449,22 @@ mod tests {
                     assert!(report.binding_hash.len() > 0);
 
                     // JSON serialization should handle the pattern safely
-                    let json_result = std::panic::catch_unwind(|| {
-                        serde_json::to_string(&report)
-                    });
-                    assert!(json_result.is_ok(), "Pattern '{}' should serialize safely", pattern.escape_unicode());
+                    let json_result = std::panic::catch_unwind(|| serde_json::to_string(&report));
+                    assert!(
+                        json_result.is_ok(),
+                        "Pattern '{}' should serialize safely",
+                        pattern.escape_unicode()
+                    );
                 }
                 Err(SdkError::InvalidArtifact(_)) => {
                     // Early rejection of injection patterns is acceptable
                 }
                 Err(other) => {
-                    panic!("Unexpected error for pattern '{}': {:?}", pattern.escape_unicode(), other);
+                    panic!(
+                        "Unexpected error for pattern '{}': {:?}",
+                        pattern.escape_unicode(),
+                        other
+                    );
                 }
             }
         }
@@ -466,10 +472,7 @@ mod tests {
 
     #[test]
     fn negative_capsule_sequence_numbers_at_arithmetic_boundaries() {
-        let boundary_inputs = vec![
-            input(u64::MAX - 1, b"near_max"),
-            input(u64::MAX, b"at_max"),
-        ];
+        let boundary_inputs = vec![input(u64::MAX - 1, b"near_max"), input(u64::MAX, b"at_max")];
 
         let capsule = create_capsule("boundary-sequences", boundary_inputs, test_environment())
             .expect("boundary sequence numbers should be accepted");
@@ -479,13 +482,16 @@ mod tests {
 
         // SDK verification should handle u64::MAX sequences
         let sdk = VerifierSdk::with_defaults();
-        let report = sdk.verify_capsule(&capsule).expect("boundary sequences should verify");
+        let report = sdk
+            .verify_capsule(&capsule)
+            .expect("boundary sequences should verify");
 
         assert!(matches!(report.verdict, VerifyVerdict::Pass));
 
         // Serialization should handle extreme values
         let json = serde_json::to_string(&capsule).expect("should serialize boundary values");
-        let parsed: ReplayCapsule = serde_json::from_str(&json).expect("should deserialize boundary values");
+        let parsed: ReplayCapsule =
+            serde_json::from_str(&json).expect("should deserialize boundary values");
         assert_eq!(parsed.inputs[1].seq, u64::MAX);
     }
 
@@ -494,19 +500,21 @@ mod tests {
         let sdk = VerifierSdk::with_defaults();
 
         // Create legitimate reports
-        let mut report1 = sdk.verify_artifact(&request("artifact-1", &"a".repeat(64), vec!["claim1"]))
+        let mut report1 = sdk
+            .verify_artifact(&request("artifact-1", &"a".repeat(64), vec!["claim1"]))
             .expect("first report should succeed");
-        let mut report2 = sdk.verify_artifact(&request("artifact-2", &"b".repeat(64), vec!["claim2"]))
+        let mut report2 = sdk
+            .verify_artifact(&request("artifact-2", &"b".repeat(64), vec!["claim2"]))
             .expect("second report should succeed");
 
         // Corrupt binding hashes with various attack patterns
         let corruption_patterns = [
-            "".to_string(),                          // Empty hash
-            "a".repeat(63),                          // Too short
-            "a".repeat(65),                          // Too long
-            "g".repeat(64),                          // Invalid hex
-            "\x00".repeat(32),                       // Null bytes
-            "\u{FEFF}".repeat(16),                   // Unicode BOM
+            "".to_string(),                                   // Empty hash
+            "a".repeat(63),                                   // Too short
+            "a".repeat(65),                                   // Too long
+            "g".repeat(64),                                   // Invalid hex
+            "\x00".repeat(32),                                // Null bytes
+            "\u{FEFF}".repeat(16),                            // Unicode BOM
             format!("{}../../../etc/passwd", "a".repeat(32)), // Path injection
         ];
 
@@ -523,10 +531,17 @@ mod tests {
                 Ok(chain_report) => {
                     // Should detect corruption in evidence
                     let failures = failed_checks(&chain_report);
-                    assert!(matches!(chain_report.verdict, VerifyVerdict::Fail(_)),
-                           "Corrupted hash '{}' should cause chain failure", pattern.escape_unicode());
-                    assert!(failures.contains(&"binding_hashes_present") || failures.contains(&"binding_hashes_unique"),
-                           "Should detect hash corruption for pattern '{}'", pattern.escape_unicode());
+                    assert!(
+                        matches!(chain_report.verdict, VerifyVerdict::Fail(_)),
+                        "Corrupted hash '{}' should cause chain failure",
+                        pattern.escape_unicode()
+                    );
+                    assert!(
+                        failures.contains(&"binding_hashes_present")
+                            || failures.contains(&"binding_hashes_unique"),
+                        "Should detect hash corruption for pattern '{}'",
+                        pattern.escape_unicode()
+                    );
                 }
                 Err(_) => {
                     // Early rejection of malformed chains is acceptable
@@ -545,28 +560,41 @@ mod tests {
         environment.config_hash = "\u{FEFF}config\u{200B}hash".to_string();
 
         // Add properties with control characters
-        environment.properties.insert("key\x00null".to_string(), "value\r\ninjection".to_string());
-        environment.properties.insert("\u{202E}rtl".to_string(), "\u{200B}invisible".to_string());
+        environment
+            .properties
+            .insert("key\x00null".to_string(), "value\r\ninjection".to_string());
+        environment
+            .properties
+            .insert("\u{202E}rtl".to_string(), "\u{200B}invisible".to_string());
 
         let capsule = create_capsule("control-chars", ordered_inputs(), environment.clone())
             .expect("environment with control chars should be accepted");
 
         // Validation should preserve control characters
         assert!(validate_capsule(&capsule).is_ok());
-        assert_eq!(capsule.environment.runtime_version, environment.runtime_version);
+        assert_eq!(
+            capsule.environment.runtime_version,
+            environment.runtime_version
+        );
         assert_eq!(capsule.environment.platform, environment.platform);
         assert_eq!(capsule.environment.config_hash, environment.config_hash);
         assert_eq!(capsule.environment.properties, environment.properties);
 
         // SDK verification should handle control characters
         let sdk = VerifierSdk::with_defaults();
-        let report = sdk.verify_capsule(&capsule).expect("control chars should verify");
+        let report = sdk
+            .verify_capsule(&capsule)
+            .expect("control chars should verify");
         assert!(matches!(report.verdict, VerifyVerdict::Pass));
 
         // JSON round-trip should preserve control characters
         let json = serde_json::to_string(&capsule).expect("should serialize control chars");
-        let parsed: ReplayCapsule = serde_json::from_str(&json).expect("should deserialize control chars");
-        assert_eq!(parsed.environment.runtime_version, environment.runtime_version);
+        let parsed: ReplayCapsule =
+            serde_json::from_str(&json).expect("should deserialize control chars");
+        assert_eq!(
+            parsed.environment.runtime_version,
+            environment.runtime_version
+        );
     }
 
     #[test]
@@ -585,9 +613,7 @@ mod tests {
         }
         nested_json.push_str(r#"],"expected_outputs":[],"environment":{"runtime_version":"test","platform":"test","config_hash":"test","properties":{}}}"#);
 
-        let result = std::panic::catch_unwind(|| {
-            from_json(&nested_json)
-        });
+        let result = std::panic::catch_unwind(|| from_json(&nested_json));
 
         // Should either deserialize safely or fail gracefully (not panic/stack overflow)
         match result {
@@ -610,7 +636,7 @@ mod tests {
         // Test configurations with potentially contradictory or extreme settings
         let contradictory_configs = [
             VerifierConfig {
-                verifier_identity: "".to_string(),  // Empty identity
+                verifier_identity: "".to_string(), // Empty identity
                 require_hash_match: true,
                 strict_claims: false,
                 extensions: BTreeMap::new(),
@@ -645,8 +671,11 @@ mod tests {
             let request = request("test-artifact", &"a".repeat(64), vec!["test-claim"]);
             let result = sdk.verify_artifact(&request);
 
-            assert!(result.is_ok() || result.is_err(),
-                   "Config {} should produce deterministic result", i);
+            assert!(
+                result.is_ok() || result.is_err(),
+                "Config {} should produce deterministic result",
+                i
+            );
 
             if let Ok(report) = result {
                 // Report should contain the configured identity
@@ -654,8 +683,11 @@ mod tests {
 
                 // JSON serialization should handle the config
                 let json_result = serde_json::to_string(&report);
-                assert!(json_result.is_ok(),
-                       "Config {} should serialize without error", i);
+                assert!(
+                    json_result.is_ok(),
+                    "Config {} should serialize without error",
+                    i
+                );
             }
         }
     }
@@ -666,10 +698,16 @@ mod tests {
 
         // Create capsules with crafted content designed to test hash collision resistance
         let collision_attempts = [
-            (vec![input(1, b"ab"), input(2, b"cd")], vec![input(1, b"abc"), input(2, b"d")]),
+            (
+                vec![input(1, b"ab"), input(2, b"cd")],
+                vec![input(1, b"abc"), input(2, b"d")],
+            ),
             (vec![input(0, b"")], vec![input(1, b"")]),
             (vec![input(1, b"\x00\x01")], vec![input(2, b"\x01\x00")]),
-            (vec![input(42, "🚀".as_bytes())], vec![input(42, "🎯".as_bytes())]),
+            (
+                vec![input(42, "🚀".as_bytes())],
+                vec![input(42, "🎯".as_bytes())],
+            ),
         ];
 
         for (inputs1, inputs2) in collision_attempts {
@@ -678,30 +716,46 @@ mod tests {
             let capsule2 = create_capsule("collision-test-2", inputs2, test_environment())
                 .expect("second capsule should create");
 
-            let report1 = sdk.verify_capsule(&capsule1).expect("first verification should work");
-            let report2 = sdk.verify_capsule(&capsule2).expect("second verification should work");
+            let report1 = sdk
+                .verify_capsule(&capsule1)
+                .expect("first verification should work");
+            let report2 = sdk
+                .verify_capsule(&capsule2)
+                .expect("second verification should work");
 
             // Different capsules should produce different binding hashes
-            assert_ne!(report1.binding_hash, report2.binding_hash,
-                      "Different capsules must produce different binding hashes");
-            assert_ne!(report1.request_id, report2.request_id,
-                      "Different capsules must produce different request IDs");
-            assert_ne!(report1.trace_id, report2.trace_id,
-                      "Different capsules must produce different trace IDs");
+            assert_ne!(
+                report1.binding_hash, report2.binding_hash,
+                "Different capsules must produce different binding hashes"
+            );
+            assert_ne!(
+                report1.request_id, report2.request_id,
+                "Different capsules must produce different request IDs"
+            );
+            assert_ne!(
+                report1.trace_id, report2.trace_id,
+                "Different capsules must produce different trace IDs"
+            );
 
             // Chain verification should detect different hashes
-            let chain_report = sdk.verify_chain(&[report1, report2]).expect("chain should verify");
-            assert!(matches!(chain_report.verdict, VerifyVerdict::Pass),
-                   "Chain with different capsules should pass uniqueness checks");
+            let chain_report = sdk
+                .verify_chain(&[report1, report2])
+                .expect("chain should verify");
+            assert!(
+                matches!(chain_report.verdict, VerifyVerdict::Pass),
+                "Chain with different capsules should pass uniqueness checks"
+            );
         }
     }
 
     #[test]
     fn negative_replay_verification_under_memory_pressure() {
         // Create capsule with large input data to stress replay system
-        let large_inputs = (0..100).map(|i| {
-            input(i, &vec![i as u8; 10000]) // 10KB per input * 100 = 1MB total
-        }).collect();
+        let large_inputs = (0..100)
+            .map(|i| {
+                input(i, &vec![i as u8; 10000]) // 10KB per input * 100 = 1MB total
+            })
+            .collect();
 
         let large_capsule = create_capsule("memory-pressure", large_inputs, test_environment())
             .expect("large capsule should create");
@@ -714,13 +768,13 @@ mod tests {
         assert!(replay_result.is_ok(), "replay should handle large data");
 
         // Verification should complete without memory issues
-        let verified = replay_and_verify(&large_capsule)
-            .expect("large capsule should verify");
+        let verified = replay_and_verify(&large_capsule).expect("large capsule should verify");
         assert!(verified, "large capsule should verify correctly");
 
         // SDK verification should handle large capsule
         let sdk = VerifierSdk::with_defaults();
-        let report = sdk.verify_capsule(&large_capsule)
+        let report = sdk
+            .verify_capsule(&large_capsule)
             .expect("SDK should handle large capsule");
         assert!(matches!(report.verdict, VerifyVerdict::Pass));
 
@@ -729,7 +783,10 @@ mod tests {
         assert!(json.is_ok(), "large capsule should serialize");
 
         if let Ok(json_str) = json {
-            assert!(json_str.len() > 1_000_000, "JSON should contain substantial data");
+            assert!(
+                json_str.len() > 1_000_000,
+                "JSON should contain substantial data"
+            );
 
             // Deserialization should work
             let parsed_result = serde_json::from_str::<ReplayCapsule>(&json_str);
@@ -744,10 +801,10 @@ mod tests {
 
         // Test versions at JavaScript safe integer limits (could cause precision loss in JSON)
         let edge_versions = [
-            1u64,                        // Minimal version
-            9007199254740991u64,         // 2^53 - 1 (max safe integer in JavaScript)
-            9007199254740992u64,         // 2^53 (precision loss boundary)
-            18446744073709551615u64,     // u64::MAX
+            1u64,                    // Minimal version
+            9007199254740991u64,     // 2^53 - 1 (max safe integer in JavaScript)
+            9007199254740992u64,     // 2^53 (precision loss boundary)
+            18446744073709551615u64, // u64::MAX
         ];
 
         for &version in &edge_versions {
@@ -756,7 +813,8 @@ mod tests {
 
             // JSON round-trip should preserve exact version
             let json = serde_json::to_string(&test_capsule).expect("should serialize version");
-            let parsed: ReplayCapsule = serde_json::from_str(&json).expect("should deserialize version");
+            let parsed: ReplayCapsule =
+                serde_json::from_str(&json).expect("should deserialize version");
             assert_eq!(parsed.format_version, version);
 
             // Validation should handle extreme versions appropriately
@@ -767,15 +825,25 @@ mod tests {
                 assert!(validation_result.is_ok(), "Version 1 should be valid");
             } else if version > CURRENT_FORMAT_VERSION {
                 // Future versions should be rejected
-                assert!(validation_result.is_err(), "Future version {} should be rejected", version);
+                assert!(
+                    validation_result.is_err(),
+                    "Future version {} should be rejected",
+                    version
+                );
                 match validation_result.unwrap_err() {
                     CapsuleError::UnsupportedVersion(v) => assert_eq!(v, version),
-                    other => panic!("Unexpected error for future version {}: {:?}", version, other),
+                    other => panic!(
+                        "Unexpected error for future version {}: {:?}",
+                        version, other
+                    ),
                 }
             } else {
                 // Past versions might be accepted or rejected depending on implementation
-                assert!(validation_result.is_ok() || validation_result.is_err(),
-                       "Version {} should have deterministic validation result", version);
+                assert!(
+                    validation_result.is_ok() || validation_result.is_err(),
+                    "Version {} should have deterministic validation result",
+                    version
+                );
             }
         }
     }
@@ -813,21 +881,29 @@ mod tests {
 
                             let result = sdk.verify_artifact(&request);
                             thread_results.push(("artifact", thread_id, operation, result.is_ok()));
-                        },
+                        }
                         1 => {
                             // Capsule verification
-                            let inputs = vec![input(operation as u64, format!("data_t{}_o{}", thread_id, operation).as_bytes())];
+                            let inputs = vec![input(
+                                operation as u64,
+                                format!("data_t{}_o{}", thread_id, operation).as_bytes(),
+                            )];
                             let capsule = create_capsule(
                                 &format!("capsule_t{}_o{}", thread_id, operation),
                                 inputs,
-                                test_environment()
+                                test_environment(),
                             );
 
                             if let Ok(capsule) = capsule {
                                 let result = sdk.verify_capsule(&capsule);
-                                thread_results.push(("capsule", thread_id, operation, result.is_ok()));
+                                thread_results.push((
+                                    "capsule",
+                                    thread_id,
+                                    operation,
+                                    result.is_ok(),
+                                ));
                             }
-                        },
+                        }
                         2 => {
                             // Chain verification (using previous results if available)
                             if thread_results.len() >= 2 {
@@ -836,7 +912,10 @@ mod tests {
                                     schema_tag: "vsk".to_string(),
                                     verifier_identity: "test".to_string(),
                                     request_id: format!("req_t{}_o{}_1", thread_id, operation),
-                                    binding_hash: format!("{:064x}", thread_id * 1000 + operation * 10 + 1),
+                                    binding_hash: format!(
+                                        "{:064x}",
+                                        thread_id * 1000 + operation * 10 + 1
+                                    ),
                                     trace_id: format!("trace_t{}_o{}_1", thread_id, operation),
                                     verdict: VerifyVerdict::Pass,
                                     evidence: Vec::new(),
@@ -846,16 +925,24 @@ mod tests {
                                     schema_tag: "vsk".to_string(),
                                     verifier_identity: "test".to_string(),
                                     request_id: format!("req_t{}_o{}_2", thread_id, operation),
-                                    binding_hash: format!("{:064x}", thread_id * 1000 + operation * 10 + 2),
+                                    binding_hash: format!(
+                                        "{:064x}",
+                                        thread_id * 1000 + operation * 10 + 2
+                                    ),
                                     trace_id: format!("trace_t{}_o{}_2", thread_id, operation),
                                     verdict: VerifyVerdict::Pass,
                                     evidence: Vec::new(),
                                 };
 
                                 let result = sdk.verify_chain(&[report1, report2]);
-                                thread_results.push(("chain", thread_id, operation, result.is_ok()));
+                                thread_results.push((
+                                    "chain",
+                                    thread_id,
+                                    operation,
+                                    result.is_ok(),
+                                ));
                             }
-                        },
+                        }
                         _ => unreachable!(),
                     }
                 }
@@ -881,9 +968,16 @@ mod tests {
         assert!(final_results.len() >= thread_count * operations_per_thread / 2);
 
         // Most operations should succeed (allowing for some deliberate failures)
-        let success_rate = final_results.iter().filter(|(_, _, _, success)| *success).count() as f64
+        let success_rate = final_results
+            .iter()
+            .filter(|(_, _, _, success)| *success)
+            .count() as f64
             / final_results.len() as f64;
-        assert!(success_rate > 0.8, "Success rate too low: {:.2}%", success_rate * 100.0);
+        assert!(
+            success_rate > 0.8,
+            "Success rate too low: {:.2}%",
+            success_rate * 100.0
+        );
     }
 
     #[test]
@@ -893,15 +987,12 @@ mod tests {
             // NFC vs NFD normalization of same visual character
             ("café", "cafe\u{0301}"),
             ("résumé", "re\u{0301}sume\u{0301}"),
-
             // Different codepoints with same visual appearance
-            ("Ⅸ", "IX"), // Roman numeral vs ASCII
+            ("Ⅸ", "IX"),       // Roman numeral vs ASCII
             ("A", "\u{0041}"), // Latin A vs Unicode codepoint
-
             // Homograph attacks
             ("microsoft", "microsоft"), // Latin 'o' vs Cyrillic 'о'
-            ("google", "gооgle"), // Latin 'o' vs Cyrillic 'о'
-
+            ("google", "gооgle"),       // Latin 'o' vs Cyrillic 'о'
             // Zero-width character injection
             ("test", "te\u{200B}st"), // Zero-width space
             ("test", "test\u{200C}"), // Zero-width non-joiner
@@ -925,8 +1016,12 @@ mod tests {
 
             // SDK verification should treat them as different
             let sdk = VerifierSdk::with_defaults();
-            let report1 = sdk.verify_capsule(&capsule1).expect("first form should verify");
-            let report2 = sdk.verify_capsule(&capsule2).expect("second form should verify");
+            let report1 = sdk
+                .verify_capsule(&capsule1)
+                .expect("first form should verify");
+            let report2 = sdk
+                .verify_capsule(&capsule2)
+                .expect("second form should verify");
 
             assert_ne!(report1.request_id, report2.request_id);
             assert_ne!(report1.binding_hash, report2.binding_hash);
@@ -934,7 +1029,10 @@ mod tests {
             // JSON serialization should preserve exact Unicode form
             let json1 = serde_json::to_string(&capsule1).expect("first should serialize");
             let json2 = serde_json::to_string(&capsule2).expect("second should serialize");
-            assert_ne!(json1, json2, "Different Unicode forms should serialize differently");
+            assert_ne!(
+                json1, json2,
+                "Different Unicode forms should serialize differently"
+            );
 
             let parsed1: ReplayCapsule = serde_json::from_str(&json1).expect("first should parse");
             let parsed2: ReplayCapsule = serde_json::from_str(&json2).expect("second should parse");
@@ -959,7 +1057,7 @@ mod tests {
             let request = request(
                 &format!("chain_artifact_{}", i),
                 &format!("{:064x}", i),
-                vec![&format!("chain_claim_{}", i)]
+                vec![&format!("chain_claim_{}", i)],
             );
 
             match sdk.verify_artifact(&request) {
@@ -978,20 +1076,30 @@ mod tests {
             }
         }
 
-        assert!(chain.len() >= 50, "Should build substantial chain despite memory pressure");
+        assert!(
+            chain.len() >= 50,
+            "Should build substantial chain despite memory pressure"
+        );
 
         // Verify chain under memory pressure
         let chain_start = std::time::Instant::now();
-        let chain_report = sdk.verify_chain(&chain).expect("chain should verify under memory pressure");
+        let chain_report = sdk
+            .verify_chain(&chain)
+            .expect("chain should verify under memory pressure");
         let chain_duration = chain_start.elapsed();
 
         assert!(matches!(chain_report.verdict, VerifyVerdict::Pass));
-        assert!(chain_duration < std::time::Duration::from_secs(30), "Chain verification should complete in reasonable time");
+        assert!(
+            chain_duration < std::time::Duration::from_secs(30),
+            "Chain verification should complete in reasonable time"
+        );
 
         // Memory cleanup should not affect verification consistency
         drop(fragmenters);
 
-        let post_cleanup_report = sdk.verify_chain(&chain).expect("chain should verify after cleanup");
+        let post_cleanup_report = sdk
+            .verify_chain(&chain)
+            .expect("chain should verify after cleanup");
         assert_eq!(chain_report.binding_hash, post_cleanup_report.binding_hash);
     }
 
@@ -1004,13 +1112,17 @@ mod tests {
 
         // Create artifacts with hashes designed to test timing consistency
         let hash_patterns = [
-            "a".repeat(64),                    // All 'a's
-            "f".repeat(64),                    // All 'f's (max hex digit)
-            "0".repeat(64),                    // All zeros
-            format!("{}{}",                    // Half zeros, half f's
-                    "0".repeat(32),
-                    "f".repeat(32)),
-            (0..64).map(|i| if i % 2 == 0 { 'a' } else { 'f' }).collect::<String>(), // Alternating
+            "a".repeat(64), // All 'a's
+            "f".repeat(64), // All 'f's (max hex digit)
+            "0".repeat(64), // All zeros
+            format!(
+                "{}{}", // Half zeros, half f's
+                "0".repeat(32),
+                "f".repeat(32)
+            ),
+            (0..64)
+                .map(|i| if i % 2 == 0 { 'a' } else { 'f' })
+                .collect::<String>(), // Alternating
         ];
 
         let mut timing_results = Vec::new();
@@ -1020,9 +1132,13 @@ mod tests {
 
             for iteration in 0..sample_size {
                 let request = request(
-                    &format!("timing_test_{}_{}", pattern.chars().next().unwrap(), iteration),
+                    &format!(
+                        "timing_test_{}_{}",
+                        pattern.chars().next().unwrap(),
+                        iteration
+                    ),
                     pattern,
-                    vec!["timing_claim"]
+                    vec!["timing_claim"],
                 );
 
                 let start = Instant::now();
@@ -1033,7 +1149,10 @@ mod tests {
                 pattern_timings.push(duration);
 
                 // Should produce consistent results
-                assert!(result.is_ok() || result.is_err(), "Result should be deterministic");
+                assert!(
+                    result.is_ok() || result.is_err(),
+                    "Result should be deterministic"
+                );
             }
 
             timing_results.push((pattern, pattern_timings));
@@ -1045,20 +1164,31 @@ mod tests {
             total_nanos as f64 / timings.len() as f64
         }
 
-        let mean_timings: Vec<(&&str, f64)> = timing_results.iter()
+        let mean_timings: Vec<(&&str, f64)> = timing_results
+            .iter()
             .map(|(pattern, timings)| (pattern, calculate_mean(timings)))
             .collect();
 
         // Check that timing doesn't vary dramatically based on hash content
         if let (Some(min_timing), Some(max_timing)) = (
-            mean_timings.iter().map(|(_, mean)| mean).min_by(|a, b| a.partial_cmp(b).unwrap()),
-            mean_timings.iter().map(|(_, mean)| mean).max_by(|a, b| a.partial_cmp(b).unwrap())
+            mean_timings
+                .iter()
+                .map(|(_, mean)| mean)
+                .min_by(|a, b| a.partial_cmp(b).unwrap()),
+            mean_timings
+                .iter()
+                .map(|(_, mean)| mean)
+                .max_by(|a, b| a.partial_cmp(b).unwrap()),
         ) {
             if *min_timing > 0.0 {
                 let timing_ratio = max_timing / min_timing;
-                assert!(timing_ratio < 5.0,
-                       "Suspicious timing variation across hash patterns: max={:.0}ns, min={:.0}ns, ratio={:.2}",
-                       max_timing, min_timing, timing_ratio);
+                assert!(
+                    timing_ratio < 5.0,
+                    "Suspicious timing variation across hash patterns: max={:.0}ns, min={:.0}ns, ratio={:.2}",
+                    max_timing,
+                    min_timing,
+                    timing_ratio
+                );
             }
         }
     }
@@ -1074,9 +1204,11 @@ mod tests {
                 let mut env = test_environment();
                 env.runtime_version = "".to_string(); // Invalid environment
                 let invalid_inputs = vec![input(0, b"")]; // Invalid sequence number
-                (create_capsule("nested-error-1", invalid_inputs, env), "should fail on multiple levels")
+                (
+                    create_capsule("nested-error-1", invalid_inputs, env),
+                    "should fail on multiple levels",
+                )
             },
-
             // Capsule with contradictory sequence numbers and missing outputs
             {
                 let inputs = vec![input(2, b"second"), input(1, b"first")]; // Wrong order
@@ -1096,41 +1228,43 @@ mod tests {
                             // Should detect issues in evidence
                             match report.verdict {
                                 VerifyVerdict::Fail(failures) => {
-                                    assert!(!failures.is_empty(),
-                                           "Failed verification should list specific failures for: {}",
-                                           error_description);
-                                },
+                                    assert!(
+                                        !failures.is_empty(),
+                                        "Failed verification should list specific failures for: {}",
+                                        error_description
+                                    );
+                                }
                                 VerifyVerdict::Pass => {
                                     // If verification passes, the capsule might actually be valid
                                     // (our error scenario might not be invalid after all)
                                 }
                             }
-                        },
+                        }
                         Err(sdk_error) => {
                             // Early rejection is also valid error propagation
                             match sdk_error {
                                 SdkError::MalformedCapsule(msg) => {
                                     assert!(!msg.is_empty(), "Error message should be descriptive");
-                                },
+                                }
                                 SdkError::InvalidArtifact(msg) => {
                                     assert!(!msg.is_empty(), "Error message should be descriptive");
-                                },
+                                }
                                 SdkError::BrokenChain(msg) => {
                                     assert!(!msg.is_empty(), "Error message should be descriptive");
-                                },
+                                }
                             }
                         }
                     }
-                },
+                }
                 Err(capsule_error) => {
                     // Capsule creation failure is expected error propagation
                     match capsule_error {
-                        CapsuleError::EmptyId |
-                        CapsuleError::NoInputs |
-                        CapsuleError::NonMonotonicInputSequence |
-                        CapsuleError::IncompleteEnvironment(_) => {
+                        CapsuleError::EmptyId
+                        | CapsuleError::NoInputs
+                        | CapsuleError::NonMonotonicInputSequence
+                        | CapsuleError::IncompleteEnvironment(_) => {
                             // Expected error types
-                        },
+                        }
                         other => {
                             // Other errors should still be descriptive
                             let error_str = format!("{:?}", other);
@@ -1189,17 +1323,20 @@ mod tests {
                 match chain_report.verdict {
                     VerifyVerdict::Pass => {
                         // If passed, circular references weren't problematic
-                    },
+                    }
                     VerifyVerdict::Fail(failures) => {
                         // May detect circular dependencies as an issue
                         assert!(!failures.is_empty());
                     }
                 }
-            },
+            }
             Err(SdkError::BrokenChain(msg)) => {
                 // Early detection of circular dependencies is acceptable
-                assert!(!msg.is_empty(), "Broken chain error should have description");
-            },
+                assert!(
+                    !msg.is_empty(),
+                    "Broken chain error should have description"
+                );
+            }
             Err(other) => {
                 panic!("Unexpected error for circular chain: {:?}", other);
             }
@@ -1210,8 +1347,11 @@ mod tests {
         let _ = sdk.verify_chain(&circular_reports);
         let duration = start.elapsed();
 
-        assert!(duration < std::time::Duration::from_secs(10),
-               "Circular dependency verification took too long: {:?}", duration);
+        assert!(
+            duration < std::time::Duration::from_secs(10),
+            "Circular dependency verification took too long: {:?}",
+            duration
+        );
     }
 
     #[test]
@@ -1222,16 +1362,12 @@ mod tests {
             r#"","malicious":"payload","original":""#,
             r#"}],"injected":true,"data":["#,
             r#"null},"hijacked":"value"//comment{"#,
-
             // Unicode escape injection
             "\u{0022}\u{003A}\u{007B}\u{0022}injected\u{0022}",
-
             // Control character injection
             "\x00\x01\x02\x03\":{\"evil\":true}//\x04\x05",
-
             // Large payload injection
             &"x".repeat(100000),
-
             // Number-like strings that could be misinterpreted
             "1.7976931348623157e+308", // Max float64
             "9007199254740992",        // JavaScript safe integer boundary
@@ -1258,21 +1394,25 @@ mod tests {
                     // JSON should not contain unescaped injection attempts
                     if payload.contains('"') || payload.contains('{') || payload.contains('}') {
                         // These characters should be escaped in JSON
-                        assert!(!json.contains(&payload.replace('\\', "")),
-                               "Dangerous payload should be escaped in JSON");
+                        assert!(
+                            !json.contains(&payload.replace('\\', "")),
+                            "Dangerous payload should be escaped in JSON"
+                        );
                     }
 
                     // Deserialization should recover exact payload
-                    let parsed: ReplayCapsule = serde_json::from_str(&json)
-                        .expect("should deserialize without injection");
+                    let parsed: ReplayCapsule =
+                        serde_json::from_str(&json).expect("should deserialize without injection");
                     assert_eq!(parsed.environment.config_hash, *payload);
 
                     // SDK verification should handle injection safely
                     let sdk = VerifierSdk::with_defaults();
                     let verification_result = sdk.verify_capsule(&capsule);
-                    assert!(verification_result.is_ok() || verification_result.is_err(),
-                           "Verification should produce deterministic result");
-                },
+                    assert!(
+                        verification_result.is_ok() || verification_result.is_err(),
+                        "Verification should produce deterministic result"
+                    );
+                }
                 Err(_) => {
                     // Early rejection of injection payloads is acceptable security measure
                 }
@@ -1280,23 +1420,19 @@ mod tests {
 
             // Test in artifact verification
             let sdk = VerifierSdk::with_defaults();
-            let malicious_request = request(
-                "injection_artifact",
-                &"a".repeat(64),
-                vec![payload]
-            );
+            let malicious_request = request("injection_artifact", &"a".repeat(64), vec![payload]);
 
             let artifact_result = sdk.verify_artifact(&malicious_request);
             match artifact_result {
                 Ok(report) => {
                     // JSON serialization of report should be safe
-                    let report_json = serde_json::to_string(&report)
-                        .expect("report should serialize safely");
+                    let report_json =
+                        serde_json::to_string(&report).expect("report should serialize safely");
 
                     let parsed_report: VerificationReport = serde_json::from_str(&report_json)
                         .expect("report should deserialize without injection");
                     assert_eq!(parsed_report.binding_hash, report.binding_hash);
-                },
+                }
                 Err(_) => {
                     // Rejection of malicious payloads is acceptable
                 }
@@ -1319,10 +1455,9 @@ mod tests {
 
             // Add random extensions
             for j in 0..i % 5 {
-                config.extensions.insert(
-                    format!("ext_{}_{}", i, j),
-                    format!("value_{}_{}", i, j)
-                );
+                config
+                    .extensions
+                    .insert(format!("ext_{}_{}", i, j), format!("value_{}_{}", i, j));
             }
 
             configs.push(config);
@@ -1349,8 +1484,12 @@ mod tests {
 
             // Re-verification with same SDK should produce same result
             let re_verification = sdks[*i].verify_artifact(&test_request);
-            assert_eq!(re_verification.is_ok(), *success,
-                      "SDK {} should produce consistent results", i);
+            assert_eq!(
+                re_verification.is_ok(),
+                *success,
+                "SDK {} should produce consistent results",
+                i
+            );
         }
 
         // No SDK should be affected by others' configurations

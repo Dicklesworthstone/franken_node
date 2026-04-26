@@ -418,7 +418,8 @@ mod tests {
             timestamp: 1000,
         };
 
-        let parsed: serde_json::Value = serde_json::from_str(&event.to_jsonl()).expect("trigger event should serialize to valid JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&event.to_jsonl())
+            .expect("trigger event should serialize to valid JSON");
 
         assert_eq!(parsed["trigger_id"], "trig-\"quoted\"");
         assert_eq!(parsed["rejection_id"], "rej-line\nbreak");
@@ -711,7 +712,9 @@ mod tests {
         for i in 0..100 {
             let r = trigger.on_guardrail_rejection(&rej, &mut sm, 1000 + i, &tid(i as u32));
             match r {
-                TriggerResult::Escalated { .. } => escalation_count = escalation_count.saturating_add(1),
+                TriggerResult::Escalated { .. } => {
+                    escalation_count = escalation_count.saturating_add(1)
+                }
                 TriggerResult::AlreadyAtMax => at_max_count = at_max_count.saturating_add(1),
                 TriggerResult::Suppressed { .. } => {
                     unreachable!("unexpected Suppressed at iteration {i}: {r:?}")
@@ -1020,6 +1023,7 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("trig-0001"));
         // Verify it's valid JSON
-        let _: serde_json::Value = serde_json::from_str(&lines[0]).expect("trigger event JSONL should be valid JSON");
+        let _: serde_json::Value =
+            serde_json::from_str(&lines[0]).expect("trigger event JSONL should be valid JSON");
     }
 }

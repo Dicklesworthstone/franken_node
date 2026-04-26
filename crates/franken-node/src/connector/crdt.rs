@@ -962,9 +962,8 @@ mod tests {
 
     #[test]
     fn serde_gcounter_negative_count_fails() {
-        let err = serde_json::from_str::<GCounter>(
-            r#"{"crdt_type":"gcounter","counts":{"r1":-1}}"#,
-        );
+        let err =
+            serde_json::from_str::<GCounter>(r#"{"crdt_type":"gcounter","counts":{"r1":-1}}"#);
 
         assert!(err.is_err());
     }
@@ -1057,9 +1056,8 @@ mod tests {
 
     #[test]
     fn negative_serde_gcounter_rejects_string_count() {
-        let err = serde_json::from_str::<GCounter>(
-            r#"{"crdt_type":"gcounter","counts":{"r1":"1"}}"#,
-        );
+        let err =
+            serde_json::from_str::<GCounter>(r#"{"crdt_type":"gcounter","counts":{"r1":"1"}}"#);
 
         assert!(err.is_err());
     }
@@ -1079,9 +1077,8 @@ mod tests {
 
     #[test]
     fn negative_serde_crdt_error_rejects_missing_actual_type() {
-        let err = serde_json::from_str::<CrdtError>(
-            r#"{"CRDT_TYPE_MISMATCH":{"expected":"lww_map"}}"#,
-        );
+        let err =
+            serde_json::from_str::<CrdtError>(r#"{"CRDT_TYPE_MISMATCH":{"expected":"lww_map"}}"#);
 
         assert!(err.is_err());
     }

@@ -747,40 +747,76 @@ mod tests {
         let secret = root_secret();
 
         // Unicode BiDi override attacks in domain names
-        let bidi_domain = "\u{202E}reltih\u{202C}marker";  // "hitler" reversed with BiDi override
+        let bidi_domain = "\u{202E}reltih\u{202C}marker"; // "hitler" reversed with BiDi override
         let err = sign_epoch_artifact(b"artifact", ControlEpoch::new(1), bidi_domain, &secret);
-        assert!(err.is_err(), "BiDi override in domain should fail validation");
+        assert!(
+            err.is_err(),
+            "BiDi override in domain should fail validation"
+        );
 
         // Zero-width character injection
-        let zero_width_domain = "mark\u{200B}er";  // Zero-width space
-        let err = sign_epoch_artifact(b"artifact", ControlEpoch::new(1), zero_width_domain, &secret);
-        assert!(err.is_err(), "Zero-width characters should fail domain validation");
+        let zero_width_domain = "mark\u{200B}er"; // Zero-width space
+        let err = sign_epoch_artifact(
+            b"artifact",
+            ControlEpoch::new(1),
+            zero_width_domain,
+            &secret,
+        );
+        assert!(
+            err.is_err(),
+            "Zero-width characters should fail domain validation"
+        );
 
         // Unicode normalization attacks (NFC vs NFD)
-        let nfc_domain = "café";  // NFC normalized (single codepoint é)
-        let nfd_domain = "cafe\u{0301}";  // NFD normalized (e + combining acute)
-        let sig1 = sign_epoch_artifact(b"artifact", ControlEpoch::new(1), nfc_domain, &secret).unwrap();
-        let sig2 = sign_epoch_artifact(b"artifact", ControlEpoch::new(1), nfd_domain, &secret).unwrap();
+        let nfc_domain = "café"; // NFC normalized (single codepoint é)
+        let nfd_domain = "cafe\u{0301}"; // NFD normalized (e + combining acute)
+        let sig1 =
+            sign_epoch_artifact(b"artifact", ControlEpoch::new(1), nfc_domain, &secret).unwrap();
+        let sig2 =
+            sign_epoch_artifact(b"artifact", ControlEpoch::new(1), nfd_domain, &secret).unwrap();
 
         // Should produce different signatures (no automatic normalization)
-        assert_ne!(sig1.bytes, sig2.bytes, "Different Unicode normalization should produce different signatures");
+        assert_ne!(
+            sig1.bytes, sig2.bytes,
+            "Different Unicode normalization should produce different signatures"
+        );
 
         // Verify domain isolation holds despite normalization differences
-        let verify_err = verify_epoch_signature(b"artifact", &sig1, ControlEpoch::new(1), nfd_domain, &secret);
-        assert!(verify_err.is_err(), "Cross-normalization signature verification should fail");
+        let verify_err = verify_epoch_signature(
+            b"artifact",
+            &sig1,
+            ControlEpoch::new(1),
+            nfd_domain,
+            &secret,
+        );
+        assert!(
+            verify_err.is_err(),
+            "Cross-normalization signature verification should fail"
+        );
 
         // Test mixed script attacks (Cyrillic/Latin lookalikes)
-        let cyrillic_domain = "mаrker";  // Cyrillic 'а' instead of Latin 'a'
+        let cyrillic_domain = "mаrker"; // Cyrillic 'а' instead of Latin 'a'
         let latin_domain = "marker";
-        let sig_cyr = sign_epoch_artifact(b"artifact", ControlEpoch::new(1), cyrillic_domain, &secret).unwrap();
-        let verify_err = verify_epoch_signature(b"artifact", &sig_cyr, ControlEpoch::new(1), latin_domain, &secret);
-        assert!(verify_err.is_err(), "Cyrillic/Latin lookalike domains should not be interchangeable");
+        let sig_cyr =
+            sign_epoch_artifact(b"artifact", ControlEpoch::new(1), cyrillic_domain, &secret)
+                .unwrap();
+        let verify_err = verify_epoch_signature(
+            b"artifact",
+            &sig_cyr,
+            ControlEpoch::new(1),
+            latin_domain,
+            &secret,
+        );
+        assert!(
+            verify_err.is_err(),
+            "Cyrillic/Latin lookalike domains should not be interchangeable"
+        );
     }
 
     #[test]
     fn hex_parsing_buffer_overflow_and_validation_bypass_attacks_fail_safely() {
         // Test extremely long hex strings to trigger buffer overflow attempts
-        let massive_hex = "00".repeat(1_000_000);  // 2MB hex string
+        let massive_hex = "00".repeat(1_000_000); // 2MB hex string
         let err = RootSecret::from_hex(&massive_hex);
         assert!(err.is_err(), "Massive hex input should be rejected safely");
 
@@ -803,7 +839,7 @@ mod tests {
         assert_eq!(root.as_bytes().len(), DERIVED_KEY_LEN);
 
         // Test Unicode hex digits (should fail)
-        let unicode_hex = "𝟎𝟎𝟏𝟏𝟐𝟐𝟑𝟑";  // Unicode mathematical alphanumeric symbols
+        let unicode_hex = "𝟎𝟎𝟏𝟏𝟐𝟐𝟑𝟑"; // Unicode mathematical alphanumeric symbols
         let err = RootSecret::from_hex(unicode_hex);
         assert!(err.is_err(), "Unicode hex digits should be rejected");
 
@@ -824,28 +860,63 @@ mod tests {
         let artifact = b"sensitive_artifact";
 
         // Attempt signature forgery with all-zero signature
-        let forged_sig = Signature { bytes: [0u8; SIGNATURE_LEN] };
-        let err = verify_epoch_signature(artifact, &forged_sig, ControlEpoch::new(1), "marker", &secret);
+        let forged_sig = Signature {
+            bytes: [0u8; SIGNATURE_LEN],
+        };
+        let err = verify_epoch_signature(
+            artifact,
+            &forged_sig,
+            ControlEpoch::new(1),
+            "marker",
+            &secret,
+        );
         assert!(err.is_err(), "All-zero signature should be rejected");
 
         // Attempt signature forgery with all-FF signature
-        let forged_sig = Signature { bytes: [0xFFu8; SIGNATURE_LEN] };
-        let err = verify_epoch_signature(artifact, &forged_sig, ControlEpoch::new(1), "marker", &secret);
+        let forged_sig = Signature {
+            bytes: [0xFFu8; SIGNATURE_LEN],
+        };
+        let err = verify_epoch_signature(
+            artifact,
+            &forged_sig,
+            ControlEpoch::new(1),
+            "marker",
+            &secret,
+        );
         assert!(err.is_err(), "All-FF signature should be rejected");
 
         // Valid signature for replay attack testing
-        let valid_sig = sign_epoch_artifact(artifact, ControlEpoch::new(1), "marker", &secret).unwrap();
+        let valid_sig =
+            sign_epoch_artifact(artifact, ControlEpoch::new(1), "marker", &secret).unwrap();
 
         // Cross-epoch replay attack
-        let err = verify_epoch_signature(artifact, &valid_sig, ControlEpoch::new(2), "marker", &secret);
+        let err = verify_epoch_signature(
+            artifact,
+            &valid_sig,
+            ControlEpoch::new(2),
+            "marker",
+            &secret,
+        );
         assert!(err.is_err(), "Cross-epoch replay should be rejected");
 
         // Cross-domain replay attack
-        let err = verify_epoch_signature(artifact, &valid_sig, ControlEpoch::new(1), "manifest", &secret);
+        let err = verify_epoch_signature(
+            artifact,
+            &valid_sig,
+            ControlEpoch::new(1),
+            "manifest",
+            &secret,
+        );
         assert!(err.is_err(), "Cross-domain replay should be rejected");
 
         // Artifact substitution attack
-        let err = verify_epoch_signature(b"different_artifact", &valid_sig, ControlEpoch::new(1), "marker", &secret);
+        let err = verify_epoch_signature(
+            b"different_artifact",
+            &valid_sig,
+            ControlEpoch::new(1),
+            "marker",
+            &secret,
+        );
         assert!(err.is_err(), "Artifact substitution should be rejected");
 
         // Test epoch overflow boundary
@@ -854,8 +925,17 @@ mod tests {
         verify_epoch_signature(artifact, &sig_max, max_epoch, "marker", &secret).unwrap();
 
         // Verify epoch boundaries are properly isolated
-        let err = verify_epoch_signature(artifact, &sig_max, ControlEpoch::new(u64::MAX - 1), "marker", &secret);
-        assert!(err.is_err(), "Epoch boundary isolation should prevent replay");
+        let err = verify_epoch_signature(
+            artifact,
+            &sig_max,
+            ControlEpoch::new(u64::MAX - 1),
+            "marker",
+            &secret,
+        );
+        assert!(
+            err.is_err(),
+            "Epoch boundary isolation should prevent replay"
+        );
     }
 
     #[test]
@@ -877,9 +957,27 @@ mod tests {
         sig_diff_mid.bytes[SIGNATURE_LEN / 2] ^= 0x01;
 
         // All signature verification failures should take similar time (constant-time comparison)
-        let err1 = verify_epoch_signature(artifact, &sig_diff_first, ControlEpoch::new(1), "marker", &secret);
-        let err2 = verify_epoch_signature(artifact, &sig_diff_last, ControlEpoch::new(1), "marker", &secret);
-        let err3 = verify_epoch_signature(artifact, &sig_diff_mid, ControlEpoch::new(1), "marker", &secret);
+        let err1 = verify_epoch_signature(
+            artifact,
+            &sig_diff_first,
+            ControlEpoch::new(1),
+            "marker",
+            &secret,
+        );
+        let err2 = verify_epoch_signature(
+            artifact,
+            &sig_diff_last,
+            ControlEpoch::new(1),
+            "marker",
+            &secret,
+        );
+        let err3 = verify_epoch_signature(
+            artifact,
+            &sig_diff_mid,
+            ControlEpoch::new(1),
+            "marker",
+            &secret,
+        );
 
         assert!(err1.is_err() && err2.is_err() && err3.is_err());
 
@@ -897,7 +995,10 @@ mod tests {
         let sig3 = sign_epoch_artifact(artifact, ControlEpoch::new(2), "marker", &secret).unwrap();
 
         assert_eq!(sig1, sig2, "Same inputs should produce equal signatures");
-        assert_ne!(sig1, sig3, "Different inputs should produce different signatures");
+        assert_ne!(
+            sig1, sig3,
+            "Different inputs should produce different signatures"
+        );
     }
 
     #[test]
@@ -934,7 +1035,7 @@ mod tests {
         let key = derive_epoch_key(&secret, ControlEpoch::new(1), "marker");
         let fingerprint = key.fingerprint();
         assert_eq!(fingerprint.len(), 16);
-        assert!(!fingerprint.contains("00000000"));  // Not all zeros
+        assert!(!fingerprint.contains("00000000")); // Not all zeros
 
         // Test that debug output doesn't leak sensitive material
         let debug_str = format!("{:?}", secret);
@@ -969,7 +1070,10 @@ mod tests {
 
         // Test that signing rejects malicious domains (but derivation doesn't validate)
         let err = sign_epoch_artifact(b"test", ControlEpoch::new(1), malicious_domain2, &secret);
-        assert!(err.is_err(), "Null byte in domain should be rejected by sign");
+        assert!(
+            err.is_err(),
+            "Null byte in domain should be rejected by sign"
+        );
 
         // Test length-based collision attempts
         let domain_a = "a".repeat(100);
@@ -989,7 +1093,10 @@ mod tests {
         // Verify that HKDF info includes proper length prefixes
         let key_short = derive_epoch_key(&secret, ControlEpoch::new(1), "a");
         let key_long = derive_epoch_key(&secret, ControlEpoch::new(1), "a".repeat(100));
-        assert_ne!(key_short, key_long, "Length prefixing should prevent collision");
+        assert_ne!(
+            key_short, key_long,
+            "Length prefixing should prevent collision"
+        );
     }
 
     #[test]
@@ -1001,16 +1108,18 @@ mod tests {
         let newline_injection = "normal\nfield\rwith\ncontrol\tchars";
 
         // Test artifact_id injection
-        let event = EpochAuthEvent::sig_verified(
-            json_injection,
-            ControlEpoch::new(1),
-            "marker",
-            "trace-1"
-        );
+        let event =
+            EpochAuthEvent::sig_verified(json_injection, ControlEpoch::new(1), "marker", "trace-1");
 
         let serialized = serde_json::to_string(&event).unwrap();
-        assert!(!serialized.contains(r#""evil":"#), "JSON injection should be escaped");
-        assert!(serialized.contains("payload"), "Content should be preserved but escaped");
+        assert!(
+            !serialized.contains(r#""evil":"#),
+            "JSON injection should be escaped"
+        );
+        assert!(
+            serialized.contains("payload"),
+            "Content should be preserved but escaped"
+        );
 
         // Test domain injection
         let event = EpochAuthEvent::sig_rejected(
@@ -1018,23 +1127,32 @@ mod tests {
             ControlEpoch::new(1),
             script_injection,
             sql_injection,
-            newline_injection
+            newline_injection,
         );
 
         let serialized = serde_json::to_string(&event).unwrap();
-        assert!(!serialized.contains("<script>"), "Script injection should be escaped");
-        assert!(!serialized.contains("DROP TABLE"), "SQL injection should be escaped");
+        assert!(
+            !serialized.contains("<script>"),
+            "Script injection should be escaped"
+        );
+        assert!(
+            !serialized.contains("DROP TABLE"),
+            "SQL injection should be escaped"
+        );
 
         // Test trace_id with control characters
         let event = EpochAuthEvent::key_derived(
             ControlEpoch::new(1),
             "marker",
             &derive_epoch_key(&root_secret(), ControlEpoch::new(1), "marker"),
-            "trace\t\n\r\x00"
+            "trace\t\n\r\x00",
         );
 
         let serialized = serde_json::to_string(&event).unwrap();
-        assert!(serde_json::from_str::<EpochAuthEvent>(&serialized).is_ok(), "Round-trip should work");
+        assert!(
+            serde_json::from_str::<EpochAuthEvent>(&serialized).is_ok(),
+            "Round-trip should work"
+        );
 
         // Test extremely long field values
         let huge_artifact_id = "x".repeat(1_000_000);
@@ -1042,20 +1160,23 @@ mod tests {
             &huge_artifact_id,
             ControlEpoch::new(1),
             "marker",
-            "trace-huge"
+            "trace-huge",
         );
 
         let serialized = serde_json::to_string(&event);
         assert!(serialized.is_ok(), "Large fields should serialize safely");
-        assert!(serialized.unwrap().len() > 1_000_000, "Content should be preserved");
+        assert!(
+            serialized.unwrap().len() > 1_000_000,
+            "Content should be preserved"
+        );
 
         // Test Unicode in all fields
         let unicode_event = EpochAuthEvent::sig_rejected(
             "artifact-🦀",
             ControlEpoch::new(1),
-            "домен",  // Cyrillic
-            "причина отклонения",  // Cyrillic reason
-            "trace-🌍"
+            "домен",              // Cyrillic
+            "причина отклонения", // Cyrillic reason
+            "trace-🌍",
         );
 
         let serialized = serde_json::to_string(&unicode_event).unwrap();
@@ -1065,9 +1186,9 @@ mod tests {
 
     #[test]
     fn concurrent_key_derivation_and_race_condition_safety_validation() {
+        use crate::security::constant_time;
         use std::sync::{Arc, Mutex};
         use std::thread;
-        use crate::security::constant_time;
 
         let secret = Arc::new(root_secret());
         let results = Arc::new(Mutex::new(Vec::new()));
@@ -1102,7 +1223,11 @@ mod tests {
         let first_hex = &results[0].2;
 
         for (i, fingerprint, hex) in results.iter() {
-            assert_eq!(fingerprint, first_fingerprint, "Thread {} fingerprint mismatch", i);
+            assert_eq!(
+                fingerprint, first_fingerprint,
+                "Thread {} fingerprint mismatch",
+                i
+            );
             assert_eq!(hex, first_hex, "Thread {} hex mismatch", i);
         }
 
@@ -1116,7 +1241,9 @@ mod tests {
 
             let handle = thread::spawn(move || {
                 let artifact = format!("artifact-{}", i).into_bytes();
-                let sig = sign_epoch_artifact(&artifact, ControlEpoch::new(1), "marker", &*secret_clone).unwrap();
+                let sig =
+                    sign_epoch_artifact(&artifact, ControlEpoch::new(1), "marker", &*secret_clone)
+                        .unwrap();
 
                 let mut results = results_clone.lock().unwrap();
                 results.push((i, artifact, sig));
@@ -1134,7 +1261,8 @@ mod tests {
 
         // Verify all signatures are valid and different
         for (i, artifact, sig) in sign_results.iter() {
-            verify_epoch_signature(artifact, sig, ControlEpoch::new(1), "marker", &*secret).unwrap();
+            verify_epoch_signature(artifact, sig, ControlEpoch::new(1), "marker", &*secret)
+                .unwrap();
 
             // Should be different from other signatures (different artifacts)
             for (j, other_artifact, other_sig) in sign_results.iter() {
@@ -1158,11 +1286,11 @@ mod tests {
         let test_cases = vec![
             (ControlEpoch::new(1), "marker"),
             (ControlEpoch::new(42), "test-domain"),
-            (ControlEpoch::new(0), ""),  // Edge case: empty domain
+            (ControlEpoch::new(0), ""), // Edge case: empty domain
             (ControlEpoch::new(u64::MAX), "boundary-epoch"),
             (ControlEpoch::new(1), "special-chars-!@#$%^&*()"),
             (ControlEpoch::new(100), "unicode-域名"),
-            (ControlEpoch::new(1), &"x".repeat(1000)),  // Large domain
+            (ControlEpoch::new(1), &"x".repeat(1000)), // Large domain
         ];
 
         for (epoch, domain) in test_cases {
@@ -1171,12 +1299,20 @@ mod tests {
             let key2 = derive_epoch_key(&secret, epoch, domain);
             let key3 = derive_epoch_key(&secret, epoch, domain);
 
-            assert_eq!(key1, key2,
-                      "MR violated: derive idempotence failed for epoch={}, domain='{}'",
-                      epoch.value(), domain);
-            assert_eq!(key2, key3,
-                      "MR violated: derive idempotence failed on third call for epoch={}, domain='{}'",
-                      epoch.value(), domain);
+            assert_eq!(
+                key1,
+                key2,
+                "MR violated: derive idempotence failed for epoch={}, domain='{}'",
+                epoch.value(),
+                domain
+            );
+            assert_eq!(
+                key2,
+                key3,
+                "MR violated: derive idempotence failed on third call for epoch={}, domain='{}'",
+                epoch.value(),
+                domain
+            );
 
             // Verify byte-level equality
             assert_eq!(key1.as_bytes(), key2.as_bytes());
@@ -1194,13 +1330,13 @@ mod tests {
 
         let domain_pairs = vec![
             ("marker", "manifest"),
-            ("", "x"),  // Empty vs single char
-            ("domain", "domain2"),  // Similar domains
-            ("a", "A"),  // Case sensitivity
-            ("test", "test "),  // Trailing space
-            ("domain", "domain\0"),  // Null byte
-            ("unicode", "unicode域"),  // Unicode difference
-            ("short", &"x".repeat(100)),  // Length difference
+            ("", "x"),                   // Empty vs single char
+            ("domain", "domain2"),       // Similar domains
+            ("a", "A"),                  // Case sensitivity
+            ("test", "test "),           // Trailing space
+            ("domain", "domain\0"),      // Null byte
+            ("unicode", "unicode域"),    // Unicode difference
+            ("short", &"x".repeat(100)), // Length difference
         ];
 
         for (domain_a, domain_b) in domain_pairs {
@@ -1208,9 +1344,11 @@ mod tests {
             let key_b = derive_epoch_key(&secret, epoch, domain_b);
 
             // MR: Different domains must produce different keys
-            assert_ne!(key_a, key_b,
-                      "MR violated: domain separation failed for '{}' vs '{}'",
-                      domain_a, domain_b);
+            assert_ne!(
+                key_a, key_b,
+                "MR violated: domain separation failed for '{}' vs '{}'",
+                domain_a, domain_b
+            );
             assert_ne!(key_a.as_bytes(), key_b.as_bytes());
             assert_ne!(key_a.to_hex(), key_b.to_hex());
             assert_ne!(key_a.fingerprint(), key_b.fingerprint());
@@ -1237,9 +1375,13 @@ mod tests {
             let key_b = derive_epoch_key(&secret, epoch_b, domain);
 
             // MR: Different epochs must produce different keys
-            assert_ne!(key_a, key_b,
-                      "MR violated: epoch separation failed for epoch {} vs {}",
-                      epoch_a.value(), epoch_b.value());
+            assert_ne!(
+                key_a,
+                key_b,
+                "MR violated: epoch separation failed for epoch {} vs {}",
+                epoch_a.value(),
+                epoch_b.value()
+            );
             assert_ne!(key_a.as_bytes(), key_b.as_bytes());
             assert_ne!(key_a.to_hex(), key_b.to_hex());
             assert_ne!(key_a.fingerprint(), key_b.fingerprint());
@@ -1254,10 +1396,22 @@ mod tests {
 
         let test_cases = vec![
             (ControlEpoch::new(1), "marker", b"test-artifact".as_slice()),
-            (ControlEpoch::new(42), "domain", b"".as_slice()),  // Empty artifact
-            (ControlEpoch::new(0), "zero-epoch", b"large-artifact".repeat(1000).as_slice()),
-            (ControlEpoch::new(u64::MAX), "max-epoch", b"boundary-test".as_slice()),
-            (ControlEpoch::new(100), "special-domain-!@#", b"special-chars-artifact-!@#$%^&*()".as_slice()),
+            (ControlEpoch::new(42), "domain", b"".as_slice()), // Empty artifact
+            (
+                ControlEpoch::new(0),
+                "zero-epoch",
+                b"large-artifact".repeat(1000).as_slice(),
+            ),
+            (
+                ControlEpoch::new(u64::MAX),
+                "max-epoch",
+                b"boundary-test".as_slice(),
+            ),
+            (
+                ControlEpoch::new(100),
+                "special-domain-!@#",
+                b"special-chars-artifact-!@#$%^&*()".as_slice(),
+            ),
         ];
 
         for (epoch, domain, artifact) in test_cases {
@@ -1265,10 +1419,15 @@ mod tests {
             let signature = sign_epoch_artifact(artifact, epoch, domain, &secret)
                 .expect("Signing should succeed");
 
-            let verify_result = verify_epoch_signature(artifact, &signature, epoch, domain, &secret);
-            assert!(verify_result.is_ok(),
-                   "MR violated: sign-verify roundtrip failed for epoch={}, domain='{}', artifact_len={}",
-                   epoch.value(), domain, artifact.len());
+            let verify_result =
+                verify_epoch_signature(artifact, &signature, epoch, domain, &secret);
+            assert!(
+                verify_result.is_ok(),
+                "MR violated: sign-verify roundtrip failed for epoch={}, domain='{}', artifact_len={}",
+                epoch.value(),
+                domain,
+                artifact.len()
+            );
         }
     }
 
@@ -1292,9 +1451,13 @@ mod tests {
             let key_a = derive_epoch_key(&secret_a, epoch, domain);
             let key_b = derive_epoch_key(&secret_b, epoch, domain);
 
-            assert_eq!(key_a, key_b,
-                      "MR violated: root secret consistency failed for epoch={}, domain='{}'",
-                      epoch.value(), domain);
+            assert_eq!(
+                key_a,
+                key_b,
+                "MR violated: root secret consistency failed for epoch={}, domain='{}'",
+                epoch.value(),
+                domain
+            );
             assert_eq!(key_a.as_bytes(), key_b.as_bytes());
 
             // Also test signing consistency
@@ -1302,9 +1465,13 @@ mod tests {
             let sig_a = sign_epoch_artifact(artifact, epoch, domain, &secret_a).unwrap();
             let sig_b = sign_epoch_artifact(artifact, epoch, domain, &secret_b).unwrap();
 
-            assert_eq!(sig_a, sig_b,
-                      "MR violated: signing consistency failed for epoch={}, domain='{}'",
-                      epoch.value(), domain);
+            assert_eq!(
+                sig_a,
+                sig_b,
+                "MR violated: signing consistency failed for epoch={}, domain='{}'",
+                epoch.value(),
+                domain
+            );
         }
     }
 
@@ -1317,7 +1484,8 @@ mod tests {
 
         // Test that keys from consecutive epochs don't have obvious patterns
         let epochs: Vec<ControlEpoch> = (1..=20).map(ControlEpoch::new).collect();
-        let keys: Vec<DerivedKey> = epochs.iter()
+        let keys: Vec<DerivedKey> = epochs
+            .iter()
             .map(|&epoch| derive_epoch_key(&secret, epoch, domain))
             .collect();
 
@@ -1325,20 +1493,29 @@ mod tests {
         for (i, key_a) in keys.iter().enumerate() {
             for (j, key_b) in keys.iter().enumerate() {
                 if i != j {
-                    assert_ne!(key_a, key_b,
-                              "MR violated: epochs {} and {} produced identical keys",
-                              epochs[i].value(), epochs[j].value());
+                    assert_ne!(
+                        key_a,
+                        key_b,
+                        "MR violated: epochs {} and {} produced identical keys",
+                        epochs[i].value(),
+                        epochs[j].value()
+                    );
 
                     // Check for simple XOR patterns (shouldn't be all same value)
-                    let xor_result: Vec<u8> = key_a.as_bytes().iter()
+                    let xor_result: Vec<u8> = key_a
+                        .as_bytes()
+                        .iter()
                         .zip(key_b.as_bytes().iter())
                         .map(|(a, b)| a ^ b)
                         .collect();
 
                     let all_same = xor_result.windows(2).all(|w| w[0] == w[1]);
-                    assert!(!all_same,
-                           "MR violated: trivial XOR pattern between epochs {} and {}",
-                           epochs[i].value(), epochs[j].value());
+                    assert!(
+                        !all_same,
+                        "MR violated: trivial XOR pattern between epochs {} and {}",
+                        epochs[i].value(),
+                        epochs[j].value()
+                    );
                 }
             }
         }
@@ -1348,15 +1525,19 @@ mod tests {
             let key_a = &window[0];
             let key_b = &window[1];
 
-            let bit_differences: u32 = key_a.as_bytes().iter()
+            let bit_differences: u32 = key_a
+                .as_bytes()
+                .iter()
                 .zip(key_b.as_bytes().iter())
                 .map(|(a, b)| (a ^ b).count_ones())
                 .sum();
 
             // Should have reasonable bit differences (not too few, not too many)
-            assert!(bit_differences >= 32 && bit_differences <= 224,
-                   "MR violated: suspicious bit difference count {} between consecutive epochs",
-                   bit_differences);
+            assert!(
+                bit_differences >= 32 && bit_differences <= 224,
+                "MR violated: suspicious bit difference count {} between consecutive epochs",
+                bit_differences
+            );
         }
     }
 
@@ -1429,7 +1610,11 @@ mod tests {
 
             // Sanity check: derived key should not be all zeros initially
             let all_zeros = [0u8; DERIVED_KEY_LEN];
-            assert_ne!(key.as_bytes(), &all_zeros, "Derived key should not be all zeros");
+            assert_ne!(
+                key.as_bytes(),
+                &all_zeros,
+                "Derived key should not be all zeros"
+            );
 
             // Manual zeroization
             key.zeroize();
@@ -1452,7 +1637,11 @@ mod tests {
         // Test that Drop trait calls zeroize() by using Zeroizing wrapper
         // This provides assurance that the Drop implementation works without unsafe UB
         {
-            let zeroizing_key = Zeroizing::new(derive_epoch_key(&secret, ControlEpoch::new(123), "drop-test"));
+            let zeroizing_key = Zeroizing::new(derive_epoch_key(
+                &secret,
+                ControlEpoch::new(123),
+                "drop-test",
+            ));
             let original_bytes = *zeroizing_key.as_bytes();
 
             // Verify the key contains derived material (not zeros)

@@ -688,11 +688,23 @@ impl TransportFaultGate {
         let content_hash = {
             let mut h = Sha256::new();
             h.update(b"transport_fault_gate_hash_v1:");
-            h.update(u64::try_from(SCHEMA_VERSION.len()).unwrap_or(u64::MAX).to_le_bytes());
+            h.update(
+                u64::try_from(SCHEMA_VERSION.len())
+                    .unwrap_or(u64::MAX)
+                    .to_le_bytes(),
+            );
             h.update(SCHEMA_VERSION.as_bytes());
-            h.update(u64::try_from(BEAD_ID.len()).unwrap_or(u64::MAX).to_le_bytes());
+            h.update(
+                u64::try_from(BEAD_ID.len())
+                    .unwrap_or(u64::MAX)
+                    .to_le_bytes(),
+            );
             h.update(BEAD_ID.as_bytes());
-            h.update(u64::try_from(SECTION.len()).unwrap_or(u64::MAX).to_le_bytes());
+            h.update(
+                u64::try_from(SECTION.len())
+                    .unwrap_or(u64::MAX)
+                    .to_le_bytes(),
+            );
             h.update(SECTION.as_bytes());
             h.update([u8::from(passed)]);
             h.update((total_tests as u64).to_le_bytes());
@@ -700,14 +712,26 @@ impl TransportFaultGate {
             h.update((failed_tests as u64).to_le_bytes());
             let results_json =
                 serde_json::to_string(&results).unwrap_or_else(|e| format!("__serde_err:{e}"));
-            h.update(u64::try_from(results_json.len()).unwrap_or(u64::MAX).to_le_bytes());
+            h.update(
+                u64::try_from(results_json.len())
+                    .unwrap_or(u64::MAX)
+                    .to_le_bytes(),
+            );
             h.update(results_json.as_bytes());
-            h.update(u64::try_from(protocols_tested.len()).unwrap_or(u64::MAX).to_le_bytes());
+            h.update(
+                u64::try_from(protocols_tested.len())
+                    .unwrap_or(u64::MAX)
+                    .to_le_bytes(),
+            );
             for p in &protocols_tested {
                 h.update(u64::try_from(p.len()).unwrap_or(u64::MAX).to_le_bytes());
                 h.update(p.as_bytes());
             }
-            h.update(u64::try_from(fault_modes_tested.len()).unwrap_or(u64::MAX).to_le_bytes());
+            h.update(
+                u64::try_from(fault_modes_tested.len())
+                    .unwrap_or(u64::MAX)
+                    .to_le_bytes(),
+            );
             for m in &fault_modes_tested {
                 h.update(u64::try_from(m.len()).unwrap_or(u64::MAX).to_le_bytes());
                 h.update(m.as_bytes());
@@ -1309,29 +1333,65 @@ mod tests {
 
         let mut h = Sha256::new();
         h.update(b"transport_fault_gate_hash_v1:");
-        h.update(u64::try_from(SCHEMA_VERSION.len()).unwrap_or(u64::MAX).to_le_bytes());
+        h.update(
+            u64::try_from(SCHEMA_VERSION.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         h.update(SCHEMA_VERSION.as_bytes());
-        h.update(u64::try_from(BEAD_ID.len()).unwrap_or(u64::MAX).to_le_bytes());
+        h.update(
+            u64::try_from(BEAD_ID.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         h.update(BEAD_ID.as_bytes());
-        h.update(u64::try_from(SECTION.len()).unwrap_or(u64::MAX).to_le_bytes());
+        h.update(
+            u64::try_from(SECTION.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         h.update(SECTION.as_bytes());
         h.update([u8::from(verdict.passed)]);
         h.update((verdict.total_tests as u64).to_le_bytes());
         h.update((verdict.passed_tests as u64).to_le_bytes());
         h.update((verdict.failed_tests as u64).to_le_bytes());
-        h.update(u64::try_from(results_json.len()).unwrap_or(u64::MAX).to_le_bytes());
+        h.update(
+            u64::try_from(results_json.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         h.update(results_json.as_bytes());
-        h.update(u64::try_from(verdict.protocols_tested.len()).unwrap_or(u64::MAX).to_le_bytes());
+        h.update(
+            u64::try_from(verdict.protocols_tested.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         for protocol in &verdict.protocols_tested {
-            h.update(u64::try_from(protocol.len()).unwrap_or(u64::MAX).to_le_bytes());
+            h.update(
+                u64::try_from(protocol.len())
+                    .unwrap_or(u64::MAX)
+                    .to_le_bytes(),
+            );
             h.update(protocol.as_bytes());
         }
-        h.update(u64::try_from(verdict.fault_modes_tested.len()).unwrap_or(u64::MAX).to_le_bytes());
+        h.update(
+            u64::try_from(verdict.fault_modes_tested.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         for fault_mode in &verdict.fault_modes_tested {
-            h.update(u64::try_from(fault_mode.len()).unwrap_or(u64::MAX).to_le_bytes());
+            h.update(
+                u64::try_from(fault_mode.len())
+                    .unwrap_or(u64::MAX)
+                    .to_le_bytes(),
+            );
             h.update(fault_mode.as_bytes());
         }
-        h.update(u64::try_from(verdict.seeds_used.len()).unwrap_or(u64::MAX).to_le_bytes());
+        h.update(
+            u64::try_from(verdict.seeds_used.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         for seed in &verdict.seeds_used {
             h.update(seed.to_le_bytes());
         }
@@ -1614,8 +1674,14 @@ mod transport_fault_gate_extreme_adversarial_negative_tests {
         // Verify audit log doesn't contain problematic Unicode sequences
         for audit_entry in gate.audit_log() {
             let json = serde_json::to_string(audit_entry).unwrap_or_default();
-            assert!(!json.contains('\u{0000}'), "audit log must not contain null bytes");
-            assert!(!json.contains('\u{202E}'), "audit log must not contain RTL override");
+            assert!(
+                !json.contains('\u{0000}'),
+                "audit log must not contain null bytes"
+            );
+            assert!(
+                !json.contains('\u{202E}'),
+                "audit log must not contain RTL override"
+            );
         }
     }
 
@@ -1625,19 +1691,16 @@ mod transport_fault_gate_extreme_adversarial_negative_tests {
 
         // Test arithmetic overflow scenarios with boundary seed values
         let boundary_seeds = vec![
-            0,                    // Minimum value
-            1,                    // Minimal non-zero
-            u64::MAX / 2,        // Mid-range
-            u64::MAX - 1,        // Near maximum
-            u64::MAX,            // Maximum value
+            0,            // Minimum value
+            1,            // Minimal non-zero
+            u64::MAX / 2, // Mid-range
+            u64::MAX - 1, // Near maximum
+            u64::MAX,     // Maximum value
         ];
 
         for &seed in &boundary_seeds {
-            let result = gate.test_protocol(
-                ControlProtocol::FencingAcquire,
-                &FaultMode::Drop,
-                seed,
-            );
+            let result =
+                gate.test_protocol(ControlProtocol::FencingAcquire, &FaultMode::Drop, seed);
 
             // Should handle boundary values without arithmetic overflow
             assert!(result.outcome.is_acceptable());
@@ -1666,11 +1729,8 @@ mod transport_fault_gate_extreme_adversarial_negative_tests {
         // Simulate rapid concurrent protocol tests
         for (i, &protocol) in protocols.iter().enumerate() {
             for j in 0..10 {
-                let result = gate.test_protocol(
-                    protocol,
-                    &FaultMode::Reorder,
-                    (i as u64 * 100) + j,
-                );
+                let result =
+                    gate.test_protocol(protocol, &FaultMode::Reorder, (i as u64 * 100) + j);
                 results.push(result);
             }
         }
@@ -1684,8 +1744,11 @@ mod transport_fault_gate_extreme_adversarial_negative_tests {
         for entry in gate.audit_log() {
             if let Some(trace_value) = entry.detail.get("trace_id") {
                 if let Some(trace_str) = trace_value.as_str() {
-                    assert!(trace_ids.insert(trace_str.to_string()),
-                        "duplicate trace ID detected: {}", trace_str);
+                    assert!(
+                        trace_ids.insert(trace_str.to_string()),
+                        "duplicate trace ID detected: {}",
+                        trace_str
+                    );
                 }
             }
         }
@@ -1708,21 +1771,34 @@ mod transport_fault_gate_extreme_adversarial_negative_tests {
             let result2 = gate.test_protocol(protocol, fault_mode, seed);
 
             // Identical inputs should produce identical hashes (determinism)
-            assert_eq!(result1.content_hash, result2.content_hash,
+            assert_eq!(
+                result1.content_hash,
+                result2.content_hash,
                 "hash collision or non-determinism detected for {} {} {}",
-                protocol.name(), fault_mode, seed);
+                protocol.name(),
+                fault_mode,
+                seed
+            );
 
             // Verify constant-time comparison for security
-            assert!(constant_time::ct_eq(&result1.content_hash, &result2.content_hash));
+            assert!(constant_time::ct_eq(
+                &result1.content_hash,
+                &result2.content_hash
+            ));
         }
 
         // Verify different inputs produce different hashes
         let result_a = gate.test_protocol(ControlProtocol::HealthCheck, &FaultMode::None, 1);
         let result_b = gate.test_protocol(ControlProtocol::HealthCheck, &FaultMode::None, 2);
 
-        assert_ne!(result_a.content_hash, result_b.content_hash,
-            "different seeds should produce different hashes");
-        assert!(!constant_time::ct_eq(&result_a.content_hash, &result_b.content_hash));
+        assert_ne!(
+            result_a.content_hash, result_b.content_hash,
+            "different seeds should produce different hashes"
+        );
+        assert!(!constant_time::ct_eq(
+            &result_a.content_hash,
+            &result_b.content_hash
+        ));
     }
 
     #[test]
@@ -1740,7 +1816,7 @@ mod transport_fault_gate_extreme_adversarial_negative_tests {
             },
             // Contradictory values
             FaultConfig {
-                drop_probability: 2.0, // > 1.0
+                drop_probability: 2.0,    // > 1.0
                 reorder_probability: 1.5, // > 1.0
                 reorder_max_depth: 0,
                 corrupt_probability: 1.1, // > 1.0
@@ -1781,18 +1857,29 @@ mod transport_fault_gate_extreme_adversarial_negative_tests {
 
         // Verify audit log entries are sanitized
         for audit_entry in gate.audit_log() {
-            assert!(!audit_entry.protocol.contains('\x00'),
-                "protocol name must not contain null bytes");
-            assert!(!audit_entry.protocol.contains('\x01'),
-                "protocol name must not contain control characters");
-            assert!(!audit_entry.fault_mode.contains('\r'),
-                "fault mode must not contain carriage return");
-            assert!(!audit_entry.fault_mode.contains('\n'),
-                "fault mode must not contain newline");
+            assert!(
+                !audit_entry.protocol.contains('\x00'),
+                "protocol name must not contain null bytes"
+            );
+            assert!(
+                !audit_entry.protocol.contains('\x01'),
+                "protocol name must not contain control characters"
+            );
+            assert!(
+                !audit_entry.fault_mode.contains('\r'),
+                "fault mode must not contain carriage return"
+            );
+            assert!(
+                !audit_entry.fault_mode.contains('\n'),
+                "fault mode must not contain newline"
+            );
 
             // Verify JSON serialization doesn't introduce control characters
             let json = serde_json::to_string(audit_entry).unwrap_or_default();
-            assert!(!json.contains("\\u0000"), "JSON must not contain escaped null bytes");
+            assert!(
+                !json.contains("\\u0000"),
+                "JSON must not contain escaped null bytes"
+            );
         }
     }
 
@@ -1800,9 +1887,9 @@ mod transport_fault_gate_extreme_adversarial_negative_tests {
     fn extreme_adversarial_resource_exhaustion_massive_messages_per_run() {
         // Test resource exhaustion with massive messages_per_run values
         let exhaustion_configs = vec![
-            1_000_000,   // 1M messages
-            10_000_000,  // 10M messages
-            usize::MAX,  // Maximum possible
+            1_000_000,  // 1M messages
+            10_000_000, // 10M messages
+            usize::MAX, // Maximum possible
         ];
 
         for &massive_count in &exhaustion_configs {
@@ -1810,7 +1897,7 @@ mod transport_fault_gate_extreme_adversarial_negative_tests {
                 seeds: vec![42], // Single seed to avoid multiplicative explosion
                 messages_per_run: massive_count,
                 protocols: vec![ControlProtocol::HealthCheck], // Single protocol
-                fault_modes: vec![FaultMode::None], // No faults for speed
+                fault_modes: vec![FaultMode::None],            // No faults for speed
             };
 
             let err = TransportFaultGate::with_config(config).unwrap_err();
@@ -1827,7 +1914,7 @@ mod transport_fault_gate_extreme_adversarial_negative_tests {
         // Test seed stability against potential hash manipulation attacks
         let suspicious_seeds = vec![
             0x5555555555555555, // Alternating bits
-            0xAAAAAAAAAAAAA, // Alternating bits (opposite)
+            0xAAAAAAAAAAAAA,    // Alternating bits (opposite)
             0x0000000000000001, // Single bit set
             0xFFFFFFFFFFFFFFFE, // All bits except one
             0x0123456789ABCDEF, // Incremental pattern
@@ -1835,19 +1922,20 @@ mod transport_fault_gate_extreme_adversarial_negative_tests {
         ];
 
         for &seed in &suspicious_seeds {
-            let stability_result = gate.check_seed_stability(
-                ControlProtocol::LeaseRenewal,
-                &FaultMode::Reorder,
-                seed,
-            );
+            let stability_result =
+                gate.check_seed_stability(ControlProtocol::LeaseRenewal, &FaultMode::Reorder, seed);
 
             // Seed stability should hold regardless of bit patterns
-            assert!(stability_result.is_ok(),
-                "seed stability failed for suspicious seed: 0x{:016X}", seed);
+            assert!(
+                stability_result.is_ok(),
+                "seed stability failed for suspicious seed: 0x{:016X}",
+                seed
+            );
         }
 
         // Verify audit log contains stability check events
-        let stability_events: Vec<_> = gate.audit_log()
+        let stability_events: Vec<_> = gate
+            .audit_log()
             .iter()
             .filter(|entry| entry.event_code == event_codes::TFG_008)
             .collect();
@@ -1858,7 +1946,7 @@ mod transport_fault_gate_extreme_adversarial_negative_tests {
         for event in stability_events {
             if let (Some(hash1), Some(hash2)) = (
                 event.detail.get("hash_1").and_then(|v| v.as_str()),
-                event.detail.get("hash_2").and_then(|v| v.as_str())
+                event.detail.get("hash_2").and_then(|v| v.as_str()),
             ) {
                 // Hashes should be identical for same seed
                 assert_eq!(hash1, hash2);
@@ -1876,24 +1964,30 @@ mod transport_fault_gate_extreme_adversarial_negative_tests {
             fault_modes: vec![FaultMode::None, FaultMode::Drop],
         };
 
-        let mut gate = TransportFaultGate::with_config(config)
-            .expect("config should be valid");
+        let mut gate = TransportFaultGate::with_config(config).expect("config should be valid");
 
-        let verdict = gate.run_full_gate()
-            .expect("gate should pass");
+        let verdict = gate.run_full_gate().expect("gate should pass");
 
         // Serialize verdict to JSON
-        let json = serde_json::to_string(&verdict)
-            .expect("verdict should serialize");
+        let json = serde_json::to_string(&verdict).expect("verdict should serialize");
 
         // Verify no JSON injection vulnerabilities
-        assert!(!json.contains("</script>"), "JSON must not contain script injection");
-        assert!(!json.contains("<!--"), "JSON must not contain comment injection");
-        assert!(!json.contains("javascript:"), "JSON must not contain javascript injection");
+        assert!(
+            !json.contains("</script>"),
+            "JSON must not contain script injection"
+        );
+        assert!(
+            !json.contains("<!--"),
+            "JSON must not contain comment injection"
+        );
+        assert!(
+            !json.contains("javascript:"),
+            "JSON must not contain javascript injection"
+        );
 
         // Verify JSON can be safely parsed back
-        let parsed: serde_json::Value = serde_json::from_str(&json)
-            .expect("JSON should parse back safely");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("JSON should parse back safely");
 
         // Verify critical fields are preserved
         assert_eq!(parsed["schema_version"], SCHEMA_VERSION);
@@ -1902,11 +1996,14 @@ mod transport_fault_gate_extreme_adversarial_negative_tests {
         assert!(parsed["passed"].as_bool().is_some());
 
         // Verify content hash integrity
-        let content_hash = parsed["content_hash"].as_str()
+        let content_hash = parsed["content_hash"]
+            .as_str()
             .expect("content hash should be present");
         assert!(content_hash.len() >= 32); // Minimum hex hash length
-        assert!(content_hash.chars().all(|c| c.is_ascii_hexdigit()),
-            "content hash should only contain hex characters");
+        assert!(
+            content_hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "content hash should only contain hex characters"
+        );
     }
 
     #[test]
@@ -1917,25 +2014,28 @@ mod transport_fault_gate_extreme_adversarial_negative_tests {
         let iterations = MAX_AUDIT_LOG_ENTRIES + 100;
 
         for i in 0..iterations {
-            gate.test_protocol(
-                ControlProtocol::HealthCheck,
-                &FaultMode::None,
-                i as u64,
-            );
+            gate.test_protocol(ControlProtocol::HealthCheck, &FaultMode::None, i as u64);
         }
 
         // Verify bounded behavior - log should not exceed maximum capacity
-        assert!(gate.audit_log().len() <= MAX_AUDIT_LOG_ENTRIES,
+        assert!(
+            gate.audit_log().len() <= MAX_AUDIT_LOG_ENTRIES,
             "audit log exceeded maximum capacity: {} > {}",
-            gate.audit_log().len(), MAX_AUDIT_LOG_ENTRIES);
+            gate.audit_log().len(),
+            MAX_AUDIT_LOG_ENTRIES
+        );
 
         // Verify most recent entries are preserved (LIFO eviction)
-        let last_entry = gate.audit_log().last()
+        let last_entry = gate
+            .audit_log()
+            .last()
             .expect("audit log should not be empty");
 
         // Last entry should be from the most recent iteration
-        assert!(last_entry.seed >= (iterations - MAX_AUDIT_LOG_ENTRIES) as u64,
-            "most recent entries should be preserved");
+        assert!(
+            last_entry.seed >= (iterations - MAX_AUDIT_LOG_ENTRIES) as u64,
+            "most recent entries should be preserved"
+        );
 
         // Verify JSONL export handles bounded log correctly
         let jsonl = gate.export_audit_log_jsonl();

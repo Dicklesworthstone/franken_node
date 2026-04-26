@@ -1249,7 +1249,10 @@ mod tests {
 
         assert_eq!(sched.decisions().len(), MAX_DECISIONS);
         assert_eq!(sched.decisions()[0].timestamp, 1);
-        assert_eq!(sched.decisions().last().expect("last decision").epoch_id, 71);
+        assert_eq!(
+            sched.decisions().last().expect("last decision").epoch_id,
+            71
+        );
     }
 
     // ── Hardening-focused negative-path tests targeting specific patterns ──
@@ -1326,11 +1329,17 @@ mod tests {
 
         // Fail-closed pattern: >= means "expired" (includes exact boundary)
         let is_expired_fail_closed = current_time >= expiry_time;
-        assert!(is_expired_fail_closed, "Boundary case should be considered expired");
+        assert!(
+            is_expired_fail_closed,
+            "Boundary case should be considered expired"
+        );
 
         // Anti-pattern would be > which would allow boundary case through
         let is_expired_anti_pattern = current_time > expiry_time;
-        assert!(!is_expired_anti_pattern, "Anti-pattern would incorrectly allow boundary");
+        assert!(
+            !is_expired_anti_pattern,
+            "Anti-pattern would incorrectly allow boundary"
+        );
 
         // Test with slightly past expiry
         let past_expiry = current_time >= (expiry_time - 1);
@@ -1352,8 +1361,14 @@ mod tests {
         let hash3 = b"integrity_sweep_hash_v1_abcdef123457"; // Different by one char
 
         // Correct pattern: use constant-time comparison
-        assert!(constant_time::ct_eq_bytes(hash1, hash2), "Identical hashes should match");
-        assert!(!constant_time::ct_eq_bytes(hash1, hash3), "Different hashes should not match");
+        assert!(
+            constant_time::ct_eq_bytes(hash1, hash2),
+            "Identical hashes should match"
+        );
+        assert!(
+            !constant_time::ct_eq_bytes(hash1, hash3),
+            "Different hashes should not match"
+        );
 
         // Anti-pattern demonstration (don't actually use this in production)
         let timing_vulnerable = hash1 == hash3; // This could leak timing info
@@ -1362,12 +1377,18 @@ mod tests {
         // Test with empty hashes
         let empty1 = b"";
         let empty2 = b"";
-        assert!(constant_time::ct_eq_bytes(empty1, empty2), "Empty hashes should match");
+        assert!(
+            constant_time::ct_eq_bytes(empty1, empty2),
+            "Empty hashes should match"
+        );
 
         // Test with different lengths (should fail fast)
         let short_hash = b"short";
         let long_hash = b"much_longer_hash";
-        assert!(!constant_time::ct_eq_bytes(short_hash, long_hash), "Different length hashes should not match");
+        assert!(
+            !constant_time::ct_eq_bytes(short_hash, long_hash),
+            "Different length hashes should not match"
+        );
     }
 
     #[test]
@@ -1391,8 +1412,11 @@ mod tests {
         let hash_without_domain = hasher_without_domain.finalize();
 
         // Should be different due to domain separation
-        assert_ne!(hash_with_domain[..], hash_without_domain[..],
-                   "Domain separator should change hash output");
+        assert_ne!(
+            hash_with_domain[..],
+            hash_without_domain[..],
+            "Domain separator should change hash output"
+        );
 
         // Test different domain separators produce different hashes
         let different_domain = b"other_system_v1:";
@@ -1401,8 +1425,11 @@ mod tests {
         hasher_different_domain.update(trajectory_data);
         let hash_different_domain = hasher_different_domain.finalize();
 
-        assert_ne!(hash_with_domain[..], hash_different_domain[..],
-                   "Different domain separators should produce different hashes");
+        assert_ne!(
+            hash_with_domain[..],
+            hash_different_domain[..],
+            "Different domain separators should produce different hashes"
+        );
 
         // Length-prefixed inputs to prevent delimiter collision
         let field1 = "key1=value1";
@@ -1441,22 +1468,25 @@ mod tests {
         };
 
         // Constructor should clamp NaN to finite value
-        assert!(nan_evidence.avg_repairability.is_finite(),
-                "Constructor should handle NaN repairability");
+        assert!(
+            nan_evidence.avg_repairability.is_finite(),
+            "Constructor should handle NaN repairability"
+        );
 
         // Test with infinity
-        let inf_evidence = EvidenceTrajectory::new(
-            1, 0, f64::INFINITY, Trend::Stable, 1001
+        let inf_evidence = EvidenceTrajectory::new(1, 0, f64::INFINITY, Trend::Stable, 1001);
+        assert!(
+            inf_evidence.avg_repairability.is_finite(),
+            "Constructor should handle infinite repairability"
         );
-        assert!(inf_evidence.avg_repairability.is_finite(),
-                "Constructor should handle infinite repairability");
 
         // Test with negative infinity
-        let neg_inf_evidence = EvidenceTrajectory::new(
-            1, 0, f64::NEG_INFINITY, Trend::Stable, 1002
+        let neg_inf_evidence =
+            EvidenceTrajectory::new(1, 0, f64::NEG_INFINITY, Trend::Stable, 1002);
+        assert!(
+            neg_inf_evidence.avg_repairability.is_finite(),
+            "Constructor should handle negative infinite repairability"
         );
-        assert!(neg_inf_evidence.avg_repairability.is_finite(),
-                "Constructor should handle negative infinite repairability");
 
         // Test scheduler behavior with float edge cases
         let mut sched = IntegritySweepScheduler::with_defaults();

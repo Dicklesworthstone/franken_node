@@ -407,10 +407,12 @@ impl TrafficPolicyRule {
                 && target_host
                     .get(target_host.len().saturating_sub(suffix.len())..)
                     .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
-                && target_host
-                    .as_bytes()
-                    .get(target_host.len().saturating_sub(suffix.len()).saturating_sub(1))
-                    == Some(&b'.');
+                && target_host.as_bytes().get(
+                    target_host
+                        .len()
+                        .saturating_sub(suffix.len())
+                        .saturating_sub(1),
+                ) == Some(&b'.');
         }
 
         target_host.eq_ignore_ascii_case(pattern)
@@ -908,13 +910,17 @@ impl EffectsFirewall {
         detail: &str,
         timestamp: &str,
     ) {
-        push_bounded(&mut self.audit_log, FirewallAuditEvent {
-            event_code: event_code.to_string(),
-            effect_id: effect_id.to_string(),
-            trace_id: trace_id.to_string(),
-            detail: detail.to_string(),
-            timestamp: timestamp.to_string(),
-        }, MAX_AUDIT_LOG_ENTRIES);
+        push_bounded(
+            &mut self.audit_log,
+            FirewallAuditEvent {
+                event_code: event_code.to_string(),
+                effect_id: effect_id.to_string(),
+                trace_id: trace_id.to_string(),
+                detail: detail.to_string(),
+                timestamp: timestamp.to_string(),
+            },
+            MAX_AUDIT_LOG_ENTRIES,
+        );
     }
 
     /// Return the audit log.
@@ -2026,8 +2032,7 @@ mod tests {
 
     #[test]
     fn test_serde_rejects_unknown_intent_classification() {
-        let result: Result<IntentClassification, _> =
-            serde_json::from_str(r#""credential_theft""#);
+        let result: Result<IntentClassification, _> = serde_json::from_str(r#""credential_theft""#);
 
         assert!(result.is_err());
     }
@@ -2154,19 +2159,19 @@ mod tests {
         use crate::security::constant_time;
 
         // BiDi override and zero-width characters in effect fields
-        let malicious_effects = vec![
-            RemoteEffect {
-                effect_id: "\u{202E}legit-id\u{202D}".to_string(),  // BiDi override
-                origin: TrafficOrigin::Extension { extension_id: "safe\u{200B}ext".to_string() },  // Zero-width
-                target_host: "api.\u{FEFF}example.com".to_string(),  // Zero-width no-break space
-                target_port: 443,
-                method: "GET\u{200C}".to_string(),  // Zero-width non-joiner
-                path: "/\u{200E}data\u{200F}".to_string(),  // LTR/RTL marks
-                has_sensitive_payload: false,
-                carries_credentials: false,
-                metadata: BTreeMap::new(),
-            },
-        ];
+        let malicious_effects = vec![RemoteEffect {
+            effect_id: "\u{202E}legit-id\u{202D}".to_string(), // BiDi override
+            origin: TrafficOrigin::Extension {
+                extension_id: "safe\u{200B}ext".to_string(),
+            }, // Zero-width
+            target_host: "api.\u{FEFF}example.com".to_string(), // Zero-width no-break space
+            target_port: 443,
+            method: "GET\u{200C}".to_string(), // Zero-width non-joiner
+            path: "/\u{200E}data\u{200F}".to_string(), // LTR/RTL marks
+            has_sensitive_payload: false,
+            carries_credentials: false,
+            metadata: BTreeMap::new(),
+        }];
 
         for effect in malicious_effects {
             // Validation should reject Unicode injection attempts
@@ -2177,16 +2182,22 @@ mod tests {
 
                 // Should either classify safely or return None for safety
                 if let Some(classification) = intent {
-                    assert!(matches!(classification,
-                        IntentClassification::DataFetch |
-                        IntentClassification::ServiceDiscovery |
-                        IntentClassification::HealthCheck),
-                        "Unicode-injected effects should only classify as benign intents");
+                    assert!(
+                        matches!(
+                            classification,
+                            IntentClassification::DataFetch
+                                | IntentClassification::ServiceDiscovery
+                                | IntentClassification::HealthCheck
+                        ),
+                        "Unicode-injected effects should only classify as benign intents"
+                    );
                 }
 
                 // Target host should not be manipulated by Unicode
-                assert!(!constant_time::ct_eq(effect.target_host.as_bytes(), b"api.example.com"),
-                       "Host parsing vulnerable to Unicode normalization");
+                assert!(
+                    !constant_time::ct_eq(effect.target_host.as_bytes(), b"api.example.com"),
+                    "Host parsing vulnerable to Unicode normalization"
+                );
             }
         }
     }
@@ -2198,13 +2209,15 @@ mod tests {
         for i in 0..100_000 {
             large_metadata.insert(
                 format!("key_{}", i),
-                "x".repeat(1000)  // Large values
+                "x".repeat(1000), // Large values
             );
         }
 
         let effect = RemoteEffect {
             effect_id: "memory-test".to_string(),
-            origin: TrafficOrigin::Extension { extension_id: "ext-001".to_string() },
+            origin: TrafficOrigin::Extension {
+                extension_id: "ext-001".to_string(),
+            },
             target_host: "api.example.com".to_string(),
             target_port: 443,
             method: "GET".to_string(),
@@ -2219,12 +2232,18 @@ mod tests {
         if let Ok(()) = validation_result {
             let intent = IntentClassifier::classify(&effect);
             // Classification should complete without OOM
-            assert!(intent.is_some() || intent.is_none(), "Classification should not panic");
+            assert!(
+                intent.is_some() || intent.is_none(),
+                "Classification should not panic"
+            );
 
             let mut firewall = make_firewall();
             let process_result = firewall.process_request(effect);
             // Processing should complete gracefully
-            assert!(process_result.is_ok() || process_result.is_err(), "Processing should not panic");
+            assert!(
+                process_result.is_ok() || process_result.is_err(),
+                "Processing should not panic"
+            );
         }
     }
 
@@ -2236,28 +2255,32 @@ mod tests {
         let bypass_attempts = vec![
             RemoteEffect {
                 effect_id: "innocent".to_string(),
-                origin: TrafficOrigin::Extension { extension_id: "ext-001".to_string() },
-                target_host: "data-collector.attacker.com".to_string(),  // Suspicious host
+                origin: TrafficOrigin::Extension {
+                    extension_id: "ext-001".to_string(),
+                },
+                target_host: "data-collector.attacker.com".to_string(), // Suspicious host
                 target_port: 443,
-                method: "GET".to_string(),  // Looks benign
-                path: "/collect_secrets".to_string(),  // But suspicious path
-                has_sensitive_payload: true,  // Actually contains secrets
-                carries_credentials: false,  // Lie about credentials
+                method: "GET".to_string(),            // Looks benign
+                path: "/collect_secrets".to_string(), // But suspicious path
+                has_sensitive_payload: true,          // Actually contains secrets
+                carries_credentials: false,           // Lie about credentials
                 metadata: {
                     let mut meta = BTreeMap::new();
-                    meta.insert("purpose".to_string(), "analytics".to_string());  // Lies
+                    meta.insert("purpose".to_string(), "analytics".to_string()); // Lies
                     meta
                 },
             },
             RemoteEffect {
                 effect_id: "health-check".to_string(),
-                origin: TrafficOrigin::Extension { extension_id: "ext-001".to_string() },
+                origin: TrafficOrigin::Extension {
+                    extension_id: "ext-001".to_string(),
+                },
                 target_host: "legitimate.api.com".to_string(),
                 target_port: 80,
-                method: "POST".to_string(),  // Mutation disguised as health check
-                path: "/admin/delete_all".to_string(),  // Destructive operation
+                method: "POST".to_string(), // Mutation disguised as health check
+                path: "/admin/delete_all".to_string(), // Destructive operation
                 has_sensitive_payload: false,
-                carries_credentials: true,  // Actually forwarding creds
+                carries_credentials: true, // Actually forwarding creds
                 metadata: BTreeMap::new(),
             },
         ];
@@ -2268,9 +2291,12 @@ mod tests {
             if let Some(classification) = intent {
                 // Ensure classification correctly identifies risk
                 if effect.has_sensitive_payload || effect.carries_credentials {
-                    assert!(classification.is_risky() ||
-                           matches!(classification, IntentClassification::DataMutation),
-                           "Risky effects should be classified as risky or mutation: {:?}", classification);
+                    assert!(
+                        classification.is_risky()
+                            || matches!(classification, IntentClassification::DataMutation),
+                        "Risky effects should be classified as risky or mutation: {:?}",
+                        classification
+                    );
                 }
 
                 // Verify firewall applies appropriate controls
@@ -2278,8 +2304,11 @@ mod tests {
                 let result = firewall.process_request(effect).expect("should process");
 
                 if classification.is_risky() {
-                    assert!(!matches!(result.verdict, FirewallVerdict::Allow),
-                           "Risky intents should not be allowed: {:?}", result.verdict);
+                    assert!(
+                        !matches!(result.verdict, FirewallVerdict::Allow),
+                        "Risky intents should not be allowed: {:?}",
+                        result.verdict
+                    );
                 }
             }
         }
@@ -2293,14 +2322,14 @@ mod tests {
         let malicious_rules = vec![
             TrafficPolicyRule {
                 intent: IntentClassification::Exfiltration,
-                verdict: FirewallVerdict::Allow,  // Dangerous: allowing exfiltration
+                verdict: FirewallVerdict::Allow, // Dangerous: allowing exfiltration
                 host_pattern: None,
-                priority: 0,  // Highest priority
+                priority: 0, // Highest priority
                 rationale: "bypass security".to_string(),
             },
             TrafficPolicyRule {
                 intent: IntentClassification::CredentialForward,
-                verdict: FirewallVerdict::Allow,  // Dangerous: allowing credential forwarding
+                verdict: FirewallVerdict::Allow, // Dangerous: allowing credential forwarding
                 host_pattern: Some("*.evil.com".to_string()),
                 priority: 1,
                 rationale: "malicious override".to_string(),
@@ -2314,7 +2343,9 @@ mod tests {
                 // If rule was accepted, verify invariants still hold
                 let effect = RemoteEffect {
                     effect_id: "test".to_string(),
-                    origin: TrafficOrigin::Extension { extension_id: "ext-001".to_string() },
+                    origin: TrafficOrigin::Extension {
+                        extension_id: "ext-001".to_string(),
+                    },
                     target_host: "evil.example.com".to_string(),
                     target_port: 443,
                     method: "POST".to_string(),
@@ -2327,10 +2358,13 @@ mod tests {
                 let process_result = firewall.process_request(effect);
                 if let Ok(decision) = process_result {
                     // Even with malicious rules, risky traffic should be restricted
-                    assert!(!matches!(decision.verdict, FirewallVerdict::Allow) ||
-                           decision.verdict == FirewallVerdict::Challenge ||
-                           decision.verdict == FirewallVerdict::Simulate,
-                           "Risky traffic should never be simply allowed: {:?}", decision.verdict);
+                    assert!(
+                        !matches!(decision.verdict, FirewallVerdict::Allow)
+                            || decision.verdict == FirewallVerdict::Challenge
+                            || decision.verdict == FirewallVerdict::Simulate,
+                        "Risky traffic should never be simply allowed: {:?}",
+                        decision.verdict
+                    );
                 }
             }
         }
@@ -2348,10 +2382,13 @@ mod tests {
 
         // Attempt to forge receipt components
         let malicious_json_variants = vec![
-            receipt_json.replace("\"verdict\":\"allow\"", "\"verdict\":\"allow\",\"forged\":true"),  // Extra field
-            receipt_json.replace("deny", "allow"),  // Verdict manipulation
-            format!("{{\"injection\":true,{}}}", &receipt_json[1..]),  // Prefix injection
-            receipt_json.replace("effect_id", "effect_id\u{0000}forged"),  // Null injection
+            receipt_json.replace(
+                "\"verdict\":\"allow\"",
+                "\"verdict\":\"allow\",\"forged\":true",
+            ), // Extra field
+            receipt_json.replace("deny", "allow"), // Verdict manipulation
+            format!("{{\"injection\":true,{}}}", &receipt_json[1..]), // Prefix injection
+            receipt_json.replace("effect_id", "effect_id\u{0000}forged"), // Null injection
         ];
 
         for malicious_json in malicious_json_variants {
@@ -2359,9 +2396,13 @@ mod tests {
 
             if let Ok(forged_receipt) = parse_result {
                 // Verify receipt integrity checks would catch forgery
-                assert!(!constant_time::ct_eq(forged_receipt.receipt_id.as_bytes(), decision.receipt_id.as_bytes()) ||
-                       forged_receipt == decision,
-                       "Forged receipts should be detectable");
+                assert!(
+                    !constant_time::ct_eq(
+                        forged_receipt.receipt_id.as_bytes(),
+                        decision.receipt_id.as_bytes()
+                    ) || forged_receipt == decision,
+                    "Forged receipts should be detectable"
+                );
 
                 // Original decision properties should be preserved
                 assert_eq!(decision.effect_id, forged_receipt.effect_id);
@@ -2377,11 +2418,21 @@ mod tests {
         firewall.register_extension("legitimate-ext");
 
         let spoofed_origins = vec![
-            TrafficOrigin::Extension { extension_id: "legitimate-ext\u{0000}evil".to_string() },  // Null injection
-            TrafficOrigin::Extension { extension_id: "\u{202E}timate-ext\u{202D}evil-ext".to_string() },  // BiDi spoof
-            TrafficOrigin::Extension { extension_id: "legitimate-ext".to_string() + "\u{200B}evil" },  // Zero-width
-            TrafficOrigin::Extension { extension_id: "LEGITIMATE-EXT".to_string() },  // Case manipulation
-            TrafficOrigin::NodeInternal { subsystem: "legitimate-ext".to_string() },  // Origin type confusion
+            TrafficOrigin::Extension {
+                extension_id: "legitimate-ext\u{0000}evil".to_string(),
+            }, // Null injection
+            TrafficOrigin::Extension {
+                extension_id: "\u{202E}timate-ext\u{202D}evil-ext".to_string(),
+            }, // BiDi spoof
+            TrafficOrigin::Extension {
+                extension_id: "legitimate-ext".to_string() + "\u{200B}evil",
+            }, // Zero-width
+            TrafficOrigin::Extension {
+                extension_id: "LEGITIMATE-EXT".to_string(),
+            }, // Case manipulation
+            TrafficOrigin::NodeInternal {
+                subsystem: "legitimate-ext".to_string(),
+            }, // Origin type confusion
         ];
 
         for spoofed_origin in spoofed_origins {
@@ -2404,10 +2455,12 @@ mod tests {
                 Ok(decision) => {
                     // If processed, should not be treated as legitimate extension
                     if let TrafficOrigin::Extension { extension_id } = &decision.effect_origin {
-                        assert!(!constant_time::ct_eq(extension_id.as_bytes(), b"legitimate-ext"),
-                               "Spoofed extension ID should not match legitimate extension");
+                        assert!(
+                            !constant_time::ct_eq(extension_id.as_bytes(), b"legitimate-ext"),
+                            "Spoofed extension ID should not match legitimate extension"
+                        );
                     }
-                },
+                }
                 Err(FirewallError::ExtensionUnknown { .. }) => {
                     // Expected behavior for unregistered extensions
                 }
@@ -2421,29 +2474,42 @@ mod tests {
     #[test]
     fn test_security_json_serialization_injection_prevention() {
         let decision = DecisionReceipt {
-            receipt_id: "test\";alert('xss');//".to_string(),  // JS injection
-            effect_id: "normal</script><script>alert('xss')</script>".to_string(),  // HTML injection
+            receipt_id: "test\";alert('xss');//".to_string(), // JS injection
+            effect_id: "normal</script><script>alert('xss')</script>".to_string(), // HTML injection
             effect_origin: TrafficOrigin::Extension {
-                extension_id: "\\\"; rm -rf / #".to_string()  // Command injection attempt
+                extension_id: "\\\"; rm -rf / #".to_string(), // Command injection attempt
             },
             classification: Some(IntentClassification::DataFetch),
             verdict: FirewallVerdict::Deny,
             matched_rule_priority: Some(0),
-            rationale: "test\ninjection\r\nattack".to_string(),  // Newline injection
-            timestamp: "2026-04-17T10:00:00Z\u{0000}".to_string(),  // Null injection
+            rationale: "test\ninjection\r\nattack".to_string(), // Newline injection
+            timestamp: "2026-04-17T10:00:00Z\u{0000}".to_string(), // Null injection
         };
 
         // JSON serialization should escape all injection attempts
         let json = decision.to_json().expect("serialization should succeed");
-        assert!(!json.contains("alert('xss')"), "JavaScript injection should be escaped");
-        assert!(!json.contains("</script>"), "HTML injection should be escaped");
-        assert!(!json.contains("rm -rf"), "Command injection should be escaped");
+        assert!(
+            !json.contains("alert('xss')"),
+            "JavaScript injection should be escaped"
+        );
+        assert!(
+            !json.contains("</script>"),
+            "HTML injection should be escaped"
+        );
+        assert!(
+            !json.contains("rm -rf"),
+            "Command injection should be escaped"
+        );
         assert!(!json.contains("\n"), "Newline injection should be escaped");
-        assert!(!json.contains("\r"), "Carriage return injection should be escaped");
+        assert!(
+            !json.contains("\r"),
+            "Carriage return injection should be escaped"
+        );
         assert!(!json.contains("\0"), "Null injection should be escaped");
 
         // Roundtrip should preserve structure but escape content
-        let parsed: DecisionReceipt = serde_json::from_str(&json).expect("deserialization should succeed");
+        let parsed: DecisionReceipt =
+            serde_json::from_str(&json).expect("deserialization should succeed");
         assert_eq!(decision.classification, parsed.classification);
         assert_eq!(decision.verdict, parsed.verdict);
         assert_eq!(decision.matched_rule_priority, parsed.matched_rule_priority);
@@ -2481,7 +2547,7 @@ mod tests {
                         intent: IntentClassification::DataFetch,
                         verdict: FirewallVerdict::Allow,
                         host_pattern: Some(format!("host-{}.com", i)),
-                        priority: (i % 1000) as u32,  // Bounded priority
+                        priority: (i % 1000) as u32, // Bounded priority
                         rationale: format!("rule-{}", i),
                     };
                     let _ = fw.update_policy_rule(rule);
@@ -2508,7 +2574,10 @@ mod tests {
         // Verify firewall state remains consistent
         let final_fw = firewall.lock().unwrap();
         let summary = final_fw.get_policy_summary();
-        assert!(summary.contains("policy_id"), "Policy summary should be valid");
+        assert!(
+            summary.contains("policy_id"),
+            "Policy summary should be valid"
+        );
     }
 
     #[test]
@@ -2529,7 +2598,7 @@ mod tests {
 
         // Test multiple rules with extreme priorities
         for i in 0..100 {
-            let priority = u32::MAX.saturating_sub(i);  // Near-max priorities
+            let priority = u32::MAX.saturating_sub(i); // Near-max priorities
             let rule = TrafficPolicyRule {
                 intent: IntentClassification::ServiceDiscovery,
                 verdict: FirewallVerdict::Allow,
@@ -2544,7 +2613,10 @@ mod tests {
         // Verify policy evaluation still works correctly
         let effect = make_effect("overflow-test", "ext-001");
         let decision = firewall.process_request(effect).expect("should process");
-        assert!(decision.matched_rule_priority.is_some(), "Should match a rule");
+        assert!(
+            decision.matched_rule_priority.is_some(),
+            "Should match a rule"
+        );
     }
 
     #[test]
@@ -2559,22 +2631,26 @@ mod tests {
             priority: 0,
             rationale: "only allow safe host".to_string(),
         };
-        firewall.update_policy_rule(restrictive_rule).expect("should update");
+        firewall
+            .update_policy_rule(restrictive_rule)
+            .expect("should update");
 
         let bypass_hosts = vec![
-            "safe.example.com.evil.com",  // Domain append
-            "evil.safe.example.com",  // Subdomain
-            "safe.example.com\u{0000}.evil.com",  // Null byte injection
-            "safe.example.com:8080",  // Port confusion
-            "SAFE.EXAMPLE.COM",  // Case manipulation
-            "safe\u{2002}example\u{2002}com",  // Unicode spaces
-            "safe．example．com",  // Unicode dots (not ASCII dots)
+            "safe.example.com.evil.com",         // Domain append
+            "evil.safe.example.com",             // Subdomain
+            "safe.example.com\u{0000}.evil.com", // Null byte injection
+            "safe.example.com:8080",             // Port confusion
+            "SAFE.EXAMPLE.COM",                  // Case manipulation
+            "safe\u{2002}example\u{2002}com",    // Unicode spaces
+            "safe．example．com",                // Unicode dots (not ASCII dots)
         ];
 
         for malicious_host in bypass_hosts {
             let effect = RemoteEffect {
                 effect_id: "bypass-test".to_string(),
-                origin: TrafficOrigin::Extension { extension_id: "ext-001".to_string() },
+                origin: TrafficOrigin::Extension {
+                    extension_id: "ext-001".to_string(),
+                },
                 target_host: malicious_host.clone(),
                 target_port: 443,
                 method: "GET".to_string(),
@@ -2587,9 +2663,12 @@ mod tests {
             let decision = firewall.process_request(effect).expect("should process");
 
             // Bypass attempts should not be allowed through host pattern matching
-            assert!(!matches!(decision.verdict, FirewallVerdict::Allow) ||
-                   decision.rationale.contains("safe.example.com"),
-                   "Host pattern bypass should be prevented for: {}", malicious_host);
+            assert!(
+                !matches!(decision.verdict, FirewallVerdict::Allow)
+                    || decision.rationale.contains("safe.example.com"),
+                "Host pattern bypass should be prevented for: {}",
+                malicious_host
+            );
         }
     }
 }

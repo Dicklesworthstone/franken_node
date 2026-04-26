@@ -489,10 +489,14 @@ mod tests {
         for i in 0..n {
             let sk = test_signing_key(i);
             let pk_hex = hex::encode(sk.verifying_key().to_bytes());
-            push_bounded(&mut signer_keys, SignerKey {
-                key_id: format!("signer-{i}"),
-                public_key_hex: pk_hex,
-            }, MAX_SIGNER_KEYS);
+            push_bounded(
+                &mut signer_keys,
+                SignerKey {
+                    key_id: format!("signer-{i}"),
+                    public_key_hex: pk_hex,
+                },
+                MAX_SIGNER_KEYS,
+            );
             push_bounded(&mut signing_keys, sk, MAX_SIGNER_KEYS);
         }
         (signing_keys, signer_keys)
@@ -711,11 +715,15 @@ mod tests {
     fn unknown_signer_not_counted() {
         let (sks, config) = test_config(2, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "unknown-signer".into(),
-            key_id: "unknown-key".into(),
-            signature_hex: "deadbeef00000000".into(),
-        }, MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "unknown-signer".into(),
+                key_id: "unknown-key".into(),
+                signature_hex: "deadbeef00000000".into(),
+            },
+            MAX_SIGNATURES,
+        );
         let result = verify_threshold(&config, &artifact, "t5", "ts");
         assert!(!result.verified);
         assert_eq!(result.valid_signatures, 1);
@@ -727,11 +735,15 @@ mod tests {
     fn invalid_signature_not_counted() {
         let (sks, config) = test_config(2, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "signer-1".into(),
-            key_id: "signer-1".into(),
-            signature_hex: "badbadbadbadbadb".into(), // wrong signature
-        }, MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "signer-1".into(),
+                key_id: "signer-1".into(),
+                signature_hex: "badbadbadbadbadb".into(), // wrong signature
+            },
+            MAX_SIGNATURES,
+        );
         let result = verify_threshold(&config, &artifact, "t6", "ts");
         assert!(!result.verified);
         assert_eq!(result.valid_signatures, 1);
@@ -744,8 +756,11 @@ mod tests {
         let (sks, config) = test_config(2, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
         // Add same signer again
-        push_bounded(&mut artifact.signatures,
-            sign(&sks[0], &config.signer_keys[0].key_id, "hash-abc"), MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            sign(&sks[0], &config.signer_keys[0].key_id, "hash-abc"),
+            MAX_SIGNATURES,
+        );
         let result = verify_threshold(&config, &artifact, "t7", "ts");
         assert!(!result.verified);
         assert_eq!(result.valid_signatures, 1);
@@ -962,7 +977,11 @@ mod tests {
     fn signature_for_different_content_hash_does_not_count() {
         let (sks, config) = test_config(2, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
-        push_bounded(&mut artifact.signatures, sign(&sks[1], &config.signer_keys[1].key_id, "hash-other"), MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            sign(&sks[1], &config.signer_keys[1].key_id, "hash-other"),
+            MAX_SIGNATURES,
+        );
 
         let result = verify_threshold(&config, &artifact, "t-wrong-message", "ts");
 
@@ -980,12 +999,20 @@ mod tests {
     fn invalid_signature_does_not_poison_later_valid_same_signer() {
         let (sks, config) = test_config(2, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "signer-1".into(),
-            key_id: "signer-1".into(),
-            signature_hex: "not-hex".into(),
-        }, MAX_SIGNATURES);
-        push_bounded(&mut artifact.signatures, sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc"), MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "signer-1".into(),
+                key_id: "signer-1".into(),
+                signature_hex: "not-hex".into(),
+            },
+            MAX_SIGNATURES,
+        );
+        push_bounded(
+            &mut artifact.signatures,
+            sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc"),
+            MAX_SIGNATURES,
+        );
 
         let result = verify_threshold(&config, &artifact, "t-invalid-then-valid", "ts");
 
@@ -998,7 +1025,11 @@ mod tests {
     fn duplicate_valid_signature_after_threshold_still_fails_if_threshold_not_met() {
         let (sks, config) = test_config(3, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 2);
-        push_bounded(&mut artifact.signatures, sign(&sks[0], &config.signer_keys[0].key_id, "hash-abc"), MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            sign(&sks[0], &config.signer_keys[0].key_id, "hash-abc"),
+            MAX_SIGNATURES,
+        );
 
         let result = verify_threshold(&config, &artifact, "t-duplicate-below", "ts");
 
@@ -1069,11 +1100,15 @@ mod tests {
     fn short_signature_hex_does_not_count_toward_threshold() {
         let (sks, config) = test_config(2, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "signer-1".to_string(),
-            key_id: "signer-1".to_string(),
-            signature_hex: "abcd".to_string(),
-        }, MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "signer-1".to_string(),
+                key_id: "signer-1".to_string(),
+                signature_hex: "abcd".to_string(),
+            },
+            MAX_SIGNATURES,
+        );
 
         let result = verify_threshold(&config, &artifact, "t-short-sig", "ts");
 
@@ -1111,16 +1146,24 @@ mod tests {
     fn unknown_signer_failure_is_preserved_when_later_invalid_signature_also_fails() {
         let (sks, config) = test_config(3, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "unknown-signer".to_string(),
-            key_id: "unknown-signer".to_string(),
-            signature_hex: "deadbeef".to_string(),
-        }, MAX_SIGNATURES);
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "signer-1".to_string(),
-            key_id: "signer-1".to_string(),
-            signature_hex: "not-hex".to_string(),
-        }, MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "unknown-signer".to_string(),
+                key_id: "unknown-signer".to_string(),
+                signature_hex: "deadbeef".to_string(),
+            },
+            MAX_SIGNATURES,
+        );
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "signer-1".to_string(),
+                key_id: "signer-1".to_string(),
+                signature_hex: "not-hex".to_string(),
+            },
+            MAX_SIGNATURES,
+        );
 
         let result = verify_threshold(&config, &artifact, "t-first-failure", "ts");
 
@@ -1139,11 +1182,15 @@ mod tests {
         let (sks, config) = test_config(2, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
         let raw_signature = sks[1].sign(b"hash-abc");
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "signer-1".to_string(),
-            key_id: "signer-1".to_string(),
-            signature_hex: hex::encode(raw_signature.to_bytes()),
-        }, MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "signer-1".to_string(),
+                key_id: "signer-1".to_string(),
+                signature_hex: hex::encode(raw_signature.to_bytes()),
+            },
+            MAX_SIGNATURES,
+        );
 
         let result = verify_threshold(&config, &artifact, "t-raw-message", "ts");
 
@@ -1202,11 +1249,15 @@ mod tests {
     fn zeroed_signature_bytes_do_not_count_toward_threshold() {
         let (sks, config) = test_config(2, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "signer-1".to_string(),
-            key_id: "signer-1".to_string(),
-            signature_hex: hex::encode([0_u8; 64]),
-        }, MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "signer-1".to_string(),
+                key_id: "signer-1".to_string(),
+                signature_hex: hex::encode([0_u8; 64]),
+            },
+            MAX_SIGNATURES,
+        );
 
         let result = verify_threshold(&config, &artifact, "t-zeroed-signature", "ts");
 
@@ -1224,16 +1275,24 @@ mod tests {
     fn invalid_signature_failure_is_preserved_when_later_unknown_signer_also_fails() {
         let (sks, config) = test_config(3, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "signer-1".to_string(),
-            key_id: "signer-1".to_string(),
-            signature_hex: "not-hex".to_string(),
-        }, MAX_SIGNATURES);
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "unknown-signer".to_string(),
-            key_id: "unknown-signer".to_string(),
-            signature_hex: "deadbeef".to_string(),
-        }, MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "signer-1".to_string(),
+                key_id: "signer-1".to_string(),
+                signature_hex: "not-hex".to_string(),
+            },
+            MAX_SIGNATURES,
+        );
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "unknown-signer".to_string(),
+                key_id: "unknown-signer".to_string(),
+                signature_hex: "deadbeef".to_string(),
+            },
+            MAX_SIGNATURES,
+        );
 
         let result = verify_threshold(&config, &artifact, "t-invalid-first", "ts");
 
@@ -1302,11 +1361,15 @@ mod tests {
     fn odd_length_signature_hex_does_not_count_toward_threshold() {
         let (sks, config) = test_config(2, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "signer-1".to_string(),
-            key_id: "signer-1".to_string(),
-            signature_hex: "abc".to_string(),
-        }, MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "signer-1".to_string(),
+                key_id: "signer-1".to_string(),
+                signature_hex: "abc".to_string(),
+            },
+            MAX_SIGNATURES,
+        );
 
         let result = verify_threshold(&config, &artifact, "t-odd-sig", "ts");
 
@@ -1324,11 +1387,15 @@ mod tests {
     fn empty_signature_hex_does_not_count_toward_threshold() {
         let (sks, config) = test_config(2, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "signer-1".to_string(),
-            key_id: "signer-1".to_string(),
-            signature_hex: String::new(),
-        }, MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "signer-1".to_string(),
+                key_id: "signer-1".to_string(),
+                signature_hex: String::new(),
+            },
+            MAX_SIGNATURES,
+        );
 
         let result = verify_threshold(&config, &artifact, "t-empty-sig", "ts");
 
@@ -1436,11 +1503,15 @@ mod tests {
 
         // Attempt signature forgery with completely invalid signature bytes
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "signer-1".to_string(),
-            key_id: "signer-1".to_string(),
-            signature_hex: "deadbeefcafebabe".repeat(8), // 64 bytes of garbage
-        }, MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "signer-1".to_string(),
+                key_id: "signer-1".to_string(),
+                signature_hex: "deadbeefcafebabe".repeat(8), // 64 bytes of garbage
+            },
+            MAX_SIGNATURES,
+        );
 
         let result = verify_threshold(&config, &artifact, "t-forge", "ts");
         assert!(!result.verified);
@@ -1449,11 +1520,15 @@ mod tests {
         // Cross-message signature replay attack
         let valid_sig_hash_a = sign(&sks[1], &config.signer_keys[1].key_id, "hash-a");
         let mut replay_artifact = signed_artifact(&sks, &config, "hash-b", 1);
-        push_bounded(&mut replay_artifact.signatures, PartialSignature {
-            signer_id: valid_sig_hash_a.signer_id,
-            key_id: valid_sig_hash_a.key_id,
-            signature_hex: valid_sig_hash_a.signature_hex,
-        }, MAX_SIGNATURES);
+        push_bounded(
+            &mut replay_artifact.signatures,
+            PartialSignature {
+                signer_id: valid_sig_hash_a.signer_id,
+                key_id: valid_sig_hash_a.key_id,
+                signature_hex: valid_sig_hash_a.signature_hex,
+            },
+            MAX_SIGNATURES,
+        );
 
         let result = verify_threshold(&config, &replay_artifact, "t-replay", "ts");
         assert!(!result.verified);
@@ -1463,11 +1538,15 @@ mod tests {
         let valid_sig = sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
         let mut malleable_bytes = hex::decode(&valid_sig.signature_hex).unwrap();
         malleable_bytes[0] ^= 0x01; // Flip a bit
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "signer-1".to_string(),
-            key_id: "signer-1".to_string(),
-            signature_hex: hex::encode(malleable_bytes),
-        }, MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "signer-1".to_string(),
+                key_id: "signer-1".to_string(),
+                signature_hex: hex::encode(malleable_bytes),
+            },
+            MAX_SIGNATURES,
+        );
 
         let result = verify_threshold(&config, &artifact, "t-malleable", "ts");
         assert!(!result.verified);
@@ -1476,11 +1555,15 @@ mod tests {
         // Public key substitution attack (valid signature for wrong key)
         let (other_sks, _) = test_keys(1);
         let wrong_key_sig = other_sks[0].sign(&build_signing_message("hash-abc"));
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "signer-1".to_string(),
-            key_id: "signer-1".to_string(),
-            signature_hex: hex::encode(wrong_key_sig.to_bytes()),
-        }, MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "signer-1".to_string(),
+                key_id: "signer-1".to_string(),
+                signature_hex: hex::encode(wrong_key_sig.to_bytes()),
+            },
+            MAX_SIGNATURES,
+        );
 
         let result = verify_threshold(&config, &artifact, "t-wrong-key", "ts");
         assert!(!result.verified);
@@ -1497,11 +1580,15 @@ mod tests {
 
         // Try to use same key signature with different signer aliases
         for i in 0..10 {
-            push_bounded(&mut duplicate_votes, PartialSignature {
-                signer_id: format!("signer-0-alias-{}", i),
-                key_id: config.signer_keys[0].key_id.clone(),
-                signature_hex: valid_sig.signature_hex.clone(),
-            }, MAX_SIGNATURES);
+            push_bounded(
+                &mut duplicate_votes,
+                PartialSignature {
+                    signer_id: format!("signer-0-alias-{}", i),
+                    key_id: config.signer_keys[0].key_id.clone(),
+                    signature_hex: valid_sig.signature_hex.clone(),
+                },
+                MAX_SIGNATURES,
+            );
         }
 
         let artifact = PublicationArtifact {
@@ -1689,11 +1776,15 @@ mod tests {
         // Massive hex string to trigger potential buffer overflow
         let massive_sig = "00".repeat(1_000_000); // 2MB hex string
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "signer-1".to_string(),
-            key_id: "signer-1".to_string(),
-            signature_hex: massive_sig,
-        }, MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "signer-1".to_string(),
+                key_id: "signer-1".to_string(),
+                signature_hex: massive_sig,
+            },
+            MAX_SIGNATURES,
+        );
 
         let result = verify_threshold(&config, &artifact, "t-massive", "ts");
         assert!(!result.verified);
@@ -1701,33 +1792,45 @@ mod tests {
 
         // Hex injection with control characters and null bytes
         let control_hex = "001122\0aabbcc\r\n33445566";
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "signer-2".to_string(),
-            key_id: "signer-2".to_string(),
-            signature_hex: control_hex.to_string(),
-        }, MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "signer-2".to_string(),
+                key_id: "signer-2".to_string(),
+                signature_hex: control_hex.to_string(),
+            },
+            MAX_SIGNATURES,
+        );
 
         let result = verify_threshold(&config, &artifact, "t-control", "ts");
         assert!(!result.verified);
 
         // Unicode hex characters (should be rejected as non-ASCII)
         let unicode_hex = "𝟎𝟎𝟏𝟏𝟐𝟐𝟑𝟑"; // Unicode mathematical digits
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "signer-2".to_string(),
-            key_id: "signer-2".to_string(),
-            signature_hex: unicode_hex.to_string(),
-        }, MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "signer-2".to_string(),
+                key_id: "signer-2".to_string(),
+                signature_hex: unicode_hex.to_string(),
+            },
+            MAX_SIGNATURES,
+        );
 
         let result = verify_threshold(&config, &artifact, "t-unicode-hex", "ts");
         assert!(!result.verified);
 
         // Integer overflow in hex parsing (extreme lengths)
         let length_attack = "ff".repeat(ED25519_SIGNATURE_HEX_LEN + 1);
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "signer-2".to_string(),
-            key_id: "signer-2".to_string(),
-            signature_hex: length_attack,
-        }, MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "signer-2".to_string(),
+                key_id: "signer-2".to_string(),
+                signature_hex: length_attack,
+            },
+            MAX_SIGNATURES,
+        );
 
         // Should not crash, just fail verification
         let result = verify_threshold(&config, &artifact, "t-overflow-hex", "ts");
@@ -1735,11 +1838,15 @@ mod tests {
 
         // Mixed case hex with embedded whitespace
         let spaced_hex = "00 11 22 33 44 55 66 77".repeat(8);
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "signer-2".to_string(),
-            key_id: "signer-2".to_string(),
-            signature_hex: spaced_hex,
-        }, MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "signer-2".to_string(),
+                key_id: "signer-2".to_string(),
+                signature_hex: spaced_hex,
+            },
+            MAX_SIGNATURES,
+        );
 
         let result = verify_threshold(&config, &artifact, "t-spaced", "ts");
         assert!(!result.verified);
@@ -1959,11 +2066,15 @@ mod tests {
         let raw_signature = sks[0].sign(raw_content.as_bytes());
         let mut artifact = signed_artifact(&sks, &config, raw_content, 0);
 
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "signer-0".to_string(),
-            key_id: "signer-0".to_string(),
-            signature_hex: hex::encode(raw_signature.to_bytes()),
-        }, MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "signer-0".to_string(),
+                key_id: "signer-0".to_string(),
+                signature_hex: hex::encode(raw_signature.to_bytes()),
+            },
+            MAX_SIGNATURES,
+        );
 
         let result = verify_threshold(&config, &artifact, "t-raw-bypass", "ts");
         assert!(!result.verified);
@@ -1977,11 +2088,15 @@ mod tests {
         fake_message.extend_from_slice(raw_content.as_bytes());
 
         let fake_signature = sks[1].sign(&fake_message);
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "signer-1".to_string(),
-            key_id: "signer-1".to_string(),
-            signature_hex: hex::encode(fake_signature.to_bytes()),
-        }, MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "signer-1".to_string(),
+                key_id: "signer-1".to_string(),
+                signature_hex: hex::encode(fake_signature.to_bytes()),
+            },
+            MAX_SIGNATURES,
+        );
 
         let result = verify_threshold(&config, &artifact, "t-fake-domain", "ts");
         assert!(!result.verified);
@@ -1992,11 +2107,15 @@ mod tests {
         extended_message.extend_from_slice(b"evil_extension");
 
         let extended_signature = sks[2].sign(&extended_message);
-        push_bounded(&mut artifact.signatures, PartialSignature {
-            signer_id: "signer-2".to_string(),
-            key_id: "signer-2".to_string(),
-            signature_hex: hex::encode(extended_signature.to_bytes()),
-        }, MAX_SIGNATURES);
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "signer-2".to_string(),
+                key_id: "signer-2".to_string(),
+                signature_hex: hex::encode(extended_signature.to_bytes()),
+            },
+            MAX_SIGNATURES,
+        );
 
         let result = verify_threshold(&config, &artifact, "t-extension", "ts");
         assert!(!result.verified);
@@ -2045,7 +2164,11 @@ mod tests {
                 );
 
                 let mut results = results_clone.lock().unwrap();
-                push_bounded(&mut results, (i, result.verified, result.valid_signatures), MAX_TEST_RESULTS);
+                push_bounded(
+                    &mut results,
+                    (i, result.verified, result.valid_signatures),
+                    MAX_TEST_RESULTS,
+                );
             });
 
             push_bounded(&mut handles, handle, MAX_TEST_RESULTS);
@@ -2087,11 +2210,15 @@ mod tests {
                 };
 
                 // Add signatures based on thread ID
-                push_bounded(&mut local_artifact.signatures, PartialSignature {
-                    signer_id: "signer-0".to_string(),
-                    key_id: "signer-0".to_string(),
-                    signature_hex: format!("{:064x}", i),
-                }, MAX_SIGNATURES);
+                push_bounded(
+                    &mut local_artifact.signatures,
+                    PartialSignature {
+                        signer_id: "signer-0".to_string(),
+                        key_id: "signer-0".to_string(),
+                        signature_hex: format!("{:064x}", i),
+                    },
+                    MAX_SIGNATURES,
+                );
 
                 let result =
                     verify_threshold(&*config_clone, &local_artifact, &format!("t-{}", i), "ts");
@@ -2424,11 +2551,15 @@ mod tests {
         let mut massive_signatures = Vec::new();
 
         for i in 0..massive_signature_count {
-            push_bounded(&mut massive_signatures, PartialSignature {
-                signer_id: format!("mass-signer-{:06}", i),
-                key_id: format!("mass-key-{:06}", i),
-                signature_hex: format!("{:064x}", i), // Fake but well-formed hex
-            }, MAX_SIGNATURES);
+            push_bounded(
+                &mut massive_signatures,
+                PartialSignature {
+                    signer_id: format!("mass-signer-{:06}", i),
+                    key_id: format!("mass-key-{:06}", i),
+                    signature_hex: format!("{:064x}", i), // Fake but well-formed hex
+                },
+                MAX_SIGNATURES,
+            );
         }
 
         let massive_artifact = PublicationArtifact {
@@ -2496,7 +2627,11 @@ mod tests {
             let result = verify_threshold(&config, &timing_artifact, "t-timing", "ts");
             let duration = start.elapsed();
 
-            push_bounded(&mut timing_measurements, duration.as_nanos(), MAX_TEST_RESULTS);
+            push_bounded(
+                &mut timing_measurements,
+                duration.as_nanos(),
+                MAX_TEST_RESULTS,
+            );
 
             // All should fail verification
             assert!(
@@ -2611,8 +2746,8 @@ mod tests {
             "content-hash-1",
             "different-content",
             "special-chars-!@#$%^&*()",
-            "",  // Edge case: empty hash
-            "x".repeat(1000),  // Large hash
+            "",               // Edge case: empty hash
+            "x".repeat(1000), // Large hash
         ];
 
         for content_hash in test_hashes {
@@ -2628,9 +2763,11 @@ mod tests {
 
             let result = verify_threshold(&config, &artifact, "trace-1", "2026-01-01T00:00:00Z");
 
-            assert!(result.verified,
-                   "MR violated: sign-then-verify roundtrip failed for content_hash: '{}'",
-                   content_hash);
+            assert!(
+                result.verified,
+                "MR violated: sign-then-verify roundtrip failed for content_hash: '{}'",
+                content_hash
+            );
             assert_eq!(result.valid_signatures, 1);
             assert!(result.failure_reason.is_none());
         }
@@ -2654,14 +2791,18 @@ mod tests {
         let config = ThresholdConfig {
             threshold: 2,
             total_signers: 3,
-            signer_keys: signers.iter().map(|(signing_key, key_id)| SignerKey {
-                key_id: key_id.clone(),
-                public_key_hex: hex::encode(signing_key.verifying_key().to_bytes()),
-            }).collect(),
+            signer_keys: signers
+                .iter()
+                .map(|(signing_key, key_id)| SignerKey {
+                    key_id: key_id.clone(),
+                    public_key_hex: hex::encode(signing_key.verifying_key().to_bytes()),
+                })
+                .collect(),
         };
 
         // Create signatures from all 3 signers
-        let mut signatures: Vec<PartialSignature> = signers.iter()
+        let mut signatures: Vec<PartialSignature> = signers
+            .iter()
             .map(|(signing_key, key_id)| sign(signing_key, key_id, content_hash))
             .collect();
 
@@ -2673,7 +2814,12 @@ mod tests {
             signatures: signatures.clone(),
         };
 
-        let result_original = verify_threshold(&config, &artifact_original, "trace-1", "2026-01-01T00:00:00Z");
+        let result_original = verify_threshold(
+            &config,
+            &artifact_original,
+            "trace-1",
+            "2026-01-01T00:00:00Z",
+        );
 
         // Test 10 random permutations
         for i in 0..10 {
@@ -2686,17 +2832,30 @@ mod tests {
                 signatures: signatures.clone(),
             };
 
-            let result_permuted = verify_threshold(&config, &artifact_permuted,
-                                                 &format!("trace-{}", i), "2026-01-01T00:00:00Z");
+            let result_permuted = verify_threshold(
+                &config,
+                &artifact_permuted,
+                &format!("trace-{}", i),
+                "2026-01-01T00:00:00Z",
+            );
 
             // MR: Permuted signatures must have same verification outcome
-            assert_eq!(result_original.verified, result_permuted.verified,
-                      "MR violated: permutation {} changed verification result", i);
-            assert_eq!(result_original.valid_signatures, result_permuted.valid_signatures,
-                      "MR violated: permutation {} changed valid signature count", i);
+            assert_eq!(
+                result_original.verified, result_permuted.verified,
+                "MR violated: permutation {} changed verification result",
+                i
+            );
+            assert_eq!(
+                result_original.valid_signatures, result_permuted.valid_signatures,
+                "MR violated: permutation {} changed valid signature count",
+                i
+            );
 
             // Both should succeed with 3 valid signatures
-            assert!(result_permuted.verified, "Permuted signatures should verify successfully");
+            assert!(
+                result_permuted.verified,
+                "Permuted signatures should verify successfully"
+            );
             assert_eq!(result_permuted.valid_signatures, 3);
         }
     }
@@ -2727,12 +2886,12 @@ mod tests {
 
         // Test various message modifications
         let tampered_messages = vec![
-            "different-content",           // Completely different
-            "original-content-hash2",      // Appended character
-            "Original-content-hash",       // Case change
-            "original-content-has",        // Character substitution
-            "",                           // Empty
-            "original-content-hash\0",     // Null byte appended
+            "different-content",       // Completely different
+            "original-content-hash2",  // Appended character
+            "Original-content-hash",   // Case change
+            "original-content-has",    // Character substitution
+            "",                        // Empty
+            "original-content-hash\0", // Null byte appended
         ];
 
         for tampered_content in tampered_messages {
@@ -2746,9 +2905,11 @@ mod tests {
             let result = verify_threshold(&config, &artifact, "trace-1", "2026-01-01T00:00:00Z");
 
             // MR: Modified message must cause verification failure
-            assert!(!result.verified,
-                   "MR violated: signature verified with tampered message: '{}'",
-                   tampered_content);
+            assert!(
+                !result.verified,
+                "MR violated: signature verified with tampered message: '{}'",
+                tampered_content
+            );
             assert_eq!(result.valid_signatures, 0);
             assert!(result.failure_reason.is_some());
         }

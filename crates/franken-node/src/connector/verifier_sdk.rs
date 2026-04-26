@@ -580,7 +580,11 @@ pub(crate) fn replay_capsule_signature_payload(
     ] {
         append_length_prefixed(&mut payload, field);
     }
-    payload.extend_from_slice(&u64::try_from(trace_chunk_hashes.len()).unwrap_or(u64::MAX).to_le_bytes());
+    payload.extend_from_slice(
+        &u64::try_from(trace_chunk_hashes.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     for hash in trace_chunk_hashes {
         append_length_prefixed(&mut payload, hash);
     }
@@ -651,9 +655,17 @@ fn migration_artifact_binding_hash(
             .unwrap_or_else(|_| expected_signer_public_key.trim().to_string());
     let mut hasher = Sha256::new();
     hasher.update(b"connector_verifier_sdk_migration_binding_v2:");
-    hasher.update(u64::try_from(canonical_payload.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(
+        u64::try_from(canonical_payload.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     hasher.update(canonical_payload);
-    hasher.update(u64::try_from(canonical_signer_public_key.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(
+        u64::try_from(canonical_signer_public_key.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     hasher.update(canonical_signer_public_key.as_bytes());
     hex::encode(hasher.finalize())
 }
@@ -681,7 +693,11 @@ fn verification_result_signature_payload(view: &VerificationResultSignatureView<
         },
     );
     payload.extend_from_slice(&view.confidence_score.to_bits().to_le_bytes());
-    payload.extend_from_slice(&u64::try_from(view.checked_assertions.len()).unwrap_or(u64::MAX).to_le_bytes());
+    payload.extend_from_slice(
+        &u64::try_from(view.checked_assertions.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     for assertion in view.checked_assertions {
         append_length_prefixed(&mut payload, &assertion.assertion);
         payload.push(u8::from(assertion.passed));
@@ -783,11 +799,19 @@ fn compute_binding_hash(claim: &Claim, evidence: &[Evidence]) -> String {
     ] {
         append_length_prefixed(&mut payload, field);
     }
-    payload.extend_from_slice(&u64::try_from(claim.evidence_refs.len()).unwrap_or(u64::MAX).to_le_bytes());
+    payload.extend_from_slice(
+        &u64::try_from(claim.evidence_refs.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     for evidence_ref in &claim.evidence_refs {
         append_length_prefixed(&mut payload, evidence_ref);
     }
-    payload.extend_from_slice(&u64::try_from(evidence.len()).unwrap_or(u64::MAX).to_le_bytes());
+    payload.extend_from_slice(
+        &u64::try_from(evidence.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     for ev in evidence {
         for field in [
             ev.evidence_id.as_str(),
@@ -796,7 +820,11 @@ fn compute_binding_hash(claim: &Claim, evidence: &[Evidence]) -> String {
         ] {
             append_length_prefixed(&mut payload, field);
         }
-        payload.extend_from_slice(&u64::try_from(ev.artifacts.len()).unwrap_or(u64::MAX).to_le_bytes());
+        payload.extend_from_slice(
+            &u64::try_from(ev.artifacts.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         for (k, v) in &ev.artifacts {
             append_length_prefixed(&mut payload, k);
             append_length_prefixed(&mut payload, v);
@@ -1170,7 +1198,11 @@ pub fn verify_trust_state(
         hasher.update(u64::try_from(v.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(v.as_bytes());
     }
-    hasher.update(u64::try_from(anchor.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(
+        u64::try_from(anchor.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     for (k, v) in anchor {
         hasher.update(u64::try_from(k.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(k.as_bytes());
@@ -1400,8 +1432,8 @@ pub fn generate_reference_verification_result() -> Result<VerificationResult, Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
     use crate::security::constant_time;
+    use ed25519_dalek::{Signer, SigningKey};
 
     // ── Reference generators ────────────────────────────────────────
 

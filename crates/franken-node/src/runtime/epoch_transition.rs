@@ -1397,7 +1397,8 @@ mod tests {
         assert_eq!(proposal.target_epoch, 1);
 
         // Test near-max epoch lag calculations
-        let mut coord_lag = ProductEpochCoordinator::new(u64::MAX - 100, u64::MAX, BarrierConfig::default());
+        let mut coord_lag =
+            ProductEpochCoordinator::new(u64::MAX - 100, u64::MAX, BarrierConfig::default());
 
         // Should handle extreme lag validation without overflow
         coord_lag
@@ -1422,23 +1423,16 @@ mod tests {
     #[test]
     fn manifest_hash_collision_resistance_edge_cases() {
         // Test hash collision scenarios with carefully crafted inputs
-        let hash1 = manifest_hash_for_transition(
-            "transition_id_1",
-            "initiator_a",
-            "reason_x",
-            100,
-        );
+        let hash1 = manifest_hash_for_transition("transition_id_1", "initiator_a", "reason_x", 100);
 
         // Different field arrangement that could collide without length prefixing
-        let hash2 = manifest_hash_for_transition(
-            "transition_id",
-            "_1initiator_a",
-            "reason_x",
-            100,
-        );
+        let hash2 = manifest_hash_for_transition("transition_id", "_1initiator_a", "reason_x", 100);
 
         // Should be different due to length prefixing
-        assert_ne!(hash1, hash2, "length prefixing should prevent delimiter collision");
+        assert_ne!(
+            hash1, hash2,
+            "length prefixing should prevent delimiter collision"
+        );
 
         // Test with embedded delimiter-like content
         let hash3 = manifest_hash_for_transition(
@@ -1455,7 +1449,10 @@ mod tests {
             u64::MAX,
         );
 
-        assert_ne!(hash3, hash4, "embedded delimiters should not cause collision");
+        assert_ne!(
+            hash3, hash4,
+            "embedded delimiters should not cause collision"
+        );
 
         // Test extreme epoch values
         let hash_min = manifest_hash_for_transition("a", "b", "c", 0);
@@ -1497,7 +1494,10 @@ mod tests {
             .abort_transition_cancellation("emergency", 42000, "trace-cancel")
             .expect("cancellation should work");
 
-        assert!(coordinator.pending.is_none(), "pending should be cleared again");
+        assert!(
+            coordinator.pending.is_none(),
+            "pending should be cleared again"
+        );
         assert_eq!(coordinator.abort_manager().abort_count(), 2);
 
         // History should record both aborts

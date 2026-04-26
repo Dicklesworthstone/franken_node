@@ -690,7 +690,8 @@ impl AuthFailureLimiter {
         if self.source_failure_counts.len() >= MAX_AUTH_FAILURE_SOURCES {
             // LRU eviction: remove the IP with the lowest failure count to make room
             // This preserves tracking of high-volume attackers while allowing new IPs
-            let min_entry = self.source_failure_counts
+            let min_entry = self
+                .source_failure_counts
                 .iter()
                 .min_by_key(|(_, &count)| count)
                 .map(|(ip, _)| ip.clone());
@@ -2324,7 +2325,7 @@ mod api_middleware_edge_negative_tests {
         let stats = limiter.get_failure_stats();
         assert_eq!(
             stats.global_failure_count,
-            (MAX_AUTH_FAILURE_SOURCES + 32 + 5) as u64  // +5 for the extra failures on 192.0.2.0
+            (MAX_AUTH_FAILURE_SOURCES + 32 + 5) as u64 // +5 for the extra failures on 192.0.2.0
         );
         assert_eq!(stats.unique_source_ips, MAX_AUTH_FAILURE_SOURCES);
         assert_eq!(

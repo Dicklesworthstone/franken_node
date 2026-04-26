@@ -5,8 +5,8 @@
 //! BTreeSet-based revocation checking with 10x latency improvement and 20x
 //! memory efficiency.
 
-use std::hash::{BuildHasher, Hash, Hasher};
 use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hash, Hasher};
 
 /// Maximum number of cuckoo evictions before declaring filter full
 const MAX_CUCKOO_EVICTIONS: usize = 500;
@@ -239,8 +239,7 @@ impl CuckooFilter {
 
     /// Get memory usage in bytes.
     pub fn memory_usage(&self) -> usize {
-        std::mem::size_of::<Self>() +
-        self.buckets.len() * std::mem::size_of::<[u16; BUCKET_SIZE]>()
+        std::mem::size_of::<Self>() + self.buckets.len() * std::mem::size_of::<[u16; BUCKET_SIZE]>()
     }
 }
 
@@ -287,7 +286,11 @@ mod tests {
 
         // Verify no false negatives - every inserted token must be found
         for token in &tokens {
-            assert!(filter.contains(token), "False negative for token: {}", token);
+            assert!(
+                filter.contains(token),
+                "False negative for token: {}",
+                token
+            );
         }
 
         // Remove half the tokens
@@ -300,7 +303,11 @@ mod tests {
 
         // Verify no false negatives after removal
         for token in &ground_truth {
-            assert!(filter.contains(token), "False negative after removal: {}", token);
+            assert!(
+                filter.contains(token),
+                "False negative after removal: {}",
+                token
+            );
         }
     }
 
@@ -326,16 +333,24 @@ mod tests {
         let observed_fpr = false_positives as f64 / test_tokens.len() as f64;
         let theoretical_fpr = filter.false_positive_rate();
 
-        println!("Observed FPR: {:.4}%, Theoretical FPR: {:.4}%",
-                 observed_fpr * 100.0, theoretical_fpr * 100.0);
+        println!(
+            "Observed FPR: {:.4}%, Theoretical FPR: {:.4}%",
+            observed_fpr * 100.0,
+            theoretical_fpr * 100.0
+        );
 
         // False positive rate should be reasonable (< 2% for this test)
-        assert!(observed_fpr < 0.02,
-               "False positive rate too high: {:.4}%", observed_fpr * 100.0);
+        assert!(
+            observed_fpr < 0.02,
+            "False positive rate too high: {:.4}%",
+            observed_fpr * 100.0
+        );
 
         // Should be within 3x of theoretical rate (accounting for randomness)
-        assert!(observed_fpr < theoretical_fpr * 3.0,
-               "Observed FPR significantly exceeds theoretical bound");
+        assert!(
+            observed_fpr < theoretical_fpr * 3.0,
+            "Observed FPR significantly exceeds theoretical bound"
+        );
     }
 
     #[test]
@@ -375,8 +390,10 @@ mod tests {
             assert!(filter.insert(&format!("token_{}", i)));
         }
 
-        assert!(filter.should_rebuild(),
-               "Filter should indicate rebuild needed at high load");
+        assert!(
+            filter.should_rebuild(),
+            "Filter should indicate rebuild needed at high load"
+        );
         assert!(filter.load_factor() > 0.80);
 
         // After clearing, should not need rebuild
@@ -397,7 +414,11 @@ mod tests {
         println!("BTreeSet base size: {} bytes", btree_base_size);
 
         // Cuckoo filter should be space-efficient even when empty
-        assert!(filter_size < 10000, "Filter too large: {} bytes", filter_size);
+        assert!(
+            filter_size < 10000,
+            "Filter too large: {} bytes",
+            filter_size
+        );
     }
 
     #[test]
@@ -413,7 +434,10 @@ mod tests {
         }
 
         // Should accept most items but eventually fail when full
-        assert!(inserted >= 8, "Filter should accept most items within capacity");
+        assert!(
+            inserted >= 8,
+            "Filter should accept most items within capacity"
+        );
         assert!(inserted < 20, "Filter should reject some items when full");
 
         println!("Inserted {} out of 20 items with capacity 10", inserted);

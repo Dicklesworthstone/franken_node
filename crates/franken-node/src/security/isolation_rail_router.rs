@@ -528,7 +528,11 @@ impl RailRouter {
             timestamp: now,
         };
 
-        push_bounded(&mut self.elevation_log, event.clone(), MAX_ELEVATION_LOG_ENTRIES);
+        push_bounded(
+            &mut self.elevation_log,
+            event.clone(),
+            MAX_ELEVATION_LOG_ENTRIES,
+        );
 
         // ISO-004: Hot-elevation completed
         self.emit_audit(
@@ -646,12 +650,16 @@ impl RailRouter {
 
     fn emit_audit(&mut self, event_code: &str, workload_id: &str, detail: &str) {
         let now = self.timestamp();
-        push_bounded(&mut self.audit_log, AuditEntry {
-            event_code: event_code.to_string(),
-            workload_id: workload_id.to_string(),
-            detail: detail.to_string(),
-            timestamp: now,
-        }, MAX_AUDIT_LOG_ENTRIES);
+        push_bounded(
+            &mut self.audit_log,
+            AuditEntry {
+                event_code: event_code.to_string(),
+                workload_id: workload_id.to_string(),
+                detail: detail.to_string(),
+                timestamp: now,
+            },
+            MAX_AUDIT_LOG_ENTRIES,
+        );
     }
 }
 
@@ -951,8 +959,12 @@ mod tests {
             // Test boundary scores
             for &score in &[0.0, 0.25, 0.50, 0.75, 1.0] {
                 let rail = policy.rail_for_score(score);
-                assert!(IsolationRail::ALL.contains(&rail),
-                       "Policy {} should assign valid rail for score {}", i, score);
+                assert!(
+                    IsolationRail::ALL.contains(&rail),
+                    "Policy {} should assign valid rail for score {}",
+                    i,
+                    score
+                );
             }
 
             // Test policy serialization
@@ -961,7 +973,11 @@ mod tests {
 
             if let Ok(json) = json_result {
                 let parsed_result: Result<ElevationPolicy, _> = serde_json::from_str(&json);
-                assert!(parsed_result.is_ok(), "Extreme policy {} should deserialize", i);
+                assert!(
+                    parsed_result.is_ok(),
+                    "Extreme policy {} should deserialize",
+                    i
+                );
             }
         }
     }
@@ -970,24 +986,24 @@ mod tests {
     #[test]
     fn test_classify_workload_malicious_ids() {
         let malicious_ids = [
-            "",                                    // Empty ID (should fail)
-            " ",                                   // Whitespace only
-            "\n\r\t",                             // Control characters
-            "\x00",                               // Null byte
-            "id\x00injection",                    // Null byte injection
-            "id\r\nCRLF\r\ninjection",           // CRLF injection
-            "../../../etc/passwd",               // Path traversal
-            "CON",                                // Windows reserved name
-            "aux.txt",                            // Windows reserved with extension
-            "\u{202E}spoofed",                    // Unicode right-to-left override
-            "\u{FEFF}BOM",                        // Byte order mark
-            "\u{200B}invisible",                  // Zero-width space
-            "id\u{1F4A9}emoji",                  // Unicode emoji
-            "x".repeat(100000),                   // Very long ID
-            "<script>alert('xss')</script>",      // XSS attempt
-            "'; DROP TABLE workloads; --",       // SQL injection attempt
-            "id\x1b[31mred\x1b[0m",             // ANSI escape sequences
-            "normal-id",                          // Valid reference for comparison
+            "",                              // Empty ID (should fail)
+            " ",                             // Whitespace only
+            "\n\r\t",                        // Control characters
+            "\x00",                          // Null byte
+            "id\x00injection",               // Null byte injection
+            "id\r\nCRLF\r\ninjection",       // CRLF injection
+            "../../../etc/passwd",           // Path traversal
+            "CON",                           // Windows reserved name
+            "aux.txt",                       // Windows reserved with extension
+            "\u{202E}spoofed",               // Unicode right-to-left override
+            "\u{FEFF}BOM",                   // Byte order mark
+            "\u{200B}invisible",             // Zero-width space
+            "id\u{1F4A9}emoji",              // Unicode emoji
+            "x".repeat(100000),              // Very long ID
+            "<script>alert('xss')</script>", // XSS attempt
+            "'; DROP TABLE workloads; --",   // SQL injection attempt
+            "id\x1b[31mred\x1b[0m",          // ANSI escape sequences
+            "normal-id",                     // Valid reference for comparison
         ];
 
         for (i, &workload_id) in malicious_ids.iter().enumerate() {
@@ -1005,18 +1021,28 @@ mod tests {
 
                     // Should be retrievable with same ID
                     let retrieved = router.get_classification(workload_id);
-                    assert!(retrieved.is_ok(), "Should retrieve classified workload {}", i);
+                    assert!(
+                        retrieved.is_ok(),
+                        "Should retrieve classified workload {}",
+                        i
+                    );
 
                     // Audit log should contain the workload ID
                     assert!(!router.audit_log().is_empty());
                 }
                 Err(RailRouterError::Unclassified { .. }) => {
                     // Expected for empty/invalid IDs
-                    assert!(workload_id.trim().is_empty(), "Only empty IDs should be rejected as unclassified");
+                    assert!(
+                        workload_id.trim().is_empty(),
+                        "Only empty IDs should be rejected as unclassified"
+                    );
                     assert_eq!(router.workload_count(), 0);
                 }
                 Err(other) => {
-                    panic!("Unexpected error for workload ID '{}': {:?}", workload_id, other);
+                    panic!(
+                        "Unexpected error for workload ID '{}': {:?}",
+                        workload_id, other
+                    );
                 }
             }
         }
@@ -1025,7 +1051,9 @@ mod tests {
         let mut router = default_router();
 
         // Add a normal workload first
-        router.classify_workload("normal", 0.3).expect("Normal workload should succeed");
+        router
+            .classify_workload("normal", 0.3)
+            .expect("Normal workload should succeed");
 
         // Try to add malicious workloads
         for &malicious_id in &malicious_ids[..5] {
@@ -1036,7 +1064,10 @@ mod tests {
 
         // Normal workload should still be accessible
         let normal_classification = router.get_classification("normal");
-        assert!(normal_classification.is_ok(), "Normal workload should remain accessible after malicious attempts");
+        assert!(
+            normal_classification.is_ok(),
+            "Normal workload should remain accessible after malicious attempts"
+        );
     }
 
     /// Test hot elevation with extreme scenarios and attack patterns
@@ -1045,22 +1076,22 @@ mod tests {
         let mut router = default_router();
 
         // Set up workloads on different rails
-        router.classify_workload("shared", 0.1).unwrap();      // Shared rail
-        router.classify_workload("sandboxed", 0.3).unwrap();   // Sandboxed rail
-        router.classify_workload("hardened", 0.6).unwrap();    // HardenedSandbox rail
-        router.classify_workload("full", 0.9).unwrap();        // FullIsolation rail
+        router.classify_workload("shared", 0.1).unwrap(); // Shared rail
+        router.classify_workload("sandboxed", 0.3).unwrap(); // Sandboxed rail
+        router.classify_workload("hardened", 0.6).unwrap(); // HardenedSandbox rail
+        router.classify_workload("full", 0.9).unwrap(); // FullIsolation rail
 
         // Test elevation with malicious reasons
         let malicious_reasons = [
-            "",                                          // Empty reason
-            "x".repeat(100000),                          // Very long reason
-            "reason\x00null\r\ninjection",              // Null/CRLF injection
-            "\u{202E}spoofed reason",                    // Unicode direction override
-            "<script>alert('xss')</script>",             // XSS attempt
-            "'; DROP TABLE elevations; --",             // SQL injection
-            "reason\x1b[31mwith\x1b[0mANSI",           // ANSI escape sequences
-            "\u{1F4A9}\u{1F525}\u{1F4A5}",              // Unicode emoji
-            "legitimate security elevation",             // Normal reason for comparison
+            "",                              // Empty reason
+            "x".repeat(100000),              // Very long reason
+            "reason\x00null\r\ninjection",   // Null/CRLF injection
+            "\u{202E}spoofed reason",        // Unicode direction override
+            "<script>alert('xss')</script>", // XSS attempt
+            "'; DROP TABLE elevations; --",  // SQL injection
+            "reason\x1b[31mwith\x1b[0mANSI", // ANSI escape sequences
+            "\u{1F4A9}\u{1F525}\u{1F4A5}",   // Unicode emoji
+            "legitimate security elevation", // Normal reason for comparison
         ];
 
         for (i, &reason) in malicious_reasons.iter().enumerate() {
@@ -1090,8 +1121,12 @@ mod tests {
 
         // Test elevation attempt with non-existent workload
         for &reason in &malicious_reasons[..3] {
-            let nonexistent_result = router.hot_elevate("nonexistent", IsolationRail::FullIsolation, reason);
-            assert!(matches!(nonexistent_result, Err(RailRouterError::WorkloadNotFound { .. })));
+            let nonexistent_result =
+                router.hot_elevate("nonexistent", IsolationRail::FullIsolation, reason);
+            assert!(matches!(
+                nonexistent_result,
+                Err(RailRouterError::WorkloadNotFound { .. })
+            ));
         }
 
         // Test all possible elevation paths for monotonicity
@@ -1117,16 +1152,34 @@ mod tests {
 
                 if target_rail.is_stronger_than(from_rail) {
                     // Should succeed (upgrade)
-                    assert!(elevation_result.is_ok(),
-                           "Upgrade from {} to {} should succeed", from_rail, target_rail);
+                    assert!(
+                        elevation_result.is_ok(),
+                        "Upgrade from {} to {} should succeed",
+                        from_rail,
+                        target_rail
+                    );
                 } else if target_rail == from_rail {
                     // Should fail (same rail)
-                    assert!(matches!(elevation_result, Err(RailRouterError::SameRailElevation { .. })),
-                           "Same rail elevation from {} to {} should fail", from_rail, target_rail);
+                    assert!(
+                        matches!(
+                            elevation_result,
+                            Err(RailRouterError::SameRailElevation { .. })
+                        ),
+                        "Same rail elevation from {} to {} should fail",
+                        from_rail,
+                        target_rail
+                    );
                 } else {
                     // Should fail (downgrade)
-                    assert!(matches!(elevation_result, Err(RailRouterError::DowngradeRejected { .. })),
-                           "Downgrade from {} to {} should fail", from_rail, target_rail);
+                    assert!(
+                        matches!(
+                            elevation_result,
+                            Err(RailRouterError::DowngradeRejected { .. })
+                        ),
+                        "Downgrade from {} to {} should fail",
+                        from_rail,
+                        target_rail
+                    );
                 }
 
                 // Reset workload rail for next test
@@ -1146,7 +1199,11 @@ mod tests {
             let risk_score = (i as f64) / 1000.0; // Scores from 0.0 to 0.999
 
             let classification_result = router.classify_workload(&workload_id, risk_score);
-            assert!(classification_result.is_ok(), "Classification should succeed for workload {}", i);
+            assert!(
+                classification_result.is_ok(),
+                "Classification should succeed for workload {}",
+                i
+            );
 
             // Verify state consistency after each classification
             assert_eq!(router.workload_count(), i + 1);
@@ -1154,23 +1211,32 @@ mod tests {
 
             let rail = router.get_rail(&workload_id).unwrap();
             let expected_rail = router.policy().rail_for_score(risk_score);
-            assert_eq!(rail, expected_rail, "Rail assignment should be deterministic for score {}", risk_score);
+            assert_eq!(
+                rail, expected_rail,
+                "Rail assignment should be deterministic for score {}",
+                risk_score
+            );
         }
 
         // Test rail summary consistency
         let summary = router.rail_summary();
         let total_in_summary: usize = summary.values().sum();
-        assert_eq!(total_in_summary, 1000, "Rail summary should account for all workloads");
+        assert_eq!(
+            total_in_summary, 1000,
+            "Rail summary should account for all workloads"
+        );
 
         // Verify every rail type is represented in summary
         for rail in &IsolationRail::ALL {
-            assert!(summary.contains_key(rail.as_str()), "Summary should contain {}", rail.as_str());
+            assert!(
+                summary.contains_key(rail.as_str()),
+                "Summary should contain {}",
+                rail.as_str()
+            );
         }
 
         // Test elevation stress
-        let workloads_to_elevate: Vec<_> = (0..100)
-            .map(|i| format!("workload-{:04}", i))
-            .collect();
+        let workloads_to_elevate: Vec<_> = (0..100).map(|i| format!("workload-{:04}", i)).collect();
 
         for workload_id in &workloads_to_elevate {
             let current_rail = router.get_rail(workload_id).unwrap();
@@ -1188,11 +1254,17 @@ mod tests {
                         *target_rail,
                         &format!("stress test elevation for {}", workload_id),
                     );
-                    assert!(elevation_result.is_ok(), "Stress test elevation should succeed");
+                    assert!(
+                        elevation_result.is_ok(),
+                        "Stress test elevation should succeed"
+                    );
 
                     // Verify elevation took effect
                     let new_rail = router.get_rail(workload_id).unwrap();
-                    assert_eq!(new_rail, *target_rail, "Elevation should update workload rail");
+                    assert_eq!(
+                        new_rail, *target_rail,
+                        "Elevation should update workload rail"
+                    );
                 }
             }
         }
@@ -1201,16 +1273,26 @@ mod tests {
         for i in 0..1000 {
             let workload_id = format!("workload-{:04}", i);
             let classification = router.get_classification(&workload_id);
-            assert!(classification.is_ok(), "Workload {} should remain accessible after stress", i);
+            assert!(
+                classification.is_ok(),
+                "Workload {} should remain accessible after stress",
+                i
+            );
         }
 
         // Test audit log integrity
         let audit_log = router.audit_log();
-        assert!(audit_log.len() >= 1000 * 2, "Should have at least classification + assignment events");
+        assert!(
+            audit_log.len() >= 1000 * 2,
+            "Should have at least classification + assignment events"
+        );
 
         // Verify audit events are chronologically consistent
         for window in audit_log.windows(2) {
-            assert_eq!(window[0].timestamp, window[1].timestamp, "All timestamps should be equal in test environment");
+            assert_eq!(
+                window[0].timestamp, window[1].timestamp,
+                "All timestamps should be equal in test environment"
+            );
         }
     }
 
@@ -1223,26 +1305,31 @@ mod tests {
             ("\"sandboxed\"", true),
             ("\"hardened_sandbox\"", true),
             ("\"full_isolation\"", true),
-            ("\"Shared\"", false),        // Wrong case
-            ("\"SHARED\"", false),        // Wrong case
-            ("\"unknown_rail\"", false),  // Invalid variant
-            ("0", false),                 // Numeric value
-            ("null", false),              // Null value
-            ("true", false),              // Boolean value
-            ("\"\"", false),              // Empty string
+            ("\"Shared\"", false),       // Wrong case
+            ("\"SHARED\"", false),       // Wrong case
+            ("\"unknown_rail\"", false), // Invalid variant
+            ("0", false),                // Numeric value
+            ("null", false),             // Null value
+            ("true", false),             // Boolean value
+            ("\"\"", false),             // Empty string
         ];
 
         for (json, should_succeed) in &rail_json_tests {
             let result: Result<IsolationRail, _> = serde_json::from_str(json);
-            assert_eq!(result.is_ok(), *should_succeed,
-                      "IsolationRail deserialization should {} for: {}",
-                      if *should_succeed { "succeed" } else { "fail" }, json);
+            assert_eq!(
+                result.is_ok(),
+                *should_succeed,
+                "IsolationRail deserialization should {} for: {}",
+                if *should_succeed { "succeed" } else { "fail" },
+                json
+            );
         }
 
         // Test round-trip serialization of all rail types
         for rail in &IsolationRail::ALL {
             let json = serde_json::to_string(rail).expect("Rail should serialize");
-            let deserialized: IsolationRail = serde_json::from_str(&json).expect("Rail should deserialize");
+            let deserialized: IsolationRail =
+                serde_json::from_str(&json).expect("Rail should deserialize");
             assert_eq!(*rail, deserialized, "Round-trip should preserve rail type");
         }
 
@@ -1258,8 +1345,10 @@ mod tests {
         match json_result {
             Ok(json) => {
                 // JSON should escape control characters
-                assert!(json.contains("\\u0000") || json.contains("\\r") || json.contains("\\n"),
-                       "JSON should escape control characters");
+                assert!(
+                    json.contains("\\u0000") || json.contains("\\r") || json.contains("\\n"),
+                    "JSON should escape control characters"
+                );
 
                 // NaN should be serialized as null or special value
                 let parsed_result: Result<WorkloadClassification, _> = serde_json::from_str(&json);
@@ -1281,11 +1370,17 @@ mod tests {
         };
 
         let event_json_result = serde_json::to_string(&extreme_event);
-        assert!(event_json_result.is_ok(), "Extreme elevation event should serialize");
+        assert!(
+            event_json_result.is_ok(),
+            "Extreme elevation event should serialize"
+        );
 
         if let Ok(json) = event_json_result {
             let parsed_result: Result<ElevationEvent, _> = serde_json::from_str(&json);
-            assert!(parsed_result.is_ok(), "Extreme elevation event should deserialize");
+            assert!(
+                parsed_result.is_ok(),
+                "Extreme elevation event should deserialize"
+            );
 
             if let Ok(parsed_event) = parsed_result {
                 assert_eq!(parsed_event.workload_id.len(), 100000);
@@ -1333,26 +1428,51 @@ mod tests {
         for (i, error) in error_test_cases.iter().enumerate() {
             // Test error display formatting
             let error_string = format!("{}", error);
-            assert!(!error_string.is_empty(), "Error {} should have non-empty display", i);
+            assert!(
+                !error_string.is_empty(),
+                "Error {} should have non-empty display",
+                i
+            );
 
             // Error should contain workload ID (even if malformed)
             match error {
-                RailRouterError::Unclassified { workload_id } |
-                RailRouterError::WorkloadNotFound { workload_id } |
-                RailRouterError::DuplicateWorkload { workload_id } |
-                RailRouterError::SameRailElevation { workload_id, .. } |
-                RailRouterError::InvalidRiskScore { workload_id, .. } |
-                RailRouterError::HotElevationDisabled { workload_id, .. } => {
-                    if !workload_id.is_empty() && workload_id.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
-                        assert!(error_string.contains(workload_id), "Error should contain workload ID");
+                RailRouterError::Unclassified { workload_id }
+                | RailRouterError::WorkloadNotFound { workload_id }
+                | RailRouterError::DuplicateWorkload { workload_id }
+                | RailRouterError::SameRailElevation { workload_id, .. }
+                | RailRouterError::InvalidRiskScore { workload_id, .. }
+                | RailRouterError::HotElevationDisabled { workload_id, .. } => {
+                    if !workload_id.is_empty()
+                        && workload_id
+                            .chars()
+                            .all(|c| c.is_ascii_graphic() || c == ' ')
+                    {
+                        assert!(
+                            error_string.contains(workload_id),
+                            "Error should contain workload ID"
+                        );
                     }
                 }
-                RailRouterError::DowngradeRejected { workload_id, current, requested } => {
-                    if workload_id.len() < 1000 { // Don't check very long IDs
-                        assert!(error_string.contains(workload_id), "Error should contain workload ID");
+                RailRouterError::DowngradeRejected {
+                    workload_id,
+                    current,
+                    requested,
+                } => {
+                    if workload_id.len() < 1000 {
+                        // Don't check very long IDs
+                        assert!(
+                            error_string.contains(workload_id),
+                            "Error should contain workload ID"
+                        );
                     }
-                    assert!(error_string.contains(&current.to_string()), "Error should contain current rail");
-                    assert!(error_string.contains(&requested.to_string()), "Error should contain requested rail");
+                    assert!(
+                        error_string.contains(&current.to_string()),
+                        "Error should contain current rail"
+                    );
+                    assert!(
+                        error_string.contains(&requested.to_string()),
+                        "Error should contain requested rail"
+                    );
                 }
             }
 
@@ -1362,15 +1482,25 @@ mod tests {
 
             if let Ok(json) = json_result {
                 let parsed_result: Result<RailRouterError, _> = serde_json::from_str(&json);
-                assert!(parsed_result.is_ok(), "Error {} should deserialize from JSON", i);
+                assert!(
+                    parsed_result.is_ok(),
+                    "Error {} should deserialize from JSON",
+                    i
+                );
 
                 // Verify round-trip preservation
                 if let Ok(parsed_error) = parsed_result {
                     match (error, &parsed_error) {
-                        (RailRouterError::InvalidRiskScore { score: s1, .. },
-                         RailRouterError::InvalidRiskScore { score: s2, .. }) => {
+                        (
+                            RailRouterError::InvalidRiskScore { score: s1, .. },
+                            RailRouterError::InvalidRiskScore { score: s2, .. },
+                        ) => {
                             // Special handling for NaN values
-                            assert_eq!(s1.is_nan(), s2.is_nan(), "NaN values should round-trip consistently");
+                            assert_eq!(
+                                s1.is_nan(),
+                                s2.is_nan(),
+                                "NaN values should round-trip consistently"
+                            );
                         }
                         _ => {
                             // For other errors, exact equality should hold
@@ -1389,7 +1519,9 @@ mod tests {
         }
 
         // Test that router remains functional after error conditions
-        router.classify_workload("recovery-test", 0.5).expect("Router should remain functional");
+        router
+            .classify_workload("recovery-test", 0.5)
+            .expect("Router should remain functional");
         assert_eq!(router.workload_count(), 1);
     }
 
@@ -1407,9 +1539,15 @@ mod tests {
         let _ = router.classify_workload("w1", 0.7); // Duplicate, should fail
         let _ = router.classify_workload("w4", -0.1); // Invalid score, should fail
 
-        router.hot_elevate("w1", IsolationRail::Sandboxed, "test elevation").unwrap();
+        router
+            .hot_elevate("w1", IsolationRail::Sandboxed, "test elevation")
+            .unwrap();
         let _ = router.hot_elevate("w2", IsolationRail::Shared, "invalid downgrade"); // Should fail
-        let _ = router.hot_elevate("nonexistent", IsolationRail::FullIsolation, "missing workload"); // Should fail
+        let _ = router.hot_elevate(
+            "nonexistent",
+            IsolationRail::FullIsolation,
+            "missing workload",
+        ); // Should fail
 
         let audit_log = router.audit_log();
 
@@ -1417,46 +1555,79 @@ mod tests {
         assert!(!audit_log.is_empty(), "Audit log should contain entries");
 
         // Check that all successful operations have corresponding audit entries
-        let successful_classifications = audit_log.iter()
+        let successful_classifications = audit_log
+            .iter()
             .filter(|entry| entry.event_code == ISO_002)
             .count();
-        assert_eq!(successful_classifications, 3, "Should have 3 successful classification events");
+        assert_eq!(
+            successful_classifications, 3,
+            "Should have 3 successful classification events"
+        );
 
-        let elevation_starts = audit_log.iter()
+        let elevation_starts = audit_log
+            .iter()
             .filter(|entry| entry.event_code == ISO_003)
             .count();
-        let elevation_completions = audit_log.iter()
+        let elevation_completions = audit_log
+            .iter()
             .filter(|entry| entry.event_code == ISO_004)
             .count();
-        assert_eq!(elevation_starts, elevation_completions, "Each elevation start should have completion");
+        assert_eq!(
+            elevation_starts, elevation_completions,
+            "Each elevation start should have completion"
+        );
 
         // Test audit entry integrity
         for (i, entry) in audit_log.iter().enumerate() {
             // Event code should be valid
-            assert!(ALL_EVENT_CODES.contains(&&*entry.event_code),
-                   "Entry {} should have valid event code: {}", i, entry.event_code);
+            assert!(
+                ALL_EVENT_CODES.contains(&&*entry.event_code),
+                "Entry {} should have valid event code: {}",
+                i,
+                entry.event_code
+            );
 
             // Workload ID should not be empty (except for certain edge cases)
-            if entry.event_code != ISO_006 { // ISO_006 can have empty/invalid workload IDs
-                assert!(!entry.workload_id.is_empty(), "Entry {} should have non-empty workload ID", i);
+            if entry.event_code != ISO_006 {
+                // ISO_006 can have empty/invalid workload IDs
+                assert!(
+                    !entry.workload_id.is_empty(),
+                    "Entry {} should have non-empty workload ID",
+                    i
+                );
             }
 
             // Timestamp should be consistent
-            assert_eq!(entry.timestamp, "2026-02-21T00:00:00Z", "Entry {} should have consistent timestamp", i);
+            assert_eq!(
+                entry.timestamp, "2026-02-21T00:00:00Z",
+                "Entry {} should have consistent timestamp",
+                i
+            );
 
             // Detail should provide meaningful information
-            assert!(!entry.detail.is_empty(), "Entry {} should have non-empty detail", i);
+            assert!(
+                !entry.detail.is_empty(),
+                "Entry {} should have non-empty detail",
+                i
+            );
         }
 
         // Test that audit entries are immutable (log is append-only)
         let initial_log_len = audit_log.len();
         router.classify_workload("w5", 0.8).unwrap();
         let new_log_len = router.audit_log().len();
-        assert!(new_log_len > initial_log_len, "Audit log should grow with new operations");
+        assert!(
+            new_log_len > initial_log_len,
+            "Audit log should grow with new operations"
+        );
 
         // Verify previous entries remain unchanged
         for (i, entry) in router.audit_log().iter().take(initial_log_len).enumerate() {
-            assert_eq!(entry, &audit_log[i], "Previous audit entry {} should remain unchanged", i);
+            assert_eq!(
+                entry, &audit_log[i],
+                "Previous audit entry {} should remain unchanged",
+                i
+            );
         }
 
         // Test audit log with extreme workload IDs
@@ -1476,7 +1647,10 @@ mod tests {
         let final_audit_log = router.audit_log();
         for entry in final_audit_log {
             let json_result = serde_json::to_string(entry);
-            assert!(json_result.is_ok(), "Audit entry should serialize despite extreme workload IDs");
+            assert!(
+                json_result.is_ok(),
+                "Audit entry should serialize despite extreme workload IDs"
+            );
         }
     }
 
@@ -1488,7 +1662,9 @@ mod tests {
         // Set up various workloads
         router.classify_workload("normal", 0.3).unwrap();
         router.classify_workload("elevated", 0.1).unwrap();
-        router.hot_elevate("elevated", IsolationRail::HardenedSandbox, "test").unwrap();
+        router
+            .hot_elevate("elevated", IsolationRail::HardenedSandbox, "test")
+            .unwrap();
 
         // Test normal removal
         let removed = router.remove_workload("normal").unwrap();
@@ -1498,24 +1674,29 @@ mod tests {
 
         // Test removal of non-existent workload
         let not_found = router.remove_workload("nonexistent");
-        assert!(matches!(not_found, Err(RailRouterError::WorkloadNotFound { .. })));
+        assert!(matches!(
+            not_found,
+            Err(RailRouterError::WorkloadNotFound { .. })
+        ));
 
         // Test removal of already removed workload
         let already_removed = router.remove_workload("normal");
-        assert!(matches!(already_removed, Err(RailRouterError::WorkloadNotFound { .. })));
+        assert!(matches!(
+            already_removed,
+            Err(RailRouterError::WorkloadNotFound { .. })
+        ));
 
         // Test removal preserves elevation history
         let elevation_log_before = router.elevation_log().len();
         router.remove_workload("elevated").unwrap();
-        assert_eq!(router.elevation_log().len(), elevation_log_before,
-                  "Elevation history should be preserved after workload removal");
+        assert_eq!(
+            router.elevation_log().len(),
+            elevation_log_before,
+            "Elevation history should be preserved after workload removal"
+        );
 
         // Test removal with extreme workload IDs
-        let extreme_ids = [
-            "\x00null",
-            "\u{202E}spoofed",
-            "x".repeat(100000),
-        ];
+        let extreme_ids = ["\x00null", "\u{202E}spoofed", "x".repeat(100000)];
 
         for &extreme_id in &extreme_ids {
             if !extreme_id.trim().is_empty() {
@@ -1524,7 +1705,10 @@ mod tests {
                 if classify_result.is_ok() {
                     // Remove it
                     let remove_result = router.remove_workload(extreme_id);
-                    assert!(remove_result.is_ok(), "Should be able to remove workload with extreme ID");
+                    assert!(
+                        remove_result.is_ok(),
+                        "Should be able to remove workload with extreme ID"
+                    );
                 }
             }
         }

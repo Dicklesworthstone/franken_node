@@ -504,8 +504,8 @@ fn test_atomic_file_operations() {
     assert!(file_path.exists());
 
     // Should be able to read back the same bundle
-    let loaded_bundle = read_bundle_from_path_with_trusted_key(&file_path, Some(&trusted_key_id))
-        .unwrap();
+    let loaded_bundle =
+        read_bundle_from_path_with_trusted_key(&file_path, Some(&trusted_key_id)).unwrap();
     assert_eq!(bundle, loaded_bundle);
 
     // No temp files should remain

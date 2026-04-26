@@ -1149,12 +1149,7 @@ mod tests {
         t.record_event(ev("a1", false, 100, "prod")).unwrap();
 
         let alerts = t
-            .check_slos(
-                &[slo("repair_debt", 0.999)],
-                "prod",
-                200,
-                "trace-debt-edge",
-            )
+            .check_slos(&[slo("repair_debt", 0.999)], "prod", 200, "trace-debt-edge")
             .unwrap();
 
         assert_eq!(alerts.len(), 1);

@@ -1776,11 +1776,11 @@ mod tests {
             match channel.send_obligation(obligation.clone(), &mut ledger, 2000 + i as u64) {
                 Ok(()) => {
                     successful_sends = successful_sends.saturating_add(1);
-                },
+                }
                 Err(ChannelError::QueueAtCapacity { .. }) => {
                     // Expected when queue fills up - should be handled gracefully
                     break;
-                },
+                }
                 Err(_) => {
                     // Other errors also acceptable under memory pressure
                     break;
@@ -1834,14 +1834,20 @@ mod tests {
             };
 
             // Should handle Unicode identifiers without corruption or crashes
-            let send_result = channel.send_obligation(obligation.clone(), &mut ledger, 2000 + i as u64);
+            let send_result =
+                channel.send_obligation(obligation.clone(), &mut ledger, 2000 + i as u64);
 
             match send_result {
                 Ok(()) => {
                     // Successfully sent - should be able to fulfill with same ID
-                    let fulfill_result = channel.fulfill_obligation(malicious_id, &mut ledger, 3000 + i as u64);
-                    assert!(fulfill_result.is_ok(), "Should fulfill obligation with Unicode ID: {}", malicious_id);
-                },
+                    let fulfill_result =
+                        channel.fulfill_obligation(malicious_id, &mut ledger, 3000 + i as u64);
+                    assert!(
+                        fulfill_result.is_ok(),
+                        "Should fulfill obligation with Unicode ID: {}",
+                        malicious_id
+                    );
+                }
                 Err(_) => {
                     // Acceptable to reject malformed identifiers
                 }
@@ -1893,7 +1899,7 @@ mod tests {
 
                     // Should handle extreme arithmetic without overflow
                     assert!(timeout_results.len() <= 1); // At most the current obligation
-                },
+                }
                 Err(_) => {
                     // Acceptable to reject extreme deadlines
                 }
@@ -1931,7 +1937,7 @@ mod tests {
         match double_prepare_result {
             PrepareResult::Failed { reason, .. } => {
                 assert!(reason.contains("already prepared") || reason.contains("invalid state"));
-            },
+            }
             _ => {} // Implementation may allow idempotent prepare
         }
 
@@ -1945,11 +1951,14 @@ mod tests {
                 let double_commit_result = flow.commit(&mut channel, &mut ledger, 5300);
                 match double_commit_result {
                     CommitResult::RolledBack { reason, .. } => {
-                        assert!(reason.contains("already committed") || reason.contains("invalid state"));
-                    },
+                        assert!(
+                            reason.contains("already committed")
+                                || reason.contains("invalid state")
+                        );
+                    }
                     _ => {} // Implementation may handle double commit differently
                 }
-            },
+            }
             CommitResult::RolledBack { .. } => {
                 // Expected if flow couldn't commit
             }
@@ -1984,7 +1993,8 @@ mod tests {
                 schema_version: SCHEMA_VERSION.to_string(),
             };
 
-            let send_result = channel.send_obligation(expired_obligation.clone(), &mut ledger, 1000);
+            let send_result =
+                channel.send_obligation(expired_obligation.clone(), &mut ledger, 1000);
 
             if send_result.is_ok() {
                 // Check timeouts with various policies
@@ -2007,26 +2017,31 @@ mod tests {
 
         // Create and send obligation
         let obligation = make_obligation("status-test", 10000, "status-trace");
-        channel.send_obligation(obligation, &mut ledger, 1000).expect("send obligation");
+        channel
+            .send_obligation(obligation, &mut ledger, 1000)
+            .expect("send obligation");
 
         // Try to fulfill
-        channel.fulfill_obligation("status-test", &mut ledger, 2000).expect("fulfill obligation");
+        channel
+            .fulfill_obligation("status-test", &mut ledger, 2000)
+            .expect("fulfill obligation");
 
         // Try to fulfill already-fulfilled obligation
         let double_fulfill_result = channel.fulfill_obligation("status-test", &mut ledger, 3000);
         match double_fulfill_result {
             Err(ChannelError::AlreadyFulfilled { .. }) => {
                 // Expected error
-            },
+            }
             _ => {} // Implementation may handle differently
         }
 
         // Try to reject already-fulfilled obligation
-        let reject_fulfilled_result = channel.reject_obligation("status-test", &mut ledger, "test reason", 4000);
+        let reject_fulfilled_result =
+            channel.reject_obligation("status-test", &mut ledger, "test reason", 4000);
         match reject_fulfilled_result {
             Err(ChannelError::AlreadyFulfilled { .. }) => {
                 // Expected error
-            },
+            }
             _ => {} // Implementation may handle differently
         }
 
@@ -2035,7 +2050,7 @@ mod tests {
         match cancel_fulfilled_result {
             Err(ChannelError::AlreadyFulfilled { .. }) => {
                 // Expected error
-            },
+            }
             _ => {} // Implementation may handle differently
         }
 
@@ -2054,15 +2069,41 @@ mod tests {
         for cycle in 0..100 {
             for op_num in 0..50 {
                 let obligation_id = format!("rapid-{:03}-{:03}", cycle, op_num);
-                let obligation = make_obligation(&obligation_id, 10000, &format!("rapid-trace-{}-{}", cycle, op_num));
+                let obligation = make_obligation(
+                    &obligation_id,
+                    10000,
+                    &format!("rapid-trace-{}-{}", cycle, op_num),
+                );
 
                 // Send obligation
-                if channel.send_obligation(obligation, &mut ledger, cycle * 100 + op_num).is_ok() {
+                if channel
+                    .send_obligation(obligation, &mut ledger, cycle * 100 + op_num)
+                    .is_ok()
+                {
                     // Randomly fulfill, reject, or cancel
                     match op_num % 3 {
-                        0 => { let _ = channel.fulfill_obligation(&obligation_id, &mut ledger, cycle * 100 + op_num + 50); },
-                        1 => { let _ = channel.reject_obligation(&obligation_id, &mut ledger, "test", cycle * 100 + op_num + 50); },
-                        2 => { let _ = channel.cancel_obligation(&obligation_id, &mut ledger, cycle * 100 + op_num + 50); },
+                        0 => {
+                            let _ = channel.fulfill_obligation(
+                                &obligation_id,
+                                &mut ledger,
+                                cycle * 100 + op_num + 50,
+                            );
+                        }
+                        1 => {
+                            let _ = channel.reject_obligation(
+                                &obligation_id,
+                                &mut ledger,
+                                "test",
+                                cycle * 100 + op_num + 50,
+                            );
+                        }
+                        2 => {
+                            let _ = channel.cancel_obligation(
+                                &obligation_id,
+                                &mut ledger,
+                                cycle * 100 + op_num + 50,
+                            );
+                        }
                         _ => {}
                     }
                 }
@@ -2094,20 +2135,35 @@ mod tests {
 
         for i in 0..large_obligation_count {
             let obligation_id = format!("closure-obligation-{:06}", i);
-            let obligation = make_obligation(&obligation_id, 20000, &format!("closure-trace-{:06}", i));
+            let obligation =
+                make_obligation(&obligation_id, 20000, &format!("closure-trace-{:06}", i));
 
-            if channel.send_obligation(obligation, &mut ledger, 1000 + i).is_ok() {
+            if channel
+                .send_obligation(obligation, &mut ledger, 1000 + i)
+                .is_ok()
+            {
                 obligation_ids.push(obligation_id.clone());
 
                 // Create various terminal states
                 match i % 4 {
-                    0 => { let _ = channel.fulfill_obligation(&obligation_id, &mut ledger, 15000 + i); },
-                    1 => { let _ = channel.reject_obligation(&obligation_id, &mut ledger, "test rejection", 15000 + i); },
-                    2 => { let _ = channel.cancel_obligation(&obligation_id, &mut ledger, 15000 + i); },
+                    0 => {
+                        let _ = channel.fulfill_obligation(&obligation_id, &mut ledger, 15000 + i);
+                    }
+                    1 => {
+                        let _ = channel.reject_obligation(
+                            &obligation_id,
+                            &mut ledger,
+                            "test rejection",
+                            15000 + i,
+                        );
+                    }
+                    2 => {
+                        let _ = channel.cancel_obligation(&obligation_id, &mut ledger, 15000 + i);
+                    }
                     3 => {
                         // Leave in Created state - will be timed out
                         let _timeout_results = channel.check_timeouts(&mut ledger, 25000 + i);
-                    },
+                    }
                     _ => {}
                 }
             }
@@ -2120,19 +2176,25 @@ mod tests {
             Ok(proof) => {
                 // Proof should handle large datasets without memory exhaustion
                 assert!(!proof.proof_id.is_empty());
-                assert!(proof.total_obligations <= u32::try_from(obligation_ids.len()).unwrap_or(u32::MAX));
+                assert!(
+                    proof.total_obligations
+                        <= u32::try_from(obligation_ids.len()).unwrap_or(u32::MAX)
+                );
                 assert!(proof.fulfilled_count <= proof.total_obligations);
                 assert!(proof.rejected_count <= proof.total_obligations);
                 assert!(proof.cancelled_count <= proof.total_obligations);
                 assert!(proof.timed_out_count <= proof.total_obligations);
 
                 // Sum should equal total
-                let sum = proof.fulfilled_count + proof.rejected_count + proof.cancelled_count + proof.timed_out_count;
+                let sum = proof.fulfilled_count
+                    + proof.rejected_count
+                    + proof.cancelled_count
+                    + proof.timed_out_count;
                 assert_eq!(sum, proof.total_obligations);
 
                 // Obligation details should be bounded or summarized appropriately
                 assert!(proof.obligation_details.len() <= large_obligation_count);
-            },
+            }
             Err(_) => {
                 // Acceptable to fail under extreme memory pressure
             }

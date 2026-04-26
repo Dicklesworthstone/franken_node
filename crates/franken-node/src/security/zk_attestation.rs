@@ -2016,13 +2016,13 @@ mod tests {
         let policy = test_policy();
 
         let malicious_ids = vec![
-            "normal\u{202e}evil\u{202c}attestation",  // BiDi override
-            "attestation\u{200b}\u{feff}hidden",      // Zero-width characters
-            "attestation\nnewline",                    // Newline injection
-            "attestation\ttab",                        // Tab injection
-            "attestation\x00null",                     // Null byte injection
-            "../../../etc/passwd",                     // Path traversal
-            "attestation\"quote'injection",            // Quote injection
+            "normal\u{202e}evil\u{202c}attestation", // BiDi override
+            "attestation\u{200b}\u{feff}hidden",     // Zero-width characters
+            "attestation\nnewline",                  // Newline injection
+            "attestation\ttab",                      // Tab injection
+            "attestation\x00null",                   // Null byte injection
+            "../../../etc/passwd",                   // Path traversal
+            "attestation\"quote'injection",          // Quote injection
         ];
 
         for (i, malicious_id) in malicious_ids.iter().enumerate() {
@@ -2069,13 +2069,15 @@ mod tests {
         };
 
         // Should handle massive proofs without memory issues
-        ledger.attestations.insert("massive-proof".to_string(), massive_attestation.clone());
+        ledger
+            .attestations
+            .insert("massive-proof".to_string(), massive_attestation.clone());
 
         let verification_result = ledger.verify_proof(
             &massive_attestation,
             &policy,
             1_000_001,
-            "trace-massive-verify".to_string()
+            "trace-massive-verify".to_string(),
         );
 
         // May reject due to size or succeed with performance impact
@@ -2139,8 +2141,8 @@ mod tests {
             u64::MAX,
             u64::MAX - 1,
             u64::MAX / 2,
-            0,  // Epoch start
-            1,  // Minimal positive
+            0, // Epoch start
+            1, // Minimal positive
         ];
 
         for (i, timestamp) in overflow_timestamps.iter().enumerate() {
@@ -2180,7 +2182,9 @@ mod tests {
             "trace-legit".to_string(),
         );
         assert!(legit_result.is_ok());
-        let legit_commitment = &ledger.attestations["legit-attestation"].payload.metadata_commitment;
+        let legit_commitment = &ledger.attestations["legit-attestation"]
+            .payload
+            .metadata_commitment;
 
         // Create spoofed attestation with same commitment
         let spoofed_attestation = ZkAttestation {
@@ -2203,11 +2207,14 @@ mod tests {
             &spoofed_attestation,
             &policy,
             1_000_002,
-            "trace-verify-spoofed".to_string()
+            "trace-verify-spoofed".to_string(),
         );
 
         // Should detect and reject spoofed attestation
-        assert!(matches!(verification_result, ZkVerificationResult::Rejected { .. }));
+        assert!(matches!(
+            verification_result,
+            ZkVerificationResult::Rejected { .. }
+        ));
     }
 
     #[test]
@@ -2239,14 +2246,15 @@ mod tests {
         }
 
         // Attempt batch verification with oversized batch
-        let oversized_batch = &attestations[..MAX_BATCH_SIZE + 5.min(attestations.len().saturating_sub(MAX_BATCH_SIZE))];
+        let oversized_batch = &attestations
+            [..MAX_BATCH_SIZE + 5.min(attestations.len().saturating_sub(MAX_BATCH_SIZE))];
 
         for attestation in oversized_batch {
             let result = ledger.verify_proof(
                 attestation,
                 &policy,
                 2_000_000,
-                "trace-batch-verify".to_string()
+                "trace-batch-verify".to_string(),
             );
 
             // Should handle large batches gracefully
@@ -2260,11 +2268,11 @@ mod tests {
         let policy = test_policy();
 
         let malicious_trace_ids = vec![
-            "trace\nNewline\nInjection",               // Newline injection
-            "trace\x00null\x00injection",              // Null byte injection
-            "trace\u{202e}reverse\u{202c}injection",  // BiDi override
-            "trace\"json'injection",                   // JSON injection
-            "../../../etc/passwd",                     // Path traversal
+            "trace\nNewline\nInjection",             // Newline injection
+            "trace\x00null\x00injection",            // Null byte injection
+            "trace\u{202e}reverse\u{202c}injection", // BiDi override
+            "trace\"json'injection",                 // JSON injection
+            "../../../etc/passwd",                   // Path traversal
         ];
 
         for malicious_trace in malicious_trace_ids {
@@ -2301,11 +2309,11 @@ mod tests {
         // Create attestations with different schema versions
         let schema_versions = vec![
             SCHEMA_VERSION.to_string(),   // Current version
-            "zka-v0.9".to_string(),      // Older version
-            "zka-v2.0".to_string(),      // Future version
-            "".to_string(),              // Empty version
+            "zka-v0.9".to_string(),       // Older version
+            "zka-v2.0".to_string(),       // Future version
+            "".to_string(),               // Empty version
             "invalid-schema".to_string(), // Invalid format
-            "\x00".to_string(),          // Null byte
+            "\x00".to_string(),           // Null byte
         ];
 
         for (i, schema_version) in schema_versions.iter().enumerate() {
@@ -2320,7 +2328,9 @@ mod tests {
                 outcome: PredicateOutcome::Pass,
                 status: AttestationStatus::Active,
                 generated_at_ms: 1_000_000 + u64::try_from(i).unwrap_or(u64::MAX),
-                expires_at_ms: 1_000_000 + u64::try_from(i).unwrap_or(u64::MAX) + DEFAULT_VALIDITY_MS,
+                expires_at_ms: 1_000_000
+                    + u64::try_from(i).unwrap_or(u64::MAX)
+                    + DEFAULT_VALIDITY_MS,
                 trace_id: format!("trace-schema-{}", i),
             };
 
@@ -2384,7 +2394,7 @@ mod tests {
         // Verify ledger consistency
         let final_ledger = ledger.lock().unwrap();
         assert_eq!(final_ledger.attestations.len(), 100); // 4 threads × 25 attestations
-        assert!(final_ledger.audit_trail.len() >= 100);   // At least one audit record per attestation
+        assert!(final_ledger.audit_trail.len() >= 100); // At least one audit record per attestation
     }
 
     #[test]
@@ -2430,18 +2440,30 @@ mod tests {
         for _ in 0..100 {
             // Time legitimate verification
             let start = Instant::now();
-            let _legit_verification_result = ledger.verify_proof(&legit_result.as_ref().unwrap(), &policy, 1_000_001, "trace-timing".to_string());
+            let _legit_verification_result = ledger.verify_proof(
+                &legit_result.as_ref().unwrap(),
+                &policy,
+                1_000_001,
+                "trace-timing".to_string(),
+            );
             push_bounded(&mut legit_times, start.elapsed(), MAX_TIMING_SAMPLES);
 
             // Time forged verification
             let start = Instant::now();
-            let _forged_verification_result = ledger.verify_proof(&forged, &policy, 1_000_001, "trace-timing-forged".to_string());
+            let _forged_verification_result = ledger.verify_proof(
+                &forged,
+                &policy,
+                1_000_001,
+                "trace-timing-forged".to_string(),
+            );
             push_bounded(&mut forged_times, start.elapsed(), MAX_TIMING_SAMPLES);
         }
 
         // Calculate average times
-        let avg_legit = legit_times.iter().sum::<std::time::Duration>() / u32::try_from(legit_times.len()).unwrap_or(u32::MAX);
-        let avg_forged = forged_times.iter().sum::<std::time::Duration>() / u32::try_from(forged_times.len()).unwrap_or(u32::MAX);
+        let avg_legit = legit_times.iter().sum::<std::time::Duration>()
+            / u32::try_from(legit_times.len()).unwrap_or(u32::MAX);
+        let avg_forged = forged_times.iter().sum::<std::time::Duration>()
+            / u32::try_from(forged_times.len()).unwrap_or(u32::MAX);
 
         // Timing should not reveal internal verification details
         // Allow some variance but flag excessive timing differences
@@ -2452,13 +2474,20 @@ mod tests {
 
             // Security: guard against non-finite division results
             if !timing_ratio.is_finite() {
-                panic!("Invalid timing ratio computation: max={:?}, min={:?}", max_time, min_time);
+                panic!(
+                    "Invalid timing ratio computation: max={:?}, min={:?}",
+                    max_time, min_time
+                );
             }
 
             // Allow up to 3x difference due to normal variance
-            assert!(timing_ratio < 3.0,
+            assert!(
+                timing_ratio < 3.0,
                 "Suspicious timing variance: legit={:?}, forged={:?}, ratio={:.2}",
-                avg_legit, avg_forged, timing_ratio);
+                avg_legit,
+                avg_forged,
+                timing_ratio
+            );
         }
     }
 
@@ -2490,11 +2519,17 @@ mod tests {
         let audit_count = ledger.audit_trail.len();
 
         // Should not exceed reasonable capacity limits
-        assert!(audit_count <= 10000, "Audit trail should respect capacity limits");
+        assert!(
+            audit_count <= 10000,
+            "Audit trail should respect capacity limits"
+        );
 
         // Recent entries should be preserved (FIFO eviction)
         let recent_records = ledger.query_audit(|r| r.trace_id.contains("overflow-99"));
-        assert!(!recent_records.is_empty(), "Recent audit records should be preserved");
+        assert!(
+            !recent_records.is_empty(),
+            "Recent audit records should be preserved"
+        );
 
         // All remaining records should maintain invariants
         for record in &ledger.audit_trail {

@@ -73,47 +73,87 @@ impl CapabilityContext {
         }
     }
 
-
     #[cfg(test)]
     fn test_capability_context_creation() {
         // Test: empty strings should be preserved exactly
         let empty_ctx = Self::new("", "");
         assert_eq!(empty_ctx.cx_id, "", "empty cx_id should be preserved");
-        assert_eq!(empty_ctx.principal, "", "empty principal should be preserved");
-        assert!(empty_ctx.scopes.is_empty(), "new context should have empty scopes");
+        assert_eq!(
+            empty_ctx.principal, "",
+            "empty principal should be preserved"
+        );
+        assert!(
+            empty_ctx.scopes.is_empty(),
+            "new context should have empty scopes"
+        );
 
         // Test: Unicode and control characters should be preserved
         let unicode_ctx = Self::new("cx\u{202E}rtl", "principal\x00null");
-        assert_eq!(unicode_ctx.cx_id, "cx\u{202E}rtl", "Unicode in cx_id should be preserved");
-        assert_eq!(unicode_ctx.principal, "principal\x00null", "null bytes in principal should be preserved");
+        assert_eq!(
+            unicode_ctx.cx_id, "cx\u{202E}rtl",
+            "Unicode in cx_id should be preserved"
+        );
+        assert_eq!(
+            unicode_ctx.principal, "principal\x00null",
+            "null bytes in principal should be preserved"
+        );
 
         // Test: very long identifiers should be handled
         let long_id = "x".repeat(100000);
         let long_ctx = Self::new(&long_id, &long_id);
-        assert_eq!(long_ctx.cx_id.len(), 100000, "long cx_id should be preserved");
-        assert_eq!(long_ctx.principal.len(), 100000, "long principal should be preserved");
+        assert_eq!(
+            long_ctx.cx_id.len(),
+            100000,
+            "long cx_id should be preserved"
+        );
+        assert_eq!(
+            long_ctx.principal.len(),
+            100000,
+            "long principal should be preserved"
+        );
 
         // Test: whitespace-only identifiers should be preserved
         let whitespace_ctx = Self::new("   ", "\t\r\n");
-        assert_eq!(whitespace_ctx.cx_id, "   ", "whitespace cx_id should be preserved");
-        assert_eq!(whitespace_ctx.principal, "\t\r\n", "whitespace principal should be preserved");
+        assert_eq!(
+            whitespace_ctx.cx_id, "   ",
+            "whitespace cx_id should be preserved"
+        );
+        assert_eq!(
+            whitespace_ctx.principal, "\t\r\n",
+            "whitespace principal should be preserved"
+        );
 
         // Test: scope access on new context should always return false
         let test_ctx = Self::new("test-cx", "test-principal");
-        assert!(!test_ctx.has_scope("any_scope"), "new context should not have any scopes");
-        assert!(!test_ctx.has_scope(""), "new context should not have empty scope");
+        assert!(
+            !test_ctx.has_scope("any_scope"),
+            "new context should not have any scopes"
+        );
+        assert!(
+            !test_ctx.has_scope(""),
+            "new context should not have empty scope"
+        );
 
         // Test: multiple contexts should be independent
         let ctx1 = Self::new("ctx1", "prin1");
         let ctx2 = Self::new("ctx2", "prin2");
-        assert_ne!(ctx1.cx_id, ctx2.cx_id, "contexts should have independent cx_ids");
-        assert_ne!(ctx1.principal, ctx2.principal, "contexts should have independent principals");
+        assert_ne!(
+            ctx1.cx_id, ctx2.cx_id,
+            "contexts should have independent cx_ids"
+        );
+        assert_ne!(
+            ctx1.principal, ctx2.principal,
+            "contexts should have independent principals"
+        );
 
         // Test: context should be cloneable and equal after clone
         let original = Self::new("clone-test", "clone-principal");
         let cloned = original.clone();
         assert_eq!(original.cx_id, cloned.cx_id, "cloned cx_id should match");
-        assert_eq!(original.principal, cloned.principal, "cloned principal should match");
+        assert_eq!(
+            original.principal, cloned.principal,
+            "cloned principal should match"
+        );
         assert_eq!(original.scopes, cloned.scopes, "cloned scopes should match");
     }
 
@@ -141,7 +181,10 @@ impl CapabilityContext {
         // Test: empty scopes collection should result in empty scope set
         let empty_scopes: Vec<String> = vec![];
         let ctx = Self::with_scopes("cx-empty", "prin-empty", empty_scopes);
-        assert!(ctx.scopes.is_empty(), "empty scopes should result in empty set");
+        assert!(
+            ctx.scopes.is_empty(),
+            "empty scopes should result in empty set"
+        );
 
         // Test: whitespace-only scopes should be filtered out
         let whitespace_scopes = vec![
@@ -153,7 +196,10 @@ impl CapabilityContext {
             "   \t\r\n  ".to_string(),
         ];
         let ctx = Self::with_scopes("cx-whitespace", "prin-whitespace", whitespace_scopes);
-        assert!(ctx.scopes.is_empty(), "whitespace-only scopes should be filtered out");
+        assert!(
+            ctx.scopes.is_empty(),
+            "whitespace-only scopes should be filtered out"
+        );
 
         // Test: mixed valid and invalid scopes should filter correctly
         let mixed_scopes = vec![
@@ -165,9 +211,18 @@ impl CapabilityContext {
         ];
         let ctx = Self::with_scopes("cx-mixed", "prin-mixed", mixed_scopes);
         assert_eq!(ctx.scopes.len(), 3, "should have 3 valid scopes");
-        assert!(ctx.has_scope("valid.scope"), "should have first valid scope");
-        assert!(ctx.has_scope("another.valid"), "should have trimmed second scope");
-        assert!(ctx.has_scope("third.scope"), "should have trimmed third scope");
+        assert!(
+            ctx.has_scope("valid.scope"),
+            "should have first valid scope"
+        );
+        assert!(
+            ctx.has_scope("another.valid"),
+            "should have trimmed second scope"
+        );
+        assert!(
+            ctx.has_scope("third.scope"),
+            "should have trimmed third scope"
+        );
 
         // Test: duplicate scopes should be deduplicated
         let duplicate_scopes = vec![
@@ -179,7 +234,10 @@ impl CapabilityContext {
         ];
         let ctx = Self::with_scopes("cx-dupe", "prin-dupe", duplicate_scopes);
         assert_eq!(ctx.scopes.len(), 2, "duplicates should be deduplicated");
-        assert!(ctx.has_scope("duplicate.scope"), "should have deduplicated scope");
+        assert!(
+            ctx.has_scope("duplicate.scope"),
+            "should have deduplicated scope"
+        );
         assert!(ctx.has_scope("unique.scope"), "should have unique scope");
 
         // Test: Unicode scopes should be preserved during normalization
@@ -191,20 +249,34 @@ impl CapabilityContext {
         ];
         let ctx = Self::with_scopes("cx-unicode", "prin-unicode", unicode_scopes);
         assert_eq!(ctx.scopes.len(), 4, "should preserve all Unicode scopes");
-        assert!(ctx.has_scope("unicode\u{202E}.scope"), "should preserve RTL override");
-        assert!(ctx.has_scope("emoji\u{1F4A9}.scope"), "should preserve emoji after trim");
-        assert!(ctx.has_scope("null\x00byte.scope"), "should preserve null bytes");
+        assert!(
+            ctx.has_scope("unicode\u{202E}.scope"),
+            "should preserve RTL override"
+        );
+        assert!(
+            ctx.has_scope("emoji\u{1F4A9}.scope"),
+            "should preserve emoji after trim"
+        );
+        assert!(
+            ctx.has_scope("null\x00byte.scope"),
+            "should preserve null bytes"
+        );
         assert!(ctx.has_scope("\u{FEFF}bom.scope"), "should preserve BOM");
 
         // Test: very large scope collections should be handled efficiently
-        let large_scopes: Vec<String> = (0..10000)
-            .map(|i| format!("scope_{:05}", i))
-            .collect();
+        let large_scopes: Vec<String> = (0..10000).map(|i| format!("scope_{:05}", i)).collect();
         let ctx = Self::with_scopes("cx-large", "prin-large", large_scopes.clone());
-        assert_eq!(ctx.scopes.len(), 10000, "should handle large scope collection");
+        assert_eq!(
+            ctx.scopes.len(),
+            10000,
+            "should handle large scope collection"
+        );
         assert!(ctx.has_scope("scope_00000"), "should have first scope");
         assert!(ctx.has_scope("scope_09999"), "should have last scope");
-        assert!(!ctx.has_scope("scope_10000"), "should not have out-of-range scope");
+        assert!(
+            !ctx.has_scope("scope_10000"),
+            "should not have out-of-range scope"
+        );
 
         // Test: pathological scope patterns that might cause hash collisions
         let collision_scopes = vec![
@@ -218,9 +290,17 @@ impl CapabilityContext {
             "cba".to_string(),
         ];
         let ctx = Self::with_scopes("cx-collision", "prin-collision", collision_scopes.clone());
-        assert_eq!(ctx.scopes.len(), collision_scopes.len(), "should handle collision patterns");
+        assert_eq!(
+            ctx.scopes.len(),
+            collision_scopes.len(),
+            "should handle collision patterns"
+        );
         for scope in &collision_scopes {
-            assert!(ctx.has_scope(scope), "should have collision pattern scope: {}", scope);
+            assert!(
+                ctx.has_scope(scope),
+                "should have collision pattern scope: {}",
+                scope
+            );
         }
 
         // Test: scope normalization preserves deterministic ordering (BTreeSet)
@@ -234,7 +314,10 @@ impl CapabilityContext {
 
         let scopes1: Vec<_> = ctx1.scopes.iter().collect();
         let scopes2: Vec<_> = ctx2.scopes.iter().collect();
-        assert_eq!(scopes1, scopes2, "scope ordering should be deterministic regardless of input order");
+        assert_eq!(
+            scopes1, scopes2,
+            "scope ordering should be deterministic regardless of input order"
+        );
     }
 
     /// Check whether this context contains the requested scope.
@@ -244,94 +327,94 @@ impl CapabilityContext {
     }
 
     // Inline negative-path tests for scope checking security (unreachable)
-        // Note: This test code is unreachable because of the return above
-        /*
-        #[cfg(test)]
-        #[allow(unreachable_code)]
-        {
-            // Test: exact match is required for scope presence
-            let ctx = Self::with_scopes("cx", "prin", vec!["admin.write".to_string(), "user.read".to_string()]);
-            assert!(ctx.has_scope("admin.write"), "should find exact scope match");
-            assert!(ctx.has_scope("user.read"), "should find second exact scope match");
+    // Note: This test code is unreachable because of the return above
+    /*
+    #[cfg(test)]
+    #[allow(unreachable_code)]
+    {
+        // Test: exact match is required for scope presence
+        let ctx = Self::with_scopes("cx", "prin", vec!["admin.write".to_string(), "user.read".to_string()]);
+        assert!(ctx.has_scope("admin.write"), "should find exact scope match");
+        assert!(ctx.has_scope("user.read"), "should find second exact scope match");
 
-            // Test: partial matches should not grant access (security critical)
-            assert!(!ctx.has_scope("admin"), "partial scope match should fail");
-            assert!(!ctx.has_scope("admin."), "scope prefix match should fail");
-            assert!(!ctx.has_scope("admin.writ"), "scope prefix match should fail");
-            assert!(!ctx.has_scope("dmin.write"), "scope suffix match should fail");
-            assert!(!ctx.has_scope("ADMIN.WRITE"), "case mismatch should fail");
+        // Test: partial matches should not grant access (security critical)
+        assert!(!ctx.has_scope("admin"), "partial scope match should fail");
+        assert!(!ctx.has_scope("admin."), "scope prefix match should fail");
+        assert!(!ctx.has_scope("admin.writ"), "scope prefix match should fail");
+        assert!(!ctx.has_scope("dmin.write"), "scope suffix match should fail");
+        assert!(!ctx.has_scope("ADMIN.WRITE"), "case mismatch should fail");
 
-            // Test: empty scope lookup should fail (security boundary)
-            assert!(!ctx.has_scope(""), "empty scope should never match");
+        // Test: empty scope lookup should fail (security boundary)
+        assert!(!ctx.has_scope(""), "empty scope should never match");
 
-            // Test: whitespace variations should not match trimmed scopes
-            let whitespace_ctx = Self::with_scopes("cx", "prin", vec!["  scope.trimmed  ".to_string()]);
-            assert!(whitespace_ctx.has_scope("scope.trimmed"), "trimmed scope should match");
-            assert!(!whitespace_ctx.has_scope("  scope.trimmed  "), "untrimmed query should not match");
-            assert!(!whitespace_ctx.has_scope("scope.trimmed "), "trailing space should not match");
-            assert!(!whitespace_ctx.has_scope(" scope.trimmed"), "leading space should not match");
+        // Test: whitespace variations should not match trimmed scopes
+        let whitespace_ctx = Self::with_scopes("cx", "prin", vec!["  scope.trimmed  ".to_string()]);
+        assert!(whitespace_ctx.has_scope("scope.trimmed"), "trimmed scope should match");
+        assert!(!whitespace_ctx.has_scope("  scope.trimmed  "), "untrimmed query should not match");
+        assert!(!whitespace_ctx.has_scope("scope.trimmed "), "trailing space should not match");
+        assert!(!whitespace_ctx.has_scope(" scope.trimmed"), "leading space should not match");
 
-            // Test: Unicode scope matching should be exact (no normalization)
-            let unicode_ctx = Self::with_scopes("cx", "prin", vec![
-                "unicode\u{202E}.scope".to_string(),
-                "emoji\u{1F4A9}.admin".to_string(),
-            ]);
-            assert!(unicode_ctx.has_scope("unicode\u{202E}.scope"), "Unicode scope should match exactly");
-            assert!(!unicode_ctx.has_scope("unicode.scope"), "missing Unicode char should not match");
-            assert!(unicode_ctx.has_scope("emoji\u{1F4A9}.admin"), "emoji scope should match exactly");
-            assert!(!unicode_ctx.has_scope("emoji.admin"), "missing emoji should not match");
+        // Test: Unicode scope matching should be exact (no normalization)
+        let unicode_ctx = Self::with_scopes("cx", "prin", vec![
+            "unicode\u{202E}.scope".to_string(),
+            "emoji\u{1F4A9}.admin".to_string(),
+        ]);
+        assert!(unicode_ctx.has_scope("unicode\u{202E}.scope"), "Unicode scope should match exactly");
+        assert!(!unicode_ctx.has_scope("unicode.scope"), "missing Unicode char should not match");
+        assert!(unicode_ctx.has_scope("emoji\u{1F4A9}.admin"), "emoji scope should match exactly");
+        assert!(!unicode_ctx.has_scope("emoji.admin"), "missing emoji should not match");
 
-            // Test: null byte and control character scope matching
-            let control_ctx = Self::with_scopes("cx", "prin", vec![
-                "scope\x00null".to_string(),
-                "scope\r\ninjection".to_string(),
-                "scope\t\x08control".to_string(),
-            ]);
-            assert!(control_ctx.has_scope("scope\x00null"), "null byte scope should match exactly");
-            assert!(!control_ctx.has_scope("scopenull"), "scope without null should not match");
-            assert!(control_ctx.has_scope("scope\r\ninjection"), "CRLF scope should match exactly");
-            assert!(control_ctx.has_scope("scope\t\x08control"), "control char scope should match exactly");
+        // Test: null byte and control character scope matching
+        let control_ctx = Self::with_scopes("cx", "prin", vec![
+            "scope\x00null".to_string(),
+            "scope\r\ninjection".to_string(),
+            "scope\t\x08control".to_string(),
+        ]);
+        assert!(control_ctx.has_scope("scope\x00null"), "null byte scope should match exactly");
+        assert!(!control_ctx.has_scope("scopenull"), "scope without null should not match");
+        assert!(control_ctx.has_scope("scope\r\ninjection"), "CRLF scope should match exactly");
+        assert!(control_ctx.has_scope("scope\t\x08control"), "control char scope should match exactly");
 
-            // Test: case sensitivity enforcement (security critical)
-            let case_ctx = Self::with_scopes("cx", "prin", vec![
-                "Admin.Write".to_string(),
-                "user.Read".to_string(),
-                "SYSTEM.OVERRIDE".to_string(),
-            ]);
-            assert!(case_ctx.has_scope("Admin.Write"), "exact case should match");
-            assert!(!case_ctx.has_scope("admin.write"), "lowercase should not match");
-            assert!(!case_ctx.has_scope("ADMIN.WRITE"), "uppercase should not match");
-            assert!(case_ctx.has_scope("user.Read"), "mixed case should match exactly");
-            assert!(!case_ctx.has_scope("user.read"), "case change should not match");
-            assert!(case_ctx.has_scope("SYSTEM.OVERRIDE"), "all caps should match exactly");
+        // Test: case sensitivity enforcement (security critical)
+        let case_ctx = Self::with_scopes("cx", "prin", vec![
+            "Admin.Write".to_string(),
+            "user.Read".to_string(),
+            "SYSTEM.OVERRIDE".to_string(),
+        ]);
+        assert!(case_ctx.has_scope("Admin.Write"), "exact case should match");
+        assert!(!case_ctx.has_scope("admin.write"), "lowercase should not match");
+        assert!(!case_ctx.has_scope("ADMIN.WRITE"), "uppercase should not match");
+        assert!(case_ctx.has_scope("user.Read"), "mixed case should match exactly");
+        assert!(!case_ctx.has_scope("user.read"), "case change should not match");
+        assert!(case_ctx.has_scope("SYSTEM.OVERRIDE"), "all caps should match exactly");
 
-            // Test: empty context should never have any scopes
-            let empty_ctx = Self::new("empty", "empty");
-            assert!(!empty_ctx.has_scope("any.scope"), "empty context should not have any scopes");
-            assert!(!empty_ctx.has_scope(""), "empty context should not have empty scope");
-            assert!(!empty_ctx.has_scope("admin"), "empty context should not have admin scope");
+        // Test: empty context should never have any scopes
+        let empty_ctx = Self::new("empty", "empty");
+        assert!(!empty_ctx.has_scope("any.scope"), "empty context should not have any scopes");
+        assert!(!empty_ctx.has_scope(""), "empty context should not have empty scope");
+        assert!(!empty_ctx.has_scope("admin"), "empty context should not have admin scope");
 
-            // Test: very long scope names should work correctly
-            let long_scope = "a".repeat(10000) + ".very.long.scope.name";
-            let long_ctx = Self::with_scopes("cx", "prin", vec![long_scope.clone()]);
-            assert!(long_ctx.has_scope(&long_scope), "very long scope should match");
-            assert!(!long_ctx.has_scope(&("b".repeat(10000) + ".very.long.scope.name")), "different long scope should not match");
+        // Test: very long scope names should work correctly
+        let long_scope = "a".repeat(10000) + ".very.long.scope.name";
+        let long_ctx = Self::with_scopes("cx", "prin", vec![long_scope.clone()]);
+        assert!(long_ctx.has_scope(&long_scope), "very long scope should match");
+        assert!(!long_ctx.has_scope(&("b".repeat(10000) + ".very.long.scope.name")), "different long scope should not match");
 
-            // Test: scope boundary conditions with similar names
-            let boundary_ctx = Self::with_scopes("cx", "prin", vec![
-                "scope".to_string(),
-                "scopes".to_string(),
-                "scope.admin".to_string(),
-                "scope.admin.write".to_string(),
-            ]);
-            assert!(boundary_ctx.has_scope("scope"), "exact short scope should match");
-            assert!(boundary_ctx.has_scope("scopes"), "plural scope should match");
-            assert!(boundary_ctx.has_scope("scope.admin"), "exact hierarchical scope should match");
-            assert!(boundary_ctx.has_scope("scope.admin.write"), "exact deep scope should match");
-            assert!(!boundary_ctx.has_scope("scope.admi"), "truncated scope should not match");
-            assert!(!boundary_ctx.has_scope("scope.admin.writ"), "truncated deep scope should not match");
-        }
-        */
+        // Test: scope boundary conditions with similar names
+        let boundary_ctx = Self::with_scopes("cx", "prin", vec![
+            "scope".to_string(),
+            "scopes".to_string(),
+            "scope.admin".to_string(),
+            "scope.admin.write".to_string(),
+        ]);
+        assert!(boundary_ctx.has_scope("scope"), "exact short scope should match");
+        assert!(boundary_ctx.has_scope("scopes"), "plural scope should match");
+        assert!(boundary_ctx.has_scope("scope.admin"), "exact hierarchical scope should match");
+        assert!(boundary_ctx.has_scope("scope.admin.write"), "exact deep scope should match");
+        assert!(!boundary_ctx.has_scope("scope.admi"), "truncated scope should not match");
+        assert!(!boundary_ctx.has_scope("scope.admin.writ"), "truncated deep scope should not match");
+    }
+    */
 }
 
 /// Mutable cancellation state used by bounded masks.
@@ -366,62 +449,162 @@ impl CancellationState {
         {
             // Test: immediate cancellation when not masked
             let mut state = Self::new();
-            assert!(!state.is_cancel_requested(), "new state should not be cancelled");
+            assert!(
+                !state.is_cancel_requested(),
+                "new state should not be cancelled"
+            );
             state.request_cancel();
-            assert!(state.is_cancel_requested(), "should be cancelled immediately when not masked");
-            assert_eq!(state.deferred_signals(), 0, "should have no deferred signals");
+            assert!(
+                state.is_cancel_requested(),
+                "should be cancelled immediately when not masked"
+            );
+            assert_eq!(
+                state.deferred_signals(),
+                0,
+                "should have no deferred signals"
+            );
 
             // Test: deferred cancellation when masked
-            let mut masked_state = Self { cancel_requested: false, masked: true, deferred_signals: 0, delivered_after_mask: 0 };
+            let mut masked_state = Self {
+                cancel_requested: false,
+                masked: true,
+                deferred_signals: 0,
+                delivered_after_mask: 0,
+            };
             masked_state.request_cancel();
-            assert!(!masked_state.is_cancel_requested(), "should not be immediately cancelled when masked");
-            assert_eq!(masked_state.deferred_signals(), 1, "should have one deferred signal");
+            assert!(
+                !masked_state.is_cancel_requested(),
+                "should not be immediately cancelled when masked"
+            );
+            assert_eq!(
+                masked_state.deferred_signals(),
+                1,
+                "should have one deferred signal"
+            );
 
             // Test: multiple deferred cancellations accumulate
             masked_state.request_cancel();
             masked_state.request_cancel();
-            assert!(!masked_state.is_cancel_requested(), "should remain not immediately cancelled");
-            assert_eq!(masked_state.deferred_signals(), 3, "should accumulate deferred signals");
+            assert!(
+                !masked_state.is_cancel_requested(),
+                "should remain not immediately cancelled"
+            );
+            assert_eq!(
+                masked_state.deferred_signals(),
+                3,
+                "should accumulate deferred signals"
+            );
 
             // Test: deferred signal counter saturating arithmetic
-            let mut overflow_state = Self { cancel_requested: false, masked: true, deferred_signals: u64::MAX - 1, delivered_after_mask: 0 };
+            let mut overflow_state = Self {
+                cancel_requested: false,
+                masked: true,
+                deferred_signals: u64::MAX - 1,
+                delivered_after_mask: 0,
+            };
             overflow_state.request_cancel();
-            assert_eq!(overflow_state.deferred_signals(), u64::MAX, "should saturate at u64::MAX");
+            assert_eq!(
+                overflow_state.deferred_signals(),
+                u64::MAX,
+                "should saturate at u64::MAX"
+            );
             overflow_state.request_cancel();
-            assert_eq!(overflow_state.deferred_signals(), u64::MAX, "should remain at u64::MAX");
+            assert_eq!(
+                overflow_state.deferred_signals(),
+                u64::MAX,
+                "should remain at u64::MAX"
+            );
 
             // Test: requesting cancellation when already cancelled and not masked
-            let mut already_cancelled = Self { cancel_requested: true, masked: false, deferred_signals: 0, delivered_after_mask: 0 };
+            let mut already_cancelled = Self {
+                cancel_requested: true,
+                masked: false,
+                deferred_signals: 0,
+                delivered_after_mask: 0,
+            };
             already_cancelled.request_cancel();
-            assert!(already_cancelled.is_cancel_requested(), "should remain cancelled");
-            assert_eq!(already_cancelled.deferred_signals(), 0, "should not add deferred signals when not masked");
+            assert!(
+                already_cancelled.is_cancel_requested(),
+                "should remain cancelled"
+            );
+            assert_eq!(
+                already_cancelled.deferred_signals(),
+                0,
+                "should not add deferred signals when not masked"
+            );
 
             // Test: requesting cancellation when already cancelled and masked
-            let mut already_cancelled_masked = Self { cancel_requested: true, masked: true, deferred_signals: 5, delivered_after_mask: 0 };
+            let mut already_cancelled_masked = Self {
+                cancel_requested: true,
+                masked: true,
+                deferred_signals: 5,
+                delivered_after_mask: 0,
+            };
             already_cancelled_masked.request_cancel();
-            assert!(already_cancelled_masked.cancel_requested, "cancel_requested should remain true");
-            assert_eq!(already_cancelled_masked.deferred_signals(), 6, "should still defer additional signals when masked");
+            assert!(
+                already_cancelled_masked.cancel_requested,
+                "cancel_requested should remain true"
+            );
+            assert_eq!(
+                already_cancelled_masked.deferred_signals(),
+                6,
+                "should still defer additional signals when masked"
+            );
 
             // Test: state consistency after mask transitions
-            let mut transition_state = Self { cancel_requested: false, masked: true, deferred_signals: 2, delivered_after_mask: 1 };
+            let mut transition_state = Self {
+                cancel_requested: false,
+                masked: true,
+                deferred_signals: 2,
+                delivered_after_mask: 1,
+            };
             transition_state.request_cancel();
-            assert_eq!(transition_state.deferred_signals(), 3, "should increment deferred while masked");
+            assert_eq!(
+                transition_state.deferred_signals(),
+                3,
+                "should increment deferred while masked"
+            );
 
             // Simulate mask ending
             transition_state.masked = false;
             transition_state.request_cancel();
-            assert!(transition_state.is_cancel_requested(), "should immediately cancel when no longer masked");
+            assert!(
+                transition_state.is_cancel_requested(),
+                "should immediately cancel when no longer masked"
+            );
 
             // Test: boundary condition with zero deferred signals
-            let mut zero_deferred = Self { cancel_requested: false, masked: true, deferred_signals: 0, delivered_after_mask: 0 };
+            let mut zero_deferred = Self {
+                cancel_requested: false,
+                masked: true,
+                deferred_signals: 0,
+                delivered_after_mask: 0,
+            };
             zero_deferred.request_cancel();
-            assert_eq!(zero_deferred.deferred_signals(), 1, "should increment from zero");
+            assert_eq!(
+                zero_deferred.deferred_signals(),
+                1,
+                "should increment from zero"
+            );
 
             // Test: preserving delivered_after_mask counter during request
-            let mut preserve_delivered = Self { cancel_requested: false, masked: true, deferred_signals: 0, delivered_after_mask: 99 };
+            let mut preserve_delivered = Self {
+                cancel_requested: false,
+                masked: true,
+                deferred_signals: 0,
+                delivered_after_mask: 99,
+            };
             preserve_delivered.request_cancel();
-            assert_eq!(preserve_delivered.delivered_after_mask(), 99, "should preserve delivered_after_mask counter");
-            assert_eq!(preserve_delivered.deferred_signals(), 1, "should increment deferred signals");
+            assert_eq!(
+                preserve_delivered.delivered_after_mask(),
+                99,
+                "should preserve delivered_after_mask counter"
+            );
+            assert_eq!(
+                preserve_delivered.deferred_signals(),
+                1,
+                "should increment deferred signals"
+            );
         }
     }
 
@@ -931,75 +1114,200 @@ fn emit_event(
         let mut empty_events = Vec::new();
         emit_event(
             &mut empty_events,
-            MaskEventKind { event_code: "TEST_001", event_name: "TEST_EVENT" },
-            MaskEventContext { operation_name: "test_op", trace_id: "test_trace", cx_id: "test_cx" },
-            MaskEventOutcome { elapsed_ns: 1000, completed_within_bound: true, deferred_cancel_pending: false }
+            MaskEventKind {
+                event_code: "TEST_001",
+                event_name: "TEST_EVENT",
+            },
+            MaskEventContext {
+                operation_name: "test_op",
+                trace_id: "test_trace",
+                cx_id: "test_cx",
+            },
+            MaskEventOutcome {
+                elapsed_ns: 1000,
+                completed_within_bound: true,
+                deferred_cancel_pending: false,
+            },
         );
-        assert_eq!(empty_events.len(), 1, "empty buffer should accept first event");
-        assert_eq!(empty_events[0].event_code, "TEST_001", "event code should be preserved");
+        assert_eq!(
+            empty_events.len(),
+            1,
+            "empty buffer should accept first event"
+        );
+        assert_eq!(
+            empty_events[0].event_code, "TEST_001",
+            "event code should be preserved"
+        );
 
         // Test: events exactly at MAX_EVENTS should not trigger overflow
         let mut max_events = Vec::new();
         for i in 0..MAX_EVENTS {
             emit_event(
                 &mut max_events,
-                MaskEventKind { event_code: "TEST_MAX", event_name: "MAX_EVENT" },
-                MaskEventContext { operation_name: &format!("op_{}", i), trace_id: "trace", cx_id: "cx" },
-                MaskEventOutcome { elapsed_ns: i as u64, completed_within_bound: true, deferred_cancel_pending: false }
+                MaskEventKind {
+                    event_code: "TEST_MAX",
+                    event_name: "MAX_EVENT",
+                },
+                MaskEventContext {
+                    operation_name: &format!("op_{}", i),
+                    trace_id: "trace",
+                    cx_id: "cx",
+                },
+                MaskEventOutcome {
+                    elapsed_ns: i as u64,
+                    completed_within_bound: true,
+                    deferred_cancel_pending: false,
+                },
             );
         }
-        assert_eq!(max_events.len(), MAX_EVENTS, "should accept exactly MAX_EVENTS without overflow");
-        assert_eq!(max_events[0].operation_name, "op_0", "first event should be preserved");
-        assert_eq!(max_events[MAX_EVENTS - 1].operation_name, format!("op_{}", MAX_EVENTS - 1), "last event should be preserved");
+        assert_eq!(
+            max_events.len(),
+            MAX_EVENTS,
+            "should accept exactly MAX_EVENTS without overflow"
+        );
+        assert_eq!(
+            max_events[0].operation_name, "op_0",
+            "first event should be preserved"
+        );
+        assert_eq!(
+            max_events[MAX_EVENTS - 1].operation_name,
+            format!("op_{}", MAX_EVENTS - 1),
+            "last event should be preserved"
+        );
 
         // Test: overflow should remove oldest events (FIFO behavior)
         emit_event(
             &mut max_events,
-            MaskEventKind { event_code: "OVERFLOW", event_name: "OVERFLOW_EVENT" },
-            MaskEventContext { operation_name: "overflow_op", trace_id: "trace", cx_id: "cx" },
-            MaskEventOutcome { elapsed_ns: 9999, completed_within_bound: false, deferred_cancel_pending: true }
+            MaskEventKind {
+                event_code: "OVERFLOW",
+                event_name: "OVERFLOW_EVENT",
+            },
+            MaskEventContext {
+                operation_name: "overflow_op",
+                trace_id: "trace",
+                cx_id: "cx",
+            },
+            MaskEventOutcome {
+                elapsed_ns: 9999,
+                completed_within_bound: false,
+                deferred_cancel_pending: true,
+            },
         );
-        assert_eq!(max_events.len(), MAX_EVENTS, "should maintain MAX_EVENTS capacity after overflow");
-        assert_eq!(max_events[0].operation_name, "op_1", "oldest event should be removed");
-        assert_eq!(max_events[MAX_EVENTS - 1].operation_name, "overflow_op", "newest event should be added");
+        assert_eq!(
+            max_events.len(),
+            MAX_EVENTS,
+            "should maintain MAX_EVENTS capacity after overflow"
+        );
+        assert_eq!(
+            max_events[0].operation_name, "op_1",
+            "oldest event should be removed"
+        );
+        assert_eq!(
+            max_events[MAX_EVENTS - 1].operation_name,
+            "overflow_op",
+            "newest event should be added"
+        );
 
         // Test: multiple overflow events should maintain FIFO order
         for i in 0..10 {
             emit_event(
                 &mut max_events,
-                MaskEventKind { event_code: "MULTI_OVERFLOW", event_name: "MULTI_EVENT" },
-                MaskEventContext { operation_name: &format!("multi_{}", i), trace_id: "trace", cx_id: "cx" },
-                MaskEventOutcome { elapsed_ns: i as u64, completed_within_bound: i % 2 == 0, deferred_cancel_pending: i % 3 == 0 }
+                MaskEventKind {
+                    event_code: "MULTI_OVERFLOW",
+                    event_name: "MULTI_EVENT",
+                },
+                MaskEventContext {
+                    operation_name: &format!("multi_{}", i),
+                    trace_id: "trace",
+                    cx_id: "cx",
+                },
+                MaskEventOutcome {
+                    elapsed_ns: i as u64,
+                    completed_within_bound: i % 2 == 0,
+                    deferred_cancel_pending: i % 3 == 0,
+                },
             );
         }
-        assert_eq!(max_events.len(), MAX_EVENTS, "should maintain capacity with multiple overflows");
-        assert_eq!(max_events[MAX_EVENTS - 1].operation_name, "multi_9", "last multi overflow should be newest");
+        assert_eq!(
+            max_events.len(),
+            MAX_EVENTS,
+            "should maintain capacity with multiple overflows"
+        );
+        assert_eq!(
+            max_events[MAX_EVENTS - 1].operation_name,
+            "multi_9",
+            "last multi overflow should be newest"
+        );
 
         // Test: pathological string content should be preserved without corruption
         let mut pathological_events = Vec::new();
         let pathological_strings = [
             ("", "", "", ""),
-            ("x".repeat(100000).as_str(), "y".repeat(50000).as_str(), "z".repeat(75000).as_str(), "w".repeat(25000).as_str()),
-            ("event\x00null", "op\r\ninjection", "trace\t\x08control", "cx\u{202E}unicode"),
-            ("\u{FEFF}bom", "\u{200B}invisible", "\u{1F4A9}emoji", "normal"),
+            (
+                "x".repeat(100000).as_str(),
+                "y".repeat(50000).as_str(),
+                "z".repeat(75000).as_str(),
+                "w".repeat(25000).as_str(),
+            ),
+            (
+                "event\x00null",
+                "op\r\ninjection",
+                "trace\t\x08control",
+                "cx\u{202E}unicode",
+            ),
+            (
+                "\u{FEFF}bom",
+                "\u{200B}invisible",
+                "\u{1F4A9}emoji",
+                "normal",
+            ),
         ];
 
-        for (i, (event_code, operation_name, trace_id, cx_id)) in pathological_strings.iter().enumerate() {
+        for (i, (event_code, operation_name, trace_id, cx_id)) in
+            pathological_strings.iter().enumerate()
+        {
             emit_event(
                 &mut pathological_events,
-                MaskEventKind { event_code, event_name: "PATHOLOGICAL" },
-                MaskEventContext { operation_name, trace_id, cx_id },
-                MaskEventOutcome { elapsed_ns: i as u64, completed_within_bound: true, deferred_cancel_pending: false }
+                MaskEventKind {
+                    event_code,
+                    event_name: "PATHOLOGICAL",
+                },
+                MaskEventContext {
+                    operation_name,
+                    trace_id,
+                    cx_id,
+                },
+                MaskEventOutcome {
+                    elapsed_ns: i as u64,
+                    completed_within_bound: true,
+                    deferred_cancel_pending: false,
+                },
             );
         }
 
-        assert_eq!(pathological_events.len(), pathological_strings.len(), "should handle all pathological strings");
+        assert_eq!(
+            pathological_events.len(),
+            pathological_strings.len(),
+            "should handle all pathological strings"
+        );
         for (i, event) in pathological_events.iter().enumerate() {
             let (expected_code, expected_op, expected_trace, expected_cx) = pathological_strings[i];
-            assert_eq!(event.event_code, expected_code, "pathological event code should be preserved");
-            assert_eq!(event.operation_name, expected_op, "pathological operation name should be preserved");
-            assert_eq!(event.trace_id, expected_trace, "pathological trace id should be preserved");
-            assert_eq!(event.cx_id, expected_cx, "pathological cx id should be preserved");
+            assert_eq!(
+                event.event_code, expected_code,
+                "pathological event code should be preserved"
+            );
+            assert_eq!(
+                event.operation_name, expected_op,
+                "pathological operation name should be preserved"
+            );
+            assert_eq!(
+                event.trace_id, expected_trace,
+                "pathological trace id should be preserved"
+            );
+            assert_eq!(
+                event.cx_id, expected_cx,
+                "pathological cx id should be preserved"
+            );
         }
 
         // Test: outcome field boundary values should be preserved correctly
@@ -1014,29 +1322,67 @@ fn emit_event(
         for (elapsed_ns, completed_within_bound, deferred_cancel_pending) in boundary_outcomes {
             emit_event(
                 &mut boundary_events,
-                MaskEventKind { event_code: "BOUNDARY", event_name: "BOUNDARY_EVENT" },
-                MaskEventContext { operation_name: "boundary_op", trace_id: "boundary_trace", cx_id: "boundary_cx" },
-                MaskEventOutcome { elapsed_ns, completed_within_bound, deferred_cancel_pending }
+                MaskEventKind {
+                    event_code: "BOUNDARY",
+                    event_name: "BOUNDARY_EVENT",
+                },
+                MaskEventContext {
+                    operation_name: "boundary_op",
+                    trace_id: "boundary_trace",
+                    cx_id: "boundary_cx",
+                },
+                MaskEventOutcome {
+                    elapsed_ns,
+                    completed_within_bound,
+                    deferred_cancel_pending,
+                },
             );
         }
 
         for (i, event) in boundary_events.iter().enumerate() {
             let (expected_elapsed, expected_bound, expected_cancel) = boundary_outcomes[i];
-            assert_eq!(event.elapsed_ns, expected_elapsed, "boundary elapsed_ns should be preserved");
-            assert_eq!(event.completed_within_bound, expected_bound, "boundary completed_within_bound should be preserved");
-            assert_eq!(event.deferred_cancel_pending, expected_cancel, "boundary deferred_cancel_pending should be preserved");
+            assert_eq!(
+                event.elapsed_ns, expected_elapsed,
+                "boundary elapsed_ns should be preserved"
+            );
+            assert_eq!(
+                event.completed_within_bound, expected_bound,
+                "boundary completed_within_bound should be preserved"
+            );
+            assert_eq!(
+                event.deferred_cancel_pending, expected_cancel,
+                "boundary deferred_cancel_pending should be preserved"
+            );
         }
 
         // Test: capacity calculation should handle edge cases without panic
         let mut edge_capacity_events = Vec::with_capacity(0);
         emit_event(
             &mut edge_capacity_events,
-            MaskEventKind { event_code: "EDGE", event_name: "EDGE_EVENT" },
-            MaskEventContext { operation_name: "edge_op", trace_id: "edge_trace", cx_id: "edge_cx" },
-            MaskEventOutcome { elapsed_ns: 1, completed_within_bound: true, deferred_cancel_pending: false }
+            MaskEventKind {
+                event_code: "EDGE",
+                event_name: "EDGE_EVENT",
+            },
+            MaskEventContext {
+                operation_name: "edge_op",
+                trace_id: "edge_trace",
+                cx_id: "edge_cx",
+            },
+            MaskEventOutcome {
+                elapsed_ns: 1,
+                completed_within_bound: true,
+                deferred_cancel_pending: false,
+            },
         );
-        assert_eq!(edge_capacity_events.len(), 1, "zero-capacity vec should grow to accept event");
-        assert!(edge_capacity_events.len() <= MAX_EVENTS, "should not exceed MAX_EVENTS");
+        assert_eq!(
+            edge_capacity_events.len(),
+            1,
+            "zero-capacity vec should grow to accept event"
+        );
+        assert!(
+            edge_capacity_events.len() <= MAX_EVENTS,
+            "should not exceed MAX_EVENTS"
+        );
     }
 }
 
@@ -1732,8 +2078,8 @@ mod bounded_mask_comprehensive_negative_tests {
     use super::*;
     use std::cell::Cell;
     use std::panic::catch_unwind;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -1751,9 +2097,7 @@ mod bounded_mask_comprehensive_negative_tests {
     #[test]
     fn negative_capability_context_with_massive_scope_collection_handles_memory_pressure() {
         // Test with extremely large scope collections to stress memory handling
-        let massive_scopes: Vec<String> = (0..100000)
-            .map(|i| format!("scope_{:010}", i))
-            .collect();
+        let massive_scopes: Vec<String> = (0..100000).map(|i| format!("scope_{:010}", i)).collect();
 
         let cx = CapabilityContext::with_scopes("cx-massive", "op-massive", massive_scopes.clone());
 
@@ -1765,7 +2109,9 @@ mod bounded_mask_comprehensive_negative_tests {
 
         // Should work correctly in bounded mask operation
         let mut cancellation = CancellationState::new();
-        let result = bounded_mask(&cx, &mut cancellation, "massive_scopes", |_cx, _cancel| 42u64);
+        let result = bounded_mask(&cx, &mut cancellation, "massive_scopes", |_cx, _cancel| {
+            42u64
+        });
         assert_eq!(result.expect("should handle massive scope collection"), 42);
     }
 
@@ -1773,10 +2119,10 @@ mod bounded_mask_comprehensive_negative_tests {
     fn negative_capability_context_with_unicode_injection_and_control_characters() {
         // Test with malicious Unicode patterns in context fields
         let malicious_patterns = [
-            ("cx\u{202E}spoofed", "op\u{200B}invisible"),     // RTL override + zero-width space
-            ("cx\x00null", "op\r\ninjection"),               // Null byte + CRLF injection
-            ("cx\u{FEFF}bom", "op\u{1F4A9}emoji"),           // BOM + emoji
-            ("cx\x1b[31mred\x1b[0m", "op\t\x08control"),     // ANSI escape + control chars
+            ("cx\u{202E}spoofed", "op\u{200B}invisible"), // RTL override + zero-width space
+            ("cx\x00null", "op\r\ninjection"),            // Null byte + CRLF injection
+            ("cx\u{FEFF}bom", "op\u{1F4A9}emoji"),        // BOM + emoji
+            ("cx\x1b[31mred\x1b[0m", "op\t\x08control"),  // ANSI escape + control chars
         ];
 
         for (cx_id, principal) in malicious_patterns {
@@ -1784,10 +2130,10 @@ mod bounded_mask_comprehensive_negative_tests {
                 cx_id,
                 principal,
                 vec![
-                    "runtime\u{202E}.mask".to_string(),  // RTL override in scope
-                    "net\x00.egress".to_string(),         // Null byte in scope
+                    "runtime\u{202E}.mask".to_string(),     // RTL override in scope
+                    "net\x00.egress".to_string(),           // Null byte in scope
                     "\u{FEFF}admin.privileges".to_string(), // BOM prefix in scope
-                ]
+                ],
             );
 
             // Should preserve Unicode patterns exactly without normalization
@@ -1839,8 +2185,9 @@ mod bounded_mask_comprehensive_negative_tests {
                     cancel.request_cancel();
                 }
                 999u32
-            }
-        ).expect("should handle counter overflow gracefully");
+            },
+        )
+        .expect("should handle counter overflow gracefully");
 
         assert_eq!(wrapped.into_inner(), 999);
         assert!(cancellation.is_cancel_requested());
@@ -1854,8 +2201,14 @@ mod bounded_mask_comprehensive_negative_tests {
         let extreme_policies = [
             (Duration::ZERO, "should handle zero timeout"),
             (Duration::from_nanos(1), "should handle minimal timeout"),
-            (Duration::new(u64::MAX, 999_999_999), "should handle maximum duration"),
-            (Duration::from_nanos(u64::MAX), "should handle max nanosecond duration"),
+            (
+                Duration::new(u64::MAX, 999_999_999),
+                "should handle maximum duration",
+            ),
+            (
+                Duration::from_nanos(u64::MAX),
+                "should handle max nanosecond duration",
+            ),
         ];
 
         let cx = CapabilityContext::new("cx-extreme", "op-extreme");
@@ -1874,8 +2227,9 @@ mod bounded_mask_comprehensive_negative_tests {
                     |_cx, _cancel| {
                         spin_for(Duration::from_micros(1));
                         1u8
-                    }
-                ).expect_err(&format!("minimal timeout should fail: {}", description));
+                    },
+                )
+                .expect_err(&format!("minimal timeout should fail: {}", description));
 
                 assert!(matches!(err, MaskError::MaskTimeoutExceeded { .. }));
             } else {
@@ -1885,8 +2239,9 @@ mod bounded_mask_comprehensive_negative_tests {
                     &mut cancellation,
                     "extreme_success",
                     &policy,
-                    |_cx, _cancel| 42u8
-                ).expect(&format!("large timeout should succeed: {}", description));
+                    |_cx, _cancel| 42u8,
+                )
+                .expect(&format!("large timeout should succeed: {}", description));
 
                 assert_eq!(result.into_inner(), 42);
             }
@@ -1924,10 +2279,15 @@ mod bounded_mask_comprehensive_negative_tests {
 
                     // Perform mask operation
                     let op_name = format!("concurrent_op_{}_{}", thread_id, iteration);
-                    let result = bounded_mask(&cx_clone, &mut local_cancellation, &op_name, |_cx, _cancel| {
-                        op_counter.fetch_add(1, Ordering::Relaxed);
-                        thread_id + iteration
-                    });
+                    let result = bounded_mask(
+                        &cx_clone,
+                        &mut local_cancellation,
+                        &op_name,
+                        |_cx, _cancel| {
+                            op_counter.fetch_add(1, Ordering::Relaxed);
+                            thread_id + iteration
+                        },
+                    );
 
                     // Should either succeed or fail deterministically
                     match result {
@@ -1935,12 +2295,17 @@ mod bounded_mask_comprehensive_negative_tests {
                         Err(MaskError::CancelledBeforeEntry) => {
                             // Expected when cancellation was requested
                         }
-                        Err(other) => panic!("Unexpected error in concurrent operation: {:?}", other),
+                        Err(other) => {
+                            panic!("Unexpected error in concurrent operation: {:?}", other)
+                        }
                     }
                 }
 
                 // Verify final state consistency
-                (local_cancellation.deferred_signals(), local_cancellation.delivered_after_mask())
+                (
+                    local_cancellation.deferred_signals(),
+                    local_cancellation.delivered_after_mask(),
+                )
             });
 
             handles.push(handle);
@@ -1954,7 +2319,10 @@ mod bounded_mask_comprehensive_negative_tests {
 
         // Verify operations completed without corruption
         let total_operations = operation_counter.load(Ordering::Relaxed);
-        assert!(total_operations > 0, "Some operations should have completed");
+        assert!(
+            total_operations > 0,
+            "Some operations should have completed"
+        );
 
         // Verify state consistency across threads
         for (deferred, delivered) in &final_states {
@@ -1991,14 +2359,22 @@ mod bounded_mask_comprehensive_negative_tests {
                         // Set up some deferred cancellation before panicking
                         cancel.request_cancel();
                         panic!("{}", panic_message_clone);
-                    }
+                    },
                 );
             }));
 
-            assert!(panic_result.is_err(), "Panic should be caught for pattern {}", i);
+            assert!(
+                panic_result.is_err(),
+                "Panic should be caught for pattern {}",
+                i
+            );
 
             // Cancellation should be delivered even after panic
-            assert!(cancellation.is_cancel_requested(), "Cancellation should be delivered after panic {}", i);
+            assert!(
+                cancellation.is_cancel_requested(),
+                "Cancellation should be delivered after panic {}",
+                i
+            );
 
             // Clear state for next test
             cancellation.clear_cancellation();
@@ -2009,8 +2385,9 @@ mod bounded_mask_comprehensive_negative_tests {
                 &mut cancellation,
                 &format!("recovery_after_panic_{}", i),
                 &policy,
-                |_cx, _cancel| format!("recovered_{}", i)
-            ).expect(&format!("Should recover after panic pattern {}", i));
+                |_cx, _cancel| format!("recovered_{}", i),
+            )
+            .expect(&format!("Should recover after panic pattern {}", i));
 
             assert_eq!(recovery_result.into_inner(), format!("recovered_{}", i));
         }
@@ -2076,19 +2453,34 @@ mod bounded_mask_comprehensive_negative_tests {
                 |_cx, _cancel| {
                     // This should exceed the timeout budget
                     pattern_clone(Duration::from_millis(10))
-                }
+                },
             );
 
             match timeout_result {
-                Err(MaskError::MaskTimeoutExceeded { elapsed_ns, max_duration_ns, .. }) => {
-                    assert!(elapsed_ns >= max_duration_ns, "Timeout should be enforced for CPU pattern {}", i);
-                    assert!(elapsed_ns < Duration::from_millis(100).as_nanos() as u64, "Timeout should not be excessively delayed for pattern {}", i);
+                Err(MaskError::MaskTimeoutExceeded {
+                    elapsed_ns,
+                    max_duration_ns,
+                    ..
+                }) => {
+                    assert!(
+                        elapsed_ns >= max_duration_ns,
+                        "Timeout should be enforced for CPU pattern {}",
+                        i
+                    );
+                    assert!(
+                        elapsed_ns < Duration::from_millis(100).as_nanos() as u64,
+                        "Timeout should not be excessively delayed for pattern {}",
+                        i
+                    );
                 }
                 Ok(_) => {
                     // Some patterns might complete within timeout, which is also valid
                     // as long as they don't hang indefinitely
                 }
-                Err(other) => panic!("Unexpected error for CPU intensive pattern {}: {:?}", i, other),
+                Err(other) => panic!(
+                    "Unexpected error for CPU intensive pattern {}: {:?}",
+                    i, other
+                ),
             }
         }
     }
@@ -2107,9 +2499,24 @@ mod bounded_mask_comprehensive_negative_tests {
         // Test event emission with pathological data
         let pathological_events = [
             ("", "empty_operation", "empty_trace", "empty_cx"),
-            ("x".repeat(100000).as_str(), "massive_operation", "massive_trace", "massive_cx"),
-            ("op\x00null", "trace\r\ninjection", "cx\t\x08control", "more_control"),
-            ("op\u{202E}rtl", "trace\u{200B}invisible", "cx\u{FEFF}bom", "unicode_test"),
+            (
+                "x".repeat(100000).as_str(),
+                "massive_operation",
+                "massive_trace",
+                "massive_cx",
+            ),
+            (
+                "op\x00null",
+                "trace\r\ninjection",
+                "cx\t\x08control",
+                "more_control",
+            ),
+            (
+                "op\u{202E}rtl",
+                "trace\u{200B}invisible",
+                "cx\u{FEFF}bom",
+                "unicode_test",
+            ),
         ];
 
         for (i, (operation_name, trace_id, cx_id, _)) in pathological_events.iter().enumerate() {
@@ -2143,9 +2550,18 @@ mod bounded_mask_comprehensive_negative_tests {
 
         // Verify no corruption in stored events
         for event in &events {
-            assert!(!event.event_code.is_empty(), "Event code should not be empty");
-            assert!(!event.event_name.is_empty(), "Event name should not be empty");
-            assert!(event.elapsed_ns < u64::MAX, "Elapsed time should be reasonable");
+            assert!(
+                !event.event_code.is_empty(),
+                "Event code should not be empty"
+            );
+            assert!(
+                !event.event_name.is_empty(),
+                "Event name should not be empty"
+            );
+            assert!(
+                event.elapsed_ns < u64::MAX,
+                "Elapsed time should be reasonable"
+            );
         }
 
         // Memory cleanup should not affect event consistency
@@ -2167,30 +2583,45 @@ mod bounded_mask_comprehensive_negative_tests {
             vec!["ab".to_string(), "ba".to_string()],
             vec!["abc".to_string(), "acb".to_string(), "bac".to_string()],
             vec!["a".repeat(100), "b".repeat(100)],
-            vec!["scope_1".to_string(), "scope_2".to_string(), "scope_1".to_string()], // Explicit duplicate
+            vec![
+                "scope_1".to_string(),
+                "scope_2".to_string(),
+                "scope_1".to_string(),
+            ], // Explicit duplicate
             vec!["".to_string(), " ".to_string(), "  ".to_string()], // Whitespace variations
-            vec!["\x00scope".to_string(), "scope\x00".to_string()], // Null byte variations
+            vec!["\x00scope".to_string(), "scope\x00".to_string()],  // Null byte variations
         ];
 
         for (test_case, scopes) in collision_candidates.iter().enumerate() {
             let cx = CapabilityContext::with_scopes(
                 format!("cx-collision-{}", test_case),
                 format!("op-collision-{}", test_case),
-                scopes.clone()
+                scopes.clone(),
             );
 
             // Deduplication should work correctly
-            let unique_scopes: std::collections::BTreeSet<String> = scopes.iter()
+            let unique_scopes: std::collections::BTreeSet<String> = scopes
+                .iter()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
 
-            assert_eq!(cx.scopes.len(), unique_scopes.len(), "Deduplication failed for case {}", test_case);
+            assert_eq!(
+                cx.scopes.len(),
+                unique_scopes.len(),
+                "Deduplication failed for case {}",
+                test_case
+            );
 
             // All valid unique scopes should be accessible
             for scope in &unique_scopes {
                 if !scope.trim().is_empty() {
-                    assert!(cx.has_scope(scope), "Should have scope '{}' in case {}", scope, test_case);
+                    assert!(
+                        cx.has_scope(scope),
+                        "Should have scope '{}' in case {}",
+                        scope,
+                        test_case
+                    );
                 }
             }
 
@@ -2218,11 +2649,19 @@ mod bounded_mask_comprehensive_negative_tests {
                 spin_for(Duration::from_micros(10)); // Exceed timeout
 
                 // This inner mask should not execute due to timeout
-                bounded_mask(inner_cx, inner_cancel, "inner_after_timeout", |_cx, _cancel| 999u32)
-            }
+                bounded_mask(
+                    inner_cx,
+                    inner_cancel,
+                    "inner_after_timeout",
+                    |_cx, _cancel| 999u32,
+                )
+            },
         );
 
-        assert!(matches!(timeout_result, Err(MaskError::MaskTimeoutExceeded { .. })));
+        assert!(matches!(
+            timeout_result,
+            Err(MaskError::MaskTimeoutExceeded { .. })
+        ));
 
         // Subsequent mask operations should work (nesting detection should be reset)
         let recovery_result = bounded_mask_with_report(
@@ -2230,8 +2669,9 @@ mod bounded_mask_comprehensive_negative_tests {
             &mut cancellation,
             "recovery_after_timeout_nesting",
             &ok_policy,
-            |_cx, _cancel| 123u32
-        ).expect("Should work after timeout nesting failure");
+            |_cx, _cancel| 123u32,
+        )
+        .expect("Should work after timeout nesting failure");
 
         assert_eq!(recovery_result.into_inner(), 123);
 
@@ -2245,14 +2685,19 @@ mod bounded_mask_comprehensive_negative_tests {
                 |inner_cx, inner_cancel| {
                     // Try to nest before panic
                     let nested_result = catch_unwind(AssertUnwindSafe(|| {
-                        bounded_mask(inner_cx, inner_cancel, "inner_before_panic", |_cx, _cancel| 777u32)
+                        bounded_mask(
+                            inner_cx,
+                            inner_cancel,
+                            "inner_before_panic",
+                            |_cx, _cancel| 777u32,
+                        )
                     }));
 
                     // Nested should panic due to nesting violation
                     assert!(nested_result.is_err());
 
                     panic!("outer panic after nesting violation");
-                }
+                },
             );
         }));
 
@@ -2264,8 +2709,9 @@ mod bounded_mask_comprehensive_negative_tests {
             &mut cancellation,
             "final_recovery_after_panic_nesting",
             &ok_policy,
-            |_cx, _cancel| 456u32
-        ).expect("Should work after panic nesting failure");
+            |_cx, _cancel| 456u32,
+        )
+        .expect("Should work after panic nesting failure");
 
         assert_eq!(final_recovery.into_inner(), 456);
     }

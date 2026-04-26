@@ -59,7 +59,8 @@ mod mr_scheduler_reorder_invariance {
         let mut reordered_assignments = HashMap::new();
 
         for (task_class, task_id) in &tasks {
-            if let Ok(assignment) = reordered_scheduler.assign_task(task_class, timestamp, "trace2") {
+            if let Ok(assignment) = reordered_scheduler.assign_task(task_class, timestamp, "trace2")
+            {
                 reordered_assignments.insert(task_id.clone(), assignment.lane);
             }
         }
@@ -67,9 +68,11 @@ mod mr_scheduler_reorder_invariance {
         // INV-LANE-EXACT-MAP: Same task class always maps to same lane
         for (task_id, original_lane) in original_assignments {
             if let Some(&reordered_lane) = reordered_assignments.get(&task_id) {
-                assert_eq!(original_lane, reordered_lane,
+                assert_eq!(
+                    original_lane, reordered_lane,
                     "Task {} lane assignment changed: {:?} -> {:?}",
-                    task_id, original_lane, reordered_lane);
+                    task_id, original_lane, reordered_lane
+                );
             }
         }
     }
@@ -85,7 +88,10 @@ mod mr_scheduler_reorder_invariance {
         let mut assignment_count = 0;
 
         for (task_class, task_id) in &tasks {
-            if scheduler.assign_task(task_class, timestamp, "trace").is_ok() {
+            if scheduler
+                .assign_task(task_class, timestamp, "trace")
+                .is_ok()
+            {
                 assignment_count += 1;
                 // Complete every other task to test cap enforcement
                 if assignment_count % 2 == 0 {
@@ -101,7 +107,10 @@ mod mr_scheduler_reorder_invariance {
         reversed_tasks.reverse();
 
         for (task_class, task_id) in &reversed_tasks {
-            if reordered_scheduler.assign_task(task_class, timestamp, "trace").is_ok() {
+            if reordered_scheduler
+                .assign_task(task_class, timestamp, "trace")
+                .is_ok()
+            {
                 reordered_assignment_count += 1;
                 if reordered_assignment_count % 2 == 0 {
                     let _ = reordered_scheduler.complete_task(task_id, timestamp + 1, "trace");
@@ -111,9 +120,11 @@ mod mr_scheduler_reorder_invariance {
 
         // INV-LANE-CAP-ENFORCE: Should handle same number of assignments regardless of order
         // Since we're using same policy and same tasks, assignment behavior should be consistent
-        assert_eq!(assignment_count, reordered_assignment_count,
+        assert_eq!(
+            assignment_count, reordered_assignment_count,
             "Different assignment counts: original={}, reordered={}",
-            assignment_count, reordered_assignment_count);
+            assignment_count, reordered_assignment_count
+        );
     }
 }
 
@@ -139,9 +150,11 @@ mod mr_telemetry_accuracy {
         for event_type in &["ASSIGN", "COMPLETE"] {
             let orig = original_counts.get(event_type).unwrap_or(&0);
             let reord = reordered_counts.get(event_type).unwrap_or(&0);
-            assert_eq!(orig, reord,
+            assert_eq!(
+                orig, reord,
                 "Event count mismatch for {}: original={}, reordered={}",
-                event_type, orig, reord);
+                event_type, orig, reord
+            );
         }
     }
 }
@@ -151,43 +164,77 @@ fn create_test_policy() -> LaneMappingPolicy {
     let mut policy = LaneMappingPolicy::new();
 
     // Add lane configs with realistic concurrency caps
-    policy.add_lane(LaneConfig::new(SchedulerLane::ControlCritical, 100, 2)).unwrap();
-    policy.add_lane(LaneConfig::new(SchedulerLane::RemoteEffect, 50, 8)).unwrap();
-    policy.add_lane(LaneConfig::new(SchedulerLane::Maintenance, 20, 4)).unwrap();
-    policy.add_lane(LaneConfig::new(SchedulerLane::Background, 10, 16)).unwrap();
+    policy
+        .add_lane(LaneConfig::new(SchedulerLane::ControlCritical, 100, 2))
+        .unwrap();
+    policy
+        .add_lane(LaneConfig::new(SchedulerLane::RemoteEffect, 50, 8))
+        .unwrap();
+    policy
+        .add_lane(LaneConfig::new(SchedulerLane::Maintenance, 20, 4))
+        .unwrap();
+    policy
+        .add_lane(LaneConfig::new(SchedulerLane::Background, 10, 16))
+        .unwrap();
 
     // Add mapping rules
-    policy.add_rule(&task_classes::epoch_transition(), SchedulerLane::ControlCritical);
-    policy.add_rule(&task_classes::barrier_coordination(), SchedulerLane::ControlCritical);
-    policy.add_rule(&task_classes::marker_write(), SchedulerLane::ControlCritical);
-    policy.add_rule(&task_classes::remote_computation(), SchedulerLane::RemoteEffect);
-    policy.add_rule(&task_classes::artifact_upload(), SchedulerLane::RemoteEffect);
-    policy.add_rule(&task_classes::garbage_collection(), SchedulerLane::Maintenance);
+    policy.add_rule(
+        &task_classes::epoch_transition(),
+        SchedulerLane::ControlCritical,
+    );
+    policy.add_rule(
+        &task_classes::barrier_coordination(),
+        SchedulerLane::ControlCritical,
+    );
+    policy.add_rule(
+        &task_classes::marker_write(),
+        SchedulerLane::ControlCritical,
+    );
+    policy.add_rule(
+        &task_classes::remote_computation(),
+        SchedulerLane::RemoteEffect,
+    );
+    policy.add_rule(
+        &task_classes::artifact_upload(),
+        SchedulerLane::RemoteEffect,
+    );
+    policy.add_rule(
+        &task_classes::garbage_collection(),
+        SchedulerLane::Maintenance,
+    );
     policy.add_rule(&task_classes::telemetry_export(), SchedulerLane::Background);
 
     policy
 }
 
 fn _get_policy_caps(policy: &LaneMappingPolicy) -> HashMap<SchedulerLane, usize> {
-    policy.lane_configs.iter()
+    policy
+        .lane_configs
+        .iter()
         .map(|(_, config)| (config.lane, config.concurrency_cap))
         .collect()
 }
 
 fn process_tasks_count_events(
     tasks: &[(TaskClass, String)],
-    policy: &LaneMappingPolicy
+    policy: &LaneMappingPolicy,
 ) -> HashMap<String, usize> {
     let mut counts = HashMap::new();
     let mut scheduler = LaneScheduler::new(policy.clone()).unwrap();
     let timestamp = current_timestamp();
 
     for (i, (task_class, task_id)) in tasks.iter().enumerate() {
-        if scheduler.assign_task(task_class, timestamp, "trace").is_ok() {
+        if scheduler
+            .assign_task(task_class, timestamp, "trace")
+            .is_ok()
+        {
             *counts.entry("ASSIGN".to_string()).or_insert(0) += 1;
 
             if i % 2 == 0 {
-                if scheduler.complete_task(task_id, timestamp + 1, "trace").is_ok() {
+                if scheduler
+                    .complete_task(task_id, timestamp + 1, "trace")
+                    .is_ok()
+                {
                     *counts.entry("COMPLETE".to_string()).or_insert(0) += 1;
                 }
             }

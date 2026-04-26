@@ -937,14 +937,14 @@ mod tests {
     fn test_security_unicode_injection_in_connector_ids_capabilities() {
         // Test Unicode BiDi override, zero-width, and injection attacks in connector IDs and capability names
         let malicious_connector_ids = [
-            "conn\u{202e}ecil",           // Right-to-Left Override
-            "conn\u{200b}ector",         // Zero Width Space
-            "conn\u{200c}ector",         // Zero Width Non-Joiner
-            "conn\u{200d}ector",         // Zero Width Joiner
-            "conn\u{feff}ector",         // Zero Width No-Break Space (BOM)
-            "conn\u{2028}ector",         // Line Separator
-            "conn\u{2029}ector",         // Paragraph Separator
-            "conn\0ector",               // Null byte injection
+            "conn\u{202e}ecil",  // Right-to-Left Override
+            "conn\u{200b}ector", // Zero Width Space
+            "conn\u{200c}ector", // Zero Width Non-Joiner
+            "conn\u{200d}ector", // Zero Width Joiner
+            "conn\u{feff}ector", // Zero Width No-Break Space (BOM)
+            "conn\u{2028}ector", // Line Separator
+            "conn\u{2029}ector", // Paragraph Separator
+            "conn\0ector",       // Null byte injection
         ];
 
         for malicious_id in &malicious_connector_ids {
@@ -956,10 +956,10 @@ mod tests {
 
         // Test malicious capability names in policy validation
         let malicious_capabilities = [
-            "\u{202e}fs_read",           // BiDi override in capability name
-            "fs_read\u{200b}",          // Zero width at end
-            "fs\0read",                 // Null injection in capability
-            "fs_read\u{2028}",          // Line separator suffix
+            "\u{202e}fs_read", // BiDi override in capability name
+            "fs_read\u{200b}", // Zero width at end
+            "fs\0read",        // Null injection in capability
+            "fs_read\u{2028}", // Line separator suffix
         ];
 
         for malicious_cap in &malicious_capabilities {
@@ -970,7 +970,10 @@ mod tests {
             });
             // Should not confuse capability matching
             let result = validate_policy(&policy);
-            assert!(result.is_ok(), "Unicode in capability should not break validation");
+            assert!(
+                result.is_ok(),
+                "Unicode in capability should not break validation"
+            );
         }
     }
 
@@ -982,26 +985,39 @@ mod tests {
 
         // Attempt memory exhaustion by rapidly changing profiles to fill audit log
         for i in 0..MAX_AUDIT_LOG_ENTRIES.saturating_mul(3) {
-            let profile = if i % 2 == 0 { SandboxProfile::Moderate } else { SandboxProfile::Strict };
+            let profile = if i % 2 == 0 {
+                SandboxProfile::Moderate
+            } else {
+                SandboxProfile::Strict
+            };
             let result = tracker.change_profile(
                 profile,
                 format!("change_{}", i),
                 format!("ts_{}", i),
                 true, // allow downgrades
             );
-            assert!(result.is_ok(), "Profile change should succeed within capacity");
+            assert!(
+                result.is_ok(),
+                "Profile change should succeed within capacity"
+            );
         }
 
         // Audit log should be bounded to MAX_AUDIT_LOG_ENTRIES
-        assert!(tracker.audit_log.len() <= MAX_AUDIT_LOG_ENTRIES,
-                "Audit log exceeded maximum capacity: {} > {}",
-                tracker.audit_log.len(), MAX_AUDIT_LOG_ENTRIES);
+        assert!(
+            tracker.audit_log.len() <= MAX_AUDIT_LOG_ENTRIES,
+            "Audit log exceeded maximum capacity: {} > {}",
+            tracker.audit_log.len(),
+            MAX_AUDIT_LOG_ENTRIES
+        );
 
         // Verify oldest entries were evicted (FIFO behavior)
         if tracker.audit_log.len() == MAX_AUDIT_LOG_ENTRIES {
             let oldest_reason = &tracker.audit_log[0].reason;
-            assert!(!oldest_reason.contains("change_0"),
-                   "Oldest entries should have been evicted, found: {}", oldest_reason);
+            assert!(
+                !oldest_reason.contains("change_0"),
+                "Oldest entries should have been evicted, found: {}",
+                oldest_reason
+            );
         }
     }
 
@@ -1014,17 +1030,25 @@ mod tests {
             SandboxProfile::Strict,
             "attack attempt".into(),
             "ts".into(),
-            false
+            false,
         );
         assert!(matches!(result, Err(SandboxError::DowngradeBlocked { .. })));
 
         // Multi-step downgrade attempts through intermediate levels
-        let result1 = tracker.change_profile(SandboxProfile::Moderate, "step1".into(), "ts1".into(), false);
+        let result1 = tracker.change_profile(
+            SandboxProfile::Moderate,
+            "step1".into(),
+            "ts1".into(),
+            false,
+        );
         assert!(result1.is_ok(), "Upgrade should succeed");
 
-        let result2 = tracker.change_profile(SandboxProfile::Strict, "step2".into(), "ts2".into(), false);
-        assert!(matches!(result2, Err(SandboxError::DowngradeBlocked { .. })),
-               "Subsequent downgrade should still be blocked");
+        let result2 =
+            tracker.change_profile(SandboxProfile::Strict, "step2".into(), "ts2".into(), false);
+        assert!(
+            matches!(result2, Err(SandboxError::DowngradeBlocked { .. })),
+            "Subsequent downgrade should still be blocked"
+        );
 
         // Verify state consistency after blocked attempts
         assert_eq!(tracker.current_profile, SandboxProfile::Moderate);
@@ -1035,7 +1059,7 @@ mod tests {
             SandboxProfile::StrictPlus,
             "emergency override".into(),
             "ts3".into(),
-            true
+            true,
         );
         assert!(result3.is_ok(), "Downgrade with override should succeed");
         assert_eq!(tracker.current_profile, SandboxProfile::StrictPlus);
@@ -1047,49 +1071,64 @@ mod tests {
         let tracker = ProfileTracker::new("conn-1".into(), SandboxProfile::Moderate);
 
         // Exact match should work
-        assert_ne!(tracker.is_capability_allowed("network_access"), AccessLevel::Deny);
+        assert_ne!(
+            tracker.is_capability_allowed("network_access"),
+            AccessLevel::Deny
+        );
 
         // Similar but different names should default to deny
         let confusing_names = [
-            "network_access_",          // Trailing underscore
-            "_network_access",          // Leading underscore
-            "network-access",           // Dash instead of underscore
-            "networkaccess",            // No separator
-            "network_Access",           // Different case
-            "NETWORK_ACCESS",           // All caps
-            "network_access\x00",       // Null terminator
-            "network_access\t",         // Tab character
-            "network_access\n",         // Newline
-            "network_access\r",         // Carriage return
+            "network_access_",    // Trailing underscore
+            "_network_access",    // Leading underscore
+            "network-access",     // Dash instead of underscore
+            "networkaccess",      // No separator
+            "network_Access",     // Different case
+            "NETWORK_ACCESS",     // All caps
+            "network_access\x00", // Null terminator
+            "network_access\t",   // Tab character
+            "network_access\n",   // Newline
+            "network_access\r",   // Carriage return
         ];
 
         for confusing_name in &confusing_names {
-            assert_eq!(tracker.is_capability_allowed(confusing_name), AccessLevel::Deny,
-                      "Confusing capability name '{}' should default to deny", confusing_name);
+            assert_eq!(
+                tracker.is_capability_allowed(confusing_name),
+                AccessLevel::Deny,
+                "Confusing capability name '{}' should default to deny",
+                confusing_name
+            );
         }
 
         // Test policy with duplicate capabilities having different access levels
         let mut policy = compile_policy(SandboxProfile::Strict);
         policy.grants.extend([
-            CapabilityGrant { capability: "test_cap".into(), access: AccessLevel::Allow },
-            CapabilityGrant { capability: "test_cap".into(), access: AccessLevel::Deny },
+            CapabilityGrant {
+                capability: "test_cap".into(),
+                access: AccessLevel::Allow,
+            },
+            CapabilityGrant {
+                capability: "test_cap".into(),
+                access: AccessLevel::Deny,
+            },
         ]);
 
         let result = validate_policy(&policy);
-        assert!(matches!(result, Err(SandboxError::PolicyConflict { .. })),
-               "Conflicting access levels should be detected");
+        assert!(
+            matches!(result, Err(SandboxError::PolicyConflict { .. })),
+            "Conflicting access levels should be detected"
+        );
     }
 
     #[test]
     fn test_security_json_serialization_injection_prevention() {
         // Test that malicious JSON in audit records doesn't bypass validation
         let malicious_reasons = [
-            r#"{"evil": "payload"}"#,           // JSON object injection
-            r#"[1, 2, 3]"#,                     // JSON array injection
-            r#""escaped": "quote\""#,           // Quote injection
-            "reason\n{\"override\": true}",    // Newline + JSON injection
-            "reason\r\n\t{\"admin\": true}",   // Multi-line injection
-            "reason\\u0000evil",               // Unicode escape injection
+            r#"{"evil": "payload"}"#,        // JSON object injection
+            r#"[1, 2, 3]"#,                  // JSON array injection
+            r#""escaped": "quote\""#,        // Quote injection
+            "reason\n{\"override\": true}",  // Newline + JSON injection
+            "reason\r\n\t{\"admin\": true}", // Multi-line injection
+            "reason\\u0000evil",             // Unicode escape injection
         ];
 
         let mut tracker = ProfileTracker::new("conn-1".into(), SandboxProfile::Strict);
@@ -1099,10 +1138,13 @@ mod tests {
                 SandboxProfile::Moderate,
                 malicious_reason.to_string(),
                 "2026-04-17T00:00:00Z".into(),
-                false
+                false,
             );
 
-            assert!(result.is_ok(), "Profile change should succeed despite malicious reason");
+            assert!(
+                result.is_ok(),
+                "Profile change should succeed despite malicious reason"
+            );
 
             // Verify the malicious content is preserved as-is without interpretation
             let latest_audit = tracker.audit_log.last().unwrap();
@@ -1113,7 +1155,8 @@ mod tests {
             assert!(serialized.contains(&serde_json::to_string(malicious_reason).unwrap()));
 
             // Reset for next iteration
-            let _ = tracker.change_profile(SandboxProfile::Strict, "reset".into(), "ts".into(), true);
+            let _ =
+                tracker.change_profile(SandboxProfile::Strict, "reset".into(), "ts".into(), true);
         }
     }
 
@@ -1122,7 +1165,10 @@ mod tests {
         use std::sync::{Arc, Mutex};
         use std::thread;
 
-        let tracker = Arc::new(Mutex::new(ProfileTracker::new("conn-1".into(), SandboxProfile::Strict)));
+        let tracker = Arc::new(Mutex::new(ProfileTracker::new(
+            "conn-1".into(),
+            SandboxProfile::Strict,
+        )));
         let mut handles = vec![];
 
         // Simulate concurrent profile changes from multiple threads
@@ -1158,8 +1204,12 @@ mod tests {
 
         // Verify tracker is in a consistent state
         let final_tracker = tracker.lock().unwrap();
-        let profile_matches_policy = final_tracker.compiled_policy.profile == final_tracker.current_profile;
-        assert!(profile_matches_policy, "Profile and policy should be consistent after concurrent access");
+        let profile_matches_policy =
+            final_tracker.compiled_policy.profile == final_tracker.current_profile;
+        assert!(
+            profile_matches_policy,
+            "Profile and policy should be consistent after concurrent access"
+        );
 
         // Audit log should be bounded and valid
         assert!(final_tracker.audit_log.len() <= MAX_AUDIT_LOG_ENTRIES);
@@ -1184,7 +1234,10 @@ mod tests {
                 // Policy compilation should produce consistent level
                 let policy = compile_policy(p1);
                 assert_eq!(policy.level, p1.level());
-                assert!(policy.level <= 3, "Profile level should be bounded to valid range");
+                assert!(
+                    policy.level <= 3,
+                    "Profile level should be bounded to valid range"
+                );
             }
         }
 
@@ -1194,7 +1247,10 @@ mod tests {
 
         // System should handle artificially high levels gracefully
         let result = validate_policy(&policy);
-        assert!(result.is_ok(), "Policy validation should handle edge case levels");
+        assert!(
+            result.is_ok(),
+            "Policy validation should handle edge case levels"
+        );
     }
 
     #[test]
@@ -1218,8 +1274,14 @@ mod tests {
 
         // But capability lookup should default to deny for unknown capabilities
         let tracker = ProfileTracker::new("conn-1".into(), SandboxProfile::Moderate);
-        assert_eq!(tracker.is_capability_allowed("admin_override"), AccessLevel::Deny);
-        assert_eq!(tracker.is_capability_allowed("bypass_sandbox"), AccessLevel::Deny);
+        assert_eq!(
+            tracker.is_capability_allowed("admin_override"),
+            AccessLevel::Deny
+        );
+        assert_eq!(
+            tracker.is_capability_allowed("bypass_sandbox"),
+            AccessLevel::Deny
+        );
 
         // Test profile/level mismatch detection
         let mut mismatched_policy = original_policy.clone();
@@ -1231,7 +1293,9 @@ mod tests {
 
         // Test grants manipulation - remove critical denials
         let mut weakened_policy = compile_policy(SandboxProfile::Strict);
-        weakened_policy.grants.retain(|g| g.capability != "network_access");
+        weakened_policy
+            .grants
+            .retain(|g| g.capability != "network_access");
 
         // Missing capabilities should default to deny
         let weakened_tracker = ProfileTracker {
@@ -1240,7 +1304,10 @@ mod tests {
             compiled_policy: weakened_policy,
             audit_log: vec![],
         };
-        assert_eq!(weakened_tracker.is_capability_allowed("network_access"), AccessLevel::Deny);
+        assert_eq!(
+            weakened_tracker.is_capability_allowed("network_access"),
+            AccessLevel::Deny
+        );
     }
 
     #[test]
@@ -1249,9 +1316,21 @@ mod tests {
 
         // Test injection attempts in audit record fields
         let malicious_inputs = [
-            ("malicious\nconnector\x00id", "normal reason", "normal timestamp"),
-            ("normal-conn", "reason\rwith\ncontrol\x00chars", "normal timestamp"),
-            ("normal-conn", "normal reason", "timestamp\twith\ninvalid\x00chars"),
+            (
+                "malicious\nconnector\x00id",
+                "normal reason",
+                "normal timestamp",
+            ),
+            (
+                "normal-conn",
+                "reason\rwith\ncontrol\x00chars",
+                "normal timestamp",
+            ),
+            (
+                "normal-conn",
+                "normal reason",
+                "timestamp\twith\ninvalid\x00chars",
+            ),
             ("conn\u{202e}evil", "reason\u{200b}hidden", "ts\u{feff}bom"),
         ];
 
@@ -1260,10 +1339,13 @@ mod tests {
                 SandboxProfile::Moderate,
                 reason.to_string(),
                 timestamp.to_string(),
-                false
+                false,
             );
 
-            assert!(result.is_ok(), "Profile change with malicious input should succeed");
+            assert!(
+                result.is_ok(),
+                "Profile change with malicious input should succeed"
+            );
 
             let latest_audit = tracker.audit_log.last().unwrap();
             assert_eq!(latest_audit.reason, *reason);
@@ -1276,7 +1358,8 @@ mod tests {
             assert_eq!(parsed, *latest_audit);
 
             // Reset for next test
-            let _ = tracker.change_profile(SandboxProfile::Strict, "reset".into(), "ts".into(), true);
+            let _ =
+                tracker.change_profile(SandboxProfile::Strict, "reset".into(), "ts".into(), true);
         }
 
         // Test audit log bounds under injection pressure
@@ -1285,7 +1368,7 @@ mod tests {
             SandboxProfile::Moderate,
             long_reason.clone(),
             "ts".into(),
-            false
+            false,
         );
 
         assert!(result.is_ok(), "Long reason should be handled gracefully");
@@ -1301,7 +1384,11 @@ mod tests {
         // Fill audit log exactly to capacity
         for i in 1..MAX_AUDIT_LOG_ENTRIES {
             let result = tracker.change_profile(
-                if i % 2 == 0 { SandboxProfile::Moderate } else { SandboxProfile::Strict },
+                if i % 2 == 0 {
+                    SandboxProfile::Moderate
+                } else {
+                    SandboxProfile::Strict
+                },
                 format!("fill_entry_{}", i),
                 format!("ts_{}", i),
                 true,
@@ -1337,7 +1424,10 @@ mod tests {
         // Test zero capacity edge case
         let mut empty_items = vec![1, 2, 3];
         push_bounded(&mut empty_items, 4, 0);
-        assert!(empty_items.is_empty(), "Zero capacity should clear all items");
+        assert!(
+            empty_items.is_empty(),
+            "Zero capacity should clear all items"
+        );
 
         // Test single capacity with multiple pushes
         let mut single_items = vec![];

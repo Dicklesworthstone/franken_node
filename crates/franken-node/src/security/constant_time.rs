@@ -240,10 +240,7 @@ mod constant_time_additional_negative_tests {
 
     #[test]
     fn rejects_delimiter_substitution_with_shared_visible_components() {
-        assert!(!ct_eq(
-            "role:user;admin:false",
-            "role:user:admin:false",
-        ));
+        assert!(!ct_eq("role:user;admin:false", "role:user:admin:false",));
     }
 
     #[test]
@@ -253,26 +250,17 @@ mod constant_time_additional_negative_tests {
 
     #[test]
     fn rejects_json_boolean_flip_with_equal_serialized_width() {
-        assert!(!ct_eq(
-            r#"{"admin":false}"#,
-            r#"{"admin":true }"#,
-        ));
+        assert!(!ct_eq(r#"{"admin":false}"#, r#"{"admin":true }"#,));
     }
 
     #[test]
     fn rejects_common_prefix_with_extra_presented_token_tail() {
-        assert!(!ct_eq(
-            "bearer:abcd1234",
-            "bearer:abcd1234:extra",
-        ));
+        assert!(!ct_eq("bearer:abcd1234", "bearer:abcd1234:extra",));
     }
 
     #[test]
     fn rejects_receipt_component_reordering() {
-        assert!(!ct_eq(
-            "receipt:lane-a:epoch-1",
-            "receipt:epoch-1:lane-a",
-        ));
+        assert!(!ct_eq("receipt:lane-a:epoch-1", "receipt:epoch-1:lane-a",));
     }
 
     #[test]
@@ -373,7 +361,10 @@ mod comprehensive_boundary_negative_tests {
         // Test with different case folding scenarios
         let turkish_i_upper = "İSTANBUL"; // Turkish capital I with dot
         let turkish_i_lower = "istanbul"; // ASCII lowercase
-        assert!(!ct_eq(turkish_i_upper.to_lowercase().as_str(), turkish_i_lower));
+        assert!(!ct_eq(
+            turkish_i_upper.to_lowercase().as_str(),
+            turkish_i_lower
+        ));
     }
 
     #[test]
@@ -391,7 +382,11 @@ mod comprehensive_boundary_negative_tests {
 
                 // Restore and verify equal
                 b[mid] = 0x5A;
-                assert!(ct_eq_bytes(&a, &b), "Failed equality check at size {}", size);
+                assert!(
+                    ct_eq_bytes(&a, &b),
+                    "Failed equality check at size {}",
+                    size
+                );
             }
         }
     }
@@ -451,7 +446,7 @@ mod comprehensive_boundary_negative_tests {
 
         // Test with early vs late differences in same-length strings
         let early_diff = "aXXXXXXXXXXXXXXXXXXXXXXXXXXX";
-        let late_diff =  "XXXXXXXXXXXXXXXXXXXXXXXXXXXa";
+        let late_diff = "XXXXXXXXXXXXXXXXXXXXXXXXXXXa";
         let reference = "XXXXXXXXXXXXXXXXXXXXXXXXXXXX";
 
         assert!(!ct_eq(early_diff, reference));
@@ -470,8 +465,10 @@ mod comprehensive_boundary_negative_tests {
     fn negative_ct_eq_with_jwt_like_structure_boundary_cases() {
         // Test with JWT-like structures that might be vulnerable to manipulation
         let jwt_valid = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJhdXRoMCJ9.signature";
-        let jwt_header_tamper = "eyJ0eXAiOiJKV1QiLCJhbGciOiJub25lIn0.eyJpc3MiOiJhdXRoMCJ9.signature";
-        let jwt_payload_tamper = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJhdGFja2VyIn0.signature";
+        let jwt_header_tamper =
+            "eyJ0eXAiOiJKV1QiLCJhbGciOiJub25lIn0.eyJpc3MiOiJhdXRoMCJ9.signature";
+        let jwt_payload_tamper =
+            "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJhdGFja2VyIn0.signature";
         let jwt_sig_tamper = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJhdXRoMCJ9.tampered";
 
         assert!(!ct_eq(jwt_valid, jwt_header_tamper));
@@ -619,18 +616,30 @@ mod comprehensive_boundary_negative_tests {
 
             // Modify the first byte
             pattern_b[0] = 0x5B;
-            assert!(!ct_eq_bytes(&pattern_a, &pattern_b), "Failed first-byte test at size {}", size);
+            assert!(
+                !ct_eq_bytes(&pattern_a, &pattern_b),
+                "Failed first-byte test at size {}",
+                size
+            );
 
             // Modify the last byte
             pattern_b[0] = 0x5A; // Restore
             pattern_b[size - 1] = 0x5B;
-            assert!(!ct_eq_bytes(&pattern_a, &pattern_b), "Failed last-byte test at size {}", size);
+            assert!(
+                !ct_eq_bytes(&pattern_a, &pattern_b),
+                "Failed last-byte test at size {}",
+                size
+            );
 
             // Modify a middle byte (cache line crossing point)
             pattern_b[size - 1] = 0x5A; // Restore
             if size > 64 {
                 pattern_b[64] = 0x5B; // Cross cache line boundary
-                assert!(!ct_eq_bytes(&pattern_a, &pattern_b), "Failed cache-boundary test at size {}", size);
+                assert!(
+                    !ct_eq_bytes(&pattern_a, &pattern_b),
+                    "Failed cache-boundary test at size {}",
+                    size
+                );
             }
         }
     }
@@ -732,8 +741,10 @@ mod comprehensive_boundary_negative_tests {
         }
 
         // Should be bounded to MAX_TEST_VECTORS
-        assert!(test_vectors.len() <= MAX_TEST_VECTORS,
-               "Test vectors should be bounded");
+        assert!(
+            test_vectors.len() <= MAX_TEST_VECTORS,
+            "Test vectors should be bounded"
+        );
 
         // Should contain latest vectors
         assert!(test_vectors.len() > 0, "Should contain some test vectors");
@@ -743,8 +754,11 @@ mod comprehensive_boundary_negative_tests {
             for (j, vec_b) in test_vectors.iter().enumerate() {
                 let should_equal = i == j;
                 let are_equal = ct_eq_bytes(vec_a, vec_b);
-                assert_eq!(should_equal, are_equal,
-                          "Constant-time comparison failed for vectors {} and {}", i, j);
+                assert_eq!(
+                    should_equal, are_equal,
+                    "Constant-time comparison failed for vectors {} and {}",
+                    i, j
+                );
             }
         }
 
@@ -757,8 +771,11 @@ mod comprehensive_boundary_negative_tests {
             push_bounded_ct_test(&mut bounded_large_vecs, large_vec, MAX_LARGE_VECS);
         }
 
-        assert_eq!(bounded_large_vecs.len(), MAX_LARGE_VECS,
-                  "Large vectors should be bounded to prevent memory exhaustion");
+        assert_eq!(
+            bounded_large_vecs.len(),
+            MAX_LARGE_VECS,
+            "Large vectors should be bounded to prevent memory exhaustion"
+        );
 
         // Production code should use: push_bounded(&mut vecs, item, MAX_CAPACITY) ✓
         // NOT: vecs.push(item) ✗ (unbounded growth)
@@ -772,9 +789,9 @@ mod comprehensive_boundary_negative_tests {
 
         // Test safe length handling for constant-time operations
         let test_cases = [
-            vec![0x41; 10],           // Small
-            vec![0x42; 1000],         // Medium
-            vec![0x43; 100_000],      // Large
+            vec![0x41; 10],      // Small
+            vec![0x42; 1000],    // Medium
+            vec![0x43; 100_000], // Large
         ];
 
         for (i, test_vec) in test_cases.iter().enumerate() {
@@ -784,13 +801,24 @@ mod comprehensive_boundary_negative_tests {
             let safe_len_u32 = u32::try_from(vec_len).unwrap_or(u32::MAX);
             let safe_len_u64 = u64::try_from(vec_len).unwrap_or(u64::MAX);
 
-            assert!(safe_len_u32 > 0, "Safe u32 conversion should be positive for case {}", i);
-            assert!(safe_len_u64 > 0, "Safe u64 conversion should be positive for case {}", i);
+            assert!(
+                safe_len_u32 > 0,
+                "Safe u32 conversion should be positive for case {}",
+                i
+            );
+            assert!(
+                safe_len_u64 > 0,
+                "Safe u64 conversion should be positive for case {}",
+                i
+            );
 
             // Verify constant-time operations work with safe length handling
             let same_vec = vec![test_vec[0]; vec_len];
-            assert!(ct_eq_bytes(test_vec, &same_vec),
-                   "Constant-time comparison should work with safe length for case {}", i);
+            assert!(
+                ct_eq_bytes(test_vec, &same_vec),
+                "Constant-time comparison should work with safe length for case {}",
+                i
+            );
 
             // Test length-dependent operations
             if vec_len > 0 {
@@ -798,17 +826,16 @@ mod comprehensive_boundary_negative_tests {
                 let safe_last_index = vec_len.saturating_sub(1);
                 modified_vec[safe_last_index] = modified_vec[safe_last_index].wrapping_add(1);
 
-                assert!(!ct_eq_bytes(test_vec, &modified_vec),
-                       "Modified vector should differ for case {}", i);
+                assert!(
+                    !ct_eq_bytes(test_vec, &modified_vec),
+                    "Modified vector should differ for case {}",
+                    i
+                );
             }
         }
 
         // Test boundary conditions for length casting
-        let boundary_sizes = [
-            u8::MAX as usize,
-            u16::MAX as usize,
-            u32::MAX as usize,
-        ];
+        let boundary_sizes = [u8::MAX as usize, u16::MAX as usize, u32::MAX as usize];
 
         for &size in &boundary_sizes {
             let safe_u32 = u32::try_from(size);
@@ -816,12 +843,24 @@ mod comprehensive_boundary_negative_tests {
 
             match size {
                 s if s <= u32::MAX as usize => {
-                    assert!(safe_u32.is_ok(), "Should safely convert to u32 for size {}", size);
-                    assert!(safe_u64.is_ok(), "Should safely convert to u64 for size {}", size);
-                },
+                    assert!(
+                        safe_u32.is_ok(),
+                        "Should safely convert to u32 for size {}",
+                        size
+                    );
+                    assert!(
+                        safe_u64.is_ok(),
+                        "Should safely convert to u64 for size {}",
+                        size
+                    );
+                }
                 _ => {
                     // Only test what's actually possible on this platform
-                    assert!(safe_u64.is_ok(), "Should safely convert to u64 for size {}", size);
+                    assert!(
+                        safe_u64.is_ok(),
+                        "Should safely convert to u64 for size {}",
+                        size
+                    );
                 }
             }
         }
@@ -863,22 +902,39 @@ mod comprehensive_boundary_negative_tests {
 
                     // Empty vectors should compare equal
                     let empty_vec = vec![];
-                    assert!(ct_eq_bytes(&test_data, &empty_vec), "Empty vectors should be equal");
-                },
+                    assert!(
+                        ct_eq_bytes(&test_data, &empty_vec),
+                        "Empty vectors should be equal"
+                    );
+                }
                 size if size > 0 => {
                     // Non-zero size: both methods should accept
-                    assert!(is_valid_fail_closed, "Fail-closed should accept non-zero: {}", description);
-                    assert!(is_valid_vulnerable, "Vulnerable should accept non-zero: {}", description);
+                    assert!(
+                        is_valid_fail_closed,
+                        "Fail-closed should accept non-zero: {}",
+                        description
+                    );
+                    assert!(
+                        is_valid_vulnerable,
+                        "Vulnerable should accept non-zero: {}",
+                        description
+                    );
 
                     // Non-empty vectors should work with constant-time comparison
                     let same_data = vec![0x5A; *test_size];
                     let diff_data = vec![0x5B; *test_size];
 
-                    assert!(ct_eq_bytes(&test_data, &same_data),
-                           "Same data should be equal: {}", description);
-                    assert!(!ct_eq_bytes(&test_data, &diff_data),
-                           "Different data should not be equal: {}", description);
-                },
+                    assert!(
+                        ct_eq_bytes(&test_data, &same_data),
+                        "Same data should be equal: {}",
+                        description
+                    );
+                    assert!(
+                        !ct_eq_bytes(&test_data, &diff_data),
+                        "Different data should not be equal: {}",
+                        description
+                    );
+                }
                 _ => unreachable!("Test case logic error"),
             }
 
@@ -892,8 +948,12 @@ mod comprehensive_boundary_negative_tests {
                 for &pos in &positions {
                     if pos < boundary_test.len() {
                         boundary_test[pos] = 0xAC;
-                        assert!(!ct_eq_bytes(&test_data, &boundary_test),
-                               "Modified at position {} should differ: {}", pos, description);
+                        assert!(
+                            !ct_eq_bytes(&test_data, &boundary_test),
+                            "Modified at position {} should differ: {}",
+                            pos,
+                            description
+                        );
                         boundary_test[pos] = 0xAB; // Restore
                     }
                 }
@@ -920,8 +980,11 @@ mod comprehensive_boundary_negative_tests {
 
         for (timing_value, description) in &timing_test_cases {
             // All timing values used in analysis should be finite
-            assert!(timing_value.is_finite(),
-                   "Timing value should be finite: {}", description);
+            assert!(
+                timing_value.is_finite(),
+                "Timing value should be finite: {}",
+                description
+            );
 
             // Test that timing ratio calculations remain finite
             let base_timing = 1.0;
@@ -929,7 +992,11 @@ mod comprehensive_boundary_negative_tests {
                 let ratio = timing_value / base_timing;
 
                 if ratio.is_finite() {
-                    assert!(ratio >= 0.0, "Timing ratio should be non-negative: {}", description);
+                    assert!(
+                        ratio >= 0.0,
+                        "Timing ratio should be non-negative: {}",
+                        description
+                    );
 
                     // Timing analysis should use safe arithmetic
                     let safe_log_ratio = if ratio > 0.0 {
@@ -940,8 +1007,11 @@ mod comprehensive_boundary_negative_tests {
 
                     // Only finite logarithms should be used in analysis
                     if safe_log_ratio.is_finite() {
-                        assert!(safe_log_ratio >= f64::MIN && safe_log_ratio <= f64::MAX,
-                               "Log ratio should be in valid range: {}", description);
+                        assert!(
+                            safe_log_ratio >= f64::MIN && safe_log_ratio <= f64::MAX,
+                            "Log ratio should be in valid range: {}",
+                            description
+                        );
                     }
                 }
             }
@@ -962,8 +1032,12 @@ mod comprehensive_boundary_negative_tests {
 
             match problematic_value {
                 v if v.is_nan() => assert!(!is_safe, "NaN should be detected as non-finite"),
-                v if v.is_infinite() => assert!(!is_safe, "Infinity should be detected as non-finite"),
-                v if v.is_finite() => assert!(is_safe, "Finite values should be detected as finite"),
+                v if v.is_infinite() => {
+                    assert!(!is_safe, "Infinity should be detected as non-finite")
+                }
+                v if v.is_finite() => {
+                    assert!(is_safe, "Finite values should be detected as finite")
+                }
                 _ => unreachable!("f64 classification error"),
             }
 
@@ -971,16 +1045,18 @@ mod comprehensive_boundary_negative_tests {
             if is_safe {
                 // Safe to use in arithmetic
                 let safe_calculation = problematic_value * 2.0;
-                assert!(safe_calculation.is_finite() || problematic_value == 0.0,
-                       "Safe calculation should remain finite");
+                assert!(
+                    safe_calculation.is_finite() || problematic_value == 0.0,
+                    "Safe calculation should remain finite"
+                );
             } else {
                 // Should be rejected or replaced with safe default
                 let safe_default = if problematic_value.is_nan() {
-                    0.0  // Default for NaN
+                    0.0 // Default for NaN
                 } else if problematic_value.is_infinite() && problematic_value > 0.0 {
-                    f64::MAX  // Clamp positive infinity
+                    f64::MAX // Clamp positive infinity
                 } else if problematic_value.is_infinite() && problematic_value < 0.0 {
-                    f64::MIN  // Clamp negative infinity
+                    f64::MIN // Clamp negative infinity
                 } else {
                     0.0
                 };
@@ -1000,10 +1076,26 @@ mod comprehensive_boundary_negative_tests {
 
         // Test hash prefix validation with domain separation
         let domain_test_cases = [
-            ("ct_comparison_v1:", "signature:deadbeef", "Constant-time signature domain"),
-            ("ct_comparison_v1:", "mac:abcdef01", "Constant-time MAC domain"),
-            ("ct_comparison_v1:", "hash:sha256:fedcba", "Constant-time hash domain"),
-            ("different_domain:", "signature:deadbeef", "Different domain same data"),
+            (
+                "ct_comparison_v1:",
+                "signature:deadbeef",
+                "Constant-time signature domain",
+            ),
+            (
+                "ct_comparison_v1:",
+                "mac:abcdef01",
+                "Constant-time MAC domain",
+            ),
+            (
+                "ct_comparison_v1:",
+                "hash:sha256:fedcba",
+                "Constant-time hash domain",
+            ),
+            (
+                "different_domain:",
+                "signature:deadbeef",
+                "Different domain same data",
+            ),
         ];
 
         for (domain, data, description) in &domain_test_cases {
@@ -1014,29 +1106,38 @@ mod comprehensive_boundary_negative_tests {
             let without_domain = data.to_string();
 
             // Domain separation should make values different
-            assert_ne!(with_domain, without_domain,
-                      "Domain separation should change value: {}", description);
+            assert_ne!(
+                with_domain, without_domain,
+                "Domain separation should change value: {}",
+                description
+            );
 
             // Different domains should produce different results
             let alt_domain = "alternative_domain:";
             let with_alt_domain = format!("{}{}", alt_domain, data);
 
             if domain != &alt_domain {
-                assert!(!ct_eq(&with_domain, &with_alt_domain),
-                       "Different domains should not be equal: {}", description);
+                assert!(
+                    !ct_eq(&with_domain, &with_alt_domain),
+                    "Different domains should not be equal: {}",
+                    description
+                );
             }
 
             // Test length-prefixed domain separation (more robust)
             let length_prefixed = format!("{}:{}:{}", domain.len(), domain, data);
-            assert!(!ct_eq(&with_domain, &length_prefixed),
-                   "Length-prefixed should differ from simple prefix: {}", description);
+            assert!(
+                !ct_eq(&with_domain, &length_prefixed),
+                "Length-prefixed should differ from simple prefix: {}",
+                description
+            );
         }
 
         // Test domain separation prevents collision attacks
         let collision_test_cases = [
-            ("domain_a", "data", "domain", "_adata"),  // Collision attempt
-            ("hash:sha", "256:abc", "hash:sha256", ":abc"),  // Boundary collision
-            ("prefix", ":suffix", "prefi", "x:suffix"),  // Character boundary
+            ("domain_a", "data", "domain", "_adata"), // Collision attempt
+            ("hash:sha", "256:abc", "hash:sha256", ":abc"), // Boundary collision
+            ("prefix", ":suffix", "prefi", "x:suffix"), // Character boundary
         ];
 
         for (domain1, data1, domain2, data2) in &collision_test_cases {
@@ -1048,25 +1149,34 @@ mod comprehensive_boundary_negative_tests {
                 // This would be a collision - verify our test case is correct
                 assert_ne!(domain1, domain2, "Test case should have different domains");
             } else {
-                assert!(!ct_eq(&combo1, &combo2),
-                       "Domain separation should prevent collision: {} vs {}", combo1, combo2);
+                assert!(
+                    !ct_eq(&combo1, &combo2),
+                    "Domain separation should prevent collision: {} vs {}",
+                    combo1,
+                    combo2
+                );
             }
         }
 
         // Test with typical cryptographic hash outputs
         let crypto_hashes = [
-            "domain_sig:", "a1b2c3d4e5f6789012345678901234567890abcd", // 40 char hex
-            "domain_mac:", "1234567890abcdef1234567890abcdef12345678", // 40 char hex
-            "domain_hash:", "fedcba0987654321fedcba0987654321fedcba09", // 40 char hex
+            "domain_sig:",
+            "a1b2c3d4e5f6789012345678901234567890abcd", // 40 char hex
+            "domain_mac:",
+            "1234567890abcdef1234567890abcdef12345678", // 40 char hex
+            "domain_hash:",
+            "fedcba0987654321fedcba0987654321fedcba09", // 40 char hex
         ];
 
         for i in 0..crypto_hashes.len() {
-            for j in (i+1)..crypto_hashes.len() {
+            for j in (i + 1)..crypto_hashes.len() {
                 let hash1 = crypto_hashes[i];
                 let hash2 = crypto_hashes[j];
 
-                assert!(!ct_eq(hash1, hash2),
-                       "Different domain-separated hashes should not be equal");
+                assert!(
+                    !ct_eq(hash1, hash2),
+                    "Different domain-separated hashes should not be equal"
+                );
             }
         }
 
@@ -1106,8 +1216,10 @@ mod comprehensive_boundary_negative_tests {
             push_bounded_comprehensive(&mut test_data_store, test_data, MAX_STORE_SIZE);
         }
 
-        assert!(test_data_store.len() <= MAX_STORE_SIZE,
-               "Data store should be bounded");
+        assert!(
+            test_data_store.len() <= MAX_STORE_SIZE,
+            "Data store should be bounded"
+        );
 
         // Test constant-time comparisons with domain separation
         for (i, data) in test_data_store.iter().enumerate() {
@@ -1123,23 +1235,36 @@ mod comprehensive_boundary_negative_tests {
 
             // Test constant-time comparison with domain-separated data
             let same_domain_data = [domain_prefix.as_bytes(), data.as_slice()].concat();
-            assert!(ct_eq_bytes(&domain_data, &same_domain_data),
-                   "Same domain data should be equal for index {}", i);
+            assert!(
+                ct_eq_bytes(&domain_data, &same_domain_data),
+                "Same domain data should be equal for index {}",
+                i
+            );
 
             // Different domain should not be equal
             let diff_domain_prefix = format!("different_v1:{}:", i);
             let diff_domain_data = [diff_domain_prefix.as_bytes(), data.as_slice()].concat();
-            assert!(!ct_eq_bytes(&domain_data, &diff_domain_data),
-                   "Different domain data should not be equal for index {}", i);
+            assert!(
+                !ct_eq_bytes(&domain_data, &diff_domain_data),
+                "Different domain data should not be equal for index {}",
+                i
+            );
 
             // Test timing measurement validation (f64 finite guards)
             let mock_timing = i as f64 * 0.1;
-            assert!(mock_timing.is_finite(), "Mock timing should be finite for index {}", i);
+            assert!(
+                mock_timing.is_finite(),
+                "Mock timing should be finite for index {}",
+                i
+            );
 
             if mock_timing > 0.0 && mock_timing.is_finite() {
                 let normalized_timing = mock_timing / 1.0; // Safe division
-                assert!(normalized_timing.is_finite(),
-                       "Normalized timing should be finite for index {}", i);
+                assert!(
+                    normalized_timing.is_finite(),
+                    "Normalized timing should be finite for index {}",
+                    i
+                );
             }
         }
 
@@ -1149,18 +1274,26 @@ mod comprehensive_boundary_negative_tests {
         let safe_boundary_len = u32::try_from(boundary_len).unwrap_or(u32::MAX);
 
         assert!(safe_boundary_len > 0, "Boundary length should be positive");
-        assert!(boundary_len >= 64, "Should meet minimum boundary size (fail-closed)");
+        assert!(
+            boundary_len >= 64,
+            "Should meet minimum boundary size (fail-closed)"
+        );
 
         // Domain-separated boundary test
         let boundary_domain = "boundary_test_v1:";
         let boundary_full = [boundary_domain.as_bytes(), &boundary_data].concat();
         let boundary_same = [boundary_domain.as_bytes(), &boundary_data].concat();
 
-        assert!(ct_eq_bytes(&boundary_full, &boundary_same),
-               "Boundary domain-separated data should be equal to itself");
+        assert!(
+            ct_eq_bytes(&boundary_full, &boundary_same),
+            "Boundary domain-separated data should be equal to itself"
+        );
 
         // Verify all hardening patterns work together without conflicts
         assert!(test_data_store.len() > 0, "Should have test data");
-        assert!(test_data_store.len() <= MAX_STORE_SIZE, "Should respect bounds");
+        assert!(
+            test_data_store.len() <= MAX_STORE_SIZE,
+            "Should respect bounds"
+        );
     }
 }

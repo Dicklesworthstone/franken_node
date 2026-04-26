@@ -836,18 +836,15 @@ mod tests {
         let source = StaticEpochSource::available(ControlEpoch::new(u64::MAX));
 
         // Test with maximum epoch values - should not panic or overflow
-        let result = guard.validate_operation_epoch(
-            ControlEpoch::new(u64::MAX),
-            &source,
-            "trace-max-epoch"
-        );
+        let result =
+            guard.validate_operation_epoch(ControlEpoch::new(u64::MAX), &source, "trace-max-epoch");
         assert!(result.is_ok());
 
         // Test with near-maximum values
         let result2 = guard.validate_operation_epoch(
             ControlEpoch::new(u64::MAX.saturating_sub(1)),
             &source,
-            "trace-near-max-epoch"
+            "trace-near-max-epoch",
         );
         assert!(result2.is_err()); // Should be stale
 
@@ -856,7 +853,7 @@ mod tests {
             "artifact-max-epoch",
             ControlEpoch::new(u64::MAX),
             &source,
-            "trace-artifact-max"
+            "trace-artifact-max",
         );
         assert!(result3.is_ok());
     }
@@ -865,18 +862,18 @@ mod tests {
     fn negative_artifact_id_with_unicode_injection_and_normalization_attacks() {
         // Test various Unicode-based injection attacks in artifact IDs
         let malicious_ids = vec![
-            "artifact\u{202E}fake\u{202D}",           // Unicode BiDi override attack
-            "artifact\u{00A0}nonbreaking",             // Non-breaking space
-            "artifact\u{200B}zerowidth",               // Zero-width space
-            "artifact\u{FEFF}bom",                     // BOM character
-            "artifact\u{034F}invisible",               // Combining grapheme joiner
-            "artifact\u{2060}wordjoiner",              // Word joiner (invisible)
-            "\u{1F4A9}emoji-artifact",                 // Emoji in ID
-            "café\u{0301}artifact",                    // Combining accent (NFD)
-            "artifact\u{0000}null",                    // Null byte
-            "artifact\u{007F}del",                     // DEL control character
-            "artifact\u{0001}soh",                     // Start of heading
-            "artifact\u{001F}unit-sep",                // Unit separator
+            "artifact\u{202E}fake\u{202D}", // Unicode BiDi override attack
+            "artifact\u{00A0}nonbreaking",  // Non-breaking space
+            "artifact\u{200B}zerowidth",    // Zero-width space
+            "artifact\u{FEFF}bom",          // BOM character
+            "artifact\u{034F}invisible",    // Combining grapheme joiner
+            "artifact\u{2060}wordjoiner",   // Word joiner (invisible)
+            "\u{1F4A9}emoji-artifact",      // Emoji in ID
+            "café\u{0301}artifact",         // Combining accent (NFD)
+            "artifact\u{0000}null",         // Null byte
+            "artifact\u{007F}del",          // DEL control character
+            "artifact\u{0001}soh",          // Start of heading
+            "artifact\u{001F}unit-sep",     // Unit separator
         ];
 
         for malicious_id in malicious_ids {
@@ -885,8 +882,11 @@ mod tests {
 
             // Some may be rejected for specific reasons, others may pass literally
             if let Some(rejection_reason) = reason {
-                assert!(!rejection_reason.is_empty(),
-                       "Rejection reason should not be empty for ID: {:?}", malicious_id);
+                assert!(
+                    !rejection_reason.is_empty(),
+                    "Rejection reason should not be empty for ID: {:?}",
+                    malicious_id
+                );
             }
 
             // Test EpochTaggedArtifact creation with malicious IDs
@@ -916,9 +916,9 @@ mod tests {
     #[test]
     fn negative_epoch_guard_event_with_massive_field_lengths() {
         // Test EpochGuardEvent with extremely large field values to check memory handling
-        let huge_trace_id = "t".repeat(1_000_000);  // 1MB trace ID
-        let huge_detail = "d".repeat(500_000);       // 500KB detail
-        let huge_artifact_id = "a".repeat(250_000);  // 250KB artifact ID
+        let huge_trace_id = "t".repeat(1_000_000); // 1MB trace ID
+        let huge_detail = "d".repeat(500_000); // 500KB detail
+        let huge_artifact_id = "a".repeat(250_000); // 250KB artifact ID
 
         let event = EpochGuardEvent {
             event_code: EPOCH_OPERATION_ACCEPTED.to_string(),
@@ -970,9 +970,12 @@ mod tests {
             // Test current_epoch consistency
             let result = source.current_epoch();
             if i % 7 == 0 {
-                assert_eq!(result, Err(EpochGuardError::EpochUnavailable {
-                    detail: "epoch source unavailable".to_string()
-                }));
+                assert_eq!(
+                    result,
+                    Err(EpochGuardError::EpochUnavailable {
+                        detail: "epoch source unavailable".to_string()
+                    })
+                );
             } else {
                 assert_eq!(result, Ok(ControlEpoch::new(epoch_val)));
             }
@@ -1038,9 +1041,15 @@ mod tests {
         for injection in &injection_attempts {
             // Test various error types with injection content
             let errors = vec![
-                EpochGuardError::EpochUnavailable { detail: injection.to_string() },
-                EpochGuardError::InvalidArtifactId { reason: injection.to_string() },
-                EpochGuardError::SignatureRejected { reason: injection.to_string() },
+                EpochGuardError::EpochUnavailable {
+                    detail: injection.to_string(),
+                },
+                EpochGuardError::InvalidArtifactId {
+                    reason: injection.to_string(),
+                },
+                EpochGuardError::SignatureRejected {
+                    reason: injection.to_string(),
+                },
             ];
 
             for error in errors {
@@ -1066,13 +1075,13 @@ mod tests {
 
         // Test arithmetic boundaries around epoch comparison
         let boundary_cases = vec![
-            (0, 0, true),                    // Both zero
-            (0, 1, false),                   // Presented zero, current one (stale)
-            (1, 0, false),                   // Presented one, current zero (future)
-            (u64::MAX, u64::MAX, true),      // Both maximum
+            (0, 0, true),                                  // Both zero
+            (0, 1, false),                                 // Presented zero, current one (stale)
+            (1, 0, false),                                 // Presented one, current zero (future)
+            (u64::MAX, u64::MAX, true),                    // Both maximum
             (u64::MAX, u64::MAX.saturating_sub(1), false), // Presented max, current max-1 (future)
             (u64::MAX.saturating_sub(1), u64::MAX, false), // Presented max-1, current max (stale)
-            (u64::MAX / 2, u64::MAX / 2, true), // Both at midpoint
+            (u64::MAX / 2, u64::MAX / 2, true),            // Both at midpoint
         ];
 
         for (presented, current, should_pass) in boundary_cases {
@@ -1080,15 +1089,23 @@ mod tests {
             let result = guard.validate_operation_epoch(
                 ControlEpoch::new(presented),
                 &source,
-                &format!("trace-boundary-{}-{}", presented, current)
+                &format!("trace-boundary-{}-{}", presented, current),
             );
 
             if should_pass {
-                assert!(result.is_ok(),
-                       "Presented {} should match current {}", presented, current);
+                assert!(
+                    result.is_ok(),
+                    "Presented {} should match current {}",
+                    presented,
+                    current
+                );
             } else {
-                assert!(result.is_err(),
-                       "Presented {} should not match current {}", presented, current);
+                assert!(
+                    result.is_err(),
+                    "Presented {} should not match current {}",
+                    presented,
+                    current
+                );
 
                 let error = result.unwrap_err();
                 if presented < current {
@@ -1104,11 +1121,11 @@ mod tests {
     fn negative_artifact_validation_with_extreme_lookback_values() {
         // Test artifact validation with various extreme lookback configurations
         let extreme_lookbacks = vec![
-            0,                               // No lookback allowed
-            1,                               // Minimal lookback
-            u64::MAX,                        // Maximum lookback
-            u64::MAX / 2,                    // Half maximum
-            u64::MAX.saturating_sub(1),      // Near maximum
+            0,                          // No lookback allowed
+            1,                          // Minimal lookback
+            u64::MAX,                   // Maximum lookback
+            u64::MAX / 2,               // Half maximum
+            u64::MAX.saturating_sub(1), // Near maximum
         ];
 
         for lookback in extreme_lookbacks {
@@ -1118,12 +1135,12 @@ mod tests {
 
             // Test various artifact epoch values against this lookback
             let test_epochs = vec![
-                0,                                           // Minimum epoch
-                current_epoch.saturating_sub(lookback),      // Exactly at lookback boundary
-                current_epoch.saturating_sub(lookback + 1),  // One past lookback (should fail)
-                current_epoch,                               // Current epoch (should pass)
-                current_epoch + 1,                           // Future epoch (should fail)
-                u64::MAX,                                     // Maximum epoch (should fail)
+                0,                                          // Minimum epoch
+                current_epoch.saturating_sub(lookback),     // Exactly at lookback boundary
+                current_epoch.saturating_sub(lookback + 1), // One past lookback (should fail)
+                current_epoch,                              // Current epoch (should pass)
+                current_epoch + 1,                          // Future epoch (should fail)
+                u64::MAX,                                   // Maximum epoch (should fail)
             ];
 
             for artifact_epoch in test_epochs {
@@ -1131,24 +1148,32 @@ mod tests {
                     &format!("artifact-lookback-{}-epoch-{}", lookback, artifact_epoch),
                     ControlEpoch::new(artifact_epoch),
                     &source,
-                    &format!("trace-lookback-{}-{}", lookback, artifact_epoch)
+                    &format!("trace-lookback-{}-{}", lookback, artifact_epoch),
                 );
 
                 // Determine expected result based on validity window
                 let is_future = artifact_epoch > current_epoch;
-                let is_stale = lookback < u64::MAX &&
-                              current_epoch > lookback &&
-                              artifact_epoch < current_epoch.saturating_sub(lookback);
+                let is_stale = lookback < u64::MAX
+                    && current_epoch > lookback
+                    && artifact_epoch < current_epoch.saturating_sub(lookback);
                 let is_valid = !is_future && !is_stale;
 
                 if is_valid {
-                    assert!(result.is_ok(),
-                           "Artifact epoch {} should be valid with lookback {} and current {}",
-                           artifact_epoch, lookback, current_epoch);
+                    assert!(
+                        result.is_ok(),
+                        "Artifact epoch {} should be valid with lookback {} and current {}",
+                        artifact_epoch,
+                        lookback,
+                        current_epoch
+                    );
                 } else {
-                    assert!(result.is_err(),
-                           "Artifact epoch {} should be invalid with lookback {} and current {}",
-                           artifact_epoch, lookback, current_epoch);
+                    assert!(
+                        result.is_err(),
+                        "Artifact epoch {} should be invalid with lookback {} and current {}",
+                        artifact_epoch,
+                        lookback,
+                        current_epoch
+                    );
 
                     let error = result.unwrap_err();
                     if is_future {
@@ -1173,7 +1198,8 @@ mod tests {
             "trust",
             b"test payload".to_vec(),
             &root,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Test various signature corruption scenarios
         let corruption_tests = vec![
@@ -1212,10 +1238,18 @@ mod tests {
             let source = StaticEpochSource::available(ControlEpoch::new(10));
 
             // Verification should fail with signature rejection
-            let result = guard.verify_tagged_artifact(&test_artifact, &source, &root,
-                                                    &format!("trace-corrupted-{}", byte_index));
+            let result = guard.verify_tagged_artifact(
+                &test_artifact,
+                &source,
+                &root,
+                &format!("trace-corrupted-{}", byte_index),
+            );
 
-            assert!(result.is_err(), "Corrupted signature should fail verification: {}", description);
+            assert!(
+                result.is_err(),
+                "Corrupted signature should fail verification: {}",
+                description
+            );
             let error = result.unwrap_err();
             assert_eq!(error.code(), EPOCH_SIGNATURE_REJECTED);
         }
@@ -1353,7 +1387,10 @@ mod tests {
             // Test epoch validation with high counter values
             let artifact_id = format!("artifact-counter-{}", i);
             let result = guard.validate_artifact_id(&artifact_id);
-            assert!(result.is_ok(), "High counter values should be handled safely");
+            assert!(
+                result.is_ok(),
+                "High counter values should be handled safely"
+            );
         }
 
         // Test sequence number arithmetic in trace IDs
@@ -1405,8 +1442,14 @@ mod tests {
         let hash_a_copy = b"hash-value-a-32-bytes-long-test!";
 
         // Verify ct_eq_bytes usage patterns
-        assert!(!constant_time::ct_eq_bytes(hash_a, hash_b), "Different hashes should not be equal");
-        assert!(constant_time::ct_eq_bytes(hash_a, hash_a_copy), "Identical hashes should be equal");
+        assert!(
+            !constant_time::ct_eq_bytes(hash_a, hash_b),
+            "Different hashes should not be equal"
+        );
+        assert!(
+            constant_time::ct_eq_bytes(hash_a, hash_a_copy),
+            "Identical hashes should be equal"
+        );
 
         // Test with various hash lengths
         for hash_len in [16, 32, 64] {
@@ -1414,8 +1457,16 @@ mod tests {
             let hash2 = vec![0xBB; hash_len];
             let hash1_copy = vec![0xAA; hash_len];
 
-            assert!(!constant_time::ct_eq_bytes(&hash1, &hash2), "Different {}-byte hashes should not be equal", hash_len);
-            assert!(constant_time::ct_eq_bytes(&hash1, &hash1_copy), "Identical {}-byte hashes should be equal", hash_len);
+            assert!(
+                !constant_time::ct_eq_bytes(&hash1, &hash2),
+                "Different {}-byte hashes should not be equal",
+                hash_len
+            );
+            assert!(
+                constant_time::ct_eq_bytes(&hash1, &hash1_copy),
+                "Identical {}-byte hashes should be equal",
+                hash_len
+            );
         }
     }
 
@@ -1427,17 +1478,19 @@ mod tests {
         // Test epoch expiry boundary conditions
         let current_time = 1000u64;
         let boundary_test_cases = vec![
-            (current_time - 1, true),   // Before current time (expired)
-            (current_time, true),       // Exactly at current time (expired - fail closed)
+            (current_time - 1, true),  // Before current time (expired)
+            (current_time, true),      // Exactly at current time (expired - fail closed)
             (current_time + 1, false), // After current time (not expired)
         ];
 
         for (test_time, should_be_expired) in boundary_test_cases {
             // Simulate expiry check: now >= expires_at for fail-closed behavior
             let is_expired = current_time >= test_time;
-            assert_eq!(is_expired, should_be_expired,
-                      "Expiry check at boundary should be fail-closed (use >= not >): time={}, current={}",
-                      test_time, current_time);
+            assert_eq!(
+                is_expired, should_be_expired,
+                "Expiry check at boundary should be fail-closed (use >= not >): time={}, current={}",
+                test_time, current_time
+            );
         }
 
         // Test signature expiry with precise boundary conditions
@@ -1453,9 +1506,11 @@ mod tests {
 
         for (check_time, should_be_expired) in expiry_boundary_tests {
             let is_expired = check_time >= expires_at; // Correct fail-closed pattern
-            assert_eq!(is_expired, should_be_expired,
-                      "Signature expiry should be fail-closed (>=): check={}, expires={}",
-                      check_time, expires_at);
+            assert_eq!(
+                is_expired, should_be_expired,
+                "Signature expiry should be fail-closed (>=): check={}, expires={}",
+                check_time, expires_at
+            );
         }
     }
 
@@ -1480,12 +1535,22 @@ mod tests {
             let safe_len_u32 = u32::try_from(artifact_len).unwrap_or(u32::MAX);
 
             // Should not panic even with very long strings
-            assert!(safe_len_u32 <= u32::MAX, "Safe casting should prevent overflow");
+            assert!(
+                safe_len_u32 <= u32::MAX,
+                "Safe casting should prevent overflow"
+            );
 
             if artifact_len > u32::MAX as usize {
-                assert_eq!(safe_len_u32, u32::MAX, "Overflow should be handled gracefully");
+                assert_eq!(
+                    safe_len_u32,
+                    u32::MAX,
+                    "Overflow should be handled gracefully"
+                );
             } else {
-                assert_eq!(safe_len_u32, artifact_len as u32, "Normal lengths should cast correctly");
+                assert_eq!(
+                    safe_len_u32, artifact_len as u32,
+                    "Normal lengths should cast correctly"
+                );
             }
 
             // Test artifact validation with length-aware logic
@@ -1493,11 +1558,11 @@ mod tests {
             match validation_result {
                 Ok(_) => {
                     // Artifact accepted despite length
-                },
+                }
                 Err(EpochGuardError::InvalidArtifactId { reason }) => {
                     // Length-based rejection is acceptable
                     assert!(!reason.is_empty(), "Rejection reason should be provided");
-                },
+                }
                 Err(_) => {
                     // Other rejection reasons acceptable
                 }

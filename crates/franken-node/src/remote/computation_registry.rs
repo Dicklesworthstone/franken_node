@@ -302,9 +302,15 @@ impl ComputationRegistry {
                 output_schema: "{}".to_string(),
             };
             let result = registry.register_computation(unicode_entry, "trace-unicode");
-            assert!(result.is_err(), "Unicode injection in computation name should be rejected");
+            assert!(
+                result.is_err(),
+                "Unicode injection in computation name should be rejected"
+            );
             if let Err(ComputationRegistryError::MalformedComputationName { name }) = result {
-                assert_eq!(name, unicode_attack_name, "Malformed name should be preserved in error");
+                assert_eq!(
+                    name, unicode_attack_name,
+                    "Malformed name should be preserved in error"
+                );
             }
 
             // Test: Control character injection in schemas
@@ -317,11 +323,20 @@ impl ComputationRegistry {
                 output_schema: "{\"result\"\r\n:\"success\"}".to_string(),
             };
             let result = registry.register_computation(control_chars_entry, "trace-control");
-            assert!(result.is_ok(), "Control characters in schemas should be preserved as-is");
+            assert!(
+                result.is_ok(),
+                "Control characters in schemas should be preserved as-is"
+            );
             if let Ok(()) = result {
                 let entry = registry.entries.get("domain.action.v1").unwrap();
-                assert!(entry.input_schema.contains('\x00'), "Control characters should be preserved in input schema");
-                assert!(entry.output_schema.contains('\r'), "Control characters should be preserved in output schema");
+                assert!(
+                    entry.input_schema.contains('\x00'),
+                    "Control characters should be preserved in input schema"
+                );
+                assert!(
+                    entry.output_schema.contains('\r'),
+                    "Control characters should be preserved in output schema"
+                );
             }
 
             // Test: Massive schema memory exhaustion attack
@@ -335,11 +350,22 @@ impl ComputationRegistry {
                 output_schema: massive_schema.clone(),
             };
             let result = registry.register_computation(massive_entry, "trace-massive");
-            assert!(result.is_ok(), "Massive schemas should be handled without memory issues");
+            assert!(
+                result.is_ok(),
+                "Massive schemas should be handled without memory issues"
+            );
             if let Ok(()) = result {
                 let entry = registry.entries.get("domain.massive.v1").unwrap();
-                assert_eq!(entry.input_schema.len(), 1_000_000, "Massive input schema should be preserved");
-                assert_eq!(entry.output_schema.len(), 1_000_000, "Massive output schema should be preserved");
+                assert_eq!(
+                    entry.input_schema.len(),
+                    1_000_000,
+                    "Massive input schema should be preserved"
+                );
+                assert_eq!(
+                    entry.output_schema.len(),
+                    1_000_000,
+                    "Massive output schema should be preserved"
+                );
             }
 
             // Test: Audit event capacity boundary attacks (audit log flooding)
@@ -363,9 +389,15 @@ impl ComputationRegistry {
                 output_schema: "{}".to_string(),
             };
             let result = registry.register_computation(flood_entry, "trace-audit-flood");
-            assert!(result.is_ok(), "Registration should succeed despite audit flood");
+            assert!(
+                result.is_ok(),
+                "Registration should succeed despite audit flood"
+            );
             // Audit events should be bounded by push_bounded
-            assert!(registry.audit_events().len() <= MAX_AUDIT_EVENTS, "Audit events should be capacity-bounded");
+            assert!(
+                registry.audit_events().len() <= MAX_AUDIT_EVENTS,
+                "Audit events should be capacity-bounded"
+            );
 
             // Test: Registry capacity boundary attacks (computation flooding)
             let mut registry = ComputationRegistry::new(1, "test-capacity");
@@ -403,10 +435,19 @@ impl ComputationRegistry {
                     output_schema: "{}".to_string(),
                 };
                 let result = registry.register_computation(injection_entry, "trace-injection");
-                assert!(result.is_ok(), "Serialization injection should be handled safely");
+                assert!(
+                    result.is_ok(),
+                    "Serialization injection should be handled safely"
+                );
                 if let Ok(()) = result {
-                    let entry = registry.entries.get(&format!("domain.injection{}.v1", i)).unwrap();
-                    assert_eq!(entry.description, injection, "Injection should be preserved as text");
+                    let entry = registry
+                        .entries
+                        .get(&format!("domain.injection{}.v1", i))
+                        .unwrap();
+                    assert_eq!(
+                        entry.description, injection,
+                        "Injection should be preserved as text"
+                    );
                 }
             }
 
@@ -436,15 +477,20 @@ impl ComputationRegistry {
 
                 let result1 = registry.register_computation(entry1, "trace-collision1");
                 let result2 = registry.register_computation(entry2, "trace-collision2");
-                assert!(result1.is_ok() && result2.is_ok(), "Similar names should not collide: {} vs {}", name1, name2);
+                assert!(
+                    result1.is_ok() && result2.is_ok(),
+                    "Similar names should not collide: {} vs {}",
+                    name1,
+                    name2
+                );
             }
 
             // Test: Normalization boundary attacks with whitespace
             let mut registry = ComputationRegistry::new(1, "test-normalization");
             let whitespace_attacks = [
                 "  domain.whitespace.v1  ", // Leading/trailing spaces
-                "\tdomain.tab.v1\t", // Tabs
-                "\ndomain.newline.v1\n", // Newlines
+                "\tdomain.tab.v1\t",        // Tabs
+                "\ndomain.newline.v1\n",    // Newlines
             ];
 
             for &attack_name in &whitespace_attacks {
@@ -462,9 +508,21 @@ impl ComputationRegistry {
                     let trimmed_name = attack_name.trim();
                     if is_canonical_computation_name(trimmed_name) {
                         let entry = registry.entries.get(trimmed_name).unwrap();
-                        assert_eq!(entry.description.trim(), "Whitespace test", "Description should be normalized");
-                        assert_eq!(entry.input_schema.trim(), "{}", "Input schema should be normalized");
-                        assert_eq!(entry.output_schema.trim(), "{}", "Output schema should be normalized");
+                        assert_eq!(
+                            entry.description.trim(),
+                            "Whitespace test",
+                            "Description should be normalized"
+                        );
+                        assert_eq!(
+                            entry.input_schema.trim(),
+                            "{}",
+                            "Input schema should be normalized"
+                        );
+                        assert_eq!(
+                            entry.output_schema.trim(),
+                            "{}",
+                            "Output schema should be normalized"
+                        );
                     }
                 }
             }
@@ -472,8 +530,8 @@ impl ComputationRegistry {
             // Test: Empty field validation edge cases
             let mut registry = ComputationRegistry::new(1, "test-empty");
             let empty_field_tests = [
-                ("domain.empty.v1", "", "{}"), // Empty description
-                ("domain.empty2.v1", "desc", ""), // Empty input schema
+                ("domain.empty.v1", "", "{}"),      // Empty description
+                ("domain.empty2.v1", "desc", ""),   // Empty input schema
                 ("domain.empty3.v1", "desc", "{}"), // Empty output schema (will be caught separately)
             ];
 
@@ -483,10 +541,18 @@ impl ComputationRegistry {
                     description: desc.to_string(),
                     required_capabilities: vec![RemoteOperation::RemoteComputation],
                     input_schema: input_schema.to_string(),
-                    output_schema: if name == "domain.empty3.v1" { "".to_string() } else { "{}".to_string() },
+                    output_schema: if name == "domain.empty3.v1" {
+                        "".to_string()
+                    } else {
+                        "{}".to_string()
+                    },
                 };
                 let result = registry.register_computation(empty_entry, "trace-empty");
-                assert!(result.is_err(), "Empty required fields should be rejected for name: {}", name);
+                assert!(
+                    result.is_err(),
+                    "Empty required fields should be rejected for name: {}",
+                    name
+                );
             }
 
             // Test: Capability injection through required_capabilities
@@ -509,7 +575,12 @@ impl ComputationRegistry {
             if let Ok(()) = result {
                 let entry = registry.entries.get("domain.capabilities.v1").unwrap();
                 // Should automatically include RemoteComputation and deduplicate
-                assert!(entry.required_capabilities.contains(&RemoteOperation::RemoteComputation), "Should auto-include RemoteComputation");
+                assert!(
+                    entry
+                        .required_capabilities
+                        .contains(&RemoteOperation::RemoteComputation),
+                    "Should auto-include RemoteComputation"
+                );
             }
 
             // Test: Duplicate registration attempts
@@ -532,15 +603,25 @@ impl ComputationRegistry {
             let first_result = registry.register_computation(original_entry, "trace-original");
             assert!(first_result.is_ok(), "First registration should succeed");
 
-            let duplicate_result = registry.register_computation(duplicate_entry, "trace-duplicate");
-            assert!(duplicate_result.is_err(), "Duplicate registration should fail");
+            let duplicate_result =
+                registry.register_computation(duplicate_entry, "trace-duplicate");
+            assert!(
+                duplicate_result.is_err(),
+                "Duplicate registration should fail"
+            );
             if let Err(ComputationRegistryError::DuplicateComputation { name }) = duplicate_result {
-                assert_eq!(name, "domain.duplicate.v1", "Duplicate error should contain computation name");
+                assert_eq!(
+                    name, "domain.duplicate.v1",
+                    "Duplicate error should contain computation name"
+                );
             }
 
             // Verify original computation is preserved
             let preserved_entry = registry.entries.get("domain.duplicate.v1").unwrap();
-            assert_eq!(preserved_entry.description, "Original computation", "Original entry should be preserved");
+            assert_eq!(
+                preserved_entry.description, "Original computation",
+                "Original entry should be preserved"
+            );
         }
     }
 
@@ -1515,10 +1596,12 @@ mod tests {
         assert_eq!(err.code(), ERR_REGISTRY_VERSION_REGRESSION);
         assert_eq!(registry.registry_version(), 4);
         assert_eq!(registry.audit_events().len(), audit_len_before);
-        assert!(!registry
-            .audit_events()
-            .iter()
-            .any(|event| event.trace_id == "trace-regression-ignored"));
+        assert!(
+            !registry
+                .audit_events()
+                .iter()
+                .any(|event| event.trace_id == "trace-regression-ignored")
+        );
     }
 
     #[test]

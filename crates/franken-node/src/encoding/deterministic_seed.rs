@@ -842,21 +842,13 @@ mod tests {
 
     #[test]
     fn test_derive_seed_is_32_bytes() {
-        let s = derive_seed(
-            &DomainTag::Encoding,
-            &content_hash(),
-            &test_config_v1(),
-        );
+        let s = derive_seed(&DomainTag::Encoding, &content_hash(), &test_config_v1());
         assert_eq!(s.bytes.len(), 32);
     }
 
     #[test]
     fn test_derive_seed_nonzero() {
-        let s = derive_seed(
-            &DomainTag::Encoding,
-            &content_hash(),
-            &test_config_v1(),
-        );
+        let s = derive_seed(&DomainTag::Encoding, &content_hash(), &test_config_v1());
         assert_ne!(s.bytes, [0u8; 32], "seed should not be all zeros");
     }
 
@@ -1047,21 +1039,13 @@ mod tests {
 
     #[test]
     fn test_seed_to_hex_length() {
-        let s = derive_seed(
-            &DomainTag::Encoding,
-            &content_hash(),
-            &test_config_v1(),
-        );
+        let s = derive_seed(&DomainTag::Encoding, &content_hash(), &test_config_v1());
         assert_eq!(s.to_hex().len(), 64);
     }
 
     #[test]
     fn test_seed_prefix_hex() {
-        let s = derive_seed(
-            &DomainTag::Encoding,
-            &content_hash(),
-            &test_config_v1(),
-        );
+        let s = derive_seed(&DomainTag::Encoding, &content_hash(), &test_config_v1());
         assert_eq!(s.prefix_hex().len(), 8);
     }
 
@@ -1082,11 +1066,7 @@ mod tests {
 
     #[test]
     fn test_seed_serialization_roundtrip() {
-        let s = derive_seed(
-            &DomainTag::Encoding,
-            &content_hash(),
-            &test_config_v1(),
-        );
+        let s = derive_seed(&DomainTag::Encoding, &content_hash(), &test_config_v1());
         let json = serde_json::to_string(&s).expect("to_string should succeed");
         let s2: DeterministicSeed = serde_json::from_str(&json).expect("from_str should succeed");
         assert_eq!(s.bytes, s2.bytes);
@@ -1143,11 +1123,7 @@ mod tests {
     #[test]
     fn test_deriver_first_call_no_bump() {
         let mut d = DeterministicSeedDeriver::new();
-        let (seed, bump) = d.derive_seed(
-            &DomainTag::Encoding,
-            &content_hash(),
-            &test_config_v1(),
-        );
+        let (seed, bump) = d.derive_seed(&DomainTag::Encoding, &content_hash(), &test_config_v1());
         assert!(bump.is_none(), "first call should not produce a bump");
         assert_eq!(seed.domain, DomainTag::Encoding);
         assert_eq!(d.tracked_domains(), 1);

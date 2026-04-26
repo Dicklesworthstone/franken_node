@@ -18,8 +18,8 @@ use sha2::{Digest, Sha256};
 
 use super::error::ApiError;
 use super::middleware::{
-    enforce_route_contract, AuthIdentity, AuthMethod, EndpointGroup, EndpointLifecycle,
-    PolicyHook, RouteMetadata, TraceContext,
+    AuthIdentity, AuthMethod, EndpointGroup, EndpointLifecycle, PolicyHook, RouteMetadata,
+    TraceContext, enforce_route_contract,
 };
 use super::trust_card_routes::ApiResponse;
 use super::utf8_prefix;
@@ -937,7 +937,12 @@ pub fn get_atc_metric_snapshot(
     trace: &TraceContext,
     metric_id: &str,
 ) -> Result<ApiResponse<AtcMetricSnapshot>, ApiError> {
-    enforce_handler_contract(identity, trace, "GET", "/api/v1/atc/verifier/metrics/{metric_id}")?;
+    enforce_handler_contract(
+        identity,
+        trace,
+        "GET",
+        "/api/v1/atc/verifier/metrics/{metric_id}",
+    )?;
     let metric_id = normalize_required_field(metric_id, "metric_id", &trace.trace_id)?;
     let computation_id = "atc-comp-latest";
     let report = build_atc_report(&trace.trace_id, computation_id)?;

@@ -1899,7 +1899,8 @@ mod tests {
     #[test]
     fn negative_lease_quorum_record_with_extremely_large_participants_list() {
         // Create a very large participants list to test memory handling
-        let large_participants: Vec<String> = (0..10000).map(|i| format!("participant-{}", i)).collect();
+        let large_participants: Vec<String> =
+            (0..10000).map(|i| format!("participant-{}", i)).collect();
 
         let record = LeaseQuorumRecord {
             quorum_id: "large-quorum".into(),
@@ -2054,8 +2055,8 @@ mod tests {
             // Zero values
             (0, 0, 0),
             // last_seq outside window
-            (10, 20, 5),   // last_seq < window_low
-            (10, 20, 25),  // last_seq > window_high
+            (10, 20, 5),  // last_seq < window_low
+            (10, 20, 25), // last_seq > window_high
         ];
 
         for (window_low, window_high, last_seq) in boundary_test_cases {
@@ -2086,16 +2087,16 @@ mod tests {
     #[test]
     fn negative_schema_migration_record_with_malformed_version_strings() {
         let malformed_versions = vec![
-            "",                           // Empty version
-            "not.a.version",             // Non-semver
-            "1.0.0-alpha+build",         // Complex semver
-            "v1.0.0",                    // Prefixed version
-            "1.0",                       // Incomplete version
-            "1.0.0.0",                   // Too many components
-            "∞.∞.∞",                     // Unicode numbers
-            "1.0.0\x00",                 // Null byte
-            "1.0.0\n",                   // Newline
-            " 1.0.0 ",                   // Whitespace padding
+            "",                  // Empty version
+            "not.a.version",     // Non-semver
+            "1.0.0-alpha+build", // Complex semver
+            "v1.0.0",            // Prefixed version
+            "1.0",               // Incomplete version
+            "1.0.0.0",           // Too many components
+            "∞.∞.∞",             // Unicode numbers
+            "1.0.0\x00",         // Null byte
+            "1.0.0\n",           // Newline
+            " 1.0.0 ",           // Whitespace padding
         ];
 
         for version_str in malformed_versions {

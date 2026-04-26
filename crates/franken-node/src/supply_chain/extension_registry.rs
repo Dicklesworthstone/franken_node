@@ -697,7 +697,8 @@ impl SignedExtensionRegistry {
                 error_code: Some(event_codes::SER_ERR_INVALID_INPUT.to_string()),
                 detail: format!(
                     "Trace ID too long: {} characters (max: {})",
-                    trace_id.len(), MAX_TRACE_ID_LEN
+                    trace_id.len(),
+                    MAX_TRACE_ID_LEN
                 ),
             };
         }
@@ -719,7 +720,8 @@ impl SignedExtensionRegistry {
                 error_code: Some(event_codes::SER_ERR_INVALID_INPUT.to_string()),
                 detail: format!(
                     "Extension name too long: {} characters (max: {})",
-                    request.name.len(), MAX_EXTENSION_NAME_LEN
+                    request.name.len(),
+                    MAX_EXTENSION_NAME_LEN
                 ),
             };
         }
@@ -741,7 +743,8 @@ impl SignedExtensionRegistry {
                 error_code: Some(event_codes::SER_ERR_INVALID_INPUT.to_string()),
                 detail: format!(
                     "Extension description too long: {} characters (max: {})",
-                    request.description.len(), MAX_EXTENSION_DESCRIPTION_LEN
+                    request.description.len(),
+                    MAX_EXTENSION_DESCRIPTION_LEN
                 ),
             };
         }
@@ -763,7 +766,8 @@ impl SignedExtensionRegistry {
                 error_code: Some(event_codes::SER_ERR_INVALID_INPUT.to_string()),
                 detail: format!(
                     "Publisher ID too long: {} characters (max: {})",
-                    request.publisher_id.len(), MAX_PUBLISHER_ID_LEN
+                    request.publisher_id.len(),
+                    MAX_PUBLISHER_ID_LEN
                 ),
             };
         }
@@ -785,7 +789,8 @@ impl SignedExtensionRegistry {
                 error_code: Some(event_codes::SER_ERR_INVALID_INPUT.to_string()),
                 detail: format!(
                     "Too many tags: {} (max: {})",
-                    request.tags.len(), MAX_TAGS_COUNT
+                    request.tags.len(),
+                    MAX_TAGS_COUNT
                 ),
             };
         }
@@ -809,7 +814,9 @@ impl SignedExtensionRegistry {
                     error_code: Some(event_codes::SER_ERR_INVALID_INPUT.to_string()),
                     detail: format!(
                         "Tag {} too long: {} characters (max: {})",
-                        i, tag.len(), MAX_TAG_LEN
+                        i,
+                        tag.len(),
+                        MAX_TAG_LEN
                     ),
                 };
             }
@@ -1865,7 +1872,11 @@ mod tests {
             result.error_code.as_deref(),
             Some(event_codes::SER_ERR_INVALID_INPUT)
         );
-        assert!(result.detail.contains("must be greater than current version"));
+        assert!(
+            result
+                .detail
+                .contains("must be greater than current version")
+        );
         assert_eq!(reg.version_lineage(&ext_id).unwrap().len(), 1);
         assert_eq!(
             reg.audit_log().last().expect("audit").event_code,

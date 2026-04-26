@@ -503,14 +503,17 @@ mod security_extreme_adversarial_negative_tests {
     #[test]
     fn extreme_adversarial_constant_time_unicode_injection_resistance() {
         // Unicode normalization attack on constant-time comparison
-        let nfc_hash = "café_hash_deadbeef12345678";           // NFC normalized
-        let nfd_hash = "cafe\u{301}_hash_deadbeef12345678";    // NFD normalized (combining accent)
-        let rtl_hash = "\u{202E}feebdaed_hash_éfac\u{202D}";   // RIGHT-TO-LEFT manipulation
+        let nfc_hash = "café_hash_deadbeef12345678"; // NFC normalized
+        let nfd_hash = "cafe\u{301}_hash_deadbeef12345678"; // NFD normalized (combining accent)
+        let rtl_hash = "\u{202E}feebdaed_hash_éfac\u{202D}"; // RIGHT-TO-LEFT manipulation
 
         // Visual similarity but different byte sequences
         assert!(!constant_time::ct_eq(&nfc_hash, &nfd_hash));
         assert!(!constant_time::ct_eq(&nfc_hash, &rtl_hash));
-        assert!(!constant_time::ct_eq_bytes(nfc_hash.as_bytes(), nfd_hash.as_bytes()));
+        assert!(!constant_time::ct_eq_bytes(
+            nfc_hash.as_bytes(),
+            nfd_hash.as_bytes()
+        ));
 
         // Unicode bomb with zero-width characters
         let unicode_bomb = format!("hash{}{}", "\u{200B}".repeat(10000), "deadbeef");
@@ -529,16 +532,16 @@ mod security_extreme_adversarial_negative_tests {
         // Massive endpoint list in scope (potential memory exhaustion)
         let mut massive_endpoints = Vec::new();
         for i in 0..100_000 {
-            if massive_endpoints.len() >= 1000 { // Bound the test to prevent actual DoS
+            if massive_endpoints.len() >= 1000 {
+                // Bound the test to prevent actual DoS
                 break;
             }
-            massive_endpoints.push(format!("https://target{i:06}.example.com/api/v1/endpoint/path/very/long/to/consume/memory"));
+            massive_endpoints.push(format!(
+                "https://target{i:06}.example.com/api/v1/endpoint/path/very/long/to/consume/memory"
+            ));
         }
 
-        let scope = RemoteScope::new(
-            vec![RemoteOperation::NetworkEgress],
-            massive_endpoints,
-        );
+        let scope = RemoteScope::new(vec![RemoteOperation::NetworkEgress], massive_endpoints);
 
         // Should handle massive scope without crashing
         let result = provider.issue(
@@ -559,7 +562,11 @@ mod security_extreme_adversarial_negative_tests {
             }
             Err(e) => {
                 // Should fail gracefully with a clear error, not panic
-                assert!(matches!(e, RemoteCapError::InvalidTtl { .. } | RemoteCapError::OperatorAuthorizationRequired));
+                assert!(matches!(
+                    e,
+                    RemoteCapError::InvalidTtl { .. }
+                        | RemoteCapError::OperatorAuthorizationRequired
+                ));
             }
         }
     }
@@ -579,10 +586,7 @@ mod security_extreme_adversarial_negative_tests {
             "https://api.example.com\x00.evil.com/nullbyte".to_string(),
         ];
 
-        let scope = RemoteScope::new(
-            vec![RemoteOperation::NetworkEgress],
-            confusing_endpoints,
-        );
+        let scope = RemoteScope::new(vec![RemoteOperation::NetworkEgress], confusing_endpoints);
 
         let cap_result = provider.issue(
             "operator-confusion",
@@ -615,7 +619,11 @@ mod security_extreme_adversarial_negative_tests {
                 );
 
                 // Should deny all malicious attempts
-                assert!(result.is_err(), "malicious URL should be denied: {}", malicious_url);
+                assert!(
+                    result.is_err(),
+                    "malicious URL should be denied: {}",
+                    malicious_url
+                );
             }
         }
     }
@@ -675,8 +683,8 @@ mod security_extreme_adversarial_negative_tests {
         // Unicode injection in action_id and trace_id
         let unicode_bombs = vec![
             format!("action{}{}", "\u{202E}", "\u{200B}".repeat(1000)), // RTL + zero-width
-            format!("action\u{0000}null\u{0001}injection"),              // Null byte injection
-            format!("action{}", "\u{FEFF}".repeat(100)),                 // BOM flooding
+            format!("action\u{0000}null\u{0001}injection"),             // Null byte injection
+            format!("action{}", "\u{FEFF}".repeat(100)),                // BOM flooding
             "action\r\nHTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_string(), // HTTP injection
         ];
 
@@ -726,11 +734,14 @@ mod security_extreme_adversarial_negative_tests {
             );
 
             // Should deny all injection attempts
-            assert!(result.is_err(), "host injection should be denied: {}", malicious_host);
+            assert!(
+                result.is_err(),
+                "host injection should be denied: {}",
+                malicious_host
+            );
 
             match result {
-                Err(SsrfError::SsrfInvalidIp { .. }) |
-                Err(SsrfError::SsrfDenied { .. }) => {
+                Err(SsrfError::SsrfInvalidIp { .. }) | Err(SsrfError::SsrfDenied { .. }) => {
                     // Expected rejection
                 }
                 Err(e) => {
@@ -752,10 +763,10 @@ mod security_extreme_adversarial_negative_tests {
 
         // Port boundary and overflow scenarios
         let boundary_ports = vec![
-            0,          // Invalid port
-            65535,      // Maximum valid port
-            65536,      // Overflow attempt
-            u16::MAX,   // Maximum u16
+            0,        // Invalid port
+            65535,    // Maximum valid port
+            65536,    // Overflow attempt
+            u16::MAX, // Maximum u16
         ];
 
         for port in boundary_ports {
@@ -821,18 +832,23 @@ mod security_extreme_adversarial_negative_tests {
                 1_700_000_001,
                 "trace-concurrent",
             );
-            if results.len() < 10 { // Bound the results collection
+            if results.len() < 10 {
+                // Bound the results collection
                 results.push(result);
             }
         }
 
         // Only one should succeed, others should fail with replay detection
         let success_count = results.iter().filter(|r| r.is_ok()).count();
-        let replay_count = results.iter().filter(|r| {
-            matches!(r, Err(RemoteCapError::ReplayDetected { .. }))
-        }).count();
+        let replay_count = results
+            .iter()
+            .filter(|r| matches!(r, Err(RemoteCapError::ReplayDetected { .. })))
+            .count();
 
-        assert_eq!(success_count, 1, "exactly one concurrent access should succeed");
+        assert_eq!(
+            success_count, 1,
+            "exactly one concurrent access should succeed"
+        );
         assert_eq!(replay_count, 2, "other attempts should detect replay");
     }
 
@@ -853,7 +869,7 @@ mod security_extreme_adversarial_negative_tests {
             "2026-13-01T12:00:00Z",           // Invalid month
             "2026-01-32T12:00:00Z",           // Invalid day
             "2026-01-01T25:00:00Z",           // Invalid hour
-            "invalid-timestamp",               // Malformed
+            "invalid-timestamp",              // Malformed
             "",                               // Empty timestamp
         ];
 
@@ -883,10 +899,11 @@ mod security_extreme_adversarial_negative_tests {
                 }
                 Err(e) => {
                     // Should fail gracefully, not panic on malformed input
-                    assert!(matches!(e,
-                        FreshnessError::StaleFrontier { .. } |
-                        FreshnessError::OverrideRequired { .. } |
-                        FreshnessError::PolicyInvalid { .. }
+                    assert!(matches!(
+                        e,
+                        FreshnessError::StaleFrontier { .. }
+                            | FreshnessError::OverrideRequired { .. }
+                            | FreshnessError::PolicyInvalid { .. }
                     ));
                 }
             }
@@ -915,8 +932,17 @@ mod security_extreme_adversarial_negative_tests {
         assert!(!constant_time::ct_eq(&medium_string, &short_string));
 
         // Byte-level comparisons
-        assert!(!constant_time::ct_eq_bytes(short_string.as_bytes(), different_short.as_bytes()));
-        assert!(!constant_time::ct_eq_bytes(long_string.as_bytes(), different_long.as_bytes()));
-        assert!(!constant_time::ct_eq_bytes(short_string.as_bytes(), long_string.as_bytes()));
+        assert!(!constant_time::ct_eq_bytes(
+            short_string.as_bytes(),
+            different_short.as_bytes()
+        ));
+        assert!(!constant_time::ct_eq_bytes(
+            long_string.as_bytes(),
+            different_long.as_bytes()
+        ));
+        assert!(!constant_time::ct_eq_bytes(
+            short_string.as_bytes(),
+            long_string.as_bytes()
+        ));
     }
 }

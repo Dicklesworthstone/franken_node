@@ -1645,18 +1645,22 @@ mod tests {
 
         // Path 1: Simple deposit
         let mut ledger1 = StakingLedger::new();
-        let stake_id1 = ledger1.deposit(publisher_id, stake_amount, risk_tier, 1000)
+        let stake_id1 = ledger1
+            .deposit(publisher_id, stake_amount, risk_tier, 1000)
             .expect("initial deposit should succeed");
 
         // Path 2: Deposit → withdraw → deposit (admission/eviction cycle)
         let mut ledger2 = StakingLedger::new();
-        let stake_id_temp = ledger2.deposit(publisher_id, stake_amount, risk_tier, 1000)
+        let stake_id_temp = ledger2
+            .deposit(publisher_id, stake_amount, risk_tier, 1000)
             .expect("first deposit should succeed");
 
-        ledger2.withdraw(stake_id_temp, 2000)
+        ledger2
+            .withdraw(stake_id_temp, 2000)
             .expect("withdrawal should succeed");
 
-        let stake_id2 = ledger2.deposit(publisher_id, stake_amount, risk_tier, 3000)
+        let stake_id2 = ledger2
+            .deposit(publisher_id, stake_amount, risk_tier, 3000)
             .expect("re-deposit should succeed");
 
         // Metamorphic relation: Both paths should result in equivalent final state
@@ -1670,8 +1674,12 @@ mod tests {
         assert_eq!(stake1.state, stake2.state); // Both should be Active
 
         // Account state should be equivalent
-        let account1 = ledger1.get_account(publisher_id).expect("account1 should exist");
-        let account2 = ledger2.get_account(publisher_id).expect("account2 should exist");
+        let account1 = ledger1
+            .get_account(publisher_id)
+            .expect("account1 should exist");
+        let account2 = ledger2
+            .get_account(publisher_id)
+            .expect("account2 should exist");
 
         assert_eq!(account1.balance, account2.balance);
         assert_eq!(account1.deposited, account2.deposited);
@@ -1703,16 +1711,20 @@ mod tests {
 
         // Path 1: A then B
         let mut ledger1 = StakingLedger::new();
-        let stake_a1 = ledger1.deposit(publisher_a, 100, RiskTier::Low, 1000)
+        let stake_a1 = ledger1
+            .deposit(publisher_a, 100, RiskTier::Low, 1000)
             .expect("deposit A first");
-        let stake_b1 = ledger1.deposit(publisher_b, 200, RiskTier::High, 2000)
+        let stake_b1 = ledger1
+            .deposit(publisher_b, 200, RiskTier::High, 2000)
             .expect("deposit B second");
 
         // Path 2: B then A
         let mut ledger2 = StakingLedger::new();
-        let stake_b2 = ledger2.deposit(publisher_b, 200, RiskTier::High, 2000)
+        let stake_b2 = ledger2
+            .deposit(publisher_b, 200, RiskTier::High, 2000)
             .expect("deposit B first");
-        let stake_a2 = ledger2.deposit(publisher_a, 100, RiskTier::Low, 1000)
+        let stake_a2 = ledger2
+            .deposit(publisher_a, 100, RiskTier::Low, 1000)
             .expect("deposit A second");
 
         // Metamorphic relation: Final state should be equivalent
@@ -1757,21 +1769,26 @@ mod tests {
 
         // Path 1: Clean stake (no slash)
         let mut ledger1 = StakingLedger::new();
-        let stake_id1 = ledger1.deposit(publisher_id, 1000, RiskTier::Critical, 1000)
+        let stake_id1 = ledger1
+            .deposit(publisher_id, 1000, RiskTier::Critical, 1000)
             .expect("clean deposit");
 
         // Path 2: Stake with slash → appeal → successful restoration
         let mut ledger2 = StakingLedger::new();
-        let stake_id2 = ledger2.deposit(publisher_id, 1000, RiskTier::Critical, 1000)
+        let stake_id2 = ledger2
+            .deposit(publisher_id, 1000, RiskTier::Critical, 1000)
             .expect("deposit for slash test");
 
-        let slash_event = ledger2.slash(stake_id2, evidence("test-slash"), 2000)
+        let slash_event = ledger2
+            .slash(stake_id2, evidence("test-slash"), 2000)
             .expect("slash should succeed");
 
-        let appeal_event = ledger2.file_appeal(stake_id2, slash_event.slash_id, "false positive", 3000)
+        let appeal_event = ledger2
+            .file_appeal(stake_id2, slash_event.slash_id, "false positive", 3000)
             .expect("appeal should succeed");
 
-        ledger2.resolve_appeal(appeal_event.appeal_id, true, 4000)
+        ledger2
+            .resolve_appeal(appeal_event.appeal_id, true, 4000)
             .expect("appeal resolution should succeed");
 
         // Metamorphic relation: After successful appeal resolution, stake should be equivalent to clean stake
@@ -1791,9 +1808,14 @@ mod tests {
 
         // Gate checks should be equivalent for both
         let gate = CapabilityStakeGate::new(StakePolicy::default_policy());
-        let (allowed_clean, _, _) = gate.check_stake(&ledger1, publisher_id, &RiskTier::Critical, 5000);
-        let (allowed_restored, _, _) = gate.check_stake(&ledger2, publisher_id, &RiskTier::Critical, 5000);
+        let (allowed_clean, _, _) =
+            gate.check_stake(&ledger1, publisher_id, &RiskTier::Critical, 5000);
+        let (allowed_restored, _, _) =
+            gate.check_stake(&ledger2, publisher_id, &RiskTier::Critical, 5000);
 
-        assert_eq!(allowed_clean, allowed_restored, "Gate checks should be equivalent after restoration");
+        assert_eq!(
+            allowed_clean, allowed_restored,
+            "Gate checks should be equivalent after restoration"
+        );
     }
 }

@@ -1707,11 +1707,11 @@ mod tests {
     fn negative_stake_id_with_extreme_numerical_values() {
         // Test StakeId with boundary numerical values
         let boundary_values = vec![
-            0,                    // Zero
-            1,                    // Minimum positive
-            u64::MAX / 2,         // Half maximum
-            u64::MAX - 1,         // Near maximum
-            u64::MAX,             // Maximum value
+            0,            // Zero
+            1,            // Minimum positive
+            u64::MAX / 2, // Half maximum
+            u64::MAX - 1, // Near maximum
+            u64::MAX,     // Maximum value
         ];
 
         for value in boundary_values {
@@ -1719,8 +1719,16 @@ mod tests {
 
             // Display should work with extreme values
             let display = format!("{}", stake_id);
-            assert!(display.starts_with("stake-"), "Display should have stake- prefix: {}", display);
-            assert!(display.contains(&value.to_string()), "Display should contain the value: {}", display);
+            assert!(
+                display.starts_with("stake-"),
+                "Display should have stake- prefix: {}",
+                display
+            );
+            assert!(
+                display.contains(&value.to_string()),
+                "Display should contain the value: {}",
+                display
+            );
 
             // Debug should also work
             let debug = format!("{:?}", stake_id);
@@ -1740,7 +1748,12 @@ mod tests {
     #[test]
     fn negative_risk_tier_serialization_and_ordering_consistency() {
         // Test RiskTier serialization edge cases
-        let tiers = [RiskTier::Low, RiskTier::Medium, RiskTier::High, RiskTier::Critical];
+        let tiers = [
+            RiskTier::Low,
+            RiskTier::Medium,
+            RiskTier::High,
+            RiskTier::Critical,
+        ];
 
         for tier in &tiers {
             // Serialization should work consistently
@@ -1764,15 +1777,19 @@ mod tests {
         // Test invalid deserialization
         let invalid_tier_json = vec![
             "\"Unknown\"",
-            "\"LOW\"",              // Wrong case
-            "\"VeryHigh\"",         // Non-existent variant
-            "42",                   // Wrong type
+            "\"LOW\"",      // Wrong case
+            "\"VeryHigh\"", // Non-existent variant
+            "42",           // Wrong type
             "null",
         ];
 
         for invalid_json in invalid_tier_json {
             let result: Result<RiskTier, _> = serde_json::from_str(invalid_json);
-            assert!(result.is_err(), "Should reject invalid tier JSON: {}", invalid_json);
+            assert!(
+                result.is_err(),
+                "Should reject invalid tier JSON: {}",
+                invalid_json
+            );
         }
     }
 
@@ -1819,7 +1836,11 @@ mod tests {
     #[test]
     fn negative_appeal_outcome_edge_cases_and_state_consistency() {
         // Test AppealOutcome with edge cases
-        let outcomes = [AppealOutcome::Pending, AppealOutcome::Upheld, AppealOutcome::Reversed];
+        let outcomes = [
+            AppealOutcome::Pending,
+            AppealOutcome::Upheld,
+            AppealOutcome::Reversed,
+        ];
 
         for outcome in &outcomes {
             // Label and display consistency
@@ -1845,9 +1866,18 @@ mod tests {
         }
 
         // Test serialization format (should be snake_case)
-        assert_eq!(serde_json::to_string(&AppealOutcome::Pending).unwrap(), "\"pending\"");
-        assert_eq!(serde_json::to_string(&AppealOutcome::Upheld).unwrap(), "\"upheld\"");
-        assert_eq!(serde_json::to_string(&AppealOutcome::Reversed).unwrap(), "\"reversed\"");
+        assert_eq!(
+            serde_json::to_string(&AppealOutcome::Pending).unwrap(),
+            "\"pending\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AppealOutcome::Upheld).unwrap(),
+            "\"upheld\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AppealOutcome::Reversed).unwrap(),
+            "\"reversed\""
+        );
     }
 
     #[test]
@@ -1869,12 +1899,12 @@ mod tests {
             SlashEvidence {
                 evidence_hash: "🚀emoji💀hash".to_string(), // Unicode emoji
                 description: "<script>alert('evidence')</script>".to_string(), // XSS
-                collected_at: u64::MAX, // Maximum timestamp
+                collected_at: u64::MAX,                     // Maximum timestamp
                 capability: "../../../etc/passwd".to_string(), // Path traversal
             },
             SlashEvidence {
                 evidence_hash: "x".repeat(10_000), // Very long hash
-                description: "y".repeat(50_000), // Very long description
+                description: "y".repeat(50_000),   // Very long description
                 collected_at: u64::MAX / 2,
                 capability: "z".repeat(1_000), // Long capability
             },
@@ -1922,15 +1952,15 @@ mod tests {
             SlashEvent {
                 stake_id: StakeId(0),
                 evidence: make_evidence("test_hash"),
-                slash_amount: 0, // Zero slash amount
-                slashed_at: 0, // Zero timestamp
+                slash_amount: 0,    // Zero slash amount
+                slashed_at: 0,      // Zero timestamp
                 appeal_deadline: 0, // Zero deadline
             },
             SlashEvent {
                 stake_id: StakeId(u64::MAX),
                 evidence: make_evidence("max_test"),
-                slash_amount: u64::MAX, // Maximum slash amount
-                slashed_at: u64::MAX, // Maximum timestamp
+                slash_amount: u64::MAX,    // Maximum slash amount
+                slashed_at: u64::MAX,      // Maximum timestamp
                 appeal_deadline: u64::MAX, // Maximum deadline
             },
             SlashEvent {
@@ -1979,8 +2009,8 @@ mod tests {
     #[test]
     fn negative_constants_validation_and_naming_consistency() {
         // Test that all event constants are well-formed
-        use event_codes::*;
         use crate::security::constant_time;
+        use event_codes::*;
 
         let event_constants = [
             STAKE_001_DEPOSITED,
@@ -1994,13 +2024,30 @@ mod tests {
 
         for constant in &event_constants {
             assert!(!constant.is_empty());
-            assert!(constant.starts_with("STAKE-"), "Event constant should start with STAKE-: {}", constant);
-            assert!(constant.is_ascii(), "Event constant should be ASCII: {}", constant);
+            assert!(
+                constant.starts_with("STAKE-"),
+                "Event constant should start with STAKE-: {}",
+                constant
+            );
+            assert!(
+                constant.is_ascii(),
+                "Event constant should be ASCII: {}",
+                constant
+            );
 
             // Should follow pattern STAKE-XXX where XXX is 3 digits
             let suffix = constant.strip_prefix("STAKE-").unwrap();
-            assert_eq!(suffix.len(), 3, "Event code suffix should be 3 digits: {}", suffix);
-            assert!(suffix.chars().all(|c| c.is_ascii_digit()), "Event code suffix should be numeric: {}", suffix);
+            assert_eq!(
+                suffix.len(),
+                3,
+                "Event code suffix should be 3 digits: {}",
+                suffix
+            );
+            assert!(
+                suffix.chars().all(|c| c.is_ascii_digit()),
+                "Event code suffix should be numeric: {}",
+                suffix
+            );
         }
 
         // Test error constants
@@ -2016,8 +2063,16 @@ mod tests {
 
         for constant in &error_constants {
             assert!(!constant.is_empty());
-            assert!(constant.starts_with("ERR_STAKE_"), "Error constant should start with ERR_STAKE_: {}", constant);
-            assert!(constant.is_ascii(), "Error constant should be ASCII: {}", constant);
+            assert!(
+                constant.starts_with("ERR_STAKE_"),
+                "Error constant should start with ERR_STAKE_: {}",
+                constant
+            );
+            assert!(
+                constant.is_ascii(),
+                "Error constant should be ASCII: {}",
+                constant
+            );
         }
 
         // Test invariant constants
@@ -2032,8 +2087,16 @@ mod tests {
 
         for constant in &invariant_constants {
             assert!(!constant.is_empty());
-            assert!(constant.starts_with("INV-STAKE-"), "Invariant should start with INV-STAKE-: {}", constant);
-            assert!(constant.is_ascii(), "Invariant constant should be ASCII: {}", constant);
+            assert!(
+                constant.starts_with("INV-STAKE-"),
+                "Invariant should start with INV-STAKE-: {}",
+                constant
+            );
+            assert!(
+                constant.is_ascii(),
+                "Invariant constant should be ASCII: {}",
+                constant
+            );
         }
 
         // Test schema version
@@ -2051,8 +2114,8 @@ mod tests {
 
         // Test potential overflow scenarios in slash calculations
         let overflow_scenarios = vec![
-            (max_amount, 100), // 100% of max amount
-            (large_amount, 200), // 200% (would overflow)
+            (max_amount, 100),        // 100% of max amount
+            (large_amount, 200),      // 200% (would overflow)
             (small_amount, u32::MAX), // Very high percentage
         ];
 
@@ -2067,7 +2130,12 @@ mod tests {
                 amount / 100 * percentage as u64 // Safe calculation
             };
 
-            assert!(slash_amount <= amount, "Slash amount should not exceed original: {} vs {}", slash_amount, amount);
+            assert!(
+                slash_amount <= amount,
+                "Slash amount should not exceed original: {} vs {}",
+                slash_amount,
+                amount
+            );
 
             // Test with saturating arithmetic
             let saturating_slash = amount.saturating_mul(percentage as u64).saturating_div(100);
@@ -2087,12 +2155,12 @@ mod tests {
     fn negative_timestamp_edge_cases_and_deadline_calculations() {
         // Test timestamp handling with edge cases
         let edge_timestamps = vec![
-            (0, 0), // Both zero
-            (0, 1), // Zero start, small deadline
-            (1, 0), // Small start, zero deadline (deadline in past)
+            (0, 0),                   // Both zero
+            (0, 1),                   // Zero start, small deadline
+            (1, 0),                   // Small start, zero deadline (deadline in past)
             (u64::MAX - 1, u64::MAX), // Near overflow
-            (u64::MAX, u64::MAX), // Both maximum
-            (1000, 500), // Deadline before current time
+            (u64::MAX, u64::MAX),     // Both maximum
+            (1000, 500),              // Deadline before current time
         ];
 
         for (current_time, deadline) in edge_timestamps {
@@ -2127,7 +2195,10 @@ mod tests {
 
             // Should be serializable even with extreme values
             let serialization = serde_json::to_string(&event);
-            assert!(serialization.is_ok(), "Should serialize extreme timestamp values");
+            assert!(
+                serialization.is_ok(),
+                "Should serialize extreme timestamp values"
+            );
         }
     }
 }

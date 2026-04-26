@@ -2900,9 +2900,11 @@ mod tests {
             .submit_proof(&regression_cid, regression_proof, "regression_actor", 5_000)
             .unwrap_err();
         assert_eq!(regression_err.code, ERR_PROOF_INVALID);
-        assert!(regression_err
-            .message
-            .contains("predate challenge creation"));
+        assert!(
+            regression_err
+                .message
+                .contains("predate challenge creation")
+        );
 
         // Test timeout calculation with overflow protection
         let overflow_challenge = Challenge {

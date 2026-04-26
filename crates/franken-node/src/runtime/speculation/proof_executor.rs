@@ -1203,12 +1203,18 @@ mod tests {
 
         // Should be deterministic
         let digest1_repeat = digest_bytes(input1);
-        assert_eq!(digest1, digest1_repeat, "digest_bytes should be deterministic");
+        assert_eq!(
+            digest1, digest1_repeat,
+            "digest_bytes should be deterministic"
+        );
 
         // Different data should produce different digests
         let input2 = b"different-data";
         let digest2 = digest_bytes(input2);
-        assert_ne!(digest1, digest2, "different inputs should produce different digests");
+        assert_ne!(
+            digest1, digest2,
+            "different inputs should produce different digests"
+        );
     }
 
     #[test]
@@ -1225,9 +1231,18 @@ mod tests {
         let digest_abc_d = digest_bytes(input_abc_d);
 
         // All should be different due to length prefixing
-        assert_ne!(digest_ab_cd, digest_a_bcd, "length prefixing should prevent ab|cd vs a| collision");
-        assert_ne!(digest_ab_cd, digest_abc_d, "length prefixing should prevent ab|cd vs abc| collision");
-        assert_ne!(digest_a_bcd, digest_abc_d, "different length inputs should hash differently");
+        assert_ne!(
+            digest_ab_cd, digest_a_bcd,
+            "length prefixing should prevent ab|cd vs a| collision"
+        );
+        assert_ne!(
+            digest_ab_cd, digest_abc_d,
+            "length prefixing should prevent ab|cd vs abc| collision"
+        );
+        assert_ne!(
+            digest_a_bcd, digest_abc_d,
+            "different length inputs should hash differently"
+        );
     }
 
     #[test]
@@ -1247,8 +1262,10 @@ mod tests {
         };
 
         // They must be different to ensure old digest is not accepted as canonical
-        assert_ne!(new_digest, old_digest,
-            "new length-prefixed digest must differ from old unframed digest");
+        assert_ne!(
+            new_digest, old_digest,
+            "new length-prefixed digest must differ from old unframed digest"
+        );
     }
 
     #[test]
@@ -1260,8 +1277,14 @@ mod tests {
         let baseline_digest2 = deterministic_baseline_digest(input);
         let direct_digest = digest_bytes(input);
 
-        assert_eq!(baseline_digest1, baseline_digest2, "baseline digest should be deterministic");
-        assert_eq!(baseline_digest1, direct_digest, "baseline digest should use digest_bytes");
+        assert_eq!(
+            baseline_digest1, baseline_digest2,
+            "baseline digest should be deterministic"
+        );
+        assert_eq!(
+            baseline_digest1, direct_digest,
+            "baseline digest should use digest_bytes"
+        );
     }
 
     #[test]
@@ -1270,11 +1293,17 @@ mod tests {
         let empty_digest1 = digest_bytes(b"");
         let empty_digest2 = digest_bytes(&[]);
 
-        assert_eq!(empty_digest1, empty_digest2, "empty input should be handled consistently");
+        assert_eq!(
+            empty_digest1, empty_digest2,
+            "empty input should be handled consistently"
+        );
 
         // Empty should be different from single byte
         let single_byte_digest = digest_bytes(b"\0");
-        assert_ne!(empty_digest1, single_byte_digest, "empty vs single byte should differ");
+        assert_ne!(
+            empty_digest1, single_byte_digest,
+            "empty vs single byte should differ"
+        );
     }
 
     #[test]
@@ -1284,12 +1313,21 @@ mod tests {
         let large_digest = digest_bytes(&large_input);
 
         // Should not panic and should produce valid hex digest
-        assert!(!large_digest.is_empty(), "large input should produce valid digest");
-        assert!(large_digest.chars().all(|c| c.is_ascii_hexdigit()), "digest should be valid hex");
+        assert!(
+            !large_digest.is_empty(),
+            "large input should produce valid digest"
+        );
+        assert!(
+            large_digest.chars().all(|c| c.is_ascii_hexdigit()),
+            "digest should be valid hex"
+        );
 
         // Length encoding edge case: very large input
         let huge_input = vec![1u8; 1_000_000];
         let huge_digest = digest_bytes(&huge_input);
-        assert_ne!(large_digest, huge_digest, "different large inputs should produce different digests");
+        assert_ne!(
+            large_digest, huge_digest,
+            "different large inputs should produce different digests"
+        );
     }
 }

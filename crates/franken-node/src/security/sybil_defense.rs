@@ -2036,9 +2036,11 @@ mod sybil_defense_negative_path_tests {
         let attenuated = detector.attenuate_sybil_signals(&signals, &BTreeSet::new());
 
         assert_eq!(attenuated.len(), 2);
-        assert!(attenuated.iter().all(|(_, weight)| {
-            (*weight - 1.0).abs() < f64::EPSILON
-        }));
+        assert!(
+            attenuated
+                .iter()
+                .all(|(_, weight)| { (*weight - 1.0).abs() < f64::EPSILON })
+        );
     }
 
     #[test]
@@ -2079,9 +2081,7 @@ mod sybil_defense_negative_path_tests {
     fn median_rejects_positive_infinity_input() {
         let aggregator = TrustAggregator::default();
 
-        let err = aggregator
-            .median(&[0.25, f64::INFINITY, 0.75])
-            .unwrap_err();
+        let err = aggregator.median(&[0.25, f64::INFINITY, 0.75]).unwrap_err();
 
         assert_eq!(err.code, ERR_SPS_AGGREGATION_FAILED);
         assert!(err.message.contains("non-finite value"));
@@ -2172,14 +2172,14 @@ mod sybil_defense_negative_path_tests {
 
         // Attack vectors targeting floating-point precision edge cases
         let precision_attack_nodes = [
-            (0, f64::MIN_POSITIVE),                    // Minimal positive reputation
-            (1, f64::EPSILON),                         // Machine epsilon
-            (u64::MAX, f64::MAX),                      // Maximum values
-            (1_000_000_000_000, 1e-100),              // Very large history, tiny rep
-            (1, 1.0 + f64::EPSILON),                   // Slightly above 1.0
-            (100, std::f64::consts::PI / 1e10),        // Irrational tiny number
-            (50, 1.0 / 3.0),                          // Repeating decimal
-            (999_999_999_999, 0.999_999_999_999),     // Near-maximum values
+            (0, f64::MIN_POSITIVE),               // Minimal positive reputation
+            (1, f64::EPSILON),                    // Machine epsilon
+            (u64::MAX, f64::MAX),                 // Maximum values
+            (1_000_000_000_000, 1e-100),          // Very large history, tiny rep
+            (1, 1.0 + f64::EPSILON),              // Slightly above 1.0
+            (100, std::f64::consts::PI / 1e10),   // Irrational tiny number
+            (50, 1.0 / 3.0),                      // Repeating decimal
+            (999_999_999_999, 0.999_999_999_999), // Near-maximum values
         ];
 
         for (history_len, reputation_score) in precision_attack_nodes {
@@ -2187,20 +2187,29 @@ mod sybil_defense_negative_path_tests {
                 "precision-attacker",
                 reputation_score,
                 history_len,
-                1_000_000_000
+                1_000_000_000,
             );
 
             let weight = weighter.compute_weight(&attack_node);
 
             // Weight calculations must remain finite and bounded
-            assert!(weight.is_finite(),
+            assert!(
+                weight.is_finite(),
                 "Weight calculation resulted in non-finite value for history={}, rep={}",
-                history_len, reputation_score);
-            assert!(weight >= 0.0,
-                "Weight calculation resulted in negative value: {}", weight);
-            assert!(weight <= weighter.max_weight * 2.0,
+                history_len,
+                reputation_score
+            );
+            assert!(
+                weight >= 0.0,
+                "Weight calculation resulted in negative value: {}",
+                weight
+            );
+            assert!(
+                weight <= weighter.max_weight * 2.0,
                 "Weight {} exceeded reasonable bounds for max_weight {}",
-                weight, weighter.max_weight);
+                weight,
+                weighter.max_weight
+            );
 
             // Verify monotonicity isn't broken by precision issues
             if history_len > 0 {
@@ -2208,13 +2217,18 @@ mod sybil_defense_negative_path_tests {
                     "smaller-history",
                     reputation_score,
                     history_len.saturating_sub(1),
-                    1_000_000_000
+                    1_000_000_000,
                 );
                 let smaller_weight = weighter.compute_weight(&smaller_node);
 
-                assert!(weight >= smaller_weight - f64::EPSILON,
+                assert!(
+                    weight >= smaller_weight - f64::EPSILON,
                     "Monotonicity violated: weight decreased from {} to {} at history change {}->{}",
-                    smaller_weight, weight, history_len.saturating_sub(1), history_len);
+                    smaller_weight,
+                    weight,
+                    history_len.saturating_sub(1),
+                    history_len
+                );
             }
         }
     }
@@ -2242,8 +2256,8 @@ mod sybil_defense_negative_path_tests {
                     signal_id: format!("complex-signal-{}-{}", i, j),
                     source_node_id: node_id.clone(),
                     target_id: format!("target-{}", i % 5), // Limited target diversity
-                    value: 0.95 + (i as f64 / 100_000.0), // Very similar values
-                    timestamp_ms: 5_000 + (j as u64), // Clustered timestamps
+                    value: 0.95 + (i as f64 / 100_000.0),   // Very similar values
+                    timestamp_ms: 5_000 + (j as u64),       // Clustered timestamps
                 });
             }
         }
@@ -2253,18 +2267,27 @@ mod sybil_defense_negative_path_tests {
         let elapsed = start.elapsed();
 
         // Detection must complete in reasonable time despite adversarial input complexity
-        assert!(elapsed.as_millis() < 5_000,
+        assert!(
+            elapsed.as_millis() < 5_000,
             "Sybil detection took {}ms for {} signals, should be <5000ms",
-            elapsed.as_millis(), signals.len());
+            elapsed.as_millis(),
+            signals.len()
+        );
 
         // Results should be deterministic regardless of complexity
-        assert!(detected.len() <= nodes.len(),
+        assert!(
+            detected.len() <= nodes.len(),
             "Detected more Sybils ({}) than total nodes ({})",
-            detected.len(), nodes.len());
+            detected.len(),
+            nodes.len()
+        );
 
         // Event logging should remain bounded
-        assert!(detector.events().len() <= 100,
-            "Event log grew to {} entries, should be bounded", detector.events().len());
+        assert!(
+            detector.events().len() <= 100,
+            "Event log grew to {} entries, should be bounded",
+            detector.events().len()
+        );
     }
 
     /// Extreme adversarial test: Memory exhaustion attack via massive trust signal batches
@@ -2305,16 +2328,24 @@ mod sybil_defense_negative_path_tests {
         // Processing should either succeed or fail gracefully
         match result {
             Ok(aggregation_result) => {
-                assert!(aggregation_result.value.is_finite(),
-                    "Massive batch processing resulted in non-finite aggregation");
-                assert!(aggregation_result.signal_count <= massive_signal_count,
+                assert!(
+                    aggregation_result.value.is_finite(),
+                    "Massive batch processing resulted in non-finite aggregation"
+                );
+                assert!(
+                    aggregation_result.signal_count <= massive_signal_count,
                     "Signal count {} exceeds input size {}",
-                    aggregation_result.signal_count, massive_signal_count);
-            },
+                    aggregation_result.signal_count,
+                    massive_signal_count
+                );
+            }
             Err(error) => {
                 // Graceful failure due to resource limits is acceptable
-                assert_eq!(error.code, ERR_SPS_AGGREGATION_FAILED,
-                    "Unexpected error type for massive batch: {}", error.code);
+                assert_eq!(
+                    error.code, ERR_SPS_AGGREGATION_FAILED,
+                    "Unexpected error type for massive batch: {}",
+                    error.code
+                );
             }
         }
 
@@ -2328,8 +2359,10 @@ mod sybil_defense_negative_path_tests {
         }];
 
         let recovery_result = pipeline.process_signals(&simple_signals, 1_700_001_000);
-        assert!(recovery_result.is_ok(),
-            "Pipeline should remain functional after stress test");
+        assert!(
+            recovery_result.is_ok(),
+            "Pipeline should remain functional after stress test"
+        );
     }
 
     /// Extreme adversarial test: Concurrent trust signal injection race condition attack
@@ -2355,37 +2388,45 @@ mod sybil_defense_negative_path_tests {
         }
 
         // Spawn multiple threads performing concurrent signal injection
-        let handles: Vec<_> = (0..8).map(|thread_id| {
-            let pipeline_clone = Arc::clone(&pipeline);
+        let handles: Vec<_> = (0..8)
+            .map(|thread_id| {
+                let pipeline_clone = Arc::clone(&pipeline);
 
-            thread::spawn(move || {
-                for batch_id in 0..25 {
-                    let mut thread_signals = Vec::new();
+                thread::spawn(move || {
+                    for batch_id in 0..25 {
+                        let mut thread_signals = Vec::new();
 
-                    // Generate varied signal patterns to stress different code paths
-                    for signal_id in 0..10 {
-                        thread_signals.push(TrustSignal {
-                            signal_id: format!("thread-{}-batch-{}-signal-{}", thread_id, batch_id, signal_id),
-                            source_node_id: format!("shared-node-{}", signal_id % 20),
-                            target_id: format!("race-target-{}-{}", thread_id, batch_id % 3),
-                            value: 0.3 + (thread_id as f64 / 20.0) + (signal_id as f64 / 100.0),
-                            timestamp_ms: 1_700_000_000 + (thread_id as u64 * 1000) + (batch_id as u64 * 100) + signal_id as u64,
-                        });
+                        // Generate varied signal patterns to stress different code paths
+                        for signal_id in 0..10 {
+                            thread_signals.push(TrustSignal {
+                                signal_id: format!(
+                                    "thread-{}-batch-{}-signal-{}",
+                                    thread_id, batch_id, signal_id
+                                ),
+                                source_node_id: format!("shared-node-{}", signal_id % 20),
+                                target_id: format!("race-target-{}-{}", thread_id, batch_id % 3),
+                                value: 0.3 + (thread_id as f64 / 20.0) + (signal_id as f64 / 100.0),
+                                timestamp_ms: 1_700_000_000
+                                    + (thread_id as u64 * 1000)
+                                    + (batch_id as u64 * 100)
+                                    + signal_id as u64,
+                            });
+                        }
+
+                        if let Ok(mut pipeline_lock) = pipeline_clone.try_lock() {
+                            let _result = pipeline_lock.process_signals(
+                                &thread_signals,
+                                1_700_000_000 + (thread_id as u64 * 1000) + batch_id as u64,
+                            );
+                            // Note: Results may vary due to race conditions, we're testing for safety not correctness
+                        }
+
+                        // Brief yield to encourage race conditions
+                        thread::yield_now();
                     }
-
-                    if let Ok(mut pipeline_lock) = pipeline_clone.try_lock() {
-                        let _result = pipeline_lock.process_signals(
-                            &thread_signals,
-                            1_700_000_000 + (thread_id as u64 * 1000) + batch_id as u64
-                        );
-                        // Note: Results may vary due to race conditions, we're testing for safety not correctness
-                    }
-
-                    // Brief yield to encourage race conditions
-                    thread::yield_now();
-                }
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all threads to complete
         for handle in handles {
@@ -2394,8 +2435,11 @@ mod sybil_defense_negative_path_tests {
 
         // Verify pipeline remains in valid state after concurrent stress
         let final_pipeline = pipeline.lock().unwrap();
-        assert_eq!(final_pipeline.nodes().len(), 20,
-            "Node count changed during concurrent processing");
+        assert_eq!(
+            final_pipeline.nodes().len(),
+            20,
+            "Node count changed during concurrent processing"
+        );
 
         // Pipeline should still be able to process signals normally
         let test_signals = vec![TrustSignal {
@@ -2406,11 +2450,13 @@ mod sybil_defense_negative_path_tests {
             timestamp_ms: 1_700_002_000,
         }];
 
-        drop(final_pipeline);  // Release lock before reacquiring
+        drop(final_pipeline); // Release lock before reacquiring
         let mut final_pipeline = pipeline.lock().unwrap();
         let final_result = final_pipeline.process_signals(&test_signals, 1_700_002_000);
-        assert!(final_result.is_ok(),
-            "Pipeline should function normally after concurrent stress test");
+        assert!(
+            final_result.is_ok(),
+            "Pipeline should function normally after concurrent stress test"
+        );
     }
 
     /// Extreme adversarial test: Statistical manipulation via crafted outlier patterns
@@ -2438,9 +2484,14 @@ mod sybil_defense_negative_path_tests {
 
             // Verify outlier resistance: result should stay close to honest mean
             let deviation = (result.value - expected_honest_mean).abs() / expected_honest_mean;
-            assert!(deviation <= 0.10,
+            assert!(
+                deviation <= 0.10,
                 "Trimmed-mean with {:.2} trim ratio deviated {:.4} from honest mean {:.2} (result: {:.4})",
-                trim_ratio, deviation, expected_honest_mean, result.value);
+                trim_ratio,
+                deviation,
+                expected_honest_mean,
+                result.value
+            );
 
             // Verify trim count calculation
             let len_f64 = u32::try_from(combined_values.len()).unwrap_or(u32::MAX) as f64;
@@ -2449,9 +2500,13 @@ mod sybil_defense_negative_path_tests {
 
             // Allow for edge cases where trimming would eliminate all values
             if actual_trim_count < combined_values.len() {
-                assert!(actual_trim_count <= expected_trim_count + 2,
+                assert!(
+                    actual_trim_count <= expected_trim_count + 2,
                     "Trim count {} exceeds expected {} for trim ratio {:.2}",
-                    actual_trim_count, expected_trim_count, trim_ratio);
+                    actual_trim_count,
+                    expected_trim_count,
+                    trim_ratio
+                );
             }
 
             // Compare with median for cross-validation
@@ -2459,9 +2514,13 @@ mod sybil_defense_negative_path_tests {
             let trimmed_median_diff = (result.value - median_result.value).abs();
 
             // Trimmed-mean and median should generally agree on outlier-resistant aggregation
-            assert!(trimmed_median_diff <= 0.3,
+            assert!(
+                trimmed_median_diff <= 0.3,
                 "Trimmed-mean ({:.4}) and median ({:.4}) disagree significantly with trim ratio {:.2}",
-                result.value, median_result.value, trim_ratio);
+                result.value,
+                median_result.value,
+                trim_ratio
+            );
         }
     }
 
@@ -2484,13 +2543,10 @@ mod sybil_defense_negative_path_tests {
         let evasion_patterns = [
             // Pattern 1: Just under burst threshold
             (burst_threshold - 1, 1_000),
-
             // Pattern 2: Burst threshold exactly at window boundary
             (burst_threshold + 1, window_ms + 1),
-
             // Pattern 3: Multiple micro-bursts within separate windows
             (2, window_ms / 3),
-
             // Pattern 4: Slow sustained rate just under detection
             (burst_threshold - 2, window_ms / 2),
         ];
@@ -2511,35 +2567,43 @@ mod sybil_defense_negative_path_tests {
                 });
             }
 
-            let detected = detector.detect_sybil_cluster(
-                &pattern_signals,
-                &nodes,
-                base_timestamp + 100_000
-            );
+            let detected =
+                detector.detect_sybil_cluster(&pattern_signals, &nodes, base_timestamp + 100_000);
 
             // Analyze detection results based on expected behavior
             if *signal_count >= burst_threshold + 1 {
                 // Patterns exceeding burst threshold should be detected if within window
-                let spans_single_window = (*time_spacing as u64 * (*signal_count as u64 - 1)) <= window_ms;
+                let spans_single_window =
+                    (*time_spacing as u64 * (*signal_count as u64 - 1)) <= window_ms;
                 if spans_single_window {
-                    assert!(detected.contains(&attacker_id),
+                    assert!(
+                        detected.contains(&attacker_id),
                         "Pattern {} with {} signals over {}ms should be detected as burst",
-                        pattern_id, signal_count, *time_spacing as u64 * (*signal_count as u64));
+                        pattern_id,
+                        signal_count,
+                        *time_spacing as u64 * (*signal_count as u64)
+                    );
                 }
             } else {
                 // Patterns under threshold should generally evade detection
                 // (unless caught by other heuristics)
                 if detected.contains(&attacker_id) {
                     // If detected, it should be due to coordination detection, not burst
-                    assert!(!detector.events().is_empty(),
-                        "Pattern {} detected without logging events", pattern_id);
+                    assert!(
+                        !detector.events().is_empty(),
+                        "Pattern {} detected without logging events",
+                        pattern_id
+                    );
                 }
             }
         }
 
         // Verify detector state remains consistent after evasion attempts
-        assert!(detector.events().len() <= 20,
-            "Event log grew excessively to {} entries", detector.events().len());
+        assert!(
+            detector.events().len() <= 20,
+            "Event log grew excessively to {} entries",
+            detector.events().len()
+        );
     }
 
     /// Extreme adversarial test: Reputation score manipulation via edge case reputation
@@ -2550,16 +2614,16 @@ mod sybil_defense_negative_path_tests {
 
         // Edge case reputation scores targeting calculation vulnerabilities
         let reputation_exploits = [
-            (f64::MIN_POSITIVE, 100),       // Minimal positive reputation
-            (f64::EPSILON, 1000),           // Machine epsilon reputation
-            (1e-100, 500),                  // Extremely small positive
-            (f64::MAX, 0),                  // Maximum reputation, no history
-            (f64::INFINITY, 1000),          // Infinite reputation (should be sanitized)
-            (f64::NAN, 500),                // NaN reputation (should be sanitized)
-            (-0.0, 100),                    // Negative zero
-            (-f64::MIN_POSITIVE, 200),      // Smallest negative
-            (1.0 / 0.0, 300),              // Division by zero result
-            (0.0 / 0.0, 400),              // NaN from division
+            (f64::MIN_POSITIVE, 100),  // Minimal positive reputation
+            (f64::EPSILON, 1000),      // Machine epsilon reputation
+            (1e-100, 500),             // Extremely small positive
+            (f64::MAX, 0),             // Maximum reputation, no history
+            (f64::INFINITY, 1000),     // Infinite reputation (should be sanitized)
+            (f64::NAN, 500),           // NaN reputation (should be sanitized)
+            (-0.0, 100),               // Negative zero
+            (-f64::MIN_POSITIVE, 200), // Smallest negative
+            (1.0 / 0.0, 300),          // Division by zero result
+            (0.0 / 0.0, 400),          // NaN from division
         ];
 
         for (reputation_score, history_len) in reputation_exploits {
@@ -2574,32 +2638,50 @@ mod sybil_defense_negative_path_tests {
             let weight = weighter.compute_weight(&exploit_node);
 
             // Weight must remain finite and positive regardless of reputation exploits
-            assert!(weight.is_finite(),
+            assert!(
+                weight.is_finite(),
                 "Weight calculation with reputation {} resulted in non-finite value: {}",
-                reputation_score, weight);
-            assert!(weight >= 0.0,
+                reputation_score,
+                weight
+            );
+            assert!(
+                weight >= 0.0,
                 "Weight calculation with reputation {} resulted in negative value: {}",
-                reputation_score, weight);
-            assert!(weight <= weighter.max_weight * 1.1, // Small tolerance for rounding
+                reputation_score,
+                weight
+            );
+            assert!(
+                weight <= weighter.max_weight * 1.1, // Small tolerance for rounding
                 "Weight {} exceeds maximum bound {} with reputation {}",
-                weight, weighter.max_weight, reputation_score);
+                weight,
+                weighter.max_weight,
+                reputation_score
+            );
 
             // Compare with baseline established node
-            let baseline_node = TrustNode::established("baseline", 75.0, history_len, 1_600_000_000);
+            let baseline_node =
+                TrustNode::established("baseline", 75.0, history_len, 1_600_000_000);
             let baseline_weight = weighter.compute_weight(&baseline_node);
 
             // Extreme reputation values should not provide unfair advantage
             if !reputation_score.is_finite() || reputation_score <= 0.0 {
-                assert!(weight <= baseline_weight * 1.1,
+                assert!(
+                    weight <= baseline_weight * 1.1,
                     "Invalid reputation {} should not exceed baseline weight {:.6} (got {:.6})",
-                    reputation_score, baseline_weight, weight);
+                    reputation_score,
+                    baseline_weight,
+                    weight
+                );
             }
 
             // Test weight ratio calculation resilience
             let ratio = weighter.weight_ratio_new_vs_established(&exploit_node, &baseline_node);
-            assert!(ratio.is_finite() && ratio >= 0.0,
+            assert!(
+                ratio.is_finite() && ratio >= 0.0,
                 "Weight ratio with exploit reputation {} resulted in invalid ratio: {}",
-                reputation_score, ratio);
+                reputation_score,
+                ratio
+            );
         }
     }
 
@@ -2610,7 +2692,12 @@ mod sybil_defense_negative_path_tests {
         let mut pipeline = SybilDefensePipeline::new();
 
         // Register mix of normal and edge-case nodes
-        pipeline.register_node(TrustNode::established("normal-node", 80.0, 200, 1_600_000_000));
+        pipeline.register_node(TrustNode::established(
+            "normal-node",
+            80.0,
+            200,
+            1_600_000_000,
+        ));
         pipeline.register_node(TrustNode {
             node_id: "edge-node".to_string(),
             reputation_score: f64::EPSILON,
@@ -2629,7 +2716,6 @@ mod sybil_defense_negative_path_tests {
                 value: 0.5,
                 timestamp_ms: u64::MAX,
             },
-
             // Signal with zero timestamp
             TrustSignal {
                 signal_id: "zero-timestamp".to_string(),
@@ -2638,7 +2724,6 @@ mod sybil_defense_negative_path_tests {
                 value: 0.6,
                 timestamp_ms: 0,
             },
-
             // Signal from non-existent node
             TrustSignal {
                 signal_id: "phantom-node-signal".to_string(),
@@ -2647,7 +2732,6 @@ mod sybil_defense_negative_path_tests {
                 value: 0.7,
                 timestamp_ms: 1_700_000_000,
             },
-
             // Signal with boundary value
             TrustSignal {
                 signal_id: "boundary-value".to_string(),
@@ -2656,7 +2740,6 @@ mod sybil_defense_negative_path_tests {
                 value: 1.0, // Exact boundary
                 timestamp_ms: 1_700_000_000,
             },
-
             // Signal with very long string IDs (potential buffer issues)
             TrustSignal {
                 signal_id: "x".repeat(10_000),
@@ -2673,27 +2756,42 @@ mod sybil_defense_negative_path_tests {
         match processing_result {
             Ok(result) => {
                 // If processing succeeds, results should be mathematically sound
-                assert!(result.value.is_finite(),
-                    "Pipeline processing with malformed signals resulted in non-finite aggregation");
-                assert!(result.signal_count <= malformed_signals.len(),
+                assert!(
+                    result.value.is_finite(),
+                    "Pipeline processing with malformed signals resulted in non-finite aggregation"
+                );
+                assert!(
+                    result.signal_count <= malformed_signals.len(),
                     "Signal count {} exceeds input size {}",
-                    result.signal_count, malformed_signals.len());
-                assert!(result.trimmed_count <= result.signal_count,
+                    result.signal_count,
+                    malformed_signals.len()
+                );
+                assert!(
+                    result.trimmed_count <= result.signal_count,
                     "Trimmed count {} exceeds total signal count {}",
-                    result.trimmed_count, result.signal_count);
-            },
+                    result.trimmed_count,
+                    result.signal_count
+                );
+            }
             Err(error) => {
                 // Graceful failure is acceptable for malformed input
-                assert!(!error.message.is_empty(),
-                    "Error processing malformed signals should have descriptive message");
-                assert!(!error.code.is_empty(),
-                    "Error processing malformed signals should have error code");
+                assert!(
+                    !error.message.is_empty(),
+                    "Error processing malformed signals should have descriptive message"
+                );
+                assert!(
+                    !error.code.is_empty(),
+                    "Error processing malformed signals should have error code"
+                );
             }
         }
 
         // Verify pipeline state integrity after malformed signal processing
-        assert_eq!(pipeline.nodes().len(), 2,
-            "Node count should remain unchanged after malformed signal processing");
+        assert_eq!(
+            pipeline.nodes().len(),
+            2,
+            "Node count should remain unchanged after malformed signal processing"
+        );
 
         // Pipeline should remain functional for normal signals
         let normal_signals = vec![TrustSignal {
@@ -2705,20 +2803,29 @@ mod sybil_defense_negative_path_tests {
         }];
 
         let recovery_result = pipeline.process_signals(&normal_signals, 1_700_001_000);
-        assert!(recovery_result.is_ok(),
+        assert!(
+            recovery_result.is_ok(),
             "Pipeline should process normal signals after malformed input: {:?}",
-            recovery_result);
+            recovery_result
+        );
 
         // Event log should remain bounded and coherent
         let events = pipeline.pipeline_events();
-        assert!(events.len() <= 100,
-            "Event log grew excessively to {} entries", events.len());
+        assert!(
+            events.len() <= 100,
+            "Event log grew excessively to {} entries",
+            events.len()
+        );
 
         for event in events {
-            assert!(!event.event_code.is_empty(),
-                "Event should have non-empty code");
-            assert!(!event.detail.is_empty(),
-                "Event should have non-empty detail");
+            assert!(
+                !event.event_code.is_empty(),
+                "Event should have non-empty code"
+            );
+            assert!(
+                !event.detail.is_empty(),
+                "Event should have non-empty detail"
+            );
         }
     }
 }

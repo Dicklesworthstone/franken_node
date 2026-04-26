@@ -336,9 +336,17 @@ fn is_sha256_hex(value: &str) -> bool {
 fn compute_replay_hash(payload: &str, inputs: &BTreeMap<String, String>) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"universal_verifier_sdk_replay_v1:");
-    hasher.update(u64::try_from(payload.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(
+        u64::try_from(payload.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     hasher.update(payload.as_bytes());
-    hasher.update(u64::try_from(inputs.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(
+        u64::try_from(inputs.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     for (k, v) in inputs {
         hasher.update(u64::try_from(k.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(k.as_bytes());
@@ -374,16 +382,28 @@ fn canonical_capsule_signature_payload(capsule: &ReplayCapsule) -> Vec<u8> {
     ] {
         append_length_prefixed(&mut payload, field);
     }
-    payload.extend_from_slice(&u64::try_from(capsule.manifest.input_refs.len()).unwrap_or(u64::MAX).to_le_bytes());
+    payload.extend_from_slice(
+        &u64::try_from(capsule.manifest.input_refs.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     for input_ref in &capsule.manifest.input_refs {
         append_length_prefixed(&mut payload, input_ref);
     }
-    payload.extend_from_slice(&u64::try_from(capsule.manifest.metadata.len()).unwrap_or(u64::MAX).to_le_bytes());
+    payload.extend_from_slice(
+        &u64::try_from(capsule.manifest.metadata.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     for (key, value) in &capsule.manifest.metadata {
         append_length_prefixed(&mut payload, key);
         append_length_prefixed(&mut payload, value);
     }
-    payload.extend_from_slice(&u64::try_from(capsule.inputs.len()).unwrap_or(u64::MAX).to_le_bytes());
+    payload.extend_from_slice(
+        &u64::try_from(capsule.inputs.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     for (k, v) in &capsule.inputs {
         append_length_prefixed(&mut payload, k);
         append_length_prefixed(&mut payload, v);

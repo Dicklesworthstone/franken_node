@@ -815,13 +815,14 @@ mod tests {
             cand("neg-inf", 100, f64::NEG_INFINITY),
         ];
 
-        let (decisions, report) =
-            evaluate_candidates(&candidates, &config(), "tr", "ts").unwrap();
+        let (decisions, report) = evaluate_candidates(&candidates, &config(), "tr", "ts").unwrap();
 
         assert!(decisions.iter().all(|decision| !decision.staged));
-        assert!(decisions
-            .iter()
-            .all(|decision| decision.reason.contains("< threshold")));
+        assert!(
+            decisions
+                .iter()
+                .all(|decision| decision.reason.contains("< threshold"))
+        );
         assert_eq!(report.staged_count, 0);
         assert_eq!(report.skipped_count, 3);
         assert_eq!(report.budget_used, 0);

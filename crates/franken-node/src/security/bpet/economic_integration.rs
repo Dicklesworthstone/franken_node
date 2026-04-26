@@ -1235,12 +1235,7 @@ mod tests {
     fn engine_with_empty_motif_library_does_not_invent_matches() {
         let mut engine = BpetEconomicEngine::new(Vec::new());
         let guidance = engine
-            .generate_guidance(
-                &make_declining_trajectory(),
-                50_000.0,
-                0.8,
-                &make_trace(),
-            )
+            .generate_guidance(&make_declining_trajectory(), 50_000.0, 0.8, &make_trace())
             .unwrap();
 
         assert!(guidance.motif_matches.is_empty());

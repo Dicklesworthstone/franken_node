@@ -3230,7 +3230,10 @@ mod tests {
                             "Unicode injection should not create admin records"
                         );
                         assert!(
-                            !constant_time::ct_eq(inserted_record.origin_node_id.as_bytes(), b"admin"),
+                            !constant_time::ct_eq(
+                                inserted_record.origin_node_id.as_bytes(),
+                                b"admin"
+                            ),
                             "Unicode injection should not create admin origins"
                         );
 
@@ -4021,7 +4024,10 @@ mod tests {
                     } else if insert_result {
                         // If tampered record was inserted, it should be distinguishable
                         assert!(
-                            !constant_time::ct_eq(found_record.payload.as_slice(), original_payload.as_slice()),
+                            !constant_time::ct_eq(
+                                found_record.payload.as_slice(),
+                                original_payload.as_slice()
+                            ),
                             "Tampered payload should be distinguishable from original"
                         );
                     }

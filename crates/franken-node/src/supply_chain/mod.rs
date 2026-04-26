@@ -435,8 +435,8 @@ mod tests {
             // Validation must reject path traversal attempts
             assert!(matches!(
                 error,
-                ManifestSchemaError::PathTraversalDetected { .. } |
-                ManifestSchemaError::InvalidEntrypoint { .. }
+                ManifestSchemaError::PathTraversalDetected { .. }
+                    | ManifestSchemaError::InvalidEntrypoint { .. }
             ));
         }
     }
@@ -449,31 +449,31 @@ mod tests {
 
         // Unicode normalization attack vectors targeting package identity spoofing
         let spoofing_names = [
-            "pac\u{212A}age-name",           // Kelvin symbol (K) vs Latin K
-            "pаckage-name",                  // Cyrillic 'a' vs Latin 'a'
-            "pac\u{0138}age-name",           // Kra character
-            "package\u{2010}name",           // Hyphen vs hyphen-minus
-            "pac\u{200D}kage-name",          // Zero-width joiner
-            "package\u{FEFF}name",           // Zero-width no-break space
-            "pac\u{034F}kage-name",          // Combining grapheme joiner
-            "pасkаgе-nаmе",                  // Mixed Cyrillic/Latin (homograph)
-            "package\u{1D5BA}name",          // Mathematical sans-serif 'e'
-            "pac\u{FF2D}age-name",           // Fullwidth 'M'
+            "pac\u{212A}age-name",  // Kelvin symbol (K) vs Latin K
+            "pаckage-name",         // Cyrillic 'a' vs Latin 'a'
+            "pac\u{0138}age-name",  // Kra character
+            "package\u{2010}name",  // Hyphen vs hyphen-minus
+            "pac\u{200D}kage-name", // Zero-width joiner
+            "package\u{FEFF}name",  // Zero-width no-break space
+            "pac\u{034F}kage-name", // Combining grapheme joiner
+            "pасkаgе-nаmе",         // Mixed Cyrillic/Latin (homograph)
+            "package\u{1D5BA}name", // Mathematical sans-serif 'e'
+            "pac\u{FF2D}age-name",  // Fullwidth 'M'
         ];
 
         for (i, spoofed_name) in spoofing_names.iter().enumerate() {
             manifest.package.name = spoofed_name.to_string();
             manifest.package.version = format!("1.0.{}", i);
 
-            let error = validate_signed_manifest(&manifest)
-                .expect_err("unicode spoofing must fail");
+            let error =
+                validate_signed_manifest(&manifest).expect_err("unicode spoofing must fail");
 
             // System must detect Unicode normalization attacks
             assert!(matches!(
                 error,
-                ManifestSchemaError::UnicodeAnomalyDetected { .. } |
-                ManifestSchemaError::SuspiciousCharacters { .. } |
-                ManifestSchemaError::InvalidPackageName { .. }
+                ManifestSchemaError::UnicodeAnomalyDetected { .. }
+                    | ManifestSchemaError::SuspiciousCharacters { .. }
+                    | ManifestSchemaError::InvalidPackageName { .. }
             ));
         }
     }
@@ -508,9 +508,9 @@ mod tests {
             // Must detect and reject URL injection attempts
             assert!(matches!(
                 error,
-                ManifestSchemaError::MaliciousUrl { .. } |
-                ManifestSchemaError::InvalidRepository { .. } |
-                ManifestSchemaError::SuspiciousCharacters { .. }
+                ManifestSchemaError::MaliciousUrl { .. }
+                    | ManifestSchemaError::InvalidRepository { .. }
+                    | ManifestSchemaError::SuspiciousCharacters { .. }
             ));
         }
     }
@@ -526,27 +526,38 @@ mod tests {
 
         // Add progressively larger attestation entries
         for i in 0..10_000 {
-            let large_digest = "sha256:".to_string() + &"a".repeat(64_usize.saturating_add(i % 1000)); // Growing size
-            push_bounded(&mut manifest.provenance.attestation_chain, AttestationRef {
-                id: format!("memory-exhaustion-att-{:05}", i),
-                attestation_type: format!("massive-type-{}", "x".repeat(i % 100)),
-                digest: large_digest,
-            }, 1000);
+            let large_digest =
+                "sha256:".to_string() + &"a".repeat(64_usize.saturating_add(i % 1000)); // Growing size
+            push_bounded(
+                &mut manifest.provenance.attestation_chain,
+                AttestationRef {
+                    id: format!("memory-exhaustion-att-{:05}", i),
+                    attestation_type: format!("massive-type-{}", "x".repeat(i % 100)),
+                    digest: large_digest,
+                },
+                1000,
+            );
 
             // Prevent actual memory exhaustion in test environment
-            if manifest.provenance.attestation_chain.len().saturating_mul(200) > 100_000 {
+            if manifest
+                .provenance
+                .attestation_chain
+                .len()
+                .saturating_mul(200)
+                > 100_000
+            {
                 break;
             }
         }
 
-        let error = validate_signed_manifest(&manifest)
-            .expect_err("massive attestation chain must fail");
+        let error =
+            validate_signed_manifest(&manifest).expect_err("massive attestation chain must fail");
 
         // System must reject oversized attestation chains
         assert!(matches!(
             error,
-            ManifestSchemaError::AttestationChainTooLarge { .. } |
-            ManifestSchemaError::ResourceExhaustion { .. }
+            ManifestSchemaError::AttestationChainTooLarge { .. }
+                | ManifestSchemaError::ResourceExhaustion { .. }
         ));
     }
 
@@ -560,14 +571,14 @@ mod tests {
         let base_sig = "QUJDREVG"; // Valid base64: "ABCDEF"
 
         let malicious_signatures = [
-            format!("{}==", base_sig),                    // Padding manipulation
-            format!("{}{}", base_sig, base_sig),          // Signature concatenation
-            format!("{}deadbeef", base_sig),              // Appended bytes
-            format!("{}00000000", base_sig),              // Null byte extension
-            base_sig.repeat(10),                          // Repeated signature
-            format!("{}ffffffff", base_sig),              // Max value extension
-            format!("{}\x00\x01\x02\x03", base_sig),     // Binary extension
-            format!("{}padding", base_sig),               // Text extension
+            format!("{}==", base_sig),               // Padding manipulation
+            format!("{}{}", base_sig, base_sig),     // Signature concatenation
+            format!("{}deadbeef", base_sig),         // Appended bytes
+            format!("{}00000000", base_sig),         // Null byte extension
+            base_sig.repeat(10),                     // Repeated signature
+            format!("{}ffffffff", base_sig),         // Max value extension
+            format!("{}\x00\x01\x02\x03", base_sig), // Binary extension
+            format!("{}padding", base_sig),          // Text extension
         ];
 
         for (i, malicious_sig) in malicious_signatures.iter().enumerate() {
@@ -580,8 +591,8 @@ mod tests {
             // Must detect signature manipulation attempts
             assert!(matches!(
                 error,
-                ManifestSchemaError::SignatureMalformed { .. } |
-                ManifestSchemaError::InvalidSignatureFormat { .. }
+                ManifestSchemaError::SignatureMalformed { .. }
+                    | ManifestSchemaError::InvalidSignatureFormat { .. }
             ));
         }
     }
@@ -608,10 +619,8 @@ mod tests {
 
         for (i, xss_payload) in xss_payloads.iter().enumerate() {
             manifest.package.name = format!("script-injection-attack-{}", i);
-            manifest.behavioral_profile.summary = format!(
-                "Legitimate summary with {} embedded payload",
-                xss_payload
-            );
+            manifest.behavioral_profile.summary =
+                format!("Legitimate summary with {} embedded payload", xss_payload);
 
             let error = validate_signed_manifest(&manifest)
                 .expect_err("script injection summary must fail");
@@ -619,8 +628,8 @@ mod tests {
             // Must detect and sanitize script injection attempts
             assert!(matches!(
                 error,
-                ManifestSchemaError::ScriptInjectionDetected { .. } |
-                ManifestSchemaError::SuspiciousContent { .. }
+                ManifestSchemaError::ScriptInjectionDetected { .. }
+                    | ManifestSchemaError::SuspiciousContent { .. }
             ));
         }
     }
@@ -639,7 +648,11 @@ mod tests {
         for i in 0..1000 {
             let complex_cap_name = format!(
                 "cap_{}_{}_{}_{}_{}",
-                i % 13, i.saturating_mul(7) % 17, i.saturating_mul(11) % 19, i.saturating_mul(13) % 23, i.saturating_mul(17) % 29
+                i % 13,
+                i.saturating_mul(7) % 17,
+                i.saturating_mul(11) % 19,
+                i.saturating_mul(13) % 23,
+                i.saturating_mul(17) % 29
             );
             push_bounded(&mut manifest.capabilities, cap(&complex_cap_name), 100);
         }
@@ -655,13 +668,13 @@ mod tests {
             Ok(_) => {
                 // If validation succeeds, ensure it's truly valid
                 assert!(!manifest.capabilities.is_empty());
-            },
+            }
             Err(error) => {
                 // If validation fails, it should be due to complexity limits, not hang
                 assert!(matches!(
                     error,
-                    ManifestSchemaError::TooManyCapabilities { .. } |
-                    ManifestSchemaError::CapabilityComplexityLimit { .. }
+                    ManifestSchemaError::TooManyCapabilities { .. }
+                        | ManifestSchemaError::CapabilityComplexityLimit { .. }
                 ));
             }
         }
@@ -678,45 +691,55 @@ mod tests {
         let base_manifest = Arc::new(valid_manifest());
 
         // Spawn multiple threads performing concurrent validations with mutations
-        let handles: Vec<_> = (0..20).map(|thread_id| {
-            let manifest_clone = Arc::clone(&base_manifest);
+        let handles: Vec<_> = (0..20)
+            .map(|thread_id| {
+                let manifest_clone = Arc::clone(&base_manifest);
 
-            thread::spawn(move || {
-                for i in 0..50 {
-                    let mut manifest = (*manifest_clone).clone();
+                thread::spawn(move || {
+                    for i in 0..50 {
+                        let mut manifest = (*manifest_clone).clone();
 
-                    // Apply thread-specific mutations to trigger races
-                    manifest.package.name = format!("race-attack-{}-{}", thread_id, i);
-                    manifest.package.version = format!("1.{}.{}", thread_id, i);
+                        // Apply thread-specific mutations to trigger races
+                        manifest.package.name = format!("race-attack-{}-{}", thread_id, i);
+                        manifest.package.version = format!("1.{}.{}", thread_id, i);
 
-                    // Randomly mutate different fields to stress validation state
-                    match i % 5 {
-                        0 => manifest.schema_version = format!("race-{}", thread_id),
-                        1 => manifest.signature.signature = format!("QUJDREVG{}", thread_id),
-                        2 => manifest.trust.certification_level = if thread_id % 2 == 0 {
-                            CertificationLevel::Verified
-                        } else {
-                            CertificationLevel::SelfSigned
-                        },
-                        3 => manifest.behavioral_profile.risk_tier = if thread_id % 2 == 0 {
-                            RiskTier::High
-                        } else {
-                            RiskTier::Low
-                        },
-                        _ => {
-                            manifest.capabilities.clear();
-                            push_bounded(&mut manifest.capabilities, cap(&format!("race-cap-{}", thread_id)), 10);
+                        // Randomly mutate different fields to stress validation state
+                        match i % 5 {
+                            0 => manifest.schema_version = format!("race-{}", thread_id),
+                            1 => manifest.signature.signature = format!("QUJDREVG{}", thread_id),
+                            2 => {
+                                manifest.trust.certification_level = if thread_id % 2 == 0 {
+                                    CertificationLevel::Verified
+                                } else {
+                                    CertificationLevel::SelfSigned
+                                }
+                            }
+                            3 => {
+                                manifest.behavioral_profile.risk_tier = if thread_id % 2 == 0 {
+                                    RiskTier::High
+                                } else {
+                                    RiskTier::Low
+                                }
+                            }
+                            _ => {
+                                manifest.capabilities.clear();
+                                push_bounded(
+                                    &mut manifest.capabilities,
+                                    cap(&format!("race-cap-{}", thread_id)),
+                                    10,
+                                );
+                            }
                         }
+
+                        // Attempt validation - should not crash or corrupt state
+                        let _result = validate_signed_manifest(&manifest);
+
+                        // Brief yield to encourage race conditions
+                        thread::yield_now();
                     }
-
-                    // Attempt validation - should not crash or corrupt state
-                    let _result = validate_signed_manifest(&manifest);
-
-                    // Brief yield to encourage race conditions
-                    thread::yield_now();
-                }
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all threads to complete
         for handle in handles {
@@ -725,9 +748,12 @@ mod tests {
 
         // After concurrent stress test, normal validation should still work
         let final_result = validate_signed_manifest(&base_manifest);
-        assert!(final_result.is_ok() || matches!(
-            final_result.unwrap_err(),
-            ManifestSchemaError::InvalidSchemaVersion { .. }
-        ));
+        assert!(
+            final_result.is_ok()
+                || matches!(
+                    final_result.unwrap_err(),
+                    ManifestSchemaError::InvalidSchemaVersion { .. }
+                )
+        );
     }
 }

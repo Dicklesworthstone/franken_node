@@ -520,17 +520,21 @@ fn validate_attestation_freshness(
                 .max_attestation_age_secs
                 .saturating_add(policy.cached_trust_window_secs);
 
-    push_bounded(issues, ChainIssue {
-        code: VerificationErrorCode::ChainStale,
-        link_role: None,
-        message: format!("attestation age {age}s exceeded policy window"),
-        remediation: if within_cached_window {
-            "Re-verify with fresh provenance before cached trust window expires.".to_string()
-        } else {
-            "Rebuild and re-attest artifact with fresh provenance timestamps.".to_string()
+    push_bounded(
+        issues,
+        ChainIssue {
+            code: VerificationErrorCode::ChainStale,
+            link_role: None,
+            message: format!("attestation age {age}s exceeded policy window"),
+            remediation: if within_cached_window {
+                "Re-verify with fresh provenance before cached trust window expires.".to_string()
+            } else {
+                "Rebuild and re-attest artifact with fresh provenance timestamps.".to_string()
+            },
+            allow_in_cached_mode: within_cached_window,
         },
-        allow_in_cached_mode: within_cached_window,
-    }, MAX_CHAIN_ISSUES);
+        MAX_CHAIN_ISSUES,
+    );
 }
 
 fn validate_links(
@@ -541,15 +545,19 @@ fn validate_links(
 ) {
     for link in &attestation.links {
         if link.revoked {
-            push_bounded(issues, ChainIssue {
-                code: VerificationErrorCode::ChainLinkRevoked,
-                link_role: Some(link.role),
-                message: format!("link revoked for signer {}", link.signer_id),
-                remediation:
-                    "Rotate compromised signing key and issue a new signed attestation link."
-                        .to_string(),
-                allow_in_cached_mode: false,
-            }, MAX_CHAIN_ISSUES);
+            push_bounded(
+                issues,
+                ChainIssue {
+                    code: VerificationErrorCode::ChainLinkRevoked,
+                    link_role: Some(link.role),
+                    message: format!("link revoked for signer {}", link.signer_id),
+                    remediation:
+                        "Rotate compromised signing key and issue a new signed attestation link."
+                            .to_string(),
+                    allow_in_cached_mode: false,
+                },
+                MAX_CHAIN_ISSUES,
+            );
         }
 
         if !policy.allow_self_signed && link.signer_id == "self" {
@@ -568,15 +576,20 @@ fn validate_links(
             &link.signed_payload_hash,
             &attestation.output_hash,
         ) {
-            push_bounded(issues, ChainIssue {
-                code: VerificationErrorCode::InvalidSignature,
-                link_role: Some(link.role),
-                message: "signed payload hash does not match attestation output hash".to_string(),
-                remediation:
-                    "Re-sign link with canonical payload hash bound to the attested output."
+            push_bounded(
+                issues,
+                ChainIssue {
+                    code: VerificationErrorCode::InvalidSignature,
+                    link_role: Some(link.role),
+                    message: "signed payload hash does not match attestation output hash"
                         .to_string(),
-                allow_in_cached_mode: false,
-            }, MAX_CHAIN_ISSUES);
+                    remediation:
+                        "Re-sign link with canonical payload hash bound to the attested output."
+                            .to_string(),
+                    allow_in_cached_mode: false,
+                },
+                MAX_CHAIN_ISSUES,
+            );
         }
 
         match expected_link_signature(attestation, link) {
@@ -596,13 +609,17 @@ fn validate_links(
                 }
             }
             Err(error) => {
-                push_bounded(issues, ChainIssue {
-                    code: error.code,
-                    link_role: Some(link.role),
-                    message: error.message,
-                    remediation: error.remediation,
-                    allow_in_cached_mode: false,
-                }, MAX_CHAIN_ISSUES);
+                push_bounded(
+                    issues,
+                    ChainIssue {
+                        code: error.code,
+                        link_role: Some(link.role),
+                        message: error.message,
+                        remediation: error.remediation,
+                        allow_in_cached_mode: false,
+                    },
+                    MAX_CHAIN_ISSUES,
+                );
             }
         }
 
@@ -620,19 +637,23 @@ fn validate_links(
                         .expires_at_epoch
                         .saturating_add(policy.cached_trust_window_secs);
 
-            push_bounded(issues, ChainIssue {
-                code: VerificationErrorCode::ChainStale,
-                link_role: Some(link.role),
-                message: format!("link age {age}s exceeded policy window"),
-                remediation: if within_cached_window {
-                    "Cached trust window is active; refresh this link immediately to avoid hard rejection."
+            push_bounded(
+                issues,
+                ChainIssue {
+                    code: VerificationErrorCode::ChainStale,
+                    link_role: Some(link.role),
+                    message: format!("link age {age}s exceeded policy window"),
+                    remediation: if within_cached_window {
+                        "Cached trust window is active; refresh this link immediately to avoid hard rejection."
                         .to_string()
-                } else {
-                    "Link is stale outside tolerated window; re-attest with fresh timestamp and signature."
+                    } else {
+                        "Link is stale outside tolerated window; re-attest with fresh timestamp and signature."
                         .to_string()
+                    },
+                    allow_in_cached_mode: within_cached_window,
                 },
-                allow_in_cached_mode: within_cached_window,
-            }, MAX_CHAIN_ISSUES);
+                MAX_CHAIN_ISSUES,
+            );
         }
     }
 }
@@ -877,9 +898,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProvenanceAttestation, AttestationEnvelopeFormat, ProvenanceLevel, AttestationLink,
-        VerificationPolicy, VerificationMode, ChainLinkRole, VerificationFailure,
-        verify_attestation_chain, sign_links_in_place, verify_and_project_gates, canonical_attestation_json
+        AttestationEnvelopeFormat, AttestationLink, ChainLinkRole, ProvenanceAttestation,
+        ProvenanceLevel, VerificationFailure, VerificationMode, VerificationPolicy,
+        canonical_attestation_json, sign_links_in_place, verify_and_project_gates,
+        verify_attestation_chain,
     };
 
     fn base_attestation() -> ProvenanceAttestation {
@@ -1846,7 +1868,7 @@ mod tests {
         for i in 0..10_000 {
             attestation.custom_claims.insert(
                 format!("claim_{:05}", i),
-                format!("value_{}_with_large_content_{}", i, "x".repeat(1000))
+                format!("value_{}_with_large_content_{}", i, "x".repeat(1000)),
             );
         }
 
@@ -1862,11 +1884,15 @@ mod tests {
 
         // Verification should work despite size
         let policy = VerificationPolicy::production_default();
-        let report = verify_attestation_chain(&attestation, &policy, 1_700_000_400, "massive-claims");
+        let report =
+            verify_attestation_chain(&attestation, &policy, 1_700_000_400, "massive-claims");
 
         // Should pass verification (large data is not invalid)
         assert!(report.chain_valid);
-        assert_eq!(report.provenance_level, ProvenanceLevel::Level3IndependentReproduced);
+        assert_eq!(
+            report.provenance_level,
+            ProvenanceLevel::Level3IndependentReproduced
+        );
     }
 
     /// Negative path: unicode characters in attestation fields
@@ -1889,8 +1915,12 @@ mod tests {
         }
 
         // Add unicode custom claims
-        attestation.custom_claims.insert("測試.claim".to_string(), "値🎯test".to_string());
-        attestation.custom_claims.insert("emoji🌟field".to_string(), "data📊value".to_string());
+        attestation
+            .custom_claims
+            .insert("測試.claim".to_string(), "値🎯test".to_string());
+        attestation
+            .custom_claims
+            .insert("emoji🌟field".to_string(), "data📊value".to_string());
 
         sign_links_in_place(&mut attestation).expect("sign unicode attestation");
 
@@ -1898,7 +1928,10 @@ mod tests {
         let report = verify_attestation_chain(&attestation, &policy, 1_700_000_400, "unicode-test");
 
         assert!(report.chain_valid);
-        assert_eq!(report.provenance_level, ProvenanceLevel::Level3IndependentReproduced);
+        assert_eq!(
+            report.provenance_level,
+            ProvenanceLevel::Level3IndependentReproduced
+        );
 
         // Unicode should be preserved in canonical form
         let canonical = canonical_attestation_json(&attestation).expect("unicode canonical");
@@ -1940,7 +1973,12 @@ mod tests {
         assert_eq!(age, 950); // u64::MAX - 50 - (u64::MAX - 1000) = 950
 
         // Should have stale chain issues due to expiry
-        assert!(report.issues.iter().any(|i| i.code == VerificationErrorCode::ChainStale));
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.code == VerificationErrorCode::ChainStale)
+        );
     }
 
     /// Negative path: hash collision resistance in signature computation
@@ -1956,10 +1994,14 @@ mod tests {
         variant2.output_hash = "prefi_x_suffix".to_string(); // Different split point
 
         let mut variant3 = base.clone();
-        variant3.custom_claims.insert("ab".to_string(), "cd".to_string());
+        variant3
+            .custom_claims
+            .insert("ab".to_string(), "cd".to_string());
 
         let mut variant4 = base.clone();
-        variant4.custom_claims.insert("a".to_string(), "bcd".to_string());
+        variant4
+            .custom_claims
+            .insert("a".to_string(), "bcd".to_string());
 
         // Sign all variants
         sign_links_in_place(&mut variant1).expect("sign variant1");
@@ -1977,17 +2019,32 @@ mod tests {
         for i in 0..signatures.len() {
             for j in (i + 1)..signatures.len() {
                 for (sig_a, sig_b) in signatures[i].iter().zip(signatures[j].iter()) {
-                    assert_ne!(sig_a, sig_b,
-                        "Signatures should be different for variants {} and {}", i, j);
+                    assert_ne!(
+                        sig_a, sig_b,
+                        "Signatures should be different for variants {} and {}",
+                        i, j
+                    );
                 }
             }
         }
 
         // All should have valid signatures
         let policy = VerificationPolicy::production_default();
-        for (idx, variant) in [&variant1, &variant2, &variant3, &variant4].iter().enumerate() {
-            let report = verify_attestation_chain(variant, &policy, 1_700_000_400, &format!("variant-{}", idx));
-            assert!(report.chain_valid, "Variant {} should have valid signatures", idx);
+        for (idx, variant) in [&variant1, &variant2, &variant3, &variant4]
+            .iter()
+            .enumerate()
+        {
+            let report = verify_attestation_chain(
+                variant,
+                &policy,
+                1_700_000_400,
+                &format!("variant-{}", idx),
+            );
+            assert!(
+                report.chain_valid,
+                "Variant {} should have valid signatures",
+                idx
+            );
         }
     }
 
@@ -1995,8 +2052,8 @@ mod tests {
     #[test]
     fn negative_canonical_json_handles_problematic_value_types() {
         // Test that problematic serde_json::Value types are handled
-        use serde_json::{Map, Value};
         use crate::security::constant_time;
+        use serde_json::{Map, Value};
 
         // Create deeply nested JSON structure
         let mut deep_nested = Value::Object(Map::new());
@@ -2049,14 +2106,15 @@ mod tests {
         // Test with zero timeout values
         let zero_policy = VerificationPolicy {
             min_level: ProvenanceLevel::Level3IndependentReproduced,
-            required_chain_depth: 0, // Zero depth
+            required_chain_depth: 0,     // Zero depth
             max_attestation_age_secs: 0, // Zero age tolerance
             cached_trust_window_secs: 0, // Zero cache window
             allow_self_signed: false,
             mode: VerificationMode::FailClosed,
         };
 
-        let report = verify_attestation_chain(&attestation, &zero_policy, 1_700_000_400, "zero-policy");
+        let report =
+            verify_attestation_chain(&attestation, &zero_policy, 1_700_000_400, "zero-policy");
         assert!(!report.chain_valid); // Should fail due to zero age tolerance
 
         // Test with maximum values
@@ -2069,9 +2127,15 @@ mod tests {
             mode: VerificationMode::CachedTrustWindow,
         };
 
-        let max_report = verify_attestation_chain(&attestation, &max_policy, 1_700_000_400, "max-policy");
+        let max_report =
+            verify_attestation_chain(&attestation, &max_policy, 1_700_000_400, "max-policy");
         assert!(!max_report.chain_valid); // Should fail due to insufficient chain depth
-        assert!(max_report.issues.iter().any(|i| i.code == VerificationErrorCode::ChainIncomplete));
+        assert!(
+            max_report
+                .issues
+                .iter()
+                .any(|i| i.code == VerificationErrorCode::ChainIncomplete)
+        );
     }
 
     /// Negative path: empty and whitespace-only field validation
@@ -2091,24 +2155,42 @@ mod tests {
         sign_links_in_place(&mut attestation).expect("sign whitespace attestation");
 
         let policy = VerificationPolicy::production_default();
-        let report = verify_attestation_chain(&attestation, &policy, 1_700_000_400, "whitespace-fields");
+        let report =
+            verify_attestation_chain(&attestation, &policy, 1_700_000_400, "whitespace-fields");
 
         assert!(!report.chain_valid);
 
         // Should detect multiple missing field issues
-        let missing_field_count = report.issues.iter()
+        let missing_field_count = report
+            .issues
+            .iter()
             .filter(|i| i.code == VerificationErrorCode::AttestationMissingField)
             .count();
-        assert!(missing_field_count >= 6, "Should detect multiple whitespace-only fields as missing");
+        assert!(
+            missing_field_count >= 6,
+            "Should detect multiple whitespace-only fields as missing"
+        );
 
         // Each required field should be flagged
-        let field_names = ["schema_version", "build_system_identifier", "builder_identity",
-                          "builder_version", "reproducibility_hash", "input_hash", "output_hash"];
+        let field_names = [
+            "schema_version",
+            "build_system_identifier",
+            "builder_identity",
+            "builder_version",
+            "reproducibility_hash",
+            "input_hash",
+            "output_hash",
+        ];
         for field in &field_names {
-            assert!(report.issues.iter().any(|i|
-                i.code == VerificationErrorCode::AttestationMissingField &&
-                i.message.contains(field)
-            ), "Field {} should be detected as missing", field);
+            assert!(
+                report
+                    .issues
+                    .iter()
+                    .any(|i| i.code == VerificationErrorCode::AttestationMissingField
+                        && i.message.contains(field)),
+                "Field {} should be detected as missing",
+                field
+            );
         }
     }
 
@@ -2123,7 +2205,10 @@ mod tests {
 
         let policy = VerificationPolicy::production_default();
         let duplicate_report = verify_attestation_chain(
-            &duplicate_attestation, &policy, 1_700_000_400, "duplicate-links"
+            &duplicate_attestation,
+            &policy,
+            1_700_000_400,
+            "duplicate-links",
         );
 
         // Should fail due to order validation (extra link at wrong position)
@@ -2135,13 +2220,19 @@ mod tests {
         sign_links_in_place(&mut reversed_attestation).expect("sign reversed links");
 
         let reversed_report = verify_attestation_chain(
-            &reversed_attestation, &policy, 1_700_000_400, "reversed-links"
+            &reversed_attestation,
+            &policy,
+            1_700_000_400,
+            "reversed-links",
         );
 
         assert!(!reversed_report.chain_valid);
-        assert!(reversed_report.issues.iter().any(|i|
-            i.code == VerificationErrorCode::ChainLinkOrderInvalid
-        ));
+        assert!(
+            reversed_report
+                .issues
+                .iter()
+                .any(|i| i.code == VerificationErrorCode::ChainLinkOrderInvalid)
+        );
 
         // Test partial shuffle (swap first two)
         let mut shuffled_attestation = base_attestation();
@@ -2149,13 +2240,19 @@ mod tests {
         sign_links_in_place(&mut shuffled_attestation).expect("sign shuffled links");
 
         let shuffled_report = verify_attestation_chain(
-            &shuffled_attestation, &policy, 1_700_000_400, "shuffled-links"
+            &shuffled_attestation,
+            &policy,
+            1_700_000_400,
+            "shuffled-links",
         );
 
         assert!(!shuffled_report.chain_valid);
-        assert!(shuffled_report.issues.iter().any(|i|
-            i.code == VerificationErrorCode::ChainLinkOrderInvalid
-        ));
+        assert!(
+            shuffled_report
+                .issues
+                .iter()
+                .any(|i| i.code == VerificationErrorCode::ChainLinkOrderInvalid)
+        );
     }
 
     /// Negative path: event system overflow with massive issue generation
@@ -2183,32 +2280,41 @@ mod tests {
                 signer_version: "v1".to_string(),
                 signature: "invalid-signature".to_string(),
                 signed_payload_hash: format!("wrong-hash-{}", i),
-                issued_at_epoch: 100, // Very old (stale issues)
+                issued_at_epoch: 100,  // Very old (stale issues)
                 expires_at_epoch: 200, // Expired
-                revoked: i % 3 == 0, // Some revoked
+                revoked: i % 3 == 0,   // Some revoked
             });
         }
 
         let policy = VerificationPolicy::production_default();
         let report = verify_attestation_chain(
-            &problematic_attestation, &policy, 1_700_000_400, "massive-issues"
+            &problematic_attestation,
+            &policy,
+            1_700_000_400,
+            "massive-issues",
         );
 
         assert!(!report.chain_valid);
 
         // Should have many different types of issues
-        let issue_types: std::collections::HashSet<_> = report.issues.iter()
-            .map(|i| i.code)
-            .collect();
+        let issue_types: std::collections::HashSet<_> =
+            report.issues.iter().map(|i| i.code).collect();
 
-        assert!(issue_types.len() >= 4, "Should have multiple types of issues");
+        assert!(
+            issue_types.len() >= 4,
+            "Should have multiple types of issues"
+        );
         assert!(issue_types.contains(&VerificationErrorCode::AttestationMissingField));
         assert!(issue_types.contains(&VerificationErrorCode::ChainLinkOrderInvalid));
         assert!(issue_types.contains(&VerificationErrorCode::InvalidSignature));
 
         // Events should be generated despite massive issues
         assert!(!report.events.is_empty());
-        assert!(report.events.contains(&ProvenanceEventCode::AttestationRejected));
+        assert!(
+            report
+                .events
+                .contains(&ProvenanceEventCode::AttestationRejected)
+        );
     }
 
     /// Negative path: canonical JSON field ordering with collision attempts
@@ -2218,13 +2324,25 @@ mod tests {
         let mut attestation2 = base_attestation();
 
         // Add custom claims in different orders that could cause issues
-        attestation1.custom_claims.insert("a_field".to_string(), "value1".to_string());
-        attestation1.custom_claims.insert("b_field".to_string(), "value2".to_string());
-        attestation1.custom_claims.insert("aa_field".to_string(), "value3".to_string()); // Between a and b lexically
+        attestation1
+            .custom_claims
+            .insert("a_field".to_string(), "value1".to_string());
+        attestation1
+            .custom_claims
+            .insert("b_field".to_string(), "value2".to_string());
+        attestation1
+            .custom_claims
+            .insert("aa_field".to_string(), "value3".to_string()); // Between a and b lexically
 
-        attestation2.custom_claims.insert("b_field".to_string(), "value2".to_string());
-        attestation2.custom_claims.insert("aa_field".to_string(), "value3".to_string());
-        attestation2.custom_claims.insert("a_field".to_string(), "value1".to_string()); // Different insertion order
+        attestation2
+            .custom_claims
+            .insert("b_field".to_string(), "value2".to_string());
+        attestation2
+            .custom_claims
+            .insert("aa_field".to_string(), "value3".to_string());
+        attestation2
+            .custom_claims
+            .insert("a_field".to_string(), "value1".to_string()); // Different insertion order
 
         sign_links_in_place(&mut attestation1).expect("sign attestation1");
         sign_links_in_place(&mut attestation2).expect("sign attestation2");
@@ -2233,17 +2351,25 @@ mod tests {
         let canonical1 = canonical_attestation_json(&attestation1).expect("canonical1");
         let canonical2 = canonical_attestation_json(&attestation2).expect("canonical2");
 
-        assert_eq!(canonical1, canonical2, "Canonical JSON should be identical despite insertion order");
+        assert_eq!(
+            canonical1, canonical2,
+            "Canonical JSON should be identical despite insertion order"
+        );
 
         // Signatures should be identical
         for (link1, link2) in attestation1.links.iter().zip(attestation2.links.iter()) {
-            assert_eq!(link1.signature, link2.signature, "Signatures should be identical for canonically equivalent data");
+            assert_eq!(
+                link1.signature, link2.signature,
+                "Signatures should be identical for canonically equivalent data"
+            );
         }
 
         // Verification results should be identical
         let policy = VerificationPolicy::production_default();
-        let report1 = verify_attestation_chain(&attestation1, &policy, 1_700_000_400, "order-test-1");
-        let report2 = verify_attestation_chain(&attestation2, &policy, 1_700_000_400, "order-test-2");
+        let report1 =
+            verify_attestation_chain(&attestation1, &policy, 1_700_000_400, "order-test-1");
+        let report2 =
+            verify_attestation_chain(&attestation2, &policy, 1_700_000_400, "order-test-2");
 
         assert_eq!(report1.chain_valid, report2.chain_valid);
         assert_eq!(report1.provenance_level, report2.provenance_level);

@@ -763,7 +763,13 @@ mod quarantine_promotion_comprehensive_negative_tests {
         req.schema_version = "1.\u{FEFF}0\u{200B}".to_string(); // Zero-width chars
         req.reason = "test\u{10FFFF}\u{E000}\u{FDD0}promotion".to_string(); // Private use + non-chars
 
-        let result = evaluate_promotion(&req, &default_rule(), "validator\u{202A}bidi", "trace\u{2066}isolate", "2026\u{200C}04\u{200D}17");
+        let result = evaluate_promotion(
+            &req,
+            &default_rule(),
+            "validator\u{202A}bidi",
+            "trace\u{2066}isolate",
+            "2026\u{200C}04\u{200D}17",
+        );
 
         // Should either reject due to schema mismatch or succeed with malicious content preserved
         assert!(result.is_ok());
@@ -792,21 +798,29 @@ mod quarantine_promotion_comprehensive_negative_tests {
         assert!(result.is_ok());
         let promotion_result = result.unwrap();
         assert!(!promotion_result.promoted); // Should fail schema match
-        assert!(promotion_result.rejection_reasons.iter().any(|r| matches!(r, RejectionReason::SchemaFailed { .. })));
+        assert!(
+            promotion_result
+                .rejection_reasons
+                .iter()
+                .any(|r| matches!(r, RejectionReason::SchemaFailed { .. }))
+        );
     }
 
     #[test]
     fn negative_batch_evaluation_with_malformed_json_escape_sequences() {
         // Test with object IDs containing JSON escape sequences that might break serialization
         let malicious_objects = [
-            "obj\"\\\r\n\t\x08\x0c",  // JSON control chars
+            "obj\"\\\r\n\t\x08\x0c",    // JSON control chars
             "obj\\u0000\\x00\\n\\r\\t", // Escaped null and control
-            r#"obj\uD800\uDFFF"#,      // Raw string with surrogate pair escapes
-            "obj\\\"quotes\\\"",         // Escaped quotes
-            "obj\\\\backslashes\\\\",    // Escaped backslashes
+            r#"obj\uD800\uDFFF"#,       // Raw string with surrogate pair escapes
+            "obj\\\"quotes\\\"",        // Escaped quotes
+            "obj\\\\backslashes\\\\",   // Escaped backslashes
         ];
 
-        let requests: Vec<_> = malicious_objects.iter().map(|&id| malicious_request(id)).collect();
+        let requests: Vec<_> = malicious_objects
+            .iter()
+            .map(|&id| malicious_request(id))
+            .collect();
         let results = evaluate_batch(&requests, &default_rule(), "validator", "trace", "ts");
 
         assert!(results.is_ok());
@@ -824,10 +838,10 @@ mod quarantine_promotion_comprehensive_negative_tests {
     fn negative_schema_version_collision_attack() {
         // Test schema versions designed to cause collisions or bypasses
         let collision_patterns = [
-            "1.0\u{0000}malicious", // Null byte injection
-            "1.0\r\n2.0",           // CRLF injection
-            "1.0 \t\n 1.0",         // Whitespace confusion
-            "\u{FEFF}1.0",          // BOM prefix
+            "1.0\u{0000}malicious",        // Null byte injection
+            "1.0\r\n2.0",                  // CRLF injection
+            "1.0 \t\n 1.0",                // Whitespace confusion
+            "\u{FEFF}1.0",                 // BOM prefix
             "1.0\u{200B}\u{200C}\u{200D}", // Zero-width chars
         ];
 
@@ -847,13 +861,21 @@ mod quarantine_promotion_comprehensive_negative_tests {
     #[test]
     fn negative_massive_batch_memory_exhaustion_attack() {
         // Test with extremely large batch to check memory handling
-        let massive_requests: Vec<_> = (0..10000).map(|i| {
-            let mut req = malicious_request(&format!("obj-massive-{}", i));
-            req.reason = "x".repeat(10000); // 10KB reason per request = 100MB total
-            req
-        }).collect();
+        let massive_requests: Vec<_> = (0..10000)
+            .map(|i| {
+                let mut req = malicious_request(&format!("obj-massive-{}", i));
+                req.reason = "x".repeat(10000); // 10KB reason per request = 100MB total
+                req
+            })
+            .collect();
 
-        let result = evaluate_batch(&massive_requests, &default_rule(), "validator", "trace", "ts");
+        let result = evaluate_batch(
+            &massive_requests,
+            &default_rule(),
+            "validator",
+            "trace",
+            "ts",
+        );
 
         // Should handle large batches without panic
         assert!(result.is_ok());
@@ -904,7 +926,11 @@ mod quarantine_promotion_comprehensive_negative_tests {
 
         // Simulate concurrent validation attempts
         for i in 0..1000 {
-            let rule = if i % 2 == 0 { &valid_rule } else { &invalid_rule };
+            let rule = if i % 2 == 0 {
+                &valid_rule
+            } else {
+                &invalid_rule
+            };
             let req = malicious_request(&format!("concurrent-obj-{}", i));
 
             let result = evaluate_promotion(&req, rule, "validator", &format!("trace-{}", i), "ts");
@@ -927,7 +953,7 @@ mod quarantine_promotion_comprehensive_negative_tests {
             "2026-04-17\x00null\x00injection",
             "\u{202E}6202-71-40\u{202D}T00:00:00Z", // BiDi spoofed
             "2026-04-17T00:00:00Z\u{FEFF}\u{200B}", // Invisible chars
-            "' OR '1'='1' --", // SQL injection pattern
+            "' OR '1'='1' --",                      // SQL injection pattern
         ];
 
         for timestamp in adversarial_timestamps {
@@ -958,7 +984,9 @@ mod quarantine_promotion_comprehensive_negative_tests {
         let mut rule = default_rule();
         rule.require_pin = true; // Enable pin requirement for comprehensive testing
 
-        for (i, (auth, schema, reachable, pinned, expected_rejections)) in test_cases.iter().enumerate() {
+        for (i, (auth, schema, reachable, pinned, expected_rejections)) in
+            test_cases.iter().enumerate()
+        {
             let mut req = malicious_request(&format!("combo-test-{}", i));
             req.authenticated = *auth;
             req.schema_version = schema.to_string();
@@ -970,7 +998,10 @@ mod quarantine_promotion_comprehensive_negative_tests {
 
             let promotion_result = result.unwrap();
             assert!(!promotion_result.promoted);
-            assert_eq!(promotion_result.rejection_reasons.len(), *expected_rejections);
+            assert_eq!(
+                promotion_result.rejection_reasons.len(),
+                *expected_rejections
+            );
             assert!(promotion_result.receipt.is_none());
         }
     }
@@ -979,10 +1010,10 @@ mod quarantine_promotion_comprehensive_negative_tests {
     fn negative_promotion_rule_validation_with_unicode_normalization_attacks() {
         // Test with Unicode normalization attacks in schema versions
         let normalization_attacks = [
-            ("café", "cafe\u{0301}"),      // NFC vs NFD
+            ("café", "cafe\u{0301}"),             // NFC vs NFD
             ("résumé", "re\u{0301}sume\u{0301}"), // Multiple combining chars
-            ("℁", "a/s"),                   // Compatibility equivalence
-            ("＜script＞", "<script>"),      // Fullwidth to ASCII
+            ("℁", "a/s"),                         // Compatibility equivalence
+            ("＜script＞", "<script>"),           // Fullwidth to ASCII
         ];
 
         for (nfc_version, attack_version) in normalization_attacks {
@@ -1001,7 +1032,12 @@ mod quarantine_promotion_comprehensive_negative_tests {
             let promotion_result = result.unwrap();
             // Should fail due to byte-level inequality despite visual similarity
             assert!(!promotion_result.promoted);
-            assert!(promotion_result.rejection_reasons.iter().any(|r| matches!(r, RejectionReason::SchemaFailed { .. })));
+            assert!(
+                promotion_result
+                    .rejection_reasons
+                    .iter()
+                    .any(|r| matches!(r, RejectionReason::SchemaFailed { .. }))
+            );
         }
     }
 
@@ -1036,7 +1072,13 @@ mod quarantine_promotion_comprehensive_negative_tests {
             },
         ];
 
-        let result = evaluate_batch(&heterogeneous_requests, &default_rule(), "validator", "trace", "ts");
+        let result = evaluate_batch(
+            &heterogeneous_requests,
+            &default_rule(),
+            "validator",
+            "trace",
+            "ts",
+        );
         assert!(result.is_ok());
 
         let batch_results = result.unwrap();
@@ -1072,7 +1114,13 @@ mod quarantine_promotion_comprehensive_negative_tests {
 
         // Test with maximum length Unicode characters
         let max_unicode_req = malicious_request("\u{10FFFF}");
-        let result = evaluate_promotion(&max_unicode_req, &default_rule(), "validator", "trace", "ts");
+        let result = evaluate_promotion(
+            &max_unicode_req,
+            &default_rule(),
+            "validator",
+            "trace",
+            "ts",
+        );
         assert!(result.is_ok());
         assert!(result.unwrap().promoted);
     }

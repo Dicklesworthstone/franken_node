@@ -1514,7 +1514,14 @@ fn rollback_or_fail_receipt(
         &original_state.schema_version,
         &original_state.canonical_state,
     ) {
-        Ok(hash) if constant_time::ct_eq_bytes(hash.as_bytes(), original_state.state_hash.as_bytes()) => hash,
+        Ok(hash)
+            if constant_time::ct_eq_bytes(
+                hash.as_bytes(),
+                original_state.state_hash.as_bytes(),
+            ) =>
+        {
+            hash
+        }
         Ok(_) | Err(_) => {
             return failed_receipt(
                 plan,
@@ -1944,7 +1951,10 @@ mod tests {
         ));
         assert!(receipt.step_results.iter().any(|result| {
             result.status == MigrationStepStatus::RolledBack
-                && constant_time::ct_eq_bytes(result.post_state_hash.as_bytes(), original_hash.as_bytes())
+                && constant_time::ct_eq_bytes(
+                    result.post_state_hash.as_bytes(),
+                    original_hash.as_bytes(),
+                )
         }));
         assert!(receipt.step_results.iter().any(|result| {
             result.status == MigrationStepStatus::Failed && result.error_detail.is_some()

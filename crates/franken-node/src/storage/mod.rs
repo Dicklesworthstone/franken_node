@@ -307,8 +307,14 @@ mod negative_path_tests {
         let ProofFailureReason::HashMismatch { expected, actual } = err.reason else {
             panic!("expected hash mismatch reason");
         };
-        assert!(constant_time::ct_eq_bytes(expected.as_bytes(), b"expected-digest"));
-        assert!(constant_time::ct_eq_bytes(actual.as_bytes(), b"actual-digest"));
+        assert!(constant_time::ct_eq_bytes(
+            expected.as_bytes(),
+            b"expected-digest"
+        ));
+        assert!(constant_time::ct_eq_bytes(
+            actual.as_bytes(),
+            b"actual-digest"
+        ));
     }
 
     #[test]

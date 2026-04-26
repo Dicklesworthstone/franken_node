@@ -1117,13 +1117,13 @@ mod atc_reciprocity_negative_path_tests {
     fn negative_unicode_injection_participant_id_preserves_exact_bytes() {
         let mut engine = ReciprocityEngine::default();
         let injection_patterns = [
-            "participant\u{202E}spoofed",    // Right-to-left override
-            "participant\u{200B}invisible", // Zero-width space
-            "participant\u{FEFF}bom",       // Byte order mark
-            "participant\x00null",          // Null byte
-            "participant\r\ninjection",     // CRLF injection
-            "participant\u{1F4A9}emoji",    // Pile of poo emoji
-            "participant\t\x08control",     // Tab and backspace
+            "participant\u{202E}spoofed",          // Right-to-left override
+            "participant\u{200B}invisible",        // Zero-width space
+            "participant\u{FEFF}bom",              // Byte order mark
+            "participant\x00null",                 // Null byte
+            "participant\r\ninjection",            // CRLF injection
+            "participant\u{1F4A9}emoji",           // Pile of poo emoji
+            "participant\t\x08control",            // Tab and backspace
             "\u{202E}\u{202D}\u{200E}directional", // Bidirectional overrides
         ];
 
@@ -1147,17 +1147,23 @@ mod atc_reciprocity_negative_path_tests {
             // JSON serialization should handle injection safely
             let json = serde_json::to_string(&decision)
                 .expect("unicode injection should serialize safely");
-            assert!(!json.contains(&pattern.replace('\\', "")),
-                   "Raw injection pattern should be escaped in JSON");
+            assert!(
+                !json.contains(&pattern.replace('\\', "")),
+                "Raw injection pattern should be escaped in JSON"
+            );
 
             // Deserialization should preserve exact pattern
-            let parsed: AccessDecision = serde_json::from_str(&json)
-                .expect("should deserialize without corruption");
+            let parsed: AccessDecision =
+                serde_json::from_str(&json).expect("should deserialize without corruption");
             assert_eq!(parsed.participant_id, *pattern);
 
             // Audit log should handle injection
-            assert!(engine.audit_log().iter().any(|entry|
-                entry.participant_id == *pattern));
+            assert!(
+                engine
+                    .audit_log()
+                    .iter()
+                    .any(|entry| entry.participant_id == *pattern)
+            );
         }
     }
 
@@ -1165,11 +1171,11 @@ mod atc_reciprocity_negative_path_tests {
     fn negative_arithmetic_boundary_contributions_saturated_safely() {
         let mut engine = ReciprocityEngine::default();
         let boundary_values = [
-            (u64::MAX - 1, u64::MAX),     // Near overflow
-            (u64::MAX, u64::MAX - 1),     // Reverse near overflow
-            (u64::MAX, u64::MAX),         // Both at max
-            (0, u64::MAX),                // Zero contributions, max consumption
-            (u64::MAX, 0),                // Max contributions, zero consumption
+            (u64::MAX - 1, u64::MAX), // Near overflow
+            (u64::MAX, u64::MAX - 1), // Reverse near overflow
+            (u64::MAX, u64::MAX),     // Both at max
+            (0, u64::MAX),            // Zero contributions, max consumption
+            (u64::MAX, 0),            // Max contributions, zero consumption
         ];
 
         for (contributions, consumed) in boundary_values {
@@ -1186,13 +1192,20 @@ mod atc_reciprocity_negative_path_tests {
 
             // Computation should not overflow
             let ratio = metrics.contribution_ratio();
-            assert!(ratio >= 0.0 && ratio <= 1.0, "Ratio should be bounded: {}", ratio);
+            assert!(
+                ratio >= 0.0 && ratio <= 1.0,
+                "Ratio should be bounded: {}",
+                ratio
+            );
             assert!(ratio.is_finite(), "Ratio should be finite");
 
             // Quality adjustment should not overflow
             let quality_ratio = metrics.quality_adjusted_ratio();
-            assert!(quality_ratio >= 0.0 && quality_ratio <= 1.0,
-                   "Quality ratio should be bounded: {}", quality_ratio);
+            assert!(
+                quality_ratio >= 0.0 && quality_ratio <= 1.0,
+                "Quality ratio should be bounded: {}",
+                quality_ratio
+            );
             assert!(quality_ratio.is_finite(), "Quality ratio should be finite");
 
             // Engine evaluation should handle boundary values
@@ -1204,8 +1217,8 @@ mod atc_reciprocity_negative_path_tests {
 
             // JSON round-trip should preserve boundary values
             let json = serde_json::to_string(&metrics).expect("boundary values should serialize");
-            let parsed: ContributionMetrics = serde_json::from_str(&json)
-                .expect("boundary values should deserialize");
+            let parsed: ContributionMetrics =
+                serde_json::from_str(&json).expect("boundary values should deserialize");
             assert_eq!(parsed.contributions_made, contributions);
             assert_eq!(parsed.intelligence_consumed, consumed);
         }
@@ -1215,17 +1228,17 @@ mod atc_reciprocity_negative_path_tests {
     fn negative_floating_point_edge_cases_in_contribution_quality() {
         let mut engine = ReciprocityEngine::default();
         let edge_cases = [
-            f64::NAN,                    // Not a number
-            f64::INFINITY,               // Positive infinity
-            f64::NEG_INFINITY,           // Negative infinity
-            f64::EPSILON,                // Smallest positive value
-            f64::MIN_POSITIVE,           // Smallest normalized positive value
-            f64::MAX,                    // Largest finite value
-            -f64::MAX,                   // Largest negative value
-            1.7976931348623157e+308,     // Near overflow
-            -1.7976931348623157e+308,    // Near underflow
-            0.0,                         // Zero
-            -0.0,                        // Negative zero
+            f64::NAN,                 // Not a number
+            f64::INFINITY,            // Positive infinity
+            f64::NEG_INFINITY,        // Negative infinity
+            f64::EPSILON,             // Smallest positive value
+            f64::MIN_POSITIVE,        // Smallest normalized positive value
+            f64::MAX,                 // Largest finite value
+            -f64::MAX,                // Largest negative value
+            1.7976931348623157e+308,  // Near overflow
+            -1.7976931348623157e+308, // Near underflow
+            0.0,                      // Zero
+            -0.0,                     // Negative zero
         ];
 
         for (i, quality) in edge_cases.iter().enumerate() {
@@ -1242,7 +1255,11 @@ mod atc_reciprocity_negative_path_tests {
 
             // Quality adjustment should handle edge cases gracefully
             let quality_ratio = metrics.quality_adjusted_ratio();
-            assert!(quality_ratio.is_finite(), "Quality ratio must be finite for quality {}", quality);
+            assert!(
+                quality_ratio.is_finite(),
+                "Quality ratio must be finite for quality {}",
+                quality
+            );
             assert!(quality_ratio >= 0.0, "Quality ratio must be non-negative");
             assert!(quality_ratio <= 1.0, "Quality ratio must not exceed 1.0");
 
@@ -1330,11 +1347,9 @@ mod atc_reciprocity_negative_path_tests {
             // Same data, different participant IDs
             ("participant_a", 50, 50),
             ("participant_b", 50, 50),
-
             // Different contribution patterns that could hash similarly
             ("hash_test_1", 100, 200),
             ("hash_test_2", 200, 100),
-
             // Byte boundary cases
             ("hash_boundary", 255, 256),
             ("hash_boundary", 256, 255),
@@ -1373,9 +1388,13 @@ mod atc_reciprocity_negative_path_tests {
         }
 
         // All different decisions should produce different hashes (no collisions)
-        assert_eq!(observed_hashes.len(), decisions.len(),
-                  "Hash collision detected: {} unique hashes for {} decisions",
-                  observed_hashes.len(), decisions.len());
+        assert_eq!(
+            observed_hashes.len(),
+            decisions.len(),
+            "Hash collision detected: {} unique hashes for {} decisions",
+            observed_hashes.len(),
+            decisions.len()
+        );
     }
 
     #[test]
@@ -1385,23 +1404,18 @@ mod atc_reciprocity_negative_path_tests {
             // JSON injection attempts
             "2026-04-17T00:00:00Z\",\"injected\":true,\"data\":\"",
             "null}\"evil\":\"payload\",\"timestamp\":\"2026-04-17T00:00:00Z",
-
             // Control character injection
             "2026-04-17T00:00:00Z\x00\r\n",
             "2026-04-17\x1b[31mT00:00:00Z",
-
             // Unicode injection
             "2026-04-17T00:00:00Z\u{202E}injection",
             "2026-04-17T00:00:00Z\u{FEFF}bom",
-
             // Extremely long timestamp
             &"2026-04-17T00:00:00Z".repeat(1000),
-
             // Empty and whitespace
             "",
             "   ",
             "\t\n\r",
-
             // Invalid ISO format
             "not-a-timestamp",
             "2026-13-45T25:70:80Z", // Invalid date/time
@@ -1433,13 +1447,16 @@ mod atc_reciprocity_negative_path_tests {
 
             // Raw injection patterns should not appear unescaped
             if timestamp.contains('"') || timestamp.contains('{') || timestamp.contains('}') {
-                assert!(!json.contains(&timestamp.replace('\\', "")),
-                       "Dangerous timestamp should be escaped in JSON: {}", timestamp.escape_debug());
+                assert!(
+                    !json.contains(&timestamp.replace('\\', "")),
+                    "Dangerous timestamp should be escaped in JSON: {}",
+                    timestamp.escape_debug()
+                );
             }
 
             // Deserialization should recover exact timestamp
-            let parsed: AccessAuditEntry = serde_json::from_str(&json)
-                .expect("should deserialize audit entry");
+            let parsed: AccessAuditEntry =
+                serde_json::from_str(&json).expect("should deserialize audit entry");
             assert_eq!(parsed.timestamp, *timestamp);
         }
     }
@@ -1457,7 +1474,6 @@ mod atc_reciprocity_negative_path_tests {
                 grace_period_tier: AccessTier::Blocked,
                 use_quality_adjustment: true,
             },
-
             // Inverted thresholds (higher tier requires lower ratio)
             ReciprocityConfig {
                 full_tier_min_ratio: 0.1,
@@ -1467,7 +1483,6 @@ mod atc_reciprocity_negative_path_tests {
                 grace_period_tier: AccessTier::Standard,
                 use_quality_adjustment: true,
             },
-
             // Extreme values
             ReciprocityConfig {
                 full_tier_min_ratio: f64::MAX,
@@ -1477,7 +1492,6 @@ mod atc_reciprocity_negative_path_tests {
                 grace_period_tier: AccessTier::Full,
                 use_quality_adjustment: false,
             },
-
             // Negative ratios
             ReciprocityConfig {
                 full_tier_min_ratio: -1.0,
@@ -1505,7 +1519,10 @@ mod atc_reciprocity_negative_path_tests {
 
             // Engine should handle extreme configurations without panicking
             let decision = engine.evaluate_access(&test_metrics, "2026-04-17T00:00:00Z");
-            assert_eq!(decision.participant_id, format!("extreme_config_test_{}", i));
+            assert_eq!(
+                decision.participant_id,
+                format!("extreme_config_test_{}", i)
+            );
 
             // Decision ratios should remain bounded despite extreme config
             assert!(decision.contribution_ratio >= 0.0);
@@ -1520,8 +1537,10 @@ mod atc_reciprocity_negative_path_tests {
                 decision.contribution_ratio
             };
             let tier = engine.classify_tier(effective_ratio);
-            assert!(matches!(tier, AccessTier::Blocked | AccessTier::Limited |
-                                  AccessTier::Standard | AccessTier::Full));
+            assert!(matches!(
+                tier,
+                AccessTier::Blocked | AccessTier::Limited | AccessTier::Standard | AccessTier::Full
+            ));
 
             // JSON serialization of extreme config should work
             let config_json = serde_json::to_string(config);
@@ -1572,7 +1591,8 @@ mod atc_reciprocity_negative_path_tests {
         assert_eq!(engine.audit_log().len(), MAX_AUDIT_LOG_ENTRIES);
 
         // All remaining entry IDs should be unique
-        let remaining_ids: BTreeSet<String> = engine.audit_log()
+        let remaining_ids: BTreeSet<String> = engine
+            .audit_log()
             .iter()
             .map(|entry| entry.entry_id.clone())
             .collect();
@@ -1580,8 +1600,11 @@ mod atc_reciprocity_negative_path_tests {
 
         // Entry IDs should maintain sequence consistency (no duplicates in full history)
         let unique_all_ids: BTreeSet<String> = all_entry_ids.into_iter().collect();
-        assert_eq!(unique_all_ids.len(), overflow_count,
-                  "Sequence numbering should prevent ID reuse");
+        assert_eq!(
+            unique_all_ids.len(),
+            overflow_count,
+            "Sequence numbering should prevent ID reuse"
+        );
 
         // Epoch and sequence should handle overflow gracefully
         for entry in engine.audit_log() {
@@ -1606,7 +1629,11 @@ mod atc_reciprocity_negative_path_tests {
                 contribution_quality: (i as f64 / large_batch_size as f64).min(1.0),
                 membership_age_seconds: 86400 * ((i % 365) + 1) as u64,
                 has_exception: i % 100 == 0, // 1% exceptions
-                exception_reason: if i % 100 == 0 { Some("bulk test".to_string()) } else { None },
+                exception_reason: if i % 100 == 0 {
+                    Some("bulk test".to_string())
+                } else {
+                    None
+                },
                 exception_expires_at: None,
             });
         }
@@ -1617,8 +1644,11 @@ mod atc_reciprocity_negative_path_tests {
         let processing_time = start_time.elapsed();
 
         // Should complete in reasonable time
-        assert!(processing_time.as_secs() < 30,
-               "Large batch processing took too long: {:?}", processing_time);
+        assert!(
+            processing_time.as_secs() < 30,
+            "Large batch processing took too long: {:?}",
+            processing_time
+        );
 
         // Matrix should have correct structure
         assert_eq!(matrix.total_participants, large_batch_size);
@@ -1683,12 +1713,16 @@ mod atc_reciprocity_negative_path_tests {
                     let metrics = ContributionMetrics {
                         participant_id: format!("concurrent_t{}_o{}", thread_id, operation),
                         contributions_made: (thread_id * operations_per_thread + operation) as u64,
-                        intelligence_consumed: ((thread_id * operations_per_thread + operation) + 1) as u64,
+                        intelligence_consumed: ((thread_id * operations_per_thread + operation) + 1)
+                            as u64,
                         contribution_quality: 0.8,
                         membership_age_seconds: 86400 * 30,
                         has_exception: operation % 10 == 0,
                         exception_reason: if operation % 10 == 0 {
-                            Some(format!("concurrent_exception_t{}_o{}", thread_id, operation))
+                            Some(format!(
+                                "concurrent_exception_t{}_o{}",
+                                thread_id, operation
+                            ))
                         } else {
                             None
                         },
@@ -1716,7 +1750,9 @@ mod atc_reciprocity_negative_path_tests {
 
         // Wait for all threads to complete
         for handle in handles {
-            handle.join().expect("Thread should complete without panics");
+            handle
+                .join()
+                .expect("Thread should complete without panics");
         }
 
         let final_results = results.lock().unwrap();
@@ -1732,17 +1768,30 @@ mod atc_reciprocity_negative_path_tests {
         assert!(final_engine.audit_log().len() <= MAX_AUDIT_LOG_ENTRIES);
 
         // All audit entry IDs should be unique (no race condition duplicates)
-        let audit_ids: BTreeSet<String> = final_engine.audit_log()
+        let audit_ids: BTreeSet<String> = final_engine
+            .audit_log()
             .iter()
             .map(|entry| entry.entry_id.clone())
             .collect();
-        assert_eq!(audit_ids.len(), final_engine.audit_log().len(),
-                  "Race conditions may have caused duplicate audit entry IDs");
+        assert_eq!(
+            audit_ids.len(),
+            final_engine.audit_log().len(),
+            "Race conditions may have caused duplicate audit entry IDs"
+        );
 
         // Results should show reasonable distribution of outcomes
-        let granted_count = final_results.iter().filter(|(_, _, _, granted)| *granted).count();
-        assert!(granted_count > 0, "At least some access should have been granted");
-        assert!(granted_count < final_results.len(), "Not all access should have been granted");
+        let granted_count = final_results
+            .iter()
+            .filter(|(_, _, _, granted)| *granted)
+            .count();
+        assert!(
+            granted_count > 0,
+            "At least some access should have been granted"
+        );
+        assert!(
+            granted_count < final_results.len(),
+            "Not all access should have been granted"
+        );
     }
 
     #[test]
@@ -1775,9 +1824,8 @@ mod atc_reciprocity_negative_path_tests {
         };
 
         // Should handle deeply nested content without stack overflow
-        let result = std::panic::catch_unwind(|| {
-            engine.evaluate_access(&metrics, "2026-04-17T00:00:00Z")
-        });
+        let result =
+            std::panic::catch_unwind(|| engine.evaluate_access(&metrics, "2026-04-17T00:00:00Z"));
 
         match result {
             Ok(decision) => {
@@ -1818,23 +1866,18 @@ mod atc_reciprocity_negative_path_tests {
             // Far future dates (year 9999, etc.)
             "9999-12-31T23:59:59Z",
             "3000-01-01T00:00:00Z",
-
             // Epoch edge cases
             "1970-01-01T00:00:00Z",
             "1969-12-31T23:59:59Z",
-
             // Invalid but parseable-looking dates
-            "2026-02-30T25:00:00Z",  // February 30th, 25 o'clock
-            "2026-13-45T00:00:00Z",  // Month 13, day 45
-
+            "2026-02-30T25:00:00Z", // February 30th, 25 o'clock
+            "2026-13-45T00:00:00Z", // Month 13, day 45
             // JSON/XML injection attempts
             "2026-04-17T00:00:00Z\"><script>alert('xss')</script>",
             "2026-04-17T00:00:00Z&amp;malicious=true",
-
             // Unicode and control character injection
             "2026-04-17T00:00:00Z\u{202E}injection",
             "2026-04-17T00:00:00Z\x00\x01\x02",
-
             // Extremely long timestamps
             &"2026-04-17T00:00:00Z".repeat(10000),
         ];
@@ -1853,23 +1896,31 @@ mod atc_reciprocity_negative_path_tests {
 
             // Should handle malicious timestamps without corruption or crashes
             let decision = engine.evaluate_access(&metrics, "2026-04-17T00:00:00Z");
-            assert!(decision.exception_applied, "Exception should still be applied");
+            assert!(
+                decision.exception_applied,
+                "Exception should still be applied"
+            );
             assert_eq!(decision.participant_id, format!("timestamp_attack_{}", i));
 
             // JSON round-trip should preserve exact timestamp
-            let json = serde_json::to_string(&metrics)
-                .expect("malicious timestamp should serialize");
+            let json =
+                serde_json::to_string(&metrics).expect("malicious timestamp should serialize");
 
             // Injection patterns should be escaped in JSON
             if timestamp.contains('"') || timestamp.contains('<') || timestamp.contains('&') {
-                assert!(!json.contains(&timestamp.replace('\\', "")),
-                       "Malicious timestamp should be escaped in JSON");
+                assert!(
+                    !json.contains(&timestamp.replace('\\', "")),
+                    "Malicious timestamp should be escaped in JSON"
+                );
             }
 
             // Deserialization should recover exact timestamp
-            let parsed: ContributionMetrics = serde_json::from_str(&json)
-                .expect("should deserialize malicious timestamp");
-            assert_eq!(parsed.exception_expires_at.as_deref(), Some(timestamp.as_str()));
+            let parsed: ContributionMetrics =
+                serde_json::from_str(&json).expect("should deserialize malicious timestamp");
+            assert_eq!(
+                parsed.exception_expires_at.as_deref(),
+                Some(timestamp.as_str())
+            );
         }
     }
 
@@ -1879,13 +1930,13 @@ mod atc_reciprocity_negative_path_tests {
 
         // Test with various capacity values
         let test_cases = [
-            (vec![1, 2, 3], 4, 0),           // Zero capacity
-            (vec![], 5, 1),                  // Empty vec, capacity 1
-            (vec![1, 2, 3], 4, 1),          // Overflow by much more than capacity
-            (vec![1, 2, 3], 4, 3),          // Exactly at capacity
-            (vec![1, 2, 3], 4, 10),         // Much higher capacity
-            (vec![1; 1000], 1001, 500),     // Large vec, medium capacity
-            (vec![1; 10], 11, usize::MAX),  // Extreme capacity value
+            (vec![1, 2, 3], 4, 0),         // Zero capacity
+            (vec![], 5, 1),                // Empty vec, capacity 1
+            (vec![1, 2, 3], 4, 1),         // Overflow by much more than capacity
+            (vec![1, 2, 3], 4, 3),         // Exactly at capacity
+            (vec![1, 2, 3], 4, 10),        // Much higher capacity
+            (vec![1; 1000], 1001, 500),    // Large vec, medium capacity
+            (vec![1; 10], 11, usize::MAX), // Extreme capacity value
         ];
 
         for (mut initial_vec, new_item, capacity) in test_cases {
@@ -1944,17 +1995,17 @@ mod atc_reciprocity_negative_path_tests {
 
         // Test serialization/deserialization with malicious values
         let malicious_tier_values = [
-            json!("blocked"),      // Lowercase (should fail)
-            json!("FULL"),         // Uppercase (should fail)
-            json!("limited_access"), // Non-existent variant
-            json!("admin"),        // Privileged-sounding variant
-            json!(""),             // Empty string
-            json!(null),           // Null value
-            json!(42),             // Number instead of string
-            json!(true),           // Boolean instead of string
-            json!(["full"]),       // Array instead of string
-            json!({"tier": "full"}), // Object instead of string
-            json!("full\u{0000}"), // Null byte injection
+            json!("blocked"),                              // Lowercase (should fail)
+            json!("FULL"),                                 // Uppercase (should fail)
+            json!("limited_access"),                       // Non-existent variant
+            json!("admin"),                                // Privileged-sounding variant
+            json!(""),                                     // Empty string
+            json!(null),                                   // Null value
+            json!(42),                                     // Number instead of string
+            json!(true),                                   // Boolean instead of string
+            json!(["full"]),                               // Array instead of string
+            json!({"tier": "full"}),                       // Object instead of string
+            json!("full\u{0000}"),                         // Null byte injection
             json!("full\"><script>alert('xss')</script>"), // XSS attempt
         ];
 
@@ -1963,8 +2014,12 @@ mod atc_reciprocity_negative_path_tests {
             let tier_result = serde_json::from_value::<AccessTier>(malicious_value.clone());
 
             // Should safely reject malicious values
-            assert!(tier_result.is_err(),
-                   "Malicious tier value {} should be rejected: {:?}", i, malicious_value);
+            assert!(
+                tier_result.is_err(),
+                "Malicious tier value {} should be rejected: {:?}",
+                i,
+                malicious_value
+            );
 
             // Test in context of decision structure
             let malicious_decision = json!({
@@ -1980,22 +2035,33 @@ mod atc_reciprocity_negative_path_tests {
             });
 
             let decision_result = serde_json::from_value::<AccessDecision>(malicious_decision);
-            assert!(decision_result.is_err(),
-                   "AccessDecision with malicious tier {} should be rejected", i);
+            assert!(
+                decision_result.is_err(),
+                "AccessDecision with malicious tier {} should be rejected",
+                i
+            );
         }
 
         // Test valid tiers serialize/deserialize correctly
-        let valid_tiers = [AccessTier::Blocked, AccessTier::Limited, AccessTier::Standard, AccessTier::Full];
+        let valid_tiers = [
+            AccessTier::Blocked,
+            AccessTier::Limited,
+            AccessTier::Standard,
+            AccessTier::Full,
+        ];
 
         for tier in &valid_tiers {
             // Should serialize to expected string
             let serialized = serde_json::to_string(tier).expect("valid tier should serialize");
-            let expected = format!("\"{}\"", match tier {
-                AccessTier::Blocked => "blocked",
-                AccessTier::Limited => "limited",
-                AccessTier::Standard => "standard",
-                AccessTier::Full => "full",
-            });
+            let expected = format!(
+                "\"{}\"",
+                match tier {
+                    AccessTier::Blocked => "blocked",
+                    AccessTier::Limited => "limited",
+                    AccessTier::Standard => "standard",
+                    AccessTier::Full => "full",
+                }
+            );
             assert_eq!(serialized, expected);
 
             // Should deserialize back to same tier
@@ -2022,7 +2088,6 @@ mod atc_reciprocity_negative_path_tests {
                 exception_reason: Some("contradiction test".to_string()),
                 exception_expires_at: Some("1999-01-01T00:00:00Z".to_string()), // Expired exception
             },
-
             // New participant with massive consumption but in grace period
             ContributionMetrics {
                 participant_id: "contradiction_2".to_string(),
@@ -2034,7 +2099,6 @@ mod atc_reciprocity_negative_path_tests {
                 exception_reason: None,
                 exception_expires_at: None,
             },
-
             // High contributor with zero consumption (infinite ratio case)
             ContributionMetrics {
                 participant_id: "contradiction_3".to_string(),
@@ -2046,7 +2110,6 @@ mod atc_reciprocity_negative_path_tests {
                 exception_reason: None,
                 exception_expires_at: None,
             },
-
             // Participant with negative quality and exception
             ContributionMetrics {
                 participant_id: "contradiction_4".to_string(),
@@ -2061,7 +2124,11 @@ mod atc_reciprocity_negative_path_tests {
         ];
 
         // Should handle contradictory states without panics or infinite loops
-        let matrix = engine.evaluate_batch(&contradictory_participants, "contradiction_test", "2026-04-17T00:00:00Z");
+        let matrix = engine.evaluate_batch(
+            &contradictory_participants,
+            "contradiction_test",
+            "2026-04-17T00:00:00Z",
+        );
 
         // Matrix should have correct participant count
         assert_eq!(matrix.total_participants, contradictory_participants.len());
@@ -2069,8 +2136,10 @@ mod atc_reciprocity_negative_path_tests {
 
         // Each participant should have a valid tier assignment
         for entry in &matrix.entries {
-            assert!(matches!(entry.tier, AccessTier::Blocked | AccessTier::Limited |
-                                       AccessTier::Standard | AccessTier::Full));
+            assert!(matches!(
+                entry.tier,
+                AccessTier::Blocked | AccessTier::Limited | AccessTier::Standard | AccessTier::Full
+            ));
 
             // Ratios should be bounded and finite
             assert!(entry.contribution_ratio >= 0.0);
@@ -2087,7 +2156,8 @@ mod atc_reciprocity_negative_path_tests {
         assert_eq!(tier_sum, matrix.total_participants);
 
         // Should count exceptions correctly (participants with has_exception=true)
-        let expected_exceptions = contradictory_participants.iter()
+        let expected_exceptions = contradictory_participants
+            .iter()
             .filter(|p| p.has_exception)
             .count();
 
@@ -2100,7 +2170,11 @@ mod atc_reciprocity_negative_path_tests {
         assert!(matrix.content_hash.chars().all(|c| c.is_ascii_hexdigit()));
 
         // Re-evaluating same batch should produce same hash
-        let matrix2 = engine.evaluate_batch(&contradictory_participants, "contradiction_test", "2026-04-17T00:00:00Z");
+        let matrix2 = engine.evaluate_batch(
+            &contradictory_participants,
+            "contradiction_test",
+            "2026-04-17T00:00:00Z",
+        );
         assert_eq!(matrix.content_hash, matrix2.content_hash);
     }
 

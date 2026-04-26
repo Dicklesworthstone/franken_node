@@ -1,7 +1,6 @@
 use super::replay_bundle::{
     EventType, RawEvent, ReplayBundle, ReplayBundleError, generate_replay_bundle,
-    replay_bundle_adversarial_fuzz_one,
-    replay_bundle_batch_adversarial_fuzz_one,
+    replay_bundle_adversarial_fuzz_one, replay_bundle_batch_adversarial_fuzz_one,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;

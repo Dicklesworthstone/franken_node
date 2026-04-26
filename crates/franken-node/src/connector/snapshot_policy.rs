@@ -898,9 +898,8 @@ mod tests {
 
     #[test]
     fn serde_unknown_snapshot_error_code_fails() {
-        let err = serde_json::from_str::<SnapshotError>(
-            r#"{"UNKNOWN_SNAPSHOT_ERROR":{"reason":"bad"}}"#,
-        );
+        let err =
+            serde_json::from_str::<SnapshotError>(r#"{"UNKNOWN_SNAPSHOT_ERROR":{"reason":"bad"}}"#);
 
         assert!(err.is_err());
     }

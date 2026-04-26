@@ -353,7 +353,9 @@ fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
 
 fn invalid_provenance_reason(provenance: &ArtifactProvenance) -> Option<String> {
     if provenance.attestations.len() > MAX_ATTESTATIONS {
-        return Some(format!("attestations exceeds maximum of {MAX_ATTESTATIONS}"));
+        return Some(format!(
+            "attestations exceeds maximum of {MAX_ATTESTATIONS}"
+        ));
     }
     None
 }

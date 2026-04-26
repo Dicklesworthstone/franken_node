@@ -270,10 +270,7 @@ mod encoding_root_negative_tests {
 
         let result: Result<DeterministicSeed, _> = serde_json::from_value(payload);
 
-        assert!(
-            result.is_err(),
-            "seed config versions must remain numeric"
-        );
+        assert!(result.is_err(), "seed config versions must remain numeric");
     }
 
     #[test]
@@ -301,39 +298,62 @@ mod encoding_root_negative_tests {
     /// Test Unicode injection attacks in encoding module components
     #[test]
     fn negative_encoding_unicode_injection_comprehensive() {
-        use super::deterministic_seed::{ContentHash, DeterministicSeedDeriver, DomainTag, ScheduleConfig};
+        use super::deterministic_seed::{
+            ContentHash, DeterministicSeedDeriver, DomainTag, ScheduleConfig,
+        };
 
         let unicode_attack_vectors = vec![
             // BiDi override attacks in content identifiers
-            ("bidi_override", format!("{}{}{}",
-                "aa".repeat(10),
-                "\u{202E}live\u{202D}",
-                "bb".repeat(10))),
-
+            (
+                "bidi_override",
+                format!(
+                    "{}{}{}",
+                    "aa".repeat(10),
+                    "\u{202E}live\u{202D}",
+                    "bb".repeat(10)
+                ),
+            ),
             // Zero-width character pollution
-            ("zws_pollution", format!("{}{}{}",
-                "cc".repeat(10),
-                "\u{200B}\u{200C}\u{200D}",
-                "dd".repeat(10))),
-
+            (
+                "zws_pollution",
+                format!(
+                    "{}{}{}",
+                    "cc".repeat(10),
+                    "\u{200B}\u{200C}\u{200D}",
+                    "dd".repeat(10)
+                ),
+            ),
             // Control character injection
-            ("control_chars", format!("{}{}{}",
-                "ee".repeat(10),
-                "\x00\x01\x02\x03",
-                "ff".repeat(8))),
-
+            (
+                "control_chars",
+                format!(
+                    "{}{}{}",
+                    "ee".repeat(10),
+                    "\x00\x01\x02\x03",
+                    "ff".repeat(8)
+                ),
+            ),
             // Unicode normalization attacks
-            ("nfd_attack", format!("{}{}{}",
-                "11".repeat(10),
-                "\u{0300}\u{0301}",
-                "22".repeat(10))),
+            (
+                "nfd_attack",
+                format!(
+                    "{}{}{}",
+                    "11".repeat(10),
+                    "\u{0300}\u{0301}",
+                    "22".repeat(10)
+                ),
+            ),
         ];
 
         for (attack_name, malicious_hex) in unicode_attack_vectors {
             let injection_result = std::panic::catch_unwind(|| {
                 // Ensure the hex string is exactly 64 chars (32 bytes)
                 let normalized_hex = if malicious_hex.len() < 64 {
-                    format!("{}{}", malicious_hex, "aa".repeat((64 - malicious_hex.len()) / 2))
+                    format!(
+                        "{}{}",
+                        malicious_hex,
+                        "aa".repeat((64 - malicious_hex.len()) / 2)
+                    )
                 } else {
                     malicious_hex[..64].to_string()
                 };
@@ -344,8 +364,17 @@ mod encoding_root_negative_tests {
                     Ok(content_hash) => {
                         // If parsed successfully, should handle Unicode consistently
                         let hex_repr = content_hash.to_hex();
-                        assert_eq!(hex_repr.len(), 64, "Hex representation should be normalized: {}", attack_name);
-                        assert!(!hex_repr.contains('\u{200B}'), "Should not contain zero-width chars: {}", attack_name);
+                        assert_eq!(
+                            hex_repr.len(),
+                            64,
+                            "Hex representation should be normalized: {}",
+                            attack_name
+                        );
+                        assert!(
+                            !hex_repr.contains('\u{200B}'),
+                            "Should not contain zero-width chars: {}",
+                            attack_name
+                        );
                     }
                     Err(_) => {
                         // Rejection of Unicode-polluted input is acceptable
@@ -359,7 +388,8 @@ mod encoding_root_negative_tests {
                     "config_version": 1
                 });
 
-                let seed_parse_result: Result<DeterministicSeed, _> = serde_json::from_value(unicode_json);
+                let seed_parse_result: Result<DeterministicSeed, _> =
+                    serde_json::from_value(unicode_json);
                 match seed_parse_result {
                     Ok(_) => {
                         // Should handle Unicode in JSON fields consistently
@@ -382,8 +412,11 @@ mod encoding_root_negative_tests {
                     Ok(json_str) => {
                         // Verify JSON is well-formed
                         let reparse: Result<ScheduleConfig, _> = serde_json::from_str(&json_str);
-                        assert!(reparse.is_ok() || reparse.is_err(),
-                               "Config should serialize deterministically: {}", attack_name);
+                        assert!(
+                            reparse.is_ok() || reparse.is_err(),
+                            "Config should serialize deterministically: {}",
+                            attack_name
+                        );
                     }
                     Err(_) => {
                         // Serialization may fail for extreme Unicode - acceptable
@@ -393,25 +426,39 @@ mod encoding_root_negative_tests {
                 // Test DeterministicSeedDeriver with Unicode content
                 let mut deriver = DeterministicSeedDeriver::new();
                 if let Ok(content_hash) = ContentHash::from_hex(&"aa".repeat(32)) {
-                    let (seed, bump) = deriver.derive_seed(&DomainTag::Encoding, &content_hash, &config);
+                    let (seed, bump) =
+                        deriver.derive_seed(&DomainTag::Encoding, &content_hash, &config);
 
                     // Should handle derivation consistently
-                    assert!(seed.bytes().len() == 32, "Derived seed should have correct length: {}", attack_name);
-                    assert!(bump.is_none() || bump.is_some(), "Bump should be handled consistently: {}", attack_name);
+                    assert!(
+                        seed.bytes().len() == 32,
+                        "Derived seed should have correct length: {}",
+                        attack_name
+                    );
+                    assert!(
+                        bump.is_none() || bump.is_some(),
+                        "Bump should be handled consistently: {}",
+                        attack_name
+                    );
                 }
 
                 Ok(())
             });
 
-            assert!(injection_result.is_ok(),
-                   "Unicode injection test should not panic: {}", attack_name);
+            assert!(
+                injection_result.is_ok(),
+                "Unicode injection test should not panic: {}",
+                attack_name
+            );
         }
     }
 
     /// Test memory exhaustion protection in encoding components
     #[test]
     fn negative_encoding_memory_exhaustion_stress() {
-        use super::deterministic_seed::{ContentHash, DeterministicSeedDeriver, DomainTag, ScheduleConfig};
+        use super::deterministic_seed::{
+            ContentHash, DeterministicSeedDeriver, DomainTag, ScheduleConfig,
+        };
 
         let memory_stress_result = std::panic::catch_unwind(|| {
             // Test massive hex string processing
@@ -440,12 +487,17 @@ mod encoding_root_negative_tests {
             match config_json {
                 Ok(json_str) => {
                     // Should not be excessively large
-                    assert!(json_str.len() < 10_000_000, "Config JSON should be reasonably sized"); // 10MB limit
+                    assert!(
+                        json_str.len() < 10_000_000,
+                        "Config JSON should be reasonably sized"
+                    ); // 10MB limit
 
                     // Test deserialization
                     let reparse: Result<ScheduleConfig, _> = serde_json::from_str(&json_str);
-                    assert!(reparse.is_ok() || reparse.is_err(),
-                           "Config should handle large parameter sets");
+                    assert!(
+                        reparse.is_ok() || reparse.is_err(),
+                        "Config should handle large parameter sets"
+                    );
                 }
                 Err(_) => {
                     // Serialization may fail under memory pressure - acceptable
@@ -454,25 +506,47 @@ mod encoding_root_negative_tests {
 
             // Test DeterministicSeedDeriver with many derivations
             let mut deriver = DeterministicSeedDeriver::new();
-            let base_content = ContentHash::from_hex(&"bb".repeat(32)).expect("Base content should parse");
+            let base_content =
+                ContentHash::from_hex(&"bb".repeat(32)).expect("Base content should parse");
 
-            for i in 0..100 { // Limited for test performance
-                let iteration_config = ScheduleConfig::new(i + 1).with_param("iteration", &i.to_string());
-                let (seed, bump) = deriver.derive_seed(&DomainTag::Encoding, &base_content, &iteration_config);
+            for i in 0..100 {
+                // Limited for test performance
+                let iteration_config =
+                    ScheduleConfig::new(i + 1).with_param("iteration", &i.to_string());
+                let (seed, bump) =
+                    deriver.derive_seed(&DomainTag::Encoding, &base_content, &iteration_config);
 
                 // Should handle multiple derivations consistently
-                assert_eq!(seed.bytes().len(), 32, "Seed should maintain correct size at iteration {}", i);
-                assert!(seed.domain() == &DomainTag::Encoding, "Seed should maintain domain at iteration {}", i);
+                assert_eq!(
+                    seed.bytes().len(),
+                    32,
+                    "Seed should maintain correct size at iteration {}",
+                    i
+                );
+                assert!(
+                    seed.domain() == &DomainTag::Encoding,
+                    "Seed should maintain domain at iteration {}",
+                    i
+                );
 
                 // Verify bump tracking doesn't grow unbounded
                 if let Some(bump_record) = bump {
-                    assert!(!bump_record.description().is_empty(), "Bump description should be present");
+                    assert!(
+                        !bump_record.description().is_empty(),
+                        "Bump description should be present"
+                    );
                 }
             }
 
             // Verify deriver state is reasonable
-            assert!(deriver.tracked_domains() <= 1, "Should track reasonable number of domains");
-            assert!(deriver.bump_records().len() <= 100, "Bump records should be bounded");
+            assert!(
+                deriver.tracked_domains() <= 1,
+                "Should track reasonable number of domains"
+            );
+            assert!(
+                deriver.bump_records().len() <= 100,
+                "Bump records should be bounded"
+            );
 
             // Test JSON with deeply nested structure
             let nested_json = serde_json::json!({
@@ -493,35 +567,52 @@ mod encoding_root_negative_tests {
 
             // Should handle or reject nested structure gracefully
             let deep_parse: Result<serde_json::Value, _> = serde_json::from_value(nested_json);
-            assert!(deep_parse.is_ok() || deep_parse.is_err(), "Should handle nested JSON");
+            assert!(
+                deep_parse.is_ok() || deep_parse.is_err(),
+                "Should handle nested JSON"
+            );
 
             Ok(())
         });
 
-        assert!(memory_stress_result.is_ok(), "Memory exhaustion stress test should not panic");
+        assert!(
+            memory_stress_result.is_ok(),
+            "Memory exhaustion stress test should not panic"
+        );
     }
 
     /// Test JSON structure integrity validation in encoding serialization
     #[test]
     fn negative_encoding_json_integrity_validation() {
-        use super::deterministic_seed::{DeterministicSeed, ScheduleConfig, DomainTag, ContentHash};
+        use super::deterministic_seed::{
+            ContentHash, DeterministicSeed, DomainTag, ScheduleConfig,
+        };
 
         let json_corruption_patterns = vec![
             // Structural JSON attacks
             (r#"{"injected": true, "bytes": ""#, "incomplete_object"),
-            (r#"bytes": "aa", "injected": {"evil": true}, "domain": ""#, "property_injection"),
-            (r#"config\": {\"malicious\": true}, \"version\": 1, \"continue\": \""#, "config_escape"),
-
+            (
+                r#"bytes": "aa", "injected": {"evil": true}, "domain": ""#,
+                "property_injection",
+            ),
+            (
+                r#"config\": {\"malicious\": true}, \"version\": 1, \"continue\": \""#,
+                "config_escape",
+            ),
             // Array confusion attacks
             (r#"["fake", "array"], "bytes": ""#, "array_confusion"),
-            (r#"[{"bytes": "evil"}], "domain": ""#, "array_object_confusion"),
-
+            (
+                r#"[{"bytes": "evil"}], "domain": ""#,
+                "array_object_confusion",
+            ),
             // Unicode escape attacks
             (r#"domain\u0022injection\u0022"#, "unicode_escape_domain"),
             (r#"bytes\u0000null_injection"#, "null_escape_bytes"),
-
             // Control character corruption
-            ("bytes\r\n{\"injected\": true}\r\naa", "crlf_injection_bytes"),
+            (
+                "bytes\r\n{\"injected\": true}\r\naa",
+                "crlf_injection_bytes",
+            ),
             ("domain\x00{\"binary\": true}", "binary_injection_domain"),
         ];
 
@@ -534,7 +625,8 @@ mod encoding_root_negative_tests {
                     "config_version": 1
                 });
 
-                let seed_parse: Result<DeterministicSeed, _> = serde_json::from_value(malicious_json);
+                let seed_parse: Result<DeterministicSeed, _> =
+                    serde_json::from_value(malicious_json);
                 match seed_parse {
                     Ok(_) => {
                         // If parsed successfully, should be well-formed
@@ -560,17 +652,27 @@ mod encoding_root_negative_tests {
                         match reserialize {
                             Ok(json_str) => {
                                 // Verify JSON structure integrity
-                                let reparse: Result<serde_json::Value, _> = serde_json::from_str(&json_str);
-                                assert!(reparse.is_ok(),
-                                       "Reserialized JSON should be valid: {}", attack_name);
+                                let reparse: Result<serde_json::Value, _> =
+                                    serde_json::from_str(&json_str);
+                                assert!(
+                                    reparse.is_ok(),
+                                    "Reserialized JSON should be valid: {}",
+                                    attack_name
+                                );
 
                                 // Verify no injection occurred
                                 let parsed = reparse.unwrap();
                                 if let Some(obj) = parsed.as_object() {
-                                    assert!(!obj.contains_key("injected"),
-                                           "Should not contain injected properties: {}", attack_name);
-                                    assert!(!obj.contains_key("malicious"),
-                                           "Should not contain malicious properties: {}", attack_name);
+                                    assert!(
+                                        !obj.contains_key("injected"),
+                                        "Should not contain injected properties: {}",
+                                        attack_name
+                                    );
+                                    assert!(
+                                        !obj.contains_key("malicious"),
+                                        "Should not contain malicious properties: {}",
+                                        attack_name
+                                    );
                                 }
                             }
                             Err(_) => {
@@ -584,10 +686,11 @@ mod encoding_root_negative_tests {
                 }
 
                 // Test ContentHash with JSON-like hex strings
-                let json_like_hex = format!("{}{}{}",
-                    "7b".repeat(8),  // "{" in hex, repeated
-                    "22".repeat(8),  // "\"" in hex, repeated
-                    "7d".repeat(8)   // "}" in hex, repeated
+                let json_like_hex = format!(
+                    "{}{}{}",
+                    "7b".repeat(8), // "{" in hex, repeated
+                    "22".repeat(8), // "\"" in hex, repeated
+                    "7d".repeat(8)  // "}" in hex, repeated
                 );
 
                 let content_result = ContentHash::from_hex(&json_like_hex);
@@ -595,14 +698,23 @@ mod encoding_root_negative_tests {
                     Ok(content_hash) => {
                         // Should handle JSON-like patterns in hex consistently
                         let hex_repr = content_hash.to_hex();
-                        assert_eq!(hex_repr.len(), 64, "Hex should be normalized: {}", attack_name);
+                        assert_eq!(
+                            hex_repr.len(),
+                            64,
+                            "Hex should be normalized: {}",
+                            attack_name
+                        );
 
                         // Test JSON serialization of ContentHash
                         let content_json = serde_json::to_string(&content_hash);
                         if let Ok(json_str) = content_json {
-                            let content_reparse: Result<ContentHash, _> = serde_json::from_str(&json_str);
-                            assert!(content_reparse.is_ok() || content_reparse.is_err(),
-                                   "ContentHash JSON should round-trip: {}", attack_name);
+                            let content_reparse: Result<ContentHash, _> =
+                                serde_json::from_str(&json_str);
+                            assert!(
+                                content_reparse.is_ok() || content_reparse.is_err(),
+                                "ContentHash JSON should round-trip: {}",
+                                attack_name
+                            );
                         }
                     }
                     Err(_) => {
@@ -613,31 +725,34 @@ mod encoding_root_negative_tests {
                 Ok(())
             });
 
-            assert!(json_integrity_result.is_ok(),
-                   "JSON integrity test should not panic: {}", attack_name);
+            assert!(
+                json_integrity_result.is_ok(),
+                "JSON integrity test should not panic: {}",
+                attack_name
+            );
         }
     }
 
     /// Test arithmetic overflow protection in encoding calculations
     #[test]
     fn negative_encoding_arithmetic_overflow_protection() {
-        use super::deterministic_seed::{ScheduleConfig, DeterministicSeedDeriver, ContentHash, DomainTag};
+        use super::deterministic_seed::{
+            ContentHash, DeterministicSeedDeriver, DomainTag, ScheduleConfig,
+        };
 
         let overflow_protection_result = std::panic::catch_unwind(|| {
             // Test ScheduleConfig with extreme version numbers
-            let extreme_versions = vec![
-                0u32,
-                1u32,
-                u32::MAX / 2,
-                u32::MAX - 1,
-                u32::MAX,
-            ];
+            let extreme_versions = vec![0u32, 1u32, u32::MAX / 2, u32::MAX - 1, u32::MAX];
 
             for extreme_version in extreme_versions {
                 let config = ScheduleConfig::new(extreme_version);
 
                 // Should handle extreme version numbers safely
-                assert!(config.version() == extreme_version, "Version should be preserved: {}", extreme_version);
+                assert!(
+                    config.version() == extreme_version,
+                    "Version should be preserved: {}",
+                    extreme_version
+                );
 
                 // Test JSON serialization with extreme versions
                 let json_result = serde_json::to_string(&config);
@@ -646,8 +761,12 @@ mod encoding_root_negative_tests {
                         let reparse: Result<ScheduleConfig, _> = serde_json::from_str(&json_str);
                         match reparse {
                             Ok(reparsed) => {
-                                assert_eq!(reparsed.version(), extreme_version,
-                                         "Version should round-trip correctly: {}", extreme_version);
+                                assert_eq!(
+                                    reparsed.version(),
+                                    extreme_version,
+                                    "Version should round-trip correctly: {}",
+                                    extreme_version
+                                );
                             }
                             Err(_) => {
                                 // Parse may fail for extreme values - acceptable
@@ -662,35 +781,57 @@ mod encoding_root_negative_tests {
 
             // Test DeterministicSeedDeriver with many domain trackings
             let mut deriver = DeterministicSeedDeriver::new();
-            let base_content = ContentHash::from_hex(&"dd".repeat(32)).expect("Base content should parse");
+            let base_content =
+                ContentHash::from_hex(&"dd".repeat(32)).expect("Base content should parse");
 
             // Test with multiple different configs to stress domain tracking
             for i in 0..100 {
                 // Use very large version numbers that could cause overflow in naive implementations
-                let large_version = (i as u32).saturating_mul(1000000).saturating_add(u32::MAX / 2);
+                let large_version = (i as u32)
+                    .saturating_mul(1000000)
+                    .saturating_add(u32::MAX / 2);
                 let config = ScheduleConfig::new(large_version);
 
-                let (seed, bump) = deriver.derive_seed(&DomainTag::Encoding, &base_content, &config);
+                let (seed, bump) =
+                    deriver.derive_seed(&DomainTag::Encoding, &base_content, &config);
 
                 // Should handle large version numbers without overflow
-                assert_eq!(seed.config_version(), large_version, "Config version should be preserved: {}", i);
-                assert_eq!(seed.bytes().len(), 32, "Seed length should be consistent: {}", i);
+                assert_eq!(
+                    seed.config_version(),
+                    large_version,
+                    "Config version should be preserved: {}",
+                    i
+                );
+                assert_eq!(
+                    seed.bytes().len(),
+                    32,
+                    "Seed length should be consistent: {}",
+                    i
+                );
 
                 // Verify domain counting doesn't overflow
-                assert!(deriver.tracked_domains() <= 100, "Domain tracking should be bounded: {}", i);
+                assert!(
+                    deriver.tracked_domains() <= 100,
+                    "Domain tracking should be bounded: {}",
+                    i
+                );
 
                 // Test bump record handling
                 if let Some(bump_record) = bump {
-                    assert!(!bump_record.description().is_empty(), "Bump description should be valid: {}", i);
+                    assert!(
+                        !bump_record.description().is_empty(),
+                        "Bump description should be valid: {}",
+                        i
+                    );
                 }
             }
 
             // Test ContentHash with edge case hex patterns that could cause overflow
             let overflow_hex_patterns = vec![
-                "ff".repeat(32), // All 0xFF bytes
-                "00".repeat(32), // All 0x00 bytes
-                "80".repeat(32), // All high bit set
-                "7f".repeat(32), // All but high bit set
+                "ff".repeat(32),   // All 0xFF bytes
+                "00".repeat(32),   // All 0x00 bytes
+                "80".repeat(32),   // All high bit set
+                "7f".repeat(32),   // All but high bit set
                 "aa55".repeat(16), // Alternating pattern
             ];
 
@@ -700,19 +841,37 @@ mod encoding_root_negative_tests {
                     Ok(content_hash) => {
                         // Should handle edge case patterns consistently
                         let hex_repr = content_hash.to_hex();
-                        assert_eq!(hex_repr.len(), 64, "Hex length should be correct: pattern {}", i);
+                        assert_eq!(
+                            hex_repr.len(),
+                            64,
+                            "Hex length should be correct: pattern {}",
+                            i
+                        );
 
                         // Test that the pattern is preserved
-                        assert_eq!(hex_repr.to_lowercase(), hex_pattern.to_lowercase(),
-                                  "Hex pattern should be preserved: pattern {}", i);
+                        assert_eq!(
+                            hex_repr.to_lowercase(),
+                            hex_pattern.to_lowercase(),
+                            "Hex pattern should be preserved: pattern {}",
+                            i
+                        );
 
                         // Test with deriver
                         let mut pattern_deriver = DeterministicSeedDeriver::new();
                         let config = ScheduleConfig::new(i as u32 + 1);
-                        let (seed, _) = pattern_deriver.derive_seed(&DomainTag::Encoding, &content_hash, &config);
+                        let (seed, _) = pattern_deriver.derive_seed(
+                            &DomainTag::Encoding,
+                            &content_hash,
+                            &config,
+                        );
 
                         // Should derive seeds consistently for edge case patterns
-                        assert_eq!(seed.bytes().len(), 32, "Derived seed should have correct length: pattern {}", i);
+                        assert_eq!(
+                            seed.bytes().len(),
+                            32,
+                            "Derived seed should have correct length: pattern {}",
+                            i
+                        );
                     }
                     Err(_) => {
                         // ContentHash may reject certain patterns - acceptable
@@ -745,35 +904,39 @@ mod encoding_root_negative_tests {
             Ok(())
         });
 
-        assert!(overflow_protection_result.is_ok(), "Arithmetic overflow protection test should not panic");
+        assert!(
+            overflow_protection_result.is_ok(),
+            "Arithmetic overflow protection test should not panic"
+        );
     }
 
     /// Test display injection and format string safety in encoding output
     #[test]
     fn negative_encoding_display_injection_safety() {
-        use super::deterministic_seed::{ContentHash, ScheduleConfig, DeterministicSeedDeriver, DomainTag};
+        use super::deterministic_seed::{
+            ContentHash, DeterministicSeedDeriver, DomainTag, ScheduleConfig,
+        };
 
         let display_injection_vectors = vec![
             // Format string injection attempts
             ("format_inject", "param%s%x%d"),
             ("format_overflow", "value%.999999s"),
             ("format_position", "key%1$s%2$x"),
-
             // ANSI escape sequence injection
             ("ansi_colors", "param\x1b[31mRED\x1b[0m"),
             ("ansi_cursor", "value\x1b[H\x1b[2J"),
             ("ansi_title", "config\x1b]0;EVIL TITLE\x07"),
-
             // Terminal control injection
             ("bell_spam", "param\x07\x07\x07"),
             ("backspace_attack", "value\x08\x08\x08hidden"),
             ("carriage_return", "config\roverwrite"),
-
             // Unicode display corruption
             ("rtl_override", "param\u{202E}gniwoh\u{202D}"),
-            ("combining_overflow", "value\u{0300}\u{0301}\u{0302}\u{0303}"),
+            (
+                "combining_overflow",
+                "value\u{0300}\u{0301}\u{0302}\u{0303}",
+            ),
             ("width_confusion", "config\u{3000}\u{FF01}"),
-
             // Log injection attempts
             ("log_inject", "param\nINJECTED: admin config"),
             ("log_crlf", "value\r\n[FAKE] Configuration breach"),
@@ -787,19 +950,42 @@ mod encoding_root_negative_tests {
 
                 // Test display formatting safety
                 let config_display = format!("{:?}", config);
-                assert!(!config_display.contains("%s"), "Config display should not contain format specifiers: {}", attack_name);
-                assert!(!config_display.contains("\x1b["), "Config display should escape ANSI sequences: {}", attack_name);
-                assert!(!config_display.contains("\r\n[FAKE]"), "Config display should not allow log injection: {}", attack_name);
+                assert!(
+                    !config_display.contains("%s"),
+                    "Config display should not contain format specifiers: {}",
+                    attack_name
+                );
+                assert!(
+                    !config_display.contains("\x1b["),
+                    "Config display should escape ANSI sequences: {}",
+                    attack_name
+                );
+                assert!(
+                    !config_display.contains("\r\n[FAKE]"),
+                    "Config display should not allow log injection: {}",
+                    attack_name
+                );
 
                 // Test JSON serialization safety
                 if let Ok(json_str) = serde_json::to_string(&config) {
-                    assert!(!json_str.contains("\x1b["), "JSON should escape control sequences: {}", attack_name);
-                    assert!(!json_str.contains("\r\n"), "JSON should escape line breaks: {}", attack_name);
+                    assert!(
+                        !json_str.contains("\x1b["),
+                        "JSON should escape control sequences: {}",
+                        attack_name
+                    );
+                    assert!(
+                        !json_str.contains("\r\n"),
+                        "JSON should escape line breaks: {}",
+                        attack_name
+                    );
 
                     // Verify JSON is structurally sound
                     let reparse: Result<serde_json::Value, _> = serde_json::from_str(&json_str);
-                    assert!(reparse.is_ok() || reparse.is_err(),
-                           "JSON should be structurally sound: {}", attack_name);
+                    assert!(
+                        reparse.is_ok() || reparse.is_err(),
+                        "JSON should be structurally sound: {}",
+                        attack_name
+                    );
                 }
 
                 // Test ContentHash with display injection attempts
@@ -807,51 +993,99 @@ mod encoding_root_negative_tests {
                 let safe_hex = "ee".repeat(32);
                 if let Ok(content_hash) = ContentHash::from_hex(&safe_hex) {
                     let content_display = format!("{:?}", content_hash);
-                    assert!(!content_display.contains("%s"), "ContentHash display should be safe: {}", attack_name);
-                    assert!(!content_display.contains("\x1b["), "ContentHash display should escape ANSI: {}", attack_name);
+                    assert!(
+                        !content_display.contains("%s"),
+                        "ContentHash display should be safe: {}",
+                        attack_name
+                    );
+                    assert!(
+                        !content_display.contains("\x1b["),
+                        "ContentHash display should escape ANSI: {}",
+                        attack_name
+                    );
 
                     // Test hex representation safety
                     let hex_repr = content_hash.to_hex();
-                    assert_eq!(hex_repr.len(), 64, "Hex representation should be normalized: {}", attack_name);
-                    assert!(!hex_repr.contains("%s"), "Hex should not contain format specifiers: {}", attack_name);
+                    assert_eq!(
+                        hex_repr.len(),
+                        64,
+                        "Hex representation should be normalized: {}",
+                        attack_name
+                    );
+                    assert!(
+                        !hex_repr.contains("%s"),
+                        "Hex should not contain format specifiers: {}",
+                        attack_name
+                    );
                 }
 
                 // Test DeterministicSeedDeriver with display injection
                 let mut deriver = DeterministicSeedDeriver::new();
                 if let Ok(base_content) = ContentHash::from_hex(&"ff".repeat(32)) {
-                    let config = ScheduleConfig::new(1).with_param(malicious_content, malicious_content);
-                    let (seed, bump) = deriver.derive_seed(&DomainTag::Encoding, &base_content, &config);
+                    let config =
+                        ScheduleConfig::new(1).with_param(malicious_content, malicious_content);
+                    let (seed, bump) =
+                        deriver.derive_seed(&DomainTag::Encoding, &base_content, &config);
 
                     // Test seed display safety
                     let seed_display = format!("{:?}", seed);
-                    assert!(!seed_display.contains("%s"), "Seed display should be safe: {}", attack_name);
-                    assert!(!seed_display.contains("\x1b["), "Seed display should escape ANSI: {}", attack_name);
+                    assert!(
+                        !seed_display.contains("%s"),
+                        "Seed display should be safe: {}",
+                        attack_name
+                    );
+                    assert!(
+                        !seed_display.contains("\x1b["),
+                        "Seed display should escape ANSI: {}",
+                        attack_name
+                    );
 
                     // Test bump record display safety if present
                     if let Some(bump_record) = bump {
                         let bump_display = format!("{:?}", bump_record);
-                        assert!(!bump_display.contains("%s"), "Bump display should be safe: {}", attack_name);
-                        assert!(!bump_display.contains("\x1b["), "Bump display should escape ANSI: {}", attack_name);
+                        assert!(
+                            !bump_display.contains("%s"),
+                            "Bump display should be safe: {}",
+                            attack_name
+                        );
+                        assert!(
+                            !bump_display.contains("\x1b["),
+                            "Bump display should escape ANSI: {}",
+                            attack_name
+                        );
                     }
 
                     // Test deriver state display safety
                     let deriver_display = format!("{:?}", deriver);
-                    assert!(!deriver_display.contains("%s"), "Deriver display should be safe: {}", attack_name);
-                    assert!(!deriver_display.contains("\x1b["), "Deriver display should escape ANSI: {}", attack_name);
+                    assert!(
+                        !deriver_display.contains("%s"),
+                        "Deriver display should be safe: {}",
+                        attack_name
+                    );
+                    assert!(
+                        !deriver_display.contains("\x1b["),
+                        "Deriver display should escape ANSI: {}",
+                        attack_name
+                    );
                 }
 
                 Ok(())
             });
 
-            assert!(display_safety_result.is_ok(),
-                   "Display injection test should not panic: {}", attack_name);
+            assert!(
+                display_safety_result.is_ok(),
+                "Display injection test should not panic: {}",
+                attack_name
+            );
         }
     }
 
     /// Test boundary condition stress in encoding edge cases
     #[test]
     fn negative_encoding_boundary_stress_comprehensive() {
-        use super::deterministic_seed::{ContentHash, ScheduleConfig, DeterministicSeedDeriver, DomainTag};
+        use super::deterministic_seed::{
+            ContentHash, DeterministicSeedDeriver, DomainTag, ScheduleConfig,
+        };
 
         let boundary_stress_result = std::panic::catch_unwind(|| {
             // Test ContentHash hex string length boundaries
@@ -869,15 +1103,29 @@ mod encoding_root_negative_tests {
             for (hex_string, test_name) in hex_length_cases {
                 let content_result = ContentHash::from_hex(&hex_string);
 
-                if hex_string.len() == 64 { // Only 32 bytes (64 hex chars) should be valid
-                    assert!(content_result.is_ok(), "Valid hex length should parse: {}", test_name);
+                if hex_string.len() == 64 {
+                    // Only 32 bytes (64 hex chars) should be valid
+                    assert!(
+                        content_result.is_ok(),
+                        "Valid hex length should parse: {}",
+                        test_name
+                    );
 
                     if let Ok(content_hash) = content_result {
                         let hex_repr = content_hash.to_hex();
-                        assert_eq!(hex_repr.len(), 64, "Hex representation should be normalized: {}", test_name);
+                        assert_eq!(
+                            hex_repr.len(),
+                            64,
+                            "Hex representation should be normalized: {}",
+                            test_name
+                        );
                     }
                 } else {
-                    assert!(content_result.is_err(), "Invalid hex length should be rejected: {}", test_name);
+                    assert!(
+                        content_result.is_err(),
+                        "Invalid hex length should be rejected: {}",
+                        test_name
+                    );
                 }
             }
 
@@ -894,7 +1142,12 @@ mod encoding_root_negative_tests {
                 let config = ScheduleConfig::new(version);
 
                 // Should handle all u32 version values
-                assert_eq!(config.version(), version, "Version should be preserved: {}", test_name);
+                assert_eq!(
+                    config.version(),
+                    version,
+                    "Version should be preserved: {}",
+                    test_name
+                );
 
                 // Test JSON round-trip with boundary versions
                 let json_result = serde_json::to_string(&config);
@@ -902,8 +1155,12 @@ mod encoding_root_negative_tests {
                     Ok(json_str) => {
                         let reparse: Result<ScheduleConfig, _> = serde_json::from_str(&json_str);
                         if let Ok(reparsed) = reparse {
-                            assert_eq!(reparsed.version(), version,
-                                     "Version should round-trip: {}", test_name);
+                            assert_eq!(
+                                reparsed.version(),
+                                version,
+                                "Version should round-trip: {}",
+                                test_name
+                            );
                         }
                     }
                     Err(_) => {
@@ -936,7 +1193,11 @@ mod encoding_root_negative_tests {
                 match json_result {
                     Ok(json_str) => {
                         // Should handle various parameter counts
-                        assert!(json_str.len() > 10, "JSON should have content: {}", test_name);
+                        assert!(
+                            json_str.len() > 10,
+                            "JSON should have content: {}",
+                            test_name
+                        );
 
                         let reparse: Result<ScheduleConfig, _> = serde_json::from_str(&json_str);
                         match reparse {
@@ -956,33 +1217,65 @@ mod encoding_root_negative_tests {
 
             // Test DeterministicSeedDeriver with repeated operations
             let mut deriver = DeterministicSeedDeriver::new();
-            let base_content = ContentHash::from_hex(&"11".repeat(32)).expect("Base content should parse");
+            let base_content =
+                ContentHash::from_hex(&"11".repeat(32)).expect("Base content should parse");
 
             // Test boundary of derivation operations
             for i in 0..1000 {
                 let config = ScheduleConfig::new(i + 1);
-                let (seed, bump) = deriver.derive_seed(&DomainTag::Encoding, &base_content, &config);
+                let (seed, bump) =
+                    deriver.derive_seed(&DomainTag::Encoding, &base_content, &config);
 
                 // Should handle repeated derivations consistently
-                assert_eq!(seed.bytes().len(), 32, "Seed length should be consistent: iteration {}", i);
-                assert_eq!(seed.config_version(), i + 1, "Config version should be correct: iteration {}", i);
+                assert_eq!(
+                    seed.bytes().len(),
+                    32,
+                    "Seed length should be consistent: iteration {}",
+                    i
+                );
+                assert_eq!(
+                    seed.config_version(),
+                    i + 1,
+                    "Config version should be correct: iteration {}",
+                    i
+                );
 
                 // Test bump tracking boundaries
                 if i == 0 {
-                    assert!(bump.is_none(), "First derivation should not bump: iteration {}", i);
+                    assert!(
+                        bump.is_none(),
+                        "First derivation should not bump: iteration {}",
+                        i
+                    );
                 } else {
-                    assert!(bump.is_some(), "Subsequent derivations should bump: iteration {}", i);
+                    assert!(
+                        bump.is_some(),
+                        "Subsequent derivations should bump: iteration {}",
+                        i
+                    );
                 }
 
                 // Verify deriver state remains bounded
-                assert!(deriver.tracked_domains() <= 10, "Domain tracking should be bounded: iteration {}", i);
-                assert!(deriver.bump_records().len() <= i + 1, "Bump records should be reasonable: iteration {}", i);
+                assert!(
+                    deriver.tracked_domains() <= 10,
+                    "Domain tracking should be bounded: iteration {}",
+                    i
+                );
+                assert!(
+                    deriver.bump_records().len() <= i + 1,
+                    "Bump records should be reasonable: iteration {}",
+                    i
+                );
 
                 // Test memory usage doesn't grow unbounded
                 if i % 100 == 0 {
                     let json_test = serde_json::to_string(&seed);
                     if let Ok(json_str) = json_test {
-                        assert!(json_str.len() < 10000, "Seed JSON should be bounded: iteration {}", i);
+                        assert!(
+                            json_str.len() < 10000,
+                            "Seed JSON should be bounded: iteration {}",
+                            i
+                        );
                     }
                 }
             }
@@ -1002,15 +1295,28 @@ mod encoding_root_negative_tests {
                     Ok(content_hash) => {
                         // Should handle all valid hex patterns
                         let hex_repr = content_hash.to_hex();
-                        assert_eq!(hex_repr.to_lowercase(), hex_pattern.to_lowercase(),
-                                  "Hex should be preserved: {}", test_name);
+                        assert_eq!(
+                            hex_repr.to_lowercase(),
+                            hex_pattern.to_lowercase(),
+                            "Hex should be preserved: {}",
+                            test_name
+                        );
 
                         // Test derivation with boundary patterns
                         let mut pattern_deriver = DeterministicSeedDeriver::new();
                         let config = ScheduleConfig::new(1);
-                        let (seed, _) = pattern_deriver.derive_seed(&DomainTag::Encoding, &content_hash, &config);
+                        let (seed, _) = pattern_deriver.derive_seed(
+                            &DomainTag::Encoding,
+                            &content_hash,
+                            &config,
+                        );
 
-                        assert_eq!(seed.bytes().len(), 32, "Derived seed should be correct length: {}", test_name);
+                        assert_eq!(
+                            seed.bytes().len(),
+                            32,
+                            "Derived seed should be correct length: {}",
+                            test_name
+                        );
                     }
                     Err(_) => {
                         // Should not happen for valid hex patterns
@@ -1022,14 +1328,19 @@ mod encoding_root_negative_tests {
             Ok(())
         });
 
-        assert!(boundary_stress_result.is_ok(), "Boundary stress test should not panic");
+        assert!(
+            boundary_stress_result.is_ok(),
+            "Boundary stress test should not panic"
+        );
     }
 
     /// Extreme adversarial test: Cryptographic seed entropy manipulation attack via
     /// predictable content hashes designed to exploit deterministic seed generation
     #[test]
     fn encoding_root_cryptographic_entropy_manipulation_predictable_seed_attack() {
-        use super::deterministic_seed::{ContentHash, DeterministicSeedDeriver, DomainTag, ScheduleConfig};
+        use super::deterministic_seed::{
+            ContentHash, DeterministicSeedDeriver, DomainTag, ScheduleConfig,
+        };
 
         let mut deriver = DeterministicSeedDeriver::new();
 
@@ -1040,63 +1351,108 @@ mod encoding_root_negative_tests {
             ("ff".repeat(32), "All one entropy"),
             ("aa".repeat(32), "Repeated pattern entropy"),
             ("0123456789abcdef".repeat(4), "Sequential pattern entropy"),
-
             // Mathematical sequences that might exploit PRNG weaknesses
-            ("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20", "Incrementing sequence"),
-            ("2020202020202020202020202020202020202020202020202020202020202020", "ASCII space pattern"),
-            ("deadbeefcafebabe" + &"0000000000000000".repeat(2), "Known constants with padding"),
-
+            (
+                "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+                "Incrementing sequence",
+            ),
+            (
+                "2020202020202020202020202020202020202020202020202020202020202020",
+                "ASCII space pattern",
+            ),
+            (
+                "deadbeefcafebabe" + &"0000000000000000".repeat(2),
+                "Known constants with padding",
+            ),
             // Bit patterns targeting cryptographic edge cases
-            ("8000000000000000000000000000000000000000000000000000000000000000", "Single bit set"),
-            ("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "Max positive"),
-            ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "Alternating bits"),
-
+            (
+                "8000000000000000000000000000000000000000000000000000000000000000",
+                "Single bit set",
+            ),
+            (
+                "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "Max positive",
+            ),
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "Alternating bits",
+            ),
             // Common cryptographic constants that might reveal implementation
-            ("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "SHA256 empty string"),
-            ("d14a028c2a3a2bc9476102bb288234c415a2b01f828ea62ac5b3e42f", "SHA224 empty"),
+            (
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "SHA256 empty string",
+            ),
+            (
+                "d14a028c2a3a2bc9476102bb288234c415a2b01f828ea62ac5b3e42f",
+                "SHA224 empty",
+            ),
         ];
 
         let mut derived_seeds = Vec::new();
 
         for (predictable_hex, description) in predictable_patterns {
-            let content_hash = ContentHash::from_hex(predictable_hex)
-                .expect("predictable content should parse");
+            let content_hash =
+                ContentHash::from_hex(predictable_hex).expect("predictable content should parse");
 
-            let config = ScheduleConfig::new(1)
-                .with_param("entropy_test", description);
+            let config = ScheduleConfig::new(1).with_param("entropy_test", description);
 
             let (seed, bump) = deriver.derive_seed(&DomainTag::Encoding, &content_hash, &config);
 
             // Verify seed derivation doesn't leak information about input patterns
-            assert_eq!(seed.bytes().len(), 32,
-                "Derived seed should have standard length for pattern: {}", description);
-            assert_eq!(seed.domain(), &DomainTag::Encoding,
-                "Derived seed should maintain domain for pattern: {}", description);
+            assert_eq!(
+                seed.bytes().len(),
+                32,
+                "Derived seed should have standard length for pattern: {}",
+                description
+            );
+            assert_eq!(
+                seed.domain(),
+                &DomainTag::Encoding,
+                "Derived seed should maintain domain for pattern: {}",
+                description
+            );
 
-            deterministic_seed::push_bounded(&mut derived_seeds, (seed.bytes().to_vec(), description), 20);
+            deterministic_seed::push_bounded(
+                &mut derived_seeds,
+                (seed.bytes().to_vec(), description),
+                20,
+            );
 
             // Verify no obvious information leakage
             let seed_bytes = seed.bytes();
             let is_all_same = seed_bytes.iter().all(|&b| b == seed_bytes[0]);
-            assert!(!is_all_same,
-                "Derived seed should not be all same byte for pattern: {}", description);
+            assert!(
+                !is_all_same,
+                "Derived seed should not be all same byte for pattern: {}",
+                description
+            );
 
             // Check for bias in derived entropy
             let zero_count = seed_bytes.iter().filter(|&&b| b == 0).count();
             let max_count = seed_bytes.iter().filter(|&&b| b == 255).count();
 
-            assert!(zero_count < 20,
-                "Derived seed should not have excessive zeros ({}) for pattern: {}", zero_count, description);
-            assert!(max_count < 20,
-                "Derived seed should not have excessive 0xFF bytes ({}) for pattern: {}", max_count, description);
+            assert!(
+                zero_count < 20,
+                "Derived seed should not have excessive zeros ({}) for pattern: {}",
+                zero_count,
+                description
+            );
+            assert!(
+                max_count < 20,
+                "Derived seed should not have excessive 0xFF bytes ({}) for pattern: {}",
+                max_count,
+                description
+            );
         }
 
         // Verify different inputs produce different outputs (no collisions)
         for i in 0..derived_seeds.len() {
             for j in (i + 1)..derived_seeds.len() {
-                assert_ne!(derived_seeds[i].0, derived_seeds[j].0,
+                assert_ne!(
+                    derived_seeds[i].0, derived_seeds[j].0,
                     "Seeds should be unique between '{}' and '{}'",
-                    derived_seeds[i].1, derived_seeds[j].1);
+                    derived_seeds[i].1, derived_seeds[j].1
+                );
             }
         }
     }
@@ -1108,7 +1464,10 @@ mod encoding_root_negative_tests {
         use super::deterministic_seed::ScheduleConfig;
 
         let mut large_parameter_map = serde_json::Map::new();
-        large_parameter_map.insert("x".repeat(10000), serde_json::Value::String("value".to_string()));
+        large_parameter_map.insert(
+            "x".repeat(10000),
+            serde_json::Value::String("value".to_string()),
+        );
         let nested_parameter_value = "{".repeat(1000) + &"}".repeat(1000);
 
         // Memory corruption attack vectors in JSON serialization
@@ -1118,7 +1477,6 @@ mod encoding_root_negative_tests {
                 "version": 1,
                 "parameters": large_parameter_map
             }),
-
             // Deep nesting to trigger stack overflow
             serde_json::json!({
                 "version": 1,
@@ -1126,7 +1484,6 @@ mod encoding_root_negative_tests {
                     "nested": nested_parameter_value
                 }
             }),
-
             // Unicode normalization attacks in parameter data
             serde_json::json!({
                 "version": 1,
@@ -1134,7 +1491,6 @@ mod encoding_root_negative_tests {
                     "unicode_attack": "café vs cafe\u{0301}"
                 }
             }),
-
             // Control character injection in parameters
             serde_json::json!({
                 "version": 1,
@@ -1142,7 +1498,6 @@ mod encoding_root_negative_tests {
                     "control": "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f"
                 }
             }),
-
             // Binary data in string fields
             serde_json::json!({
                 "version": 1,
@@ -1151,13 +1506,11 @@ mod encoding_root_negative_tests {
                         .into_owned()
                 }
             }),
-
             // Extremely large version numbers
             serde_json::json!({
                 "version": 4294967295_u32,
                 "parameters": {}
             }),
-
             // Parameter values that could exploit string handling
             serde_json::json!({
                 "version": 1,
@@ -1168,39 +1521,51 @@ mod encoding_root_negative_tests {
         ];
 
         for (i, corruption_payload) in corruption_payloads.iter().enumerate() {
-            let parse_result: Result<ScheduleConfig, _> = serde_json::from_value(corruption_payload.clone());
+            let parse_result: Result<ScheduleConfig, _> =
+                serde_json::from_value(corruption_payload.clone());
 
             match parse_result {
                 Ok(config) => {
                     // If parsing succeeded, verify internal consistency
-                    assert!(config.version() <= u32::MAX,
-                        "Version should remain within bounds for payload {}", i);
+                    assert!(
+                        config.version() <= u32::MAX,
+                        "Version should remain within bounds for payload {}",
+                        i
+                    );
 
                     // Test re-serialization to detect corruption
                     let reserialize_result = serde_json::to_string(&config);
                     match reserialize_result {
                         Ok(json_str) => {
                             // Verify serialized output is reasonable
-                            assert!(json_str.len() < 1_000_000,
-                                "Serialized config should not be excessively large for payload {}", i);
+                            assert!(
+                                json_str.len() < 1_000_000,
+                                "Serialized config should not be excessively large for payload {}",
+                                i
+                            );
 
                             // Verify round-trip integrity
-                            let round_trip_result: Result<ScheduleConfig, _> = serde_json::from_str(&json_str);
+                            let round_trip_result: Result<ScheduleConfig, _> =
+                                serde_json::from_str(&json_str);
                             match round_trip_result {
                                 Ok(round_trip_config) => {
-                                    assert_eq!(round_trip_config.version(), config.version(),
-                                        "Round-trip version should match for payload {}", i);
-                                },
+                                    assert_eq!(
+                                        round_trip_config.version(),
+                                        config.version(),
+                                        "Round-trip version should match for payload {}",
+                                        i
+                                    );
+                                }
                                 Err(_) => {
                                     // Round-trip failure for corrupted data is acceptable
                                 }
                             }
-                        },
+                        }
                         Err(_) => {
                             // Serialization failure for corrupted data is acceptable
                         }
                     }
-                },
+                }
                 Err(_) => {
                     // Graceful parsing failure for malformed data is expected
                 }
@@ -1212,51 +1577,62 @@ mod encoding_root_negative_tests {
     /// targeting shared state corruption in deterministic seed derivation systems
     #[test]
     fn encoding_root_concurrent_domain_tracking_race_condition_attack() {
+        use super::deterministic_seed::{
+            ContentHash, DeterministicSeedDeriver, DomainTag, ScheduleConfig,
+        };
         use std::sync::{Arc, Mutex};
         use std::thread;
-        use super::deterministic_seed::{ContentHash, DeterministicSeedDeriver, DomainTag, ScheduleConfig};
 
         let deriver = Arc::new(Mutex::new(DeterministicSeedDeriver::new()));
 
         // Spawn threads performing concurrent domain operations
-        let handles: Vec<_> = (0..10).map(|thread_id| {
-            let deriver_clone = Arc::clone(&deriver);
+        let handles: Vec<_> = (0..10)
+            .map(|thread_id| {
+                let deriver_clone = Arc::clone(&deriver);
 
-            thread::spawn(move || {
-                for iteration in 0..100 {
-                    let content_hex = format!("{:02x}", thread_id).repeat(32);
-                    let content_hash = ContentHash::from_hex(&content_hex)
-                        .expect("thread content should be valid");
+                thread::spawn(move || {
+                    for iteration in 0..100 {
+                        let content_hex = format!("{:02x}", thread_id).repeat(32);
+                        let content_hash = ContentHash::from_hex(&content_hex)
+                            .expect("thread content should be valid");
 
-                    // Cycle through domains to stress tracking logic
-                    let domains = [
-                        DomainTag::Encoding,
-                        DomainTag::Repair,
-                        DomainTag::Scheduling,
-                    ];
-                    let domain = &domains[iteration % domains.len()];
+                        // Cycle through domains to stress tracking logic
+                        let domains = [
+                            DomainTag::Encoding,
+                            DomainTag::Repair,
+                            DomainTag::Scheduling,
+                        ];
+                        let domain = &domains[iteration % domains.len()];
 
-                    let config = ScheduleConfig::new((thread_id * 1000 + iteration) as u32)
-                        .with_param("thread", &thread_id.to_string())
-                        .with_param("iteration", &iteration.to_string());
+                        let config = ScheduleConfig::new((thread_id * 1000 + iteration) as u32)
+                            .with_param("thread", &thread_id.to_string())
+                            .with_param("iteration", &iteration.to_string());
 
-                    // Attempt derivation with brief lock to encourage races
-                    if let Ok(mut deriver_lock) = deriver_clone.try_lock() {
-                        let (seed, _bump) = deriver_lock.derive_seed(domain, &content_hash, &config);
+                        // Attempt derivation with brief lock to encourage races
+                        if let Ok(mut deriver_lock) = deriver_clone.try_lock() {
+                            let (seed, _bump) =
+                                deriver_lock.derive_seed(domain, &content_hash, &config);
 
-                        // Verify seed integrity during concurrent access
-                        assert_eq!(seed.bytes().len(), 32,
-                            "Seed length should be correct during concurrent access");
-                        assert_eq!(seed.domain(), domain,
-                            "Seed domain should match request during concurrent access");
+                            // Verify seed integrity during concurrent access
+                            assert_eq!(
+                                seed.bytes().len(),
+                                32,
+                                "Seed length should be correct during concurrent access"
+                            );
+                            assert_eq!(
+                                seed.domain(),
+                                domain,
+                                "Seed domain should match request during concurrent access"
+                            );
 
-                        // Brief yield to encourage race conditions
-                        std::mem::drop(deriver_lock);
-                        thread::yield_now();
+                            // Brief yield to encourage race conditions
+                            std::mem::drop(deriver_lock);
+                            thread::yield_now();
+                        }
                     }
-                }
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all threads to complete
         for handle in handles {
@@ -1268,20 +1644,27 @@ mod encoding_root_negative_tests {
         let tracked_domains = final_deriver.tracked_domains();
         let bump_records = final_deriver.bump_records();
 
-        assert!(tracked_domains <= 3,
-            "Should not track more than 3 domains after concurrent access: {}", tracked_domains);
-        assert!(tracked_domains > 0,
-            "Should track at least one domain after concurrent operations");
-        assert!(bump_records.len() <= tracked_domains * 10,
-            "Bump records should be reasonable relative to tracked domains");
+        assert!(
+            tracked_domains <= 3,
+            "Should not track more than 3 domains after concurrent access: {}",
+            tracked_domains
+        );
+        assert!(
+            tracked_domains > 0,
+            "Should track at least one domain after concurrent operations"
+        );
+        assert!(
+            bump_records.len() <= tracked_domains * 10,
+            "Bump records should be reasonable relative to tracked domains"
+        );
     }
 
     /// Extreme adversarial test: Algorithmic complexity explosion via crafted parameter
     /// maps designed to exploit worst-case performance in configuration processing
     #[test]
     fn encoding_root_algorithmic_complexity_explosion_parameter_processing_attack() {
-        use std::time::Instant;
         use super::deterministic_seed::ScheduleConfig;
+        use std::time::Instant;
 
         // Generate configuration with pathological parameter patterns
         let mut complex_config = ScheduleConfig::new(1);
@@ -1290,13 +1673,15 @@ mod encoding_root_negative_tests {
         let complexity_factor = 100; // Limited to prevent actual DoS
         for i in 0..complexity_factor {
             for j in 0..10 {
-                let key = format!("param_{}_{}_{}_{}_end",
+                let key = format!(
+                    "param_{}_{}_{}_{}_end",
                     "x".repeat(i % 20),
                     i,
                     "y".repeat(j),
                     "z".repeat((i * j) % 15)
                 );
-                let value = format!("value_{}_{}_{}",
+                let value = format!(
+                    "value_{}_{}_{}",
                     "a".repeat((i * 7) % 30),
                     j,
                     "b".repeat((i + j) % 25)
@@ -1315,35 +1700,44 @@ mod encoding_root_negative_tests {
         let serialize_result = serde_json::to_string(&complex_config);
         let serialize_time = start.elapsed();
 
-        assert!(serialize_time.as_millis() < 5000,
+        assert!(
+            serialize_time.as_millis() < 5000,
             "Complex config serialization should complete in reasonable time: {}ms",
-            serialize_time.as_millis());
+            serialize_time.as_millis()
+        );
 
         match serialize_result {
             Ok(json_str) => {
-                assert!(json_str.len() < 10_000_000,
+                assert!(
+                    json_str.len() < 10_000_000,
                     "Serialized complex config should not be excessively large: {} bytes",
-                    json_str.len());
+                    json_str.len()
+                );
 
                 // Test deserialization performance
                 let start = Instant::now();
                 let deserialize_result: Result<ScheduleConfig, _> = serde_json::from_str(&json_str);
                 let deserialize_time = start.elapsed();
 
-                assert!(deserialize_time.as_millis() < 5000,
+                assert!(
+                    deserialize_time.as_millis() < 5000,
                     "Complex config deserialization should complete in reasonable time: {}ms",
-                    deserialize_time.as_millis());
+                    deserialize_time.as_millis()
+                );
 
                 match deserialize_result {
                     Ok(restored_config) => {
-                        assert_eq!(restored_config.version(), complex_config.version(),
-                            "Complex config version should be preserved");
-                    },
+                        assert_eq!(
+                            restored_config.version(),
+                            complex_config.version(),
+                            "Complex config version should be preserved"
+                        );
+                    }
                     Err(_) => {
                         // Graceful failure for extremely complex configs is acceptable
                     }
                 }
-            },
+            }
             Err(_) => {
                 // Serialization failure for overly complex configs is acceptable
             }
@@ -1364,44 +1758,35 @@ mod encoding_root_negative_tests {
             "\"Scheduling\"",
             "\"Placement\"",
             "\"Verification\"",
-
             // Case variation attacks
             "\"encoding\"",
             "\"ENCODING\"",
             "\"EnCoDiNg\"",
-
             // Injection attempts
             "\"Encoding\\\"\"",
             "\"Encoding\\\",\\\"evil\\\":\\\"payload\"",
-
             // Unicode variants
             "\"Еncoding\"", // Cyrillic E
             "\"Ǝncoding\"", // Rotated E
-
             // Special characters
             "\"Encoding \"",
             "\" Encoding\"",
             "\"Encoding\\n\"",
             "\"Encoding\\t\"",
-
             // Numeric attempts
             "\"0\"",
             "\"1\"",
             "\"999\"",
-
             // Boolean attempts
             "\"true\"",
             "\"false\"",
-
             // Empty/null attempts
             "\"\"",
             "null",
-
             // Path-like attempts
             "\"../Encoding\"",
             "\"./Encoding\"",
             "\"/Encoding\"",
-
             // Special domain attempts
             "\"Admin\"",
             "\"Root\"",
@@ -1419,7 +1804,7 @@ mod encoding_root_negative_tests {
             match parse_result {
                 Ok(domain) => {
                     successful_domains.push((domain, probe));
-                },
+                }
                 Err(_) => {
                     // Expected failure for invalid domain attempts
                 }
@@ -1427,16 +1812,19 @@ mod encoding_root_negative_tests {
         }
 
         // Verify only legitimate domains were accepted
-        assert!(successful_domains.len() <= DomainTag::all().len(),
+        assert!(
+            successful_domains.len() <= DomainTag::all().len(),
             "Should only accept known valid domains, got: {:?}",
-            successful_domains);
+            successful_domains
+        );
 
         for (domain, probe_str) in successful_domains {
             // Verify each successful domain is genuinely valid
             assert!(
                 DomainTag::all().contains(&domain),
                 "Unexpected domain variant accepted: {:?} from probe {}",
-                domain, probe_str
+                domain,
+                probe_str
             );
         }
     }
@@ -1454,37 +1842,39 @@ mod encoding_root_negative_tests {
             ("a".repeat(65), "Oversized by 1 char"),
             ("", "Empty hex string"),
             ("a", "Single hex character"),
-
             // Character boundary attacks
             ("g".repeat(64), "Invalid hex character 'g'"),
             ("G".repeat(64), "Invalid hex character 'G'"),
             ("@".repeat(64), "Invalid hex character '@'"),
             (":".repeat(64), "Invalid hex character ':'"),
             ("[".repeat(64), "Invalid hex character '['"),
-
             // Mixed valid/invalid characters
-            (format!("{}g{}", "a".repeat(31), "a".repeat(32)), "Mixed valid/invalid"),
-            (format!("{}G{}", "f".repeat(31), "f".repeat(32)), "Mixed case"),
-
+            (
+                format!("{}g{}", "a".repeat(31), "a".repeat(32)),
+                "Mixed valid/invalid",
+            ),
+            (
+                format!("{}G{}", "f".repeat(31), "f".repeat(32)),
+                "Mixed case",
+            ),
             // Whitespace injection at boundaries
             (format!(" {}", "a".repeat(64)), "Leading whitespace"),
             (format!("{} ", "a".repeat(64)), "Trailing whitespace"),
-            (format!("{} {}", "a".repeat(31), "a".repeat(32)), "Mid whitespace"),
-
+            (
+                format!("{} {}", "a".repeat(31), "a".repeat(32)),
+                "Mid whitespace",
+            ),
             // Control character injection
             (format!("\x00{}", "a".repeat(63)), "Null byte prefix"),
             (format!("{}\x00", "a".repeat(63)), "Null byte suffix"),
             (format!("\r\n{}", "a".repeat(62)), "CRLF prefix"),
-
             // Unicode boundary tests
             (format!("а{}", "a".repeat(63)), "Cyrillic prefix"), // а (U+0430)
             (format!("{}а", "a".repeat(63)), "Cyrillic suffix"),
-
             // Number-like patterns that might confuse parsing
             ("0x".repeat(32), "Repeated hex prefix"),
             ("00".repeat(31) + "0x", "Hex prefix at end"),
             ("#".repeat(64), "Hash character spam"),
-
             // Extreme ASCII values
             ("\x7f".repeat(64), "DEL character"),
             ("\x1f".repeat(64), "Unit separator"),
@@ -1494,15 +1884,18 @@ mod encoding_root_negative_tests {
             let parse_result = ContentHash::from_hex(&boundary_hex);
 
             // All boundary manipulation attempts should be rejected
-            assert!(parse_result.is_err(),
+            assert!(
+                parse_result.is_err(),
                 "Boundary attack should be rejected: {} - '{:?}'",
-                description, boundary_hex);
+                description,
+                boundary_hex
+            );
 
             // Verify we get appropriate error type
             match parse_result.unwrap_err() {
                 super::deterministic_seed::SeedError::InvalidContentHash => {
                     // Expected error type for invalid content hashes
-                },
+                }
             }
         }
 
@@ -1517,16 +1910,23 @@ mod encoding_root_negative_tests {
         for (valid_hex, description) in valid_boundary_tests {
             let parse_result = ContentHash::from_hex(&valid_hex);
 
-            assert!(parse_result.is_ok(),
+            assert!(
+                parse_result.is_ok(),
                 "Valid boundary case should succeed: {} - '{}'",
-                description, valid_hex);
+                description,
+                valid_hex
+            );
 
             let content_hash = parse_result.unwrap();
             let restored_hex = content_hash.to_hex();
 
             // Verify round-trip integrity at boundaries
-            assert_eq!(restored_hex.to_lowercase(), valid_hex.to_lowercase(),
-                "Boundary hex should round-trip correctly: {}", description);
+            assert_eq!(
+                restored_hex.to_lowercase(),
+                valid_hex.to_lowercase(),
+                "Boundary hex should round-trip correctly: {}",
+                description
+            );
         }
     }
 
@@ -1550,26 +1950,48 @@ mod encoding_root_negative_tests {
         let bomb_payloads = [
             // Deeply nested object structure
             (deep_object_payload, "Deep object nesting"),
-
             // Repeated key attack
-            (format!(r#"{{"version":1,"parameters":{{{}}}}}"#,
-                (0..1000).map(|i| format!("\"key{}\":\"value{}\"", i, i)).collect::<Vec<_>>().join(",")),
-                "Massive key count"),
-
+            (
+                format!(
+                    r#"{{"version":1,"parameters":{{{}}}}}"#,
+                    (0..1000)
+                        .map(|i| format!("\"key{}\":\"value{}\"", i, i))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                "Massive key count",
+            ),
             // Large string values
-            (format!(r#"{{"version":1,"parameters":{{"large":"{}"}}}}"#, "x".repeat(100_000)), "Massive string value"),
-
+            (
+                format!(
+                    r#"{{"version":1,"parameters":{{"large":"{}"}}}}"#,
+                    "x".repeat(100_000)
+                ),
+                "Massive string value",
+            ),
             // Array bombing (if arrays were accepted)
             (array_bomb_payload, "Array structure"),
-
             // Unicode bombing
-            (format!(r#"{{"version":1,"parameters":{{"unicode":"{}"}}}}"#, "🔥".repeat(10_000)), "Unicode bombing"),
-
+            (
+                format!(
+                    r#"{{"version":1,"parameters":{{"unicode":"{}"}}}}"#,
+                    "🔥".repeat(10_000)
+                ),
+                "Unicode bombing",
+            ),
             // Escape sequence bombing
-            (format!(r#"{{"version":1,"parameters":{{"escaped":"{}"}}}}"#, r#"\"""#.repeat(10_000)), "Escape bombing"),
-
+            (
+                format!(
+                    r#"{{"version":1,"parameters":{{"escaped":"{}"}}}}"#,
+                    r#"\"""#.repeat(10_000)
+                ),
+                "Escape bombing",
+            ),
             // Number precision bombing
-            (format!(r#"{{"version":{},"parameters":{{}}}}"#, "1".repeat(100)), "Large version number"),
+            (
+                format!(r#"{{"version":{},"parameters":{{}}}}"#, "1".repeat(100)),
+                "Large version number",
+            ),
         ];
 
         for (bomb_json, description) in bomb_payloads {
@@ -1578,36 +2000,48 @@ mod encoding_root_negative_tests {
             let parse_time = start.elapsed();
 
             // Parsing should complete in reasonable time or fail gracefully
-            assert!(parse_time.as_millis() < 10_000,
+            assert!(
+                parse_time.as_millis() < 10_000,
                 "JSON bomb parsing should not take excessive time: {} took {}ms",
-                description, parse_time.as_millis());
+                description,
+                parse_time.as_millis()
+            );
 
             match parse_result {
                 Ok(config) => {
                     // If parsing succeeded, verify resource usage is reasonable
-                    assert!(config.version() <= u32::MAX,
-                        "Version should remain bounded for bomb: {}", description);
+                    assert!(
+                        config.version() <= u32::MAX,
+                        "Version should remain bounded for bomb: {}",
+                        description
+                    );
 
                     // Test that serialization is also bounded
                     let start = std::time::Instant::now();
                     let serialize_result = serde_json::to_string(&config);
                     let serialize_time = start.elapsed();
 
-                    assert!(serialize_time.as_millis() < 5_000,
+                    assert!(
+                        serialize_time.as_millis() < 5_000,
                         "Bomb serialization should not take excessive time: {} took {}ms",
-                        description, serialize_time.as_millis());
+                        description,
+                        serialize_time.as_millis()
+                    );
 
                     match serialize_result {
                         Ok(json_str) => {
-                            assert!(json_str.len() < 10_000_000,
+                            assert!(
+                                json_str.len() < 10_000_000,
                                 "Serialized bomb should not be excessively large: {} bytes for {}",
-                                json_str.len(), description);
-                        },
+                                json_str.len(),
+                                description
+                            );
+                        }
                         Err(_) => {
                             // Serialization failure for bombs is acceptable
                         }
                     }
-                },
+                }
                 Err(_) => {
                     // Expected graceful failure for malformed JSON bombs
                 }

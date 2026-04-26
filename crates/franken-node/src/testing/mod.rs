@@ -424,9 +424,11 @@ mod testing_module_negative_tests {
     fn negative_scenario_builder_rejects_node_name_with_control_characters() {
         let control_char_name = "Node\x00\r\n\t\x1b[31mRed\x1b[0m";
 
-        let result = ScenarioBuilder::new("control-char-test")
-            .seed(42)
-            .add_node("n1", control_char_name, NodeRole::Coordinator);
+        let result = ScenarioBuilder::new("control-char-test").seed(42).add_node(
+            "n1",
+            control_char_name,
+            NodeRole::Coordinator,
+        );
 
         // Should handle control characters gracefully
         match result {
@@ -452,18 +454,28 @@ mod testing_module_negative_tests {
         let mut transport = VirtualTransportLayer::with_event_log_capacity(42, 0);
 
         // Should function normally even with zero event log capacity
-        transport.create_link("n1", "n2", super::virtual_transport::LinkFaultConfig::no_faults())
+        transport
+            .create_link(
+                "n1",
+                "n2",
+                super::virtual_transport::LinkFaultConfig::no_faults(),
+            )
             .expect("link creation should work with zero event capacity");
 
-        transport.send_message("n1", "n2", b"test message".to_vec())
+        transport
+            .send_message("n1", "n2", b"test message".to_vec())
             .expect("message send should work");
 
-        let delivered = transport.deliver_next("n1->n2")
+        let delivered = transport
+            .deliver_next("n1->n2")
             .expect("delivery should work")
             .expect("message should be delivered");
 
         assert_eq!(delivered.payload, b"test message");
-        assert!(transport.event_log().is_empty(), "event log should remain empty with zero capacity");
+        assert!(
+            transport.event_log().is_empty(),
+            "event log should remain empty with zero capacity"
+        );
     }
 
     #[test]
@@ -486,11 +498,17 @@ mod testing_module_negative_tests {
             Ok(scenario) => {
                 // If accepted, JSON serialization should work
                 let json_result = scenario.to_json();
-                assert!(json_result.is_ok(), "JSON serialization should handle large tick values");
+                assert!(
+                    json_result.is_ok(),
+                    "JSON serialization should handle large tick values"
+                );
             }
             Err(err) => {
                 // Graceful rejection of extreme tick values is acceptable
-                assert!(matches!(err, ScenarioBuilderError::InvalidAssertionValue { .. }));
+                assert!(matches!(
+                    err,
+                    ScenarioBuilderError::InvalidAssertionValue { .. }
+                ));
             }
         }
     }
@@ -501,10 +519,10 @@ mod testing_module_negative_tests {
 
         // Create a link with extreme fault configuration
         let extreme_config = super::virtual_transport::LinkFaultConfig {
-            drop_probability: 0.999999999999,  // Nearly 1.0 but not quite
-            reorder_depth: usize::MAX / 2,     // Very large reorder depth
-            corrupt_bit_count: 1_000_000,      // Extreme corruption
-            delay_ticks: u64::MAX / 4,         // Very large delay
+            drop_probability: 0.999999999999, // Nearly 1.0 but not quite
+            reorder_depth: usize::MAX / 2,    // Very large reorder depth
+            corrupt_bit_count: 1_000_000,     // Extreme corruption
+            delay_ticks: u64::MAX / 4,        // Very large delay
             partition: false,
         };
 
@@ -524,7 +542,10 @@ mod testing_module_negative_tests {
             }
             Err(err) => {
                 // Rejection of extreme config is acceptable
-                assert!(matches!(err, super::virtual_transport::VirtualTransportError::InvalidProbability { .. }));
+                assert!(matches!(
+                    err,
+                    super::virtual_transport::VirtualTransportError::InvalidProbability { .. }
+                ));
             }
         }
     }
@@ -537,9 +558,14 @@ mod testing_module_negative_tests {
         for i in 0..100 {
             let node_id = format!("node_{}", i);
             let node_desc = format!("Node {} Description", i);
-            let role = if i == 0 { NodeRole::Coordinator } else { NodeRole::Participant };
+            let role = if i == 0 {
+                NodeRole::Coordinator
+            } else {
+                NodeRole::Participant
+            };
 
-            builder = builder.add_node(&node_id, &node_desc, role)
+            builder = builder
+                .add_node(&node_id, &node_desc, role)
                 .expect("node addition should work");
         }
 
@@ -549,7 +575,8 @@ mod testing_module_negative_tests {
             let from = format!("node_{}", i);
             let to = format!("node_{}", i + 1);
 
-            builder = builder.add_link(&link_id, &from, &to, true)
+            builder = builder
+                .add_link(&link_id, &from, &to, true)
                 .expect("link addition should work");
         }
 
@@ -569,7 +596,10 @@ mod testing_module_negative_tests {
 
         // JSON serialization should handle complex nested structure without stack overflow
         let json_result = std::panic::catch_unwind(|| scenario.to_json());
-        assert!(json_result.is_ok(), "JSON serialization should not panic on complex structures");
+        assert!(
+            json_result.is_ok(),
+            "JSON serialization should not panic on complex structures"
+        );
 
         if let Ok(Ok(json)) = json_result {
             assert!(json.len() > 1000, "JSON should contain substantial content");
@@ -581,7 +611,12 @@ mod testing_module_negative_tests {
     #[test]
     fn negative_virtual_transport_message_id_exhaustion_cascading_effects() {
         let mut transport = VirtualTransportLayer::new(42);
-        transport.create_link("n1", "n2", super::virtual_transport::LinkFaultConfig::no_faults())
+        transport
+            .create_link(
+                "n1",
+                "n2",
+                super::virtual_transport::LinkFaultConfig::no_faults(),
+            )
             .expect("link creation should succeed");
 
         // Simulate message ID near exhaustion
@@ -610,9 +645,13 @@ mod testing_module_negative_tests {
         if exhausted {
             // If we hit exhaustion, further attempts should consistently fail
             for _ in 0..10 {
-                let err = transport.send_message("n1", "n2", b"after-exhaustion".to_vec())
+                let err = transport
+                    .send_message("n1", "n2", b"after-exhaustion".to_vec())
                     .expect_err("should fail after ID exhaustion");
-                assert!(matches!(err, super::virtual_transport::VirtualTransportError::MessageIdExhausted));
+                assert!(matches!(
+                    err,
+                    super::virtual_transport::VirtualTransportError::MessageIdExhausted
+                ));
             }
 
             // Transport should still function for other operations
@@ -623,7 +662,9 @@ mod testing_module_negative_tests {
             let mut delivered = 0;
             while transport.deliver_next("n1->n2").unwrap().is_some() {
                 delivered = delivered.saturating_add(1);
-                if delivered > message_count + 10 { break; } // Safety valve
+                if delivered > message_count + 10 {
+                    break;
+                } // Safety valve
             }
             assert_eq!(delivered, message_count);
         }
@@ -632,12 +673,12 @@ mod testing_module_negative_tests {
     #[test]
     fn negative_scenario_serialization_with_unicode_injection_patterns() {
         let injection_patterns = [
-            "node\u{202E}spoofed",  // Right-to-left override
+            "node\u{202E}spoofed",   // Right-to-left override
             "node\u{200B}invisible", // Zero-width space
-            "node\u{FEFF}bom",      // Byte order mark
-            "node\x00null",         // Null byte
-            "node\r\ninjection",    // CRLF injection
-            "node\u{1F4A9}emoji",   // Emoji
+            "node\u{FEFF}bom",       // Byte order mark
+            "node\x00null",          // Null byte
+            "node\r\ninjection",     // CRLF injection
+            "node\u{1F4A9}emoji",    // Emoji
         ];
 
         for pattern in &injection_patterns {
@@ -657,12 +698,18 @@ mod testing_module_negative_tests {
                     .expect("JSON deserialization should work");
 
                 // Verify the pattern is preserved exactly
-                assert!(json.contains(pattern), "pattern should be preserved in JSON");
+                assert!(
+                    json.contains(pattern),
+                    "pattern should be preserved in JSON"
+                );
                 parsed
             });
 
-            assert!(result.is_ok(), "Unicode pattern '{}' should be handled without panic",
-                   pattern.escape_unicode());
+            assert!(
+                result.is_ok(),
+                "Unicode pattern '{}' should be handled without panic",
+                pattern.escape_unicode()
+            );
         }
     }
 
@@ -697,8 +744,8 @@ mod testing_module_negative_tests {
         // Test empty node ID (edge case)
         let empty_id_result = builder.add_node("", "Empty ID Node", NodeRole::Coordinator);
         match empty_id_result {
-            Ok(_) => {}, // Empty ID accepted
-            Err(ScenarioBuilderError::EmptyNodeId) => {}, // Rejected gracefully
+            Ok(_) => {}                                  // Empty ID accepted
+            Err(ScenarioBuilderError::EmptyNodeId) => {} // Rejected gracefully
             Err(other) => panic!("Unexpected error for empty node ID: {:?}", other),
         }
 
@@ -706,8 +753,8 @@ mod testing_module_negative_tests {
         let long_id = "x".repeat(100000);
         let long_id_result = builder.add_node(&long_id, "Long ID Node", NodeRole::Participant);
         match long_id_result {
-            Ok(_) => {}, // Long ID accepted
-            Err(ScenarioBuilderError::NodeIdTooLong { .. }) => {}, // Rejected gracefully
+            Ok(_) => {}                                           // Long ID accepted
+            Err(ScenarioBuilderError::NodeIdTooLong { .. }) => {} // Rejected gracefully
             Err(other) => panic!("Unexpected error for long node ID: {:?}", other),
         }
 
@@ -715,8 +762,8 @@ mod testing_module_negative_tests {
         let long_desc = "D".repeat(1000000);
         let long_desc_result = builder.add_node("long_desc", &long_desc, NodeRole::Observer);
         match long_desc_result {
-            Ok(_) => {}, // Long description accepted
-            Err(ScenarioBuilderError::NodeDescTooLong { .. }) => {}, // Rejected gracefully
+            Ok(_) => {}                                             // Long description accepted
+            Err(ScenarioBuilderError::NodeDescTooLong { .. }) => {} // Rejected gracefully
             Err(other) => panic!("Unexpected error for long description: {:?}", other),
         }
     }
@@ -762,8 +809,8 @@ mod testing_module_negative_tests {
         let result3 = transport.create_link("e", "f", subnormal);
         // Should either accept subnormal values or reject gracefully
         match result3 {
-            Ok(_) => {}, // Subnormal accepted
-            Err(_) => {}, // Subnormal rejected (also valid)
+            Ok(_) => {}  // Subnormal accepted
+            Err(_) => {} // Subnormal rejected (also valid)
         }
 
         // Test maximum normal finite value just under 1.0
@@ -780,7 +827,12 @@ mod testing_module_negative_tests {
     #[test]
     fn test_virtual_transport_payload_boundaries() {
         let mut transport = VirtualTransportLayer::new(42);
-        transport.create_link("a", "b", super::virtual_transport::LinkFaultConfig::no_faults())
+        transport
+            .create_link(
+                "a",
+                "b",
+                super::virtual_transport::LinkFaultConfig::no_faults(),
+            )
             .expect("link creation should succeed");
 
         // Empty payload
@@ -804,7 +856,7 @@ mod testing_module_negative_tests {
             Err(err) => {
                 // Rejection of oversized payload is also acceptable
                 match err {
-                    super::virtual_transport::VirtualTransportError::PayloadTooLarge { .. } => {},
+                    super::virtual_transport::VirtualTransportError::PayloadTooLarge { .. } => {}
                     other => panic!("Unexpected error for large payload: {:?}", other),
                 }
             }
@@ -813,7 +865,10 @@ mod testing_module_negative_tests {
         // Payload with all possible byte values
         let full_range_payload: Vec<u8> = (0..=255).collect();
         let full_range_result = transport.send_message("a", "b", full_range_payload.clone());
-        assert!(full_range_result.is_ok(), "Full byte range should be accepted");
+        assert!(
+            full_range_result.is_ok(),
+            "Full byte range should be accepted"
+        );
 
         let delivered_full = transport.deliver_next("a->b").unwrap().unwrap();
         assert_eq!(delivered_full.payload, full_range_payload);
@@ -843,11 +898,17 @@ mod testing_module_negative_tests {
         // Test timer scheduling near overflow boundary
         runtime.test_clock.current_tick = u64::MAX - 10;
         let near_overflow_result = runtime.schedule_timer(5, "near_overflow");
-        assert!(near_overflow_result.is_ok(), "Timer just under overflow should work");
+        assert!(
+            near_overflow_result.is_ok(),
+            "Timer just under overflow should work"
+        );
 
         // Test timer that would overflow
         let overflow_result = runtime.schedule_timer(20, "overflow");
-        assert!(overflow_result.is_err(), "Timer causing overflow should be rejected");
+        assert!(
+            overflow_result.is_err(),
+            "Timer causing overflow should be rejected"
+        );
 
         // Test advancing clock with zero delta
         let zero_advance_result = runtime.advance_clock(0);
@@ -860,14 +921,17 @@ mod testing_module_negative_tests {
         // Test timer label with extreme content
         let weird_label = "\x00\r\n\t🚀🔥💀\u{202E}reverse";
         let weird_label_result = runtime.schedule_timer(1, weird_label);
-        assert!(weird_label_result.is_ok(), "Weird timer labels should be accepted");
+        assert!(
+            weird_label_result.is_ok(),
+            "Weird timer labels should be accepted"
+        );
 
         // Test very long timer label
         let long_label = "L".repeat(100000);
         let long_label_result = runtime.schedule_timer(1, long_label);
         match long_label_result {
-            Ok(_) => {}, // Long labels accepted
-            Err(_) => {}, // Or rejected gracefully
+            Ok(_) => {}  // Long labels accepted
+            Err(_) => {} // Or rejected gracefully
         }
     }
 
@@ -902,14 +966,16 @@ mod testing_module_negative_tests {
             .seed(42)
             .add_node("", "Empty ID", NodeRole::Coordinator)
             .and_then(|b| b.add_node("n2", "Normal", NodeRole::Participant))
-            .map(|b| b.add_assertion(ScenarioAssertion::PartitionDetected {
-                by_node: "".to_string(),
-                within_ticks: 10,
-            }));
+            .map(|b| {
+                b.add_assertion(ScenarioAssertion::PartitionDetected {
+                    by_node: "".to_string(),
+                    within_ticks: 10,
+                })
+            });
 
         match empty_from_result {
-            Ok(_) => {}, // Empty node names in assertions accepted
-            Err(_) => {}, // Or rejected gracefully
+            Ok(_) => {}  // Empty node names in assertions accepted
+            Err(_) => {} // Or rejected gracefully
         }
 
         // Test assertion with very long node names
@@ -922,8 +988,8 @@ mod testing_module_negative_tests {
         // Build should validate and either accept or reject gracefully
         let build_result = builder.build();
         match build_result {
-            Ok(_) => {}, // Long node names accepted
-            Err(ScenarioBuilderError::InvalidAssertionNode { .. }) => {}, // Rejected gracefully
+            Ok(_) => {}                                                  // Long node names accepted
+            Err(ScenarioBuilderError::InvalidAssertionNode { .. }) => {} // Rejected gracefully
             Err(other) => panic!("Unexpected error for long assertion node name: {:?}", other),
         }
     }
@@ -938,8 +1004,8 @@ mod testing_module_negative_tests {
             r#"Node", "injected": "value", "fake"#,
             "Node\"},\"injected\":\"value\",\"fake\":\"",
             "Node\\\"},\\\"injected\\\":\\\"value\\\",\\\"fake\\\":\\\"",
-            "Node\x00\x01\x02\x03\x04\x05",  // Control characters
-            "Node\u{FEFF}\u{200B}\u{202E}",  // Unicode special chars
+            "Node\x00\x01\x02\x03\x04\x05", // Control characters
+            "Node\u{FEFF}\u{200B}\u{202E}", // Unicode special chars
         ];
 
         for injection in injection_attempts {
@@ -956,8 +1022,8 @@ mod testing_module_negative_tests {
                 let json = scenario.to_json().expect("JSON should serialize");
 
                 // Verify JSON is well-formed
-                let _parsed: serde_json::Value = serde_json::from_str(&json)
-                    .expect("JSON should be valid");
+                let _parsed: serde_json::Value =
+                    serde_json::from_str(&json).expect("JSON should be valid");
 
                 // Verify injection didn't break structure
                 assert!(json.contains("n1"), "Node ID should be preserved");
@@ -966,7 +1032,11 @@ mod testing_module_negative_tests {
                 json
             });
 
-            assert!(result.is_ok(), "Injection attempt should be handled safely: {:?}", injection);
+            assert!(
+                result.is_ok(),
+                "Injection attempt should be handled safely: {:?}",
+                injection
+            );
         }
 
         // Test extremely nested/recursive-looking content
@@ -984,7 +1054,10 @@ mod testing_module_negative_tests {
             scenario.to_json().expect("JSON should serialize")
         });
 
-        assert!(recursive_result.is_ok(), "Recursive-looking content should be handled safely");
+        assert!(
+            recursive_result.is_ok(),
+            "Recursive-looking content should be handled safely"
+        );
     }
 
     /// Test memory and resource exhaustion scenarios
@@ -1032,7 +1105,10 @@ mod testing_module_negative_tests {
             builder.build()
         });
 
-        assert!(large_scenario_result.is_ok(), "Large scenario construction should not panic");
+        assert!(
+            large_scenario_result.is_ok(),
+            "Large scenario construction should not panic"
+        );
 
         // Test extremely large single string fields
         let huge_string = "X".repeat(10_000_000); // 10MB string
@@ -1045,9 +1121,9 @@ mod testing_module_negative_tests {
         });
 
         match huge_string_result {
-            Ok(Ok(Ok(_))) => {}, // Huge strings accepted
-            Ok(Ok(Err(_))) => {}, // Or rejected gracefully
-            Ok(Err(_)) => {}, // Node addition failed gracefully
+            Ok(Ok(Ok(_))) => {}  // Huge strings accepted
+            Ok(Ok(Err(_))) => {} // Or rejected gracefully
+            Ok(Err(_)) => {}     // Node addition failed gracefully
             Err(_) => panic!("Huge string should not cause panic"),
         }
     }
@@ -1065,32 +1141,38 @@ mod testing_module_negative_tests {
         let transport = Arc::new(Mutex::new(VirtualTransportLayer::new(42)));
 
         // Spawn multiple threads to stress concurrent access
-        let handles: Vec<_> = (0..4).map(|thread_id| {
-            let transport_clone = Arc::clone(&transport);
-            thread::spawn(move || {
-                for i in 0..100 {
-                    let link_id = format!("link_{}_{}", thread_id, i);
-                    let source = format!("src_{}_{}", thread_id, i);
-                    let target = format!("tgt_{}_{}", thread_id, i);
+        let handles: Vec<_> = (0..4)
+            .map(|thread_id| {
+                let transport_clone = Arc::clone(&transport);
+                thread::spawn(move || {
+                    for i in 0..100 {
+                        let link_id = format!("link_{}_{}", thread_id, i);
+                        let source = format!("src_{}_{}", thread_id, i);
+                        let target = format!("tgt_{}_{}", thread_id, i);
 
-                    let link_result = {
-                        let mut t = transport_clone.lock().unwrap();
-                        t.create_link(&source, &target, super::virtual_transport::LinkFaultConfig::no_faults())
-                    };
-
-                    match link_result {
-                        Ok(_) => {
-                            // Try to send a message
+                        let link_result = {
                             let mut t = transport_clone.lock().unwrap();
-                            let _ = t.send_message(&source, &target, vec![i as u8]);
-                        }
-                        Err(_) => {
-                            // Link creation failed (expected under concurrent stress)
+                            t.create_link(
+                                &source,
+                                &target,
+                                super::virtual_transport::LinkFaultConfig::no_faults(),
+                            )
+                        };
+
+                        match link_result {
+                            Ok(_) => {
+                                // Try to send a message
+                                let mut t = transport_clone.lock().unwrap();
+                                let _ = t.send_message(&source, &target, vec![i as u8]);
+                            }
+                            Err(_) => {
+                                // Link creation failed (expected under concurrent stress)
+                            }
                         }
                     }
-                }
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all threads to complete
         for handle in handles {
@@ -1099,7 +1181,10 @@ mod testing_module_negative_tests {
 
         // Verify transport state is still consistent
         let final_transport = transport.lock().unwrap();
-        assert!(final_transport.link_count() <= 400, "Link count should be reasonable");
+        assert!(
+            final_transport.link_count() <= 400,
+            "Link count should be reasonable"
+        );
         assert!(final_transport.stats().total_messages <= final_transport.link_count() as u64);
 
         // Test scenario builder under concurrent-like stress (single threaded but rapid operations)
@@ -1119,7 +1204,10 @@ mod testing_module_negative_tests {
             Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
         });
 
-        assert!(rapid_scenario_result.is_ok(), "Rapid scenario creation should not panic");
+        assert!(
+            rapid_scenario_result.is_ok(),
+            "Rapid scenario creation should not panic"
+        );
     }
 
     // ============================================================================
@@ -1135,25 +1223,35 @@ mod testing_module_negative_tests {
 
         let unicode_attack_vectors = vec![
             // BiDi override attacks in scenario names
-            ("bidi_scenario", "test\u{202e}_gnirwol\u{202c}_scenario", "normal_node"),
-
+            (
+                "bidi_scenario",
+                "test\u{202e}_gnirwol\u{202c}_scenario",
+                "normal_node",
+            ),
             // Zero-width character pollution in node names
-            ("zws_nodes", "normal_scenario", "node\u{200b}_test\u{200c}_id\u{200d}"),
-
+            (
+                "zws_nodes",
+                "normal_scenario",
+                "node\u{200b}_test\u{200c}_id\u{200d}",
+            ),
             // BOM injection in scenario/node combinations
-            ("bom_mixed", "\u{feff}scenario\u{feff}", "\u{feff}node\u{feff}"),
-
+            (
+                "bom_mixed",
+                "\u{feff}scenario\u{feff}",
+                "\u{feff}node\u{feff}",
+            ),
             // Unicode normalization confusion
             ("nfc_attack", "café_scenario", "café_node"),
             ("nfd_attack", "cafe\u{0301}_scenario", "cafe\u{0301}_node"),
-
             // Confusable characters across modules
-            ("cyrillic_confuse", "sсenario", "nоde"),  // Cyrillic chars
+            ("cyrillic_confuse", "sсenario", "nоde"), // Cyrillic chars
             ("greek_confuse", "sсenario", "nοde"),    // Greek chars
-
             // Combining character stacking
-            ("combining_overflow", "sc\u{0300}\u{0301}\u{0302}enario", "no\u{0300}\u{0301}\u{0302}de"),
-
+            (
+                "combining_overflow",
+                "sc\u{0300}\u{0301}\u{0302}enario",
+                "no\u{0300}\u{0301}\u{0302}de",
+            ),
             // Mixed script injection
             ("mixed_script", "test_сценарий_scenario", "test_नोड_node"),
         ];
@@ -1184,12 +1282,21 @@ mod testing_module_negative_tests {
                         match create_result {
                             Ok(_) => {
                                 // Test message sending with Unicode payload
-                                let unicode_payload = format!("message_from_{}", scenario_name).as_bytes().to_vec();
-                                let send_result = transport.send_message(node_name, "target_node", unicode_payload);
+                                let unicode_payload = format!("message_from_{}", scenario_name)
+                                    .as_bytes()
+                                    .to_vec();
+                                let send_result = transport.send_message(
+                                    node_name,
+                                    "target_node",
+                                    unicode_payload,
+                                );
 
                                 // Should handle Unicode without corruption
-                                assert!(send_result.is_ok() || send_result.is_err(),
-                                       "Send should complete without panic: {}", test_name);
+                                assert!(
+                                    send_result.is_ok() || send_result.is_err(),
+                                    "Send should complete without panic: {}",
+                                    test_name
+                                );
                             }
                             Err(_) => {
                                 // Transport may reject Unicode node names - that's acceptable
@@ -1198,15 +1305,26 @@ mod testing_module_negative_tests {
                         Ok(())
                     });
 
-                    assert!(transport_result.is_ok(), "Transport operations should not panic: {}", test_name);
+                    assert!(
+                        transport_result.is_ok(),
+                        "Transport operations should not panic: {}",
+                        test_name
+                    );
 
                     // Verify scenario JSON serialization handles Unicode correctly
                     let json_result = scenario.to_json();
-                    assert!(json_result.is_ok(), "JSON serialization should handle Unicode: {}", test_name);
+                    assert!(
+                        json_result.is_ok(),
+                        "JSON serialization should handle Unicode: {}",
+                        test_name
+                    );
 
                     if let Ok(json) = json_result {
-                        assert!(json.contains(scenario_name) || json.len() > 10,
-                               "JSON should preserve or escape Unicode: {}", test_name);
+                        assert!(
+                            json.contains(scenario_name) || json.len() > 10,
+                            "JSON should preserve or escape Unicode: {}",
+                            test_name
+                        );
                     }
                 }
                 Ok(Err(_)) => {
@@ -1222,7 +1340,7 @@ mod testing_module_negative_tests {
     #[test]
     fn negative_memory_exhaustion_cross_module_stress() {
         // Test memory exhaustion attacks across integrated module boundaries
-        use super::scenario_builder::{NodeRole, ScenarioBuilder, ScenarioAssertion};
+        use super::scenario_builder::{NodeRole, ScenarioAssertion, ScenarioBuilder};
         use super::virtual_transport::{LinkFaultConfig, VirtualTransportLayer};
 
         // Test 1: Massive scenario with many nodes and transport links
@@ -1274,7 +1392,8 @@ mod testing_module_negative_tests {
             let mut transport = VirtualTransportLayer::new(77777);
 
             // Create transport links corresponding to scenario links
-            for link in scenario.links().iter().take(100) { // Limit for memory
+            for link in scenario.links().iter().take(100) {
+                // Limit for memory
                 let create_result = transport.create_link(
                     &link.source_node,
                     &link.target_node,
@@ -1285,7 +1404,9 @@ mod testing_module_negative_tests {
                     Ok(_) => {
                         // Send test message
                         let payload = format!("test_{}", link.id).as_bytes().to_vec();
-                        transport.send_message(&link.source_node, &link.target_node, payload).ok();
+                        transport
+                            .send_message(&link.source_node, &link.target_node, payload)
+                            .ok();
                     }
                     Err(_) => {
                         // Transport may reject due to capacity limits
@@ -1297,7 +1418,10 @@ mod testing_module_negative_tests {
             Ok(())
         });
 
-        assert!(massive_scenario_result.is_ok(), "Massive cross-module scenario should not panic");
+        assert!(
+            massive_scenario_result.is_ok(),
+            "Massive cross-module scenario should not panic"
+        );
 
         // Test 2: Very long string fields across modules
         let long_string_test = std::panic::catch_unwind(|| {
@@ -1315,11 +1439,8 @@ mod testing_module_negative_tests {
                 Ok(scenario) => {
                     // Test transport with huge identifiers
                     let mut transport = VirtualTransportLayer::new(22222);
-                    let create_result = transport.create_link(
-                        "node1",
-                        "node2",
-                        LinkFaultConfig::default(),
-                    );
+                    let create_result =
+                        transport.create_link("node1", "node2", LinkFaultConfig::default());
 
                     // Should handle or reject gracefully
                     match create_result {
@@ -1343,7 +1464,10 @@ mod testing_module_negative_tests {
             Ok(())
         });
 
-        assert!(long_string_test.is_ok(), "Long string cross-module test should not panic");
+        assert!(
+            long_string_test.is_ok(),
+            "Long string cross-module test should not panic"
+        );
     }
 
     #[test]
@@ -1358,8 +1482,7 @@ mod testing_module_negative_tests {
             (1.0 - f64::EPSILON, "one_minus_epsilon"),
             (f64::MIN_POSITIVE, "min_positive"),
             (0.1 + 0.2, "classic_fp_precision"), // Should be 0.3 but might have precision issues
-            (1.0/3.0, "one_third_fraction"),
-
+            (1.0 / 3.0, "one_third_fraction"),
             // Boundary probability values
             (0.0, "zero_prob"),
             (1.0, "one_prob"),
@@ -1401,7 +1524,9 @@ mod testing_module_negative_tests {
                     Ok(_) => {
                         // Send multiple messages to test probability behavior
                         for i in 0..100 {
-                            let payload = format!("precision_test_{}_{}", test_name, i).as_bytes().to_vec();
+                            let payload = format!("precision_test_{}_{}", test_name, i)
+                                .as_bytes()
+                                .to_vec();
                             transport.send_message("source", "target", payload).ok();
                         }
 
@@ -1409,12 +1534,24 @@ mod testing_module_negative_tests {
                         let stats = transport.stats();
 
                         if drop_probability == 0.0 {
-                            assert_eq!(stats.messages_dropped, 0, "Zero probability should drop no messages: {}", test_name);
+                            assert_eq!(
+                                stats.messages_dropped, 0,
+                                "Zero probability should drop no messages: {}",
+                                test_name
+                            );
                         } else if drop_probability == 1.0 {
-                            assert_eq!(stats.messages_delivered, 0, "100% drop should deliver no messages: {}", test_name);
+                            assert_eq!(
+                                stats.messages_delivered, 0,
+                                "100% drop should deliver no messages: {}",
+                                test_name
+                            );
                         }
                         // For intermediate probabilities, just verify no overflow/corruption
-                        assert!(stats.total_messages < u64::MAX, "Message count should not overflow: {}", test_name);
+                        assert!(
+                            stats.total_messages < u64::MAX,
+                            "Message count should not overflow: {}",
+                            test_name
+                        );
                     }
                     Err(_) => {
                         // Transport may reject extreme precision values - acceptable
@@ -1423,12 +1560,20 @@ mod testing_module_negative_tests {
 
                 // Test scenario JSON serialization preserves precision
                 let json = scenario.to_json()?;
-                assert!(json.len() > 50, "Scenario JSON should be reasonable size: {}", test_name);
+                assert!(
+                    json.len() > 50,
+                    "Scenario JSON should be reasonable size: {}",
+                    test_name
+                );
 
                 Ok(())
             });
 
-            assert!(precision_test_cases.is_ok(), "Precision test should not panic: {}", test_name);
+            assert!(
+                precision_test_cases.is_ok(),
+                "Precision test should not panic: {}",
+                test_name
+            );
         }
 
         // Test invalid probability values across modules
@@ -1448,7 +1593,11 @@ mod testing_module_negative_tests {
 
             // Validation should catch invalid values
             let validation = invalid_config.validate();
-            assert!(validation.is_err(), "Invalid probability should be rejected: {}", test_name);
+            assert!(
+                validation.is_err(),
+                "Invalid probability should be rejected: {}",
+                test_name
+            );
 
             // Scenario builder should also reject invalid configs
             let scenario_result = ScenarioBuilder::new("invalid_test")
@@ -1459,33 +1608,39 @@ mod testing_module_negative_tests {
                 .and_then(|b| b.set_fault_profile("link1", invalid_config))
                 .and_then(|b| b.build());
 
-            assert!(scenario_result.is_err(), "Scenario with invalid probability should be rejected: {}", test_name);
+            assert!(
+                scenario_result.is_err(),
+                "Scenario with invalid probability should be rejected: {}",
+                test_name
+            );
         }
     }
 
     #[test]
     fn negative_json_serialization_injection_cross_module() {
         // Test JSON serialization attacks across scenario and transport modules
-        use super::scenario_builder::{NodeRole, ScenarioBuilder, ScenarioAssertion};
+        use super::scenario_builder::{NodeRole, ScenarioAssertion, ScenarioBuilder};
         use super::virtual_transport::{LinkFaultConfig, VirtualTransportLayer};
 
         let json_injection_patterns = vec![
             // JSON structure injection in node names
-            ("json_node", r#"node": "injected", "evil": true, "real_node"#),
-            ("json_escape", r#"node\": \"injection\": true, \"continue\": \""#),
-
+            (
+                "json_node",
+                r#"node": "injected", "evil": true, "real_node"#,
+            ),
+            (
+                "json_escape",
+                r#"node\": \"injection\": true, \"continue\": \""#,
+            ),
             // Unicode escape injection
             ("unicode_escape", r#"node\u0022injection\u0022"#),
             ("unicode_null", r#"node\u0000hidden"#),
-
             // Control character injection
             ("newline_inject", "node\nINJECTED: true\nreal"),
             ("carriage_inject", "node\rSET: evil=true\rreal"),
-
             // Nested structure attempts
             ("nested_json", r#"{"nested": {"evil": true}, "node": ""#),
             ("array_inject", r#"["injected", "array"], "node": ""#),
-
             // Binary data disguised as JSON
             ("binary_json", "node\x00{\"evil\": true}"),
             ("mixed_control", "node\x01\x02\x03\x7F"),
@@ -1499,11 +1654,13 @@ mod testing_module_negative_tests {
                     .add_node(injection_pattern, "Injected Node", NodeRole::Coordinator)
                     .and_then(|b| b.add_node("normal", "Normal Node", NodeRole::Participant))
                     .and_then(|b| b.add_link("test_link", injection_pattern, "normal", true))
-                    .and_then(|b| b.add_assertion(ScenarioAssertion::MessageDelivered {
-                        from: injection_pattern.to_string(),
-                        to: "normal".to_string(),
-                        within_ticks: 100,
-                    }))
+                    .and_then(|b| {
+                        b.add_assertion(ScenarioAssertion::MessageDelivered {
+                            from: injection_pattern.to_string(),
+                            to: "normal".to_string(),
+                            within_ticks: 100,
+                        })
+                    })
                     .and_then(|b| b.build());
 
                 match scenario_result {
@@ -1513,12 +1670,23 @@ mod testing_module_negative_tests {
                         match json_result {
                             Ok(json_str) => {
                                 // Verify JSON is properly escaped
-                                assert!(!json_str.contains("\"evil\": true"), "Should not contain unescaped injection");
-                                assert!(!json_str.contains("\"INJECTED\""), "Should not contain unescaped injection");
+                                assert!(
+                                    !json_str.contains("\"evil\": true"),
+                                    "Should not contain unescaped injection"
+                                );
+                                assert!(
+                                    !json_str.contains("\"INJECTED\""),
+                                    "Should not contain unescaped injection"
+                                );
 
                                 // Test round-trip deserialization
-                                let parse_result: Result<serde_json::Value, _> = serde_json::from_str(&json_str);
-                                assert!(parse_result.is_ok(), "Serialized JSON should be parseable: {}", test_name);
+                                let parse_result: Result<serde_json::Value, _> =
+                                    serde_json::from_str(&json_str);
+                                assert!(
+                                    parse_result.is_ok(),
+                                    "Serialized JSON should be parseable: {}",
+                                    test_name
+                                );
                             }
                             Err(_) => {
                                 // JSON serialization may fail for extreme injection patterns - acceptable
@@ -1536,12 +1704,20 @@ mod testing_module_negative_tests {
                         match create_result {
                             Ok(_) => {
                                 // Send message with injection pattern in payload
-                                let injection_payload = format!("payload with {}", injection_pattern).as_bytes().to_vec();
-                                transport.send_message(injection_pattern, "normal", injection_payload).ok();
+                                let injection_payload =
+                                    format!("payload with {}", injection_pattern)
+                                        .as_bytes()
+                                        .to_vec();
+                                transport
+                                    .send_message(injection_pattern, "normal", injection_payload)
+                                    .ok();
 
                                 // Test transport statistics don't leak injection
                                 let stats = transport.stats();
-                                assert!(stats.total_messages < u64::MAX, "Stats should not be corrupted");
+                                assert!(
+                                    stats.total_messages < u64::MAX,
+                                    "Stats should not be corrupted"
+                                );
                             }
                             Err(_) => {
                                 // Transport may reject injection patterns - acceptable
@@ -1556,7 +1732,11 @@ mod testing_module_negative_tests {
                 Ok(())
             });
 
-            assert!(cross_module_result.is_ok(), "JSON injection test should not panic: {}", test_name);
+            assert!(
+                cross_module_result.is_ok(),
+                "JSON injection test should not panic: {}",
+                test_name
+            );
         }
     }
 
@@ -1603,7 +1783,8 @@ mod testing_module_negative_tests {
                                     &format!("transport_src_{}", i),
                                     &format!("transport_tgt_{}", i),
                                     payload,
-                                ).ok();
+                                )
+                                .ok();
                             }
                         }
                     }
@@ -1616,8 +1797,14 @@ mod testing_module_negative_tests {
                 if i % 10 == 0 {
                     let t = transport.lock().unwrap();
                     let stats = t.stats();
-                    assert!(stats.total_messages < u64::MAX, "Transport stats should not overflow");
-                    assert!(stats.total_links_created < u64::MAX, "Link count should not overflow");
+                    assert!(
+                        stats.total_messages < u64::MAX,
+                        "Transport stats should not overflow"
+                    );
+                    assert!(
+                        stats.total_links_created < u64::MAX,
+                        "Link count should not overflow"
+                    );
                 }
             }
 
@@ -1625,11 +1812,16 @@ mod testing_module_negative_tests {
             assert!(!scenarios.is_empty(), "Should have created some scenarios");
 
             // Test JSON serialization of all scenarios
-            for (i, scenario) in scenarios.iter().enumerate().take(10) { // Limit for performance
+            for (i, scenario) in scenarios.iter().enumerate().take(10) {
+                // Limit for performance
                 let json_result = scenario.to_json();
                 match json_result {
                     Ok(json) => {
-                        assert!(json.len() > 20, "Scenario {} JSON should be reasonable size", i);
+                        assert!(
+                            json.len() > 20,
+                            "Scenario {} JSON should be reasonable size",
+                            i
+                        );
                     }
                     Err(_) => {
                         // JSON generation may fail under stress - acceptable
@@ -1640,13 +1832,22 @@ mod testing_module_negative_tests {
             // Verify transport final state
             let final_transport = transport.lock().unwrap();
             let final_stats = final_transport.stats();
-            assert!(final_stats.total_messages <= 50 * 5, "Message count should be reasonable");
-            assert!(final_stats.total_links_created <= 50, "Link count should be reasonable");
+            assert!(
+                final_stats.total_messages <= 50 * 5,
+                "Message count should be reasonable"
+            );
+            assert!(
+                final_stats.total_links_created <= 50,
+                "Link count should be reasonable"
+            );
 
             Ok(())
         });
 
-        assert!(cross_module_stress.is_ok(), "Cross-module stress test should not panic");
+        assert!(
+            cross_module_stress.is_ok(),
+            "Cross-module stress test should not panic"
+        );
     }
 
     #[test]
@@ -1657,17 +1858,52 @@ mod testing_module_negative_tests {
 
         let node_role_edge_cases = vec![
             // Test all role combinations
-            (NodeRole::Coordinator, NodeRole::Participant, "coord_to_participant"),
-            (NodeRole::Coordinator, NodeRole::Observer, "coord_to_observer"),
-            (NodeRole::Participant, NodeRole::Coordinator, "participant_to_coord"),
-            (NodeRole::Participant, NodeRole::Observer, "participant_to_observer"),
-            (NodeRole::Observer, NodeRole::Coordinator, "observer_to_coord"),
-            (NodeRole::Observer, NodeRole::Participant, "observer_to_participant"),
-
+            (
+                NodeRole::Coordinator,
+                NodeRole::Participant,
+                "coord_to_participant",
+            ),
+            (
+                NodeRole::Coordinator,
+                NodeRole::Observer,
+                "coord_to_observer",
+            ),
+            (
+                NodeRole::Participant,
+                NodeRole::Coordinator,
+                "participant_to_coord",
+            ),
+            (
+                NodeRole::Participant,
+                NodeRole::Observer,
+                "participant_to_observer",
+            ),
+            (
+                NodeRole::Observer,
+                NodeRole::Coordinator,
+                "observer_to_coord",
+            ),
+            (
+                NodeRole::Observer,
+                NodeRole::Participant,
+                "observer_to_participant",
+            ),
             // Self-connections
-            (NodeRole::Coordinator, NodeRole::Coordinator, "coord_to_coord"),
-            (NodeRole::Participant, NodeRole::Participant, "participant_to_participant"),
-            (NodeRole::Observer, NodeRole::Observer, "observer_to_observer"),
+            (
+                NodeRole::Coordinator,
+                NodeRole::Coordinator,
+                "coord_to_coord",
+            ),
+            (
+                NodeRole::Participant,
+                NodeRole::Participant,
+                "participant_to_participant",
+            ),
+            (
+                NodeRole::Observer,
+                NodeRole::Observer,
+                "observer_to_observer",
+            ),
         ];
 
         for (source_role, target_role, test_name) in node_role_edge_cases {
@@ -1700,17 +1936,29 @@ mod testing_module_negative_tests {
                     Ok(_) => {
                         // Test role-specific message patterns
                         let role_specific_messages = match (source_role, target_role) {
-                            (NodeRole::Coordinator, _) => vec![b"coordinator_command".to_vec(), b"coordination_update".to_vec()],
-                            (NodeRole::Participant, _) => vec![b"participant_data".to_vec(), b"participant_status".to_vec()],
-                            (NodeRole::Observer, _) => vec![b"observation_report".to_vec(), b"observer_query".to_vec()],
+                            (NodeRole::Coordinator, _) => vec![
+                                b"coordinator_command".to_vec(),
+                                b"coordination_update".to_vec(),
+                            ],
+                            (NodeRole::Participant, _) => {
+                                vec![b"participant_data".to_vec(), b"participant_status".to_vec()]
+                            }
+                            (NodeRole::Observer, _) => {
+                                vec![b"observation_report".to_vec(), b"observer_query".to_vec()]
+                            }
                         };
 
                         for (i, message) in role_specific_messages.into_iter().enumerate() {
-                            let send_result = transport.send_message("source_node", "target_node", message);
+                            let send_result =
+                                transport.send_message("source_node", "target_node", message);
 
                             match send_result {
                                 Ok(message_id) => {
-                                    assert!(message_id > 0, "Message ID should be valid for role test: {}", test_name);
+                                    assert!(
+                                        message_id > 0,
+                                        "Message ID should be valid for role test: {}",
+                                        test_name
+                                    );
                                 }
                                 Err(_) => {
                                     // Message sending may fail due to fault injection - acceptable
@@ -1720,13 +1968,21 @@ mod testing_module_negative_tests {
                             // Periodically check transport state
                             if i % 2 == 0 {
                                 let stats = transport.stats();
-                                assert!(stats.total_messages < u64::MAX, "Stats should not overflow: {}", test_name);
+                                assert!(
+                                    stats.total_messages < u64::MAX,
+                                    "Stats should not overflow: {}",
+                                    test_name
+                                );
                             }
                         }
 
                         // Verify transport still functions after role-specific operations
                         let final_stats = transport.stats();
-                        assert!(final_stats.total_messages >= 0, "Message count should be non-negative: {}", test_name);
+                        assert!(
+                            final_stats.total_messages >= 0,
+                            "Message count should be non-negative: {}",
+                            test_name
+                        );
                     }
                     Err(_) => {
                         // Transport creation may fail - acceptable
@@ -1735,20 +1991,29 @@ mod testing_module_negative_tests {
 
                 // Test scenario serialization preserves roles correctly
                 let json = scenario.to_json()?;
-                assert!(json.contains("Coordinator") || json.contains("Participant") || json.contains("Observer"),
-                       "JSON should contain role information: {}", test_name);
+                assert!(
+                    json.contains("Coordinator")
+                        || json.contains("Participant")
+                        || json.contains("Observer"),
+                    "JSON should contain role information: {}",
+                    test_name
+                );
 
                 Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
             });
 
-            assert!(role_test_result.is_ok(), "Role integration test should not panic: {}", test_name);
+            assert!(
+                role_test_result.is_ok(),
+                "Role integration test should not panic: {}",
+                test_name
+            );
         }
     }
 
     #[test]
     fn negative_assertion_transport_message_correlation_edge_cases() {
         // Test edge cases in assertion and transport message correlation
-        use super::scenario_builder::{NodeRole, ScenarioBuilder, ScenarioAssertion};
+        use super::scenario_builder::{NodeRole, ScenarioAssertion, ScenarioBuilder};
         use super::virtual_transport::{LinkFaultConfig, VirtualTransportLayer};
 
         let correlation_edge_cases = vec![
@@ -1756,7 +2021,6 @@ mod testing_module_negative_tests {
             (1, "immediate_delivery"),
             (u64::MAX, "infinite_timeout"),
             (0, "zero_timeout"),
-
             // Boundary timing values
             (u32::MAX as u64, "u32_max_timeout"),
             (1000000, "large_timeout"),
@@ -1769,13 +2033,19 @@ mod testing_module_negative_tests {
                 let scenario_result = ScenarioBuilder::new(&format!("correlation_{}", test_name))
                     .seed(13131)
                     .add_node("message_source", "Message Source", NodeRole::Coordinator)
-                    .and_then(|b| b.add_node("message_target", "Message Target", NodeRole::Participant))
-                    .and_then(|b| b.add_link("correlation_link", "message_source", "message_target", true))
-                    .and_then(|b| b.add_assertion(ScenarioAssertion::MessageDelivered {
-                        from: "message_source".to_string(),
-                        to: "message_target".to_string(),
-                        within_ticks,
-                    }))
+                    .and_then(|b| {
+                        b.add_node("message_target", "Message Target", NodeRole::Participant)
+                    })
+                    .and_then(|b| {
+                        b.add_link("correlation_link", "message_source", "message_target", true)
+                    })
+                    .and_then(|b| {
+                        b.add_assertion(ScenarioAssertion::MessageDelivered {
+                            from: "message_source".to_string(),
+                            to: "message_target".to_string(),
+                            within_ticks,
+                        })
+                    })
                     .and_then(|b| b.build());
 
                 match scenario_result {
@@ -1795,8 +2065,8 @@ mod testing_module_negative_tests {
                             "message_target",
                             LinkFaultConfig {
                                 drop_probability: 0.0, // No drops for timing test
-                                reorder_depth: 0,       // No reordering for timing test
-                                corrupt_bit_count: 0,   // No corruption for timing test
+                                reorder_depth: 0,      // No reordering for timing test
+                                corrupt_bit_count: 0,  // No corruption for timing test
                                 delay_ticks,
                                 partition: false,
                             },
@@ -1805,8 +2075,13 @@ mod testing_module_negative_tests {
                         match create_result {
                             Ok(_) => {
                                 // Send test message
-                                let timing_payload = format!("timing_test_{}", test_name).as_bytes().to_vec();
-                                let send_result = transport.send_message("message_source", "message_target", timing_payload);
+                                let timing_payload =
+                                    format!("timing_test_{}", test_name).as_bytes().to_vec();
+                                let send_result = transport.send_message(
+                                    "message_source",
+                                    "message_target",
+                                    timing_payload,
+                                );
 
                                 if send_result.is_ok() {
                                     // Advance transport time and check delivery
@@ -1814,15 +2089,20 @@ mod testing_module_negative_tests {
                                         transport.advance_time(tick);
 
                                         // Check if message delivered
-                                        let delivered_messages = transport.get_delivered_messages("message_target");
+                                        let delivered_messages =
+                                            transport.get_delivered_messages("message_target");
 
                                         if !delivered_messages.is_empty() {
-                                            let delivery_tick = delivered_messages[0].delivery_tick();
+                                            let delivery_tick =
+                                                delivered_messages[0].delivery_tick();
 
                                             // Verify timing constraint behavior
                                             if within_ticks != u64::MAX {
-                                                assert!(delivery_tick <= within_ticks + delay_ticks,
-                                                       "Delivery should respect timing bounds: {}", test_name);
+                                                assert!(
+                                                    delivery_tick <= within_ticks + delay_ticks,
+                                                    "Delivery should respect timing bounds: {}",
+                                                    test_name
+                                                );
                                             }
                                             break;
                                         }
@@ -1830,8 +2110,16 @@ mod testing_module_negative_tests {
 
                                     // Verify transport state consistency
                                     let stats = transport.stats();
-                                    assert!(stats.total_messages >= 1, "Should have processed test message: {}", test_name);
-                                    assert!(stats.total_messages < u64::MAX, "Message count should not overflow: {}", test_name);
+                                    assert!(
+                                        stats.total_messages >= 1,
+                                        "Should have processed test message: {}",
+                                        test_name
+                                    );
+                                    assert!(
+                                        stats.total_messages < u64::MAX,
+                                        "Message count should not overflow: {}",
+                                        test_name
+                                    );
                                 }
                             }
                             Err(_) => {
@@ -1842,11 +2130,17 @@ mod testing_module_negative_tests {
                         // Test assertion serialization with edge case timing
                         let json = scenario.to_json()?;
                         if within_ticks == u64::MAX {
-                            assert!(json.contains("within_ticks") || json.len() > 50,
-                                   "JSON should handle u64::MAX timing: {}", test_name);
+                            assert!(
+                                json.contains("within_ticks") || json.len() > 50,
+                                "JSON should handle u64::MAX timing: {}",
+                                test_name
+                            );
                         } else {
-                            assert!(json.contains(&within_ticks.to_string()) || json.len() > 50,
-                                   "JSON should preserve timing constraint: {}", test_name);
+                            assert!(
+                                json.contains(&within_ticks.to_string()) || json.len() > 50,
+                                "JSON should preserve timing constraint: {}",
+                                test_name
+                            );
                         }
                     }
                     Err(_) => {
@@ -1854,7 +2148,10 @@ mod testing_module_negative_tests {
                         if within_ticks == u64::MAX || within_ticks == 0 {
                             // These edge cases may legitimately be rejected
                         } else {
-                            panic!("Reasonable timing constraint should not fail: {} ticks", within_ticks);
+                            panic!(
+                                "Reasonable timing constraint should not fail: {} ticks",
+                                within_ticks
+                            );
                         }
                     }
                 }
@@ -1862,7 +2159,11 @@ mod testing_module_negative_tests {
                 Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
             });
 
-            assert!(correlation_test_result.is_ok(), "Correlation test should not panic: {}", test_name);
+            assert!(
+                correlation_test_result.is_ok(),
+                "Correlation test should not panic: {}",
+                test_name
+            );
         }
 
         /// Test Unicode injection attacks in testing module components
@@ -1874,23 +2175,31 @@ mod testing_module_negative_tests {
             let unicode_injection_vectors = vec![
                 // BiDi override attacks in test scenarios
                 ("bidi_override", "test\u{202E}gninoisufnoc\u{202D}scenario"),
-                ("bidi_nested", "test\u{202E}level1\u{202E}level2\u{202D}nested\u{202D}scenario"),
-
+                (
+                    "bidi_nested",
+                    "test\u{202E}level1\u{202E}level2\u{202D}nested\u{202D}scenario",
+                ),
                 // Zero-width character pollution
-                ("zws_pollution", "test\u{200B}invisible\u{200C}spaces\u{200D}scenario"),
-                ("zwj_sequence", "test\u{200D}\u{1F469}\u{200D}\u{1F4BB}scenario"),
-
+                (
+                    "zws_pollution",
+                    "test\u{200B}invisible\u{200C}spaces\u{200D}scenario",
+                ),
+                (
+                    "zwj_sequence",
+                    "test\u{200D}\u{1F469}\u{200D}\u{1F4BB}scenario",
+                ),
                 // Confusable character attacks
                 ("cyrillic_spoof", "tеst_scеnario"), // Cyrillic 'e' characters
-                ("greek_spoof", "test_scεnαrio"),      // Greek characters
-
+                ("greek_spoof", "test_scεnαrio"),    // Greek characters
                 // Control character injection
                 ("ansi_escape", "test\x1b[31mred\x1b[0mscenario"),
                 ("vertical_tab", "test\x0Bscenario"),
-
                 // Unicode normalization attacks
                 ("nfd_attack", "cafe\u{0301}_scenario"), // NFD form
-                ("combining_stack", "test\u{0300}\u{0301}\u{0302}\u{0303}scenario"),
+                (
+                    "combining_stack",
+                    "test\u{0300}\u{0301}\u{0302}\u{0303}scenario",
+                ),
             ];
 
             for (attack_name, malicious_input) in unicode_injection_vectors {
@@ -1899,18 +2208,21 @@ mod testing_module_negative_tests {
                     let scenario_result = ScenarioBuilder::new(malicious_input)
                         .seed(98765)
                         .add_node("clean_node", "Clean Node", NodeRole::Coordinator)
-                        .and_then(|b| b.add_node(malicious_input, "Injected Node", NodeRole::Participant));
+                        .and_then(|b| {
+                            b.add_node(malicious_input, "Injected Node", NodeRole::Participant)
+                        });
 
                     match scenario_result {
                         Ok(builder) => {
-                            let final_scenario = builder.build().expect("Should build successfully");
+                            let final_scenario =
+                                builder.build().expect("Should build successfully");
 
                             // Test JSON serialization preserves security
                             let json = final_scenario.to_json().expect("JSON should serialize");
 
                             // Ensure injection didn't break JSON structure
-                            let parsed: serde_json::Value = serde_json::from_str(&json)
-                                .expect("JSON should remain valid");
+                            let parsed: serde_json::Value =
+                                serde_json::from_str(&json).expect("JSON should remain valid");
                             assert!(parsed.is_object(), "JSON should maintain object structure");
 
                             // Test virtual transport with Unicode-injected identifiers
@@ -1918,17 +2230,25 @@ mod testing_module_negative_tests {
                             let create_result = transport.create_link(
                                 "clean_node",
                                 malicious_input,
-                                LinkFaultConfig::no_faults()
+                                LinkFaultConfig::no_faults(),
                             );
 
                             if create_result.is_ok() {
                                 // Test message with Unicode payload
-                                let unicode_payload = format!("payload_{}", malicious_input).into_bytes();
-                                let send_result = transport.send_message("clean_node", malicious_input, unicode_payload);
+                                let unicode_payload =
+                                    format!("payload_{}", malicious_input).into_bytes();
+                                let send_result = transport.send_message(
+                                    "clean_node",
+                                    malicious_input,
+                                    unicode_payload,
+                                );
 
                                 // Should handle without corruption or bypass
-                                assert!(send_result.is_ok() || send_result.is_err(),
-                                       "Send should complete deterministically for: {}", attack_name);
+                                assert!(
+                                    send_result.is_ok() || send_result.is_err(),
+                                    "Send should complete deterministically for: {}",
+                                    attack_name
+                                );
                             }
                         }
                         Err(_) => {
@@ -1939,15 +2259,18 @@ mod testing_module_negative_tests {
                     Ok(())
                 });
 
-                assert!(injection_result.is_ok(),
-                       "Unicode injection should not cause panic: {}", attack_name);
+                assert!(
+                    injection_result.is_ok(),
+                    "Unicode injection should not cause panic: {}",
+                    attack_name
+                );
             }
         }
 
         /// Test memory exhaustion protection in testing modules
         #[test]
         fn negative_testing_memory_exhaustion_stress() {
-            use super::scenario_builder::{NodeRole, ScenarioBuilder, ScenarioAssertion};
+            use super::scenario_builder::{NodeRole, ScenarioAssertion, ScenarioBuilder};
             use super::virtual_transport::{LinkFaultConfig, VirtualTransportLayer};
 
             // Test massive scenario construction with bounded resources
@@ -1972,7 +2295,9 @@ mod testing_module_negative_tests {
                     }
 
                     // Safety valve to prevent actual memory exhaustion in tests
-                    if i >= 1000 { break; }
+                    if i >= 1000 {
+                        break;
+                    }
                 }
 
                 // Attempt massive link creation
@@ -2015,18 +2340,32 @@ mod testing_module_negative_tests {
 
                         // Create subset of transport links (bounded for memory)
                         for link in scenario.links().iter().take(100) {
-                            if transport.create_link(&link.source_node, &link.target_node,
-                                                   LinkFaultConfig::default()).is_ok() {
+                            if transport
+                                .create_link(
+                                    &link.source_node,
+                                    &link.target_node,
+                                    LinkFaultConfig::default(),
+                                )
+                                .is_ok()
+                            {
                                 // Send bounded message
                                 let payload = vec![0x42; 1024]; // 1KB message
-                                transport.send_message(&link.source_node, &link.target_node, payload).ok();
+                                transport
+                                    .send_message(&link.source_node, &link.target_node, payload)
+                                    .ok();
                             }
                         }
 
                         // Verify transport state remains stable
                         let stats = transport.stats();
-                        assert!(stats.total_messages < u64::MAX, "Message count should not overflow");
-                        assert!(stats.total_links_created <= 100, "Link count should be bounded");
+                        assert!(
+                            stats.total_messages < u64::MAX,
+                            "Message count should not overflow"
+                        );
+                        assert!(
+                            stats.total_links_created <= 100,
+                            "Link count should be bounded"
+                        );
                     }
                     Err(_) => {
                         // Build failure under memory pressure is acceptable
@@ -2036,28 +2375,37 @@ mod testing_module_negative_tests {
                 Ok(())
             });
 
-            assert!(memory_stress_result.is_ok(), "Memory stress test should not panic");
+            assert!(
+                memory_stress_result.is_ok(),
+                "Memory stress test should not panic"
+            );
         }
 
         /// Test JSON structure integrity validation in testing components
         #[test]
         fn negative_testing_json_integrity_validation() {
-            use super::scenario_builder::{NodeRole, ScenarioBuilder, Scenario};
+            use super::scenario_builder::{NodeRole, Scenario, ScenarioBuilder};
 
             let json_corruption_patterns = vec![
                 // Structural JSON attacks
                 (r#"{"injected": true, "real_scenario""#, "incomplete_object"),
-                (r#"scenario": {"injected": "payload"}, "real""#, "property_injection"),
-                (r#"scenario\": {\"nested\": true}, \"continue\": \""#, "escape_injection"),
-
+                (
+                    r#"scenario": {"injected": "payload"}, "real""#,
+                    "property_injection",
+                ),
+                (
+                    r#"scenario\": {\"nested\": true}, \"continue\": \""#,
+                    "escape_injection",
+                ),
                 // Array confusion attacks
                 (r#"["fake", "array"], "scenario""#, "array_confusion"),
-                (r#"scenario", {"fake": "object"}, "continue"#, "mixed_structure"),
-
+                (
+                    r#"scenario", {"fake": "object"}, "continue"#,
+                    "mixed_structure",
+                ),
                 // Unicode escape attacks
                 (r#"scenario\u0022injection\u0022"#, "unicode_escape"),
                 (r#"scenario\u0000null_injection"#, "null_escape"),
-
                 // Control character corruption
                 ("scenario\r\n{\"injected\": true}\r\nreal", "crlf_injection"),
                 ("scenario\x00{\"binary\": true}", "binary_injection"),
@@ -2082,17 +2430,26 @@ mod testing_module_negative_tests {
                                     let parse_result: Result<serde_json::Value, _> =
                                         serde_json::from_str(&json_string);
 
-                                    assert!(parse_result.is_ok(),
-                                           "JSON should remain valid after serialization: {}", attack_name);
+                                    assert!(
+                                        parse_result.is_ok(),
+                                        "JSON should remain valid after serialization: {}",
+                                        attack_name
+                                    );
 
                                     // Verify no injection occurred
                                     let parsed = parse_result.unwrap();
                                     if let Some(obj) = parsed.as_object() {
                                         // Should not contain injected properties
-                                        assert!(!obj.contains_key("injected"),
-                                               "Should not contain injected properties: {}", attack_name);
-                                        assert!(!obj.contains_key("fake"),
-                                               "Should not contain fake properties: {}", attack_name);
+                                        assert!(
+                                            !obj.contains_key("injected"),
+                                            "Should not contain injected properties: {}",
+                                            attack_name
+                                        );
+                                        assert!(
+                                            !obj.contains_key("fake"),
+                                            "Should not contain fake properties: {}",
+                                            attack_name
+                                        );
                                     }
 
                                     // Test round-trip integrity
@@ -2119,17 +2476,20 @@ mod testing_module_negative_tests {
                     Ok(())
                 });
 
-                assert!(json_test_result.is_ok(),
-                       "JSON integrity test should not panic: {}", attack_name);
+                assert!(
+                    json_test_result.is_ok(),
+                    "JSON integrity test should not panic: {}",
+                    attack_name
+                );
             }
         }
 
         /// Test arithmetic overflow protection in testing module counters
         #[test]
         fn negative_testing_arithmetic_overflow_protection() {
+            use super::lab_runtime::{LabConfig, LabRuntime};
             use super::scenario_builder::{NodeRole, ScenarioBuilder};
             use super::virtual_transport::VirtualTransportLayer;
-            use super::lab_runtime::{LabConfig, LabRuntime};
 
             // Test virtual transport with overflow-prone operations
             let overflow_test_result = std::panic::catch_unwind(|| {
@@ -2137,8 +2497,12 @@ mod testing_module_negative_tests {
 
                 // Simulate near-overflow message ID scenarios
                 // Note: We can't directly set internal state, so we test overflow handling
-                transport.create_link("overflow_src", "overflow_tgt",
-                                    super::virtual_transport::LinkFaultConfig::no_faults())
+                transport
+                    .create_link(
+                        "overflow_src",
+                        "overflow_tgt",
+                        super::virtual_transport::LinkFaultConfig::no_faults(),
+                    )
                     .expect("Link creation should succeed");
 
                 // Test message sending with potential counter overflow
@@ -2160,13 +2524,23 @@ mod testing_module_negative_tests {
 
                 // Test statistics calculation without overflow
                 let stats = transport.stats();
-                assert!(stats.total_messages <= message_count, "Stats should not exceed sent messages");
-                assert!(stats.delivered_messages <= stats.total_messages, "Delivered ≤ total");
-                assert!(stats.dropped_messages <= stats.total_messages, "Dropped ≤ total");
+                assert!(
+                    stats.total_messages <= message_count,
+                    "Stats should not exceed sent messages"
+                );
+                assert!(
+                    stats.delivered_messages <= stats.total_messages,
+                    "Delivered ≤ total"
+                );
+                assert!(
+                    stats.dropped_messages <= stats.total_messages,
+                    "Dropped ≤ total"
+                );
 
                 // Test lab runtime with overflow-prone tick operations
                 let lab_config = LabConfig::default();
-                let mut runtime = LabRuntime::new(lab_config).expect("Runtime creation should succeed");
+                let mut runtime =
+                    LabRuntime::new(lab_config).expect("Runtime creation should succeed");
 
                 // Test timer scheduling near tick overflow boundaries
                 let near_max_tick = u64::MAX - 1000;
@@ -2174,19 +2548,27 @@ mod testing_module_negative_tests {
 
                 // Schedule timer with small delta (should succeed)
                 let small_timer_result = runtime.schedule_timer(500, "near_overflow_safe");
-                assert!(small_timer_result.is_ok(), "Safe timer scheduling should succeed");
+                assert!(
+                    small_timer_result.is_ok(),
+                    "Safe timer scheduling should succeed"
+                );
 
                 // Schedule timer that would overflow (should fail gracefully)
                 let overflow_timer_result = runtime.schedule_timer(2000, "overflow_attempt");
-                assert!(overflow_timer_result.is_err(), "Overflow timer should be rejected");
+                assert!(
+                    overflow_timer_result.is_err(),
+                    "Overflow timer should be rejected"
+                );
 
                 // Test clock advance with saturation
                 let advance_result = runtime.advance_clock(1000);
                 match advance_result {
                     Ok(_) => {
                         // If advance succeeds, tick should be bounded
-                        assert!(runtime.test_clock.current_tick <= u64::MAX,
-                               "Clock tick should not exceed maximum");
+                        assert!(
+                            runtime.test_clock.current_tick <= u64::MAX,
+                            "Clock tick should not exceed maximum"
+                        );
                     }
                     Err(_) => {
                         // Advance may fail if it would cause overflow - acceptable
@@ -2196,7 +2578,10 @@ mod testing_module_negative_tests {
                 Ok(())
             });
 
-            assert!(overflow_test_result.is_ok(), "Arithmetic overflow test should not panic");
+            assert!(
+                overflow_test_result.is_ok(),
+                "Arithmetic overflow test should not panic"
+            );
         }
 
         /// Test concurrent access safety simulation in testing modules
@@ -2213,8 +2598,8 @@ mod testing_module_negative_tests {
                 for thread_id in 0..4 {
                     // Simulate concurrent scenario building
                     let scenario_name = format!("concurrent_test_{}", thread_id);
-                    let builder = ScenarioBuilder::new(&scenario_name)
-                        .seed(12345 + thread_id as u64);
+                    let builder =
+                        ScenarioBuilder::new(&scenario_name).seed(12345 + thread_id as u64);
 
                     // Add nodes in rapid succession
                     let mut current_builder = builder;
@@ -2222,7 +2607,8 @@ mod testing_module_negative_tests {
                         let node_id = format!("thread_{}_node_{}", thread_id, i);
                         let node_desc = format!("Concurrent Node {} {}", thread_id, i);
 
-                        match current_builder.add_node(&node_id, &node_desc, NodeRole::Participant) {
+                        match current_builder.add_node(&node_id, &node_desc, NodeRole::Participant)
+                        {
                             Ok(new_builder) => current_builder = new_builder,
                             Err(_) => break,
                         }
@@ -2238,7 +2624,8 @@ mod testing_module_negative_tests {
                 let transport = Arc::new(Mutex::new(VirtualTransportLayer::new(99999)));
                 let mut handles = Vec::new();
 
-                for thread_id in 0..2 { // Limit threads for test stability
+                for thread_id in 0..2 {
+                    // Limit threads for test stability
                     let transport_clone = Arc::clone(&transport);
                     let handle = thread::spawn(move || {
                         for i in 0..50 {
@@ -2248,11 +2635,14 @@ mod testing_module_negative_tests {
                             // Acquire lock and perform transport operations
                             if let Ok(mut transport) = transport_clone.lock() {
                                 let create_result = transport.create_link(
-                                    &source, &target, LinkFaultConfig::no_faults()
+                                    &source,
+                                    &target,
+                                    LinkFaultConfig::no_faults(),
                                 );
 
                                 if create_result.is_ok() {
-                                    let payload = format!("concurrent_msg_{}_{}", thread_id, i).into_bytes();
+                                    let payload =
+                                        format!("concurrent_msg_{}_{}", thread_id, i).into_bytes();
                                     transport.send_message(&source, &target, payload).ok();
                                 }
                             }
@@ -2272,8 +2662,14 @@ mod testing_module_negative_tests {
                 // Verify final state consistency
                 if let Ok(final_transport) = transport.lock() {
                     let final_stats = final_transport.stats();
-                    assert!(final_stats.total_messages < u64::MAX, "Message count should not overflow");
-                    assert!(final_stats.total_links_created <= 100, "Link count should be reasonable");
+                    assert!(
+                        final_stats.total_messages < u64::MAX,
+                        "Message count should not overflow"
+                    );
+                    assert!(
+                        final_stats.total_links_created <= 100,
+                        "Link count should be reasonable"
+                    );
                 }
 
                 // Verify scenario data integrity
@@ -2288,7 +2684,10 @@ mod testing_module_negative_tests {
                 Ok(())
             });
 
-            assert!(concurrent_safety_result.is_ok(), "Concurrent safety test should not panic");
+            assert!(
+                concurrent_safety_result.is_ok(),
+                "Concurrent safety test should not panic"
+            );
         }
 
         /// Test display injection and format string safety in testing output
@@ -2302,17 +2701,14 @@ mod testing_module_negative_tests {
                 ("format_inject", "test%s%x%d%p"),
                 ("format_overflow", "test%.999999s"),
                 ("format_position", "test%1$s%2$x"),
-
                 // ANSI escape sequence injection
                 ("ansi_colors", "test\x1b[31mRED\x1b[0m"),
                 ("ansi_cursor", "test\x1b[H\x1b[2J"),
                 ("ansi_title", "test\x1b]0;TITLE\x07"),
-
                 // Terminal control injection
                 ("bell_spam", "test\x07\x07\x07"),
                 ("backspace_attack", "test\x08\x08\x08hidden"),
                 ("carriage_return", "test\roverwrite"),
-
                 // Unicode display corruption
                 ("rtl_override", "test\u{202E}desrever\u{202D}"),
                 ("combining_overflow", "test\u{0300}\u{0301}\u{0302}\u{0303}"),
@@ -2325,20 +2721,38 @@ mod testing_module_negative_tests {
                     let scenario_result = ScenarioBuilder::new(malicious_content)
                         .seed(44444)
                         .add_node("display_node", malicious_content, NodeRole::Coordinator)
-                        .and_then(|b| b.add_node("target_node", "Normal Target", NodeRole::Participant))
+                        .and_then(|b| {
+                            b.add_node("target_node", "Normal Target", NodeRole::Participant)
+                        })
                         .and_then(|b| b.build());
 
                     match scenario_result {
                         Ok(scenario) => {
                             // Test display formatting safety
                             let display_test = format!("{:?}", scenario);
-                            assert!(!display_test.contains("%s"), "Display should not contain format specifiers: {}", attack_name);
-                            assert!(!display_test.contains("\x1b["), "Display should escape ANSI sequences: {}", attack_name);
+                            assert!(
+                                !display_test.contains("%s"),
+                                "Display should not contain format specifiers: {}",
+                                attack_name
+                            );
+                            assert!(
+                                !display_test.contains("\x1b["),
+                                "Display should escape ANSI sequences: {}",
+                                attack_name
+                            );
 
                             // Test JSON display safety
                             if let Ok(json) = scenario.to_json() {
-                                assert!(!json.contains("\x1b["), "JSON should escape control sequences: {}", attack_name);
-                                assert!(!json.contains("\x00"), "JSON should escape null bytes: {}", attack_name);
+                                assert!(
+                                    !json.contains("\x1b["),
+                                    "JSON should escape control sequences: {}",
+                                    attack_name
+                                );
+                                assert!(
+                                    !json.contains("\x00"),
+                                    "JSON should escape null bytes: {}",
+                                    attack_name
+                                );
                             }
                         }
                         Err(_) => {
@@ -2348,31 +2762,47 @@ mod testing_module_negative_tests {
 
                     // Test transport error display safety
                     let mut transport = VirtualTransportLayer::new(66666);
-                    let error_result = transport.send_message(malicious_content, "nonexistent", b"test".to_vec());
+                    let error_result =
+                        transport.send_message(malicious_content, "nonexistent", b"test".to_vec());
 
                     if let Err(error) = error_result {
                         let error_display = format!("{}", error);
-                        assert!(!error_display.contains("%s"), "Error display should not contain format specifiers: {}", attack_name);
-                        assert!(!error_display.contains("\x1b["), "Error display should escape ANSI: {}", attack_name);
+                        assert!(
+                            !error_display.contains("%s"),
+                            "Error display should not contain format specifiers: {}",
+                            attack_name
+                        );
+                        assert!(
+                            !error_display.contains("\x1b["),
+                            "Error display should escape ANSI: {}",
+                            attack_name
+                        );
 
                         let error_debug = format!("{:?}", error);
-                        assert!(!error_debug.contains("\x00"), "Error debug should escape null bytes: {}", attack_name);
+                        assert!(
+                            !error_debug.contains("\x00"),
+                            "Error debug should escape null bytes: {}",
+                            attack_name
+                        );
                     }
 
                     Ok(())
                 });
 
-                assert!(display_safety_result.is_ok(),
-                       "Display injection test should not panic: {}", attack_name);
+                assert!(
+                    display_safety_result.is_ok(),
+                    "Display injection test should not panic: {}",
+                    attack_name
+                );
             }
         }
 
         /// Test boundary condition stress in testing module edge cases
         #[test]
         fn negative_testing_boundary_stress_comprehensive() {
-            use super::scenario_builder::{NodeRole, ScenarioBuilder, ScenarioAssertion};
-            use super::virtual_transport::{LinkFaultConfig, VirtualTransportLayer};
             use super::lab_runtime::{LabConfig, LabRuntime};
+            use super::scenario_builder::{NodeRole, ScenarioAssertion, ScenarioBuilder};
+            use super::virtual_transport::{LinkFaultConfig, VirtualTransportLayer};
 
             // Test scenario boundary conditions
             let boundary_test_result = std::panic::catch_unwind(|| {
@@ -2384,8 +2814,8 @@ mod testing_module_negative_tests {
                     .and_then(|b| b.build());
 
                 match minimal_result {
-                    Ok(_) => {}, // Minimal scenarios accepted
-                    Err(_) => {}, // Or rejected - both acceptable
+                    Ok(_) => {}  // Minimal scenarios accepted
+                    Err(_) => {} // Or rejected - both acceptable
                 }
 
                 // Test maximum realistic scenario size
@@ -2421,34 +2851,47 @@ mod testing_module_negative_tests {
 
                 let build_result = large_builder.build();
                 match build_result {
-                    Ok(_) => {}, // Large scenarios accepted
-                    Err(_) => {}, // Or rejected at boundary
+                    Ok(_) => {}  // Large scenarios accepted
+                    Err(_) => {} // Or rejected at boundary
                 }
 
                 // Test virtual transport boundaries
                 let mut transport = VirtualTransportLayer::new(11111);
 
                 // Test empty payload boundaries
-                transport.create_link("empty_test_src", "empty_test_tgt", LinkFaultConfig::no_faults())
+                transport
+                    .create_link(
+                        "empty_test_src",
+                        "empty_test_tgt",
+                        LinkFaultConfig::no_faults(),
+                    )
                     .expect("Empty test link should be created");
 
-                let empty_send_result = transport.send_message("empty_test_src", "empty_test_tgt", vec![]);
+                let empty_send_result =
+                    transport.send_message("empty_test_src", "empty_test_tgt", vec![]);
                 assert!(empty_send_result.is_ok(), "Empty payload should be allowed");
 
                 // Test single byte payload
-                let single_byte_result = transport.send_message("empty_test_src", "empty_test_tgt", vec![0xFF]);
+                let single_byte_result =
+                    transport.send_message("empty_test_src", "empty_test_tgt", vec![0xFF]);
                 assert!(single_byte_result.is_ok(), "Single byte should be allowed");
 
                 // Test maximum reasonable payload size
                 let large_payload = vec![0x42; 1_000_000]; // 1MB payload
-                let large_send_result = transport.send_message("empty_test_src", "empty_test_tgt", large_payload);
+                let large_send_result =
+                    transport.send_message("empty_test_src", "empty_test_tgt", large_payload);
                 match large_send_result {
                     Ok(_) => {
                         // Large payloads accepted - verify delivery works
-                        let delivered = transport.deliver_next("empty_test_src->empty_test_tgt")
+                        let delivered = transport
+                            .deliver_next("empty_test_src->empty_test_tgt")
                             .expect("Delivery should work")
                             .expect("Message should be delivered");
-                        assert_eq!(delivered.payload.len(), 1_000_000, "Payload size should be preserved");
+                        assert_eq!(
+                            delivered.payload.len(),
+                            1_000_000,
+                            "Payload size should be preserved"
+                        );
                     }
                     Err(_) => {
                         // Large payloads rejected - acceptable
@@ -2461,11 +2904,17 @@ mod testing_module_negative_tests {
 
                 // Test zero-delay timer
                 let zero_timer_result = runtime.schedule_timer(0, "immediate");
-                assert!(zero_timer_result.is_ok(), "Zero delay timer should be allowed");
+                assert!(
+                    zero_timer_result.is_ok(),
+                    "Zero delay timer should be allowed"
+                );
 
                 // Test maximum delay timer
                 let max_timer_result = runtime.schedule_timer(u64::MAX / 2, "very_long");
-                assert!(max_timer_result.is_ok(), "Large delay timer should be allowed");
+                assert!(
+                    max_timer_result.is_ok(),
+                    "Large delay timer should be allowed"
+                );
 
                 // Test clock at maximum value
                 runtime.test_clock.current_tick = u64::MAX - 100;
@@ -2474,18 +2923,24 @@ mod testing_module_negative_tests {
 
                 // Test clock advance that would overflow
                 let overflow_advance = runtime.advance_clock(200);
-                assert!(overflow_advance.is_err(), "Clock advance causing overflow should be rejected");
+                assert!(
+                    overflow_advance.is_err(),
+                    "Clock advance causing overflow should be rejected"
+                );
 
                 Ok(())
             });
 
-            assert!(boundary_test_result.is_ok(), "Boundary stress test should not panic");
+            assert!(
+                boundary_test_result.is_ok(),
+                "Boundary stress test should not panic"
+            );
         }
 
         /// Test cross-module integration edge cases with sophisticated attack scenarios
         #[test]
         fn negative_testing_integration_attack_scenarios() {
-            use super::scenario_builder::{NodeRole, ScenarioBuilder, ScenarioAssertion};
+            use super::scenario_builder::{NodeRole, ScenarioAssertion, ScenarioBuilder};
             use super::virtual_transport::{LinkFaultConfig, VirtualTransportLayer};
 
             let integration_attack_result = std::panic::catch_unwind(|| {
@@ -2495,21 +2950,32 @@ mod testing_module_negative_tests {
 
                 let coordinated_result = ScenarioBuilder::new(attack_scenario_name)
                     .seed(88888)
-                    .add_node(attack_node_name, "Malicious Node Description", NodeRole::Coordinator)
+                    .add_node(
+                        attack_node_name,
+                        "Malicious Node Description",
+                        NodeRole::Coordinator,
+                    )
                     .and_then(|b| b.add_node("victim_node", "Victim Node", NodeRole::Participant))
                     .and_then(|b| b.add_link("attack_link", attack_node_name, "victim_node", true))
-                    .and_then(|b| b.set_fault_profile("attack_link", LinkFaultConfig {
-                        drop_probability: 0.999999, // Near-certain drop to stress edge case
-                        reorder_depth: usize::MAX / 1000, // Large but not overflow-inducing
-                        corrupt_bit_count: 1000000, // High corruption
-                        delay_ticks: u64::MAX / 2, // Very large delay
-                        partition: false,
-                    }))
-                    .and_then(|b| b.add_assertion(ScenarioAssertion::MessageDelivered {
-                        from: attack_node_name.to_string(),
-                        to: "victim_node".to_string(),
-                        within_ticks: 1, // Nearly impossible timing with high delay
-                    }))
+                    .and_then(|b| {
+                        b.set_fault_profile(
+                            "attack_link",
+                            LinkFaultConfig {
+                                drop_probability: 0.999999,       // Near-certain drop to stress edge case
+                                reorder_depth: usize::MAX / 1000, // Large but not overflow-inducing
+                                corrupt_bit_count: 1000000,       // High corruption
+                                delay_ticks: u64::MAX / 2,        // Very large delay
+                                partition: false,
+                            },
+                        )
+                    })
+                    .and_then(|b| {
+                        b.add_assertion(ScenarioAssertion::MessageDelivered {
+                            from: attack_node_name.to_string(),
+                            to: "victim_node".to_string(),
+                            within_ticks: 1, // Nearly impossible timing with high delay
+                        })
+                    })
                     .and_then(|b| b.build());
 
                 match coordinated_result {
@@ -2519,13 +2985,23 @@ mod testing_module_negative_tests {
                         match json_result {
                             Ok(json_str) => {
                                 // Verify attack didn't break JSON structure
-                                let parse_check: Result<serde_json::Value, _> = serde_json::from_str(&json_str);
-                                assert!(parse_check.is_ok(), "JSON should remain valid under attack");
+                                let parse_check: Result<serde_json::Value, _> =
+                                    serde_json::from_str(&json_str);
+                                assert!(
+                                    parse_check.is_ok(),
+                                    "JSON should remain valid under attack"
+                                );
 
                                 // Verify display safety
                                 let display_test = format!("{:?}", attack_scenario);
-                                assert!(!display_test.contains("\x1b[31m"), "Display should escape ANSI");
-                                assert!(!display_test.contains("%s"), "Display should escape format strings");
+                                assert!(
+                                    !display_test.contains("\x1b[31m"),
+                                    "Display should escape ANSI"
+                                );
+                                assert!(
+                                    !display_test.contains("%s"),
+                                    "Display should escape format strings"
+                                );
                             }
                             Err(_) => {
                                 // JSON serialization may fail under extreme attack - acceptable
@@ -2543,7 +3019,7 @@ mod testing_module_negative_tests {
                                 corrupt_bit_count: 100,
                                 delay_ticks: 1000,
                                 partition: false,
-                            }
+                            },
                         );
 
                         match create_result {
@@ -2557,12 +3033,20 @@ mod testing_module_negative_tests {
                                 ];
 
                                 for (i, payload) in attack_payloads.into_iter().enumerate() {
-                                    let send_result = transport.send_message(attack_node_name, "victim_node", payload);
+                                    let send_result = transport.send_message(
+                                        attack_node_name,
+                                        "victim_node",
+                                        payload,
+                                    );
 
                                     // Should handle attack payloads without corruption
                                     match send_result {
                                         Ok(msg_id) => {
-                                            assert!(msg_id > 0, "Message ID should be valid for attack payload {}", i);
+                                            assert!(
+                                                msg_id > 0,
+                                                "Message ID should be valid for attack payload {}",
+                                                i
+                                            );
                                         }
                                         Err(_) => {
                                             // Message may be rejected - acceptable under attack
@@ -2572,8 +3056,14 @@ mod testing_module_negative_tests {
 
                                 // Verify transport state integrity under attack
                                 let stats = transport.stats();
-                                assert!(stats.total_messages < u64::MAX, "Stats should not overflow under attack");
-                                assert!(stats.dropped_messages <= stats.total_messages, "Dropped ≤ total under attack");
+                                assert!(
+                                    stats.total_messages < u64::MAX,
+                                    "Stats should not overflow under attack"
+                                );
+                                assert!(
+                                    stats.dropped_messages <= stats.total_messages,
+                                    "Dropped ≤ total under attack"
+                                );
                             }
                             Err(_) => {
                                 // Transport may reject attack configuration - acceptable
@@ -2586,21 +3076,26 @@ mod testing_module_negative_tests {
                 }
 
                 // Test cascading failure resistance
-                let cascade_test = ScenarioBuilder::new("cascade_test")
-                    .seed(99999)
-                    .add_node("cascade_1", "Node 1", NodeRole::Coordinator);
+                let cascade_test = ScenarioBuilder::new("cascade_test").seed(99999).add_node(
+                    "cascade_1",
+                    "Node 1",
+                    NodeRole::Coordinator,
+                );
 
                 // Add nodes in rapid succession to test failure propagation
                 let mut current_builder = cascade_test.expect("Initial builder should work");
                 for i in 2..=100 {
                     let node_id = format!("cascade_{}", i);
-                    match current_builder.add_node(&node_id, "Cascade Node", NodeRole::Participant) {
+                    match current_builder.add_node(&node_id, "Cascade Node", NodeRole::Participant)
+                    {
                         Ok(builder) => current_builder = builder,
                         Err(_) => {
                             // Failure should be isolated, not cascade to previous nodes
                             let partial_build = current_builder.build();
-                            assert!(partial_build.is_ok() || partial_build.is_err(),
-                                   "Partial build should complete deterministically");
+                            assert!(
+                                partial_build.is_ok() || partial_build.is_err(),
+                                "Partial build should complete deterministically"
+                            );
                             break;
                         }
                     }
@@ -2609,7 +3104,10 @@ mod testing_module_negative_tests {
                 Ok(())
             });
 
-            assert!(integration_attack_result.is_ok(), "Integration attack test should not panic");
+            assert!(
+                integration_attack_result.is_ok(),
+                "Integration attack test should not panic"
+            );
         }
     }
 }

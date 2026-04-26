@@ -60,8 +60,12 @@ fn content_digest_matches(observed: &str, expected: &str) -> bool {
     if !observed.is_ascii() || !expected.is_ascii() {
         return false;
     }
-    let observed_has_forbidden = observed.chars().any(|c| c.is_control() || c.is_whitespace());
-    let expected_has_forbidden = expected.chars().any(|c| c.is_control() || c.is_whitespace());
+    let observed_has_forbidden = observed
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace());
+    let expected_has_forbidden = expected
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace());
     if observed_has_forbidden || expected_has_forbidden {
         return false;
     }
@@ -803,11 +807,17 @@ mod tests {
     }
 
     fn assert_hash_eq(left: &str, right: &str) {
-        assert!(constant_time::ct_eq_bytes(left.as_bytes(), right.as_bytes()));
+        assert!(constant_time::ct_eq_bytes(
+            left.as_bytes(),
+            right.as_bytes()
+        ));
     }
 
     fn assert_hash_ne(left: &str, right: &str) {
-        assert!(!constant_time::ct_eq_bytes(left.as_bytes(), right.as_bytes()));
+        assert!(!constant_time::ct_eq_bytes(
+            left.as_bytes(),
+            right.as_bytes()
+        ));
     }
 
     // -- Config defaults --
@@ -1208,7 +1218,11 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.code, ERR_INVALID_ARTIFACT_ID);
-        assert!(gate.events().iter().any(|event| event.code == RG_EVICTION_BLOCKED));
+        assert!(
+            gate.events()
+                .iter()
+                .any(|event| event.code == RG_EVICTION_BLOCKED)
+        );
     }
 
     #[test]
@@ -1238,7 +1252,11 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.code, ERR_INVALID_SEGMENT_ID);
-        assert!(gate.events().iter().any(|event| event.code == RG_EVICTION_BLOCKED));
+        assert!(
+            gate.events()
+                .iter()
+                .any(|event| event.code == RG_EVICTION_BLOCKED)
+        );
     }
 
     #[test]
@@ -1795,7 +1813,10 @@ mod tests {
 
     #[test]
     fn test_canonical_digest_rejects_whitespace() {
-        let digest = format!("{} ", &content_hash(b"space")[..SHA256_DIGEST_HEX_CHARS - 1]);
+        let digest = format!(
+            "{} ",
+            &content_hash(b"space")[..SHA256_DIGEST_HEX_CHARS - 1]
+        );
 
         assert!(!is_canonical_sha256_hex_digest(&digest));
     }
@@ -1866,7 +1887,10 @@ mod tests {
 
     #[test]
     fn test_content_digest_matches_rejects_matching_non_ascii_digest() {
-        assert!(!content_digest_matches("archive\u{e9}hash", "archive\u{e9}hash"));
+        assert!(!content_digest_matches(
+            "archive\u{e9}hash",
+            "archive\u{e9}hash"
+        ));
     }
 
     #[test]
@@ -3007,20 +3031,20 @@ mod storage_migration_integration_tests {
         // Unicode injection attempts in artifact and segment IDs
         let malicious_identifiers = vec![
             (
-                "\u{202E}safe-artifact\u{202D}malicious",  // BiDi override in artifact ID
-                "segment\u{200B}001",  // Zero-width space in segment ID
+                "\u{202E}safe-artifact\u{202D}malicious", // BiDi override in artifact ID
+                "segment\u{200B}001",                     // Zero-width space in segment ID
             ),
             (
-                "artifact\u{FEFF}123",  // Zero-width no-break space
-                "\u{0000}bypass-segment",  // Null injection in segment ID
+                "artifact\u{FEFF}123",    // Zero-width no-break space
+                "\u{0000}bypass-segment", // Null injection in segment ID
             ),
             (
-                "secure\u{2028}artifact",  // Line separator
-                "segment\u{2029}admin",  // Paragraph separator
+                "secure\u{2028}artifact", // Line separator
+                "segment\u{2029}admin",   // Paragraph separator
             ),
             (
-                "\u{200E}normal\u{200F}",  // LTR/RTL marks
-                "segment\u{202C}reset",  // Pop directional formatting
+                "\u{200E}normal\u{200F}", // LTR/RTL marks
+                "segment\u{202C}reset",   // Pop directional formatting
             ),
         ];
 
@@ -3033,16 +3057,24 @@ mod storage_migration_integration_tests {
             gate.register_target(&artifact_id, &segment_id, &good_state(&test_hash));
 
             // Verify Unicode doesn't create privileged identifiers
-            assert!(!constant_time::ct_eq(artifact_id.0.as_bytes(), b"admin"),
-                   "Unicode injection should not create admin artifacts");
-            assert!(!constant_time::ct_eq(segment_id.0.as_bytes(), b"admin"),
-                   "Unicode injection should not create admin segments");
+            assert!(
+                !constant_time::ct_eq(artifact_id.0.as_bytes(), b"admin"),
+                "Unicode injection should not create admin artifacts"
+            );
+            assert!(
+                !constant_time::ct_eq(segment_id.0.as_bytes(), b"admin"),
+                "Unicode injection should not create admin segments"
+            );
 
             // Verify null bytes don't appear in identifiers
-            assert!(!artifact_id.0.contains('\0'),
-                   "Artifact ID should not contain null bytes");
-            assert!(!segment_id.0.contains('\0'),
-                   "Segment ID should not contain null bytes");
+            assert!(
+                !artifact_id.0.contains('\0'),
+                "Artifact ID should not contain null bytes"
+            );
+            assert!(
+                !segment_id.0.contains('\0'),
+                "Segment ID should not contain null bytes"
+            );
 
             // Verify proof request works deterministically despite Unicode
             let proof_result = gate.proof_eviction_safety(&artifact_id, &segment_id);
@@ -3050,7 +3082,7 @@ mod storage_migration_integration_tests {
                 Ok(_receipt) => {
                     // If proof passed, verify it was for the correct identifiers
                     assert!(gate.receipts().len() > 0, "Should have receipts");
-                },
+                }
                 Err(_) => {
                     // Graceful rejection of Unicode-injected IDs is acceptable
                 }
@@ -3082,7 +3114,7 @@ mod storage_migration_integration_tests {
             // Hash with Unicode injection
             format!("{}\u{202E}", legitimate_hash),
             // Truncated hash
-            legitimate_hash[..legitimate_hash.len()-2].to_string(),
+            legitimate_hash[..legitimate_hash.len() - 2].to_string(),
             // Extended hash
             format!("{}00", legitimate_hash),
             // Invalid hex characters
@@ -3131,10 +3163,13 @@ mod storage_migration_integration_tests {
                 }
                 Err(err) => {
                     // Expected rejection of malformed hashes
-                    assert!(err.contains("ERR_HASH_MISMATCH") ||
-                           err.contains("ERR_INVALID") ||
-                           err.contains("hash"),
-                           "Error should indicate hash validation failure: {}", err);
+                    assert!(
+                        err.contains("ERR_HASH_MISMATCH")
+                            || err.contains("ERR_INVALID")
+                            || err.contains("hash"),
+                        "Error should indicate hash validation failure: {}",
+                        err
+                    );
                 }
             }
         }
@@ -3150,14 +3185,18 @@ mod storage_migration_integration_tests {
         let collision_test_vectors = vec![
             // Different payloads with potential hash collisions
             (b"collision_test_1".to_vec(), b"collision_test_2".to_vec()),
-            (b"".to_vec(), b"\x00".to_vec()),  // Empty vs single byte
-            (b"abc".to_vec(), b"ab\x00c".to_vec()),  // Null injection
-            (b"test_data".to_vec(), b"test\x00_data".to_vec()),  // Null boundary
-
+            (b"".to_vec(), b"\x00".to_vec()), // Empty vs single byte
+            (b"abc".to_vec(), b"ab\x00c".to_vec()), // Null injection
+            (b"test_data".to_vec(), b"test\x00_data".to_vec()), // Null boundary
             // Unicode normalization collision attempts
-            ("test".as_bytes().to_vec(), "te\u{0301}st".as_bytes().to_vec()),  // Combining character
-            ("café".as_bytes().to_vec(), "cafe\u{0301}".as_bytes().to_vec()),  // Acute accent
-
+            (
+                "test".as_bytes().to_vec(),
+                "te\u{0301}st".as_bytes().to_vec(),
+            ), // Combining character
+            (
+                "café".as_bytes().to_vec(),
+                "cafe\u{0301}".as_bytes().to_vec(),
+            ), // Acute accent
             // Length extension attempts
             (b"data".to_vec(), b"data\x00\x00\x00\x00".to_vec()),
         ];
@@ -3170,8 +3209,12 @@ mod storage_migration_integration_tests {
 
             // Different payloads should produce different hashes
             if payload1 != payload2 {
-                assert!(!constant_time::ct_eq_bytes(hash1.as_bytes(), hash2.as_bytes()),
-                       "Different payloads should have different hashes: {} vs {}", hash1, hash2);
+                assert!(
+                    !constant_time::ct_eq_bytes(hash1.as_bytes(), hash2.as_bytes()),
+                    "Different payloads should have different hashes: {} vs {}",
+                    hash1,
+                    hash2
+                );
             }
 
             // Register target with first hash
@@ -3203,8 +3246,10 @@ mod storage_migration_integration_tests {
                     }
                     Err(err) => {
                         // Expected rejection of hash mismatch
-                        assert!(err.contains("ERR_HASH_MISMATCH"),
-                               "Should report hash mismatch error");
+                        assert!(
+                            err.contains("ERR_HASH_MISMATCH"),
+                            "Should report hash mismatch error"
+                        );
                     }
                 }
             }
@@ -3223,10 +3268,16 @@ mod storage_migration_integration_tests {
 
         // Attempt proof binding manipulation by creating similar identifiers
         let similar_identifiers = vec![
-            (aid("binding_test_artifact\u{200B}"), sid("binding_test_segment")),  // Zero-width in artifact
-            (aid("binding_test_artifact"), sid("binding_test_segment\u{200B}")),  // Zero-width in segment
-            (aid("binding_test_artifact "), sid("binding_test_segment")),  // Trailing space in artifact
-            (aid("binding_test_artifact"), sid(" binding_test_segment")),  // Leading space in segment
+            (
+                aid("binding_test_artifact\u{200B}"),
+                sid("binding_test_segment"),
+            ), // Zero-width in artifact
+            (
+                aid("binding_test_artifact"),
+                sid("binding_test_segment\u{200B}"),
+            ), // Zero-width in segment
+            (aid("binding_test_artifact "), sid("binding_test_segment")), // Trailing space in artifact
+            (aid("binding_test_artifact"), sid(" binding_test_segment")), // Leading space in segment
             (aid("BINDING_TEST_ARTIFACT"), sid("binding_test_segment")),  // Case manipulation
             (aid("binding_test_artifact"), sid("BINDING_TEST_SEGMENT")),  // Case manipulation
         ];
@@ -3241,18 +3292,25 @@ mod storage_migration_integration_tests {
             match proof_result {
                 Ok(receipt) => {
                     // If proof succeeded, verify binding is preserved
-                    assert_eq!(receipt.artifact_id.0, similar_artifact.0,
-                             "Receipt should be bound to exact artifact ID");
-                    assert_eq!(receipt.segment_id.0, similar_segment.0,
-                             "Receipt should be bound to exact segment ID");
+                    assert_eq!(
+                        receipt.artifact_id.0, similar_artifact.0,
+                        "Receipt should be bound to exact artifact ID"
+                    );
+                    assert_eq!(
+                        receipt.segment_id.0, similar_segment.0,
+                        "Receipt should be bound to exact segment ID"
+                    );
 
                     // Proof should not be transferable to original identifiers if different
                     if similar_artifact.0 != artifact_id.0 || similar_segment.0 != segment_id.0 {
                         let cross_proof = gate.proof_eviction_safety(&artifact_id, &segment_id);
                         // Cross-binding should require separate proof
-                        assert!(cross_proof.is_ok(), "Original identifiers should have separate proof");
+                        assert!(
+                            cross_proof.is_ok(),
+                            "Original identifiers should have separate proof"
+                        );
                     }
-                },
+                }
                 Err(_) => {
                     // Graceful rejection of similar identifiers is acceptable
                 }
@@ -3263,7 +3321,7 @@ mod storage_migration_integration_tests {
     #[test]
     fn test_security_latency_manipulation_attacks() {
         let mut gate = RetrievabilityGate::new(RetrievabilityConfig {
-            max_latency_ms: 1000,  // Strict latency limit
+            max_latency_ms: 1000, // Strict latency limit
             require_hash_match: true,
         });
 
@@ -3273,11 +3331,11 @@ mod storage_migration_integration_tests {
 
         // Attempt latency manipulation attacks
         let malicious_latencies = vec![
-            999,   // Just under limit (should pass)
-            1000,  // At limit (boundary test)
-            1001,  // Just over limit (should fail)
-            u32::MAX,  // Extreme latency
-            0,     // Zero latency (suspicious)
+            999,      // Just under limit (should pass)
+            1000,     // At limit (boundary test)
+            1001,     // Just over limit (should fail)
+            u32::MAX, // Extreme latency
+            0,        // Zero latency (suspicious)
         ];
 
         for malicious_latency in malicious_latencies {
@@ -3298,19 +3356,27 @@ mod storage_migration_integration_tests {
                 Ok(receipt) => {
                     if malicious_latency > 1000 {
                         // High latency should fail proof
-                        assert!(!receipt.proof_passed,
-                               "High latency {} should fail proof", malicious_latency);
+                        assert!(
+                            !receipt.proof_passed,
+                            "High latency {} should fail proof",
+                            malicious_latency
+                        );
                     } else {
                         // Low latency should pass
-                        assert!(receipt.proof_passed,
-                               "Low latency {} should pass proof", malicious_latency);
+                        assert!(
+                            receipt.proof_passed,
+                            "Low latency {} should pass proof",
+                            malicious_latency
+                        );
                     }
-                },
+                }
                 Err(err) => {
                     // Expected rejection for excessive latency
                     if malicious_latency > 1000 {
-                        assert!(err.contains("ERR_LATENCY_EXCEEDED"),
-                               "Should report latency exceeded error");
+                        assert!(
+                            err.contains("ERR_LATENCY_EXCEEDED"),
+                            "Should report latency exceeded error"
+                        );
                     }
                 }
             }
@@ -3329,12 +3395,13 @@ mod storage_migration_integration_tests {
             // Unreachable target claiming to be reachable
             TargetTierState {
                 content_hash: test_hash.clone(),
-                reachable: false,  // Actually unreachable
-                fetch_latency_ms: 50,  // But claiming fast latency
+                reachable: false,     // Actually unreachable
+                fetch_latency_ms: 50, // But claiming fast latency
             },
             // Target with suspicious hash claiming good state
             TargetTierState {
-                content_hash: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),  // All zeros
+                content_hash: "0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_string(), // All zeros
                 reachable: true,
                 fetch_latency_ms: 50,
             },
@@ -3348,7 +3415,7 @@ mod storage_migration_integration_tests {
             TargetTierState {
                 content_hash: test_hash.clone(),
                 reachable: true,
-                fetch_latency_ms: 0,  // Suspiciously fast
+                fetch_latency_ms: 0, // Suspiciously fast
             },
         ];
 
@@ -3364,22 +3431,26 @@ mod storage_migration_integration_tests {
                 Ok(receipt) => {
                     // Unreachable targets should fail proof
                     if !spoofed_state.reachable {
-                        assert!(!receipt.proof_passed,
-                               "Unreachable target should fail proof");
+                        assert!(
+                            !receipt.proof_passed,
+                            "Unreachable target should fail proof"
+                        );
                     }
 
                     // Invalid hashes should fail proof
                     if !is_canonical_sha256_hex_digest(&spoofed_state.content_hash) {
-                        assert!(!receipt.proof_passed,
-                               "Invalid hash should fail proof");
+                        assert!(!receipt.proof_passed, "Invalid hash should fail proof");
                     }
-                },
+                }
                 Err(err) => {
                     // Expected rejection of spoofed states
-                    assert!(err.contains("ERR_TARGET_UNREACHABLE") ||
-                           err.contains("ERR_HASH_MISMATCH") ||
-                           err.contains("ERR_INVALID"),
-                           "Should report spoofing-related error: {}", err);
+                    assert!(
+                        err.contains("ERR_TARGET_UNREACHABLE")
+                            || err.contains("ERR_HASH_MISMATCH")
+                            || err.contains("ERR_INVALID"),
+                        "Should report spoofing-related error: {}",
+                        err
+                    );
                 }
             }
         }
@@ -3393,20 +3464,20 @@ mod storage_migration_integration_tests {
         // Artifact/segment IDs with injection attempts
         let injection_identifiers = vec![
             (
-                aid("\";alert('xss');//"),  // JS injection
+                aid("\";alert('xss');//"), // JS injection
                 sid("normal_segment"),
             ),
             (
                 aid("normal_artifact"),
-                sid("</script><script>alert('xss')</script>"),  // HTML injection
+                sid("</script><script>alert('xss')</script>"), // HTML injection
             ),
             (
-                aid("$(rm -rf /)"),  // Command injection
+                aid("$(rm -rf /)"), // Command injection
                 sid("normal_segment"),
             ),
             (
-                aid("line1\nline2\r\nline3"),  // Newline injection
-                sid("tab\tseparated\tsegment"),  // Tab injection
+                aid("line1\nline2\r\nline3"),   // Newline injection
+                sid("tab\tseparated\tsegment"), // Tab injection
             ),
         ];
 
@@ -3423,24 +3494,36 @@ mod storage_migration_integration_tests {
                     match json_result {
                         Ok(json) => {
                             // JSON should escape all injection attempts
-                            assert!(!json.contains("alert('xss')"), "JavaScript injection should be escaped");
-                            assert!(!json.contains("</script>"), "HTML injection should be escaped");
-                            assert!(!json.contains("rm -rf"), "Command injection should be escaped");
+                            assert!(
+                                !json.contains("alert('xss')"),
+                                "JavaScript injection should be escaped"
+                            );
+                            assert!(
+                                !json.contains("</script>"),
+                                "HTML injection should be escaped"
+                            );
+                            assert!(
+                                !json.contains("rm -rf"),
+                                "Command injection should be escaped"
+                            );
                             assert!(!json.contains("\n"), "Newline injection should be escaped");
-                            assert!(!json.contains("\r"), "Carriage return injection should be escaped");
+                            assert!(
+                                !json.contains("\r"),
+                                "Carriage return injection should be escaped"
+                            );
                             assert!(!json.contains("\t"), "Tab injection should be escaped");
 
                             // Verify roundtrip preserves structure
-                            let parsed: ProofReceipt = serde_json::from_str(&json)
-                                .expect("should deserialize");
+                            let parsed: ProofReceipt =
+                                serde_json::from_str(&json).expect("should deserialize");
                             assert_eq!(receipt.artifact_id.0, parsed.artifact_id.0);
                             assert_eq!(receipt.segment_id.0, parsed.segment_id.0);
-                        },
+                        }
                         Err(_) => {
                             // Graceful serialization failure is acceptable for extreme injection
                         }
                     }
-                },
+                }
                 Err(_) => {
                     // Graceful rejection of injection attempts is expected
                 }
@@ -3466,11 +3549,16 @@ mod storage_migration_integration_tests {
                 let artifact_id = aid(&format!("concurrent_artifact_{}", i));
                 let segment_id = sid(&format!("concurrent_segment_{}", i));
 
-                let mut locked_gate = gate_clone.lock()
+                let mut locked_gate = gate_clone
+                    .lock()
                     .unwrap_or_else(|poison| poison.into_inner());
 
                 // Register target
-                locked_gate.register_target(&artifact_id, &segment_id, &good_state(&test_hash_clone));
+                locked_gate.register_target(
+                    &artifact_id,
+                    &segment_id,
+                    &good_state(&test_hash_clone),
+                );
 
                 // Attempt proof
                 locked_gate.proof_eviction_safety(&artifact_id, &segment_id)
@@ -3491,9 +3579,11 @@ mod storage_migration_integration_tests {
             match result {
                 Ok(receipt) => {
                     assert!(receipt.proof_passed, "Concurrent proof {} should pass", i);
-                    assert!(receipt.artifact_id.0.contains(&i.to_string()),
-                           "Artifact ID should be preserved");
-                },
+                    assert!(
+                        receipt.artifact_id.0.contains(&i.to_string()),
+                        "Artifact ID should be preserved"
+                    );
+                }
                 Err(err) => {
                     panic!("Concurrent proof {} should not fail: {}", i, err);
                 }
@@ -3501,10 +3591,13 @@ mod storage_migration_integration_tests {
         }
 
         // Verify final gate state is consistent
-        let final_gate = gate.lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let final_gate = gate.lock().unwrap_or_else(|poison| poison.into_inner());
         assert_eq!(final_gate.receipts().len(), 10, "Should have 10 receipts");
-        assert_eq!(final_gate.passed_count(), 10, "Should have 10 passed proofs");
+        assert_eq!(
+            final_gate.passed_count(),
+            10,
+            "Should have 10 passed proofs"
+        );
     }
 
     #[test]
@@ -3524,8 +3617,10 @@ mod storage_migration_integration_tests {
 
             // Verify bounded growth
             if gate.receipts().len() > MAX_RECEIPTS {
-                assert!(gate.receipts().len() <= MAX_RECEIPTS + 100,
-                       "Receipt count should be bounded near MAX_RECEIPTS");
+                assert!(
+                    gate.receipts().len() <= MAX_RECEIPTS + 100,
+                    "Receipt count should be bounded near MAX_RECEIPTS"
+                );
             }
         }
 
@@ -3537,7 +3632,10 @@ mod storage_migration_integration_tests {
         gate.register_target(&test_artifact, &test_segment, &good_state(&test_hash));
         let final_result = gate.proof_eviction_safety(&test_artifact, &test_segment);
 
-        assert!(final_result.is_ok(), "Gate should remain functional after memory pressure");
+        assert!(
+            final_result.is_ok(),
+            "Gate should remain functional after memory pressure"
+        );
         // Test should complete without OOM
     }
 
@@ -3549,11 +3647,15 @@ mod storage_migration_integration_tests {
         let segment_id = sid("bypass_test_segment");
 
         // Register target but don't perform successful proof
-        gate.register_target(&artifact_id, &segment_id, &TargetTierState {
-            content_hash: test_hash,
-            reachable: false,  // Unreachable target
-            fetch_latency_ms: 10000,  // High latency
-        });
+        gate.register_target(
+            &artifact_id,
+            &segment_id,
+            &TargetTierState {
+                content_hash: test_hash,
+                reachable: false,        // Unreachable target
+                fetch_latency_ms: 10000, // High latency
+            },
+        );
 
         // Attempt various eviction bypass methods
         let bypass_attempts = vec![
@@ -3564,16 +3666,23 @@ mod storage_migration_integration_tests {
             // Case manipulation
             (aid("BYPASS_TEST_ARTIFACT"), sid("bypass_test_segment")),
             // Unicode similar identifiers
-            (aid("bypass_test_artifact\u{200B}"), sid("bypass_test_segment")),
+            (
+                aid("bypass_test_artifact\u{200B}"),
+                sid("bypass_test_segment"),
+            ),
         ];
 
         for (bypass_artifact, bypass_segment) in bypass_attempts {
             // Register bypass target
-            gate.register_target(&bypass_artifact, &bypass_segment, &TargetTierState {
-                content_hash: content_hash(b"eviction_bypass_test"),
-                reachable: true,  // Claim reachable
-                fetch_latency_ms: 50,  // Low latency
-            });
+            gate.register_target(
+                &bypass_artifact,
+                &bypass_segment,
+                &TargetTierState {
+                    content_hash: content_hash(b"eviction_bypass_test"),
+                    reachable: true,      // Claim reachable
+                    fetch_latency_ms: 50, // Low latency
+                },
+            );
 
             // Attempt proof for bypass target
             let proof_result = gate.proof_eviction_safety(&bypass_artifact, &bypass_segment);
@@ -3581,25 +3690,33 @@ mod storage_migration_integration_tests {
             match proof_result {
                 Ok(receipt) => {
                     // Successful proof should be bound to exact identifiers
-                    assert_eq!(receipt.artifact_id, bypass_artifact,
-                             "Proof should be bound to exact artifact ID");
-                    assert_eq!(receipt.segment_id, bypass_segment,
-                             "Proof should be bound to exact segment ID");
+                    assert_eq!(
+                        receipt.artifact_id, bypass_artifact,
+                        "Proof should be bound to exact artifact ID"
+                    );
+                    assert_eq!(
+                        receipt.segment_id, bypass_segment,
+                        "Proof should be bound to exact segment ID"
+                    );
 
                     // Original target should still be blocked
                     let original_proof = gate.proof_eviction_safety(&artifact_id, &segment_id);
                     match original_proof {
                         Ok(original_receipt) => {
-                            assert!(!original_receipt.proof_passed,
-                                   "Original unreachable target should still fail proof");
-                        },
+                            assert!(
+                                !original_receipt.proof_passed,
+                                "Original unreachable target should still fail proof"
+                            );
+                        }
                         Err(err) => {
-                            assert!(err.contains("ERR_TARGET_UNREACHABLE") ||
-                                   err.contains("ERR_LATENCY_EXCEEDED"),
-                                   "Original target should remain blocked");
+                            assert!(
+                                err.contains("ERR_TARGET_UNREACHABLE")
+                                    || err.contains("ERR_LATENCY_EXCEEDED"),
+                                "Original target should remain blocked"
+                            );
                         }
                     }
-                },
+                }
                 Err(_) => {
                     // Rejection of bypass attempts is acceptable
                 }
@@ -3630,16 +3747,25 @@ mod storage_migration_integration_tests {
         let aid = ArtifactId("overflow_artifact".to_string());
         let sid = SegmentId("overflow_segment".to_string());
 
-        gate.register_target(&aid, &sid, StorageTier::L3Archive, TargetTierState {
-            content_hash: test_hash.clone(),
-            reachable: true,
-            fetch_latency_ms: 100,
-        });
+        gate.register_target(
+            &aid,
+            &sid,
+            StorageTier::L3Archive,
+            TargetTierState {
+                content_hash: test_hash.clone(),
+                reachable: true,
+                fetch_latency_ms: 100,
+            },
+        );
 
         // Multiple operations near u64::MAX should use saturating_add
         for i in 0..10 {
             let result = gate.check_retrievability(
-                &aid, &sid, StorageTier::L2Warm, StorageTier::L3Archive, &test_hash
+                &aid,
+                &sid,
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                &test_hash,
             );
 
             match result {
@@ -3647,7 +3773,7 @@ mod storage_migration_integration_tests {
                     // Timestamp should saturate at u64::MAX, not wrap to 0
                     assert!(proof.proof_timestamp >= u64::MAX.saturating_sub(10));
                     assert_eq!(proof.proof_timestamp, u64::MAX);
-                },
+                }
                 Err(e) => panic!("Overflow test #{} failed: {}", i, e),
             }
 
@@ -3683,23 +3809,38 @@ mod storage_migration_integration_tests {
         ];
 
         for (latency_ms, should_fail, description) in latency_attack_vectors {
-            gate.register_target(&aid, &sid, StorageTier::L3Archive, TargetTierState {
-                content_hash: test_hash.clone(),
-                reachable: true,
-                fetch_latency_ms: latency_ms,
-            });
+            gate.register_target(
+                &aid,
+                &sid,
+                StorageTier::L3Archive,
+                TargetTierState {
+                    content_hash: test_hash.clone(),
+                    reachable: true,
+                    fetch_latency_ms: latency_ms,
+                },
+            );
 
             let result = gate.check_retrievability(
-                &aid, &sid, StorageTier::L2Warm, StorageTier::L3Archive, &test_hash
+                &aid,
+                &sid,
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                &test_hash,
             );
 
             match (should_fail, &result) {
-                (true, Ok(_)) => panic!("Latency attack should fail ({}): {}ms", description, latency_ms),
-                (false, Err(e)) => panic!("Valid latency should pass ({}): {}ms - {}", description, latency_ms, e),
+                (true, Ok(_)) => panic!(
+                    "Latency attack should fail ({}): {}ms",
+                    description, latency_ms
+                ),
+                (false, Err(e)) => panic!(
+                    "Valid latency should pass ({}): {}ms - {}",
+                    description, latency_ms, e
+                ),
                 (true, Err(e)) => {
                     assert_eq!(e.code, ERR_LATENCY_EXCEEDED);
                     assert!(e.reason.label() == "latency_exceeded");
-                },
+                }
                 (false, Ok(proof)) => {
                     assert!(proof.latency_ms < gate.config.max_latency_ms);
                 }
@@ -3728,27 +3869,45 @@ mod storage_migration_integration_tests {
             // Similar-looking characters
             ("dead8eef".repeat(8), "similar characters"),
             // Domain separator injection attempt
-            (format!("{}retrievability_gate_hash_v1:", legitimate_hash), "domain separator injection"),
+            (
+                format!("{}retrievability_gate_hash_v1:", legitimate_hash),
+                "domain separator injection",
+            ),
             // Hash prefix collision attempt
-            (format!("{}{}", &legitimate_hash[..32], "0".repeat(32)), "prefix collision"),
+            (
+                format!("{}{}", &legitimate_hash[..32], "0".repeat(32)),
+                "prefix collision",
+            ),
         ];
 
         for (malicious_hash, attack_type) in collision_vectors {
-            gate.register_target(&aid, &sid, StorageTier::L3Archive, TargetTierState {
-                content_hash: malicious_hash.clone(),
-                reachable: true,
-                fetch_latency_ms: 100,
-            });
+            gate.register_target(
+                &aid,
+                &sid,
+                StorageTier::L3Archive,
+                TargetTierState {
+                    content_hash: malicious_hash.clone(),
+                    reachable: true,
+                    fetch_latency_ms: 100,
+                },
+            );
 
             // All collision attempts should fail with constant time
             let start = std::time::Instant::now();
             let result = gate.check_retrievability(
-                &aid, &sid, StorageTier::L2Warm, StorageTier::L3Archive, &legitimate_hash
+                &aid,
+                &sid,
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                &legitimate_hash,
             );
             let duration = start.elapsed();
 
             match result {
-                Ok(_) => panic!("Hash collision attack should fail ({}): {}", attack_type, malicious_hash),
+                Ok(_) => panic!(
+                    "Hash collision attack should fail ({}): {}",
+                    attack_type, malicious_hash
+                ),
                 Err(e) => {
                     // Should fail with hash mismatch, not other errors
                     if malicious_hash.is_empty() {
@@ -3760,7 +3919,11 @@ mod storage_migration_integration_tests {
                     assert!(e.reason.label() == "hash_mismatch");
 
                     // Timing should be consistent (within reasonable bounds for constant-time)
-                    assert!(duration.as_millis() < 100, "Hash comparison took too long: {}ms", duration.as_millis());
+                    assert!(
+                        duration.as_millis() < 100,
+                        "Hash comparison took too long: {}ms",
+                        duration.as_millis()
+                    );
                 }
             }
         }
@@ -3775,19 +3938,32 @@ mod storage_migration_integration_tests {
             let aid = ArtifactId(format!("exhaust_artifact_{}", i));
             let sid = SegmentId(format!("exhaust_segment_{}", i));
 
-            gate.register_target(&aid, &sid, StorageTier::L3Archive, TargetTierState {
-                content_hash: "invalid_hash".to_string(), // Will fail
-                reachable: true,
-                fetch_latency_ms: 100,
-            });
+            gate.register_target(
+                &aid,
+                &sid,
+                StorageTier::L3Archive,
+                TargetTierState {
+                    content_hash: "invalid_hash".to_string(), // Will fail
+                    reachable: true,
+                    fetch_latency_ms: 100,
+                },
+            );
 
             let _result = gate.check_retrievability(
-                &aid, &sid, StorageTier::L2Warm, StorageTier::L3Archive, "expected_hash"
+                &aid,
+                &sid,
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                "expected_hash",
             );
         }
 
         // Events should be bounded by push_bounded implementation
-        assert!(gate.events.len() <= MAX_EVENTS + 10, "Events not properly bounded: {}", gate.events.len());
+        assert!(
+            gate.events.len() <= MAX_EVENTS + 10,
+            "Events not properly bounded: {}",
+            gate.events.len()
+        );
 
         // Test receipts capacity boundary
         for i in 0..MAX_RECEIPTS + 50 {
@@ -3795,19 +3971,32 @@ mod storage_migration_integration_tests {
             let sid = SegmentId(format!("receipt_segment_{}", i));
             let test_hash = content_hash(format!("receipt_test_{}", i).as_bytes());
 
-            gate.register_target(&aid, &sid, StorageTier::L3Archive, TargetTierState {
-                content_hash: test_hash.clone(),
-                reachable: true,
-                fetch_latency_ms: 100,
-            });
+            gate.register_target(
+                &aid,
+                &sid,
+                StorageTier::L3Archive,
+                TargetTierState {
+                    content_hash: test_hash.clone(),
+                    reachable: true,
+                    fetch_latency_ms: 100,
+                },
+            );
 
             let _result = gate.check_retrievability(
-                &aid, &sid, StorageTier::L2Warm, StorageTier::L3Archive, &test_hash
+                &aid,
+                &sid,
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                &test_hash,
             );
         }
 
         // Receipts should be bounded
-        assert!(gate.receipts.len() <= MAX_RECEIPTS + 10, "Receipts not properly bounded: {}", gate.receipts.len());
+        assert!(
+            gate.receipts.len() <= MAX_RECEIPTS + 10,
+            "Receipts not properly bounded: {}",
+            gate.receipts.len()
+        );
     }
 
     #[test]
@@ -3820,13 +4009,24 @@ mod storage_migration_integration_tests {
             // Control character injection
             ("artifact\0id", "segment_id", "null byte in artifact"),
             ("artifact_id", "segment\0id", "null byte in segment"),
-            ("artifact\u{200B}id", "segment_id", "zero-width space artifact"),
+            (
+                "artifact\u{200B}id",
+                "segment_id",
+                "zero-width space artifact",
+            ),
             ("artifact_id", "segment\u{FEFF}id", "BOM in segment"),
-
             // Whitespace normalization
             ("artifact\u{2000}id", "segment_id", "en quad in artifact"),
-            ("artifact_id", "segment\u{2028}id", "line separator in segment"),
-            ("artifact\u{00A0}id", "segment_id", "non-breaking space in artifact"),
+            (
+                "artifact_id",
+                "segment\u{2028}id",
+                "line separator in segment",
+            ),
+            (
+                "artifact\u{00A0}id",
+                "segment_id",
+                "non-breaking space in artifact",
+            ),
         ];
 
         for (artifact_id, segment_id, attack_type) in injection_vectors {
@@ -3834,37 +4034,72 @@ mod storage_migration_integration_tests {
             let sid = SegmentId(segment_id.to_string());
 
             // Check input validation
-            match (invalid_artifact_id_reason(&aid), invalid_segment_id_reason(&sid)) {
+            match (
+                invalid_artifact_id_reason(&aid),
+                invalid_segment_id_reason(&sid),
+            ) {
                 (Some(artifact_reason), _) => {
                     // Should reject invalid artifact IDs
-                    assert!(artifact_reason.contains("control") ||
-                           artifact_reason.contains("whitespace") ||
-                           artifact_reason.contains("empty"),
-                           "Should detect artifact ID issue ({}): {}", attack_type, artifact_reason);
-                },
+                    assert!(
+                        artifact_reason.contains("control")
+                            || artifact_reason.contains("whitespace")
+                            || artifact_reason.contains("empty"),
+                        "Should detect artifact ID issue ({}): {}",
+                        attack_type,
+                        artifact_reason
+                    );
+                }
                 (_, Some(segment_reason)) => {
                     // Should reject invalid segment IDs
-                    assert!(segment_reason.contains("control") ||
-                           segment_reason.contains("whitespace") ||
-                           segment_reason.contains("empty"),
-                           "Should detect segment ID issue ({}): {}", attack_type, segment_reason);
-                },
+                    assert!(
+                        segment_reason.contains("control")
+                            || segment_reason.contains("whitespace")
+                            || segment_reason.contains("empty"),
+                        "Should detect segment ID issue ({}): {}",
+                        attack_type,
+                        segment_reason
+                    );
+                }
                 (None, None) => {
                     // If validation passes, test proof binding
-                    gate.register_target(&aid, &sid, StorageTier::L3Archive, TargetTierState {
-                        content_hash: test_hash.clone(),
-                        reachable: true,
-                        fetch_latency_ms: 100,
-                    });
-
-                    match gate.check_retrievability(&aid, &sid, StorageTier::L2Warm, StorageTier::L3Archive, &test_hash) {
-                        Ok(proof) => {
-                            assert_eq!(proof.artifact_id.0, aid.0, "Proof artifact binding mismatch ({})", attack_type);
-                            assert_eq!(proof.segment_id.0, sid.0, "Proof segment binding mismatch ({})", attack_type);
+                    gate.register_target(
+                        &aid,
+                        &sid,
+                        StorageTier::L3Archive,
+                        TargetTierState {
+                            content_hash: test_hash.clone(),
+                            reachable: true,
+                            fetch_latency_ms: 100,
                         },
+                    );
+
+                    match gate.check_retrievability(
+                        &aid,
+                        &sid,
+                        StorageTier::L2Warm,
+                        StorageTier::L3Archive,
+                        &test_hash,
+                    ) {
+                        Ok(proof) => {
+                            assert_eq!(
+                                proof.artifact_id.0, aid.0,
+                                "Proof artifact binding mismatch ({})",
+                                attack_type
+                            );
+                            assert_eq!(
+                                proof.segment_id.0, sid.0,
+                                "Proof segment binding mismatch ({})",
+                                attack_type
+                            );
+                        }
                         Err(e) => {
-                            assert!(e.code == ERR_INVALID_ARTIFACT_ID || e.code == ERR_INVALID_SEGMENT_ID,
-                                   "Unexpected error for injection attack ({}): {}", attack_type, e);
+                            assert!(
+                                e.code == ERR_INVALID_ARTIFACT_ID
+                                    || e.code == ERR_INVALID_SEGMENT_ID,
+                                "Unexpected error for injection attack ({}): {}",
+                                attack_type,
+                                e
+                            );
                         }
                     }
                 }

@@ -274,7 +274,10 @@ mod additional_federation_edge_tests {
         let mut engine = ParticipationWeightEngine::default();
         let identity = participant(
             "infinite-stake",
-            vec![attestation("infinite-stake", AttestationLevel::VerifierBacked)],
+            vec![attestation(
+                "infinite-stake",
+                AttestationLevel::VerifierBacked,
+            )],
             Some(StakeEvidence {
                 amount: f64::INFINITY,
                 deposited_at: "2025-06-01T00:00:00Z".to_string(),
@@ -296,7 +299,10 @@ mod additional_federation_edge_tests {
         let mut engine = ParticipationWeightEngine::default();
         let identity = participant(
             "negative-stake",
-            vec![attestation("negative-stake", AttestationLevel::VerifierBacked)],
+            vec![attestation(
+                "negative-stake",
+                AttestationLevel::VerifierBacked,
+            )],
             Some(StakeEvidence {
                 amount: -100.0,
                 deposited_at: "2025-06-01T00:00:00Z".to_string(),
@@ -320,7 +326,10 @@ mod additional_federation_edge_tests {
         reputation.score = f64::NAN;
         let identity = participant(
             "nan-reputation",
-            vec![attestation("nan-reputation", AttestationLevel::VerifierBacked)],
+            vec![attestation(
+                "nan-reputation",
+                AttestationLevel::VerifierBacked,
+            )],
             None,
             Some(reputation),
             None,
@@ -347,7 +356,12 @@ mod additional_federation_edge_tests {
         assert_eq!(record.sybil_clusters_detected, 1);
         assert_eq!(record.participants_rejected, participants.len());
         assert!(record.weights.iter().all(|weight| weight.rejected));
-        assert!(record.weights.iter().all(|weight| weight.final_weight <= f64::EPSILON));
+        assert!(
+            record
+                .weights
+                .iter()
+                .all(|weight| weight.final_weight <= f64::EPSILON)
+        );
     }
 
     #[test]
@@ -431,9 +445,18 @@ mod additional_federation_edge_tests {
         assert_eq!(matrix.freeriders_blocked, participants.len());
         assert_eq!(matrix.exceptions_active, 0);
         assert_eq!(
-            matrix.tier_distribution.get("Blocked").copied().unwrap_or_default(),
+            matrix
+                .tier_distribution
+                .get("Blocked")
+                .copied()
+                .unwrap_or_default(),
             participants.len()
         );
-        assert!(matrix.entries.iter().all(|entry| matches!(entry.tier, AccessTier::Blocked)));
+        assert!(
+            matrix
+                .entries
+                .iter()
+                .all(|entry| matches!(entry.tier, AccessTier::Blocked))
+        );
     }
 }

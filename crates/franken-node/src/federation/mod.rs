@@ -564,7 +564,13 @@ mod federation_root_negative_tests {
         // Should preserve exact Unicode in audit trail for forensics
         let audit_entries = weighting.audit_log();
         assert!(!audit_entries.is_empty());
-        assert!(audit_entries[0].notes.as_ref().unwrap_or(&"".to_string()).contains('\u{202E}'));
+        assert!(
+            audit_entries[0]
+                .notes
+                .as_ref()
+                .unwrap_or(&"".to_string())
+                .contains('\u{202E}')
+        );
     }
 
     /// Extreme adversarial test: Massive contribution metrics to trigger arithmetic overflow
@@ -590,7 +596,10 @@ mod federation_root_negative_tests {
         assert!(decision.quality_adjusted_ratio.is_finite());
         assert!(decision.contribution_ratio <= 1.0 + f64::EPSILON);
         // Quality clamping should prevent infinite amplification
-        assert!(decision.quality_adjusted_ratio <= 1.0 + f64::EPSILON || decision.quality_adjusted_ratio == 0.0);
+        assert!(
+            decision.quality_adjusted_ratio <= 1.0 + f64::EPSILON
+                || decision.quality_adjusted_ratio == 0.0
+        );
         assert_ne!(decision.tier, AccessTier::Full); // Should not grant max privileges
     }
 
@@ -662,10 +671,8 @@ mod federation_root_negative_tests {
             assert!(record.total_weight.is_finite());
 
             // Test reciprocity with same malformed time
-            let decision = reciprocity.evaluate_access(
-                &metrics(&id, 100, 10, 1.0, 86400 * 90),
-                malicious_time,
-            );
+            let decision = reciprocity
+                .evaluate_access(&metrics(&id, 100, 10, 1.0, 86400 * 90), malicious_time);
             assert!(decision.contribution_ratio.is_finite());
         }
     }
@@ -678,9 +685,11 @@ mod federation_root_negative_tests {
 
         // Construct deeply nested JSON-like exception reason (simulated attack)
         let mut nested_reason = String::from("exception");
-        for _ in 0..1000 { // Simulate deep nesting attempt
+        for _ in 0..1000 {
+            // Simulate deep nesting attempt
             nested_reason = format!("{{\"inner\": \"{}\"}}", nested_reason.replace('"', "\\\""));
-            if nested_reason.len() > 100_000 { // Prevent actual memory exhaustion in test
+            if nested_reason.len() > 100_000 {
+                // Prevent actual memory exhaustion in test
                 break;
             }
         }
@@ -727,7 +736,12 @@ mod federation_root_negative_tests {
         for i in 0..100 {
             let mut participant = participant_with_attestation(&format!("complexity-attack-{}", i));
             // Create overlapping cluster patterns that require maximum comparisons
-            participant.cluster_hint = Some(format!("cluster-{}-{}-{}", i % 10, (i + 1) % 10, (i + 2) % 10));
+            participant.cluster_hint = Some(format!(
+                "cluster-{}-{}-{}",
+                i % 10,
+                (i + 1) % 10,
+                (i + 2) % 10
+            ));
             participants.push(participant);
         }
 
@@ -760,23 +774,27 @@ mod federation_root_negative_tests {
         let base_metrics = metrics("race-participant", 100, 10, 1.0, 86400 * 90);
 
         // Simulate concurrent access patterns that could corrupt internal state
-        let handles: Vec<_> = (0..10).map(|thread_id| {
-            let reciprocity_clone = Arc::clone(&reciprocity);
-            let mut thread_metrics = base_metrics.clone();
-            thread_metrics.participant_id = format!("race-participant-{}", thread_id);
+        let handles: Vec<_> = (0..10)
+            .map(|thread_id| {
+                let reciprocity_clone = Arc::clone(&reciprocity);
+                let mut thread_metrics = base_metrics.clone();
+                thread_metrics.participant_id = format!("race-participant-{}", thread_id);
 
-            thread::spawn(move || {
-                let batch = vec![thread_metrics; 5]; // Small batches for rapid iteration
-                for i in 0..20 { // 20 rapid evaluations per thread
-                    let session_id = format!("race-session-{}-{}", thread_id, i);
-                    if let Ok(mut engine) = reciprocity_clone.try_lock() {
-                        let _matrix = engine.evaluate_batch(&batch, &session_id, "2026-04-17T00:00:00Z");
-                        // Intentionally brief lock to maximize contention
+                thread::spawn(move || {
+                    let batch = vec![thread_metrics; 5]; // Small batches for rapid iteration
+                    for i in 0..20 {
+                        // 20 rapid evaluations per thread
+                        let session_id = format!("race-session-{}-{}", thread_id, i);
+                        if let Ok(mut engine) = reciprocity_clone.try_lock() {
+                            let _matrix =
+                                engine.evaluate_batch(&batch, &session_id, "2026-04-17T00:00:00Z");
+                            // Intentionally brief lock to maximize contention
+                        }
+                        thread::yield_now(); // Encourage race conditions
                     }
-                    thread::yield_now(); // Encourage race conditions
-                }
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all threads to complete
         for handle in handles {

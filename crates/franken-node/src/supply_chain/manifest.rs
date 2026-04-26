@@ -1069,11 +1069,15 @@ mod tests {
     #[test]
     fn second_attestation_blank_digest_reports_second_index() {
         let mut manifest = valid_manifest();
-        push_bounded(&mut manifest.provenance.attestation_chain, AttestationRef {
-            id: "att-02".to_string(),
-            attestation_type: "slsa".to_string(),
-            digest: " \t".to_string(),
-        }, MAX_CHAIN_ENTRIES);
+        push_bounded(
+            &mut manifest.provenance.attestation_chain,
+            AttestationRef {
+                id: "att-02".to_string(),
+                attestation_type: "slsa".to_string(),
+                digest: " \t".to_string(),
+            },
+            MAX_CHAIN_ENTRIES,
+        );
 
         let error = validate_signed_manifest(&manifest).expect_err("should fail");
 
@@ -1175,12 +1179,12 @@ mod tests {
         let mut manifest = valid_manifest();
 
         let malicious_key_ids = vec![
-            "../../../etc/passwd",                    // Path traversal
-            "key\nnewline",                          // Newline injection
-            "key\ttab",                              // Tab injection
-            "key\x00null",                           // Null byte injection
-            "key\"quote'single",                     // Quote injection
-            "key\u{202e}reverse\u{202c}trap",       // BiDi override
+            "../../../etc/passwd",            // Path traversal
+            "key\nnewline",                   // Newline injection
+            "key\ttab",                       // Tab injection
+            "key\x00null",                    // Null byte injection
+            "key\"quote'single",              // Quote injection
+            "key\u{202e}reverse\u{202c}trap", // BiDi override
         ];
 
         for malicious_id in malicious_key_ids {
@@ -1201,11 +1205,15 @@ mod tests {
         // Create massive attestation chain (1000 entries)
         let mut massive_chain = Vec::new();
         for i in 0..1000 {
-            push_bounded(&mut massive_chain, AttestationRef {
-                id: format!("attestation-{:04}", i),
-                attestation_type: "slsa".to_string(),
-                digest: format!("sha256:{:064x}", i),
-            }, MAX_CHAIN_ENTRIES);
+            push_bounded(
+                &mut massive_chain,
+                AttestationRef {
+                    id: format!("attestation-{:04}", i),
+                    attestation_type: "slsa".to_string(),
+                    digest: format!("sha256:{:064x}", i),
+                },
+                MAX_CHAIN_ENTRIES,
+            );
         }
         manifest.provenance.attestation_chain = massive_chain;
 
@@ -1251,9 +1259,7 @@ mod tests {
         let mut manifest = valid_manifest();
 
         // Create massive network zones list (10000 entries)
-        let massive_zones: Vec<String> = (0..10000)
-            .map(|i| format!("zone-{:04}", i))
-            .collect();
+        let massive_zones: Vec<String> = (0..10000).map(|i| format!("zone-{:04}", i)).collect();
         manifest.behavioral_profile.declared_network_zones = massive_zones;
 
         let result = validate_signed_manifest(&manifest);
@@ -1269,12 +1275,12 @@ mod tests {
         let mut manifest = valid_manifest();
 
         let unicode_markers = vec![
-            "\u{FEFF}BOM-marker",                    // Byte Order Mark
-            "marker\u{200B}\u{200C}\u{200D}zwj",    // Zero-width joiners
-            "marker\u{1F4A9}\u{1F525}emoji",        // Emoji sequence
-            "\u{202E}reverse\u{202C}marker",        // BiDi override
-            "marker\u{0000}null",                   // Null byte
-            "marker\nnewline",                      // Newline
+            "\u{FEFF}BOM-marker",                // Byte Order Mark
+            "marker\u{200B}\u{200C}\u{200D}zwj", // Zero-width joiners
+            "marker\u{1F4A9}\u{1F525}emoji",     // Emoji sequence
+            "\u{202E}reverse\u{202C}marker",     // BiDi override
+            "marker\u{0000}null",                // Null byte
+            "marker\nnewline",                   // Newline
         ];
 
         for marker in unicode_markers {
@@ -1294,9 +1300,9 @@ mod tests {
 
         // Test extremely long entrypoint paths
         let long_paths = vec![
-            "a".repeat(10000),                              // 10KB path
-            format!("{}/main.js", "dir/".repeat(1000)),     // Deep nesting
-            format!("main{}.js", "x".repeat(5000)),         // Long filename
+            "a".repeat(10000),                          // 10KB path
+            format!("{}/main.js", "dir/".repeat(1000)), // Deep nesting
+            format!("main{}.js", "x".repeat(5000)),     // Long filename
         ];
 
         for path in long_paths {
@@ -1317,12 +1323,12 @@ mod tests {
     fn negative_signature_scheme_deserialization_edge_cases() {
         // Test malformed signature scheme JSON
         let malformed_schemes = vec![
-            r#""""#,                    // Empty string
-            r#""ED25519""#,             // Wrong case
-            r#""ed25519_variant""#,     // Non-existent variant
-            r#"null"#,                  // Null value
-            r#"123"#,                   // Number instead of string
-            r#"[]"#,                    // Array instead of string
+            r#""""#,                // Empty string
+            r#""ED25519""#,         // Wrong case
+            r#""ed25519_variant""#, // Non-existent variant
+            r#"null"#,              // Null value
+            r#"123"#,               // Number instead of string
+            r#"[]"#,                // Array instead of string
         ];
 
         for scheme_json in malformed_schemes {
@@ -1338,7 +1344,8 @@ mod tests {
         // Add edge case values that might break serialization
         manifest.package.name = "test\u{FFFF}package".to_string();
         manifest.signature.signed_at = "2024-01-01T00:00:00.000000000Z".to_string(); // Max precision
-        manifest.behavioral_profile.summary = "Summary with\n\t\rwhitespace\u{0000}chars".to_string();
+        manifest.behavioral_profile.summary =
+            "Summary with\n\t\rwhitespace\u{0000}chars".to_string();
 
         // Test serialization round-trip
         let serialized = serde_json::to_string(&manifest);
@@ -1359,21 +1366,23 @@ mod tests {
 
         let barrier = Arc::new(Barrier::new(4));
 
-        let handles: Vec<_> = (0..4).map(|i| {
-            let barrier = Arc::clone(&barrier);
-            thread::spawn(move || {
-                barrier.wait();
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
 
-                let mut manifest = valid_manifest();
-                manifest.package.name = format!("concurrent-package-{}", i);
+                    let mut manifest = valid_manifest();
+                    manifest.package.name = format!("concurrent-package-{}", i);
 
-                // Each thread validates different manifests
-                for j in 0..100 {
-                    manifest.package.version = format!("1.{}.{}", i, j);
-                    let _ = validate_signed_manifest(&manifest);
-                }
+                    // Each thread validates different manifests
+                    for j in 0..100 {
+                        manifest.package.version = format!("1.{}.{}", i, j);
+                        let _ = validate_signed_manifest(&manifest);
+                    }
+                })
             })
-        }).collect();
+            .collect();
 
         for handle in handles {
             handle.join().expect("Thread should complete");

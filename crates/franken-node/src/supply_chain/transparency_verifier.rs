@@ -72,7 +72,8 @@ impl TransparencyPolicy {
     pub fn is_checkpoint_pinned(&self, tree_size: u64, root_hash: &str) -> bool {
         self.pinned_roots.iter().fold(false, |acc, r| {
             let size_match = r.tree_size == tree_size;
-            let hash_match = constant_time::ct_eq_bytes(r.root_hash.as_bytes(), root_hash.as_bytes());
+            let hash_match =
+                constant_time::ct_eq_bytes(r.root_hash.as_bytes(), root_hash.as_bytes());
             acc | (size_match & hash_match)
         })
     }
@@ -443,7 +444,10 @@ pub fn build_test_tree(leaves: &[&str]) -> (String, Vec<InclusionProof>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{LogRoot, TransparencyPolicy, InclusionProof, ProofReceipt, ProofFailure, TransparencyError, verify_inclusion_proof};
+    use super::{
+        InclusionProof, LogRoot, ProofFailure, ProofReceipt, TransparencyError, TransparencyPolicy,
+        verify_inclusion_proof,
+    };
 
     fn test_policy(root: &str, tree_size: u64) -> TransparencyPolicy {
         TransparencyPolicy {

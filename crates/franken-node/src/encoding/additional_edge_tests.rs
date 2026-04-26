@@ -284,7 +284,11 @@ mod additional_encoding_edge_tests {
 
         let mut seeds = Vec::new();
         for handle in handles {
-            deterministic_seed::push_bounded(&mut seeds, handle.join().expect("Thread should complete successfully"), 10);
+            deterministic_seed::push_bounded(
+                &mut seeds,
+                handle.join().expect("Thread should complete successfully"),
+                10,
+            );
         }
 
         // All seeds should be different (due to different thread IDs in config)

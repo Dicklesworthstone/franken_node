@@ -1553,18 +1553,16 @@ mod tests {
         let mut eco = MigrationKitEcosystem::default();
 
         // Unicode injection attacks in step IDs and descriptions
-        let malicious_steps = vec![
-            MigrationStep {
-                step_id: "step\u{202e}evil\u{200b}\u{0000}inject".to_string(),
-                phase: MigrationPhase::Assessment,
-                title: "Assessment\u{feff}\u{1f4a9}\u{2028}bypass".to_string(),
-                description: "Analyze\u{0085}\u{2029}\u{00ad}payload\u{061c}system".to_string(),
-                dependencies: vec!["dep\u{034f}\u{180e}\u{200c}id".to_string()],
-                rollback_procedure: "Restore\u{200d}\u{200f}state".to_string(),
-                status: StepStatus::Pending,
-                estimated_duration_min: 30,
-            }
-        ];
+        let malicious_steps = vec![MigrationStep {
+            step_id: "step\u{202e}evil\u{200b}\u{0000}inject".to_string(),
+            phase: MigrationPhase::Assessment,
+            title: "Assessment\u{feff}\u{1f4a9}\u{2028}bypass".to_string(),
+            description: "Analyze\u{0085}\u{2029}\u{00ad}payload\u{061c}system".to_string(),
+            dependencies: vec!["dep\u{034f}\u{180e}\u{200c}id".to_string()],
+            rollback_procedure: "Restore\u{200d}\u{200f}state".to_string(),
+            status: StepStatus::Pending,
+            estimated_duration_min: 30,
+        }];
 
         let mut compat = sample_compat(Archetype::Express);
         compat.supported_versions = vec!["ver\u{202a}sion\u{202b}18.x".to_string()];
@@ -1578,8 +1576,12 @@ mod tests {
             .expect("unicode in migration identifiers should be handled safely");
 
         // Operations should work with Unicode content
-        eco.start_step(&kit_id, "step\u{202e}evil\u{200b}\u{0000}inject", malicious_trace)
-            .expect("unicode step operations should work");
+        eco.start_step(
+            &kit_id,
+            "step\u{202e}evil\u{200b}\u{0000}inject",
+            malicious_trace,
+        )
+        .expect("unicode step operations should work");
 
         // Audit log should contain Unicode safely
         assert!(!eco.audit_log().is_empty());
@@ -1622,7 +1624,12 @@ mod tests {
         ];
 
         let kit_id = eco
-            .load_kit(Archetype::Express, sample_compat(Archetype::Express), extreme_steps, "trace-extreme")
+            .load_kit(
+                Archetype::Express,
+                sample_compat(Archetype::Express),
+                extreme_steps,
+                "trace-extreme",
+            )
             .expect("extreme durations should be handled safely");
 
         // Progress calculation should handle extreme values
@@ -1630,19 +1637,32 @@ mod tests {
             .generate_report(&kit_id, "trace-report")
             .expect("report generation should handle extreme durations");
 
-        assert!(report.progress_pct.is_finite(), "progress should be finite even with extreme durations");
-        assert!(report.progress_pct >= 0.0 && report.progress_pct <= 100.0, "progress should be in valid range");
+        assert!(
+            report.progress_pct.is_finite(),
+            "progress should be finite even with extreme durations"
+        );
+        assert!(
+            report.progress_pct >= 0.0 && report.progress_pct <= 100.0,
+            "progress should be in valid range"
+        );
 
         // JSON serialization should handle extreme durations
-        let jsonl = eco.export_audit_log_jsonl().expect("JSONL export should work with extreme values");
+        let jsonl = eco
+            .export_audit_log_jsonl()
+            .expect("JSONL export should work with extreme values");
         assert!(jsonl.len() > 0);
 
         // Verify no overflow in arithmetic operations
         let kit = eco.kits().get(&kit_id).unwrap();
-        let total_duration: u64 = kit.steps.iter()
+        let total_duration: u64 = kit
+            .steps
+            .iter()
             .map(|s| s.estimated_duration_min as u64)
             .fold(0u64, |acc, duration| acc.saturating_add(duration));
-        assert!(total_duration < u64::MAX, "duration sum should not overflow");
+        assert!(
+            total_duration < u64::MAX,
+            "duration sum should not overflow"
+        );
     }
 
     #[test]
@@ -1656,7 +1676,11 @@ mod tests {
                 phase: MigrationPhase::TestValidation,
                 title: format!("Mass Migration Step {}", i),
                 description: format!("Generated step {} for memory pressure testing", i),
-                dependencies: if i > 0 { vec![format!("mass-step-{}", i - 1)] } else { vec![] },
+                dependencies: if i > 0 {
+                    vec![format!("mass-step-{}", i - 1)]
+                } else {
+                    vec![]
+                },
                 rollback_procedure: format!("Rollback step {}", i),
                 status: StepStatus::Pending,
                 estimated_duration_min: (i % 1000) as u32,
@@ -1665,7 +1689,12 @@ mod tests {
 
         // Should handle massive step collections
         let kit_id = eco
-            .load_kit(Archetype::BunNative, sample_compat(Archetype::BunNative), massive_steps, "trace-mass")
+            .load_kit(
+                Archetype::BunNative,
+                sample_compat(Archetype::BunNative),
+                massive_steps,
+                "trace-mass",
+            )
             .expect("massive step collections should be handled");
 
         // Generate many reports to test MAX_REPORTS boundary
@@ -1675,16 +1704,26 @@ mod tests {
         }
 
         // Reports should be bounded to MAX_REPORTS
-        assert!(eco.reports().len() <= MAX_REPORTS, "reports should be bounded to MAX_REPORTS");
+        assert!(
+            eco.reports().len() <= MAX_REPORTS,
+            "reports should be bounded to MAX_REPORTS"
+        );
 
         // Generate many audit entries to test MAX_AUDIT_LOG_ENTRIES boundary
         for i in 0..MAX_AUDIT_LOG_ENTRIES + 200 {
-            eco.start_step(&kit_id, &format!("mass-step-{}", i % 100), &format!("trace-audit-{}", i))
-                .ok(); // Some may fail, that's expected
+            eco.start_step(
+                &kit_id,
+                &format!("mass-step-{}", i % 100),
+                &format!("trace-audit-{}", i),
+            )
+            .ok(); // Some may fail, that's expected
         }
 
         // Audit log should be bounded
-        assert!(eco.audit_log().len() <= MAX_AUDIT_LOG_ENTRIES, "audit log should be bounded to MAX_AUDIT_LOG_ENTRIES");
+        assert!(
+            eco.audit_log().len() <= MAX_AUDIT_LOG_ENTRIES,
+            "audit log should be bounded to MAX_AUDIT_LOG_ENTRIES"
+        );
 
         // Memory structures should remain functional
         assert!(eco.kits().len() > 0);
@@ -1700,7 +1739,12 @@ mod tests {
         empty_compat.supported_versions = vec![];
 
         let kit_id1 = eco
-            .load_kit(Archetype::Koa, empty_compat, sample_steps(), "trace-empty-versions")
+            .load_kit(
+                Archetype::Koa,
+                empty_compat,
+                sample_steps(),
+                "trace-empty-versions",
+            )
             .expect("empty supported versions should be allowed");
 
         // Very long version strings (potential DoS)
@@ -1709,7 +1753,12 @@ mod tests {
         long_compat.known_incompatibilities = vec!["y".repeat(50_000)];
 
         let kit_id2 = eco
-            .load_kit(Archetype::NextJs, long_compat, sample_steps(), "trace-long-strings")
+            .load_kit(
+                Archetype::NextJs,
+                long_compat,
+                sample_steps(),
+                "trace-long-strings",
+            )
             .expect("very long compatibility strings should be handled");
 
         // Null bytes in version strings
@@ -1718,7 +1767,12 @@ mod tests {
         null_compat.known_incompatibilities = vec!["feature\0bypass".to_string()];
 
         let kit_id3 = eco
-            .load_kit(Archetype::Fastify, null_compat, sample_steps(), "trace-null-bytes")
+            .load_kit(
+                Archetype::Fastify,
+                null_compat,
+                sample_steps(),
+                "trace-null-bytes",
+            )
             .expect("null bytes in compatibility should be handled");
 
         // All kits should be loaded and functional
@@ -1740,21 +1794,34 @@ mod tests {
     fn concurrent_step_state_manipulation_edge_cases() {
         let mut eco = MigrationKitEcosystem::default();
         let kit_id = eco
-            .load_kit(Archetype::Express, sample_compat(Archetype::Express), sample_steps(), "trace-concurrent")
+            .load_kit(
+                Archetype::Express,
+                sample_compat(Archetype::Express),
+                sample_steps(),
+                "trace-concurrent",
+            )
             .expect("kit should load");
 
         // Test rapid state transitions that could cause inconsistency
-        eco.start_step(&kit_id, "s1", "trace-start-1").expect("start should work");
+        eco.start_step(&kit_id, "s1", "trace-start-1")
+            .expect("start should work");
 
         // Multiple completion attempts
-        eco.complete_step(&kit_id, "s1", "trace-complete-1").expect("first complete should work");
-        let err = eco.complete_step(&kit_id, "s1", "trace-complete-2").expect_err("second complete should fail");
+        eco.complete_step(&kit_id, "s1", "trace-complete-1")
+            .expect("first complete should work");
+        let err = eco
+            .complete_step(&kit_id, "s1", "trace-complete-2")
+            .expect_err("second complete should fail");
         assert!(err.contains("expected InProgress"));
 
         // Start new step and try multiple rollbacks
-        eco.start_step(&kit_id, "s2", "trace-start-2").expect("start s2 should work");
-        eco.rollback_step(&kit_id, "s2", "trace-rollback-1").expect("rollback should work");
-        let err = eco.rollback_step(&kit_id, "s2", "trace-rollback-2").expect_err("second rollback should fail");
+        eco.start_step(&kit_id, "s2", "trace-start-2")
+            .expect("start s2 should work");
+        eco.rollback_step(&kit_id, "s2", "trace-rollback-1")
+            .expect("rollback should work");
+        let err = eco
+            .rollback_step(&kit_id, "s2", "trace-rollback-2")
+            .expect_err("second rollback should fail");
         assert!(err.contains("expected InProgress or Failed"));
 
         // Verify final state consistency
@@ -1764,7 +1831,9 @@ mod tests {
         assert_eq!(kit.steps[2].status, StepStatus::Pending);
 
         // Audit log should reflect all attempted operations
-        let step_events: Vec<&str> = eco.audit_log().iter()
+        let step_events: Vec<&str> = eco
+            .audit_log()
+            .iter()
             .map(|r| r.event_code.as_str())
             .filter(|code| code.starts_with("MKE-0"))
             .collect();
@@ -1776,52 +1845,74 @@ mod tests {
         let mut eco = MigrationKitEcosystem::default();
 
         // Test potential hash collision scenarios
-        let steps1 = vec![
-            MigrationStep {
-                step_id: "step_id_1".to_string(),
-                phase: MigrationPhase::Assessment,
-                title: "title_a".to_string(),
-                description: "desc_x".to_string(),
-                dependencies: vec!["dep1".to_string()],
-                rollback_procedure: "rollback1".to_string(),
-                status: StepStatus::Pending,
-                estimated_duration_min: 100,
-            }
-        ];
+        let steps1 = vec![MigrationStep {
+            step_id: "step_id_1".to_string(),
+            phase: MigrationPhase::Assessment,
+            title: "title_a".to_string(),
+            description: "desc_x".to_string(),
+            dependencies: vec!["dep1".to_string()],
+            rollback_procedure: "rollback1".to_string(),
+            status: StepStatus::Pending,
+            estimated_duration_min: 100,
+        }];
 
         // Different arrangement that could collide without proper domain separation
-        let steps2 = vec![
-            MigrationStep {
-                step_id: "step_id".to_string(),
-                phase: MigrationPhase::Assessment,
-                title: "_1title_a".to_string(),
-                description: "desc_x".to_string(),
-                dependencies: vec!["dep1".to_string()],
-                rollback_procedure: "rollback1".to_string(),
-                status: StepStatus::Pending,
-                estimated_duration_min: 100,
-            }
-        ];
+        let steps2 = vec![MigrationStep {
+            step_id: "step_id".to_string(),
+            phase: MigrationPhase::Assessment,
+            title: "_1title_a".to_string(),
+            description: "desc_x".to_string(),
+            dependencies: vec!["dep1".to_string()],
+            rollback_procedure: "rollback1".to_string(),
+            status: StepStatus::Pending,
+            estimated_duration_min: 100,
+        }];
 
-        let kit_id1 = eco.load_kit(Archetype::Express, sample_compat(Archetype::Express), steps1, "trace1").unwrap();
-        let kit_id2 = eco.load_kit(Archetype::Express, sample_compat(Archetype::Express), steps2, "trace2").unwrap();
+        let kit_id1 = eco
+            .load_kit(
+                Archetype::Express,
+                sample_compat(Archetype::Express),
+                steps1,
+                "trace1",
+            )
+            .unwrap();
+        let kit_id2 = eco
+            .load_kit(
+                Archetype::Express,
+                sample_compat(Archetype::Express),
+                steps2,
+                "trace2",
+            )
+            .unwrap();
 
         let hash1 = &eco.kits().get(&kit_id1).unwrap().content_hash;
         let hash2 = &eco.kits().get(&kit_id2).unwrap().content_hash;
 
         // Should produce different hashes due to proper serialization
-        assert_ne!(hash1, hash2, "different step arrangements should produce different hashes");
+        assert_ne!(
+            hash1, hash2,
+            "different step arrangements should produce different hashes"
+        );
 
         // Test report hash collision resistance
         let report1 = eco.generate_report(&kit_id1, "report-trace1").unwrap();
         let report2 = eco.generate_report(&kit_id2, "report-trace2").unwrap();
 
         // Reports should have different hashes even with similar step counts
-        assert_ne!(report1.content_hash, report2.content_hash, "reports should have collision-resistant hashes");
+        assert_ne!(
+            report1.content_hash, report2.content_hash,
+            "reports should have collision-resistant hashes"
+        );
 
         // Verify domain separation in hash inputs
-        assert!(hash1.len() == 64 && hash2.len() == 64, "hashes should be proper SHA256 hex");
-        assert!(report1.content_hash.len() == 64 && report2.content_hash.len() == 64, "report hashes should be proper SHA256 hex");
+        assert!(
+            hash1.len() == 64 && hash2.len() == 64,
+            "hashes should be proper SHA256 hex"
+        );
+        assert!(
+            report1.content_hash.len() == 64 && report2.content_hash.len() == 64,
+            "report hashes should be proper SHA256 hex"
+        );
     }
 
     #[test]
@@ -1830,10 +1921,17 @@ mod tests {
 
         // Test empty steps collection
         let empty_kit_id = eco
-            .load_kit(Archetype::Express, sample_compat(Archetype::Express), vec![], "trace-empty")
+            .load_kit(
+                Archetype::Express,
+                sample_compat(Archetype::Express),
+                vec![],
+                "trace-empty",
+            )
             .expect("empty steps should be allowed");
 
-        let empty_report = eco.generate_report(&empty_kit_id, "trace-empty-report").unwrap();
+        let empty_report = eco
+            .generate_report(&empty_kit_id, "trace-empty-report")
+            .unwrap();
         assert_eq!(empty_report.total_steps, 0);
         assert_eq!(empty_report.completed_steps, 0);
         assert_eq!(empty_report.failed_steps, 0);
@@ -1841,29 +1939,34 @@ mod tests {
         assert_eq!(empty_report.overall_status, MigrationStatus::NotStarted);
 
         // Test single step boundary
-        let single_step = vec![
-            MigrationStep {
-                step_id: "only-step".to_string(),
-                phase: MigrationPhase::Deployment,
-                title: "Only Step".to_string(),
-                description: "Single step test".to_string(),
-                dependencies: vec![],
-                rollback_procedure: "Rollback only".to_string(),
-                status: StepStatus::Pending,
-                estimated_duration_min: 1,
-            }
-        ];
+        let single_step = vec![MigrationStep {
+            step_id: "only-step".to_string(),
+            phase: MigrationPhase::Deployment,
+            title: "Only Step".to_string(),
+            description: "Single step test".to_string(),
+            dependencies: vec![],
+            rollback_procedure: "Rollback only".to_string(),
+            status: StepStatus::Pending,
+            estimated_duration_min: 1,
+        }];
 
         let single_kit_id = eco
-            .load_kit(Archetype::Fastify, sample_compat(Archetype::Fastify), single_step, "trace-single")
+            .load_kit(
+                Archetype::Fastify,
+                sample_compat(Archetype::Fastify),
+                single_step,
+                "trace-single",
+            )
             .expect("single step should work");
 
         // Test 0% -> 100% transition
         let report_0 = eco.generate_report(&single_kit_id, "trace-0").unwrap();
         assert_eq!(report_0.progress_pct, 0.0);
 
-        eco.start_step(&single_kit_id, "only-step", "trace-start-single").unwrap();
-        eco.complete_step(&single_kit_id, "only-step", "trace-complete-single").unwrap();
+        eco.start_step(&single_kit_id, "only-step", "trace-start-single")
+            .unwrap();
+        eco.complete_step(&single_kit_id, "only-step", "trace-complete-single")
+            .unwrap();
 
         let report_100 = eco.generate_report(&single_kit_id, "trace-100").unwrap();
         assert_eq!(report_100.progress_pct, 100.0);
@@ -1883,7 +1986,14 @@ mod tests {
         let mut bad_compat = sample_compat(Archetype::Express);
         bad_compat.api_coverage_pct = 50.0;
 
-        let err1 = eco.load_kit(Archetype::Express, bad_compat, sample_steps(), "trace-bad-compat").unwrap_err();
+        let err1 = eco
+            .load_kit(
+                Archetype::Express,
+                bad_compat,
+                sample_steps(),
+                "trace-bad-compat",
+            )
+            .unwrap_err();
         assert!(err1.contains("below minimum"));
 
         // Should log error without creating kit
@@ -1892,13 +2002,19 @@ mod tests {
         assert_eq!(eco.audit_log()[0].event_code, event_codes::MKE_ERR_COMPAT);
 
         // 2. Operations on non-existent kit
-        let err2 = eco.start_step("missing-kit", "step", "trace-missing").unwrap_err();
+        let err2 = eco
+            .start_step("missing-kit", "step", "trace-missing")
+            .unwrap_err();
         assert_eq!(err2, "Kit not found");
 
-        let err3 = eco.generate_plan("missing-kit", "trace-missing-plan").unwrap_err();
+        let err3 = eco
+            .generate_plan("missing-kit", "trace-missing-plan")
+            .unwrap_err();
         assert_eq!(err3, "Kit not found");
 
-        let err4 = eco.generate_report("missing-kit", "trace-missing-report").unwrap_err();
+        let err4 = eco
+            .generate_report("missing-kit", "trace-missing-report")
+            .unwrap_err();
         assert_eq!(err4, "Kit not found");
 
         // Audit log should not grow for failed operations on missing kits
@@ -1906,13 +2022,20 @@ mod tests {
 
         // 3. Load valid kit and test error propagation
         let kit_id = eco
-            .load_kit(Archetype::Koa, sample_compat(Archetype::Koa), sample_steps(), "trace-valid")
+            .load_kit(
+                Archetype::Koa,
+                sample_compat(Archetype::Koa),
+                sample_steps(),
+                "trace-valid",
+            )
             .expect("valid kit should load");
 
         let before_audit = eco.audit_log().len();
 
         // Failed step operation
-        let err5 = eco.start_step(&kit_id, "missing-step", "trace-missing-step").unwrap_err();
+        let err5 = eco
+            .start_step(&kit_id, "missing-step", "trace-missing-step")
+            .unwrap_err();
         assert_eq!(err5, "Step not found");
 
         // Should not add audit entry for failed step operation

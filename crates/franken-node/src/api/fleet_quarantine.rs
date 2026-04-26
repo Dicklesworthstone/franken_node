@@ -29,8 +29,7 @@ use sha2::{Digest, Sha256};
 
 use crate::control_plane::fleet_transport::{
     FileFleetTransport, FleetAction as PersistedFleetAction, FleetActionRecord, FleetTargetKind,
-    FleetTransport as PersistedFleetTransport,
-    FleetTransportError as PersistedFleetTransportError,
+    FleetTransport as PersistedFleetTransport, FleetTransportError as PersistedFleetTransportError,
 };
 
 /// Maximum fleet control events before oldest are evicted.

@@ -514,8 +514,8 @@ impl LedgerCapacity {
 /// Type alias for configuration-style usage.
 pub type LedgerConfig = LedgerCapacity;
 
-fn format_ledger_init_event(capacity: &LedgerCapacity) -> String {
-    format!(
+fn format_ledger_init_event(capacity: &LedgerCapacity) -> impl fmt::Display + '_ {
+    format_args!(
         "{}: evidence ledger initialized: max_entries={}, max_bytes={}",
         event_codes::LEDGER_CAPACITY_WARN,
         capacity.max_entries,
@@ -523,8 +523,8 @@ fn format_ledger_init_event(capacity: &LedgerCapacity) -> String {
     )
 }
 
-fn format_ledger_zero_capacity_event(entry: &EvidenceEntry) -> String {
-    format!(
+fn format_ledger_zero_capacity_event(entry: &EvidenceEntry) -> impl fmt::Display + '_ {
+    format_args!(
         "{}: append rejected because max_entries=0, epoch={}",
         event_codes::LEDGER_CAPACITY_WARN,
         entry.epoch_id,
@@ -535,8 +535,8 @@ fn format_ledger_entry_too_large_event(
     entry_size: usize,
     max_bytes: usize,
     epoch_id: u64,
-) -> String {
-    format!(
+) -> impl fmt::Display {
+    format_args!(
         "{}: entry size {} exceeds max_bytes {}, epoch={}",
         event_codes::LEDGER_CAPACITY_WARN,
         entry_size,
@@ -545,8 +545,12 @@ fn format_ledger_entry_too_large_event(
     )
 }
 
-fn format_ledger_append_event(id: EntryId, entry: &EvidenceEntry, entry_size: usize) -> String {
-    format!(
+fn format_ledger_append_event(
+    id: EntryId,
+    entry: &EvidenceEntry,
+    entry_size: usize,
+) -> impl fmt::Display + '_ {
+    format_args!(
         "{}: entry={}, decision={}, epoch={}, size={}",
         event_codes::LEDGER_APPEND,
         id,
@@ -560,8 +564,8 @@ fn format_ledger_eviction_event(
     evicted_id: EntryId,
     evicted_entry: &EvidenceEntry,
     evicted_size: usize,
-) -> String {
-    format!(
+) -> impl fmt::Display + '_ {
+    format_args!(
         "{}: evicted entry={}, decision={}, epoch={}, freed_bytes={}",
         event_codes::LEDGER_EVICTION,
         evicted_id,
@@ -571,8 +575,8 @@ fn format_ledger_eviction_event(
     )
 }
 
-fn format_ledger_spill_event(id: EntryId, bytes: usize) -> String {
-    format!(
+fn format_ledger_spill_event(id: EntryId, bytes: usize) -> impl fmt::Display {
+    format_args!(
         "{}: spill wrote entry={}, bytes={}",
         event_codes::LEDGER_SPILL,
         id,
@@ -3059,11 +3063,11 @@ mod tests {
             let entry = make_entry("DEC-STRUCT", 7);
 
             assert_eq!(
-                format_ledger_append_event(EntryId(7), &entry, 123),
+                format!("{}", format_ledger_append_event(EntryId(7), &entry, 123)),
                 "EVD-LEDGER-001: entry=E-00000007, decision=DEC-STRUCT, epoch=7, size=123"
             );
             assert_eq!(
-                format_ledger_eviction_event(EntryId(8), &entry, 456),
+                format!("{}", format_ledger_eviction_event(EntryId(8), &entry, 456)),
                 "EVD-LEDGER-002: evicted entry=E-00000008, decision=DEC-STRUCT, epoch=7, freed_bytes=456"
             );
         }
@@ -3074,19 +3078,22 @@ mod tests {
             let entry = make_entry("DEC-CAP", 11);
 
             assert_eq!(
-                format_ledger_init_event(&capacity),
+                format!("{}", format_ledger_init_event(&capacity)),
                 "EVD-LEDGER-004: evidence ledger initialized: max_entries=3, max_bytes=4096"
             );
             assert_eq!(
-                format_ledger_zero_capacity_event(&entry),
+                format!("{}", format_ledger_zero_capacity_event(&entry)),
                 "EVD-LEDGER-004: append rejected because max_entries=0, epoch=11"
             );
             assert_eq!(
-                format_ledger_entry_too_large_event(5000, 4096, entry.epoch_id),
+                format!(
+                    "{}",
+                    format_ledger_entry_too_large_event(5000, 4096, entry.epoch_id)
+                ),
                 "EVD-LEDGER-004: entry size 5000 exceeds max_bytes 4096, epoch=11"
             );
             assert_eq!(
-                format_ledger_spill_event(EntryId(12), 99),
+                format!("{}", format_ledger_spill_event(EntryId(12), 99)),
                 "EVD-LEDGER-003: spill wrote entry=E-00000012, bytes=99"
             );
             assert_eq!(

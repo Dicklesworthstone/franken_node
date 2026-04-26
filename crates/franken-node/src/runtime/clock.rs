@@ -148,12 +148,19 @@ mod tests {
 
         let advanced_time = test_clock.now();
         let expected_advanced = fixed_time + advance_by;
-        assert_eq!(advanced_time, expected_advanced, "TestClock should advance deterministically");
+        assert_eq!(
+            advanced_time, expected_advanced,
+            "TestClock should advance deterministically"
+        );
 
         // Time can be set to specific values for testing edge cases
         let edge_case_time = Utc.with_ymd_and_hms(2038, 1, 19, 3, 14, 8).unwrap(); // Y2038 edge
         test_clock.set_time(edge_case_time);
-        assert_eq!(test_clock.now(), edge_case_time, "TestClock should allow setting specific times");
+        assert_eq!(
+            test_clock.now(),
+            edge_case_time,
+            "TestClock should allow setting specific times"
+        );
 
         // This demonstrates the key benefit: tests using wall_now() via the centralized
         // clock can be made deterministic by injecting a TestClock, preventing flaky

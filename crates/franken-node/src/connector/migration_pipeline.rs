@@ -1374,7 +1374,10 @@ fn run_analysis(state: &PipelineState) -> Result<CompatibilityReport, PipelineEr
 }
 
 /// Generate a migration plan from compatibility results.
-fn generate_plan(state: &PipelineState, report: &CompatibilityReport) -> Result<MigrationPlan, PipelineError> {
+fn generate_plan(
+    state: &PipelineState,
+    report: &CompatibilityReport,
+) -> Result<MigrationPlan, PipelineError> {
     let mut steps = Vec::new();
     for (name, spec) in &state.extension_specs {
         let Some(finding) = report.findings.get(name) else {
@@ -2355,7 +2358,8 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_phase_evidence_artifact_preserves_extension_boundaries() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_plan_phase_evidence_artifact_preserves_extension_boundaries()
+    -> Result<(), Box<dyn std::error::Error>> {
         let cohort_a = CohortDefinition {
             cohort_id: "cohort-comma-a".to_string(),
             extensions: vec![
@@ -2477,7 +2481,8 @@ mod tests {
     }
 
     #[test]
-    fn test_verification_without_analysis_finding_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_verification_without_analysis_finding_fails_closed()
+    -> Result<(), Box<dyn std::error::Error>> {
         let cohort = single_ext_cohort("missing_analysis_finding");
         let mut state = new(&cohort).expect("should succeed");
         state.current_stage = PipelineStage::Verification;
@@ -2541,7 +2546,8 @@ mod tests {
     }
 
     #[test]
-    fn test_blocked_dependency_withholds_dependent_from_canary() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_blocked_dependency_withholds_dependent_from_canary()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut dependent_evidence = healthy_evidence();
         dependent_evidence.dependency_edges = vec!["blocked_core".to_string()];
         let cohort = CohortDefinition {

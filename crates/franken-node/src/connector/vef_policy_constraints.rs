@@ -607,7 +607,11 @@ fn snapshot_hash(normalized: &NormalizedPolicy) -> Result<String, ConstraintComp
     })?;
     let mut hasher = Sha256::new();
     hasher.update(b"vef_snapshot_hash_v1:");
-    hasher.update(u64::try_from(canonical.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(
+        u64::try_from(canonical.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     hasher.update(&canonical);
     let digest = hasher.finalize();
     Ok(format!("sha256:{}", hex::encode(digest)))
@@ -1503,7 +1507,8 @@ mod tests {
         let mut rules = Vec::new();
         for idx in 0..24 {
             x = lcg(x);
-            let action_idx = (x % u64::try_from(ActionClass::all().len()).unwrap_or(u64::MAX)) as usize;
+            let action_idx =
+                (x % u64::try_from(ActionClass::all().len()).unwrap_or(u64::MAX)) as usize;
             let action = ActionClass::all()[action_idx];
             x = lcg(x);
             let effect = match x % 3 {

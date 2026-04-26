@@ -924,8 +924,16 @@ mod tests {
 
         assert_eq!(results.len(), 3);
         assert!(results.iter().all(|result| !result.passed));
-        assert!(results.iter().all(|result| result.details.contains("expected=")));
-        assert!(results.iter().all(|result| result.details.contains("actual=")));
+        assert!(
+            results
+                .iter()
+                .all(|result| result.details.contains("expected="))
+        );
+        assert!(
+            results
+                .iter()
+                .all(|result| result.details.contains("actual="))
+        );
     }
 
     #[test]

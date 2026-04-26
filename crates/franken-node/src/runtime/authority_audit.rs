@@ -1551,10 +1551,7 @@ mod authority_audit_comprehensive_negative_tests {
                 "trace\"\\escape\r\n",
                 "principal<script>alert('xss')</script>",
             ),
-            (
-                "trace' OR '1'='1' --",
-                "principal\u{FFFD}\u{FFFD}",
-            ),
+            ("trace' OR '1'='1' --", "principal\u{FFFD}\u{FFFD}"),
             (
                 "trace\x00\x01\x02\x03\x04",
                 "principal\u{202A}bidi\u{202B}isolate\u{202C}",
@@ -1644,10 +1641,7 @@ mod authority_audit_comprehensive_negative_tests {
             );
 
             // Each check generates multiple events
-            let _ = guard.check_context(
-                &format!("crate::security::stress_{}", i),
-                &massive_ctx,
-            );
+            let _ = guard.check_context(&format!("crate::security::stress_{}", i), &massive_ctx);
         }
 
         // Events should be bounded by MAX_EVENTS
@@ -1723,7 +1717,8 @@ mod authority_audit_comprehensive_negative_tests {
 
         // Test capability injection attempts
         ctx.granted.insert("key_access\x00null".to_string(), true); // Null byte injection
-        ctx.granted.insert("key_access\u{FEFF}bom".to_string(), true); // BOM injection
+        ctx.granted
+            .insert("key_access\u{FEFF}bom".to_string(), true); // BOM injection
         ctx.granted.insert("key_access\u{200B}zw".to_string(), true); // Zero-width injection
 
         // None of these should satisfy the actual capability
@@ -1742,7 +1737,8 @@ mod authority_audit_comprehensive_negative_tests {
         ctx.granted.insert("key_access".to_string(), true);
         ctx.granted.insert("artifact_signing".to_string(), true);
         ctx.granted.insert("network_egress".to_string(), true);
-        ctx.granted.insert("evil_capability_\u{202E}spoofed".to_string(), true);
+        ctx.granted
+            .insert("evil_capability_\u{202E}spoofed".to_string(), true);
 
         assert!(ctx.has_all(&[
             Capability::KeyAccess,
@@ -1856,10 +1852,10 @@ mod authority_audit_comprehensive_negative_tests {
     fn negative_risk_level_and_capability_enum_serialization_tampering() {
         // Test RiskLevel with invalid serialization attempts
         let invalid_risk_levels = [
-            "\"Critical\"", // Wrong case
-            "\"CRITICAL\"", // All caps
+            "\"Critical\"",   // Wrong case
+            "\"CRITICAL\"",   // All caps
             "\"ultra_high\"", // Non-existent level
-            "\"\"", // Empty string
+            "\"\"",           // Empty string
             "null",
             "42",
             "true",
@@ -1869,15 +1865,19 @@ mod authority_audit_comprehensive_negative_tests {
 
         for invalid_json in invalid_risk_levels {
             let result: Result<RiskLevel, _> = serde_json::from_str(invalid_json);
-            assert!(result.is_err(), "Should reject invalid RiskLevel: {}", invalid_json);
+            assert!(
+                result.is_err(),
+                "Should reject invalid RiskLevel: {}",
+                invalid_json
+            );
         }
 
         // Test Capability with invalid serialization attempts
         let invalid_capabilities = [
-            "\"KeyAccess\"", // Wrong case
-            "\"KEY_ACCESS\"", // Wrong format
+            "\"KeyAccess\"",          // Wrong case
+            "\"KEY_ACCESS\"",         // Wrong format
             "\"unknown_capability\"", // Non-existent
-            "\"network-egress\"", // Wrong separator
+            "\"network-egress\"",     // Wrong separator
             "\"\"",
             "null",
             "false",
@@ -1885,11 +1885,20 @@ mod authority_audit_comprehensive_negative_tests {
 
         for invalid_json in invalid_capabilities {
             let result: Result<Capability, _> = serde_json::from_str(invalid_json);
-            assert!(result.is_err(), "Should reject invalid Capability: {}", invalid_json);
+            assert!(
+                result.is_err(),
+                "Should reject invalid Capability: {}",
+                invalid_json
+            );
         }
 
         // Test valid round-trips still work
-        for risk_level in [RiskLevel::Low, RiskLevel::Medium, RiskLevel::High, RiskLevel::Critical] {
+        for risk_level in [
+            RiskLevel::Low,
+            RiskLevel::Medium,
+            RiskLevel::High,
+            RiskLevel::Critical,
+        ] {
             let json = serde_json::to_string(&risk_level).unwrap();
             let parsed: RiskLevel = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, risk_level);
@@ -1987,9 +1996,9 @@ mod authority_audit_comprehensive_negative_tests {
         use std::sync::{Arc, Mutex};
         use std::thread;
 
-        let guard = Arc::new(Mutex::new(
-            AuthorityAuditGuard::with_default_inventory(true)
-        ));
+        let guard = Arc::new(Mutex::new(AuthorityAuditGuard::with_default_inventory(
+            true,
+        )));
         let mut handles = vec![];
 
         // Spawn multiple threads performing concurrent operations
@@ -2017,7 +2026,10 @@ mod authority_audit_comprehensive_negative_tests {
                     // Test inventory manipulation attempts
                     if op_id % 10 == 0 {
                         guard.inventory.add_module(SecurityCriticalModule {
-                            module_path: format!("crate::security::concurrent_{}_{}", thread_id, op_id),
+                            module_path: format!(
+                                "crate::security::concurrent_{}_{}",
+                                thread_id, op_id
+                            ),
                             required_capabilities: vec!["key_access".to_string()],
                             risk_level: "critical".to_string(),
                             description: "concurrent test module".to_string(),

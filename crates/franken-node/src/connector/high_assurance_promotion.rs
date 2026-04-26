@@ -1044,7 +1044,11 @@ mod tests {
         let malicious_artifact_id = "\u{202E}trojan\u{202D}legitimate_artifact";
         let bundle = ProofBundle::full();
 
-        let result = gate.evaluate(malicious_artifact_id, ObjectClass::CriticalMarker, Some(&bundle));
+        let result = gate.evaluate(
+            malicious_artifact_id,
+            ObjectClass::CriticalMarker,
+            Some(&bundle),
+        );
         assert!(result.is_ok()); // Should process but preserve the malicious ID
 
         // Zero-width character injection
@@ -1088,7 +1092,11 @@ mod tests {
         };
 
         // Should still check against requirements regardless of internal contradictions
-        let result = gate.evaluate("contradictory", ObjectClass::CriticalMarker, Some(&contradictory_bundle));
+        let result = gate.evaluate(
+            "contradictory",
+            ObjectClass::CriticalMarker,
+            Some(&contradictory_bundle),
+        );
         assert!(result.is_ok()); // has_proof_chain=true satisfies FullProofChain
 
         // Test edge case: all proofs false but claim to be "full"
@@ -1099,7 +1107,11 @@ mod tests {
             has_schema_proof: false,
         };
 
-        let result2 = gate.evaluate("fake_full", ObjectClass::CriticalMarker, Some(&fake_full_bundle));
+        let result2 = gate.evaluate(
+            "fake_full",
+            ObjectClass::CriticalMarker,
+            Some(&fake_full_bundle),
+        );
         assert!(result2.is_err()); // Should fail - no actual proof
 
         // Test proof requirement bypassing attempts for each class
@@ -1112,7 +1124,10 @@ mod tests {
 
         // Try to use hash-only for classes that require more
         let bypass_attempts = vec![
-            (ObjectClass::CriticalMarker, ProofRequirement::FullProofChain),
+            (
+                ObjectClass::CriticalMarker,
+                ProofRequirement::FullProofChain,
+            ),
             (ObjectClass::StateObject, ProofRequirement::IntegrityProof),
             (ObjectClass::ConfigObject, ProofRequirement::SchemaProof),
         ];
@@ -1121,14 +1136,15 @@ mod tests {
             let result = gate.evaluate(
                 &format!("bypass_{}", class.label()),
                 class,
-                Some(&hash_only_bundle)
+                Some(&hash_only_bundle),
             );
 
             if class == ObjectClass::TelemetryArtifact {
                 assert!(result.is_ok()); // This class only needs IntegrityHash
             } else {
                 assert!(result.is_err()); // Others should fail
-                if let Err(PromotionDenialReason::ProofBundleInsufficient { required, .. }) = result {
+                if let Err(PromotionDenialReason::ProofBundleInsufficient { required, .. }) = result
+                {
                     assert_eq!(required, expected_req);
                 }
             }
@@ -1143,7 +1159,11 @@ mod tests {
         // Test approval counter near overflow boundary
         gate.approvals = u64::MAX - 5;
         for i in 0..10 {
-            let result = gate.evaluate(&format!("overflow_test_{}", i), ObjectClass::CriticalMarker, Some(&bundle));
+            let result = gate.evaluate(
+                &format!("overflow_test_{}", i),
+                ObjectClass::CriticalMarker,
+                Some(&bundle),
+            );
             assert!(result.is_ok());
         }
 
@@ -1155,7 +1175,11 @@ mod tests {
         denial_gate.denials = u64::MAX - 3;
 
         for i in 0..8 {
-            let result = denial_gate.evaluate(&format!("denial_overflow_{}", i), ObjectClass::CriticalMarker, None);
+            let result = denial_gate.evaluate(
+                &format!("denial_overflow_{}", i),
+                ObjectClass::CriticalMarker,
+                None,
+            );
             assert!(result.is_err());
         }
 
@@ -1245,7 +1269,10 @@ mod tests {
 
             if is_zero {
                 assert!(result.is_err());
-                assert!(matches!(result, Err(PromotionDenialReason::UnauthorizedModeDowngrade { .. })));
+                assert!(matches!(
+                    result,
+                    Err(PromotionDenialReason::UnauthorizedModeDowngrade { .. })
+                ));
             } else {
                 assert!(result.is_ok());
             }
@@ -1253,7 +1280,7 @@ mod tests {
 
         // Test authorization field length attacks
         let long_field_auth = PolicyAuthorization {
-            policy_ref: "A".repeat(100_000), // Very long policy reference
+            policy_ref: "A".repeat(100_000),    // Very long policy reference
             authorizer_id: "B".repeat(100_000), // Very long authorizer ID
             timestamp_ms: 1000,
         };
@@ -1468,9 +1495,9 @@ mod tests {
 
         // Test authorization with extreme edge values
         let edge_auth = PolicyAuthorization {
-            policy_ref: "A".to_string(), // Single character
+            policy_ref: "A".to_string(),    // Single character
             authorizer_id: "B".to_string(), // Single character
-            timestamp_ms: 1, // Minimum valid timestamp
+            timestamp_ms: 1,                // Minimum valid timestamp
         };
 
         let result4 = gate.switch_mode(AssuranceMode::HighAssurance, None);
@@ -1486,30 +1513,42 @@ mod tests {
 
         // Test class confusion attacks - using wrong proof for different classes
         let proofs_by_type = vec![
-            ("full_chain", ProofBundle {
-                has_proof_chain: true,
-                has_integrity_proof: false,
-                has_integrity_hash: false,
-                has_schema_proof: false,
-            }),
-            ("integrity_proof", ProofBundle {
-                has_proof_chain: false,
-                has_integrity_proof: true,
-                has_integrity_hash: false,
-                has_schema_proof: false,
-            }),
-            ("integrity_hash", ProofBundle {
-                has_proof_chain: false,
-                has_integrity_proof: false,
-                has_integrity_hash: true,
-                has_schema_proof: false,
-            }),
-            ("schema_proof", ProofBundle {
-                has_proof_chain: false,
-                has_integrity_proof: false,
-                has_integrity_hash: false,
-                has_schema_proof: true,
-            }),
+            (
+                "full_chain",
+                ProofBundle {
+                    has_proof_chain: true,
+                    has_integrity_proof: false,
+                    has_integrity_hash: false,
+                    has_schema_proof: false,
+                },
+            ),
+            (
+                "integrity_proof",
+                ProofBundle {
+                    has_proof_chain: false,
+                    has_integrity_proof: true,
+                    has_integrity_hash: false,
+                    has_schema_proof: false,
+                },
+            ),
+            (
+                "integrity_hash",
+                ProofBundle {
+                    has_proof_chain: false,
+                    has_integrity_proof: false,
+                    has_integrity_hash: true,
+                    has_schema_proof: false,
+                },
+            ),
+            (
+                "schema_proof",
+                ProofBundle {
+                    has_proof_chain: false,
+                    has_integrity_proof: false,
+                    has_integrity_hash: false,
+                    has_schema_proof: true,
+                },
+            ),
         ];
 
         // Test each proof type against each object class
@@ -1522,11 +1561,24 @@ mod tests {
                 let should_succeed = bundle.satisfies(expected_requirement);
 
                 if should_succeed {
-                    assert!(result.is_ok(), "Expected success for {} with {} proof", class.label(), proof_name);
+                    assert!(
+                        result.is_ok(),
+                        "Expected success for {} with {} proof",
+                        class.label(),
+                        proof_name
+                    );
                 } else {
-                    assert!(result.is_err(), "Expected failure for {} with {} proof", class.label(), proof_name);
+                    assert!(
+                        result.is_err(),
+                        "Expected failure for {} with {} proof",
+                        class.label(),
+                        proof_name
+                    );
 
-                    if let Err(PromotionDenialReason::ProofBundleInsufficient { required, .. }) = result {
+                    if let Err(PromotionDenialReason::ProofBundleInsufficient {
+                        required, ..
+                    }) = result
+                    {
                         assert_eq!(required, expected_requirement);
                     }
                 }
@@ -1559,7 +1611,7 @@ mod tests {
 
         // Test proof bundle satisfies logic edge cases
         let contradictory_bundle = ProofBundle {
-            has_proof_chain: true,    // Should imply others are also true
+            has_proof_chain: true,      // Should imply others are also true
             has_integrity_proof: false, // But they're false - logical inconsistency
             has_integrity_hash: false,
             has_schema_proof: false,

@@ -1519,9 +1519,7 @@ mod tests {
                 .unwrap();
         }
         // Now uses bounded eviction instead of error
-        let receipt = p
-            .add_allowlist("overflow", None, "r", "t", "time")
-            .unwrap();
+        let receipt = p.add_allowlist("overflow", None, "r", "t", "time").unwrap();
         assert_eq!(p.allowlist.len(), MAX_ALLOWLIST_ENTRIES);
         assert_eq!(receipt.host, "overflow");
         // Verify oldest entry was evicted
@@ -1540,7 +1538,11 @@ mod tests {
     #[test]
     fn ssrf_connector_id_unicode_injection_attack() {
         // Test BiDi override and control character injection in connector IDs
-        let malicious_id = format!("conn-{}\u{202e}evil\u{202d}-{}", "\u{200b}".repeat(1000), "🔥".repeat(500));
+        let malicious_id = format!(
+            "conn-{}\u{202e}evil\u{202d}-{}",
+            "\u{200b}".repeat(1000),
+            "🔥".repeat(500)
+        );
         let mut policy = SsrfPolicyTemplate::default_template(malicious_id.clone());
 
         let result = policy.check_ssrf("8.8.8.8", 443, Protocol::Http, "trace-unicode", "ts");
@@ -1583,7 +1585,9 @@ mod tests {
         assert!(last_entry.trace_id.contains("999")); // Should contain recent entry
 
         // Verify memory usage is bounded despite massive payloads
-        let total_audit_size: usize = policy.audit_log.iter()
+        let total_audit_size: usize = policy
+            .audit_log
+            .iter()
             .map(|r| r.host.len() + r.trace_id.len() + r.connector_id.len())
             .sum();
         assert!(total_audit_size < 50_000_000); // Reasonable memory bound
@@ -1601,7 +1605,7 @@ mod tests {
             Some(443),
             "legitimate reason",
             "trace-json",
-            "ts"
+            "ts",
         );
         assert!(result.is_ok()); // Should accept but sanitize
 
@@ -1646,7 +1650,10 @@ mod tests {
         // Test overflow protection at capacity boundary
         let overflow_result = policy.add_allowlist("overflow", None, "test", "trace", "ts");
         assert!(overflow_result.is_err());
-        assert!(matches!(overflow_result.unwrap_err(), SsrfError::SsrfTemplateInvalid { .. }));
+        assert!(matches!(
+            overflow_result.unwrap_err(),
+            SsrfError::SsrfTemplateInvalid { .. }
+        ));
     }
 
     #[test]
@@ -1672,14 +1679,17 @@ mod tests {
 
         for (ip, should_be_public) in bypass_attempts {
             let is_private = SsrfPolicyTemplate::is_private_ip(ip);
-            assert_eq!(is_private, !should_be_public, "CIDR bypass check failed for {ip}");
+            assert_eq!(
+                is_private, !should_be_public,
+                "CIDR bypass check failed for {ip}"
+            );
         }
 
         // Test prefix length edge cases
         let edge_cidrs = [
-            CidrRange::new([0, 0, 0, 0], 0, "everything"),   // /0 should match all
-            CidrRange::new([127, 0, 0, 1], 32, "exact"),     // /32 should match exactly
-            CidrRange::new([192, 168, 1, 0], 31, "tiny"),    // /31 should match 2 IPs
+            CidrRange::new([0, 0, 0, 0], 0, "everything"), // /0 should match all
+            CidrRange::new([127, 0, 0, 1], 32, "exact"),   // /32 should match exactly
+            CidrRange::new([192, 168, 1, 0], 31, "tiny"),  // /31 should match 2 IPs
         ];
 
         for cidr in &edge_cidrs {
@@ -1698,18 +1708,20 @@ mod tests {
         let mut policy = SsrfPolicyTemplate::default_template("conn-extra".into());
 
         // Add legitimate entry
-        policy.add_allowlist("api.example.com", Some(443), "legitimate", "trace-1", "ts").unwrap();
+        policy
+            .add_allowlist("api.example.com", Some(443), "legitimate", "trace-1", "ts")
+            .unwrap();
 
         // Test various homograph and collision attempts
         let collision_attempts = [
-            "api.example.com\u{200b}",     // Zero-width space
-            "api.example.com\u{feff}",     // Zero-width no-break space
-            "api.example.com\u{00a0}",     // Non-breaking space
-            "api.example.com\u{2009}",     // Thin space
-            "api.еxample.com",             // Cyrillic 'е' instead of 'e'
-            "АPI.example.com",             // Cyrillic 'А' instead of 'A'
-            "api.example.co\u{006d}",      // Normal 'm' for verification
-            "api.example.com\u{ff2e}",     // Full-width 'M'
+            "api.example.com\u{200b}", // Zero-width space
+            "api.example.com\u{feff}", // Zero-width no-break space
+            "api.example.com\u{00a0}", // Non-breaking space
+            "api.example.com\u{2009}", // Thin space
+            "api.еxample.com",         // Cyrillic 'е' instead of 'e'
+            "АPI.example.com",         // Cyrillic 'А' instead of 'A'
+            "api.example.co\u{006d}",  // Normal 'm' for verification
+            "api.example.com\u{ff2e}", // Full-width 'M'
         ];
 
         for malicious_host in collision_attempts {
@@ -1720,15 +1732,18 @@ mod tests {
                 assert!(found.is_some(), "Normal host should match");
             } else {
                 // Unicode variants should not bypass allowlist matching
-                let should_match = malicious_host == "api.example.com\u{200b}" ||
-                                 malicious_host == "api.example.com\u{feff}" ||
-                                 malicious_host == "api.example.com\u{00a0}";
+                let should_match = malicious_host == "api.example.com\u{200b}"
+                    || malicious_host == "api.example.com\u{feff}"
+                    || malicious_host == "api.example.com\u{00a0}";
 
                 if should_match {
                     // These might match due to normalization - verify behavior
                     let _ = found; // Allow either match or no-match
                 } else {
-                    assert!(found.is_none(), "Collision attempt should not match: {malicious_host:?}");
+                    assert!(
+                        found.is_none(),
+                        "Collision attempt should not match: {malicious_host:?}"
+                    );
                 }
             }
         }
@@ -1740,7 +1755,9 @@ mod tests {
         use std::sync::{Arc, Mutex};
         use std::thread;
 
-        let policy = Arc::new(Mutex::new(SsrfPolicyTemplate::default_template("conn-extra".into())));
+        let policy = Arc::new(Mutex::new(SsrfPolicyTemplate::default_template(
+            "conn-extra".into(),
+        )));
         let mut handles = vec![];
 
         // Spawn concurrent threads performing different operations
@@ -1757,7 +1774,7 @@ mod tests {
                             Some(8080_u16.saturating_add(thread_id as u16)),
                             "concurrent test",
                             &format!("trace-{thread_id}"),
-                            "ts"
+                            "ts",
                         );
                     },
                     || {
@@ -1767,13 +1784,13 @@ mod tests {
                             443,
                             Protocol::Http,
                             &format!("trace-check-{thread_id}"),
-                            "ts"
+                            "ts",
                         );
                     },
                     || {
                         let p = policy_clone.lock().unwrap();
                         let _ = p.validate();
-                    }
+                    },
                 ];
 
                 // Perform multiple operations in this thread
@@ -1811,11 +1828,26 @@ mod tests {
 
         // Add entries with format specifiers and injection attempts
         let malicious_inputs = [
-            ("api.{}.com", Some(443), "reason with {} format", "trace-{}-injection"),
+            (
+                "api.{}.com",
+                Some(443),
+                "reason with {} format",
+                "trace-{}-injection",
+            ),
             ("host\n\tmalicious", None, "reason\x00null", "trace\r\nCRLF"),
             ("host%n%s%d", Some(80), "reason%x%p", "trace%c%u"),
-            ("api.\x1b[31mred\x1b[0m.com", Some(443), "ANSI\x1b[1mbold\x1b[0m", "trace\x1b[?1049h"),
-            ("\u{1f4a9}\u{200d}\u{1f525}", None, "\u{202e}RLO\u{202d}", "\u{2066}LRI\u{2069}"),
+            (
+                "api.\x1b[31mred\x1b[0m.com",
+                Some(443),
+                "ANSI\x1b[1mbold\x1b[0m",
+                "trace\x1b[?1049h",
+            ),
+            (
+                "\u{1f4a9}\u{200d}\u{1f525}",
+                None,
+                "\u{202e}RLO\u{202d}",
+                "\u{2066}LRI\u{2069}",
+            ),
         ];
 
         for (host, port, reason, trace) in malicious_inputs {
@@ -1823,23 +1855,33 @@ mod tests {
             assert!(result.is_ok(), "Should accept malicious input for testing");
 
             // Test SSRF check with the injected host
-            let check_result = policy.check_ssrf(host, port.unwrap_or(80), Protocol::Http, trace, "ts");
+            let check_result =
+                policy.check_ssrf(host, port.unwrap_or(80), Protocol::Http, trace, "ts");
             let _ = check_result; // Allow any result, testing safety
         }
 
         // Test display safety - should not panic or produce control sequences
         for entry in &policy.allowlist {
             let debug_str = format!("{:?}", entry);
-            assert!(!debug_str.contains('\x00'), "Debug output should escape null bytes");
+            assert!(
+                !debug_str.contains('\x00'),
+                "Debug output should escape null bytes"
+            );
 
             let receipt_display = format!("{}", entry.receipt.trace_id);
-            assert!(receipt_display.len() >= 1, "Display should produce some output");
+            assert!(
+                receipt_display.len() >= 1,
+                "Display should produce some output"
+            );
         }
 
         // Test audit log display safety
         for record in &policy.audit_log {
             let json_str = serde_json::to_string(record).unwrap();
-            assert!(!json_str.contains("\\u0000"), "JSON should escape control chars safely");
+            assert!(
+                !json_str.contains("\\u0000"),
+                "JSON should escape control chars safely"
+            );
 
             let debug_str = format!("{:?}", record);
             assert!(!debug_str.contains('\r'), "Debug should escape CRLF");
@@ -1848,15 +1890,27 @@ mod tests {
 
         // Test error display safety
         let errors = [
-            SsrfError::SsrfDenied { host: "host\x00\x1b[31m".to_string(), cidr: "cidr%s".to_string() },
-            SsrfError::SsrfInvalidIp { host: "invalid\r\n%n".to_string() },
-            SsrfError::SsrfReceiptMissing { detail: "detail\t%p".to_string() },
-            SsrfError::SsrfTemplateInvalid { reason: "reason\x1b[?1049h".to_string() },
+            SsrfError::SsrfDenied {
+                host: "host\x00\x1b[31m".to_string(),
+                cidr: "cidr%s".to_string(),
+            },
+            SsrfError::SsrfInvalidIp {
+                host: "invalid\r\n%n".to_string(),
+            },
+            SsrfError::SsrfReceiptMissing {
+                detail: "detail\t%p".to_string(),
+            },
+            SsrfError::SsrfTemplateInvalid {
+                reason: "reason\x1b[?1049h".to_string(),
+            },
         ];
 
         for error in errors {
             let display_str = format!("{}", error);
-            assert!(!display_str.contains('\x00'), "Error display should be safe");
+            assert!(
+                !display_str.contains('\x00'),
+                "Error display should be safe"
+            );
 
             let debug_str = format!("{:?}", error);
             assert!(debug_str.len() > 10, "Error debug should produce output");
@@ -1870,16 +1924,16 @@ mod tests {
 
         // Test empty and minimal inputs
         let boundary_hosts = [
-            "",           // Empty string
-            " ",          // Whitespace only
-            "a",          // Single character
-            ".",          // Single dot
-            "0.0.0.0",    // Network address
+            "",                // Empty string
+            " ",               // Whitespace only
+            "a",               // Single character
+            ".",               // Single dot
+            "0.0.0.0",         // Network address
             "255.255.255.255", // Broadcast address
-            "::1",        // IPv6 loopback (should be blocked)
-            "[::]",       // IPv6 any (malformed)
-            "[::1",       // Unbalanced brackets
-            "::1]",       // Unbalanced brackets
+            "::1",             // IPv6 loopback (should be blocked)
+            "[::]",            // IPv6 any (malformed)
+            "[::1",            // Unbalanced brackets
+            "::1]",            // Unbalanced brackets
         ];
 
         for host in boundary_hosts {
@@ -1894,7 +1948,8 @@ mod tests {
         // Test port boundaries
         let boundary_ports = [0, 1, 80, 443, 65534, 65535];
         for &port in &boundary_ports {
-            let result = policy.check_ssrf("8.8.8.8", port, Protocol::Http, "trace-port-boundary", "ts");
+            let result =
+                policy.check_ssrf("8.8.8.8", port, Protocol::Http, "trace-port-boundary", "ts");
             assert!(result.is_ok(), "Public IP should be allowed on any port");
         }
 
@@ -1907,14 +1962,21 @@ mod tests {
         assert!(add_result.is_ok(), "Should handle very long inputs");
 
         let check_result = policy.check_ssrf(&long_host, 443, Protocol::Http, &long_trace, "ts");
-        assert!(check_result.is_ok(), "Should allow very long allowlisted host");
+        assert!(
+            check_result.is_ok(),
+            "Should allow very long allowlisted host"
+        );
 
         // Test serialization with boundary data
         let json_result = serde_json::to_string(&policy);
         assert!(json_result.is_ok(), "Should serialize boundary data safely");
 
-        let parsed_result: Result<SsrfPolicyTemplate, _> = serde_json::from_str(&json_result.unwrap());
-        assert!(parsed_result.is_ok(), "Should deserialize boundary data safely");
+        let parsed_result: Result<SsrfPolicyTemplate, _> =
+            serde_json::from_str(&json_result.unwrap());
+        assert!(
+            parsed_result.is_ok(),
+            "Should deserialize boundary data safely"
+        );
     }
 }
 
@@ -2360,13 +2422,7 @@ mod ssrf_additional_negative_tests {
             .expect("allowlist fixture");
 
         let err = policy
-            .check_ssrf(
-                "0x7f000001",
-                80,
-                Protocol::Http,
-                "trace-lax-loopback",
-                "ts",
-            )
+            .check_ssrf("0x7f000001", 80, Protocol::Http, "trace-lax-loopback", "ts")
             .unwrap_err();
 
         assert!(matches!(err, SsrfError::SsrfInvalidIp { .. }));

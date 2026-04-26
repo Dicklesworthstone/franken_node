@@ -2359,20 +2359,20 @@ mod hardware_planner_comprehensive_negative_tests {
     fn negative_hardware_profile_with_unicode_injection_and_extreme_values() {
         // Test hardware profiles with malicious Unicode patterns and boundary values
         let malicious_patterns = [
-            ("hw\u{202E}spoofed", "GPU \u{200B}invisible"),     // RTL override + zero-width space
-            ("hw\x00null", "FPGA\r\ninjection"),               // Null byte + CRLF injection
-            ("hw\u{FEFF}bom", "TPU\u{1F4A9}emoji"),            // BOM + emoji
-            ("hw\x1b[31mred\x1b[0m", "CPU\t\x08control"),      // ANSI escape + control chars
-            ("hw🚀rocket", "AI🎯accelerator"),                  // Unicode emoji patterns
+            ("hw\u{202E}spoofed", "GPU \u{200B}invisible"), // RTL override + zero-width space
+            ("hw\x00null", "FPGA\r\ninjection"),            // Null byte + CRLF injection
+            ("hw\u{FEFF}bom", "TPU\u{1F4A9}emoji"),         // BOM + emoji
+            ("hw\x1b[31mred\x1b[0m", "CPU\t\x08control"),   // ANSI escape + control chars
+            ("hw🚀rocket", "AI🎯accelerator"),              // Unicode emoji patterns
         ];
 
         for (profile_id, description) in malicious_patterns {
             // Test with extreme values at boundaries
             let extreme_test_cases = [
-                (0u32, 0u32),                    // Zero risk, zero capacity
-                (1u32, 1u32),                    // Minimal values
-                (MAX_RISK_LEVEL, u32::MAX),      // Max risk, max capacity
-                (MAX_RISK_LEVEL + 1, 1000),      // Over max risk (should fail)
+                (0u32, 0u32),               // Zero risk, zero capacity
+                (1u32, 1u32),               // Minimal values
+                (MAX_RISK_LEVEL, u32::MAX), // Max risk, max capacity
+                (MAX_RISK_LEVEL + 1, 1000), // Over max risk (should fail)
             ];
 
             for (risk, slots) in extreme_test_cases {
@@ -2386,7 +2386,12 @@ mod hardware_planner_comprehensive_negative_tests {
 
                 if risk > MAX_RISK_LEVEL {
                     // Should reject invalid risk levels
-                    assert!(profile_result.is_err(), "Should reject risk {} for profile {}", risk, profile_id);
+                    assert!(
+                        profile_result.is_err(),
+                        "Should reject risk {} for profile {}",
+                        risk,
+                        profile_id
+                    );
                 } else {
                     // Should handle Unicode patterns and extreme values correctly
                     let profile = profile_result.expect("Should accept valid risk levels");
@@ -2409,9 +2414,8 @@ mod hardware_planner_comprehensive_negative_tests {
         let mut planner = make_planner();
 
         // Generate massive capability sets
-        let massive_capabilities: BTreeSet<String> = (0..10000)
-            .map(|i| format!("capability_{:06}", i))
-            .collect();
+        let massive_capabilities: BTreeSet<String> =
+            (0..10000).map(|i| format!("capability_{:06}", i)).collect();
 
         let policy = PlacementPolicy {
             policy_id: "massive_policy".to_string(),
@@ -2424,13 +2428,14 @@ mod hardware_planner_comprehensive_negative_tests {
 
         // Should handle large policies without memory exhaustion
         let register_result = planner.register_policy(policy.clone(), 1000, "trace-massive");
-        assert!(register_result.is_ok(), "Should handle massive capability collections");
+        assert!(
+            register_result.is_ok(),
+            "Should handle massive capability collections"
+        );
 
         // Create hardware profile with subset of capabilities
-        let subset_capabilities: BTreeSet<String> = massive_capabilities.iter()
-            .take(5000)
-            .cloned()
-            .collect();
+        let subset_capabilities: BTreeSet<String> =
+            massive_capabilities.iter().take(5000).cloned().collect();
 
         let profile = HardwareProfile {
             profile_id: "hw-massive".to_string(),
@@ -2443,7 +2448,10 @@ mod hardware_planner_comprehensive_negative_tests {
         };
 
         let profile_result = planner.register_profile(profile, 1001, "trace-massive-hw");
-        assert!(profile_result.is_ok(), "Should handle massive hardware capabilities");
+        assert!(
+            profile_result.is_ok(),
+            "Should handle massive hardware capabilities"
+        );
 
         // Workload request should work with massive capability matching
         let workload_req = WorkloadRequest {
@@ -2456,7 +2464,10 @@ mod hardware_planner_comprehensive_negative_tests {
 
         let placement_result = planner.request_placement(&workload_req, 2000);
         // Should either succeed or fail deterministically without hanging
-        assert!(placement_result.is_ok() || placement_result.is_err(), "Should complete in reasonable time");
+        assert!(
+            placement_result.is_ok() || placement_result.is_err(),
+            "Should complete in reasonable time"
+        );
     }
 
     #[test]
@@ -2471,10 +2482,19 @@ mod hardware_planner_comprehensive_negative_tests {
             caps(&["gpu", "compute"]),
             10,
             5, // Only 5 slots available
-        ).unwrap();
+        )
+        .unwrap();
 
-        planner.register_profile(limited_profile, 1000, "trace-limited").unwrap();
-        planner.register_policy(PlacementPolicy::new("default", "Default", 50), 1001, "trace-policy").unwrap();
+        planner
+            .register_profile(limited_profile, 1000, "trace-limited")
+            .unwrap();
+        planner
+            .register_policy(
+                PlacementPolicy::new("default", "Default", 50),
+                1001,
+                "trace-policy",
+            )
+            .unwrap();
 
         // Make many concurrent placement requests
         let mut placement_results = Vec::new();
@@ -2498,7 +2518,11 @@ mod hardware_planner_comprehensive_negative_tests {
         }
 
         // Should have exactly 5 successful placements due to capacity limit
-        assert_eq!(successful_placements.len(), 5, "Should respect hardware capacity limits");
+        assert_eq!(
+            successful_placements.len(),
+            5,
+            "Should respect hardware capacity limits"
+        );
 
         // Used slots should not exceed total slots
         let profile = planner.get_profile("hw-limited").unwrap();
@@ -2509,8 +2533,14 @@ mod hardware_planner_comprehensive_negative_tests {
         assert_eq!(planner.active_placements.len(), 5);
 
         // Failed placements should have appropriate error codes
-        let failed_count = placement_results.iter().filter(|(_, success)| !success).count();
-        assert_eq!(failed_count, 15, "Should have 15 failed placements due to capacity exhaustion");
+        let failed_count = placement_results
+            .iter()
+            .filter(|(_, success)| !success)
+            .count();
+        assert_eq!(
+            failed_count, 15,
+            "Should have 15 failed placements due to capacity exhaustion"
+        );
     }
 
     #[test]
@@ -2534,18 +2564,20 @@ mod hardware_planner_comprehensive_negative_tests {
                 caps(&["compute"]),
                 risk_level,
                 10,
-            ).unwrap();
+            )
+            .unwrap();
 
-            planner.register_profile(profile, 1000 + risk_level as u64, &format!("trace-risk-{}", risk_level)).unwrap();
+            planner
+                .register_profile(
+                    profile,
+                    1000 + risk_level as u64,
+                    &format!("trace-risk-{}", risk_level),
+                )
+                .unwrap();
         }
 
         // Test invalid risk levels that should be rejected
-        let invalid_risk_cases = [
-            MAX_RISK_LEVEL + 1,
-            u32::MAX / 2,
-            u32::MAX - 1,
-            u32::MAX,
-        ];
+        let invalid_risk_cases = [MAX_RISK_LEVEL + 1, u32::MAX / 2, u32::MAX - 1, u32::MAX];
 
         for invalid_risk in invalid_risk_cases {
             let invalid_profile_result = HardwareProfile::new(
@@ -2556,17 +2588,30 @@ mod hardware_planner_comprehensive_negative_tests {
                 10,
             );
 
-            assert!(invalid_profile_result.is_err(), "Should reject invalid risk level {}", invalid_risk);
+            assert!(
+                invalid_profile_result.is_err(),
+                "Should reject invalid risk level {}",
+                invalid_risk
+            );
         }
 
         // Register default policy
-        planner.register_policy(PlacementPolicy::new("boundary_test", "Boundary test", 50), 2000, "trace-policy").unwrap();
+        planner
+            .register_policy(
+                PlacementPolicy::new("boundary_test", "Boundary test", 50),
+                2000,
+                "trace-policy",
+            )
+            .unwrap();
 
         // Test workload requests with boundary risk tolerances
         let workload_risk_cases = [
-            (0u32, vec![0u32]),                                    // Only zero-risk hardware
-            (1u32, vec![0u32, 1u32]),                             // Zero and minimal risk hardware
-            (MAX_RISK_LEVEL / 2, (0..=MAX_RISK_LEVEL/2).collect::<Vec<_>>()), // Half the hardware
+            (0u32, vec![0u32]),       // Only zero-risk hardware
+            (1u32, vec![0u32, 1u32]), // Zero and minimal risk hardware
+            (
+                MAX_RISK_LEVEL / 2,
+                (0..=MAX_RISK_LEVEL / 2).collect::<Vec<_>>(),
+            ), // Half the hardware
             (MAX_RISK_LEVEL, (0..=MAX_RISK_LEVEL).collect::<Vec<_>>()), // All hardware
         ];
 
@@ -2583,10 +2628,18 @@ mod hardware_planner_comprehensive_negative_tests {
 
             if max_risk == 0 && expected_eligible_risks.contains(&0) {
                 // Should succeed if zero-risk hardware is available
-                assert!(placement_result.is_ok(), "Should succeed for max_risk {}", max_risk);
+                assert!(
+                    placement_result.is_ok(),
+                    "Should succeed for max_risk {}",
+                    max_risk
+                );
             } else if !expected_eligible_risks.is_empty() {
                 // Should succeed if any eligible hardware exists
-                assert!(placement_result.is_ok(), "Should succeed for max_risk {}", max_risk);
+                assert!(
+                    placement_result.is_ok(),
+                    "Should succeed for max_risk {}",
+                    max_risk
+                );
             }
         }
     }
@@ -2601,7 +2654,7 @@ mod hardware_planner_comprehensive_negative_tests {
             "hw\x00\r\n\textreme",
             "Hardware with\u{202E}extreme\u{200B}characteristics".to_string(),
             caps(&[
-                "", // Empty capability (should be filtered)
+                "",    // Empty capability (should be filtered)
                 "   ", // Whitespace capability (should be filtered)
                 "normal_cap",
                 "cap\x00with\nnull\tbytes",
@@ -2610,9 +2663,12 @@ mod hardware_planner_comprehensive_negative_tests {
             ]),
             75,
             u32::MAX, // Maximum capacity
-        ).unwrap();
+        )
+        .unwrap();
 
-        planner.register_profile(extreme_profile, 1000, "trace\x00extreme").unwrap();
+        planner
+            .register_profile(extreme_profile, 1000, "trace\x00extreme")
+            .unwrap();
 
         // Register policy with malformed characteristics
         let malformed_policy = PlacementPolicy {
@@ -2625,14 +2681,13 @@ mod hardware_planner_comprehensive_negative_tests {
                 "cap\x00with\nnull",
                 "🚀emoji_capability",
             ]),
-            preferred_capabilities: caps(&[
-                "\u{FEFF}preferred_with_bom",
-                "preferred\ttab",
-            ]),
+            preferred_capabilities: caps(&["\u{FEFF}preferred_with_bom", "preferred\ttab"]),
             schema_version: SCHEMA_VERSION.to_string(),
         };
 
-        planner.register_policy(malformed_policy, 1001, "trace-malformed-policy").unwrap();
+        planner
+            .register_policy(malformed_policy, 1001, "trace-malformed-policy")
+            .unwrap();
 
         // Create workload request with extreme characteristics
         let extreme_workload = WorkloadRequest {
@@ -2649,7 +2704,10 @@ mod hardware_planner_comprehensive_negative_tests {
 
         // Request placement should handle malformed inputs gracefully
         let placement_result = planner.request_placement(&extreme_workload, 2000);
-        assert!(placement_result.is_ok(), "Should handle malformed inputs gracefully");
+        assert!(
+            placement_result.is_ok(),
+            "Should handle malformed inputs gracefully"
+        );
 
         // Evidence should be generated despite malformed inputs
         let evidence = placement_result.unwrap();
@@ -2661,7 +2719,11 @@ mod hardware_planner_comprehensive_negative_tests {
         assert_eq!(evidence.schema_version, SCHEMA_VERSION);
 
         // Placement should be recorded in active placements
-        assert!(planner.active_placements.contains_key(&extreme_workload.workload_id));
+        assert!(
+            planner
+                .active_placements
+                .contains_key(&extreme_workload.workload_id)
+        );
     }
 
     #[test]
@@ -2671,9 +2733,9 @@ mod hardware_planner_comprehensive_negative_tests {
 
         // Register multiple hardware profiles with different failure modes
         let failure_profiles = [
-            ("hw-no-cap", caps(&["fpga"]), 10, 10),           // Wrong capabilities
+            ("hw-no-cap", caps(&["fpga"]), 10, 10), // Wrong capabilities
             ("hw-high-risk", caps(&["gpu", "compute"]), 90, 10), // Too high risk
-            ("hw-no-slots", caps(&["gpu", "compute"]), 10, 0),   // No capacity
+            ("hw-no-slots", caps(&["gpu", "compute"]), 10, 0), // No capacity
         ];
 
         for (profile_id, capabilities, risk, slots) in failure_profiles {
@@ -2683,9 +2745,12 @@ mod hardware_planner_comprehensive_negative_tests {
                 capabilities,
                 risk,
                 slots,
-            ).unwrap();
+            )
+            .unwrap();
 
-            planner.register_profile(profile, 1000, &format!("trace-{}", profile_id)).unwrap();
+            planner
+                .register_profile(profile, 1000, &format!("trace-{}", profile_id))
+                .unwrap();
         }
 
         // Add one valid profile that should be selected as fallback
@@ -2695,9 +2760,12 @@ mod hardware_planner_comprehensive_negative_tests {
             caps(&["gpu", "compute"]),
             25,
             5,
-        ).unwrap();
+        )
+        .unwrap();
 
-        planner.register_profile(valid_profile, 1001, "trace-valid-fallback").unwrap();
+        planner
+            .register_profile(valid_profile, 1001, "trace-valid-fallback")
+            .unwrap();
 
         // Create policy that requires specific capabilities and low risk
         let strict_policy = PlacementPolicy {
@@ -2709,7 +2777,9 @@ mod hardware_planner_comprehensive_negative_tests {
             schema_version: SCHEMA_VERSION.to_string(),
         };
 
-        planner.register_policy(strict_policy, 1002, "trace-strict-policy").unwrap();
+        planner
+            .register_policy(strict_policy, 1002, "trace-strict-policy")
+            .unwrap();
 
         // Workload that will trigger fallback behavior
         let fallback_workload = WorkloadRequest {
@@ -2725,7 +2795,10 @@ mod hardware_planner_comprehensive_negative_tests {
         assert!(placement_result.is_ok(), "Should succeed via fallback");
 
         let evidence = placement_result.unwrap();
-        assert_eq!(evidence.selected_profile_id, Some("hw-valid-fallback".to_string()));
+        assert_eq!(
+            evidence.selected_profile_id,
+            Some("hw-valid-fallback".to_string())
+        );
 
         // Valid hardware should have used slots
         let valid_hw = planner.get_profile("hw-valid-fallback").unwrap();
@@ -2755,10 +2828,19 @@ mod hardware_planner_comprehensive_negative_tests {
             caps(&["compute"]),
             25,
             100,
-        ).unwrap();
+        )
+        .unwrap();
 
-        planner.register_profile(profile, 1000, "trace-audit-hw").unwrap();
-        planner.register_policy(PlacementPolicy::new("audit_policy", "Audit policy", 50), 1001, "trace-audit-policy").unwrap();
+        planner
+            .register_profile(profile, 1000, "trace-audit-hw")
+            .unwrap();
+        planner
+            .register_policy(
+                PlacementPolicy::new("audit_policy", "Audit policy", 50),
+                1001,
+                "trace-audit-policy",
+            )
+            .unwrap();
 
         // Generate many events to test audit trail capacity
         let mut placement_requests = Vec::new();
@@ -2781,16 +2863,25 @@ mod hardware_planner_comprehensive_negative_tests {
         }
 
         // Audit trail should be bounded to prevent memory exhaustion
-        assert!(planner.audit_trail.len() <= MAX_AUDIT_LOG_ENTRIES, "Audit trail should be bounded");
+        assert!(
+            planner.audit_trail.len() <= MAX_AUDIT_LOG_ENTRIES,
+            "Audit trail should be bounded"
+        );
 
         // Latest events should be preserved
         if !planner.audit_trail.is_empty() {
             let latest_event = planner.audit_trail.last().unwrap();
-            assert!(latest_event.timestamp >= 2000, "Latest events should be preserved");
+            assert!(
+                latest_event.timestamp >= 2000,
+                "Latest events should be preserved"
+            );
         }
 
         // Active placements should be bounded by hardware capacity
-        assert!(planner.active_placements.len() <= 100, "Active placements should respect capacity");
+        assert!(
+            planner.active_placements.len() <= 100,
+            "Active placements should respect capacity"
+        );
 
         // Memory cleanup should not affect planner state consistency
         drop(memory_pressure);
@@ -2806,7 +2897,10 @@ mod hardware_planner_comprehensive_negative_tests {
 
         let final_result = planner.request_placement(&final_workload, 10000);
         // Should either succeed or fail deterministically based on remaining capacity
-        assert!(final_result.is_ok() || final_result.is_err(), "Should remain functional after memory pressure");
+        assert!(
+            final_result.is_ok() || final_result.is_err(),
+            "Should remain functional after memory pressure"
+        );
     }
 
     #[test]
@@ -2816,13 +2910,13 @@ mod hardware_planner_comprehensive_negative_tests {
 
         // Test hardware profile with various schema version patterns
         let schema_test_cases = [
-            SCHEMA_VERSION,                    // Valid schema
-            "",                               // Empty schema
-            "hwp-v0.0",                       // Different version
-            "hwp-v999.999",                   // Future version
-            "invalid-schema\x00null",         // Malformed schema
-            "\u{FEFF}hwp-v1.0",              // Schema with BOM
-            "hwp-v1.0\r\n",                   // Schema with CRLF
+            SCHEMA_VERSION,           // Valid schema
+            "",                       // Empty schema
+            "hwp-v0.0",               // Different version
+            "hwp-v999.999",           // Future version
+            "invalid-schema\x00null", // Malformed schema
+            "\u{FEFF}hwp-v1.0",       // Schema with BOM
+            "hwp-v1.0\r\n",           // Schema with CRLF
         ];
 
         for (i, schema_version) in schema_test_cases.iter().enumerate() {
@@ -2837,20 +2931,37 @@ mod hardware_planner_comprehensive_negative_tests {
             };
 
             // Should register successfully (validation happens at higher levels)
-            let register_result = planner.register_profile(profile, 1000 + i as u64, &format!("trace-schema-{}", i));
-            assert!(register_result.is_ok(), "Should register profile with schema version {}", schema_version);
+            let register_result =
+                planner.register_profile(profile, 1000 + i as u64, &format!("trace-schema-{}", i));
+            assert!(
+                register_result.is_ok(),
+                "Should register profile with schema version {}",
+                schema_version
+            );
 
             // Test serialization/deserialization robustness
             let profile = planner.get_profile(&format!("hw-schema-{}", i)).unwrap();
             let serialization_result = serde_json::to_string(&profile);
-            assert!(serialization_result.is_ok(), "Should serialize profile with schema {}", schema_version);
+            assert!(
+                serialization_result.is_ok(),
+                "Should serialize profile with schema {}",
+                schema_version
+            );
 
             if let Ok(json) = serialization_result {
-                let deserialization_result: Result<HardwareProfile, _> = serde_json::from_str(&json);
-                assert!(deserialization_result.is_ok(), "Should deserialize profile with schema {}", schema_version);
+                let deserialization_result: Result<HardwareProfile, _> =
+                    serde_json::from_str(&json);
+                assert!(
+                    deserialization_result.is_ok(),
+                    "Should deserialize profile with schema {}",
+                    schema_version
+                );
 
                 if let Ok(deserialized) = deserialization_result {
-                    assert_eq!(deserialized.schema_version, *schema_version, "Schema version should roundtrip correctly");
+                    assert_eq!(
+                        deserialized.schema_version, *schema_version,
+                        "Schema version should roundtrip correctly"
+                    );
                 }
             }
         }
@@ -2865,7 +2976,9 @@ mod hardware_planner_comprehensive_negative_tests {
             schema_version: "policy-v-test\u{200B}".to_string(), // Unicode zero-width space
         };
 
-        planner.register_policy(policy, 2000, "trace-schema-policy").unwrap();
+        planner
+            .register_policy(policy, 2000, "trace-schema-policy")
+            .unwrap();
 
         // Workload request should succeed and preserve schema information
         let workload_req = WorkloadRequest {
@@ -2877,7 +2990,10 @@ mod hardware_planner_comprehensive_negative_tests {
         };
 
         let placement_result = planner.request_placement(&workload_req, 3000);
-        assert!(placement_result.is_ok(), "Should handle various schema versions in placement");
+        assert!(
+            placement_result.is_ok(),
+            "Should handle various schema versions in placement"
+        );
 
         let evidence = placement_result.unwrap();
         assert_eq!(evidence.schema_version, SCHEMA_VERSION); // Evidence should use canonical schema

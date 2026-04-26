@@ -398,10 +398,10 @@ mod tests {
     fn negative_runtime_bulkhead_arithmetic_overflow_protection_in_capacity_calculations() {
         // Test bulkhead capacity calculations with values that could cause overflow
         let overflow_test_cases = vec![
-            (u32::MAX - 1, 100),     // Near max capacity
-            (u32::MAX, 1),           // Max capacity, min retry
-            (1000, u32::MAX - 1),    // Normal capacity, near max retry
-            (1000, u32::MAX),        // Normal capacity, max retry
+            (u32::MAX - 1, 100),  // Near max capacity
+            (u32::MAX, 1),        // Max capacity, min retry
+            (1000, u32::MAX - 1), // Normal capacity, near max retry
+            (1000, u32::MAX),     // Normal capacity, max retry
         ];
 
         for (capacity, retry_ms) in overflow_test_cases {
@@ -435,13 +435,14 @@ mod tests {
         // Test reload with overflow-prone values
         let mut stable_bulkhead = GlobalBulkhead::new(100, 1000).expect("stable bulkhead");
         let reload_test_cases = vec![
-            (u32::MAX, 1, 1),        // Max capacity
-            (1, u32::MAX, 1),        // Max retry window
-            (1, 1, u32::MAX),        // Max retry delay
+            (u32::MAX, 1, 1), // Max capacity
+            (1, u32::MAX, 1), // Max retry window
+            (1, 1, u32::MAX), // Max retry delay
         ];
 
         for (new_capacity, retry_window, retry_delay) in reload_test_cases {
-            let reload_result = stable_bulkhead.reload_limits(new_capacity, retry_window, retry_delay);
+            let reload_result =
+                stable_bulkhead.reload_limits(new_capacity, retry_window, retry_delay);
 
             match reload_result {
                 Ok(_) => {
@@ -464,14 +465,14 @@ mod tests {
 
         // Test timestamps at various boundaries that might cause parsing issues
         let boundary_timestamps = vec![
-            "1970-01-01T00:00:00Z",              // Unix epoch start
-            "2038-01-19T03:14:07Z",              // 32-bit timestamp boundary
-            "2038-01-19T03:14:08Z",              // Just after 32-bit boundary
-            "2106-02-07T06:28:15Z",              // 32-bit unsigned boundary
-            "9999-12-31T23:59:59Z",              // Far future
-            "1900-01-01T00:00:00Z",              // Before Unix epoch
-            "2026-02-29T12:00:00Z",              // Leap year edge case
-            "2026-04-17T23:59:59.999999999Z",    // High precision
+            "1970-01-01T00:00:00Z",           // Unix epoch start
+            "2038-01-19T03:14:07Z",           // 32-bit timestamp boundary
+            "2038-01-19T03:14:08Z",           // Just after 32-bit boundary
+            "2106-02-07T06:28:15Z",           // 32-bit unsigned boundary
+            "9999-12-31T23:59:59Z",           // Far future
+            "1900-01-01T00:00:00Z",           // Before Unix epoch
+            "2026-02-29T12:00:00Z",           // Leap year edge case
+            "2026-04-17T23:59:59.999999999Z", // High precision
         ];
 
         for timestamp in &boundary_timestamps {
@@ -486,7 +487,11 @@ mod tests {
             });
 
             // Should handle timestamp parsing without panics
-            assert!(entry_result.is_ok(), "Timestamp '{}' should not cause panic on entry", timestamp);
+            assert!(
+                entry_result.is_ok(),
+                "Timestamp '{}' should not cause panic on entry",
+                timestamp
+            );
 
             if controller.is_active() {
                 // Test safe mode exit with boundary timestamp
@@ -498,7 +503,11 @@ mod tests {
                     )
                 });
 
-                assert!(exit_result.is_ok(), "Timestamp '{}' should not cause panic on exit", timestamp);
+                assert!(
+                    exit_result.is_ok(),
+                    "Timestamp '{}' should not cause panic on exit",
+                    timestamp
+                );
 
                 // Reset for next test
                 if controller.is_active() {
@@ -513,15 +522,15 @@ mod tests {
 
         // Test with malformed timestamps
         let malformed_timestamps = vec![
-            "",                           // Empty
-            "not-a-timestamp",           // Invalid format
-            "2026-13-01T00:00:00Z",      // Invalid month
-            "2026-04-32T00:00:00Z",      // Invalid day
-            "2026-04-17T25:00:00Z",      // Invalid hour
-            "2026-04-17T12:60:00Z",      // Invalid minute
-            "2026-04-17T12:00:61Z",      // Invalid second
-            "2026-04-17T12:00:00",       // Missing timezone
-            "2026/04/17 12:00:00",       // Wrong separators
+            "",                     // Empty
+            "not-a-timestamp",      // Invalid format
+            "2026-13-01T00:00:00Z", // Invalid month
+            "2026-04-32T00:00:00Z", // Invalid day
+            "2026-04-17T25:00:00Z", // Invalid hour
+            "2026-04-17T12:60:00Z", // Invalid minute
+            "2026-04-17T12:00:61Z", // Invalid second
+            "2026-04-17T12:00:00",  // Missing timezone
+            "2026/04/17 12:00:00",  // Wrong separators
         ];
 
         for malformed_timestamp in &malformed_timestamps {
@@ -536,8 +545,11 @@ mod tests {
             });
 
             // Should either work (if timestamp is accepted) or fail gracefully
-            assert!(entry_result.is_ok(),
-                   "Malformed timestamp '{}' should not cause panic", malformed_timestamp);
+            assert!(
+                entry_result.is_ok(),
+                "Malformed timestamp '{}' should not cause panic",
+                malformed_timestamp
+            );
         }
     }
 
@@ -548,11 +560,11 @@ mod tests {
         // Test anomaly data with extreme patterns that could cause processing issues
         let extreme_anomaly_patterns = vec![
             // Massive anomaly description
-            vec!["x".repeat(10_000_000)],  // 10MB anomaly
-
+            vec!["x".repeat(10_000_000)], // 10MB anomaly
             // Many small anomalies
-            (0..100_000).map(|i| format!("anomaly_{:05}", i)).collect::<Vec<_>>(),
-
+            (0..100_000)
+                .map(|i| format!("anomaly_{:05}", i))
+                .collect::<Vec<_>>(),
             // Unicode edge cases in anomalies
             vec![
                 "anomaly\u{0000}with\u{0001}nulls".to_string(),
@@ -561,7 +573,6 @@ mod tests {
                 "anomaly🚀with🎯emojis🔥everywhere💻⚡🌟".to_string(),
                 "anomaly\r\n\t\x1B[31mwith\x1B[0m\x7Fcontrol".to_string(),
             ],
-
             // Injection attempts in anomaly descriptions
             vec![
                 "anomaly\"; DROP TABLE evidence; --".to_string(),
@@ -569,10 +580,11 @@ mod tests {
                 "anomaly../../../etc/passwd".to_string(),
                 "anomaly${IFS}injection${PATH}".to_string(),
             ],
-
             // Binary-like content
             vec![
-                (0u8..=255u8).map(|b| format!("{:02x}", b)).collect::<String>(),
+                (0u8..=255u8)
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>(),
             ],
         ];
 
@@ -581,7 +593,9 @@ mod tests {
 
             let entry_result = std::panic::catch_unwind(|| {
                 controller.enter_safe_mode(
-                    SafeModeEntryReason::AnomalyClassification(AnomalyClassification::CriticalIncident),
+                    SafeModeEntryReason::AnomalyClassification(
+                        AnomalyClassification::CriticalIncident,
+                    ),
                     "2026-04-17T12:00:00Z",
                     &format!("sha256:extreme_test_{}", test_idx),
                     anomalies.clone(),
@@ -591,12 +605,19 @@ mod tests {
             let entry_duration = start_time.elapsed();
 
             // Should complete in reasonable time despite extreme anomaly data
-            assert!(entry_duration < std::time::Duration::from_secs(30),
-                   "Extreme anomaly pattern {} took too long: {:?}", test_idx, entry_duration);
+            assert!(
+                entry_duration < std::time::Duration::from_secs(30),
+                "Extreme anomaly pattern {} took too long: {:?}",
+                test_idx,
+                entry_duration
+            );
 
             // Should not panic regardless of anomaly content
-            assert!(entry_result.is_ok(),
-                   "Extreme anomaly pattern {} should not cause panic", test_idx);
+            assert!(
+                entry_result.is_ok(),
+                "Extreme anomaly pattern {} should not cause panic",
+                test_idx
+            );
 
             if controller.is_active() {
                 // Safe mode operations should still work with extreme anomaly data
@@ -608,8 +629,11 @@ mod tests {
                     "extreme_test_operator",
                     "2026-04-17T12:05:00Z",
                 );
-                assert!(exit_result.is_ok() || exit_result.is_err(),
-                       "Exit should complete deterministically for pattern {}", test_idx);
+                assert!(
+                    exit_result.is_ok() || exit_result.is_err(),
+                    "Exit should complete deterministically for pattern {}",
+                    test_idx
+                );
 
                 // Reset if still active
                 if controller.is_active() {
@@ -633,26 +657,22 @@ mod tests {
             "a".repeat(64),
             "0123456789abcdef".repeat(4),
             "sha256:deadbeef".repeat(2),
-
             // Unicode edge cases
             "permit\u{0000}null",
             "permit\u{202E}rtl",
             "permit\u{FEFF}bom",
             "permit🚀emoji",
             "permit\r\n\tcontrol",
-
             // Injection attempts
             "permit'; DROP TABLE permits; --",
             "permit</permit><malicious>content</malicious>",
             "permit${PATH}injection",
             "permit../../../etc/passwd",
-
             // Length edge cases
-            "",                          // Empty
-            "x".repeat(100_000),        // Very long
-            "a",                        // Single char
-            "\x00",                     // Single null byte
-
+            "",                  // Empty
+            "x".repeat(100_000), // Very long
+            "a",                 // Single char
+            "\x00",              // Single null byte
             // Special characters
             "permit with spaces",
             "permit\twith\ttabs",
@@ -669,9 +689,12 @@ mod tests {
             let acquire_duration = acquire_start.elapsed();
 
             // Should complete quickly regardless of permit ID content
-            assert!(acquire_duration < std::time::Duration::from_millis(100),
-                   "Acquire with permit '{}' took too long: {:?}",
-                   permit_id.escape_debug(), acquire_duration);
+            assert!(
+                acquire_duration < std::time::Duration::from_millis(100),
+                "Acquire with permit '{}' took too long: {:?}",
+                permit_id.escape_debug(),
+                acquire_duration
+            );
 
             match acquire_result {
                 Ok(_) => {
@@ -680,9 +703,11 @@ mod tests {
 
                     // Release should work with same ID
                     let release_result = bulkhead.release(permit_id);
-                    assert!(release_result.is_ok() || release_result.is_err(),
-                           "Release should complete deterministically for permit '{}'",
-                           permit_id.escape_debug());
+                    assert!(
+                        release_result.is_ok() || release_result.is_err(),
+                        "Release should complete deterministically for permit '{}'",
+                        permit_id.escape_debug()
+                    );
                 }
                 Err(_) => {
                     // Some permit IDs might be rejected, which is acceptable
@@ -692,9 +717,9 @@ mod tests {
 
         // Test permit ID collision detection
         let collision_pairs = vec![
-            ("permit_a", "permit_a"),           // Exact match
+            ("permit_a", "permit_a"),             // Exact match
             ("permit\x00null", "permit\x00null"), // Null byte match
-            ("café", "cafe\u{0301}"),           // Unicode normalization
+            ("café", "cafe\u{0301}"),             // Unicode normalization
         ];
 
         for (id1, id2) in collision_pairs {
@@ -705,12 +730,17 @@ mod tests {
 
                 if id1 == id2 {
                     // Exact duplicates should be rejected
-                    assert!(duplicate_result.is_err(),
-                           "Duplicate permit ID '{}' should be rejected", id1.escape_debug());
+                    assert!(
+                        duplicate_result.is_err(),
+                        "Duplicate permit ID '{}' should be rejected",
+                        id1.escape_debug()
+                    );
                 } else {
                     // Different Unicode representations should be treated separately
-                    assert!(duplicate_result.is_ok() || duplicate_result.is_err(),
-                           "Unicode variants should be handled deterministically");
+                    assert!(
+                        duplicate_result.is_ok() || duplicate_result.is_err(),
+                        "Unicode variants should be handled deterministically"
+                    );
                 }
 
                 // Clean up
@@ -728,31 +758,28 @@ mod tests {
         let contradictory_configs = vec![
             // Extreme timeout values
             SafeModeConfig {
-                max_recovery_time_secs: u64::MAX,     // Infinite recovery time
+                max_recovery_time_secs: u64::MAX, // Infinite recovery time
                 require_operator_confirmation: true,
                 allowed_capabilities: vec![Capability::ReadOnlyOperations],
                 trust_verification_required: true,
             },
-
             // Minimal timeout
             SafeModeConfig {
-                max_recovery_time_secs: 0,           // Zero timeout
+                max_recovery_time_secs: 0, // Zero timeout
                 require_operator_confirmation: false,
-                allowed_capabilities: Vec::new(),    // No capabilities
+                allowed_capabilities: Vec::new(), // No capabilities
                 trust_verification_required: false,
             },
-
             // Contradictory settings
             SafeModeConfig {
                 max_recovery_time_secs: 1,           // Very short timeout
                 require_operator_confirmation: true, // But requires manual confirmation
                 allowed_capabilities: vec![
                     Capability::ReadOnlyOperations,
-                    Capability::EmergencyBypass,     // Contradictory capabilities
+                    Capability::EmergencyBypass, // Contradictory capabilities
                 ],
-                trust_verification_required: true,   // Strict verification with emergency bypass
+                trust_verification_required: true, // Strict verification with emergency bypass
             },
-
             // Maximum capabilities
             SafeModeConfig {
                 max_recovery_time_secs: 3600,
@@ -763,7 +790,7 @@ mod tests {
                     Capability::EmergencyBypass,
                     Capability::DiagnosticAccess,
                 ],
-                trust_verification_required: false,  // Permissive verification with all capabilities
+                trust_verification_required: false, // Permissive verification with all capabilities
             },
         ];
 
@@ -772,7 +799,10 @@ mod tests {
 
             // Should handle contradictory configs without crashing
             assert_eq!(controller.config(), config);
-            assert!(!controller.is_active(), "Should start inactive regardless of config");
+            assert!(
+                !controller.is_active(),
+                "Should start inactive regardless of config"
+            );
 
             // Test safe mode operations with contradictory config
             let entry_result = std::panic::catch_unwind(|| {
@@ -784,22 +814,28 @@ mod tests {
                 );
             });
 
-            assert!(entry_result.is_ok(),
-                   "Contradictory config {} should not cause panic on entry", config_idx);
+            assert!(
+                entry_result.is_ok(),
+                "Contradictory config {} should not cause panic on entry",
+                config_idx
+            );
 
             if controller.is_active() {
                 // Test capability checks with contradictory settings
                 for capability in &config.allowed_capabilities {
                     let has_capability = controller.has_capability(capability);
                     // Should return consistent boolean regardless of config contradictions
-                    assert!(has_capability || !has_capability,
-                           "Capability check should be deterministic for config {}", config_idx);
+                    assert!(
+                        has_capability || !has_capability,
+                        "Capability check should be deterministic for config {}",
+                        config_idx
+                    );
                 }
 
                 // Exit operations should handle contradictory settings
                 let exit_verification = ExitVerification {
                     trust_state_consistent: !config.trust_verification_required, // Opposite of requirement
-                    operator_confirmed: !config.require_operator_confirmation,   // Opposite of requirement
+                    operator_confirmed: !config.require_operator_confirmation, // Opposite of requirement
                     ..passing_exit_verification()
                 };
 
@@ -810,24 +846,33 @@ mod tests {
                 );
 
                 // Should handle verification appropriately based on config
-                match (config.trust_verification_required, config.require_operator_confirmation) {
+                match (
+                    config.trust_verification_required,
+                    config.require_operator_confirmation,
+                ) {
                     (true, true) => {
                         // Both required but verification fails both - should fail
-                        assert!(exit_result.is_err(),
-                               "Config {} with strict requirements should fail exit with bad verification",
-                               config_idx);
+                        assert!(
+                            exit_result.is_err(),
+                            "Config {} with strict requirements should fail exit with bad verification",
+                            config_idx
+                        );
                     }
                     (false, false) => {
                         // Neither required - should succeed
-                        assert!(exit_result.is_ok() || exit_result.is_err(),
-                               "Config {} should handle permissive exit deterministically",
-                               config_idx);
+                        assert!(
+                            exit_result.is_ok() || exit_result.is_err(),
+                            "Config {} should handle permissive exit deterministically",
+                            config_idx
+                        );
                     }
                     _ => {
                         // Mixed requirements - behavior should be deterministic
-                        assert!(exit_result.is_ok() || exit_result.is_err(),
-                               "Config {} should handle mixed requirements deterministically",
-                               config_idx);
+                        assert!(
+                            exit_result.is_ok() || exit_result.is_err(),
+                            "Config {} should handle mixed requirements deterministically",
+                            config_idx
+                        );
                     }
                 }
             }
@@ -846,7 +891,7 @@ mod tests {
         }
 
         let bulkhead = Arc::new(Mutex::new(
-            GlobalBulkhead::new(1000, 100).expect("concurrent test bulkhead")
+            GlobalBulkhead::new(1000, 100).expect("concurrent test bulkhead"),
         ));
         let results = Arc::new(Mutex::new(Vec::new()));
 
@@ -874,9 +919,13 @@ mod tests {
                     let acquire_duration = acquire_start.elapsed();
 
                     // Should complete quickly despite memory pressure
-                    assert!(acquire_duration < std::time::Duration::from_millis(50),
-                           "Thread {} operation {} acquire took too long: {:?}",
-                           thread_id, operation, acquire_duration);
+                    assert!(
+                        acquire_duration < std::time::Duration::from_millis(50),
+                        "Thread {} operation {} acquire took too long: {:?}",
+                        thread_id,
+                        operation,
+                        acquire_duration
+                    );
 
                     match acquire_result {
                         Ok(_) => {
@@ -891,9 +940,13 @@ mod tests {
                             };
                             let release_duration = release_start.elapsed();
 
-                            assert!(release_duration < std::time::Duration::from_millis(50),
-                                   "Thread {} operation {} release took too long: {:?}",
-                                   thread_id, operation, release_duration);
+                            assert!(
+                                release_duration < std::time::Duration::from_millis(50),
+                                "Thread {} operation {} release took too long: {:?}",
+                                thread_id,
+                                operation,
+                                release_duration
+                            );
 
                             thread_results.push((thread_id, operation, "success"));
                         }
@@ -923,7 +976,8 @@ mod tests {
         assert_eq!(final_results.len(), thread_count * operations_per_thread);
 
         // Count successes
-        let success_count = final_results.iter()
+        let success_count = final_results
+            .iter()
             .filter(|(_, _, status)| *status == "success")
             .count();
 
@@ -933,18 +987,28 @@ mod tests {
             let rate = success_count as f64 / final_results.len() as f64;
             if rate.is_finite() { rate } else { 0.0 }
         };
-        assert!(success_rate > 0.8,
-               "Success rate too low under memory pressure: {:.2}%", success_rate * 100.0);
+        assert!(
+            success_rate > 0.8,
+            "Success rate too low under memory pressure: {:.2}%",
+            success_rate * 100.0
+        );
 
         // Final bulkhead state should be consistent
         let final_bulkhead = bulkhead.lock().unwrap();
-        assert_eq!(final_bulkhead.in_flight(), 0, "All permits should be released");
+        assert_eq!(
+            final_bulkhead.in_flight(),
+            0,
+            "All permits should be released"
+        );
 
         // Memory cleanup should not affect bulkhead operations
         drop(memory_pressure);
 
         let post_cleanup_result = final_bulkhead.try_acquire("post_cleanup_permit");
-        assert!(post_cleanup_result.is_ok(), "Should work after memory cleanup");
+        assert!(
+            post_cleanup_result.is_ok(),
+            "Should work after memory cleanup"
+        );
     }
 
     #[test]
@@ -959,22 +1023,20 @@ mod tests {
                 verification_timestamp: "1970-01-01T00:00:00Z".to_string(), // Epoch start
                 additional_context: (0..100_000).map(|i| format!("context_{}", i)).collect(), // Massive context
             },
-
             TrustVerificationInput {
-                evidence_hash: "\x00".repeat(64),     // Null byte hash
+                evidence_hash: "\x00".repeat(64),       // Null byte hash
                 operator_identity: "x".repeat(100_000), // Massive identity
                 verification_timestamp: "9999-12-31T23:59:59Z".to_string(), // Far future
                 additional_context: vec!["".to_string(); 50_000], // Many empty contexts
             },
-
             TrustVerificationInput {
-                evidence_hash: "🚀".repeat(16),       // Unicode hash
+                evidence_hash: "🚀".repeat(16), // Unicode hash
                 operator_identity: "operator\u{0000}null\r\n\tcontrol".to_string(), // Control chars
                 verification_timestamp: "invalid-timestamp".to_string(), // Invalid timestamp
                 additional_context: vec![
                     "context\"; DROP TABLE trust; --".to_string(), // SQL injection
                     "context</context><script>alert('xss')</script>".to_string(), // XSS
-                    "context../../../etc/passwd".to_string(), // Path traversal
+                    "context../../../etc/passwd".to_string(),      // Path traversal
                 ],
             },
         ];
@@ -989,22 +1051,31 @@ mod tests {
 
             // Test trust verification processing with extreme inputs
             let verification_start = std::time::Instant::now();
-            let verification_result = std::panic::catch_unwind(|| {
-                controller.verify_trust_state(trust_input)
-            });
+            let verification_result =
+                std::panic::catch_unwind(|| controller.verify_trust_state(trust_input));
             let verification_duration = verification_start.elapsed();
 
             // Should complete without panic and in reasonable time
-            assert!(verification_result.is_ok(),
-                   "Trust verification {} should not panic", test_idx);
+            assert!(
+                verification_result.is_ok(),
+                "Trust verification {} should not panic",
+                test_idx
+            );
 
-            assert!(verification_duration < std::time::Duration::from_secs(30),
-                   "Trust verification {} took too long: {:?}", test_idx, verification_duration);
+            assert!(
+                verification_duration < std::time::Duration::from_secs(30),
+                "Trust verification {} took too long: {:?}",
+                test_idx,
+                verification_duration
+            );
 
             // Trust verification should handle extreme values gracefully
             if let Ok(trust_result) = verification_result {
-                assert!(trust_result.is_ok() || trust_result.is_err(),
-                       "Trust verification {} should return deterministic result", test_idx);
+                assert!(
+                    trust_result.is_ok() || trust_result.is_err(),
+                    "Trust verification {} should return deterministic result",
+                    test_idx
+                );
             }
 
             // Exit safe mode for next test
@@ -1022,12 +1093,10 @@ mod tests {
 
         // Test operation flags with various bitwise patterns that might cause issues
         let extreme_flag_patterns = vec![
-            OperationFlags::empty(),              // No flags
-            OperationFlags::all(),                // All flags
-            OperationFlags::MAINTENANCE_MODE |
-            OperationFlags::EMERGENCY_ACCESS,     // Contradictory flags
-            OperationFlags::READ_ONLY |
-            OperationFlags::EMERGENCY_ACCESS,     // Read-only with emergency
+            OperationFlags::empty(), // No flags
+            OperationFlags::all(),   // All flags
+            OperationFlags::MAINTENANCE_MODE | OperationFlags::EMERGENCY_ACCESS, // Contradictory flags
+            OperationFlags::READ_ONLY | OperationFlags::EMERGENCY_ACCESS, // Read-only with emergency
         ];
 
         for (pattern_idx, flags) in extreme_flag_patterns.iter().enumerate() {
@@ -1048,29 +1117,49 @@ mod tests {
             let flag_check_duration = flag_check_start.elapsed();
 
             // Should complete flag checks quickly
-            assert!(flag_check_duration < std::time::Duration::from_millis(100),
-                   "Flag operations {} took too long: {:?}", pattern_idx, flag_check_duration);
+            assert!(
+                flag_check_duration < std::time::Duration::from_millis(100),
+                "Flag operations {} took too long: {:?}",
+                pattern_idx,
+                flag_check_duration
+            );
 
             // All operations should return deterministic boolean results
             for (op_idx, result) in flag_operations.iter().enumerate() {
-                assert!(result.is_ok() || result.is_err(),
-                       "Flag operation {} result {} should be deterministic", pattern_idx, op_idx);
+                assert!(
+                    result.is_ok() || result.is_err(),
+                    "Flag operation {} result {} should be deterministic",
+                    pattern_idx,
+                    op_idx
+                );
             }
 
             // Test flag serialization/representation
             let flag_debug = format!("{:?}", flags);
-            assert!(!flag_debug.is_empty(), "Flag debug representation should not be empty");
+            assert!(
+                !flag_debug.is_empty(),
+                "Flag debug representation should not be empty"
+            );
 
             let flag_bits = flags.bits();
-            assert!(flag_bits == 0 || flag_bits > 0, "Flag bits should be deterministic");
+            assert!(
+                flag_bits == 0 || flag_bits > 0,
+                "Flag bits should be deterministic"
+            );
 
             // Test bitwise operations don't cause overflow
             let combined_flags = *flags | OperationFlags::all();
             let intersect_flags = *flags & OperationFlags::all();
             let xor_flags = *flags ^ OperationFlags::all();
 
-            assert!(combined_flags.bits() >= flags.bits(), "Union should not reduce flags");
-            assert!(intersect_flags.bits() <= flags.bits(), "Intersection should not add flags");
+            assert!(
+                combined_flags.bits() >= flags.bits(),
+                "Union should not reduce flags"
+            );
+            assert!(
+                intersect_flags.bits() <= flags.bits(),
+                "Intersection should not add flags"
+            );
 
             // Exit for next test
             let _ = controller.exit_safe_mode(

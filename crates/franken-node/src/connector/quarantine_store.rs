@@ -353,7 +353,12 @@ mod tests {
         let mut store = QuarantineStore::new(config()).unwrap();
         for i in 0..5 {
             store
-                .ingest(&format!("obj{i}"), 10, "peer1", 1000_u64.saturating_add(i as u64))
+                .ingest(
+                    &format!("obj{i}"),
+                    10,
+                    "peer1",
+                    1000_u64.saturating_add(i as u64),
+                )
                 .unwrap();
         }
         // 6th object triggers quota eviction
@@ -529,7 +534,12 @@ mod tests {
         let mut store = QuarantineStore::new(config()).unwrap();
         for i in 0..5 {
             store
-                .ingest(&format!("obj{i}"), 10, "peer1", 1000_u64.saturating_add(i as u64))
+                .ingest(
+                    &format!("obj{i}"),
+                    10,
+                    "peer1",
+                    1000_u64.saturating_add(i as u64),
+                )
                 .unwrap();
         }
 
@@ -903,7 +913,9 @@ mod tests {
     fn quota_rejection_when_empty_does_not_create_entry_or_eviction() {
         let mut store = QuarantineStore::new(config()).unwrap();
 
-        let err = store.ingest("too-big-empty", 501, "peer1", 1000).unwrap_err();
+        let err = store
+            .ingest("too-big-empty", 501, "peer1", 1000)
+            .unwrap_err();
 
         assert!(matches!(
             err,

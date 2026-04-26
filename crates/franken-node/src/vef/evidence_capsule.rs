@@ -814,8 +814,14 @@ mod tests {
         let result = capsule.verify_all();
 
         // Verify counters don't overflow (should use saturating arithmetic)
-        assert!(result.passed <= result.checked, "Passed count should not exceed checked count");
-        assert!(result.checked <= usize::MAX, "Checked count should not overflow");
+        assert!(
+            result.passed <= result.checked,
+            "Passed count should not exceed checked count"
+        );
+        assert!(
+            result.checked <= usize::MAX,
+            "Checked count should not overflow"
+        );
 
         // Test boundary condition with maximum evidence count
         let max_evidence_count = usize::MAX;
@@ -826,7 +832,11 @@ mod tests {
 
         // Demonstrate safe arithmetic (hardened)
         let safe_increment = max_evidence_count.saturating_add(1);
-        assert_eq!(safe_increment, usize::MAX, "Saturating add stays at maximum");
+        assert_eq!(
+            safe_increment,
+            usize::MAX,
+            "Saturating add stays at maximum"
+        );
 
         // In production: passed = passed.saturating_add(1) ✓
         // NOT: passed += 1 ✗ (can overflow)
@@ -875,25 +885,44 @@ mod tests {
         let identical_secure_equal = constant_time::ct_eq_bytes(&hash1_bytes, &hash3_bytes);
 
         // Test both different and identical hash comparisons
-        assert!(!secure_equal, "Different evidence should have different hashes");
-        assert!(identical_secure_equal, "Identical evidence should have matching hashes");
-        assert_ne!(hash1_bytes.as_slice(), hash2_bytes.as_slice(), "Different evidence should have different hashes");
+        assert!(
+            !secure_equal,
+            "Different evidence should have different hashes"
+        );
+        assert!(
+            identical_secure_equal,
+            "Identical evidence should have matching hashes"
+        );
+        assert_ne!(
+            hash1_bytes.as_slice(),
+            hash2_bytes.as_slice(),
+            "Different evidence should have different hashes"
+        );
 
         // Regression test: timing attack resistance for hash comparisons
         // Test identical hashes
         let hash_a = [0x42u8; 32];
         let hash_b = [0x42u8; 32];
-        assert!(constant_time::ct_eq_bytes(&hash_a, &hash_b), "Identical hashes should be equal");
+        assert!(
+            constant_time::ct_eq_bytes(&hash_a, &hash_b),
+            "Identical hashes should be equal"
+        );
 
         // Test first-byte difference (timing must be constant regardless of difference position)
         let mut hash_c = [0x42u8; 32];
         hash_c[0] = 0x43; // Different first byte
-        assert!(!constant_time::ct_eq_bytes(&hash_a, &hash_c), "Hashes differing in first byte should not be equal");
+        assert!(
+            !constant_time::ct_eq_bytes(&hash_a, &hash_c),
+            "Hashes differing in first byte should not be equal"
+        );
 
         // Test last-byte difference (timing must be constant regardless of difference position)
         let mut hash_d = [0x42u8; 32];
         hash_d[31] = 0x43; // Different last byte
-        assert!(!constant_time::ct_eq_bytes(&hash_a, &hash_d), "Hashes differing in last byte should not be equal");
+        assert!(
+            !constant_time::ct_eq_bytes(&hash_a, &hash_d),
+            "Hashes differing in last byte should not be equal"
+        );
 
         // Test with very similar hashes (high timing attack potential)
         let mut similar_evidence = evidence1.clone();
@@ -901,12 +930,17 @@ mod tests {
 
         let mut similar_hasher = Sha256::new();
         similar_hasher.update(b"evidence_v1:");
-        let similar_evidence_json = serde_json::to_string(&similar_evidence).expect("similar_evidence serialization");
+        let similar_evidence_json =
+            serde_json::to_string(&similar_evidence).expect("similar_evidence serialization");
         similar_hasher.update(similar_evidence_json.as_bytes());
         let similar_hash_bytes = similar_hasher.finalize();
 
         // Even tiny differences should be detectable without timing leaks
-        assert_ne!(hash1_bytes.as_slice(), similar_hash_bytes.as_slice(), "Tiny differences should be detected");
+        assert_ne!(
+            hash1_bytes.as_slice(),
+            similar_hash_bytes.as_slice(),
+            "Tiny differences should be detected"
+        );
 
         // Production code should use: constant_time::ct_eq_bytes(&hash1_bytes, &hash2_bytes) ✓
         // NOT: hash1_bytes == hash2_bytes ✗ (timing attack vulnerable)
@@ -917,13 +951,16 @@ mod tests {
         // Test that expiry checks use >= instead of > for fail-closed behavior
         // Using > allows exactly-expired items to pass through (security bypass)
         let current_epoch = 2000;
-        let expired_epoch = 2000;     // Exactly at boundary
-        let future_epoch = 2001;      // Clearly in future
-        let past_epoch = 1999;        // Clearly in past
+        let expired_epoch = 2000; // Exactly at boundary
+        let future_epoch = 2001; // Clearly in future
+        let past_epoch = 1999; // Clearly in past
 
         let expiry_test_cases = [
             (past_epoch, "past epoch should be expired"),
-            (expired_epoch, "boundary epoch should be expired (fail-closed)"),
+            (
+                expired_epoch,
+                "boundary epoch should be expired (fail-closed)",
+            ),
             (future_epoch, "future epoch should not be expired"),
         ];
 
@@ -934,7 +971,7 @@ mod tests {
                 proof_id: format!("proof-{}", test_epoch),
                 proof_type: "expiry-test".into(),
                 window_start: 1000,
-                window_end: *test_epoch,  // Using as expiry time
+                window_end: *test_epoch, // Using as expiry time
                 verified: true,
                 policy_constraints: vec!["test".into()],
             };
@@ -947,17 +984,32 @@ mod tests {
             match (*test_epoch, is_expired_safe, is_expired_vulnerable) {
                 (epoch, true, true) if epoch < current_epoch => {
                     // Past epoch: both methods correctly identify as expired
-                    assert!(is_expired_safe && is_expired_vulnerable, "Past should be expired: {}", description);
-                },
+                    assert!(
+                        is_expired_safe && is_expired_vulnerable,
+                        "Past should be expired: {}",
+                        description
+                    );
+                }
                 (epoch, true, false) if epoch == current_epoch => {
                     // Boundary epoch: safe method correctly identifies as expired, vulnerable doesn't
-                    assert!(is_expired_safe, "Boundary should be expired (fail-closed): {}", description);
-                    assert!(!is_expired_vulnerable, "Vulnerable method incorrectly allows boundary case");
-                },
+                    assert!(
+                        is_expired_safe,
+                        "Boundary should be expired (fail-closed): {}",
+                        description
+                    );
+                    assert!(
+                        !is_expired_vulnerable,
+                        "Vulnerable method incorrectly allows boundary case"
+                    );
+                }
                 (epoch, false, false) if epoch > current_epoch => {
                     // Future epoch: both methods correctly identify as not expired
-                    assert!(!is_expired_safe && !is_expired_vulnerable, "Future should not be expired: {}", description);
-                },
+                    assert!(
+                        !is_expired_safe && !is_expired_vulnerable,
+                        "Future should not be expired: {}",
+                        description
+                    );
+                }
                 _ => {
                     assert!(false, "Unexpected expiry state for: {}", description);
                 }
@@ -969,7 +1021,10 @@ mod tests {
 
         // Boundary timestamp should be considered expired when checked at same time (fail-closed)
         let is_capsule_expired = current_epoch >= boundary_capsule.created_at_epoch;
-        assert!(is_capsule_expired, "Boundary capsule should be considered expired (fail-closed)");
+        assert!(
+            is_capsule_expired,
+            "Boundary capsule should be considered expired (fail-closed)"
+        );
 
         // Production code should use: now >= expires_at ✓ (fail-closed)
         // NOT: now > expires_at ✗ (allows expired items through at boundary)
@@ -1000,24 +1055,39 @@ mod tests {
         let evidence_count = capsule.evidence.len();
 
         // Safe conversion should succeed for small counts
-        let safe_count = u32::try_from(evidence_count)
-            .expect("Small count should convert safely");
-        assert_eq!(safe_count as usize, evidence_count, "Safe conversion should be accurate");
+        let safe_count = u32::try_from(evidence_count).expect("Small count should convert safely");
+        assert_eq!(
+            safe_count as usize, evidence_count,
+            "Safe conversion should be accurate"
+        );
 
         // Test with collection that would overflow u32 (simulate large size)
         let large_size: usize = (u32::MAX as usize) + 1;
         let overflow_result = u32::try_from(large_size);
-        assert!(overflow_result.is_err(), "Large size should fail safe conversion");
+        assert!(
+            overflow_result.is_err(),
+            "Large size should fail safe conversion"
+        );
 
         // Demonstrate the problem with unsafe casting
         let unsafe_cast = large_size as u32;
-        assert_eq!(unsafe_cast, 0, "Unsafe cast wraps around to 0, losing high bits");
+        assert_eq!(
+            unsafe_cast, 0,
+            "Unsafe cast wraps around to 0, losing high bits"
+        );
 
         // Test boundary at u32::MAX
         let max_u32_size = u32::MAX as usize;
         let max_conversion = u32::try_from(max_u32_size);
-        assert!(max_conversion.is_ok(), "u32::MAX should convert successfully");
-        assert_eq!(max_conversion.unwrap(), u32::MAX, "Max conversion should be accurate");
+        assert!(
+            max_conversion.is_ok(),
+            "u32::MAX should convert successfully"
+        );
+        assert_eq!(
+            max_conversion.unwrap(),
+            u32::MAX,
+            "Max conversion should be accurate"
+        );
 
         // Test metadata length casting
         let mut metadata_test = BTreeMap::new();
@@ -1037,15 +1107,15 @@ mod tests {
     fn negative_hash_operations_must_include_domain_separators() {
         // Test that hash operations include domain separators to prevent collision attacks
         // Without domain separation, different data types can produce identical hashes
-        use sha2::{Digest, Sha256};
         use crate::security::constant_time;
+        use sha2::{Digest, Sha256};
 
         let evidence = test_evidence();
         let capsule = sealed_capsule();
 
         // Create hash with domain separator (proper approach)
         let mut hasher_with_domain = Sha256::new();
-        hasher_with_domain.update(b"vef_evidence_v1:");  // Domain separator
+        hasher_with_domain.update(b"vef_evidence_v1:"); // Domain separator
         let evidence_json = serde_json::to_string(&evidence).expect("evidence serialization");
         hasher_with_domain.update(evidence_json.as_bytes());
         let evidence_hash_with_domain = hasher_with_domain.finalize();
@@ -1056,19 +1126,25 @@ mod tests {
         let evidence_hash_without_domain = hasher_without_domain.finalize();
 
         // Domain separator should change the hash value
-        assert_ne!(evidence_hash_with_domain.as_slice(), evidence_hash_without_domain.as_slice(),
-                  "Domain separator should change hash value");
+        assert_ne!(
+            evidence_hash_with_domain.as_slice(),
+            evidence_hash_without_domain.as_slice(),
+            "Domain separator should change hash value"
+        );
 
         // Test different domain separators for different types
         let mut capsule_hasher = Sha256::new();
-        capsule_hasher.update(b"evidence_capsule_v1:");  // Different domain
+        capsule_hasher.update(b"evidence_capsule_v1:"); // Different domain
         let capsule_json = serde_json::to_string(&capsule).expect("capsule serialization");
         capsule_hasher.update(capsule_json.as_bytes());
         let capsule_hash = capsule_hasher.finalize();
 
         // Different types with different domains should not collide
-        assert_ne!(evidence_hash_with_domain.as_slice(), capsule_hash.as_slice(),
-                  "Different types should have different hash domains");
+        assert_ne!(
+            evidence_hash_with_domain.as_slice(),
+            capsule_hash.as_slice(),
+            "Different types should have different hash domains"
+        );
 
         // Test length-prefixed domain separation (even better)
         let mut length_prefixed_hasher = Sha256::new();
@@ -1079,8 +1155,11 @@ mod tests {
         let length_prefixed_hash = length_prefixed_hasher.finalize();
 
         // Length-prefixed should differ from simple prefix
-        assert_ne!(length_prefixed_hash.as_slice(), evidence_hash_with_domain.as_slice(),
-                  "Length-prefixed domain separation should be distinct");
+        assert_ne!(
+            length_prefixed_hash.as_slice(),
+            evidence_hash_with_domain.as_slice(),
+            "Length-prefixed domain separation should be distinct"
+        );
 
         // Test schema version as domain separator
         let mut schema_domain_hasher = Sha256::new();
@@ -1089,8 +1168,11 @@ mod tests {
         let schema_domain_hash = schema_domain_hasher.finalize();
 
         // Schema version domain should be different
-        assert_ne!(schema_domain_hash.as_slice(), evidence_hash_with_domain.as_slice(),
-                  "Schema version domain should create distinct hash");
+        assert_ne!(
+            schema_domain_hash.as_slice(),
+            evidence_hash_with_domain.as_slice(),
+            "Schema version domain should create distinct hash"
+        );
 
         // Production code should use domain separators like:
         // hasher.update(b"vef_evidence_v1:");  // Domain separator ✓
@@ -1124,13 +1206,17 @@ mod tests {
                 proof_id: format!("proof-{}", i),
                 proof_type: "comprehensive".into(),
                 window_start: current_time - 1000,
-                window_end: current_time + i,  // Some expired, some not
-                verified: i % 3 == 0,  // Mix of verified/unverified
+                window_end: current_time + i, // Some expired, some not
+                verified: i % 3 == 0,         // Mix of verified/unverified
                 policy_constraints: (0..i).map(|j| format!("constraint-{}", j)).collect(),
             };
 
             let add_result = capsule.add_evidence(evidence);
-            assert!(add_result.is_ok(), "Should add evidence successfully for index {}", i);
+            assert!(
+                add_result.is_ok(),
+                "Should add evidence successfully for index {}",
+                i
+            );
         }
 
         // Test safe length conversion
@@ -1146,35 +1232,61 @@ mod tests {
         // Test verification with proper counter arithmetic (uses saturating_add internally)
         let verification = capsule.verify_all();
         assert!(verification.checked > 0, "Should check some evidence");
-        assert!(verification.passed <= verification.checked, "Passed should not exceed checked");
+        assert!(
+            verification.passed <= verification.checked,
+            "Passed should not exceed checked"
+        );
 
         // Test expiry semantics in evidence windows
-        let expired_count = capsule.evidence.iter()
-            .filter(|ev| current_time >= ev.window_end)  // Fail-closed expiry check
+        let expired_count = capsule
+            .evidence
+            .iter()
+            .filter(|ev| current_time >= ev.window_end) // Fail-closed expiry check
             .count();
-        let vulnerable_expired_count = capsule.evidence.iter()
-            .filter(|ev| current_time > ev.window_end)   // Vulnerable expiry check
+        let vulnerable_expired_count = capsule
+            .evidence
+            .iter()
+            .filter(|ev| current_time > ev.window_end) // Vulnerable expiry check
             .count();
 
         // Fail-closed should find more expired items (includes boundary cases)
-        assert!(expired_count >= vulnerable_expired_count,
-               "Fail-closed expiry should find at least as many expired items");
+        assert!(
+            expired_count >= vulnerable_expired_count,
+            "Fail-closed expiry should find at least as many expired items"
+        );
 
         // Test export with hash-based verification simulation
         let export_result = registry.export_capsule(&capsule, "test-endpoint");
         assert!(export_result.is_ok(), "Should export successfully");
 
         let export_manifest = export_result.unwrap();
-        assert_eq!(export_manifest.capsule_id, capsule.capsule_id, "Capsule ID should match");
-        assert_eq!(export_manifest.evidence_count, capsule.evidence_count(), "Evidence count should match");
+        assert_eq!(
+            export_manifest.capsule_id, capsule.capsule_id,
+            "Capsule ID should match"
+        );
+        assert_eq!(
+            export_manifest.evidence_count,
+            capsule.evidence_count(),
+            "Evidence count should match"
+        );
 
         // Verify audit log uses bounded capacity (no overflow)
         let audit_count_before = registry.audit_log().len();
-        let audit_count_safe = std::convert::TryFrom::try_from(audit_count_before).unwrap_or(u32::MAX);
-        assert!(audit_count_safe <= MAX_AUDIT_LOG_ENTRIES as u32, "Audit log should be bounded");
+        let audit_count_safe =
+            std::convert::TryFrom::try_from(audit_count_before).unwrap_or(u32::MAX);
+        assert!(
+            audit_count_safe <= MAX_AUDIT_LOG_ENTRIES as u32,
+            "Audit log should be bounded"
+        );
 
         // All hardening patterns should work together without conflicts
-        assert!(verification.valid || !verification.valid, "Verification should complete");
-        assert!(evidence_count == capsule.evidence_count(), "Length calculations should be consistent");
+        assert!(
+            verification.valid || !verification.valid,
+            "Verification should complete"
+        );
+        assert!(
+            evidence_count == capsule.evidence_count(),
+            "Length calculations should be consistent"
+        );
     }
 }

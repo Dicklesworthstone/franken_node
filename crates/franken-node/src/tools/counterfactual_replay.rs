@@ -878,8 +878,9 @@ pub fn error_from_bundle(err: ReplayBundleError) -> CounterfactualReplayError {
 mod tests {
     use super::*;
     use crate::tools::replay_bundle::{
-        RawEvent, generate_replay_bundle, sign_replay_bundle, ReplayBundleSigningMaterial,
-        write_bundle_to_path_with_trusted_key, read_bundle_from_path_with_trusted_key,
+        RawEvent, ReplayBundleSigningMaterial, generate_replay_bundle,
+        read_bundle_from_path_with_trusted_key, sign_replay_bundle,
+        write_bundle_to_path_with_trusted_key,
     };
     use tempfile::TempDir;
 
@@ -936,9 +937,11 @@ mod tests {
         let bundle_path = workspace.path().join("counterfactual_replay_bundle.json");
 
         // Derive trusted key ID for file operations
-        let trusted_key_id = frankenengine_node::supply_chain::artifact_signing::KeyId::from_verifying_key(
-            &signing_key.verifying_key()
-        ).to_string();
+        let trusted_key_id =
+            frankenengine_node::supply_chain::artifact_signing::KeyId::from_verifying_key(
+                &signing_key.verifying_key(),
+            )
+            .to_string();
 
         // Write bundle to real file system
         write_bundle_to_path_with_trusted_key(&bundle, &bundle_path, &trusted_key_id)

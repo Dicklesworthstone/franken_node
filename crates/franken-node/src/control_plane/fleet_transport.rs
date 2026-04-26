@@ -234,7 +234,11 @@ pub struct FleetSharedState {
 
 impl FleetSharedState {
     #[must_use]
-    pub fn matching_nodes<'a>(&'a self, node_id: &str, zone_id: Option<&str>) -> Vec<&'a NodeStatus> {
+    pub fn matching_nodes<'a>(
+        &'a self,
+        node_id: &str,
+        zone_id: Option<&str>,
+    ) -> Vec<&'a NodeStatus> {
         self.nodes
             .iter()
             .filter(|node| {

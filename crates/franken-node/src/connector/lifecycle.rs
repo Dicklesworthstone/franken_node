@@ -630,8 +630,7 @@ mod tests {
 
     #[test]
     fn negative_serde_transition_entry_rejects_missing_target_state() {
-        let err =
-            serde_json::from_str::<TransitionEntry>(r#"{"from":"discovered","legal":true}"#);
+        let err = serde_json::from_str::<TransitionEntry>(r#"{"from":"discovered","legal":true}"#);
 
         assert!(err.is_err());
     }

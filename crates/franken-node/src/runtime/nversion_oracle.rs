@@ -2774,10 +2774,10 @@ mod tests {
                 // Allow reasonable variance but flag excessive timing differences
                 assert!(
                     timing_ratio < 5.0,
-                "Suspicious timing variance in L1 linkage verification: valid={:?}, invalid={:?}, ratio={:.2}",
-                avg_valid,
-                avg_invalid,
-                timing_ratio
+                    "Suspicious timing variance in L1 linkage verification: valid={:?}, invalid={:?}, ratio={:.2}",
+                    avg_valid,
+                    avg_invalid,
+                    timing_ratio
                 );
             }
         }

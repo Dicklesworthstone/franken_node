@@ -235,7 +235,11 @@ impl GaussianSuffStats {
             f64::MAX
         } else {
             let result = self.n + 1.0;
-            if !result.is_finite() { f64::MAX } else { result }
+            if !result.is_finite() {
+                f64::MAX
+            } else {
+                result
+            }
         };
         let delta = x - self.mean;
         self.mean = self.mean + (delta / self.n);
@@ -427,7 +431,11 @@ impl PoissonSuffStats {
             f64::MAX
         } else {
             let result = self.n + 1.0;
-            if !result.is_finite() { f64::MAX } else { result }
+            if !result.is_finite() {
+                f64::MAX
+            } else {
+                result
+            }
         };
         // Hardening: use safe addition with overflow detection
         let old_sum = self.sum;
@@ -543,7 +551,11 @@ impl CategoricalSuffStats {
                 f64::MAX
             } else {
                 let result = old_count + 1.0;
-                if !result.is_finite() { f64::MAX } else { result }
+                if !result.is_finite() {
+                    f64::MAX
+                } else {
+                    result
+                }
             };
         }
     }

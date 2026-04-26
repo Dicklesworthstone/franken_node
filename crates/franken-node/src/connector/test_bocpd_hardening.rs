@@ -535,7 +535,11 @@ mod bocpd_hardening_regression_tests {
     fn negative_correlator_drops_prior_shift_outside_window() {
         let mut correlator = MultiStreamCorrelator::new(60);
 
-        assert!(correlator.record_shift(valid_shift("stream-a", 100)).is_empty());
+        assert!(
+            correlator
+                .record_shift(valid_shift("stream-a", 100))
+                .is_empty()
+        );
         let correlated = correlator.record_shift(valid_shift("stream-b", 161));
 
         assert!(correlated.is_empty());

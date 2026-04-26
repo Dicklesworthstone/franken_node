@@ -388,8 +388,12 @@ impl ZoneSegmentationEngine {
         // Convention: dual-owner proof contains both zone IDs separated by ":".
         // Use segment-exact matching to prevent substring false positives.
         let proof_segments: Vec<&str> = req.authorization_proof.split(':').collect();
-        if !proof_segments.iter().any(|s| constant_time::ct_eq(s, &req.source_zone))
-            || !proof_segments.iter().any(|s| constant_time::ct_eq(s, &req.target_zone))
+        if !proof_segments
+            .iter()
+            .any(|s| constant_time::ct_eq(s, &req.source_zone))
+            || !proof_segments
+                .iter()
+                .any(|s| constant_time::ct_eq(s, &req.target_zone))
         {
             return Err(SegmentationError::BridgeAuthIncomplete {
                 detail: format!(
@@ -1335,7 +1339,9 @@ mod tests {
     fn test_get_tenant_after_zone_deletion_returns_not_bound() {
         let mut engine = make_engine();
         engine.register_zone(make_policy("zone-a")).unwrap();
-        engine.bind_tenant(make_binding("team-alpha", "zone-a")).unwrap();
+        engine
+            .bind_tenant(make_binding("team-alpha", "zone-a"))
+            .unwrap();
         engine.delete_zone("zone-a", Some("fresh-proof")).unwrap();
 
         let err = engine.get_tenant("team-alpha").unwrap_err();

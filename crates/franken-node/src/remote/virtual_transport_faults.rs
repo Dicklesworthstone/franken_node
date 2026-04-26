@@ -905,18 +905,24 @@ mod tests {
         let config = chaos();
         let result = harness.run_campaign("chaos", &config, 100, "t1");
         assert_eq!(harness.fault_count(), result.total_faults);
-        assert!(harness
-            .audit_log()
-            .iter()
-            .any(|entry| entry.event_code == event_codes::FAULT_SCHEDULE_CREATED));
-        assert!(harness
-            .audit_log()
-            .iter()
-            .any(|entry| entry.event_code == event_codes::FAULT_INJECTED));
-        assert!(harness
-            .audit_log()
-            .iter()
-            .any(|entry| entry.event_code == event_codes::FAULT_SCENARIO_END));
+        assert!(
+            harness
+                .audit_log()
+                .iter()
+                .any(|entry| entry.event_code == event_codes::FAULT_SCHEDULE_CREATED)
+        );
+        assert!(
+            harness
+                .audit_log()
+                .iter()
+                .any(|entry| entry.event_code == event_codes::FAULT_INJECTED)
+        );
+        assert!(
+            harness
+                .audit_log()
+                .iter()
+                .any(|entry| entry.event_code == event_codes::FAULT_SCENARIO_END)
+        );
     }
 
     #[test]
@@ -1308,10 +1314,12 @@ mod tests {
         assert_eq!(result.corruptions, 0);
         assert_eq!(harness.fault_count(), 0);
         assert!(!result.content_hash.is_empty());
-        assert!(harness
-            .audit_log()
-            .iter()
-            .any(|record| record.event_code == event_codes::FAULT_SCENARIO_END));
+        assert!(
+            harness
+                .audit_log()
+                .iter()
+                .any(|record| record.event_code == event_codes::FAULT_SCENARIO_END)
+        );
     }
 
     #[test]

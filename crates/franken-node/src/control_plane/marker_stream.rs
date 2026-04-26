@@ -442,8 +442,13 @@ impl MarkerStream {
         };
 
         if self.markers.len() >= MAX_MARKERS {
-            let overflow = self.markers.len().saturating_sub(MAX_MARKERS).saturating_add(1);
-            self.chain_anchor_hash = Some(self.markers[overflow.saturating_sub(1)].marker_hash.clone());
+            let overflow = self
+                .markers
+                .len()
+                .saturating_sub(MAX_MARKERS)
+                .saturating_add(1);
+            self.chain_anchor_hash =
+                Some(self.markers[overflow.saturating_sub(1)].marker_hash.clone());
             self.markers.drain(0..overflow);
         }
         self.markers.push(marker);

@@ -977,7 +977,8 @@ impl SessionManager {
         // PERF: Batch cleanup replay windows - single O(m) pass instead of O(n×m)
         // Previously: called retain() for each expired session = O(n×m) complexity
         // Now: single retain() call for all expired sessions = O(n+m) complexity
-        self.replay_windows.retain(|key, _| !expired_set.contains(key.0.as_str()));
+        self.replay_windows
+            .retain(|key, _| !expired_set.contains(key.0.as_str()));
     }
 
     fn map_key_role_error(
@@ -5988,7 +5989,7 @@ mod session_auth_boundary_negative_tests {
 
         let config = SessionConfig {
             replay_window: 100,
-            max_sessions: 1000, // Large capacity for stress test
+            max_sessions: 1000,     // Large capacity for stress test
             session_timeout_ms: 10, // Short timeout for easy expiration
         };
         let mut mgr = SessionManager::new(config, test_root_secret(), test_epoch());
@@ -6028,8 +6029,10 @@ mod session_auth_boundary_negative_tests {
         // Verify we have many sessions and replay windows
         assert_eq!(mgr.sessions.len(), session_count);
         let total_replay_windows = mgr.replay_windows.len();
-        assert!(total_replay_windows > session_count,
-                "Should have more replay windows than sessions");
+        assert!(
+            total_replay_windows > session_count,
+            "Should have more replay windows than sessions"
+        );
 
         // Now expire all sessions at once (stress test the batch cleanup)
         let expiry_timestamp = 1000 + 20; // All sessions should expire
@@ -6039,15 +6042,22 @@ mod session_auth_boundary_negative_tests {
         for session_idx in 0..session_count {
             let session_id = format!("perf-session-{}", session_idx);
             let session = mgr.get_session(&session_id).unwrap();
-            assert_eq!(session.state, SessionState::Expired,
-                      "Session {} should be expired", session_id);
+            assert_eq!(
+                session.state,
+                SessionState::Expired,
+                "Session {} should be expired",
+                session_id
+            );
         }
 
         // Verify replay windows were cleaned up efficiently in single pass
         // Previously O(n×m): 50 sessions × 500 replay windows = 25,000 retain() operations
         // Now O(n+m): 50 + 500 = 550 operations total
-        assert_eq!(mgr.replay_windows.len(), 0,
-                   "All replay windows should be cleaned up");
+        assert_eq!(
+            mgr.replay_windows.len(),
+            0,
+            "All replay windows should be cleaned up"
+        );
 
         // The fix ensures this completes quickly even with many sessions/windows
         // Time complexity improved from O(n×m) to O(n+m)

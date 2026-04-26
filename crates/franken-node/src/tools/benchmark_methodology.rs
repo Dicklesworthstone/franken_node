@@ -1767,8 +1767,10 @@ mod tests {
         let catalog_hash = compute_catalog_hash(1, &by_topic, &by_status, "v1");
 
         // Hashes should be different due to distinct domain separators
-        assert_ne!(pub_hash, catalog_hash,
-            "Publication and catalog hashes should use distinct domain separators");
+        assert_ne!(
+            pub_hash, catalog_hash,
+            "Publication and catalog hashes should use distinct domain separators"
+        );
 
         // Verify domain separators are actually different by testing manual hash
         let mut pub_hasher = Sha256::new();
@@ -1779,8 +1781,10 @@ mod tests {
         cat_hasher.update(b"benchmark_methodology_catalog_v1:");
         let cat_domain_hash = hex::encode(cat_hasher.finalize());
 
-        assert_ne!(pub_domain_hash, cat_domain_hash,
-            "Domain separator prefixes should produce different hashes");
+        assert_ne!(
+            pub_domain_hash, cat_domain_hash,
+            "Domain separator prefixes should produce different hashes"
+        );
     }
 
     #[test]
@@ -1800,8 +1804,10 @@ mod tests {
         let hash2 = compute_publication_hash(&pub2);
 
         // Length prefixing should prevent collision
-        assert_ne!(hash1, hash2,
-            "Length-prefixed publication hashing should prevent field boundary collisions");
+        assert_ne!(
+            hash1, hash2,
+            "Length-prefixed publication hashing should prevent field boundary collisions"
+        );
     }
 
     #[test]
@@ -1823,8 +1829,10 @@ mod tests {
         let hash2 = compute_catalog_hash(1, &by_topic2, &by_status2, "v1");
 
         // Should produce different hashes due to length prefixing
-        assert_ne!(hash1, hash2,
-            "Catalog hash should prevent collision between different field arrangements");
+        assert_ne!(
+            hash1, hash2,
+            "Catalog hash should prevent collision between different field arrangements"
+        );
     }
 
     #[test]
@@ -1844,8 +1852,10 @@ mod tests {
         let hash2 = hex::encode(hasher2.finalize());
 
         // These should be different despite same concatenated content
-        assert_ne!(hash1, hash2,
-            "Length-prefixed hashing should distinguish different field boundaries");
+        assert_ne!(
+            hash1, hash2,
+            "Length-prefixed hashing should distinguish different field boundaries"
+        );
 
         // Verify the length prefix is actually included
         let mut hasher3 = Sha256::new();
@@ -1858,8 +1868,10 @@ mod tests {
         hasher4.update(b"test"); // Direct update without length prefix
         let direct_hash = hex::encode(hasher4.finalize());
 
-        assert_ne!(prefixed_hash, direct_hash,
-            "Length-prefixed hash should differ from direct hash");
+        assert_ne!(
+            prefixed_hash, direct_hash,
+            "Length-prefixed hash should differ from direct hash"
+        );
     }
 
     #[test]
@@ -1885,7 +1897,8 @@ mod tests {
             "pub_version": &pub_entry.pub_version,
             "created_at": &pub_entry.created_at,
             "updated_at": &pub_entry.updated_at,
-        }).to_string();
+        })
+        .to_string();
 
         let mut old_hasher = Sha256::new();
         old_hasher.update(b"benchmark_methodology_hash_v1:"); // Old generic domain
@@ -1893,7 +1906,9 @@ mod tests {
         let old_style_hash = hex::encode(old_hasher.finalize());
 
         // New hash should be different (this is intentional for security)
-        assert_ne!(new_hash, old_style_hash,
-            "New secure hash should differ from old vulnerable pattern");
+        assert_ne!(
+            new_hash, old_style_hash,
+            "New secure hash should differ from old vulnerable pattern"
+        );
     }
 }

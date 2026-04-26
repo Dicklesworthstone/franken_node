@@ -868,8 +868,7 @@ impl CertificationRegistry {
                 .saturating_add(1)
                 .min(self.audit_trail.len());
             if overflow > 0 {
-                self.chain_anchor_hash =
-                    Some(self.audit_trail[overflow - 1].entry_hash.clone());
+                self.chain_anchor_hash = Some(self.audit_trail[overflow - 1].entry_hash.clone());
             }
             self.audit_trail.drain(0..overflow);
         }
@@ -1000,8 +999,7 @@ mod tests {
             scope: "full security audit".to_owned(),
             findings_summary: "no critical findings".to_owned(),
             attestation_hash:
-                "sha256:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
-                    .to_owned(),
+                "sha256:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90".to_owned(),
         }
     }
 
@@ -2029,7 +2027,10 @@ mod tests {
         refs[0].verification_receipt_hash = "c".repeat(64);
         let changed = compute_derivation_hash(&refs, 42);
 
-        assert!(!constant_time::ct_eq_bytes(original.as_bytes(), changed.as_bytes()));
+        assert!(!constant_time::ct_eq_bytes(
+            original.as_bytes(),
+            changed.as_bytes()
+        ));
     }
 
     #[test]
@@ -2261,16 +2262,18 @@ mod tests {
             audit_date: "2026-01-15".to_owned(),
             scope: "full security audit".to_owned(),
             findings_summary: "no critical findings".to_owned(),
-            attestation_hash: "sha256:A1B2C3D4E5F60718293A4B5C6D7E8F90A1B2C3D4E5F60718293A4B5C6D7E8F90"
-                .to_owned(),
+            attestation_hash:
+                "sha256:A1B2C3D4E5F60718293A4B5C6D7E8F90A1B2C3D4E5F60718293A4B5C6D7E8F90".to_owned(),
         });
 
         let result = evaluate_certification(&input);
 
         assert_eq!(result.level, CertificationLevel::Verified);
-        assert!(result
-            .unsatisfied_criteria
-            .contains(&"third_party_audit_attestation".to_owned()));
+        assert!(
+            result
+                .unsatisfied_criteria
+                .contains(&"third_party_audit_attestation".to_owned())
+        );
     }
 
     #[test]
@@ -2290,8 +2293,8 @@ mod tests {
             audit_date: "2026-01-15".to_owned(),
             scope: "full security audit".to_owned(),
             findings_summary: "no critical findings".to_owned(),
-            attestation_hash: "blake3:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
-                .to_owned(),
+            attestation_hash:
+                "blake3:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90".to_owned(),
         });
 
         let result = evaluate_certification(&input);
@@ -2314,9 +2317,11 @@ mod tests {
         let result = evaluate_certification(&input);
 
         assert_eq!(result.level, CertificationLevel::Standard);
-        assert!(result
-            .unsatisfied_criteria
-            .contains(&"test_coverage_above_80pct".to_owned()));
+        assert!(
+            result
+                .unsatisfied_criteria
+                .contains(&"test_coverage_above_80pct".to_owned())
+        );
     }
 
     #[test]
@@ -2328,10 +2333,7 @@ mod tests {
 
         // Hash should still be computed (not panic), but empty ID is included
         assert!(hash.starts_with("sha256:"));
-        assert_ne!(
-            hash,
-            compute_derivation_hash(&sample_evidence_refs(), 42)
-        );
+        assert_ne!(hash, compute_derivation_hash(&sample_evidence_refs(), 42));
     }
 
     #[test]

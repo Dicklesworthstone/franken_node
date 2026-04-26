@@ -1196,7 +1196,10 @@ mod tests {
             BTreeMap::new(),
         );
 
-        assert!(matches!(result, Err(ProductErrorBuildError::MissingTraceId)));
+        assert!(matches!(
+            result,
+            Err(ProductErrorBuildError::MissingTraceId)
+        ));
     }
 
     #[test]
@@ -1391,9 +1394,12 @@ mod tests {
 
         assert!(!report.is_compatible());
         assert_eq!(report.violations.len(), 2);
-        assert!(report.violations.iter().all(|violation| {
-            violation.code == "FRANKEN_EGRESS_BAD_ADDITION"
-        }));
+        assert!(
+            report
+                .violations
+                .iter()
+                .all(|violation| { violation.code == "FRANKEN_EGRESS_BAD_ADDITION" })
+        );
     }
 
     fn valid_protocol_error_frame_value() -> Value {

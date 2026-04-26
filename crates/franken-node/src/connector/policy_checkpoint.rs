@@ -444,13 +444,7 @@ impl PolicyCheckpointChain {
     ) -> Result<&PolicyCheckpoint, CheckpointChainError> {
         self.reject_if_chain_invalid(trace_id, epoch_id, self.next_seq, &channel)?;
         if let Err(err) = validate_checkpoint_fields(&channel, policy_hash, signer, trace_id) {
-            self.emit_rejection_event(
-                trace_id,
-                epoch_id,
-                self.next_seq,
-                &channel,
-                err.to_string(),
-            );
+            self.emit_rejection_event(trace_id, epoch_id, self.next_seq, &channel, err.to_string());
             return Err(err);
         }
 
@@ -1036,7 +1030,13 @@ mod tests {
     ) {
         let mut chain = PolicyCheckpointChain::new();
         let original_head = chain
-            .create_checkpoint(1, ReleaseChannel::Stable, "seed-policy", "alice", "seed-trace")
+            .create_checkpoint(
+                1,
+                ReleaseChannel::Stable,
+                "seed-policy",
+                "alice",
+                "seed-trace",
+            )
             .expect("seed checkpoint")
             .checkpoint_hash
             .clone();

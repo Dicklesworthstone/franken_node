@@ -235,7 +235,11 @@ impl WeightAuditRecord {
             serde_json::to_string(weights).unwrap_or_else(|e| format!("__serde_err:{e}"));
         let mut hasher = Sha256::new();
         hasher.update(b"atc_participation_hash_v1:");
-        hasher.update(u64::try_from(canonical.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(canonical.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(canonical.as_bytes());
         hex::encode(hasher.finalize())
     }
@@ -1639,13 +1643,13 @@ mod atc_participation_weighting_negative_path_tests {
     fn negative_unicode_injection_participant_id_preserves_exact_bytes() {
         let mut engine = ParticipationWeightEngine::default();
         let injection_patterns = [
-            "participant\u{202E}spoofed",    // Right-to-left override
-            "participant\u{200B}invisible", // Zero-width space
-            "participant\u{FEFF}bom",       // Byte order mark
-            "participant\x00null",          // Null byte
-            "participant\r\ninjection",     // CRLF injection
-            "participant\u{1F4A9}emoji",    // Pile of poo emoji
-            "participant\t\x08control",     // Tab and backspace
+            "participant\u{202E}spoofed",          // Right-to-left override
+            "participant\u{200B}invisible",        // Zero-width space
+            "participant\u{FEFF}bom",              // Byte order mark
+            "participant\x00null",                 // Null byte
+            "participant\r\ninjection",            // CRLF injection
+            "participant\u{1F4A9}emoji",           // Pile of poo emoji
+            "participant\t\x08control",            // Tab and backspace
             "\u{202E}\u{202D}\u{200E}directional", // Bidirectional overrides
         ];
 
@@ -1677,20 +1681,23 @@ mod atc_participation_weighting_negative_path_tests {
                 cluster_hint: None,
             };
 
-            let record = engine.compute_weights(&[participant], "unicode_test", "2026-04-17T00:00:00Z");
+            let record =
+                engine.compute_weights(&[participant], "unicode_test", "2026-04-17T00:00:00Z");
 
             // Unicode should be preserved exactly
             assert_eq!(record.weights[0].participant_id, *pattern);
 
             // JSON serialization should handle injection safely
-            let json = serde_json::to_string(&record)
-                .expect("unicode injection should serialize safely");
-            assert!(!json.contains(&pattern.replace('\\', "")),
-                   "Raw injection pattern should be escaped in JSON");
+            let json =
+                serde_json::to_string(&record).expect("unicode injection should serialize safely");
+            assert!(
+                !json.contains(&pattern.replace('\\', "")),
+                "Raw injection pattern should be escaped in JSON"
+            );
 
             // Deserialization should preserve exact pattern
-            let parsed: WeightAuditRecord = serde_json::from_str(&json)
-                .expect("should deserialize without corruption");
+            let parsed: WeightAuditRecord =
+                serde_json::from_str(&json).expect("should deserialize without corruption");
             assert_eq!(parsed.weights[0].participant_id, *pattern);
         }
     }
@@ -1699,16 +1706,16 @@ mod atc_participation_weighting_negative_path_tests {
     fn negative_arithmetic_boundary_stake_amounts_saturated_safely() {
         let mut engine = ParticipationWeightEngine::default();
         let boundary_values = [
-            f64::MAX,                       // Maximum finite value
-            f64::MIN,                       // Minimum finite value
-            1.7976931348623157e+308,       // Near overflow
-            -1.7976931348623157e+308,      // Near underflow
-            f64::EPSILON,                  // Smallest positive value
-            -f64::EPSILON,                 // Smallest negative value
-            0.0,                           // Zero
-            -0.0,                          // Negative zero
-            1e100,                         // Very large
-            1e-100,                        // Very small
+            f64::MAX,                 // Maximum finite value
+            f64::MIN,                 // Minimum finite value
+            1.7976931348623157e+308,  // Near overflow
+            -1.7976931348623157e+308, // Near underflow
+            f64::EPSILON,             // Smallest positive value
+            -f64::EPSILON,            // Smallest negative value
+            0.0,                      // Zero
+            -0.0,                     // Negative zero
+            1e100,                    // Very large
+            1e-100,                   // Very small
         ];
 
         for (i, stake_amount) in boundary_values.iter().enumerate() {
@@ -1741,15 +1748,30 @@ mod atc_participation_weighting_negative_path_tests {
 
             // Weight computation should not panic or produce invalid values
             let weight = engine.compute_single_weight(&participant);
-            assert!(weight.stake_component.is_finite(), "Stake component must be finite");
-            assert!(weight.stake_component >= 0.0, "Stake component must be non-negative");
-            assert!(weight.stake_component <= 1.0, "Stake component must be <= 1.0");
+            assert!(
+                weight.stake_component.is_finite(),
+                "Stake component must be finite"
+            );
+            assert!(
+                weight.stake_component >= 0.0,
+                "Stake component must be non-negative"
+            );
+            assert!(
+                weight.stake_component <= 1.0,
+                "Stake component must be <= 1.0"
+            );
 
             assert!(weight.raw_weight.is_finite(), "Raw weight must be finite");
             assert!(weight.raw_weight >= 0.0, "Raw weight must be non-negative");
 
-            assert!(weight.final_weight.is_finite(), "Final weight must be finite");
-            assert!(weight.final_weight >= 0.0, "Final weight must be non-negative");
+            assert!(
+                weight.final_weight.is_finite(),
+                "Final weight must be finite"
+            );
+            assert!(
+                weight.final_weight >= 0.0,
+                "Final weight must be non-negative"
+            );
 
             // JSON round-trip should handle boundary values
             match serde_json::to_string(&weight) {
@@ -1776,16 +1798,16 @@ mod atc_participation_weighting_negative_path_tests {
     fn negative_floating_point_edge_cases_in_reputation_score() {
         let mut engine = ParticipationWeightEngine::default();
         let edge_cases = [
-            f64::NAN,                    // Not a number
-            f64::INFINITY,               // Positive infinity
-            f64::NEG_INFINITY,           // Negative infinity
-            f64::EPSILON,                // Smallest positive value
-            f64::MIN_POSITIVE,           // Smallest normalized positive value
-            f64::MAX,                    // Largest finite value
-            -f64::MAX,                   // Largest negative value
-            1.0000000000000002,          // Precision edge case
-            0.9999999999999999,          // Precision edge case
-            2.2250738585072014e-308,     // Subnormal value
+            f64::NAN,                // Not a number
+            f64::INFINITY,           // Positive infinity
+            f64::NEG_INFINITY,       // Negative infinity
+            f64::EPSILON,            // Smallest positive value
+            f64::MIN_POSITIVE,       // Smallest normalized positive value
+            f64::MAX,                // Largest finite value
+            -f64::MAX,               // Largest negative value
+            1.0000000000000002,      // Precision edge case
+            0.9999999999999999,      // Precision edge case
+            2.2250738585072014e-308, // Subnormal value
         ];
 
         for (i, score) in edge_cases.iter().enumerate() {
@@ -1818,9 +1840,18 @@ mod atc_participation_weighting_negative_path_tests {
 
             // Reputation computation should handle edge cases gracefully
             let reputation_component = engine.compute_reputation_component(&participant);
-            assert!(reputation_component.is_finite(), "Reputation component must be finite");
-            assert!(reputation_component >= 0.0, "Reputation component must be non-negative");
-            assert!(reputation_component <= 1.0, "Reputation component must be <= 1.0");
+            assert!(
+                reputation_component.is_finite(),
+                "Reputation component must be finite"
+            );
+            assert!(
+                reputation_component >= 0.0,
+                "Reputation component must be non-negative"
+            );
+            assert!(
+                reputation_component <= 1.0,
+                "Reputation component must be <= 1.0"
+            );
 
             // Overall weight computation should not panic
             let weight = engine.compute_single_weight(&participant);
@@ -1832,7 +1863,8 @@ mod atc_participation_weighting_negative_path_tests {
             assert!(weight.final_weight.is_finite());
 
             // Record-level computation should handle edge cases
-            let record = engine.compute_weights(&[participant], "edge_test", "2026-04-17T00:00:00Z");
+            let record =
+                engine.compute_weights(&[participant], "edge_test", "2026-04-17T00:00:00Z");
             assert!(record.total_weight.is_finite());
             assert!(record.weights[0].reputation_component.is_finite());
         }
@@ -1889,16 +1921,22 @@ mod atc_participation_weighting_negative_path_tests {
             let weight = engine.compute_single_weight(&participant);
             let duration = start_time.elapsed();
 
-            assert!(duration.as_millis() < 1000,
-                   "Large attestation chain took too long: {:?} for {} attestations",
-                   duration, size);
+            assert!(
+                duration.as_millis() < 1000,
+                "Large attestation chain took too long: {:?} for {} attestations",
+                duration,
+                size
+            );
 
             assert!(weight.attestation_component.is_finite());
             assert!(weight.attestation_component >= 0.0);
             assert!(weight.attestation_component <= 1.0);
 
             // Should find the strongest attestation correctly
-            assert_eq!(participant.strongest_attestation(), Some(AttestationLevel::AuthorityCertified));
+            assert_eq!(
+                participant.strongest_attestation(),
+                Some(AttestationLevel::AuthorityCertified)
+            );
             assert!(participant.has_attestation());
 
             // JSON serialization should handle large chains
@@ -1910,7 +1948,10 @@ mod atc_participation_weighting_negative_path_tests {
                     match serde_json::from_str::<ParticipantIdentity>(&json) {
                         Ok(parsed) => {
                             assert_eq!(parsed.attestations.len(), size);
-                            assert_eq!(parsed.strongest_attestation(), Some(AttestationLevel::AuthorityCertified));
+                            assert_eq!(
+                                parsed.strongest_attestation(),
+                                Some(AttestationLevel::AuthorityCertified)
+                            );
                         }
                         Err(_) => {
                             // Very large chains might fail to deserialize due to memory limits
@@ -1929,29 +1970,23 @@ mod atc_participation_weighting_negative_path_tests {
         let mut engine = ParticipationWeightEngine::default();
         let malicious_hints = [
             // Hash-like strings that could confuse clustering
-            "a".repeat(64), // Valid hex length
-            "0123456789abcdef".repeat(4), // Valid hex pattern
+            "a".repeat(64),                        // Valid hex length
+            "0123456789abcdef".repeat(4),          // Valid hex pattern
             format!("cluster:{}", "b".repeat(32)), // Prefixed hash
-
             // JSON injection attempts
             "hint\",\"injected\":true,\"cluster\":\"",
             "null}\"evil\":\"payload\",\"cluster\":\"normal",
-
             // Control character injection
             "cluster\x00null\r\n",
             "cluster\x1b[31mred\x1b[0m",
-
             // Unicode injection
             "cluster\u{202E}injection",
             "cluster\u{FEFF}bom",
-
             // Path-like strings that could cause issues
             "../../../etc/passwd",
             "..\\..\\windows\\system32",
-
             // Extremely long hint
             "long_cluster_hint_".repeat(10000),
-
             // Empty and whitespace
             "",
             "   ",
@@ -1984,7 +2019,8 @@ mod atc_participation_weighting_negative_path_tests {
         }
 
         // Should handle malicious cluster hints without corruption or crashes
-        let record = engine.compute_weights(&participants, "cluster_injection", "2026-04-17T00:00:00Z");
+        let record =
+            engine.compute_weights(&participants, "cluster_injection", "2026-04-17T00:00:00Z");
 
         assert_eq!(record.weights.len(), participants.len());
 
@@ -2011,14 +2047,16 @@ mod atc_participation_weighting_negative_path_tests {
         // Injection patterns should be escaped
         for hint in &malicious_hints {
             if hint.contains('"') || hint.contains('{') || hint.contains('}') {
-                assert!(!json.contains(&hint.replace('\\', "")),
-                       "Dangerous cluster hint should be escaped in JSON");
+                assert!(
+                    !json.contains(&hint.replace('\\', "")),
+                    "Dangerous cluster hint should be escaped in JSON"
+                );
             }
         }
 
         // Deserialization should preserve exact hints
-        let parsed: WeightAuditRecord = serde_json::from_str(&json)
-            .expect("should deserialize without corruption");
+        let parsed: WeightAuditRecord =
+            serde_json::from_str(&json).expect("should deserialize without corruption");
         assert_eq!(parsed.weights.len(), participants.len());
     }
 
@@ -2031,11 +2069,9 @@ mod atc_participation_weighting_negative_path_tests {
             // Same participant data with slight variations
             ("collision_test_1", 100, 50),
             ("collision_test_2", 50, 100),
-
             // Different attestation levels with same overall structure
             ("hash_boundary_1", 200, 100),
             ("hash_boundary_2", 100, 200),
-
             // Byte boundary cases that might collide
             ("boundary_255", 255, 256),
             ("boundary_256", 256, 255),
@@ -2072,7 +2108,8 @@ mod atc_participation_weighting_negative_path_tests {
                 cluster_hint: None,
             };
 
-            let record = engine.compute_weights(&[participant], participant_id, "2026-04-17T00:00:00Z");
+            let record =
+                engine.compute_weights(&[participant], participant_id, "2026-04-17T00:00:00Z");
             all_records.push(record);
         }
 
@@ -2090,20 +2127,24 @@ mod atc_participation_weighting_negative_path_tests {
         }
 
         // All different weight computations should produce different hashes (no collisions)
-        assert_eq!(observed_hashes.len(), all_records.len(),
-                  "Hash collision detected: {} unique hashes for {} records",
-                  observed_hashes.len(), all_records.len());
+        assert_eq!(
+            observed_hashes.len(),
+            all_records.len(),
+            "Hash collision detected: {} unique hashes for {} records",
+            observed_hashes.len(),
+            all_records.len()
+        );
     }
 
     #[test]
     fn negative_extreme_contribution_counts_with_overflow_protection() {
         let engine = ParticipationWeightEngine::default();
         let extreme_values = [
-            (u64::MAX, 1),              // Max accepted contributions
-            (1, u64::MAX),              // Max rejected contributions
-            (u64::MAX, u64::MAX),       // Both at maximum
-            (u64::MAX - 1, u64::MAX),   // Near overflow boundary
-            (0, 0),                     // Both zero
+            (u64::MAX, 1),            // Max accepted contributions
+            (1, u64::MAX),            // Max rejected contributions
+            (u64::MAX, u64::MAX),     // Both at maximum
+            (u64::MAX - 1, u64::MAX), // Near overflow boundary
+            (0, 0),                   // Both zero
         ];
 
         for (accepted, rejected) in extreme_values {
@@ -2217,13 +2258,20 @@ mod atc_participation_weighting_negative_path_tests {
 
             // Should handle large batches without memory issues or performance degradation
             let start_time = std::time::Instant::now();
-            let record = engine.compute_weights(&participants, &format!("massive_batch_{}", batch_size), "2026-04-17T00:00:00Z");
+            let record = engine.compute_weights(
+                &participants,
+                &format!("massive_batch_{}", batch_size),
+                "2026-04-17T00:00:00Z",
+            );
             let processing_time = start_time.elapsed();
 
             // Should complete in reasonable time
-            assert!(processing_time.as_secs() < 60,
-                   "Large batch processing took too long: {:?} for {} participants",
-                   processing_time, batch_size);
+            assert!(
+                processing_time.as_secs() < 60,
+                "Large batch processing took too long: {:?} for {} participants",
+                processing_time,
+                batch_size
+            );
 
             // Record should have correct structure
             assert_eq!(record.participant_count, batch_size);
@@ -2234,7 +2282,10 @@ mod atc_participation_weighting_negative_path_tests {
             assert!(record.total_weight >= 0.0);
 
             // Should detect some clusters
-            assert!(record.sybil_clusters_detected > 0, "Should detect clusters in large batch");
+            assert!(
+                record.sybil_clusters_detected > 0,
+                "Should detect clusters in large batch"
+            );
 
             // Content hash should be consistent
             assert_eq!(record.content_hash.len(), 64);
@@ -2243,11 +2294,14 @@ mod atc_participation_weighting_negative_path_tests {
             // Memory cleanup test - processing another batch should not degrade
             let participants2 = vec![participants[0].clone()];
             let start_time2 = std::time::Instant::now();
-            let _record2 = engine.compute_weights(&participants2, "cleanup_test", "2026-04-17T00:00:00Z");
+            let _record2 =
+                engine.compute_weights(&participants2, "cleanup_test", "2026-04-17T00:00:00Z");
             let processing_time2 = start_time2.elapsed();
 
-            assert!(processing_time2.as_millis() < 100,
-                   "Memory cleanup may have failed - subsequent processing too slow");
+            assert!(
+                processing_time2.as_millis() < 100,
+                "Memory cleanup may have failed - subsequent processing too slow"
+            );
         }
     }
 
@@ -2309,11 +2363,16 @@ mod atc_participation_weighting_negative_path_tests {
                         engine_guard.compute_weights(
                             &[participant],
                             &format!("concurrent_t{}_o{}", thread_id, operation),
-                            "2026-04-17T00:00:00Z"
+                            "2026-04-17T00:00:00Z",
                         )
                     };
 
-                    thread_results.push((thread_id, operation, record.total_weight, record.weights[0].final_weight));
+                    thread_results.push((
+                        thread_id,
+                        operation,
+                        record.total_weight,
+                        record.weights[0].final_weight,
+                    ));
                 }
 
                 // Merge results
@@ -2328,7 +2387,9 @@ mod atc_participation_weighting_negative_path_tests {
 
         // Wait for all threads to complete
         for handle in handles {
-            handle.join().expect("Thread should complete without panics");
+            handle
+                .join()
+                .expect("Thread should complete without panics");
         }
 
         let final_results = results.lock().unwrap();
@@ -2341,20 +2402,32 @@ mod atc_participation_weighting_negative_path_tests {
 
         // All weights should be valid
         for (thread_id, operation, total_weight, final_weight) in &*final_results {
-            assert!(total_weight.is_finite(), "Total weight should be finite for t{} o{}", thread_id, operation);
-            assert!(final_weight.is_finite(), "Final weight should be finite for t{} o{}", thread_id, operation);
+            assert!(
+                total_weight.is_finite(),
+                "Total weight should be finite for t{} o{}",
+                thread_id,
+                operation
+            );
+            assert!(
+                final_weight.is_finite(),
+                "Final weight should be finite for t{} o{}",
+                thread_id,
+                operation
+            );
             assert!(*total_weight >= 0.0, "Total weight should be non-negative");
             assert!(*final_weight >= 0.0, "Final weight should be non-negative");
         }
 
         // Results should show reasonable variety
         let weights: Vec<f64> = final_results.iter().map(|(_, _, _, w)| *w).collect();
-        let unique_weights: BTreeSet<String> = weights.iter()
-            .map(|w| format!("{:.10}", w))
-            .collect();
+        let unique_weights: BTreeSet<String> =
+            weights.iter().map(|w| format!("{:.10}", w)).collect();
 
         // Should have reasonable variety in weights (not all identical)
-        assert!(unique_weights.len() > 1, "Should have variety in computed weights");
+        assert!(
+            unique_weights.len() > 1,
+            "Should have variety in computed weights"
+        );
 
         // Audit log should contain entries (may be bounded by capacity)
         assert!(final_engine.audit_log().len() > 0);
@@ -2436,15 +2509,15 @@ mod atc_participation_weighting_negative_path_tests {
 
         // Test serialization/deserialization with malicious values
         let malicious_level_values = [
-            json!("self_signed"),      // Valid but lowercase underscore (should work)
-            json!("AUTHORITY_CERTIFIED"), // Valid but uppercase (should fail)
-            json!("admin"),            // Privileged-sounding variant
-            json!("root"),             // System-like variant
-            json!("super_certified"),  // Non-existent higher level
-            json!(""),                 // Empty string
-            json!(null),               // Null value
-            json!(42),                 // Number instead of string
-            json!(true),               // Boolean instead of string
+            json!("self_signed"),           // Valid but lowercase underscore (should work)
+            json!("AUTHORITY_CERTIFIED"),   // Valid but uppercase (should fail)
+            json!("admin"),                 // Privileged-sounding variant
+            json!("root"),                  // System-like variant
+            json!("super_certified"),       // Non-existent higher level
+            json!(""),                      // Empty string
+            json!(null),                    // Null value
+            json!(42),                      // Number instead of string
+            json!(true),                    // Boolean instead of string
             json!(["authority_certified"]), // Array instead of string
             json!({"level": "authority_certified"}), // Object instead of string
             json!("authority_certified\u{0000}"), // Null byte injection
@@ -2468,10 +2541,13 @@ mod atc_participation_weighting_negative_path_tests {
                     } else {
                         // Some edge cases might deserialize - verify they're safe
                         let level = level_result.unwrap();
-                        assert!(matches!(level, AttestationLevel::SelfSigned |
-                                              AttestationLevel::PeerVerified |
-                                              AttestationLevel::VerifierBacked |
-                                              AttestationLevel::AuthorityCertified));
+                        assert!(matches!(
+                            level,
+                            AttestationLevel::SelfSigned
+                                | AttestationLevel::PeerVerified
+                                | AttestationLevel::VerifierBacked
+                                | AttestationLevel::AuthorityCertified
+                        ));
                     }
                 }
             }
@@ -2486,16 +2562,20 @@ mod atc_participation_weighting_negative_path_tests {
                 "signature_hex": "deadbeef"
             });
 
-            let attestation_result = serde_json::from_value::<AttestationEvidence>(malicious_attestation);
+            let attestation_result =
+                serde_json::from_value::<AttestationEvidence>(malicious_attestation);
 
             // Should handle malicious levels in attestation context
             match attestation_result {
                 Ok(attestation) => {
                     // If parsed successfully, should have valid level
-                    assert!(matches!(attestation.level, AttestationLevel::SelfSigned |
-                                                       AttestationLevel::PeerVerified |
-                                                       AttestationLevel::VerifierBacked |
-                                                       AttestationLevel::AuthorityCertified));
+                    assert!(matches!(
+                        attestation.level,
+                        AttestationLevel::SelfSigned
+                            | AttestationLevel::PeerVerified
+                            | AttestationLevel::VerifierBacked
+                            | AttestationLevel::AuthorityCertified
+                    ));
 
                     // Multiplier should be valid
                     let multiplier = attestation.level.multiplier();
@@ -2540,15 +2620,12 @@ mod atc_participation_weighting_negative_path_tests {
             // Hash-like strings that might collide
             "a".repeat(32),
             "b".repeat(32),
-
             // Similar but different strings
             "cluster_group_alpha",
             "cluster_group_beta",
-
             // Strings that could hash to similar values
             "subnet_192_168_1",
             "subnet_192_168_2",
-
             // Unicode variations that look similar
             "café_network",
             "cafe\u{0301}_network",
@@ -2560,10 +2637,18 @@ mod atc_participation_weighting_negative_path_tests {
         for hint in &collision_hints {
             for i in 0..4 {
                 participants.push(ParticipantIdentity {
-                    participant_id: format!("collision_{}_{}", hint.chars().take(8).collect::<String>(), i),
+                    participant_id: format!(
+                        "collision_{}_{}",
+                        hint.chars().take(8).collect::<String>(),
+                        i
+                    ),
                     display_name: format!("Collision Test {}", i),
                     attestations: vec![AttestationEvidence {
-                        attestation_id: format!("att-{}-{}", hint.chars().take(8).collect::<String>(), i),
+                        attestation_id: format!(
+                            "att-{}-{}",
+                            hint.chars().take(8).collect::<String>(),
+                            i
+                        ),
                         issuer: "collision-test".to_string(),
                         level: AttestationLevel::SelfSigned,
                         issued_at: "2026-04-17T00:00:00Z".to_string(),
@@ -2587,14 +2672,21 @@ mod atc_participation_weighting_negative_path_tests {
         let clusters = engine.detect_sybil_clusters(&participants);
 
         // Should detect one cluster per hint (since each has 4 participants)
-        assert_eq!(clusters.len(), collision_hints.len(),
-                  "Should detect {} clusters for {} different hints",
-                  collision_hints.len(), collision_hints.len());
+        assert_eq!(
+            clusters.len(),
+            collision_hints.len(),
+            "Should detect {} clusters for {} different hints",
+            collision_hints.len(),
+            collision_hints.len()
+        );
 
         // Each cluster should have exactly 4 members
         for cluster in &clusters {
-            assert_eq!(cluster.member_ids.len(), 4,
-                      "Each cluster should have 4 members");
+            assert_eq!(
+                cluster.member_ids.len(),
+                4,
+                "Each cluster should have 4 members"
+            );
 
             // Cluster ID should be unique
             assert!(!cluster.cluster_id.is_empty());
@@ -2609,17 +2701,22 @@ mod atc_participation_weighting_negative_path_tests {
         }
 
         // All cluster IDs should be unique
-        let cluster_ids: BTreeSet<String> = clusters.iter()
-            .map(|c| c.cluster_id.clone())
-            .collect();
-        assert_eq!(cluster_ids.len(), clusters.len(), "All cluster IDs should be unique");
+        let cluster_ids: BTreeSet<String> = clusters.iter().map(|c| c.cluster_id.clone()).collect();
+        assert_eq!(
+            cluster_ids.len(),
+            clusters.len(),
+            "All cluster IDs should be unique"
+        );
 
         // Compute weights and verify cluster attenuation
-        let record = engine.compute_weights(&participants, "collision_test", "2026-04-17T00:00:00Z");
+        let record =
+            engine.compute_weights(&participants, "collision_test", "2026-04-17T00:00:00Z");
 
         assert_eq!(record.sybil_clusters_detected, collision_hints.len());
-        assert!(record.weights.iter().all(|w| w.sybil_penalty > 0.0),
-               "All participants should have sybil penalty applied");
+        assert!(
+            record.weights.iter().all(|w| w.sybil_penalty > 0.0),
+            "All participants should have sybil penalty applied"
+        );
     }
 
     #[test]
@@ -2637,7 +2734,6 @@ mod atc_participation_weighting_negative_path_tests {
                 sybil_attenuation_factor: 0.0,
                 sybil_cluster_min_size: 0,
             },
-
             // All weights at maximum
             WeightingConfig {
                 attestation_weight: f64::MAX,
@@ -2649,7 +2745,6 @@ mod atc_participation_weighting_negative_path_tests {
                 sybil_attenuation_factor: f64::MAX,
                 sybil_cluster_min_size: usize::MAX,
             },
-
             // All weights negative
             WeightingConfig {
                 attestation_weight: -1.0,
@@ -2661,7 +2756,6 @@ mod atc_participation_weighting_negative_path_tests {
                 sybil_attenuation_factor: -1.0,
                 sybil_cluster_min_size: 3,
             },
-
             // Invalid floating point values
             WeightingConfig {
                 attestation_weight: f64::NAN,
@@ -2734,11 +2828,27 @@ mod atc_participation_weighting_negative_path_tests {
             let weight = engine.compute_single_weight(&test_participant);
 
             // Weight computation should produce finite, non-negative results
-            assert!(weight.raw_weight.is_finite(), "Raw weight should be finite for config {}", i);
-            assert!(weight.raw_weight >= 0.0, "Raw weight should be non-negative for config {}", i);
+            assert!(
+                weight.raw_weight.is_finite(),
+                "Raw weight should be finite for config {}",
+                i
+            );
+            assert!(
+                weight.raw_weight >= 0.0,
+                "Raw weight should be non-negative for config {}",
+                i
+            );
 
-            assert!(weight.final_weight.is_finite(), "Final weight should be finite for config {}", i);
-            assert!(weight.final_weight >= 0.0, "Final weight should be non-negative for config {}", i);
+            assert!(
+                weight.final_weight.is_finite(),
+                "Final weight should be finite for config {}",
+                i
+            );
+            assert!(
+                weight.final_weight >= 0.0,
+                "Final weight should be non-negative for config {}",
+                i
+            );
 
             assert!(weight.attestation_component.is_finite());
             assert!(weight.attestation_component >= 0.0);
@@ -2798,23 +2908,33 @@ mod atc_participation_weighting_negative_path_tests {
                 cluster_hint: None,
             };
 
-            engine.compute_weights(&[participant], &format!("overflow_{}", i), "2026-04-17T00:00:00Z");
+            engine.compute_weights(
+                &[participant],
+                &format!("overflow_{}", i),
+                "2026-04-17T00:00:00Z",
+            );
 
             // Memory usage should remain bounded
-            assert!(engine.audit_log().len() <= MAX_AUDIT_LOG_ENTRIES,
-                   "Audit log should not exceed maximum capacity");
+            assert!(
+                engine.audit_log().len() <= MAX_AUDIT_LOG_ENTRIES,
+                "Audit log should not exceed maximum capacity"
+            );
         }
 
         // Final audit log should be at capacity
         assert_eq!(engine.audit_log().len(), MAX_AUDIT_LOG_ENTRIES);
 
         // All remaining records should have unique batch IDs (no corruption)
-        let batch_ids: BTreeSet<String> = engine.audit_log()
+        let batch_ids: BTreeSet<String> = engine
+            .audit_log()
             .iter()
             .map(|record| record.batch_id.clone())
             .collect();
-        assert_eq!(batch_ids.len(), engine.audit_log().len(),
-                  "All audit records should have unique batch IDs");
+        assert_eq!(
+            batch_ids.len(),
+            engine.audit_log().len(),
+            "All audit records should have unique batch IDs"
+        );
 
         // All records should have valid structure
         for record in engine.audit_log() {
@@ -2836,7 +2956,10 @@ mod atc_participation_weighting_negative_path_tests {
 
             // Should deserialize back to audit records
             let parsed_result: Result<Vec<WeightAuditRecord>, _> = serde_json::from_str(&json);
-            assert!(parsed_result.is_ok(), "Exported audit JSON should deserialize");
+            assert!(
+                parsed_result.is_ok(),
+                "Exported audit JSON should deserialize"
+            );
 
             if let Ok(parsed_records) = parsed_result {
                 assert_eq!(parsed_records.len(), MAX_AUDIT_LOG_ENTRIES);

@@ -1568,7 +1568,11 @@ mod tests {
     #[test]
     fn test_infinite_weight_override_falls_back_without_poisoning_score() {
         let mut reg = ReputationRegistry::new();
-        let mut signal = make_signal("sig-inf-weight", "pub-1", SignalKind::CertificationAdherence);
+        let mut signal = make_signal(
+            "sig-inf-weight",
+            "pub-1",
+            SignalKind::CertificationAdherence,
+        );
         signal.weight_override = Some(f64::INFINITY);
 
         let result = reg.ingest_signal(&signal, &ts(1)).unwrap();
@@ -1620,7 +1624,11 @@ mod tests {
         if let Some(pub_rec) = reg.publishers.get_mut("pub-1") {
             pub_rec.score = f64::NAN;
         }
-        let signal = make_signal("sig-nan-score-ingest", "pub-1", SignalKind::ExtensionQuality);
+        let signal = make_signal(
+            "sig-nan-score-ingest",
+            "pub-1",
+            SignalKind::ExtensionQuality,
+        );
 
         let result = reg.ingest_signal(&signal, &ts(2)).unwrap();
 

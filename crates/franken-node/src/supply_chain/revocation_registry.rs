@@ -144,7 +144,8 @@ impl RevocationRegistry {
             return Err(RevocationError::InvalidInput {
                 detail: format!(
                     "zone_id too long: {} characters (max: {})",
-                    zone_id.len(), MAX_ZONE_ID_LEN
+                    zone_id.len(),
+                    MAX_ZONE_ID_LEN
                 ),
             });
         }
@@ -166,7 +167,8 @@ impl RevocationRegistry {
             return Err(RevocationError::InvalidInput {
                 detail: format!(
                     "zone_id too long: {} characters (max: {})",
-                    zone_id.len(), MAX_ZONE_ID_LEN
+                    zone_id.len(),
+                    MAX_ZONE_ID_LEN
                 ),
             });
         }
@@ -190,7 +192,8 @@ impl RevocationRegistry {
             return Err(RevocationError::InvalidInput {
                 detail: format!(
                     "zone_id too long: {} characters (max: {})",
-                    head.zone_id.len(), MAX_ZONE_ID_LEN
+                    head.zone_id.len(),
+                    MAX_ZONE_ID_LEN
                 ),
             });
         }
@@ -199,7 +202,8 @@ impl RevocationRegistry {
             return Err(RevocationError::InvalidInput {
                 detail: format!(
                     "revoked_artifact too long: {} characters (max: {})",
-                    head.revoked_artifact.len(), MAX_ARTIFACT_ID_LEN
+                    head.revoked_artifact.len(),
+                    MAX_ARTIFACT_ID_LEN
                 ),
             });
         }
@@ -208,7 +212,8 @@ impl RevocationRegistry {
             return Err(RevocationError::InvalidInput {
                 detail: format!(
                     "reason too long: {} characters (max: {})",
-                    head.reason.len(), MAX_REASON_LEN
+                    head.reason.len(),
+                    MAX_REASON_LEN
                 ),
             });
         }
@@ -217,7 +222,8 @@ impl RevocationRegistry {
             return Err(RevocationError::InvalidInput {
                 detail: format!(
                     "trace_id too long: {} characters (max: {})",
-                    head.trace_id.len(), MAX_TRACE_ID_LEN
+                    head.trace_id.len(),
+                    MAX_TRACE_ID_LEN
                 ),
             });
         }
@@ -321,7 +327,8 @@ impl RevocationRegistry {
             return Err(RevocationError::InvalidInput {
                 detail: format!(
                     "zone_id too long: {} characters (max: {})",
-                    zone_id.len(), MAX_ZONE_ID_LEN
+                    zone_id.len(),
+                    MAX_ZONE_ID_LEN
                 ),
             });
         }
@@ -330,7 +337,8 @@ impl RevocationRegistry {
             return Err(RevocationError::InvalidInput {
                 detail: format!(
                     "artifact too long: {} characters (max: {})",
-                    artifact.len(), MAX_ARTIFACT_ID_LEN
+                    artifact.len(),
+                    MAX_ARTIFACT_ID_LEN
                 ),
             });
         }
@@ -431,7 +439,7 @@ impl RevocationRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::{RevocationHead, RevocationRegistry, RevocationError, RevocationAudit};
+    use super::{RevocationAudit, RevocationError, RevocationHead, RevocationRegistry};
 
     fn head(zone: &str, seq: u64, artifact: &str) -> RevocationHead {
         RevocationHead {
@@ -1181,7 +1189,7 @@ mod tests {
 
 #[cfg(test)]
 mod revocation_registry_comprehensive_negative_tests {
-    use super::{RevocationHead, RevocationRegistry, RevocationError};
+    use super::{RevocationError, RevocationHead, RevocationRegistry};
     use std::collections::HashMap;
 
     /// Negative test: Unicode injection and encoding attacks in zone IDs and artifact names

@@ -1291,8 +1291,7 @@ mod tests {
             .budgets
             .iter_mut()
             .find(|budget| {
-                budget.hot_path == VefHotPath::ChainAppend
-                    && budget.mode == VefBudgetMode::Normal
+                budget.hot_path == VefHotPath::ChainAppend && budget.mode == VefBudgetMode::Normal
             })
             .unwrap();
         budget.p95_overhead_ms = -1.0;

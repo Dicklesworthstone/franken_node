@@ -395,24 +395,32 @@ mod remote_module_negative_tests {
         let stats = harness.get_statistics();
 
         // Check that counters don't wrap around to 0 (overflow protection)
-        assert!(stats.faults_applied <= stats.faults_scheduled,
-               "Applied faults should not exceed scheduled due to overflow");
+        assert!(
+            stats.faults_applied <= stats.faults_scheduled,
+            "Applied faults should not exceed scheduled due to overflow"
+        );
 
         // Test boundary condition with maximum counter values
         // This tests whether internal counters use saturating arithmetic
         let config_max_faults = FaultConfig {
-            max_faults: usize::MAX,  // Test maximum value
+            max_faults: usize::MAX, // Test maximum value
             ..valid_config()
         };
 
         match config_max_faults.validate() {
             Ok(_) => {
                 // If accepted, internal operations should handle max values safely
-                assert!(config_max_faults.max_faults > 0, "Max faults should remain positive");
-            },
+                assert!(
+                    config_max_faults.max_faults > 0,
+                    "Max faults should remain positive"
+                );
+            }
             Err(error_msg) => {
                 // Rejection of extreme values is also acceptable
-                assert!(!error_msg.is_empty(), "Should provide error message for extreme max_faults");
+                assert!(
+                    !error_msg.is_empty(),
+                    "Should provide error message for extreme max_faults"
+                );
             }
         }
     }
@@ -434,7 +442,7 @@ mod remote_module_negative_tests {
 
         let config2 = FaultConfig {
             drop_probability: 0.1,
-            corrupt_bit_count: 5,  // Different bit count
+            corrupt_bit_count: 5, // Different bit count
             ..valid_config()
         };
 
@@ -465,13 +473,20 @@ mod remote_module_negative_tests {
 
         // Verify different configs produce different hashes (no collision)
         if config1 != config2 {
-            assert_ne!(hash1, hash2, "Different configs should produce different hashes");
-            assert_eq!(fault_checksums.len(), 2, "Should have two distinct hash entries");
+            assert_ne!(
+                hash1, hash2,
+                "Different configs should produce different hashes"
+            );
+            assert_eq!(
+                fault_checksums.len(),
+                2,
+                "Should have two distinct hash entries"
+            );
         }
 
         // Test hash comparison with similar but different data
         let similar_config = FaultConfig {
-            drop_probability: 0.10000000000001,  // Very slightly different
+            drop_probability: 0.10000000000001, // Very slightly different
             ..config1
         };
 
@@ -483,7 +498,11 @@ mod remote_module_negative_tests {
 
         // Even tiny differences should be detectable
         if similar_config != config1 {
-            assert_ne!(similar_hash.as_slice(), hash_bytes1, "Tiny differences should be detected in hash comparison");
+            assert_ne!(
+                similar_hash.as_slice(),
+                hash_bytes1,
+                "Tiny differences should be detected in hash comparison"
+            );
         }
 
         // Note: In production code, these hash comparisons should use ct_eq_bytes
@@ -495,21 +514,24 @@ mod remote_module_negative_tests {
         // Test that expiry checks use >= instead of > for fail-closed behavior
         // Using > allows exactly-expired items to pass, creating security bypass
         let current_time_ms = 1000000;
-        let expired_time_ms = 1000000;  // Exactly at boundary
-        let future_time_ms = 1000001;   // Clearly in future
-        let past_time_ms = 999999;      // Clearly in past
+        let expired_time_ms = 1000000; // Exactly at boundary
+        let future_time_ms = 1000001; // Clearly in future
+        let past_time_ms = 999999; // Clearly in past
 
         // Test fault schedule expiry logic
         let expiry_test_cases = [
             (past_time_ms, "past time should be expired"),
-            (expired_time_ms, "boundary time should be expired (fail-closed)"),
+            (
+                expired_time_ms,
+                "boundary time should be expired (fail-closed)",
+            ),
             (future_time_ms, "future time should not be expired"),
         ];
 
         for (test_time, description) in &expiry_test_cases {
             let fault = ScheduledFault {
                 fault_class: FaultClass::Corrupt,
-                delay_millis: *test_time,  // Using as expiry time for this test
+                delay_millis: *test_time, // Using as expiry time for this test
                 event_code: event_codes::SCHEDULED_FAULT,
             };
 
@@ -523,11 +545,11 @@ mod remote_module_negative_tests {
                 (time, true) if time <= current_time_ms => {
                     // Correctly identified as expired (including boundary case)
                     assert!(is_expired, "Should be expired: {}", description);
-                },
+                }
                 (time, false) if time > current_time_ms => {
                     // Correctly identified as not expired
                     assert!(!is_expired, "Should not be expired: {}", description);
-                },
+                }
                 _ => {
                     // This case should not occur with proper >= comparison
                     assert!(false, "Unexpected expiry state for: {}", description);
@@ -537,7 +559,7 @@ mod remote_module_negative_tests {
 
         // Test configuration validation with boundary expiry values
         let boundary_config = FaultConfig {
-            max_faults: 0,  // Test zero boundary
+            max_faults: 0, // Test zero boundary
             ..valid_config()
         };
 
@@ -546,12 +568,19 @@ mod remote_module_negative_tests {
         match validation_result {
             Ok(_) => {
                 // If zero is accepted, it should disable faults (safe behavior)
-                assert_eq!(boundary_config.max_faults, 0, "Zero max_faults should remain zero");
-            },
+                assert_eq!(
+                    boundary_config.max_faults, 0,
+                    "Zero max_faults should remain zero"
+                );
+            }
             Err(error_msg) => {
                 // Rejection of zero max_faults is also acceptable (fail-closed)
-                assert!(error_msg.contains("max_faults") || error_msg.contains("zero") || error_msg.contains("0"),
-                       "Error should mention zero/max_faults constraint");
+                assert!(
+                    error_msg.contains("max_faults")
+                        || error_msg.contains("zero")
+                        || error_msg.contains("0"),
+                    "Error should mention zero/max_faults constraint"
+                );
             }
         }
     }
@@ -563,48 +592,62 @@ mod remote_module_negative_tests {
         use std::convert::TryFrom;
 
         // Test with small collections (safe conversion)
-        let small_schedule = vec![
-            ScheduledFault {
-                fault_class: FaultClass::Drop,
-                delay_millis: 100,
-                event_code: event_codes::SCHEDULED_FAULT,
-            }
-        ];
+        let small_schedule = vec![ScheduledFault {
+            fault_class: FaultClass::Drop,
+            delay_millis: 100,
+            event_code: event_codes::SCHEDULED_FAULT,
+        }];
 
         // Safe conversion should succeed
-        let small_count = u32::try_from(small_schedule.len())
-            .expect("Small collection should convert safely");
-        assert_eq!(small_count, 1, "Small collection conversion should be accurate");
+        let small_count =
+            u32::try_from(small_schedule.len()).expect("Small collection should convert safely");
+        assert_eq!(
+            small_count, 1,
+            "Small collection conversion should be accurate"
+        );
 
         // Test with medium-sized collection
-        let medium_schedule: Vec<ScheduledFault> = (0..1000).map(|i| {
-            ScheduledFault {
+        let medium_schedule: Vec<ScheduledFault> = (0..1000)
+            .map(|i| ScheduledFault {
                 fault_class: FaultClass::Reorder,
                 delay_millis: i as u64,
                 event_code: event_codes::SCHEDULED_FAULT,
-            }
-        }).collect();
+            })
+            .collect();
 
-        let medium_count = u32::try_from(medium_schedule.len())
-            .expect("Medium collection should convert safely");
-        assert_eq!(medium_count, 1000, "Medium collection conversion should be accurate");
+        let medium_count =
+            u32::try_from(medium_schedule.len()).expect("Medium collection should convert safely");
+        assert_eq!(
+            medium_count, 1000,
+            "Medium collection conversion should be accurate"
+        );
 
         // Test with collection that would overflow u32 (on 64-bit systems)
         // We can't actually create a 4GB+ vector in tests, so simulate the check
         let large_size: usize = (u32::MAX as usize) + 1;
         let overflow_result = u32::try_from(large_size);
 
-        assert!(overflow_result.is_err(), "Large size should fail safe conversion");
+        assert!(
+            overflow_result.is_err(),
+            "Large size should fail safe conversion"
+        );
 
         // Demonstrate the problem with unsafe casting
-        let unsafe_cast = large_size as u32;  // This would be wrong in production
+        let unsafe_cast = large_size as u32; // This would be wrong in production
         assert_eq!(unsafe_cast, 0, "Unsafe cast wraps around to 0, losing data");
 
         // Test boundary at u32::MAX
         let max_u32_size = u32::MAX as usize;
         let max_conversion = u32::try_from(max_u32_size);
-        assert!(max_conversion.is_ok(), "u32::MAX should convert successfully");
-        assert_eq!(max_conversion.unwrap(), u32::MAX, "Boundary conversion should be accurate");
+        assert!(
+            max_conversion.is_ok(),
+            "u32::MAX should convert successfully"
+        );
+        assert_eq!(
+            max_conversion.unwrap(),
+            u32::MAX,
+            "Boundary conversion should be accurate"
+        );
 
         // In production code, should use:
         // let safe_count = u32::try_from(collection.len()).unwrap_or(u32::MAX);
@@ -627,7 +670,7 @@ mod remote_module_negative_tests {
 
         // Create hash with domain separator (proper approach)
         let mut hasher_with_domain = Sha256::new();
-        hasher_with_domain.update(b"fault_config_v1:");  // Domain separator
+        hasher_with_domain.update(b"fault_config_v1:"); // Domain separator
         let config_json = serde_json::to_string(&base_config).expect("config serialization");
         hasher_with_domain.update(config_json.as_bytes());
         let hash_with_domain = hasher_with_domain.finalize();
@@ -638,13 +681,16 @@ mod remote_module_negative_tests {
         let hash_without_domain = hasher_without_domain.finalize();
 
         // Hashes should be different when domain separator is included
-        assert_ne!(hash_with_domain.as_slice(), hash_without_domain.as_slice(),
-                  "Domain separator should change hash value");
+        assert_ne!(
+            hash_with_domain.as_slice(),
+            hash_without_domain.as_slice(),
+            "Domain separator should change hash value"
+        );
 
         // Test domain separation prevents collision between different data types
         let fault_schedule = ScheduledFault {
             fault_class: FaultClass::Drop,
-            delay_millis: 0,  // Same numeric values as in config
+            delay_millis: 0, // Same numeric values as in config
             event_code: event_codes::SCHEDULED_FAULT,
         };
 
@@ -663,8 +709,11 @@ mod remote_module_negative_tests {
         let schedule_hash = schedule_hasher.finalize();
 
         // Different domain separators should prevent collisions
-        assert_ne!(config_hash.as_slice(), schedule_hash.as_slice(),
-                  "Different domain separators should prevent hash collisions");
+        assert_ne!(
+            config_hash.as_slice(),
+            schedule_hash.as_slice(),
+            "Different domain separators should prevent hash collisions"
+        );
 
         // Test length-prefixed domain separation (even better)
         let mut length_prefixed_hasher = Sha256::new();
@@ -675,8 +724,11 @@ mod remote_module_negative_tests {
         let length_prefixed_hash = length_prefixed_hasher.finalize();
 
         // Length-prefixed should be different from simple prefix
-        assert_ne!(length_prefixed_hash.as_slice(), hash_with_domain.as_slice(),
-                  "Length-prefixed domain separation should differ from simple prefix");
+        assert_ne!(
+            length_prefixed_hash.as_slice(),
+            hash_with_domain.as_slice(),
+            "Length-prefixed domain separation should differ from simple prefix"
+        );
 
         // In production code, all hash operations should include domain separators like:
         // hasher.update(b"fault_config_v1:");  // or length-prefixed version
@@ -691,19 +743,44 @@ mod remote_module_negative_tests {
         // Test saturating arithmetic with probabilities at boundaries
         let boundary_configs = [
             // Test floating-point boundaries
-            FaultConfig { drop_probability: 0.0, ..valid_config() },
-            FaultConfig { drop_probability: 1.0, ..valid_config() },
-            FaultConfig { drop_probability: f64::EPSILON, ..valid_config() },
-            FaultConfig { drop_probability: 1.0 - f64::EPSILON, ..valid_config() },
-
+            FaultConfig {
+                drop_probability: 0.0,
+                ..valid_config()
+            },
+            FaultConfig {
+                drop_probability: 1.0,
+                ..valid_config()
+            },
+            FaultConfig {
+                drop_probability: f64::EPSILON,
+                ..valid_config()
+            },
+            FaultConfig {
+                drop_probability: 1.0 - f64::EPSILON,
+                ..valid_config()
+            },
             // Test integer boundaries with safe casting
-            FaultConfig { max_faults: 0, ..valid_config() },
-            FaultConfig { max_faults: 1, ..valid_config() },
-            FaultConfig { max_faults: usize::MAX, ..valid_config() },
-
+            FaultConfig {
+                max_faults: 0,
+                ..valid_config()
+            },
+            FaultConfig {
+                max_faults: 1,
+                ..valid_config()
+            },
+            FaultConfig {
+                max_faults: usize::MAX,
+                ..valid_config()
+            },
             // Test corruption bit count boundaries
-            FaultConfig { corrupt_bit_count: 0, ..valid_config() },
-            FaultConfig { corrupt_bit_count: usize::MAX, ..valid_config() },
+            FaultConfig {
+                corrupt_bit_count: 0,
+                ..valid_config()
+            },
+            FaultConfig {
+                corrupt_bit_count: usize::MAX,
+                ..valid_config()
+            },
         ];
 
         for (i, config) in boundary_configs.iter().enumerate() {
@@ -716,31 +793,50 @@ mod remote_module_negative_tests {
                     // Test safe length conversion
                     let config_json = serde_json::to_string(config).unwrap();
                     let json_len_safe = u32::try_from(config_json.len()).unwrap_or(u32::MAX);
-                    assert!(json_len_safe > 0, "JSON length should be positive for config {}", i);
+                    assert!(
+                        json_len_safe > 0,
+                        "JSON length should be positive for config {}",
+                        i
+                    );
 
                     // Test probability values remain in bounds after operations
-                    let sum = config.drop_probability + config.reorder_probability + config.corrupt_probability;
+                    let sum = config.drop_probability
+                        + config.reorder_probability
+                        + config.corrupt_probability;
                     if sum.is_finite() {
-                        assert!(sum >= 0.0, "Probability sum should be non-negative for config {}", i);
+                        assert!(
+                            sum >= 0.0,
+                            "Probability sum should be non-negative for config {}",
+                            i
+                        );
                     }
 
                     // Test that max_faults doesn't overflow when incremented
                     let incremented = config.max_faults.saturating_add(1);
-                    assert!(incremented >= config.max_faults, "Saturating add should not decrease for config {}", i);
-
-                },
+                    assert!(
+                        incremented >= config.max_faults,
+                        "Saturating add should not decrease for config {}",
+                        i
+                    );
+                }
                 Err(error_msg) => {
                     // Boundary rejection is acceptable - verify error message quality
-                    assert!(!error_msg.is_empty(), "Error message should not be empty for config {}", i);
+                    assert!(
+                        !error_msg.is_empty(),
+                        "Error message should not be empty for config {}",
+                        i
+                    );
 
                     // Error message should not contain the raw values (avoid information leakage)
                     if config.max_faults == usize::MAX {
                         // Large values should be described generically
                         assert!(
-                            error_msg.contains("too large") ||
-                            error_msg.contains("exceeds") ||
-                            error_msg.contains("invalid"),
-                            "Error should describe boundary violation generically for config {}: {}", i, error_msg
+                            error_msg.contains("too large")
+                                || error_msg.contains("exceeds")
+                                || error_msg.contains("invalid"),
+                            "Error should describe boundary violation generically for config {}: {}",
+                            i,
+                            error_msg
                         );
                     }
                 }
@@ -770,9 +866,13 @@ mod remote_module_negative_tests {
         };
 
         // Verify statistics remain consistent (no overflow or corruption)
-        assert!(stats_after.faults_scheduled >= stats_before.faults_scheduled,
-               "Fault count should increase monotonically");
-        assert!(stats_after.faults_applied <= stats_after.faults_scheduled,
-               "Applied faults should never exceed scheduled faults");
+        assert!(
+            stats_after.faults_scheduled >= stats_before.faults_scheduled,
+            "Fault count should increase monotonically"
+        );
+        assert!(
+            stats_after.faults_applied <= stats_after.faults_scheduled,
+            "Applied faults should never exceed scheduled faults"
+        );
     }
 }

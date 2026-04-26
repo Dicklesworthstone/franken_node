@@ -187,19 +187,39 @@ impl CapabilityToken {
         let mut hasher = Sha256::new();
         hasher.update(b"impossible_default_hash_v1:");
         // Length-prefix variable-length string fields to prevent delimiter-collision attacks.
-        hasher.update(u64::try_from(self.token_id.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(self.token_id.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(self.token_id.as_bytes());
         let cap_label = self.capability.label();
-        hasher.update(u64::try_from(cap_label.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(cap_label.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(cap_label.as_bytes());
-        hasher.update(u64::try_from(self.issuer.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(self.issuer.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(self.issuer.as_bytes());
-        hasher.update(u64::try_from(self.subject.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(self.subject.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(self.subject.as_bytes());
         // Fixed-size u64 fields — no length-prefix needed.
         hasher.update(self.issued_at_ms.to_le_bytes());
         hasher.update(self.expires_at_ms.to_le_bytes());
-        hasher.update(u64::try_from(self.justification.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(self.justification.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(self.justification.as_bytes());
         hex::encode(hasher.finalize())
     }
@@ -336,16 +356,32 @@ impl EnforcementAuditEntry {
         let mut hasher = Sha256::new();
         hasher.update(b"impossible_default_audit_hash_v1:");
         // Length-prefix variable-length string fields to prevent delimiter-collision attacks.
-        hasher.update(u64::try_from(self.event_code.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(self.event_code.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(self.event_code.as_bytes());
         let cap_label = self.capability.label();
-        hasher.update(u64::try_from(cap_label.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(cap_label.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(cap_label.as_bytes());
-        hasher.update(u64::try_from(self.actor.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(self.actor.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(self.actor.as_bytes());
         // Fixed-size u64 field — no length-prefix needed.
         hasher.update(self.timestamp_ms.to_le_bytes());
-        hasher.update(u64::try_from(self.detail.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(self.detail.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(self.detail.as_bytes());
         // Optional token_id: use 0-length sentinel for None, length-prefixed for Some.
         match &self.token_id {
@@ -360,7 +396,11 @@ impl EnforcementAuditEntry {
                 hasher.update(u64::MAX.to_le_bytes());
             }
         }
-        hasher.update(u64::try_from(self.prev_hash.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(self.prev_hash.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(self.prev_hash.as_bytes());
         hex::encode(hasher.finalize())
     }
@@ -2089,7 +2129,6 @@ mod impossible_default_negative_path_tests {
                 expires_at_ms: 5000,
                 signature: String::new(),
             },
-
             // Token with Unicode injection in fields
             CapabilityToken {
                 token_id: "token🚀攻击кибер".to_string(),
@@ -2100,7 +2139,6 @@ mod impossible_default_negative_path_tests {
                 expires_at_ms: 5000,
                 signature: String::new(),
             },
-
             // Token with control characters and null bytes
             CapabilityToken {
                 token_id: "token\0null\r\ninjection".to_string(),
@@ -2111,7 +2149,6 @@ mod impossible_default_negative_path_tests {
                 expires_at_ms: 5000,
                 signature: String::new(),
             },
-
             // Token with script injection attempts
             CapabilityToken {
                 token_id: "token<script>alert('xss')</script>".to_string(),
@@ -2122,7 +2159,6 @@ mod impossible_default_negative_path_tests {
                 expires_at_ms: 5000,
                 signature: String::new(),
             },
-
             // Token with path traversal attempts
             CapabilityToken {
                 token_id: "../../../etc/passwd".to_string(),
@@ -2133,7 +2169,6 @@ mod impossible_default_negative_path_tests {
                 expires_at_ms: 5000,
                 signature: String::new(),
             },
-
             // Token with binary data injection
             CapabilityToken {
                 token_id: String::from_utf8_lossy(b"token\xFF\xFE\xFD").to_string(),
@@ -2153,12 +2188,15 @@ mod impossible_default_negative_path_tests {
             match grant_result_unsigned {
                 Err(ImpossibleCapabilityError::InvalidSignature { .. }) => {
                     // Expected for unsigned tokens
-                },
+                }
                 Err(_) => {
                     // Other validation errors acceptable for malformed tokens
-                },
+                }
                 Ok(()) => {
-                    panic!("Should not grant capability with unsigned malicious token {}", i);
+                    panic!(
+                        "Should not grant capability with unsigned malicious token {}",
+                        i
+                    );
                 }
             }
 
@@ -2173,9 +2211,13 @@ mod impossible_default_negative_path_tests {
                     assert!(capability_status.is_granted());
 
                     // Test that malicious content doesn't affect other operations
-                    let attempt_result = enforcer.attempt_operation(malicious_token.capability, 2000);
-                    assert!(attempt_result.is_ok(), "Operation should succeed despite malicious token content");
-                },
+                    let attempt_result =
+                        enforcer.attempt_operation(malicious_token.capability, 2000);
+                    assert!(
+                        attempt_result.is_ok(),
+                        "Operation should succeed despite malicious token content"
+                    );
+                }
                 Err(_) => {
                     // Acceptable to reject malformed tokens even with valid signatures
                 }
@@ -2198,17 +2240,18 @@ mod impossible_default_negative_path_tests {
             (u64::MAX, u64::MAX, "max_both"),
             (u64::MAX.saturating_sub(1000), u64::MAX, "near_max_issued"),
             (1, u64::MAX.saturating_sub(1), "near_max_expiry"),
-
             // Token issued in the future
             (u64::MAX.saturating_sub(100), 1000, "future_issued"),
-
             // Token with zero timestamps
             (0, 0, "zero_both"),
             (0, 1, "zero_issued"),
             (1, 0, "zero_expiry"),
-
             // Tokens with potential overflow in TTL calculations
-            (u64::MAX.saturating_sub(500), u64::MAX.saturating_sub(100), "overflow_ttl"),
+            (
+                u64::MAX.saturating_sub(500),
+                u64::MAX.saturating_sub(100),
+                "overflow_ttl",
+            ),
         ];
 
         for (issued_at, expires_at, case_name) in extreme_timestamp_cases {
@@ -2239,28 +2282,29 @@ mod impossible_default_negative_path_tests {
                     ];
 
                     for operation_time in operation_times {
-                        let attempt_result = enforcer.attempt_operation(extreme_token.capability, operation_time);
+                        let attempt_result =
+                            enforcer.attempt_operation(extreme_token.capability, operation_time);
 
                         // Should handle extreme timestamps without arithmetic overflow
                         match attempt_result {
                             Ok(()) => {
                                 // Operation allowed - timestamp arithmetic worked correctly
-                            },
+                            }
                             Err(ImpossibleCapabilityError::TokenExpired { .. }) => {
                                 // Expected if operation time > expires_at
-                            },
+                            }
                             Err(ImpossibleCapabilityError::Blocked { .. }) => {
                                 // Expected if capability not granted or other issues
-                            },
+                            }
                             Err(_) => {
                                 // Other errors acceptable for extreme timestamps
                             }
                         }
                     }
-                },
+                }
                 Err(ImpossibleCapabilityError::TokenExpired { .. }) => {
                     // Expected for tokens with invalid timestamp relationships
-                },
+                }
                 Err(_) => {
                     // Other validation errors acceptable for extreme timestamps
                 }
@@ -2286,43 +2330,35 @@ mod impossible_default_negative_path_tests {
         let signature_attack_scenarios = vec![
             // Empty signature
             ("empty_signature", ""),
-
             // Invalid hex signature
             ("invalid_hex", "gggggggg"),
-
             // Valid hex but wrong length
             ("wrong_length", "deadbeef"),
-
             // Signature from wrong key
             ("wrong_key", {
                 let mut token = make_token(ImpossibleCapability::FsAccess, 5000, &malicious_sk);
                 token.signature.clone()
             }),
-
             // Signature over different data
             ("different_data", {
-                let mut token = make_token(ImpossibleCapability::OutboundNetwork, 5000, &legitimate_sk);
+                let mut token =
+                    make_token(ImpossibleCapability::OutboundNetwork, 5000, &legitimate_sk);
                 token.signature.clone()
             }),
-
             // Signature with extra data appended
             ("extra_data", {
                 let mut token = make_token(ImpossibleCapability::FsAccess, 5000, &legitimate_sk);
                 format!("{}deadbeef", token.signature)
             }),
-
             // Signature with case variation
             ("case_variation", {
                 let mut token = make_token(ImpossibleCapability::FsAccess, 5000, &legitimate_sk);
                 token.signature.to_uppercase()
             }),
-
             // Signature with null bytes
             ("null_bytes", "0".repeat(127) + "\0"),
-
             // Signature with Unicode
             ("unicode_sig", "🔐".repeat(16)),
-
             // Extremely long signature
             ("long_signature", "a".repeat(100_000)),
         ];
@@ -2343,12 +2379,15 @@ mod impossible_default_negative_path_tests {
             match grant_result {
                 Err(ImpossibleCapabilityError::InvalidSignature { .. }) => {
                     // Expected for signature attacks
-                },
+                }
                 Err(_) => {
                     // Other validation errors acceptable
-                },
+                }
                 Ok(()) => {
-                    panic!("Should not grant capability with forged signature: {}", attack_name);
+                    panic!(
+                        "Should not grant capability with forged signature: {}",
+                        attack_name
+                    );
                 }
             }
         }
@@ -2358,7 +2397,9 @@ mod impossible_default_negative_path_tests {
         let original_signature = legitimate_token.signature.clone();
 
         // Grant legitimate token
-        enforcer.grant_capability(legitimate_token.clone()).expect("legitimate token should be granted");
+        enforcer
+            .grant_capability(legitimate_token.clone())
+            .expect("legitimate token should be granted");
 
         // Try to reuse signature on different token
         let mut replay_token = CapabilityToken {
@@ -2376,10 +2417,10 @@ mod impossible_default_negative_path_tests {
         match replay_result {
             Err(ImpossibleCapabilityError::InvalidSignature { .. }) => {
                 // Expected - signature should not validate for different data
-            },
+            }
             Err(_) => {
                 // Other validation errors acceptable
-            },
+            }
             Ok(()) => {
                 panic!("Should not allow signature replay attack");
             }
@@ -2393,7 +2434,9 @@ mod impossible_default_negative_path_tests {
 
         // Grant a capability legitimately
         let legitimate_token = make_token(ImpossibleCapability::FsAccess, 5000, &sk);
-        enforcer.grant_capability(legitimate_token).expect("legitimate grant should succeed");
+        enforcer
+            .grant_capability(legitimate_token)
+            .expect("legitimate grant should succeed");
 
         // Attempt operations on other capabilities without proper tokens
         let unauthorized_capabilities = vec![
@@ -2409,12 +2452,15 @@ mod impossible_default_negative_path_tests {
             match unauthorized_result {
                 Err(ImpossibleCapabilityError::Blocked { .. }) => {
                     // Expected - should block unauthorized capabilities
-                },
+                }
                 Err(_) => {
                     // Other errors acceptable
-                },
+                }
                 Ok(()) => {
-                    panic!("Should not allow unauthorized capability: {:?}", unauthorized_cap);
+                    panic!(
+                        "Should not allow unauthorized capability: {:?}",
+                        unauthorized_cap
+                    );
                 }
             }
 
@@ -2424,13 +2470,20 @@ mod impossible_default_negative_path_tests {
 
         // Test rapid operation attempts (potential DoS)
         for _i in 0..1000 {
-            let rapid_result = enforcer.attempt_operation(ImpossibleCapability::OutboundNetwork, 2000);
-            assert!(rapid_result.is_err(), "Rapid attempts should continue to be blocked");
+            let rapid_result =
+                enforcer.attempt_operation(ImpossibleCapability::OutboundNetwork, 2000);
+            assert!(
+                rapid_result.is_err(),
+                "Rapid attempts should continue to be blocked"
+            );
         }
 
         // Test operations with future timestamps
         let future_result = enforcer.attempt_operation(ImpossibleCapability::FsAccess, u64::MAX);
-        assert!(future_result.is_err(), "Future timestamp should not bypass expiry");
+        assert!(
+            future_result.is_err(),
+            "Future timestamp should not bypass expiry"
+        );
 
         // Test operations with past timestamps
         let past_result = enforcer.attempt_operation(ImpossibleCapability::FsAccess, 0);
@@ -2458,7 +2511,9 @@ mod impossible_default_negative_path_tests {
 
         for cap in capabilities {
             let token = make_token(cap, 10000, &sk);
-            enforcer.grant_capability(token).expect("grant should succeed");
+            enforcer
+                .grant_capability(token)
+                .expect("grant should succeed");
         }
 
         // Flood with massive number of operations
@@ -2469,7 +2524,11 @@ mod impossible_default_negative_path_tests {
             let operation_time = 1000 + (i as u64);
 
             // Mix of valid and expired operations
-            let expiry_time = if i % 3 == 0 { 500 } else { operation_time + 1000 };
+            let expiry_time = if i % 3 == 0 {
+                500
+            } else {
+                operation_time + 1000
+            };
 
             let _ = enforcer.attempt_operation(capability, expiry_time);
 
@@ -2498,7 +2557,10 @@ mod impossible_default_negative_path_tests {
         // Enforcer should remain functional after flood
         let post_flood_token = make_token(ImpossibleCapability::FsAccess, 20000, &sk);
         let post_flood_result = enforcer.grant_capability(post_flood_token);
-        assert!(post_flood_result.is_ok(), "Enforcer should remain functional after flood");
+        assert!(
+            post_flood_result.is_ok(),
+            "Enforcer should remain functional after flood"
+        );
     }
 
     #[test]
@@ -2547,7 +2609,10 @@ mod impossible_default_negative_path_tests {
                         let result = match op_type.as_str() {
                             "grant" => {
                                 let token = CapabilityToken {
-                                    token_id: format!("concurrent-{}-{}-{}", op_type, thread_id, iteration),
+                                    token_id: format!(
+                                        "concurrent-{}-{}-{}",
+                                        op_type, thread_id, iteration
+                                    ),
                                     capability,
                                     issuer: format!("concurrent-issuer-{}", thread_id),
                                     subject: format!("concurrent-subject-{}", thread_id),
@@ -2560,19 +2625,27 @@ mod impossible_default_negative_path_tests {
                                 let mut signed_token = token;
                                 sign_token(&mut signed_token, &sk_clone);
 
-                                enforcer_clone.lock().unwrap().grant_capability(signed_token).map_err(|e| format!("{:?}", e))
-                            },
-                            "attempt" => {
-                                enforcer_clone.lock().unwrap().attempt_operation(capability, timestamp).map_err(|e| format!("{:?}", e))
-                            },
-                            "revoke" => {
-                                enforcer_clone.lock().unwrap().revoke_capability(capability, timestamp).map_err(|e| format!("{:?}", e))
-                            },
+                                enforcer_clone
+                                    .lock()
+                                    .unwrap()
+                                    .grant_capability(signed_token)
+                                    .map_err(|e| format!("{:?}", e))
+                            }
+                            "attempt" => enforcer_clone
+                                .lock()
+                                .unwrap()
+                                .attempt_operation(capability, timestamp)
+                                .map_err(|e| format!("{:?}", e)),
+                            "revoke" => enforcer_clone
+                                .lock()
+                                .unwrap()
+                                .revoke_capability(capability, timestamp)
+                                .map_err(|e| format!("{:?}", e)),
                             "status_check" => {
                                 let status = enforcer_clone.lock().unwrap().status(capability);
                                 // Status check always succeeds
                                 Ok(())
-                            },
+                            }
                             _ => unreachable!(),
                         };
 
@@ -2580,7 +2653,7 @@ mod impossible_default_negative_path_tests {
                             Ok(()) => {
                                 let mut count = success_count_clone.lock().unwrap();
                                 *count = count.saturating_add(1);
-                            },
+                            }
                             Err(_) => {
                                 let mut count = error_count_clone.lock().unwrap();
                                 *count = count.saturating_add(1);
@@ -2655,7 +2728,6 @@ mod impossible_default_negative_path_tests {
                 },
                 true, // Should have same hash
             ),
-
             // Single bit difference
             (
                 CapabilityToken {
@@ -2678,7 +2750,6 @@ mod impossible_default_negative_path_tests {
                 },
                 false, // Should have different hash
             ),
-
             // Length extension attempt
             (
                 CapabilityToken {
@@ -2701,7 +2772,6 @@ mod impossible_default_negative_path_tests {
                 },
                 false, // Should have different hash
             ),
-
             // Unicode normalization variations
             (
                 CapabilityToken {
@@ -2733,14 +2803,23 @@ mod impossible_default_negative_path_tests {
             if should_match {
                 assert_eq!(hash1, hash2, "Identical tokens should have same hash");
             } else {
-                assert_ne!(hash1, hash2, "Different tokens should have different hashes");
+                assert_ne!(
+                    hash1, hash2,
+                    "Different tokens should have different hashes"
+                );
             }
 
             // All hashes should be valid SHA256 format
             assert_eq!(hash1.len(), 64, "Hash should be 64 hex characters");
             assert_eq!(hash2.len(), 64, "Hash should be 64 hex characters");
-            assert!(hash1.chars().all(|c| c.is_ascii_hexdigit()), "Hash should contain only hex characters");
-            assert!(hash2.chars().all(|c| c.is_ascii_hexdigit()), "Hash should contain only hex characters");
+            assert!(
+                hash1.chars().all(|c| c.is_ascii_hexdigit()),
+                "Hash should contain only hex characters"
+            );
+            assert!(
+                hash2.chars().all(|c| c.is_ascii_hexdigit()),
+                "Hash should contain only hex characters"
+            );
         }
 
         // Test hash avalanche effect with systematic bit flips
@@ -2771,12 +2850,21 @@ mod impossible_default_negative_path_tests {
             };
 
             let variant_hash = variant_token.content_hash();
-            assert_ne!(variant_hash, base_hash, "Variant should have different hash");
-            assert!(unique_hashes.insert(variant_hash), "All variant hashes should be unique");
+            assert_ne!(
+                variant_hash, base_hash,
+                "Variant should have different hash"
+            );
+            assert!(
+                unique_hashes.insert(variant_hash),
+                "All variant hashes should be unique"
+            );
         }
 
         // Should have generated many unique hashes
-        assert!(unique_hashes.len() > 90, "Should generate unique hashes for small variations");
+        assert!(
+            unique_hashes.len() > 90,
+            "Should generate unique hashes for small variations"
+        );
     }
 
     #[test]
@@ -2785,27 +2873,41 @@ mod impossible_default_negative_path_tests {
         let (mut enforcer, sk) = make_enforcer();
 
         // Grant capabilities legitimately
-        for cap in [ImpossibleCapability::FsAccess, ImpossibleCapability::OutboundNetwork] {
+        for cap in [
+            ImpossibleCapability::FsAccess,
+            ImpossibleCapability::OutboundNetwork,
+        ] {
             let token = make_token(cap, 10000, &sk);
-            enforcer.grant_capability(token).expect("grant should succeed");
+            enforcer
+                .grant_capability(token)
+                .expect("grant should succeed");
         }
 
         // Simulate silent disable attempts through state manipulation
         let silent_disable_scenarios = vec![
             // Attempt to directly disable enforcement
             ("direct_disable", ImpossibleCapability::FsAccess),
-            ("environment_override", ImpossibleCapability::OutboundNetwork),
+            (
+                "environment_override",
+                ImpossibleCapability::OutboundNetwork,
+            ),
             ("configuration_bypass", ImpossibleCapability::FsAccess),
         ];
 
         for (attack_type, capability) in silent_disable_scenarios {
             // Record initial state
             let initial_status = enforcer.status(capability);
-            assert!(initial_status.is_granted(), "Capability should be initially granted");
+            assert!(
+                initial_status.is_granted(),
+                "Capability should be initially granted"
+            );
 
             // Attempt operation that should succeed
             let legitimate_operation = enforcer.attempt_operation(capability, 2000);
-            assert!(legitimate_operation.is_ok(), "Legitimate operation should succeed");
+            assert!(
+                legitimate_operation.is_ok(),
+                "Legitimate operation should succeed"
+            );
 
             // Simulate potential silent disable detection
             // In a real implementation, this might involve:
@@ -2816,14 +2918,21 @@ mod impossible_default_negative_path_tests {
 
             // Verify capability status remains consistent
             let post_operation_status = enforcer.status(capability);
-            assert!(post_operation_status.is_granted(), "Status should remain granted after operation");
+            assert!(
+                post_operation_status.is_granted(),
+                "Status should remain granted after operation"
+            );
 
             // Verify audit trail includes operations
             let audit_events = enforcer.audit_events();
-            let operation_events = audit_events.iter()
+            let operation_events = audit_events
+                .iter()
                 .filter(|e| e.capability == capability && e.event_code == IBD_002_OPT_IN_GRANTED)
                 .count();
-            assert!(operation_events > 0, "Should have audit events for capability operations");
+            assert!(
+                operation_events > 0,
+                "Should have audit events for capability operations"
+            );
 
             // Test that revocation is properly audited (not silent)
             let revoke_result = enforcer.revoke_capability(capability, 3000);
@@ -2831,11 +2940,17 @@ mod impossible_default_negative_path_tests {
                 Ok(()) => {
                     // Verify revocation is audited
                     let post_revoke_events = enforcer.audit_events();
-                    assert!(post_revoke_events.len() > audit_events.len(), "Revocation should be audited");
+                    assert!(
+                        post_revoke_events.len() > audit_events.len(),
+                        "Revocation should be audited"
+                    );
 
                     // Verify status properly reflects revocation
-                    assert!(enforcer.status(capability).is_blocked(), "Status should be blocked after revocation");
-                },
+                    assert!(
+                        enforcer.status(capability).is_blocked(),
+                        "Status should be blocked after revocation"
+                    );
+                }
                 Err(_) => {
                     // Revocation failure is acceptable in some implementations
                 }
@@ -2844,15 +2959,27 @@ mod impossible_default_negative_path_tests {
 
         // Verify that metrics accurately track all operations (no silent operations)
         let final_metrics = enforcer.metrics();
-        assert!(final_metrics.total_attempts > 0, "Should track all operation attempts");
-        assert!(final_metrics.blocked_attempts_total >= 0, "Should track blocked attempts");
+        assert!(
+            final_metrics.total_attempts > 0,
+            "Should track all operation attempts"
+        );
+        assert!(
+            final_metrics.blocked_attempts_total >= 0,
+            "Should track blocked attempts"
+        );
 
         // Test detection of configuration tampering
         // This would typically involve file system monitoring, but we test the audit trail
         let audit_events = enforcer.audit_events();
         for event in audit_events {
-            assert!(!event.event_code.is_empty(), "All events should have valid codes");
-            assert!(event.timestamp_ms > 0, "All events should have valid timestamps");
+            assert!(
+                !event.event_code.is_empty(),
+                "All events should have valid codes"
+            );
+            assert!(
+                event.timestamp_ms > 0,
+                "All events should have valid timestamps"
+            );
         }
     }
 }

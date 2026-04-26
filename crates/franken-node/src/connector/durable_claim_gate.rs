@@ -1109,9 +1109,7 @@ mod tests {
     fn duplicate_required_proof_is_rejected_before_event_emission() {
         let mut gate = DurableClaimGate::new(DurableClaimGateConfig::default()).unwrap();
         let mut claim = base_claim();
-        claim
-            .required_proofs
-            .push(ProofType::MerkleInclusion);
+        claim.required_proofs.push(ProofType::MerkleInclusion);
 
         let err = gate
             .evaluate_claim(&claim, &valid_input(), 10)

@@ -323,15 +323,19 @@ impl AdmissionBudgetTracker {
         // Dimension 1: bytes
         let bytes_after = usage.bytes_used.saturating_add(request.bytes_requested);
         let bytes_ok = bytes_after <= self.budget.max_bytes;
-        push_bounded(&mut records, BudgetCheckRecord {
-            peer_id: request.peer_id.clone(),
-            timestamp: timestamp.to_string(),
-            dimension: "bytes".into(),
-            usage_before: usage.bytes_used,
-            requested: request.bytes_requested,
-            limit: self.budget.max_bytes,
-            verdict: if bytes_ok { "PASS" } else { "FAIL" }.into(),
-        }, MAX_AUDIT_RECORDS);
+        push_bounded(
+            &mut records,
+            BudgetCheckRecord {
+                peer_id: request.peer_id.clone(),
+                timestamp: timestamp.to_string(),
+                dimension: "bytes".into(),
+                usage_before: usage.bytes_used,
+                requested: request.bytes_requested,
+                limit: self.budget.max_bytes,
+                verdict: if bytes_ok { "PASS" } else { "FAIL" }.into(),
+            },
+            MAX_AUDIT_RECORDS,
+        );
         if !bytes_ok {
             push_bounded(&mut violations, BudgetDimension::Bytes, MAX_VIOLATIONS);
         }
@@ -339,47 +343,63 @@ impl AdmissionBudgetTracker {
         // Dimension 2: symbols
         let symbols_after = usage.symbols_used.saturating_add(request.symbols_requested);
         let symbols_ok = symbols_after <= self.budget.max_symbols;
-        push_bounded(&mut records, BudgetCheckRecord {
-            peer_id: request.peer_id.clone(),
-            timestamp: timestamp.to_string(),
-            dimension: "symbols".into(),
-            usage_before: usage.symbols_used,
-            requested: request.symbols_requested,
-            limit: self.budget.max_symbols,
-            verdict: if symbols_ok { "PASS" } else { "FAIL" }.into(),
-        }, MAX_AUDIT_RECORDS);
+        push_bounded(
+            &mut records,
+            BudgetCheckRecord {
+                peer_id: request.peer_id.clone(),
+                timestamp: timestamp.to_string(),
+                dimension: "symbols".into(),
+                usage_before: usage.symbols_used,
+                requested: request.symbols_requested,
+                limit: self.budget.max_symbols,
+                verdict: if symbols_ok { "PASS" } else { "FAIL" }.into(),
+            },
+            MAX_AUDIT_RECORDS,
+        );
         if !symbols_ok {
             push_bounded(&mut violations, BudgetDimension::Symbols, MAX_VIOLATIONS);
         }
 
         // Dimension 3: failed_auth (current count, no increment from request)
         let auth_ok = usage.failed_auth_count < self.budget.max_failed_auth;
-        push_bounded(&mut records, BudgetCheckRecord {
-            peer_id: request.peer_id.clone(),
-            timestamp: timestamp.to_string(),
-            dimension: "failed_auth".into(),
-            usage_before: usage.failed_auth_count as u64,
-            requested: 0,
-            limit: self.budget.max_failed_auth as u64,
-            verdict: if auth_ok { "PASS" } else { "FAIL" }.into(),
-        }, MAX_AUDIT_RECORDS);
+        push_bounded(
+            &mut records,
+            BudgetCheckRecord {
+                peer_id: request.peer_id.clone(),
+                timestamp: timestamp.to_string(),
+                dimension: "failed_auth".into(),
+                usage_before: usage.failed_auth_count as u64,
+                requested: 0,
+                limit: self.budget.max_failed_auth as u64,
+                verdict: if auth_ok { "PASS" } else { "FAIL" }.into(),
+            },
+            MAX_AUDIT_RECORDS,
+        );
         if !auth_ok {
             push_bounded(&mut violations, BudgetDimension::FailedAuth, MAX_VIOLATIONS);
         }
 
         // Dimension 4: inflight_decode (current count)
         let inflight_ok = usage.inflight_decode_count < self.budget.max_inflight_decode;
-        push_bounded(&mut records, BudgetCheckRecord {
-            peer_id: request.peer_id.clone(),
-            timestamp: timestamp.to_string(),
-            dimension: "inflight_decode".into(),
-            usage_before: usage.inflight_decode_count as u64,
-            requested: 0,
-            limit: self.budget.max_inflight_decode as u64,
-            verdict: if inflight_ok { "PASS" } else { "FAIL" }.into(),
-        }, MAX_AUDIT_RECORDS);
+        push_bounded(
+            &mut records,
+            BudgetCheckRecord {
+                peer_id: request.peer_id.clone(),
+                timestamp: timestamp.to_string(),
+                dimension: "inflight_decode".into(),
+                usage_before: usage.inflight_decode_count as u64,
+                requested: 0,
+                limit: self.budget.max_inflight_decode as u64,
+                verdict: if inflight_ok { "PASS" } else { "FAIL" }.into(),
+            },
+            MAX_AUDIT_RECORDS,
+        );
         if !inflight_ok {
-            push_bounded(&mut violations, BudgetDimension::InflightDecode, MAX_VIOLATIONS);
+            push_bounded(
+                &mut violations,
+                BudgetDimension::InflightDecode,
+                MAX_VIOLATIONS,
+            );
         }
 
         // Dimension 5: decode_cpu
@@ -387,15 +407,19 @@ impl AdmissionBudgetTracker {
             .decode_cpu_ms
             .saturating_add(request.decode_cpu_estimate_ms);
         let cpu_ok = cpu_after <= self.budget.max_decode_cpu_ms;
-        push_bounded(&mut records, BudgetCheckRecord {
-            peer_id: request.peer_id.clone(),
-            timestamp: timestamp.to_string(),
-            dimension: "decode_cpu".into(),
-            usage_before: usage.decode_cpu_ms,
-            requested: request.decode_cpu_estimate_ms,
-            limit: self.budget.max_decode_cpu_ms,
-            verdict: if cpu_ok { "PASS" } else { "FAIL" }.into(),
-        }, MAX_AUDIT_RECORDS);
+        push_bounded(
+            &mut records,
+            BudgetCheckRecord {
+                peer_id: request.peer_id.clone(),
+                timestamp: timestamp.to_string(),
+                dimension: "decode_cpu".into(),
+                usage_before: usage.decode_cpu_ms,
+                requested: request.decode_cpu_estimate_ms,
+                limit: self.budget.max_decode_cpu_ms,
+                verdict: if cpu_ok { "PASS" } else { "FAIL" }.into(),
+            },
+            MAX_AUDIT_RECORDS,
+        );
         if !cpu_ok {
             push_bounded(&mut violations, BudgetDimension::DecodeCpu, MAX_VIOLATIONS);
         }
@@ -1500,7 +1524,14 @@ mod tests {
 
         // 4th attempt should be rejected
         let err = tracker.record_failed_auth("p1").unwrap_err();
-        assert!(matches!(err, AdmissionError::AuthExceeded { count: 4, limit: 3, .. }));
+        assert!(matches!(
+            err,
+            AdmissionError::AuthExceeded {
+                count: 4,
+                limit: 3,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1516,7 +1547,14 @@ mod tests {
 
         // 6th decode start should be rejected
         let err = tracker.record_decode_start("p1").unwrap_err();
-        assert!(matches!(err, AdmissionError::InflightExceeded { count: 6, limit: 5, .. }));
+        assert!(matches!(
+            err,
+            AdmissionError::InflightExceeded {
+                count: 6,
+                limit: 5,
+                ..
+            }
+        ));
         // Count should not have been incremented on failure
         assert_eq!(tracker.get_usage("p1").inflight_decode_count, 5);
     }
@@ -1534,13 +1572,27 @@ mod tests {
         tracker.record_failed_auth("p1").unwrap();
         assert_eq!(tracker.get_usage("p1").failed_auth_count, 1);
         let err = tracker.record_failed_auth("p1").unwrap_err();
-        assert!(matches!(err, AdmissionError::AuthExceeded { count: 2, limit: 1, .. }));
+        assert!(matches!(
+            err,
+            AdmissionError::AuthExceeded {
+                count: 2,
+                limit: 1,
+                ..
+            }
+        ));
 
         // Inflight decode: max=1, first should succeed, second should fail
         tracker.record_decode_start("p2").unwrap();
         assert_eq!(tracker.get_usage("p2").inflight_decode_count, 1);
         let err = tracker.record_decode_start("p2").unwrap_err();
-        assert!(matches!(err, AdmissionError::InflightExceeded { count: 2, limit: 1, .. }));
+        assert!(matches!(
+            err,
+            AdmissionError::InflightExceeded {
+                count: 2,
+                limit: 1,
+                ..
+            }
+        ));
         assert_eq!(tracker.get_usage("p2").inflight_decode_count, 1);
     }
 }

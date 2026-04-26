@@ -944,34 +944,42 @@ mod tests {
             // Unicode control characters, NULL bytes, normalization attacks
             let malicious_names = vec![
                 "lane\u{0000}scheduler",
-                "lane\u{200B}scheduler", // Zero-width space
-                "lane\u{FEFF}scheduler", // BOM
+                "lane\u{200B}scheduler",         // Zero-width space
+                "lane\u{FEFF}scheduler",         // BOM
                 "lane\u{202E}scheduler\u{202D}", // RTL override/LTR override
-                "lane\x1B[31mscheduler", // ANSI escape sequences
-                "lane\u{1F4A9}scheduler", // Emoji flood
-                "lane\u{0301}scheduler", // Combining acute accent
-                "lane\u{0308}scheduler", // Combining diaeresis
-                "lane\u{AD}scheduler", // Soft hyphen
-                "lane\u{034F}scheduler", // Combining grapheme joiner
+                "lane\x1B[31mscheduler",         // ANSI escape sequences
+                "lane\u{1F4A9}scheduler",        // Emoji flood
+                "lane\u{0301}scheduler",         // Combining acute accent
+                "lane\u{0308}scheduler",         // Combining diaeresis
+                "lane\u{AD}scheduler",           // Soft hyphen
+                "lane\u{034F}scheduler",         // Combining grapheme joiner
             ];
 
             for malicious_name in &malicious_names {
                 // Lookup should safely reject malicious names
                 let result = lookup(malicious_name);
-                assert!(result.is_none(), "Should reject malicious name: {:?}", malicious_name);
+                assert!(
+                    result.is_none(),
+                    "Should reject malicious name: {:?}",
+                    malicious_name
+                );
             }
 
             // Test Unicode normalization attacks
             let normalization_attacks = vec![
-                "lane_sche\u{0301}duler", // Combining acute accent on 'e'
-                "lane_schedul\u{0308}er", // Combining diaeresis on 'l'
+                "lane_sche\u{0301}duler",         // Combining acute accent on 'e'
+                "lane_schedul\u{0308}er",         // Combining diaeresis on 'l'
                 "lane\u{0041}\u{0301}_scheduler", // A + combining acute accent
-                "lane_\u{1e00}scheduler", // A with ring below
+                "lane_\u{1e00}scheduler",         // A with ring below
             ];
 
             for attack in &normalization_attacks {
                 let result = lookup(attack);
-                assert!(result.is_none(), "Should reject normalization attack: {:?}", attack);
+                assert!(
+                    result.is_none(),
+                    "Should reject normalization attack: {:?}",
+                    attack
+                );
             }
         }
 
@@ -979,12 +987,16 @@ mod tests {
         fn memory_exhaustion_through_massive_version_collections() {
             // Test that all_versions() handles large registries efficiently
             let versions = all_versions();
-            let total_memory_estimate = versions.iter()
+            let total_memory_estimate = versions
+                .iter()
                 .map(|(name, value)| name.len() + value.len())
                 .sum::<usize>();
 
             // Should be reasonable size (not indicating memory exhaustion vulnerability)
-            assert!(total_memory_estimate < 1_000_000, "Registry should not consume excessive memory");
+            assert!(
+                total_memory_estimate < 1_000_000,
+                "Registry should not consume excessive memory"
+            );
 
             // Test repeated calls don't accumulate memory
             for _ in 0..1000 {
@@ -1016,20 +1028,28 @@ mod tests {
                 "{{.constructor.constructor('return process')()}}}",
                 "<script>alert('xss')</script>",
                 "'; DROP TABLE versions; --",
-                "\x00\x01\x02\x03", // Binary data
+                "\x00\x01\x02\x03",      // Binary data
                 "\\u0000\\u0001\\u0002", // Escaped binary
             ];
 
             // Test semver triplet validation against injection
             for attack in &format_attacks {
                 let result = is_semver_triplet(attack);
-                assert!(!result, "Should reject format attack as semver: {:?}", attack);
+                assert!(
+                    !result,
+                    "Should reject format attack as semver: {:?}",
+                    attack
+                );
             }
 
             // Test lookup operations against injection
             for attack in &format_attacks {
                 let result = lookup(attack);
-                assert!(result.is_none(), "Should reject format attack in lookup: {:?}", attack);
+                assert!(
+                    result.is_none(),
+                    "Should reject format attack in lookup: {:?}",
+                    attack
+                );
             }
         }
 
@@ -1050,7 +1070,10 @@ mod tests {
                 let elapsed = start.elapsed();
 
                 assert!(result.is_none(), "Should reject massive string");
-                assert!(elapsed < std::time::Duration::from_millis(100), "Lookup should be fast even for massive strings");
+                assert!(
+                    elapsed < std::time::Duration::from_millis(100),
+                    "Lookup should be fast even for massive strings"
+                );
             }
 
             // Test semver validation with massive strings
@@ -1060,7 +1083,10 @@ mod tests {
                 let elapsed = start.elapsed();
 
                 assert!(!result, "Should reject massive string as semver");
-                assert!(elapsed < std::time::Duration::from_millis(100), "Semver check should be fast");
+                assert!(
+                    elapsed < std::time::Duration::from_millis(100),
+                    "Semver check should be fast"
+                );
             }
         }
 
@@ -1084,10 +1110,10 @@ mod tests {
                 "1.22.333",
                 "123.4.56789",
                 // Just at boundaries
-                "1.0",    // Missing patch
+                "1.0",     // Missing patch
                 "1.0.0.0", // Extra segment
-                "",       // Empty
-                "1",      // Single component
+                "",        // Empty
+                "1",       // Single component
             ];
 
             for case in &boundary_cases {
@@ -1095,8 +1121,12 @@ mod tests {
 
                 // Only "1.2.3", "9.9.9", "1.22.333", "123.4.56789", and pure numeric triplets should pass
                 let should_pass = case.split('.').count() == 3
-                    && case.split('.').all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
-                    && !case.split('.').any(|part| part.starts_with('0') && part.len() > 1);
+                    && case
+                        .split('.')
+                        .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+                    && !case
+                        .split('.')
+                        .any(|part| part.starts_with('0') && part.len() > 1);
 
                 if should_pass {
                     assert!(result, "Should accept valid semver: {:?}", case);
@@ -1110,12 +1140,12 @@ mod tests {
         fn timing_attack_resistance_in_lookup_operations() {
             // Test that lookup time is consistent regardless of input
             let test_cases = vec![
-                "lane_scheduler",           // Valid, exists
-                "nonexistent_scheduler",    // Valid format, doesn't exist
+                "lane_scheduler",                     // Valid, exists
+                "nonexistent_scheduler",              // Valid format, doesn't exist
                 "lane_scheduler" + &"x".repeat(1000), // Long but similar prefix
-                "zzzzzzzzzz_scheduler",     // Different prefix
-                "",                         // Empty
-                "a",                        // Very short
+                "zzzzzzzzzz_scheduler",               // Different prefix
+                "",                                   // Empty
+                "a",                                  // Very short
             ];
 
             let mut timings = Vec::new();
@@ -1138,12 +1168,24 @@ mod tests {
             }
 
             // Verify timing variations are not excessive (potential timing attack resistance)
-            let min_time = timings.iter().map(|(_, t)| *t).min().expect("timings should not be empty");
-            let max_time = timings.iter().map(|(_, t)| *t).max().expect("timings should not be empty");
+            let min_time = timings
+                .iter()
+                .map(|(_, t)| *t)
+                .min()
+                .expect("timings should not be empty");
+            let max_time = timings
+                .iter()
+                .map(|(_, t)| *t)
+                .max()
+                .expect("timings should not be empty");
 
             // Allow for some variation but ensure it's not excessive
             let time_ratio = max_time.as_nanos() as f64 / min_time.as_nanos() as f64;
-            assert!(time_ratio < 10.0, "Timing variation too high (potential timing attack): ratio {:.2}", time_ratio);
+            assert!(
+                time_ratio < 10.0,
+                "Timing variation too high (potential timing attack): ratio {:.2}",
+                time_ratio
+            );
         }
 
         #[test]
@@ -1161,22 +1203,38 @@ mod tests {
                             0 => {
                                 // Test valid lookups
                                 let result = lookup("lane_scheduler");
-                                push_bounded(&mut results, ("valid_lookup", result.is_some()), MAX_THREAD_RESULTS);
+                                push_bounded(
+                                    &mut results,
+                                    ("valid_lookup", result.is_some()),
+                                    MAX_THREAD_RESULTS,
+                                );
                             }
                             1 => {
                                 // Test invalid lookups
                                 let result = lookup(&format!("invalid_{thread_id}_{op_id}"));
-                                push_bounded(&mut results, ("invalid_lookup", result.is_none()), MAX_THREAD_RESULTS);
+                                push_bounded(
+                                    &mut results,
+                                    ("invalid_lookup", result.is_none()),
+                                    MAX_THREAD_RESULTS,
+                                );
                             }
                             2 => {
                                 // Test all_versions consistency
                                 let versions = all_versions();
-                                push_bounded(&mut results, ("all_versions", !versions.is_empty()), MAX_THREAD_RESULTS);
+                                push_bounded(
+                                    &mut results,
+                                    ("all_versions", !versions.is_empty()),
+                                    MAX_THREAD_RESULTS,
+                                );
                             }
                             _ => {
                                 // Test semver validation
                                 let result = is_semver_triplet("1.0.0");
-                                push_bounded(&mut results, ("semver_valid", result), MAX_THREAD_RESULTS);
+                                push_bounded(
+                                    &mut results,
+                                    ("semver_valid", result),
+                                    MAX_THREAD_RESULTS,
+                                );
                             }
                         }
                     }
@@ -1193,20 +1251,26 @@ mod tests {
             }
 
             // Verify consistent behavior across concurrent access
-            let valid_lookups = all_results.iter()
+            let valid_lookups = all_results
+                .iter()
                 .filter(|(op, _)| op == &"valid_lookup")
                 .all(|(_, success)| *success);
             assert!(valid_lookups, "Valid lookups should always succeed");
 
-            let invalid_lookups = all_results.iter()
+            let invalid_lookups = all_results
+                .iter()
                 .filter(|(op, _)| op == &"invalid_lookup")
                 .all(|(_, failed)| *failed);
             assert!(invalid_lookups, "Invalid lookups should always fail");
 
-            let all_versions_calls = all_results.iter()
+            let all_versions_calls = all_results
+                .iter()
                 .filter(|(op, _)| op == &"all_versions")
                 .all(|(_, success)| *success);
-            assert!(all_versions_calls, "all_versions should always return non-empty");
+            assert!(
+                all_versions_calls,
+                "all_versions should always return non-empty"
+            );
         }
 
         #[test]
@@ -1215,15 +1279,32 @@ mod tests {
             let versions = all_versions();
 
             // Verify reasonable bounds on registry size
-            assert!(versions.len() < 10000, "Registry should not have excessive entries");
-            assert!(versions.len() > 50, "Registry should have substantial entries");
+            assert!(
+                versions.len() < 10000,
+                "Registry should not have excessive entries"
+            );
+            assert!(
+                versions.len() > 50,
+                "Registry should have substantial entries"
+            );
 
             // Test maximum name and version lengths
-            let max_name_len = versions.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
-            let max_version_len = versions.iter().map(|(_, version)| version.len()).max().unwrap_or(0);
+            let max_name_len = versions
+                .iter()
+                .map(|(name, _)| name.len())
+                .max()
+                .unwrap_or(0);
+            let max_version_len = versions
+                .iter()
+                .map(|(_, version)| version.len())
+                .max()
+                .unwrap_or(0);
 
             assert!(max_name_len < 200, "Name lengths should be reasonable");
-            assert!(max_version_len < 100, "Version lengths should be reasonable");
+            assert!(
+                max_version_len < 100,
+                "Version lengths should be reasonable"
+            );
 
             // Test for any suspicious patterns in the registry
             for (name, version) in &versions {
@@ -1234,14 +1315,32 @@ mod tests {
 
                 // No URLs or network references
                 assert!(!version.contains("://"), "Versions should not contain URLs");
-                assert!(!version.contains("www."), "Versions should not contain URLs");
-                assert!(!version.contains(".com"), "Versions should not contain URLs");
-                assert!(!version.contains(".net"), "Versions should not contain URLs");
+                assert!(
+                    !version.contains("www."),
+                    "Versions should not contain URLs"
+                );
+                assert!(
+                    !version.contains(".com"),
+                    "Versions should not contain URLs"
+                );
+                assert!(
+                    !version.contains(".net"),
+                    "Versions should not contain URLs"
+                );
 
                 // No obvious injection patterns
-                assert!(!version.contains("${"), "Versions should not contain template injection");
-                assert!(!version.contains("<%"), "Versions should not contain template injection");
-                assert!(!version.contains("{{"), "Versions should not contain template injection");
+                assert!(
+                    !version.contains("${"),
+                    "Versions should not contain template injection"
+                );
+                assert!(
+                    !version.contains("<%"),
+                    "Versions should not contain template injection"
+                );
+                assert!(
+                    !version.contains("{{"),
+                    "Versions should not contain template injection"
+                );
             }
         }
 
@@ -1270,24 +1369,64 @@ mod tests {
             for attack in &serialization_attacks {
                 // Lookup should safely reject serialization attacks
                 let result = lookup(attack);
-                assert!(result.is_none(), "Should reject serialization attack: {:?}", attack);
+                assert!(
+                    result.is_none(),
+                    "Should reject serialization attack: {:?}",
+                    attack
+                );
 
                 // Semver parsing should safely reject attacks
                 let semver_result = is_semver_triplet(attack);
-                assert!(!semver_result, "Should reject attack as semver: {:?}", attack);
+                assert!(
+                    !semver_result,
+                    "Should reject attack as semver: {:?}",
+                    attack
+                );
             }
 
             // Verify registry values are safe for serialization
             for (name, version) in all_versions() {
                 // Should not contain obvious serialization metacharacters
-                assert!(!version.contains("\""), "Version should not contain quotes: {}", name);
-                assert!(!version.contains("'"), "Version should not contain single quotes: {}", name);
-                assert!(!version.contains("{"), "Version should not contain braces: {}", name);
-                assert!(!version.contains("}"), "Version should not contain braces: {}", name);
-                assert!(!version.contains("["), "Version should not contain brackets: {}", name);
-                assert!(!version.contains("]"), "Version should not contain brackets: {}", name);
-                assert!(!version.contains("<"), "Version should not contain angle brackets: {}", name);
-                assert!(!version.contains(">"), "Version should not contain angle brackets: {}", name);
+                assert!(
+                    !version.contains("\""),
+                    "Version should not contain quotes: {}",
+                    name
+                );
+                assert!(
+                    !version.contains("'"),
+                    "Version should not contain single quotes: {}",
+                    name
+                );
+                assert!(
+                    !version.contains("{"),
+                    "Version should not contain braces: {}",
+                    name
+                );
+                assert!(
+                    !version.contains("}"),
+                    "Version should not contain braces: {}",
+                    name
+                );
+                assert!(
+                    !version.contains("["),
+                    "Version should not contain brackets: {}",
+                    name
+                );
+                assert!(
+                    !version.contains("]"),
+                    "Version should not contain brackets: {}",
+                    name
+                );
+                assert!(
+                    !version.contains("<"),
+                    "Version should not contain angle brackets: {}",
+                    name
+                );
+                assert!(
+                    !version.contains(">"),
+                    "Version should not contain angle brackets: {}",
+                    name
+                );
             }
         }
     }

@@ -474,7 +474,11 @@ pub fn measure_repairability(
         }
     }
 
-    let capped_score = if score.is_finite() { score.min(1.0) } else { 0.0 };
+    let capped_score = if score.is_finite() {
+        score.min(1.0)
+    } else {
+        0.0
+    };
 
     // [EVD-RETROHARDEN-004]
     let _event = EVD_RETROHARDEN_004;

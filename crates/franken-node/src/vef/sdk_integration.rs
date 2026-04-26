@@ -1700,7 +1700,10 @@ mod tests {
         let hash1 = sha256_hex(data);
         let hash2 = sha256_hex(data);
         assert_eq!(hash1, hash2, "sha256_hex should be deterministic");
-        assert!(hash1.starts_with("sha256:"), "hash should have sha256: prefix");
+        assert!(
+            hash1.starts_with("sha256:"),
+            "hash should have sha256: prefix"
+        );
     }
 
     #[test]
@@ -1708,16 +1711,28 @@ mod tests {
         // Test: different data should produce different hashes
         let hash1 = sha256_hex(b"data1");
         let hash2 = sha256_hex(b"data2");
-        assert_ne!(hash1, hash2, "different data should produce different hashes");
+        assert_ne!(
+            hash1, hash2,
+            "different data should produce different hashes"
+        );
 
         // Test: length extension attack prevention
         let hash_ab_cd = sha256_hex(b"abcd");
         let hash_a_bcd = sha256_hex(b"a");
         let hash_abc_d = sha256_hex(b"abc");
         // All should be different due to length prefixing
-        assert_ne!(hash_ab_cd, hash_a_bcd, "length prefixing should prevent ab|cd vs a|bcd collision");
-        assert_ne!(hash_ab_cd, hash_abc_d, "length prefixing should prevent ab|cd vs abc|d collision");
-        assert_ne!(hash_a_bcd, hash_abc_d, "different length data should hash differently");
+        assert_ne!(
+            hash_ab_cd, hash_a_bcd,
+            "length prefixing should prevent ab|cd vs a|bcd collision"
+        );
+        assert_ne!(
+            hash_ab_cd, hash_abc_d,
+            "length prefixing should prevent ab|cd vs abc|d collision"
+        );
+        assert_ne!(
+            hash_a_bcd, hash_abc_d,
+            "different length data should hash differently"
+        );
     }
 
     #[test]
@@ -1730,12 +1745,18 @@ mod tests {
         // Test different proof_ref
         let proof_ref2 = "proof-456";
         let hash2 = compute_binding_hash(proof_ref2, payload1).unwrap();
-        assert_ne!(hash1, hash2, "different proof_ref should produce different binding hash");
+        assert_ne!(
+            hash1, hash2,
+            "different proof_ref should produce different binding hash"
+        );
 
         // Test different capsule payload
         let payload2 = "different-capsule-data";
         let hash3 = compute_binding_hash(proof_ref1, payload2).unwrap();
-        assert_ne!(hash1, hash3, "different capsule payload should produce different binding hash");
+        assert_ne!(
+            hash1, hash3,
+            "different capsule payload should produce different binding hash"
+        );
 
         // Test concatenation attack resistance
         let proof_ref_ab = "ab";
@@ -1746,7 +1767,10 @@ mod tests {
         let payload_bcd = "bcd";
         let hash_a_bcd = compute_binding_hash(proof_ref_a, payload_bcd).unwrap();
 
-        assert_ne!(hash_ab_cd, hash_a_bcd, "binding hash should resist concatenation attacks");
+        assert_ne!(
+            hash_ab_cd, hash_a_bcd,
+            "binding hash should resist concatenation attacks"
+        );
     }
 
     #[test]
@@ -1758,7 +1782,10 @@ mod tests {
         let hash2 = compute_binding_hash(proof_ref, capsule_payload).unwrap();
 
         assert_eq!(hash1, hash2, "binding hash should be deterministic");
-        assert!(hash1.starts_with("sha256:"), "binding hash should have sha256: prefix");
+        assert!(
+            hash1.starts_with("sha256:"),
+            "binding hash should have sha256: prefix"
+        );
     }
 
     #[test]
@@ -1770,15 +1797,24 @@ mod tests {
         // Test: single character changes should be detected
         let tampered_proof_ref = "original-proo"; // removed 'f'
         let tampered_hash1 = compute_binding_hash(tampered_proof_ref, original_payload).unwrap();
-        assert_ne!(original_hash, tampered_hash1, "single character change in proof_ref should be detected");
+        assert_ne!(
+            original_hash, tampered_hash1,
+            "single character change in proof_ref should be detected"
+        );
 
         let tampered_payload = "original-payloa"; // removed 'd'
         let tampered_hash2 = compute_binding_hash(original_proof_ref, tampered_payload).unwrap();
-        assert_ne!(original_hash, tampered_hash2, "single character change in payload should be detected");
+        assert_ne!(
+            original_hash, tampered_hash2,
+            "single character change in payload should be detected"
+        );
 
         // Test: reordering should be detected
         let reordered_proof_ref = "proof-original";
         let reordered_hash = compute_binding_hash(reordered_proof_ref, original_payload).unwrap();
-        assert_ne!(original_hash, reordered_hash, "reordering should be detected");
+        assert_ne!(
+            original_hash, reordered_hash,
+            "reordering should be detected"
+        );
     }
 }

@@ -410,7 +410,10 @@ mod tests {
         )
         .expect_err("shrinking the validity window must fail closed");
 
-        assert_eq!(rejection.rejection_reason, EpochRejectionReason::ExpiredEpoch);
+        assert_eq!(
+            rejection.rejection_reason,
+            EpochRejectionReason::ExpiredEpoch
+        );
         assert_eq!(policy.min_accepted_epoch(), ControlEpoch::new(16));
     }
 
@@ -518,6 +521,9 @@ mod tests {
         assert!(!event.verify_no_partial_state());
         assert_eq!(manager.abort_count(), 1);
         assert_eq!(manager.audit_log().len(), 1);
-        assert_eq!(manager.abort_events()[0].barrier_id, "barrier-recorded-partial");
+        assert_eq!(
+            manager.abort_events()[0].barrier_id,
+            "barrier-recorded-partial"
+        );
     }
 }

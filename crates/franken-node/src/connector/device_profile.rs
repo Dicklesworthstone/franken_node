@@ -120,14 +120,11 @@ pub fn validate_profile(profile: &DeviceProfile) -> Result<(), RegistryError> {
         });
     }
     if profile.capabilities.is_empty()
-        || profile
-            .capabilities
-            .iter()
-            .any(|capability| {
-                capability.trim().is_empty()
-                    || capability.trim() != capability
-                    || contains_nul(capability)
-            })
+        || profile.capabilities.iter().any(|capability| {
+            capability.trim().is_empty()
+                || capability.trim() != capability
+                || contains_nul(capability)
+        })
     {
         return Err(RegistryError::SchemaInvalid {
             device_id: profile.device_id.clone(),

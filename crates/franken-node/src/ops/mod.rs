@@ -510,9 +510,12 @@ tokio = "1"
         let result = check_tokio_drift(dir.path());
 
         assert!(!result.is_clean());
-        assert!(result.violations.iter().any(|violation| {
-            violation.pattern == "tokio dependency in [dependencies]"
-        }));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|violation| { violation.pattern == "tokio dependency in [dependencies]" })
+        );
     }
 
     #[test]
@@ -583,9 +586,12 @@ tokio = "1"
 
         assert_eq!(result.exceptions_honored, 0);
         assert!(!result.is_clean());
-        assert!(result.violations.iter().any(|violation| {
-            violation.pattern == "tokio dependency in [dependencies]"
-        }));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|violation| { violation.pattern == "tokio dependency in [dependencies]" })
+        );
     }
 
     #[test]
@@ -668,8 +674,11 @@ async fn main() {}
 
         assert_eq!(result.exceptions_honored, 1);
         assert!(!result.is_clean());
-        assert!(result.violations.iter().any(|violation| {
-            violation.pattern == "tokio dependency in [dependencies]"
-        }));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|violation| { violation.pattern == "tokio dependency in [dependencies]" })
+        );
     }
 }

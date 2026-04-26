@@ -49,8 +49,7 @@ const DETERMINISTIC_FIXTURE_ADAPTER_KIND: &str = "deterministic_fixture_test_ada
 #[cfg(any(test, feature = "test-support"))]
 const DETERMINISTIC_FIXTURE_EXECUTION_MODE: &str = "synthetic_test_fixture";
 #[cfg(any(test, feature = "test-support"))]
-const DETERMINISTIC_FIXTURE_RUNNER_DETAIL: &str =
-    "fixture_marker=synthetic_test_fixture crash_classifier=string_trigger coverage_semantics=placeholder_zero";
+const DETERMINISTIC_FIXTURE_RUNNER_DETAIL: &str = "fixture_marker=synthetic_test_fixture crash_classifier=string_trigger coverage_semantics=placeholder_zero";
 
 // ── Fuzz target categories ──────────────────────────────────────────────────
 

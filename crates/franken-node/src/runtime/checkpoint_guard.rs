@@ -754,18 +754,18 @@ mod checkpoint_guard_comprehensive_negative_tests {
     fn negative_checkpoint_guard_with_unicode_injection_attacks() {
         // Test with malicious Unicode patterns in orchestration and trace IDs
         let orchestration_patterns = [
-            "orch\u{202E}spoofed\u{202D}", // BiDi override attack
+            "orch\u{202E}spoofed\u{202D}",              // BiDi override attack
             "orch\u{0000}null\r\n\t\x1b[31mred\x1b[0m", // Null bytes + ANSI escapes
-            "orch\u{FEFF}\u{200B}\u{200C}\u{200D}", // BOM + zero-width chars
-            "orch\u{10FFFF}\u{E000}\u{FDD0}", // Private use + non-characters
-            "orch\u{FFFD}\u{FFFD}", // Surrogate pairs
+            "orch\u{FEFF}\u{200B}\u{200C}\u{200D}",     // BOM + zero-width chars
+            "orch\u{10FFFF}\u{E000}\u{FDD0}",           // Private use + non-characters
+            "orch\u{FFFD}\u{FFFD}",                     // Surrogate pairs
         ];
 
         let trace_patterns = [
             "trace\"\\escape\r\n",
             "trace\u{202A}bidi\u{202B}isolate\u{202C}",
-            "trace\x00\x01\x02\x03\x04", // Control characters
-            "trace' OR '1'='1' --", // SQL injection pattern
+            "trace\x00\x01\x02\x03\x04",          // Control characters
+            "trace' OR '1'='1' --",               // SQL injection pattern
             "trace<script>alert('xss')</script>", // XSS pattern
         ];
 
@@ -866,7 +866,9 @@ mod checkpoint_guard_comprehensive_negative_tests {
 
             // Verify safe display formatting
             assert!(display_string.contains("CHECKPOINT_CONTRACT_VIOLATION"));
-            assert!(display_string.contains(&format!("orchestration={}", violation.orchestration_id)));
+            assert!(
+                display_string.contains(&format!("orchestration={}", violation.orchestration_id))
+            );
             assert!(display_string.contains(&format!("iteration={}", violation.iteration_count)));
             assert!(display_string.contains(&format!("elapsed_ms={}", violation.elapsed_ms)));
         }
@@ -930,7 +932,8 @@ mod checkpoint_guard_comprehensive_negative_tests {
     #[test]
     fn negative_concurrent_checkpoint_and_iteration_race_conditions() {
         // Test potential race conditions between checkpoint() and on_iteration()
-        let mut guard = CheckpointGuard::new("concurrent-test", "concurrent-trace", malicious_config());
+        let mut guard =
+            CheckpointGuard::new("concurrent-test", "concurrent-trace", malicious_config());
 
         // Simulate rapid alternating checkpoint and iteration calls
         for i in 0..1000 {
@@ -946,7 +949,9 @@ mod checkpoint_guard_comprehensive_negative_tests {
         }
 
         // Should have events for all checkpoints
-        let checkpoint_events: Vec<_> = guard.events().iter()
+        let checkpoint_events: Vec<_> = guard
+            .events()
+            .iter()
             .filter(|e| e.event_code == FN_CK_001_CHECKPOINT_SAVE)
             .collect();
         assert!(checkpoint_events.len() <= guard.events().len());
@@ -966,7 +971,7 @@ mod checkpoint_guard_comprehensive_negative_tests {
         // Test invalid mode deserialization
         let invalid_modes = [
             "\"Invalid\"",
-            "\"warn\"", // lowercase
+            "\"warn\"",   // lowercase
             "\"STRICT\"", // uppercase
             "\"Strict\"", // different case
             "null",
@@ -976,7 +981,11 @@ mod checkpoint_guard_comprehensive_negative_tests {
 
         for invalid_json in invalid_modes {
             let result: Result<GuardMode, _> = serde_json::from_str(invalid_json);
-            assert!(result.is_err(), "Should reject invalid mode: {}", invalid_json);
+            assert!(
+                result.is_err(),
+                "Should reject invalid mode: {}",
+                invalid_json
+            );
         }
     }
 
@@ -984,8 +993,8 @@ mod checkpoint_guard_comprehensive_negative_tests {
     fn negative_push_bounded_with_adversarial_capacity_patterns() {
         // Test push_bounded with various adversarial capacity patterns
         let test_patterns = [
-            (0, vec![1, 2, 3], vec![]), // Zero capacity
-            (1, vec![1, 2, 3], vec![3]), // Capacity 1
+            (0, vec![1, 2, 3], vec![]),                 // Zero capacity
+            (1, vec![1, 2, 3], vec![3]),                // Capacity 1
             (usize::MAX, vec![1, 2, 3], vec![1, 2, 3]), // Max capacity
         ];
 
@@ -1083,7 +1092,8 @@ mod checkpoint_guard_comprehensive_negative_tests {
     #[test]
     fn negative_iteration_count_manipulation_and_underflow_attacks() {
         // Test with iteration count manipulation that might cause underflow
-        let mut guard = CheckpointGuard::new("underflow-test", "underflow-trace", malicious_config());
+        let mut guard =
+            CheckpointGuard::new("underflow-test", "underflow-trace", malicious_config());
 
         // Set checkpoint at high iteration
         guard.checkpoint(u64::MAX);
@@ -1106,8 +1116,8 @@ mod checkpoint_guard_comprehensive_negative_tests {
         // Test elapsed_ms with various time scenarios that might overflow
         let test_instants = [
             Instant::now() - Duration::from_secs(u64::MAX / 2000), // Large past time
-            Instant::now() - Duration::from_millis(u64::MAX / 2), // Very large past time
-            Instant::now(), // Current time
+            Instant::now() - Duration::from_millis(u64::MAX / 2),  // Very large past time
+            Instant::now(),                                        // Current time
         ];
 
         for instant in test_instants {
@@ -1131,10 +1141,10 @@ mod checkpoint_guard_comprehensive_negative_tests {
     fn negative_checkpoint_guard_event_with_unicode_normalization_attacks() {
         // Test events with Unicode normalization attacks
         let normalization_attacks = [
-            ("café", "cafe\u{0301}"), // NFC vs NFD
+            ("café", "cafe\u{0301}"),             // NFC vs NFD
             ("résumé", "re\u{0301}sume\u{0301}"), // Multiple combining chars
-            ("℁ℂ℃℄", "a/sCC℄"), // Compatibility variants
-            ("＜script＞", "<script>"), // Fullwidth to ASCII
+            ("℁ℂ℃℄", "a/sCC℄"),                   // Compatibility variants
+            ("＜script＞", "<script>"),           // Fullwidth to ASCII
         ];
 
         for (nfc_form, attack_form) in normalization_attacks {

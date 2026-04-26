@@ -625,8 +625,16 @@ impl EcosystemRegistry {
         };
         entry.entry_hash = compute_audit_hash(&entry);
         if self.audit_trail.len() >= MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_trail.len().saturating_sub(MAX_AUDIT_LOG_ENTRIES).saturating_add(1);
-            self.chain_anchor_hash = Some(self.audit_trail[overflow.saturating_sub(1)].entry_hash.clone());
+            let overflow = self
+                .audit_trail
+                .len()
+                .saturating_sub(MAX_AUDIT_LOG_ENTRIES)
+                .saturating_add(1);
+            self.chain_anchor_hash = Some(
+                self.audit_trail[overflow.saturating_sub(1)]
+                    .entry_hash
+                    .clone(),
+            );
             self.audit_trail.drain(0..overflow);
         }
         self.audit_trail.push(entry);
@@ -1472,7 +1480,8 @@ mod tests {
         // Fill the audit trail to capacity
         for i in 0..MAX_AUDIT_LOG_ENTRIES {
             let test_meta = make_metadata(&format!("ext-{}", i), "pub-1", "key-1");
-            reg.register_extension(test_meta, &ts(i as u64), "t").unwrap();
+            reg.register_extension(test_meta, &ts(i as u64), "t")
+                .unwrap();
         }
 
         assert_eq!(reg.audit_trail_len(), MAX_AUDIT_LOG_ENTRIES);
@@ -1480,7 +1489,8 @@ mod tests {
 
         // Add one more entry to trigger overflow with saturating arithmetic
         let overflow_meta = make_metadata("overflow-ext", "pub-1", "key-1");
-        reg.register_extension(overflow_meta, &ts(MAX_AUDIT_LOG_ENTRIES as u64), "t").unwrap();
+        reg.register_extension(overflow_meta, &ts(MAX_AUDIT_LOG_ENTRIES as u64), "t")
+            .unwrap();
 
         // Should still be at capacity, with oldest entry evicted and chain anchor updated
         assert_eq!(reg.audit_trail_len(), MAX_AUDIT_LOG_ENTRIES);

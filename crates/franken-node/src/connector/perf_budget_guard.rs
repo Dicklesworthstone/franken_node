@@ -1795,21 +1795,41 @@ mod tests {
         let trace_id = &events[0].trace_id;
 
         // Should NOT contain BiDi override characters
-        assert!(!trace_id.contains('\u{202E}'), "trace ID must not contain BiDi override");
-        assert!(!trace_id.contains('\u{202D}'), "trace ID must not contain BiDi override");
+        assert!(
+            !trace_id.contains('\u{202E}'),
+            "trace ID must not contain BiDi override"
+        );
+        assert!(
+            !trace_id.contains('\u{202D}'),
+            "trace ID must not contain BiDi override"
+        );
 
         // Should NOT contain ANSI escape sequences
-        assert!(!trace_id.contains("\x1b["), "trace ID must not contain ANSI escapes");
+        assert!(
+            !trace_id.contains("\x1b["),
+            "trace ID must not contain ANSI escapes"
+        );
 
         // Should NOT contain null bytes or control characters
-        assert!(!trace_id.contains('\0'), "trace ID must not contain null bytes");
-        assert!(!trace_id.contains('\r'), "trace ID must not contain carriage return");
-        assert!(!trace_id.contains('\n'), "trace ID must not contain newlines");
+        assert!(
+            !trace_id.contains('\0'),
+            "trace ID must not contain null bytes"
+        );
+        assert!(
+            !trace_id.contains('\r'),
+            "trace ID must not contain carriage return"
+        );
+        assert!(
+            !trace_id.contains('\n'),
+            "trace ID must not contain newlines"
+        );
 
         // Should use constant-time comparison for generated trace IDs
         let expected_prefix = "perf-health_gate_evaluation";
-        assert!(constant_time::ct_eq(trace_id.as_str(), expected_prefix),
-               "trace ID comparison must be constant-time");
+        assert!(
+            constant_time::ct_eq(trace_id.as_str(), expected_prefix),
+            "trace ID comparison must be constant-time"
+        );
     }
 
     #[test]
@@ -1830,16 +1850,24 @@ mod tests {
         push_bounded(&mut gate.events, malicious_event, MAX_EVENTS);
 
         // Verify bounded storage prevents memory exhaustion
-        assert!(gate.events().len() <= MAX_EVENTS,
-               "event storage must respect MAX_EVENTS bound");
+        assert!(
+            gate.events().len() <= MAX_EVENTS,
+            "event storage must respect MAX_EVENTS bound"
+        );
 
         // Verify event detail is properly bounded when serialized
         let json = serde_json::to_string(&gate.events()[0]).unwrap_or_default();
-        assert!(json.len() < 10_000_000, "serialized event must not cause memory exhaustion");
+        assert!(
+            json.len() < 10_000_000,
+            "serialized event must not cause memory exhaustion"
+        );
 
         // Verify CSV export is also bounded
         let csv = gate.to_csv();
-        assert!(csv.len() < 10_000_000, "CSV export must not cause memory exhaustion");
+        assert!(
+            csv.len() < 10_000_000,
+            "CSV export must not cause memory exhaustion"
+        );
     }
 
     #[test]
@@ -1854,11 +1882,15 @@ mod tests {
 
         let result = MeasurementResult::from_measurements(
             HotPath::HealthGateEvaluation,
-            100.0, 110.0, 120.0,
-            105.0, 118.0, 130.0,
+            100.0,
+            110.0,
+            120.0,
+            105.0,
+            118.0,
+            130.0,
             15.0,
             &malicious_budget,
-            Some(r#"flamegraph.svg","injection":"malicious"}"#.to_string())
+            Some(r#"flamegraph.svg","injection":"malicious"}"#.to_string()),
         );
 
         // Serialize to JSON and verify no injection
@@ -1869,10 +1901,16 @@ mod tests {
         let flamegraph_path = parsed["flamegraph_path"].as_str().unwrap();
 
         // Should be the literal string, not parsed as JSON injection
-        assert_eq!(flamegraph_path, r#"flamegraph.svg","injection":"malicious"}"#);
+        assert_eq!(
+            flamegraph_path,
+            r#"flamegraph.svg","injection":"malicious"}"#
+        );
 
         // Verify no extra fields were injected
-        assert!(parsed.get("injection").is_none(), "JSON injection must not create extra fields");
+        assert!(
+            parsed.get("injection").is_none(),
+            "JSON injection must not create extra fields"
+        );
     }
 
     #[test]
@@ -1883,28 +1921,52 @@ mod tests {
             let label_str = hot_path.label();
 
             // Verify no ANSI escape sequences
-            assert!(!display_str.contains("\x1b["),
-                   "HotPath display must not contain ANSI escapes: {}", hot_path);
-            assert!(!label_str.contains("\x1b["),
-                   "HotPath label must not contain ANSI escapes: {}", hot_path);
+            assert!(
+                !display_str.contains("\x1b["),
+                "HotPath display must not contain ANSI escapes: {}",
+                hot_path
+            );
+            assert!(
+                !label_str.contains("\x1b["),
+                "HotPath label must not contain ANSI escapes: {}",
+                hot_path
+            );
 
             // Verify no BiDi override attacks
-            assert!(!display_str.contains('\u{202E}'),
-                   "HotPath display must not contain BiDi override: {}", hot_path);
-            assert!(!label_str.contains('\u{202E}'),
-                   "HotPath label must not contain BiDi override: {}", hot_path);
+            assert!(
+                !display_str.contains('\u{202E}'),
+                "HotPath display must not contain BiDi override: {}",
+                hot_path
+            );
+            assert!(
+                !label_str.contains('\u{202E}'),
+                "HotPath label must not contain BiDi override: {}",
+                hot_path
+            );
 
             // Verify no null bytes or newlines
-            assert!(!display_str.contains('\0'),
-                   "HotPath display must not contain null bytes: {}", hot_path);
-            assert!(!display_str.contains('\n'),
-                   "HotPath display must not contain newlines: {}", hot_path);
+            assert!(
+                !display_str.contains('\0'),
+                "HotPath display must not contain null bytes: {}",
+                hot_path
+            );
+            assert!(
+                !display_str.contains('\n'),
+                "HotPath display must not contain newlines: {}",
+                hot_path
+            );
 
             // Verify consistent safe length
-            assert!(display_str.len() < 100,
-                   "HotPath display must be reasonably bounded: {}", hot_path);
-            assert!(label_str.len() < 100,
-                   "HotPath label must be reasonably bounded: {}", hot_path);
+            assert!(
+                display_str.len() < 100,
+                "HotPath display must be reasonably bounded: {}",
+                hot_path
+            );
+            assert!(
+                label_str.len() < 100,
+                "HotPath label must be reasonably bounded: {}",
+                hot_path
+            );
         }
     }
 
@@ -1939,12 +2001,19 @@ mod tests {
         // Verify header is not corrupted
         let header = lines[0];
         let expected_header = "hot_path,baseline_p50_us,baseline_p95_us,baseline_p99_us,integrated_p50_us,integrated_p95_us,integrated_p99_us,overhead_p95_pct,overhead_p99_pct,cold_start_ms,within_budget";
-        assert_eq!(header, expected_header, "CSV header must not be corrupted by injection");
+        assert_eq!(
+            header, expected_header,
+            "CSV header must not be corrupted by injection"
+        );
 
         // Verify data row has exactly the expected number of fields
         let data_row = lines[1];
         let fields: Vec<&str> = data_row.split(',').collect();
-        assert_eq!(fields.len(), 11, "CSV data row must have exactly 11 fields, not be corrupted by injection");
+        assert_eq!(
+            fields.len(),
+            11,
+            "CSV data row must have exactly 11 fields, not be corrupted by injection"
+        );
 
         // Verify no extra commas from injection
         let comma_count = data_row.matches(',').count();
@@ -1956,10 +2025,15 @@ mod tests {
         // Create policy with 10,000 identical budgets to stress memory
         let massive_budgets: Vec<HotPathBudget> = (0..10_000)
             .map(|i| HotPathBudget {
-                hot_path: if i % 4 == 0 { HotPath::LifecycleTransition }
-                         else if i % 4 == 1 { HotPath::HealthGateEvaluation }
-                         else if i % 4 == 2 { HotPath::RolloutStateChange }
-                         else { HotPath::FencingTokenOp },
+                hot_path: if i % 4 == 0 {
+                    HotPath::LifecycleTransition
+                } else if i % 4 == 1 {
+                    HotPath::HealthGateEvaluation
+                } else if i % 4 == 2 {
+                    HotPath::RolloutStateChange
+                } else {
+                    HotPath::FencingTokenOp
+                },
                 p95_overhead_pct: (i as f64) * 0.001, // Vary slightly
                 p99_overhead_pct: (i as f64) * 0.002,
                 cold_start_ms: (i as f64) * 0.01,
@@ -1975,17 +2049,26 @@ mod tests {
 
         // Verify budget lookup still works efficiently
         let budget = gate.policy().budget_for(HotPath::HealthGateEvaluation);
-        assert!(budget.is_some(), "budget lookup must work even with massive policy");
+        assert!(
+            budget.is_some(),
+            "budget lookup must work even with massive policy"
+        );
 
         // Verify JSON serialization is bounded
         let json = gate.policy().to_json();
-        assert!(json.len() < 50_000_000, "massive policy JSON must not cause excessive memory usage");
+        assert!(
+            json.len() < 50_000_000,
+            "massive policy JSON must not cause excessive memory usage"
+        );
 
         // Verify policy doesn't cause stack overflow in normal operations
         let test_result = within_budget_result(HotPath::HealthGateEvaluation);
         let mut test_gate = OverheadGate::new(gate.policy().clone());
         let decision = test_gate.evaluate(test_result);
-        assert!(decision.is_pass(), "massive policy must not break normal evaluation");
+        assert!(
+            decision.is_pass(),
+            "massive policy must not break normal evaluation"
+        );
     }
 
     #[test]
@@ -1995,14 +2078,21 @@ mod tests {
         // Test with values very close to zero (potential division issues)
         let near_zero_result = MeasurementResult::from_measurements(
             HotPath::HealthGateEvaluation,
-            1e-100, 1e-100, 1e-100, // baseline near zero
-            1e-99,  1e-99,  1e-99,  // integrated slightly larger
+            1e-100,
+            1e-100,
+            1e-100, // baseline near zero
+            1e-99,
+            1e-99,
+            1e-99, // integrated slightly larger
             10.0,
             &budget,
             None,
         );
         // Should handle gracefully without panic
-        assert!(near_zero_result.overhead_p95_pct.is_finite() || near_zero_result.overhead_p95_pct == 0.0);
+        assert!(
+            near_zero_result.overhead_p95_pct.is_finite()
+                || near_zero_result.overhead_p95_pct == 0.0
+        );
 
         // Test with very large finite values (near f64::MAX)
         let huge_baseline = 1e100;
@@ -2010,21 +2100,32 @@ mod tests {
 
         let huge_result = MeasurementResult::from_measurements(
             HotPath::HealthGateEvaluation,
-            huge_baseline, huge_baseline, huge_baseline,
-            huge_integrated, huge_integrated, huge_integrated,
+            huge_baseline,
+            huge_baseline,
+            huge_baseline,
+            huge_integrated,
+            huge_integrated,
+            huge_integrated,
             10.0,
             &budget,
             None,
         );
 
         // Should detect this is over budget due to extreme overhead
-        assert!(!huge_result.within_budget, "extreme overhead must fail budget");
+        assert!(
+            !huge_result.within_budget,
+            "extreme overhead must fail budget"
+        );
 
         // Test overflow protection in saturating arithmetic patterns
         let max_result = MeasurementResult::from_measurements(
             HotPath::HealthGateEvaluation,
-            f64::MAX / 2.0, f64::MAX / 2.0, f64::MAX / 2.0,
-            f64::MAX, f64::MAX, f64::MAX,
+            f64::MAX / 2.0,
+            f64::MAX / 2.0,
+            f64::MAX / 2.0,
+            f64::MAX,
+            f64::MAX,
+            f64::MAX,
             f64::MAX,
             &budget,
             None,
@@ -2052,7 +2153,7 @@ mod tests {
         ];
 
         let fail_decision = GateDecision::Fail {
-            violations: malicious_violations.clone()
+            violations: malicious_violations.clone(),
         };
 
         let display_str = format!("{}", fail_decision);
@@ -2063,14 +2164,19 @@ mod tests {
 
         // Verify the display itself doesn't propagate injection patterns
         // (The violations are stored as-is, but display should be safe)
-        assert!(!display_str.contains("\x1b[31m"),
-               "display must not propagate ANSI escape sequences");
+        assert!(
+            !display_str.contains("\x1b[31m"),
+            "display must not propagate ANSI escape sequences"
+        );
 
         // Test serde safety with malicious violations
         let json = serde_json::to_string(&fail_decision).unwrap();
         let parsed: GateDecision = serde_json::from_str(&json).unwrap();
 
-        if let GateDecision::Fail { violations: parsed_violations } = parsed {
+        if let GateDecision::Fail {
+            violations: parsed_violations,
+        } = parsed
+        {
             assert_eq!(parsed_violations.len(), 5);
             // Verify violations are preserved exactly (for forensics) but contained
             assert_eq!(parsed_violations, malicious_violations);
@@ -2104,13 +2210,22 @@ mod tests {
                     // Acquire lock and evaluate
                     let mut locked_gate = gate_clone.lock().unwrap();
                     let decision = locked_gate.evaluate(result);
-                    assert!(decision.is_pass(), "concurrent evaluation must remain correct");
+                    assert!(
+                        decision.is_pass(),
+                        "concurrent evaluation must remain correct"
+                    );
 
                     // Verify internal state consistency
                     let summary = locked_gate.summary();
                     assert!(summary.total > 0, "total count must be positive");
-                    assert_eq!(summary.over_budget, 0, "all results should be within budget");
-                    assert!(summary.within_budget <= summary.total, "counts must be consistent");
+                    assert_eq!(
+                        summary.over_budget, 0,
+                        "all results should be within budget"
+                    );
+                    assert!(
+                        summary.within_budget <= summary.total,
+                        "counts must be consistent"
+                    );
                 }
             });
             handles.push(handle);
@@ -2124,8 +2239,14 @@ mod tests {
         // Verify final state
         let final_gate = gate.lock().unwrap();
         let final_summary = final_gate.summary();
-        assert_eq!(final_summary.total, 800, "should have 8 threads × 100 evaluations");
-        assert_eq!(final_summary.within_budget, 800, "all should be within budget");
+        assert_eq!(
+            final_summary.total, 800,
+            "should have 8 threads × 100 evaluations"
+        );
+        assert_eq!(
+            final_summary.within_budget, 800,
+            "all should be within budget"
+        );
         assert_eq!(final_summary.over_budget, 0, "none should be over budget");
         assert!(final_gate.gate_pass(), "final gate should pass");
     }
@@ -2137,9 +2258,9 @@ mod tests {
         for _ in 0..1000 {
             malicious_budgets.push(HotPathBudget {
                 hot_path: HotPath::HealthGateEvaluation,
-                p95_overhead_pct: f64::INFINITY, // Extreme value
+                p95_overhead_pct: f64::INFINITY,     // Extreme value
                 p99_overhead_pct: f64::NEG_INFINITY, // Extreme value
-                cold_start_ms: f64::NAN, // Extreme value
+                cold_start_ms: f64::NAN,             // Extreme value
             });
         }
 
@@ -2171,7 +2292,10 @@ mod tests {
 
         // Should not contain raw infinity/NaN that could break parsers
         // (serde_json should serialize these as null or string representations)
-        assert!(policy_str.len() < 1_000_000, "policy serialization must be bounded");
+        assert!(
+            policy_str.len() < 1_000_000,
+            "policy serialization must be bounded"
+        );
 
         // Verify report can be re-parsed safely
         let report_str = serde_json::to_string(&report).unwrap();

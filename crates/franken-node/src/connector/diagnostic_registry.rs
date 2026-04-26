@@ -1507,7 +1507,10 @@ mod tests {
             .expect_err("unknown diagnostic must fail");
         let after = sched.compute_voi("health_ping", 1000).unwrap();
 
-        assert_eq!(err, VoiError::UnknownDiagnostic("missing_diagnostic".into()));
+        assert_eq!(
+            err,
+            VoiError::UnknownDiagnostic("missing_diagnostic".into())
+        );
         assert_eq!(before, after);
     }
 

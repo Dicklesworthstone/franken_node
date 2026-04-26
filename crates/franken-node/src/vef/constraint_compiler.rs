@@ -1815,7 +1815,10 @@ mod tests {
         let hash_b = compiler.sha256_hex(input_b);
 
         // These should produce different hashes due to length prefixing
-        assert_ne!(hash_a, hash_b, "Different policy strings should produce different hashes");
+        assert_ne!(
+            hash_a, hash_b,
+            "Different policy strings should produce different hashes"
+        );
         assert_eq!(hash_a.len(), 64, "Hash A should be 64 hex chars");
         assert_eq!(hash_b.len(), 64, "Hash B should be 64 hex chars");
 
@@ -1826,14 +1829,20 @@ mod tests {
         let hash_rule_a = compiler.sha256_hex(rule_a);
         let hash_rule_b = compiler.sha256_hex(rule_b);
 
-        assert_ne!(hash_rule_a, hash_rule_b, "Different rule strings should produce different hashes");
+        assert_ne!(
+            hash_rule_a, hash_rule_b,
+            "Different rule strings should produce different hashes"
+        );
 
         // Test case 3: Ensure same input produces same hash (deterministic)
         let policy_c = "consistent_policy_definition";
         let hash_c1 = compiler.sha256_hex(policy_c);
         let hash_c2 = compiler.sha256_hex(policy_c);
 
-        assert_eq!(hash_c1, hash_c2, "Same input should produce same hash (deterministic)");
+        assert_eq!(
+            hash_c1, hash_c2,
+            "Same input should produce same hash (deterministic)"
+        );
 
         // Test case 4: Empty vs single character (boundary condition)
         let empty_input = "";
@@ -1842,6 +1851,9 @@ mod tests {
         let hash_empty = compiler.sha256_hex(empty_input);
         let hash_single = compiler.sha256_hex(single_char);
 
-        assert_ne!(hash_empty, hash_single, "Empty and single char should produce different hashes");
+        assert_ne!(
+            hash_empty, hash_single,
+            "Empty and single char should produce different hashes"
+        );
     }
 }

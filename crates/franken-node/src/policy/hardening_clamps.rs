@@ -334,7 +334,11 @@ impl HardeningClampPolicy {
                 proposed_level: proposed,
                 effective_level: current,
                 reason,
-                budget_utilization_pct: if utilization.is_finite() { utilization.min(1.0) } else { 0.0 },
+                budget_utilization_pct: if utilization.is_finite() {
+                    utilization.min(1.0)
+                } else {
+                    0.0
+                },
             };
             return (result, event);
         }

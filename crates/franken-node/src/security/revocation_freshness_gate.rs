@@ -316,9 +316,7 @@ impl RevocationFreshnessGate {
     pub fn classify_action(&self, action_id: &str) -> SafetyTier {
         self.tier_table
             .iter()
-            .filter(|(pattern, _)| {
-                action_id == pattern || action_id.starts_with(pattern.as_str())
-            })
+            .filter(|(pattern, _)| action_id == pattern || action_id.starts_with(pattern.as_str()))
             .map(|(_, tier)| *tier)
             .max_by_key(|tier| tier.strictness())
             .unwrap_or(SafetyTier::Advisory)
@@ -336,9 +334,7 @@ impl RevocationFreshnessGate {
         }
         if proof.nonce.len() > MAX_FRESHNESS_PROOF_FIELD_BYTES {
             return Err(FreshnessError::ProofTampered {
-                detail: format!(
-                    "nonce must not exceed {MAX_FRESHNESS_PROOF_FIELD_BYTES} bytes"
-                ),
+                detail: format!("nonce must not exceed {MAX_FRESHNESS_PROOF_FIELD_BYTES} bytes"),
             });
         }
         if proof.signature.trim().is_empty() {
@@ -1524,17 +1520,37 @@ mod tests {
 
         // Attempt signature forgery with all-zero HMAC
         let mut forge_zero = proof(SafetyTier::Advisory, 100, "forge-zero");
-        forge_zero.signature = "0000000000000000000000000000000000000000000000000000000000000000".to_string();
+        forge_zero.signature =
+            "0000000000000000000000000000000000000000000000000000000000000000".to_string();
 
-        let err = g.check(&forge_zero, 100, true, false, "telemetry_config", "tr-forge-zero").unwrap_err();
+        let err = g
+            .check(
+                &forge_zero,
+                100,
+                true,
+                false,
+                "telemetry_config",
+                "tr-forge-zero",
+            )
+            .unwrap_err();
         assert_eq!(err.code(), "ERR_RFG_TAMPERED");
         assert!(!g.is_nonce_consumed("forge-zero"));
 
         // Attempt signature forgery with all-FF HMAC
         let mut forge_ff = proof(SafetyTier::Advisory, 100, "forge-ff");
-        forge_ff.signature = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string();
+        forge_ff.signature =
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string();
 
-        let err = g.check(&forge_ff, 100, true, false, "telemetry_config", "tr-forge-ff").unwrap_err();
+        let err = g
+            .check(
+                &forge_ff,
+                100,
+                true,
+                false,
+                "telemetry_config",
+                "tr-forge-ff",
+            )
+            .unwrap_err();
         assert_eq!(err.code(), "ERR_RFG_TAMPERED");
         assert!(!g.is_nonce_consumed("forge-ff"));
 
@@ -1542,16 +1558,28 @@ mod tests {
         let valid_sig = test_sig(&proof(SafetyTier::Advisory, 100, "timing-test"));
 
         let mut first_byte_diff = proof(SafetyTier::Advisory, 100, "timing-test");
-        first_byte_diff.signature = if valid_sig.starts_with('s') { format!("t{}", &valid_sig[1..]) } else { format!("s{}", &valid_sig[1..]) };
+        first_byte_diff.signature = if valid_sig.starts_with('s') {
+            format!("t{}", &valid_sig[1..])
+        } else {
+            format!("s{}", &valid_sig[1..])
+        };
 
         let mut last_byte_diff = proof(SafetyTier::Advisory, 100, "timing-test");
         let mut last_chars: Vec<char> = valid_sig.chars().collect();
-        if let Some(last) = last_chars.last_mut() { *last = if *last == '0' { '1' } else { '0' }; }
+        if let Some(last) = last_chars.last_mut() {
+            *last = if *last == '0' { '1' } else { '0' };
+        }
         last_byte_diff.signature = last_chars.into_iter().collect();
 
         let mut mid_byte_diff = proof(SafetyTier::Advisory, 100, "timing-test");
         let mut mid_chars: Vec<char> = valid_sig.chars().collect();
-        if mid_chars.len() > 2 { mid_chars[mid_chars.len() / 2] = if mid_chars[mid_chars.len() / 2] == '0' { '1' } else { '0' }; }
+        if mid_chars.len() > 2 {
+            mid_chars[mid_chars.len() / 2] = if mid_chars[mid_chars.len() / 2] == '0' {
+                '1'
+            } else {
+                '0'
+            };
+        }
         mid_byte_diff.signature = mid_chars.into_iter().collect();
 
         // All should fail with same error code (constant-time comparison)
@@ -1608,15 +1636,17 @@ mod tests {
             "nonce-collision-a",
             "nonce-collision-b",
             "nonce-collision-c",
-            "nonce_collision_a",  // Underscore vs hyphen
-            "nonce collision a",  // Space vs hyphen
+            "nonce_collision_a",   // Underscore vs hyphen
+            "nonce collision a",   // Space vs hyphen
             "nonce\0collision\0a", // Null byte injection
         ];
 
         let mut successful_nonces = 0;
         for pattern in &collision_patterns {
             let p = proof(SafetyTier::Advisory, 100, pattern);
-            if g.check(&p, 100, true, false, "telemetry_config", "tr-collision").is_ok() {
+            if g.check(&p, 100, true, false, "telemetry_config", "tr-collision")
+                .is_ok()
+            {
                 successful_nonces = successful_nonces.saturating_add(1);
             }
         }
@@ -1625,13 +1655,30 @@ mod tests {
 
         // Test replay attack with modified but structurally similar proofs
         let original = proof(SafetyTier::Advisory, 100, "replay-similar");
-        g.check(&original, 100, true, false, "telemetry_config", "tr-original").unwrap();
+        g.check(
+            &original,
+            100,
+            true,
+            false,
+            "telemetry_config",
+            "tr-original",
+        )
+        .unwrap();
 
         let mut modified_timestamp = original.clone();
         modified_timestamp.timestamp = 1700000001; // Different timestamp
         modified_timestamp.signature = test_sig(&modified_timestamp);
 
-        let err = g.check(&modified_timestamp, 100, true, false, "telemetry_config", "tr-modified").unwrap_err();
+        let err = g
+            .check(
+                &modified_timestamp,
+                100,
+                true,
+                false,
+                "telemetry_config",
+                "tr-modified",
+            )
+            .unwrap_err();
         assert_eq!(err.code(), "ERR_RFG_REPLAY"); // Same nonce should be detected
     }
 
@@ -1641,42 +1688,88 @@ mod tests {
 
         // Test proof tier spoofing - Critical action with Advisory proof
         let spoofed_critical = proof(SafetyTier::Advisory, 100, "spoof-critical");
-        let err = g.check(&spoofed_critical, 100, true, false, "key_rotate", "tr-spoof").unwrap_err();
+        let err = g
+            .check(
+                &spoofed_critical,
+                100,
+                true,
+                false,
+                "key_rotate",
+                "tr-spoof",
+            )
+            .unwrap_err();
         assert_eq!(err.code(), "ERR_RFG_TAMPERED");
         assert!(format!("{err}").contains("does not match action tier Critical"));
 
         // Test proof tier spoofing - Advisory action with Critical proof
         let spoofed_advisory = proof(SafetyTier::Critical, 100, "spoof-advisory");
-        let err = g.check(&spoofed_advisory, 100, true, false, "unknown_action", "tr-spoof-adv").unwrap_err();
+        let err = g
+            .check(
+                &spoofed_advisory,
+                100,
+                true,
+                false,
+                "unknown_action",
+                "tr-spoof-adv",
+            )
+            .unwrap_err();
         assert_eq!(err.code(), "ERR_RFG_TAMPERED");
         assert!(format!("{err}").contains("does not match action tier Advisory"));
 
         // Test action classification manipulation through prefix matching
         let prefix_critical = proof(SafetyTier::Critical, 100, "prefix-critical");
-        g.check(&prefix_critical, 100, true, false, "key_rotate_extended", "tr-prefix").unwrap(); // Should work
+        g.check(
+            &prefix_critical,
+            100,
+            true,
+            false,
+            "key_rotate_extended",
+            "tr-prefix",
+        )
+        .unwrap(); // Should work
 
         let wrong_prefix = proof(SafetyTier::Standard, 100, "wrong-prefix");
-        let err = g.check(&wrong_prefix, 100, true, false, "key_rotate_extended", "tr-wrong").unwrap_err();
+        let err = g
+            .check(
+                &wrong_prefix,
+                100,
+                true,
+                false,
+                "key_rotate_extended",
+                "tr-wrong",
+            )
+            .unwrap_err();
         assert_eq!(err.code(), "ERR_RFG_TAMPERED");
 
         // Test tier bypass through action name manipulation. These must be
         // rejected before classification so malformed critical action names
         // cannot fall through to the Advisory default.
         let bypass_attempts = [
-            "KEY_ROTATE",           // Case variation
-            "key_rotate ",          // Trailing space
-            " key_rotate",          // Leading space
-            "key\0rotate",          // Null byte injection
-            "key_rotate\n",         // Newline injection
-            "key_rotate\t",         // Tab injection
-            "\u{202E}key_rotate",   // BiDi override
+            "KEY_ROTATE",         // Case variation
+            "key_rotate ",        // Trailing space
+            " key_rotate",        // Leading space
+            "key\0rotate",        // Null byte injection
+            "key_rotate\n",       // Newline injection
+            "key_rotate\t",       // Tab injection
+            "\u{202E}key_rotate", // BiDi override
         ];
 
         for malicious_action in &bypass_attempts {
-            let bypass_proof = proof(SafetyTier::Advisory, 100, &format!("bypass-{}", malicious_action.len()));
+            let bypass_proof = proof(
+                SafetyTier::Advisory,
+                100,
+                &format!("bypass-{}", malicious_action.len()),
+            );
 
             let err = g
-                .check(&bypass_proof, 100, true, false, malicious_action, "tr-bypass")
+                .check(
+                    &bypass_proof,
+                    100,
+                    true,
+                    false,
+                    malicious_action,
+                    "tr-bypass",
+                )
                 .unwrap_err();
             assert_eq!(err.code(), "ERR_RFG_TAMPERED");
             assert!(!g.is_nonce_consumed(&bypass_proof.nonce));
@@ -1684,12 +1777,12 @@ mod tests {
 
         // Test staleness calculation manipulation at tier boundaries
         let boundary_tests = [
-            (SafetyTier::Critical, 99, 100, false),  // staleness=1, max=1 → stale
-            (SafetyTier::Standard, 95, 100, false),  // staleness=5, max=5 → stale
-            (SafetyTier::Advisory, 90, 100, false),  // staleness=10, max=10 → stale
-            (SafetyTier::Critical, 100, 100, true),  // staleness=0, max=1 → fresh
-            (SafetyTier::Standard, 96, 100, true),   // staleness=4, max=5 → fresh
-            (SafetyTier::Advisory, 91, 100, true),   // staleness=9, max=10 → fresh
+            (SafetyTier::Critical, 99, 100, false), // staleness=1, max=1 → stale
+            (SafetyTier::Standard, 95, 100, false), // staleness=5, max=5 → stale
+            (SafetyTier::Advisory, 90, 100, false), // staleness=10, max=10 → stale
+            (SafetyTier::Critical, 100, 100, true), // staleness=0, max=1 → fresh
+            (SafetyTier::Standard, 96, 100, true),  // staleness=4, max=5 → fresh
+            (SafetyTier::Advisory, 91, 100, true),  // staleness=9, max=10 → fresh
         ];
 
         for (tier, proof_epoch, current_epoch, should_be_fresh) in boundary_tests {
@@ -1699,15 +1792,41 @@ mod tests {
                 SafetyTier::Advisory => "telemetry_config",
             };
 
-            let boundary_proof = proof(tier, proof_epoch, &format!("boundary-{}-{}-{}", proof_epoch, current_epoch, should_be_fresh));
-            let result = g.check(&boundary_proof, current_epoch, true, false, action, "tr-boundary");
+            let boundary_proof = proof(
+                tier,
+                proof_epoch,
+                &format!(
+                    "boundary-{}-{}-{}",
+                    proof_epoch, current_epoch, should_be_fresh
+                ),
+            );
+            let result = g.check(
+                &boundary_proof,
+                current_epoch,
+                true,
+                false,
+                action,
+                "tr-boundary",
+            );
 
             if should_be_fresh {
-                assert!(result.is_ok(), "Expected fresh proof to succeed: tier={:?}, proof_epoch={}, current_epoch={}", tier, proof_epoch, current_epoch);
+                assert!(
+                    result.is_ok(),
+                    "Expected fresh proof to succeed: tier={:?}, proof_epoch={}, current_epoch={}",
+                    tier,
+                    proof_epoch,
+                    current_epoch
+                );
                 let decision = result.unwrap();
                 assert!(!decision.degraded);
             } else {
-                assert!(result.is_err(), "Expected stale proof to fail: tier={:?}, proof_epoch={}, current_epoch={}", tier, proof_epoch, current_epoch);
+                assert!(
+                    result.is_err(),
+                    "Expected stale proof to fail: tier={:?}, proof_epoch={}, current_epoch={}",
+                    tier,
+                    proof_epoch,
+                    current_epoch
+                );
                 assert_eq!(result.unwrap_err().code(), "ERR_RFG_STALE");
             }
         }
@@ -1719,17 +1838,40 @@ mod tests {
 
         // Test epoch overflow at u64::MAX boundaries
         let max_epoch_proof = proof(SafetyTier::Advisory, u64::MAX, "max-epoch");
-        let result = g.check(&max_epoch_proof, u64::MAX, true, false, "telemetry_config", "tr-max");
+        let result = g.check(
+            &max_epoch_proof,
+            u64::MAX,
+            true,
+            false,
+            "telemetry_config",
+            "tr-max",
+        );
         assert!(result.is_ok()); // Should work at exact boundary
 
         let overflow_epoch_proof = proof(SafetyTier::Advisory, u64::MAX, "overflow-epoch");
-        let err = g.check(&overflow_epoch_proof, u64::MAX - 1, true, false, "telemetry_config", "tr-overflow").unwrap_err();
+        let err = g
+            .check(
+                &overflow_epoch_proof,
+                u64::MAX - 1,
+                true,
+                false,
+                "telemetry_config",
+                "tr-overflow",
+            )
+            .unwrap_err();
         assert_eq!(err.code(), "ERR_RFG_TAMPERED");
         assert!(format!("{err}").contains("in the future"));
 
         // Test epoch arithmetic overflow in staleness calculation
         let near_overflow_proof = proof(SafetyTier::Advisory, 0, "near-overflow");
-        let result = g.check(&near_overflow_proof, u64::MAX, true, false, "telemetry_config", "tr-near-overflow");
+        let result = g.check(
+            &near_overflow_proof,
+            u64::MAX,
+            true,
+            false,
+            "telemetry_config",
+            "tr-near-overflow",
+        );
         assert!(result.is_ok()); // saturating_sub should handle this safely
 
         // Test epoch manipulation to bypass staleness limits
@@ -1746,8 +1888,19 @@ mod tests {
                 SafetyTier::Advisory => "telemetry_config",
             };
 
-            let bypass_proof = proof(tier, proof_epoch, &format!("staleness-bypass-{}-{}", proof_epoch, current_epoch));
-            let result = g.check(&bypass_proof, current_epoch, true, tier == SafetyTier::Standard, action, "tr-staleness");
+            let bypass_proof = proof(
+                tier,
+                proof_epoch,
+                &format!("staleness-bypass-{}-{}", proof_epoch, current_epoch),
+            );
+            let result = g.check(
+                &bypass_proof,
+                current_epoch,
+                true,
+                tier == SafetyTier::Standard,
+                action,
+                "tr-staleness",
+            );
 
             match tier {
                 SafetyTier::Critical => {
@@ -1769,14 +1922,25 @@ mod tests {
 
         // Test integer wraparound in epoch comparisons
         let wraparound_cases = [
-            (1, 0),           // Proof from future (invalid)
-            (u64::MAX, 0),    // Maximum future proof
-            (0, u64::MAX),    // Maximum staleness
+            (1, 0),        // Proof from future (invalid)
+            (u64::MAX, 0), // Maximum future proof
+            (0, u64::MAX), // Maximum staleness
         ];
 
         for (proof_epoch, current_epoch) in wraparound_cases {
-            let wraparound_proof = proof(SafetyTier::Advisory, proof_epoch, &format!("wraparound-{}-{}", proof_epoch, current_epoch));
-            let result = g.check(&wraparound_proof, current_epoch, true, false, "telemetry_config", "tr-wraparound");
+            let wraparound_proof = proof(
+                SafetyTier::Advisory,
+                proof_epoch,
+                &format!("wraparound-{}-{}", proof_epoch, current_epoch),
+            );
+            let result = g.check(
+                &wraparound_proof,
+                current_epoch,
+                true,
+                false,
+                "telemetry_config",
+                "tr-wraparound",
+            );
 
             if proof_epoch > current_epoch {
                 assert!(result.is_err());
@@ -1795,16 +1959,14 @@ mod tests {
             // Credential list manipulation to create identical payloads
             (vec!["ab".to_string(), "cd".to_string()], "nonce1"),
             (vec!["a".to_string(), "bcd".to_string()], "nonce1"), // Different split, same content
-            (vec!["abcd".to_string()], "nonce1"),                  // Single credential
-
+            (vec!["abcd".to_string()], "nonce1"),                 // Single credential
             // Nonce manipulation
-            (vec!["cred1".to_string()], "ab\0cd"),     // Null byte in nonce
-            (vec!["cred1".to_string()], "ab\ncd"),     // Newline in nonce
-            (vec!["cred1".to_string()], "ab\x01cd"),   // Control character
-
+            (vec!["cred1".to_string()], "ab\0cd"), // Null byte in nonce
+            (vec!["cred1".to_string()], "ab\ncd"), // Newline in nonce
+            (vec!["cred1".to_string()], "ab\x01cd"), // Control character
             // Credential ID manipulation
-            (vec!["cred\01".to_string()], "nonce1"),   // Null in credential
-            (vec!["cred\n1".to_string()], "nonce1"),   // Newline in credential
+            (vec!["cred\01".to_string()], "nonce1"), // Null in credential
+            (vec!["cred\n1".to_string()], "nonce1"), // Newline in credential
             (vec!["".to_string(), "cred1".to_string()], "nonce1"), // Empty credential (should be rejected)
         ];
 
@@ -1826,7 +1988,10 @@ mod tests {
             // Verify no two different logical proofs produce the same canonical payload
             let proof_description = format!("{:?}-{}", credentials, nonce);
             if !seen_payloads.insert((payload.clone(), proof_description.clone())) {
-                panic!("Collision detected: {} produces duplicate canonical payload", proof_description);
+                panic!(
+                    "Collision detected: {} produces duplicate canonical payload",
+                    proof_description
+                );
             }
 
             // Test that empty credentials are handled properly
@@ -1842,7 +2007,7 @@ mod tests {
         let length_attacks = [
             // Try to confuse length prefixes with crafted content
             "credential\x00\x00\x00\x00\x00\x00\x00\x08otherval", // Embedded length bytes
-            "cred\x01\x00\x00\x00\x00\x00\x00\x00credential",      // Length that could point elsewhere
+            "cred\x01\x00\x00\x00\x00\x00\x00\x00credential", // Length that could point elsewhere
         ];
 
         for malicious_cred in length_attacks {
@@ -1895,7 +2060,10 @@ mod tests {
             let manipulated_payload = hasher.finalize().to_vec();
 
             if tier_str != "Advisory" {
-                assert_ne!(normal_payload, manipulated_payload, "Tier manipulation should produce different canonical payload");
+                assert_ne!(
+                    normal_payload, manipulated_payload,
+                    "Tier manipulation should produce different canonical payload"
+                );
             }
         }
     }
@@ -1906,16 +2074,23 @@ mod tests {
 
         // Unicode injection attacks in various fields
         let unicode_attacks = [
-            "\u{202E}gninoisiv\u{202C}nonce",     // BiDi override
-            "nonce\u{200B}invisible",              // Zero-width space
-            "noncе",                                // Cyrillic 'е' instead of Latin 'e'
-            "nonce\u{0301}",                        // Combining character
-            "nonce\u{FEFF}",                        // Zero-width no-break space (BOM)
+            "\u{202E}gninoisiv\u{202C}nonce", // BiDi override
+            "nonce\u{200B}invisible",         // Zero-width space
+            "noncе",                          // Cyrillic 'е' instead of Latin 'e'
+            "nonce\u{0301}",                  // Combining character
+            "nonce\u{FEFF}",                  // Zero-width no-break space (BOM)
         ];
 
         for attack_nonce in unicode_attacks {
             let unicode_proof = proof(SafetyTier::Advisory, 100, attack_nonce);
-            let result = g.check(&unicode_proof, 100, true, false, "telemetry_config", "tr-unicode");
+            let result = g.check(
+                &unicode_proof,
+                100,
+                true,
+                false,
+                "telemetry_config",
+                "tr-unicode",
+            );
 
             // Should either succeed (treating as unique nonce) or fail validation
             match result {
@@ -1926,11 +2101,11 @@ mod tests {
 
         // Credential injection attacks
         let credential_attacks = [
-            vec!["cred1".to_string(), "cred2\ncred3".to_string()],   // Newline injection
-            vec!["cred1".to_string(), "cred2\0cred3".to_string()],   // Null byte injection
-            vec!["cred1".to_string(), "cred2\tcred3".to_string()],   // Tab injection
-            vec!["a".repeat(1000)],                                   // Extremely long credential
-            vec!["\u{202E}evil\u{202C}cred".to_string()],           // BiDi override in credential
+            vec!["cred1".to_string(), "cred2\ncred3".to_string()], // Newline injection
+            vec!["cred1".to_string(), "cred2\0cred3".to_string()], // Null byte injection
+            vec!["cred1".to_string(), "cred2\tcred3".to_string()], // Tab injection
+            vec!["a".repeat(1000)],                                // Extremely long credential
+            vec!["\u{202E}evil\u{202C}cred".to_string()],          // BiDi override in credential
         ];
 
         for attack_creds in credential_attacks {
@@ -1944,9 +2119,20 @@ mod tests {
             };
             cred_proof.signature = test_sig(&cred_proof);
 
-            let result = g.check(&cred_proof, 100, true, false, "telemetry_config", "tr-cred-attack");
+            let result = g.check(
+                &cred_proof,
+                100,
+                true,
+                false,
+                "telemetry_config",
+                "tr-cred-attack",
+            );
             // Should succeed (credentials are treated as opaque identifiers)
-            assert!(result.is_ok(), "Credential content should not affect verification: {:?}", attack_creds);
+            assert!(
+                result.is_ok(),
+                "Credential content should not affect verification: {:?}",
+                attack_creds
+            );
         }
 
         // Trace ID and Action ID injection attacks
@@ -1960,7 +2146,11 @@ mod tests {
         ];
 
         for (trace_id, action_id) in id_attacks {
-            let id_proof = proof(SafetyTier::Advisory, 100, &format!("id-attack-{}-{}", trace_id.len(), action_id.len()));
+            let id_proof = proof(
+                SafetyTier::Advisory,
+                100,
+                &format!("id-attack-{}-{}", trace_id.len(), action_id.len()),
+            );
             let result = g.check(&id_proof, 100, true, false, action_id, trace_id);
 
             let err = result.expect_err("malformed action_id/trace_id must fail closed");
@@ -1979,7 +2169,11 @@ mod tests {
         ];
 
         for attack_sig in signature_attacks {
-            let mut sig_proof = proof(SafetyTier::Advisory, 100, &format!("sig-attack-{}", attack_sig.len()));
+            let mut sig_proof = proof(
+                SafetyTier::Advisory,
+                100,
+                &format!("sig-attack-{}", attack_sig.len()),
+            );
             sig_proof.signature = attack_sig.to_string();
 
             let result = g.verify_proof(&sig_proof);
@@ -1999,8 +2193,19 @@ mod tests {
         ];
 
         for (authenticated, bypass_flag, description) in auth_bypass_cases {
-            let bypass_proof = proof(SafetyTier::Standard, 100, &format!("auth-bypass-{}-{}", authenticated, bypass_flag));
-            let result = g.check(&bypass_proof, 100, authenticated, bypass_flag, "policy_deploy", "tr-auth-bypass");
+            let bypass_proof = proof(
+                SafetyTier::Standard,
+                100,
+                &format!("auth-bypass-{}-{}", authenticated, bypass_flag),
+            );
+            let result = g.check(
+                &bypass_proof,
+                100,
+                authenticated,
+                bypass_flag,
+                "policy_deploy",
+                "tr-auth-bypass",
+            );
 
             assert!(result.is_err(), "{} should be rejected", description);
             assert_eq!(result.unwrap_err().code(), "ERR_RFG_UNAUTHENTICATED");
@@ -2009,12 +2214,12 @@ mod tests {
 
         // Test owner bypass escalation attacks
         let bypass_escalation_cases = [
-            (SafetyTier::Critical, true, false),   // Critical should never allow bypass
-            (SafetyTier::Critical, false, false),  // Critical without bypass
-            (SafetyTier::Standard, true, true),    // Standard with bypass should work
-            (SafetyTier::Standard, false, false),  // Standard without bypass should fail
-            (SafetyTier::Advisory, true, true),    // Advisory always works (bypass irrelevant)
-            (SafetyTier::Advisory, false, true),   // Advisory always works
+            (SafetyTier::Critical, true, false), // Critical should never allow bypass
+            (SafetyTier::Critical, false, false), // Critical without bypass
+            (SafetyTier::Standard, true, true),  // Standard with bypass should work
+            (SafetyTier::Standard, false, false), // Standard without bypass should fail
+            (SafetyTier::Advisory, true, true),  // Advisory always works (bypass irrelevant)
+            (SafetyTier::Advisory, false, true), // Advisory always works
         ];
 
         for (tier, owner_bypass, should_succeed) in bypass_escalation_cases {
@@ -2026,19 +2231,40 @@ mod tests {
 
             // Create stale proof to trigger bypass logic
             let stale_epoch = 100 - tier.max_staleness_epochs() - 1;
-            let escalation_proof = proof(tier, stale_epoch, &format!("escalation-{:?}-{}-{}", tier, owner_bypass, should_succeed));
+            let escalation_proof = proof(
+                tier,
+                stale_epoch,
+                &format!("escalation-{:?}-{}-{}", tier, owner_bypass, should_succeed),
+            );
 
-            let result = g.check(&escalation_proof, 100, true, owner_bypass, action, "tr-escalation");
+            let result = g.check(
+                &escalation_proof,
+                100,
+                true,
+                owner_bypass,
+                action,
+                "tr-escalation",
+            );
 
             if should_succeed {
-                assert!(result.is_ok(), "Expected escalation to succeed for {:?} with bypass={}", tier, owner_bypass);
+                assert!(
+                    result.is_ok(),
+                    "Expected escalation to succeed for {:?} with bypass={}",
+                    tier,
+                    owner_bypass
+                );
                 let decision = result.unwrap();
                 if tier != SafetyTier::Critical {
                     assert!(decision.degraded); // Should be marked as degraded
                 }
                 assert!(g.is_nonce_consumed(&escalation_proof.nonce));
             } else {
-                assert!(result.is_err(), "Expected escalation to fail for {:?} with bypass={}", tier, owner_bypass);
+                assert!(
+                    result.is_err(),
+                    "Expected escalation to fail for {:?} with bypass={}",
+                    tier,
+                    owner_bypass
+                );
                 assert_eq!(result.unwrap_err().code(), "ERR_RFG_STALE");
                 assert!(!g.is_nonce_consumed(&escalation_proof.nonce));
             }
@@ -2055,13 +2281,27 @@ mod tests {
         ];
 
         for (action, proof_tier, should_succeed) in privilege_escalation_tests {
-            let privilege_proof = proof(proof_tier, 100, &format!("privilege-{}-{:?}", action, proof_tier));
+            let privilege_proof = proof(
+                proof_tier,
+                100,
+                &format!("privilege-{}-{:?}", action, proof_tier),
+            );
             let result = g.check(&privilege_proof, 100, true, false, action, "tr-privilege");
 
             if should_succeed {
-                assert!(result.is_ok(), "Expected privilege escalation to succeed for {} with {:?}", action, proof_tier);
+                assert!(
+                    result.is_ok(),
+                    "Expected privilege escalation to succeed for {} with {:?}",
+                    action,
+                    proof_tier
+                );
             } else {
-                assert!(result.is_err(), "Expected privilege escalation to fail for {} with {:?}", action, proof_tier);
+                assert!(
+                    result.is_err(),
+                    "Expected privilege escalation to fail for {} with {:?}",
+                    action,
+                    proof_tier
+                );
                 assert_eq!(result.unwrap_err().code(), "ERR_RFG_TAMPERED");
                 assert!(!g.is_nonce_consumed(&privilege_proof.nonce));
             }
@@ -2076,13 +2316,20 @@ mod tests {
         let massive_fields = [
             ("massive_nonce", "x".repeat(1_000_000)),
             ("massive_credential", vec!["y".repeat(1_000_000)]),
-            ("many_credentials", (0..10_000).map(|i| format!("cred-{}", i)).collect::<Vec<_>>()),
+            (
+                "many_credentials",
+                (0..10_000)
+                    .map(|i| format!("cred-{}", i))
+                    .collect::<Vec<_>>(),
+            ),
         ];
 
         for (attack_type, field_value) in massive_fields.iter() {
             let mut memory_proof = FreshnessProof {
                 timestamp: 1700000000,
-                credentials_checked: if attack_type == &"massive_credential" || attack_type == &"many_credentials" {
+                credentials_checked: if attack_type == &"massive_credential"
+                    || attack_type == &"many_credentials"
+                {
                     field_value.clone()
                 } else {
                     vec!["normal-cred".to_string()]
@@ -2099,30 +2346,45 @@ mod tests {
             memory_proof.signature = test_sig(&memory_proof);
 
             // Should reject excessive proof material before signature verification or nonce storage.
-            let result = g.check(&memory_proof, 100, true, false, "telemetry_config", "tr-memory");
+            let result = g.check(
+                &memory_proof,
+                100,
+                true,
+                false,
+                "telemetry_config",
+                "tr-memory",
+            );
             assert!(result.is_err(), "Massive {attack_type} should be rejected");
             let err = result.unwrap_err();
             assert_eq!(err.code(), "ERR_RFG_TAMPERED");
             assert!(
-                format!("{err}").contains("must not exceed")
-                    || format!("{err}").contains("over")
+                format!("{err}").contains("must not exceed") || format!("{err}").contains("over")
             );
             assert!(!g.is_nonce_consumed(&memory_proof.nonce));
         }
 
         // Test nonce capacity exhaustion patterns
         let exhaustion_patterns = [
-            "predictable-",     // Predictable pattern
-            "random-pattern-",  // Semi-random pattern
-            "",                 // Numeric only (will be formatted)
+            "predictable-",    // Predictable pattern
+            "random-pattern-", // Semi-random pattern
+            "",                // Numeric only (will be formatted)
         ];
 
         for pattern in exhaustion_patterns {
-            let pattern_nonces = (0..50).map(|i| format!("{}{:08x}", pattern, i)).collect::<Vec<_>>();
+            let pattern_nonces = (0..50)
+                .map(|i| format!("{}{:08x}", pattern, i))
+                .collect::<Vec<_>>();
 
             for nonce in pattern_nonces {
                 let pattern_proof = proof(SafetyTier::Advisory, 100, &nonce);
-                let result = g.check(&pattern_proof, 100, true, false, "telemetry_config", "tr-pattern");
+                let result = g.check(
+                    &pattern_proof,
+                    100,
+                    true,
+                    false,
+                    "telemetry_config",
+                    "tr-pattern",
+                );
 
                 // First occurrence should succeed
                 if !g.is_nonce_consumed(&nonce) {
@@ -2154,14 +2416,18 @@ mod tests {
         let duration = start.elapsed();
 
         // Should complete within reasonable time (not exponential complexity)
-        assert!(duration.as_secs() < 5, "Canonical payload generation took too long: {:?}", duration);
+        assert!(
+            duration.as_secs() < 5,
+            "Canonical payload generation took too long: {:?}",
+            duration
+        );
     }
 
     #[test]
     fn concurrent_access_and_race_condition_safety_validation() {
+        use crate::security::constant_time;
         use std::sync::{Arc, Mutex};
         use std::thread;
-        use crate::security::constant_time;
 
         let gate_mutex = Arc::new(Mutex::new(gate()));
         let results = Arc::new(Mutex::new(Vec::new()));
@@ -2188,7 +2454,8 @@ mod tests {
                 let test_proof = proof(tier, 100, &nonce);
 
                 let mut gate = gate_clone.lock().unwrap();
-                let result = gate.check(&test_proof, 100, true, false, action, &format!("tr-{}", i));
+                let result =
+                    gate.check(&test_proof, 100, true, false, action, &format!("tr-{}", i));
 
                 let mut results = results_clone.lock().unwrap();
                 results.push((i, nonce, result.is_ok()));
@@ -2207,7 +2474,10 @@ mod tests {
 
         // Verify all operations completed successfully (no race conditions)
         let successful_ops = results.iter().filter(|(_, _, success)| *success).count();
-        assert_eq!(successful_ops, 100, "All concurrent operations should succeed");
+        assert_eq!(
+            successful_ops, 100,
+            "All concurrent operations should succeed"
+        );
 
         // Verify nonce consumption state is consistent
         let gate = gate_mutex.lock().unwrap();
@@ -2215,7 +2485,11 @@ mod tests {
 
         // Verify no duplicate nonces were processed
         for (_, nonce, _) in results.iter() {
-            assert!(gate.is_nonce_consumed(nonce), "Nonce {} should be consumed", nonce);
+            assert!(
+                gate.is_nonce_consumed(nonce),
+                "Nonce {} should be consumed",
+                nonce
+            );
         }
 
         // Test concurrent replay attack detection
@@ -2237,7 +2511,14 @@ mod tests {
                     let test_proof = proof(SafetyTier::Advisory, 100, &shared_nonce);
 
                     let mut gate = gate_clone.lock().unwrap();
-                    let result = gate.check(&test_proof, 100, true, false, "telemetry_config", &format!("tr-{}-{}", thread_id, nonce_id));
+                    let result = gate.check(
+                        &test_proof,
+                        100,
+                        true,
+                        false,
+                        "telemetry_config",
+                        &format!("tr-{}-{}", thread_id, nonce_id),
+                    );
 
                     let mut results = results_clone.lock().unwrap();
                     results.push((thread_id, nonce_id, shared_nonce, result.is_ok()));
@@ -2257,18 +2538,33 @@ mod tests {
         let gate = replay_gate.lock().unwrap();
         for nonce_id in 0..10 {
             let nonce = format!("shared-nonce-{}", nonce_id);
-            assert!(gate.is_nonce_consumed(&nonce), "Shared nonce {} should be consumed", nonce);
+            assert!(
+                gate.is_nonce_consumed(&nonce),
+                "Shared nonce {} should be consumed",
+                nonce
+            );
 
             // Count how many threads reported success for this nonce
-            let success_count = replay_results.iter()
+            let success_count = replay_results
+                .iter()
                 .filter(|(_, n_id, _, success)| *n_id == nonce_id && *success)
                 .count();
 
-            assert_eq!(success_count, 1, "Exactly one thread should succeed per shared nonce {}", nonce_id);
+            assert_eq!(
+                success_count, 1,
+                "Exactly one thread should succeed per shared nonce {}",
+                nonce_id
+            );
         }
 
         // Total successful operations should equal number of unique nonces
-        let total_successes = replay_results.iter().filter(|(_, _, _, success)| *success).count();
-        assert_eq!(total_successes, 10, "Should have exactly 10 successful operations (one per unique nonce)");
+        let total_successes = replay_results
+            .iter()
+            .filter(|(_, _, _, success)| *success)
+            .count();
+        assert_eq!(
+            total_successes, 10,
+            "Should have exactly 10 successful operations (one per unique nonce)"
+        );
     }
 }

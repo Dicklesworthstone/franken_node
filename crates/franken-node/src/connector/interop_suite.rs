@@ -587,10 +587,12 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(!results[0].passed);
         assert_eq!(results[0].details, "invalid sources count: 2 ");
-        assert!(results[0]
-            .reproducer
-            .as_ref()
-            .is_some_and(|reproducer| reproducer.contains("\"field\":\"sources\"")));
+        assert!(
+            results[0]
+                .reproducer
+                .as_ref()
+                .is_some_and(|reproducer| reproducer.contains("\"field\":\"sources\""))
+        );
     }
 
     #[test]
@@ -625,10 +627,12 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(!results[0].passed);
         assert_eq!(results[0].details, "invalid required count:  1");
-        assert!(results[0]
-            .reproducer
-            .as_ref()
-            .is_some_and(|reproducer| reproducer.contains("\"field\":\"required\"")));
+        assert!(
+            results[0]
+                .reproducer
+                .as_ref()
+                .is_some_and(|reproducer| reproducer.contains("\"field\":\"required\""))
+        );
     }
 
     #[test]
@@ -775,10 +779,12 @@ mod tests {
         assert!(!result.passed);
         assert_eq!(result.class, InteropClass::Signature);
         assert_eq!(result.details, "");
-        assert!(result
-            .reproducer
-            .as_ref()
-            .is_some_and(|reproducer| reproducer.contains("\"case\":\"sig-empty-detail\"")));
+        assert!(
+            result
+                .reproducer
+                .as_ref()
+                .is_some_and(|reproducer| reproducer.contains("\"case\":\"sig-empty-detail\""))
+        );
     }
 
     #[test]
@@ -788,10 +794,12 @@ mod tests {
         assert!(!result.passed);
         assert_eq!(result.class, InteropClass::Revocation);
         assert_eq!(result.details, "impl_a=false, impl_b=true");
-        assert!(result
-            .reproducer
-            .as_ref()
-            .is_some_and(|reproducer| reproducer.contains("\"impl_b\":true")));
+        assert!(
+            result
+                .reproducer
+                .as_ref()
+                .is_some_and(|reproducer| reproducer.contains("\"impl_b\":true"))
+        );
     }
 
     #[test]
@@ -962,7 +970,11 @@ mod tests {
         ];
 
         for invalid_token in &invalid_tokens {
-            assert_eq!(valid_token.len(), invalid_token.len(), "Test tokens must be same length for timing test");
+            assert_eq!(
+                valid_token.len(),
+                invalid_token.len(),
+                "Test tokens must be same length for timing test"
+            );
 
             let result = check_object_id("revocation-timing", valid_token, invalid_token);
             assert!(

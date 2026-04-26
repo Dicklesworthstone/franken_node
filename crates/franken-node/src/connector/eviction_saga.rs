@@ -400,7 +400,10 @@ impl EvictionSaga {
     }
 
     /// Mark upload as successful and transition to verification.
-    pub fn upload_complete(&mut self, remote_cap: RemoteCapLookup) -> Result<(), EvictionSagaError> {
+    pub fn upload_complete(
+        &mut self,
+        remote_cap: RemoteCapLookup,
+    ) -> Result<(), EvictionSagaError> {
         self.ensure_transition_allowed(SagaPhase::Verifying)?;
         self.require_remote_cap_recheck(SagaPhase::Uploading, remote_cap, "upload_complete")?;
         self.tier_presence.l3_present = true;
@@ -408,7 +411,10 @@ impl EvictionSaga {
     }
 
     /// Mark verification as successful and transition to retirement.
-    pub fn verify_complete(&mut self, remote_cap: RemoteCapLookup) -> Result<(), EvictionSagaError> {
+    pub fn verify_complete(
+        &mut self,
+        remote_cap: RemoteCapLookup,
+    ) -> Result<(), EvictionSagaError> {
         self.ensure_transition_allowed(SagaPhase::Retiring)?;
         self.require_remote_cap_recheck(SagaPhase::Verifying, remote_cap, "verify_complete")?;
         if !self.tier_presence.l3_present {
@@ -422,7 +428,10 @@ impl EvictionSaga {
     }
 
     /// Mark retirement complete; saga is done.
-    pub fn retire_complete(&mut self, remote_cap: RemoteCapLookup) -> Result<(), EvictionSagaError> {
+    pub fn retire_complete(
+        &mut self,
+        remote_cap: RemoteCapLookup,
+    ) -> Result<(), EvictionSagaError> {
         self.ensure_transition_allowed(SagaPhase::Complete)?;
         self.require_remote_cap_recheck(SagaPhase::Retiring, remote_cap, "retire_complete")?;
         if !self.tier_presence.can_retire_l2() {
@@ -625,14 +634,26 @@ impl EvictionSaga {
     pub fn content_hash(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(b"eviction_saga_hash_v1:");
-        hasher.update(u64::try_from(self.saga_id.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(self.saga_id.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(self.saga_id.as_bytes());
-        hasher.update(u64::try_from(self.artifact_id.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(self.artifact_id.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(self.artifact_id.as_bytes());
         let phase = self.current_phase.as_str();
         hasher.update(u64::try_from(phase.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(phase.as_bytes());
-        hasher.update(u64::try_from(self.transitions.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(self.transitions.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hex::encode(hasher.finalize())
     }
 }

@@ -2912,10 +2912,11 @@ mod tests {
             )
             .expect_err("second real use must fail");
         assert_eq!(err.code(), "REMOTECAP_REPLAY");
-        assert!(gate
-            .audit_log()
-            .iter()
-            .any(|event| event.event_code == "REMOTECAP_RECHECK_PASSED"));
+        assert!(
+            gate.audit_log()
+                .iter()
+                .any(|event| event.event_code == "REMOTECAP_RECHECK_PASSED")
+        );
     }
 
     #[test]
@@ -4753,10 +4754,12 @@ mod remote_cap_comprehensive_negative_tests {
 
         // Normalization should deduplicate and clean up endpoints
         assert!(unnormalized_scope.endpoint_prefixes.len() <= 2); // At most 2 unique endpoints after normalization
-        assert!(!unnormalized_scope
-            .endpoint_prefixes
-            .iter()
-            .any(|e| e.trim().is_empty())); // No empty entries
+        assert!(
+            !unnormalized_scope
+                .endpoint_prefixes
+                .iter()
+                .any(|e| e.trim().is_empty())
+        ); // No empty entries
     }
 
     /// Negative test: Advanced cryptographic attack scenarios
@@ -5040,9 +5043,10 @@ mod remote_cap_comprehensive_negative_tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.code(), "REMOTECAP_CRYPTO_UNAVAILABLE");
-        assert!(err
-            .to_string()
-            .contains("verification material is unavailable"));
+        assert!(
+            err.to_string()
+                .contains("verification material is unavailable")
+        );
     }
 
     #[test]
@@ -5051,9 +5055,10 @@ mod remote_cap_comprehensive_negative_tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.code(), "REMOTECAP_CRYPTO_UNAVAILABLE");
-        assert!(err
-            .to_string()
-            .contains("verification material is unavailable"));
+        assert!(
+            err.to_string()
+                .contains("verification material is unavailable")
+        );
     }
 
     #[test]

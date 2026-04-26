@@ -821,8 +821,8 @@ mod tests {
 
             // Should be sorted by posterior desc, then principal_id asc
             assert!(
-                prev.posterior > curr.posterior ||
-                (prev.posterior == curr.posterior && prev.principal_id <= curr.principal_id)
+                prev.posterior > curr.posterior
+                    || (prev.posterior == curr.posterior && prev.principal_id <= curr.principal_id)
             );
         }
     }
@@ -1026,7 +1026,10 @@ mod quarantine_controller_additional_negative_tests {
         assert!(decision.posterior.is_finite());
         assert_eq!(decision.posterior, controller.policy().revoke);
         assert!(decision.signed_evidence.posterior.is_finite());
-        assert_eq!(decision.signed_evidence.posterior, controller.policy().revoke);
+        assert_eq!(
+            decision.signed_evidence.posterior,
+            controller.policy().revoke
+        );
         assert_eq!(decision.threshold, controller.policy().revoke);
         assert!(controller.verify_signature(&decision.signed_evidence));
         serde_json::to_string(&decision).expect("clamped non-finite posterior should serialize");
@@ -1046,7 +1049,10 @@ mod quarantine_controller_additional_negative_tests {
 
             assert_eq!(decision.action, ControlAction::Revoke);
             assert_eq!(decision.posterior, controller.policy().revoke);
-            assert_eq!(decision.signed_evidence.posterior, controller.policy().revoke);
+            assert_eq!(
+                decision.signed_evidence.posterior,
+                controller.policy().revoke
+            );
             assert!(decision.posterior.is_finite());
             assert!(decision.signed_evidence.posterior.is_finite());
             assert!(controller.verify_decision(&decision));
@@ -1204,30 +1210,30 @@ mod quarantine_controller_additional_negative_tests {
         // Unicode injection attempts in principal_id and trace_id
         let malicious_posteriors = vec![
             AdversaryPosterior {
-                principal_id: "\u{202E}user123\u{202D}admin".to_string(),  // BiDi override
+                principal_id: "\u{202E}user123\u{202D}admin".to_string(), // BiDi override
                 alpha: 1,
                 beta: 1,
                 posterior: 0.8,
                 evidence_count: 1,
-                last_trace_id: "trace\u{200B}001".to_string(),  // Zero-width space
+                last_trace_id: "trace\u{200B}001".to_string(), // Zero-width space
                 evidence_hash: "sha256:test".to_string(),
             },
             AdversaryPosterior {
-                principal_id: "user\u{FEFF}123".to_string(),  // Zero-width no-break space
+                principal_id: "user\u{FEFF}123".to_string(), // Zero-width no-break space
                 alpha: 1,
                 beta: 1,
                 posterior: 0.9,
                 evidence_count: 1,
-                last_trace_id: "\u{0000}trace001".to_string(),  // Null injection
+                last_trace_id: "\u{0000}trace001".to_string(), // Null injection
                 evidence_hash: "sha256:test".to_string(),
             },
             AdversaryPosterior {
-                principal_id: "user\u{2028}123\u{2029}".to_string(),  // Line/paragraph separators
+                principal_id: "user\u{2028}123\u{2029}".to_string(), // Line/paragraph separators
                 alpha: 1,
                 beta: 1,
                 posterior: 0.95,
                 evidence_count: 1,
-                last_trace_id: "trace\u{200E}001\u{200F}".to_string(),  // LTR/RTL marks
+                last_trace_id: "trace\u{200E}001\u{200F}".to_string(), // LTR/RTL marks
                 evidence_hash: "sha256:test".to_string(),
             },
         ];
@@ -1237,18 +1243,34 @@ mod quarantine_controller_additional_negative_tests {
 
             if let Ok(evidence) = result {
                 // Unicode should not affect the control logic
-                assert!(evidence.action != ControlAction::Throttle || malicious_posterior.posterior >= 0.45);
-                assert!(evidence.action != ControlAction::Isolate || malicious_posterior.posterior >= 0.60);
-                assert!(evidence.action != ControlAction::Quarantine || malicious_posterior.posterior >= 0.75);
-                assert!(evidence.action != ControlAction::Revoke || malicious_posterior.posterior >= 0.90);
+                assert!(
+                    evidence.action != ControlAction::Throttle
+                        || malicious_posterior.posterior >= 0.45
+                );
+                assert!(
+                    evidence.action != ControlAction::Isolate
+                        || malicious_posterior.posterior >= 0.60
+                );
+                assert!(
+                    evidence.action != ControlAction::Quarantine
+                        || malicious_posterior.posterior >= 0.75
+                );
+                assert!(
+                    evidence.action != ControlAction::Revoke
+                        || malicious_posterior.posterior >= 0.90
+                );
 
                 // Principal ID should not be normalized in a way that bypasses security
-                assert!(!constant_time::ct_eq_bytes(evidence.principal_id.as_bytes(), b"admin"),
-                       "Unicode injection should not create admin privileges");
+                assert!(
+                    !constant_time::ct_eq_bytes(evidence.principal_id.as_bytes(), b"admin"),
+                    "Unicode injection should not create admin privileges"
+                );
 
                 // Trace ID should preserve injection detection
-                assert!(!evidence.trace_id.contains('\0'),
-                       "Null bytes should not appear in trace ID");
+                assert!(
+                    !evidence.trace_id.contains('\0'),
+                    "Null bytes should not appear in trace ID"
+                );
             }
         }
     }
@@ -1263,7 +1285,7 @@ mod quarantine_controller_additional_negative_tests {
                 principal_id: "user001".to_string(),
                 alpha: 1,
                 beta: 1,
-                posterior: f64::INFINITY,  // Positive infinity
+                posterior: f64::INFINITY, // Positive infinity
                 evidence_count: 1,
                 last_trace_id: "trace001".to_string(),
                 evidence_hash: "sha256:test".to_string(),
@@ -1272,7 +1294,7 @@ mod quarantine_controller_additional_negative_tests {
                 principal_id: "user002".to_string(),
                 alpha: 1,
                 beta: 1,
-                posterior: f64::NEG_INFINITY,  // Negative infinity
+                posterior: f64::NEG_INFINITY, // Negative infinity
                 evidence_count: 1,
                 last_trace_id: "trace002".to_string(),
                 evidence_hash: "sha256:test".to_string(),
@@ -1281,7 +1303,7 @@ mod quarantine_controller_additional_negative_tests {
                 principal_id: "user003".to_string(),
                 alpha: 1,
                 beta: 1,
-                posterior: f64::NAN,  // Not a Number
+                posterior: f64::NAN, // Not a Number
                 evidence_count: 1,
                 last_trace_id: "trace003".to_string(),
                 evidence_hash: "sha256:test".to_string(),
@@ -1290,7 +1312,7 @@ mod quarantine_controller_additional_negative_tests {
                 principal_id: "user004".to_string(),
                 alpha: 1,
                 beta: 1,
-                posterior: 1.0000000000000002,  // Slightly above 1.0
+                posterior: 1.0000000000000002, // Slightly above 1.0
                 evidence_count: 1,
                 last_trace_id: "trace004".to_string(),
                 evidence_hash: "sha256:test".to_string(),
@@ -1303,14 +1325,21 @@ mod quarantine_controller_additional_negative_tests {
             match result {
                 Ok(evidence) => {
                     // If accepted, verify the action makes sense
-                    assert!(evidence.posterior.is_finite() || evidence.action == ControlAction::Revoke,
-                           "Non-finite posteriors should trigger maximum action");
+                    assert!(
+                        evidence.posterior.is_finite() || evidence.action == ControlAction::Revoke,
+                        "Non-finite posteriors should trigger maximum action"
+                    );
 
-                    if extreme_posterior.posterior.is_infinite() && extreme_posterior.posterior > 0.0 {
-                        assert_eq!(evidence.action, ControlAction::Revoke,
-                                 "Positive infinity should trigger revoke");
+                    if extreme_posterior.posterior.is_infinite()
+                        && extreme_posterior.posterior > 0.0
+                    {
+                        assert_eq!(
+                            evidence.action,
+                            ControlAction::Revoke,
+                            "Positive infinity should trigger revoke"
+                        );
                     }
-                },
+                }
                 Err(_) => {
                     // Graceful rejection of extreme values is acceptable
                 }
@@ -1339,16 +1368,16 @@ mod quarantine_controller_additional_negative_tests {
                 ..evidence.clone()
             },
             SignedEvidenceEntry {
-                signature: original_signature[1..].to_string(),  // Truncated
+                signature: original_signature[1..].to_string(), // Truncated
                 ..evidence.clone()
             },
             SignedEvidenceEntry {
-                action: ControlAction::Throttle,  // Modified action
+                action: ControlAction::Throttle, // Modified action
                 signature: original_signature.clone(),
                 ..evidence.clone()
             },
             SignedEvidenceEntry {
-                posterior: 0.1,  // Modified posterior
+                posterior: 0.1, // Modified posterior
                 signature: original_signature.clone(),
                 ..evidence.clone()
             },
@@ -1356,15 +1385,25 @@ mod quarantine_controller_additional_negative_tests {
 
         for forged_evidence in forged_evidence_variants {
             // Signature verification should detect tampering
-            if constant_time::ct_eq_bytes(forged_evidence.signature.as_bytes(), original_signature.as_bytes()) {
+            if constant_time::ct_eq_bytes(
+                forged_evidence.signature.as_bytes(),
+                original_signature.as_bytes(),
+            ) {
                 // If signature wasn't changed, other fields were modified
-                assert!(forged_evidence.action != evidence.action ||
-                       (forged_evidence.posterior - evidence.posterior).abs() > f64::EPSILON,
-                       "Evidence modification should be detectable");
+                assert!(
+                    forged_evidence.action != evidence.action
+                        || (forged_evidence.posterior - evidence.posterior).abs() > f64::EPSILON,
+                    "Evidence modification should be detectable"
+                );
             } else {
                 // Signature was modified - should be detectable through verification
-                assert!(!constant_time::ct_eq_bytes(forged_evidence.signature.as_bytes(), original_signature.as_bytes()),
-                       "Signature tampering should be detectable");
+                assert!(
+                    !constant_time::ct_eq_bytes(
+                        forged_evidence.signature.as_bytes(),
+                        original_signature.as_bytes()
+                    ),
+                    "Signature tampering should be detectable"
+                );
             }
         }
     }
@@ -1374,13 +1413,13 @@ mod quarantine_controller_additional_negative_tests {
         // Test threshold policies with manipulated boundaries
         let malicious_policies = vec![
             QuarantineThresholdPolicy {
-                throttle: 0.90,  // Inverted order
+                throttle: 0.90, // Inverted order
                 isolate: 0.75,
                 quarantine: 0.60,
                 revoke: 0.45,
             },
             QuarantineThresholdPolicy {
-                throttle: -0.1,  // Negative threshold
+                throttle: -0.1, // Negative threshold
                 isolate: 0.60,
                 quarantine: 0.75,
                 revoke: 0.90,
@@ -1389,11 +1428,11 @@ mod quarantine_controller_additional_negative_tests {
                 throttle: 0.45,
                 isolate: 0.60,
                 quarantine: 0.75,
-                revoke: 1.1,  // Above 1.0
+                revoke: 1.1, // Above 1.0
             },
             QuarantineThresholdPolicy {
-                throttle: f64::EPSILON,  // Extremely small
-                isolate: 1.0 - f64::EPSILON,  // Extremely close to 1.0
+                throttle: f64::EPSILON,      // Extremely small
+                isolate: 1.0 - f64::EPSILON, // Extremely close to 1.0
                 quarantine: 1.0 - f64::EPSILON,
                 revoke: 1.0,
             },
@@ -1405,13 +1444,15 @@ mod quarantine_controller_additional_negative_tests {
 
             // Invalid policies should be rejected
             if validation_result.is_err() || controller_result.is_err() {
-                continue;  // Expected rejection
+                continue; // Expected rejection
             }
 
             // If policy was somehow accepted, verify it behaves securely
             let controller = controller_result.unwrap();
             let test_posterior = posterior("user001", 0.8, "trace001");
-            let evidence = controller.evaluate(&test_posterior).expect("should evaluate");
+            let evidence = controller
+                .evaluate(&test_posterior)
+                .expect("should evaluate");
 
             // Actions should still be coherent despite boundary manipulation
             match evidence.action {
@@ -1427,23 +1468,32 @@ mod quarantine_controller_additional_negative_tests {
     fn test_security_json_serialization_injection() {
         let controller = controller();
         let posterior = AdversaryPosterior {
-            principal_id: "\";alert('xss');//".to_string(),  // JS injection
+            principal_id: "\";alert('xss');//".to_string(), // JS injection
             alpha: 1,
             beta: 1,
             posterior: 0.8,
             evidence_count: 1,
-            last_trace_id: "trace\ninjection\r\nattack".to_string(),  // Newline injection
-            evidence_hash: "sha256:test</script><script>alert('xss')</script>".to_string(),  // HTML injection
+            last_trace_id: "trace\ninjection\r\nattack".to_string(), // Newline injection
+            evidence_hash: "sha256:test</script><script>alert('xss')</script>".to_string(), // HTML injection
         };
 
         let evidence = controller.evaluate(&posterior).expect("should evaluate");
         let json = serde_json::to_string(&evidence).expect("should serialize");
 
         // JSON should escape all injection attempts
-        assert!(!json.contains("alert('xss')"), "JavaScript injection should be escaped");
-        assert!(!json.contains("</script>"), "HTML injection should be escaped");
+        assert!(
+            !json.contains("alert('xss')"),
+            "JavaScript injection should be escaped"
+        );
+        assert!(
+            !json.contains("</script>"),
+            "HTML injection should be escaped"
+        );
         assert!(!json.contains("\n"), "Newline injection should be escaped");
-        assert!(!json.contains("\r"), "Carriage return injection should be escaped");
+        assert!(
+            !json.contains("\r"),
+            "Carriage return injection should be escaped"
+        );
 
         // Roundtrip should preserve structure but escape content
         let parsed: SignedEvidenceEntry = serde_json::from_str(&json).expect("should deserialize");
@@ -1458,13 +1508,13 @@ mod quarantine_controller_additional_negative_tests {
 
         // Attempt memory exhaustion through large string fields
         let large_posterior = AdversaryPosterior {
-            principal_id: "a".repeat(1000000),  // 1MB string
+            principal_id: "a".repeat(1000000), // 1MB string
             alpha: 1,
             beta: 1,
             posterior: 0.8,
             evidence_count: 1,
-            last_trace_id: "b".repeat(1000000),  // 1MB string
-            evidence_hash: format!("sha256:{}", "c".repeat(1000000)),  // Large hash
+            last_trace_id: "b".repeat(1000000), // 1MB string
+            evidence_hash: format!("sha256:{}", "c".repeat(1000000)), // Large hash
         };
 
         // Should either handle gracefully or reject
@@ -1475,7 +1525,7 @@ mod quarantine_controller_additional_negative_tests {
                 assert!(!evidence.principal_id.is_empty());
                 assert!(!evidence.trace_id.is_empty());
                 assert!(!evidence.signature.is_empty());
-            },
+            }
             Err(_) => {
                 // Graceful rejection is acceptable
             }
@@ -1515,8 +1565,10 @@ mod quarantine_controller_additional_negative_tests {
         let max_time = timing_results.iter().max().unwrap();
 
         // Timing should be relatively constant (not perfect, but reasonable)
-        assert!(max_time.as_nanos() < min_time.as_nanos() * 100,
-               "Timing variance suggests potential timing attack vulnerability");
+        assert!(
+            max_time.as_nanos() < min_time.as_nanos() * 100,
+            "Timing variance suggests potential timing attack vulnerability"
+        );
     }
 
     #[test]
@@ -1531,7 +1583,11 @@ mod quarantine_controller_additional_negative_tests {
         for i in 0..20 {
             let ctrl_clone = Arc::clone(&controller);
             let handle = thread::spawn(move || {
-                let test_posterior = posterior(&format!("user{}", i), 0.5 + (i as f64 / 40.0), &format!("trace{}", i));
+                let test_posterior = posterior(
+                    &format!("user{}", i),
+                    0.5 + (i as f64 / 40.0),
+                    &format!("trace{}", i),
+                );
 
                 let ctrl = ctrl_clone.lock().unwrap();
                 ctrl.evaluate(&test_posterior)
@@ -1567,10 +1623,10 @@ mod quarantine_controller_additional_negative_tests {
         // Test with extreme evidence_count values
         let overflow_posterior = AdversaryPosterior {
             principal_id: "user001".to_string(),
-            alpha: u32::MAX as u64,  // Extreme alpha
-            beta: u32::MAX as u64,   // Extreme beta
+            alpha: u32::MAX as u64, // Extreme alpha
+            beta: u32::MAX as u64,  // Extreme beta
             posterior: 0.8,
-            evidence_count: u64::MAX,  // Maximum evidence count
+            evidence_count: u64::MAX, // Maximum evidence count
             last_trace_id: "trace001".to_string(),
             evidence_hash: "sha256:test".to_string(),
         };
@@ -1586,7 +1642,7 @@ mod quarantine_controller_additional_negative_tests {
                 // Evidence count should be handled safely
                 assert_eq!(evidence.principal_id, "user001");
                 assert_eq!(evidence.trace_id, "trace001");
-            },
+            }
             Err(_) => {
                 // Graceful rejection of extreme values is acceptable
             }
@@ -1597,38 +1653,45 @@ mod quarantine_controller_additional_negative_tests {
     fn test_security_hmac_key_manipulation_resistance() {
         // Test controllers with different key qualities
         let key_tests = vec![
-            "".to_string(),  // Empty key (should be rejected)
-            "\0\0\0\0".to_string(),  // Null bytes
-            "\u{202E}key\u{202D}".to_string(),  // BiDi override
-            "a".repeat(1000),  // Very long key
-            "short".to_string(),  // Short but valid key
-            "normal_signing_key_123".to_string(),  // Normal key
+            "".to_string(),                       // Empty key (should be rejected)
+            "\0\0\0\0".to_string(),               // Null bytes
+            "\u{202E}key\u{202D}".to_string(),    // BiDi override
+            "a".repeat(1000),                     // Very long key
+            "short".to_string(),                  // Short but valid key
+            "normal_signing_key_123".to_string(), // Normal key
         ];
 
         for test_key in key_tests {
-            let controller_result = QuarantineController::new(
-                QuarantineThresholdPolicy::default(),
-                test_key.clone()
-            );
+            let controller_result =
+                QuarantineController::new(QuarantineThresholdPolicy::default(), test_key.clone());
 
             match controller_result {
                 Ok(controller) => {
                     // If controller was created, it should work securely
                     let test_posterior = posterior("user001", 0.8, "trace001");
-                    let evidence = controller.evaluate(&test_posterior).expect("should evaluate");
+                    let evidence = controller
+                        .evaluate(&test_posterior)
+                        .expect("should evaluate");
 
                     // Signature should be non-empty and deterministic
                     assert!(!evidence.signature.is_empty());
 
                     // Same input should produce same signature
-                    let evidence2 = controller.evaluate(&test_posterior).expect("should evaluate");
-                    assert_eq!(evidence.signature, evidence2.signature,
-                             "Signatures should be deterministic");
-                },
+                    let evidence2 = controller
+                        .evaluate(&test_posterior)
+                        .expect("should evaluate");
+                    assert_eq!(
+                        evidence.signature, evidence2.signature,
+                        "Signatures should be deterministic"
+                    );
+                }
                 Err(QuarantineControllerError::InvalidSigningKey) => {
                     // Expected for empty/invalid keys
-                    assert!(test_key.trim().is_empty(), "Invalid key should be empty or whitespace");
-                },
+                    assert!(
+                        test_key.trim().is_empty(),
+                        "Invalid key should be empty or whitespace"
+                    );
+                }
                 Err(other) => {
                     panic!("Unexpected error for key '{}': {:?}", test_key, other);
                 }

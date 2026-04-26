@@ -837,16 +837,26 @@ impl GateEngine {
                 policy_context: BTreeMap::new(),
             };
             let result = engine.gate_check(&unicode_attack_request);
-            assert!(result.is_ok(), "Unicode injection should be handled gracefully");
+            assert!(
+                result.is_ok(),
+                "Unicode injection should be handled gracefully"
+            );
             if let Ok(check_result) = result {
-                assert!(check_result.rationale.explanation.contains(&unicode_attack_request.package_id), "Malicious package ID should be preserved in explanation");
+                assert!(
+                    check_result
+                        .rationale
+                        .explanation
+                        .contains(&unicode_attack_request.package_id),
+                    "Malicious package ID should be preserved in explanation"
+                );
             }
 
             // Test: Memory exhaustion through massive policy context
             let mut engine = GateEngine::new(vec![0x42; 32]);
             let massive_value = "X".repeat(10_000); // 10KB values
             let mut massive_context = BTreeMap::new();
-            for i in 0..100 { // 1MB total context
+            for i in 0..100 {
+                // 1MB total context
                 massive_context.insert(format!("key_{}", i), massive_value.clone());
             }
             let massive_request = GateCheckRequest {
@@ -856,7 +866,10 @@ impl GateEngine {
                 policy_context: massive_context,
             };
             let result = engine.gate_check(&massive_request);
-            assert!(result.is_ok(), "Massive policy context should be handled without memory issues");
+            assert!(
+                result.is_ok(),
+                "Massive policy context should be handled without memory issues"
+            );
 
             // Test: Trace ID space exhaustion simulation
             let mut engine = GateEngine::new(vec![0x42; 32]);
@@ -885,8 +898,8 @@ impl GateEngine {
             engine.set_scope_mode("boundary.scope", CompatMode::Balanced); // Risk level 1
 
             let boundary_tests = [
-                (CompatMode::Strict, Verdict::Allow),    // Risk 0 <= 1 should allow
-                (CompatMode::Balanced, Verdict::Allow),  // Risk 1 <= 1 should allow
+                (CompatMode::Strict, Verdict::Allow), // Risk 0 <= 1 should allow
+                (CompatMode::Balanced, Verdict::Allow), // Risk 1 <= 1 should allow
                 (CompatMode::LegacyRisky, Verdict::Deny), // Risk 2 > 1 should deny
             ];
 
@@ -898,9 +911,19 @@ impl GateEngine {
                     policy_context: BTreeMap::new(),
                 };
                 let result = engine.gate_check(&boundary_request);
-                assert!(result.is_ok(), "Boundary test should complete for mode {:?}", requested_mode);
+                assert!(
+                    result.is_ok(),
+                    "Boundary test should complete for mode {:?}",
+                    requested_mode
+                );
                 if let Ok(check_result) = result {
-                    assert_eq!(check_result.decision, expected_verdict, "Mode {} should produce verdict {:?}", requested_mode.label(), expected_verdict);
+                    assert_eq!(
+                        check_result.decision,
+                        expected_verdict,
+                        "Mode {} should produce verdict {:?}",
+                        requested_mode.label(),
+                        expected_verdict
+                    );
                 }
             }
 
@@ -908,7 +931,12 @@ impl GateEngine {
             let mut engine = GateEngine::new(vec![0x42; 32]);
             // Pre-fill audit trail close to capacity
             for i in 0..(MAX_AUDIT_TRAIL_ENTRIES - 5) {
-                engine.emit_audit("TEST_EVENT", &format!("flood.scope.{}", i), &format!("flood event {}", i), &format!("trace-{}", i));
+                engine.emit_audit(
+                    "TEST_EVENT",
+                    &format!("flood.scope.{}", i),
+                    &format!("flood event {}", i),
+                    &format!("trace-{}", i),
+                );
             }
 
             // Trigger gate checks that should generate audit events
@@ -922,7 +950,10 @@ impl GateEngine {
                 let _ = engine.gate_check(&flood_request);
             }
             // Audit trail should be bounded by push_bounded
-            assert!(engine.audit_trail.len() <= MAX_AUDIT_TRAIL_ENTRIES, "Audit trail should be capacity-bounded");
+            assert!(
+                engine.audit_trail.len() <= MAX_AUDIT_TRAIL_ENTRIES,
+                "Audit trail should be capacity-bounded"
+            );
 
             // Test: Malformed scope mode signature injection
             let mut engine = GateEngine::new(vec![0x42; 32]);
@@ -941,7 +972,9 @@ impl GateEngine {
                     vec!["MALFORMED_CODE".to_string()],
                 ),
             };
-            engine.scope_modes.insert("malformed.scope".to_string(), malformed_scope_mode);
+            engine
+                .scope_modes
+                .insert("malformed.scope".to_string(), malformed_scope_mode);
 
             let malformed_request = GateCheckRequest {
                 package_id: "malformed.package".to_string(),
@@ -950,19 +983,38 @@ impl GateEngine {
                 policy_context: BTreeMap::new(),
             };
             let result = engine.gate_check(&malformed_request);
-            assert!(result.is_ok(), "Malformed scope mode should be handled gracefully");
+            assert!(
+                result.is_ok(),
+                "Malformed scope mode should be handled gracefully"
+            );
             // Should likely fail signature verification and deny
             if let Ok(check_result) = result {
-                assert_eq!(check_result.decision, Verdict::Deny, "Malformed signature should result in denial");
+                assert_eq!(
+                    check_result.decision,
+                    Verdict::Deny,
+                    "Malformed signature should result in denial"
+                );
             }
 
             // Test: Policy context injection attacks
             let mut engine = GateEngine::new(vec![0x42; 32]);
             let mut injection_context = BTreeMap::new();
-            injection_context.insert("sql_injection".to_string(), "'; DROP TABLE policies; --".to_string());
-            injection_context.insert("xss_injection".to_string(), "<script>alert('xss')</script>".to_string());
-            injection_context.insert("json_injection".to_string(), r#"{"malicious":"payload"}"#.to_string());
-            injection_context.insert("null_injection".to_string(), "value\x00with\x00nulls".to_string());
+            injection_context.insert(
+                "sql_injection".to_string(),
+                "'; DROP TABLE policies; --".to_string(),
+            );
+            injection_context.insert(
+                "xss_injection".to_string(),
+                "<script>alert('xss')</script>".to_string(),
+            );
+            injection_context.insert(
+                "json_injection".to_string(),
+                r#"{"malicious":"payload"}"#.to_string(),
+            );
+            injection_context.insert(
+                "null_injection".to_string(),
+                "value\x00with\x00nulls".to_string(),
+            );
 
             let injection_request = GateCheckRequest {
                 package_id: "injection.test".to_string(),
@@ -971,7 +1023,10 @@ impl GateEngine {
                 policy_context: injection_context.clone(),
             };
             let result = engine.gate_check(&injection_request);
-            assert!(result.is_ok(), "Policy context injections should be handled safely");
+            assert!(
+                result.is_ok(),
+                "Policy context injections should be handled safely"
+            );
             // Injected content should be preserved as-is without interpretation
 
             // Test: Scope freshness boundary conditions
@@ -994,7 +1049,9 @@ impl GateEngine {
                     vec!["POLICY_COMPAT_SCOPE_MODE_SET".to_string()],
                 ),
             };
-            engine.scope_modes.insert("expired.scope".to_string(), expired_scope_mode);
+            engine
+                .scope_modes
+                .insert("expired.scope".to_string(), expired_scope_mode);
 
             let freshness_request = GateCheckRequest {
                 package_id: "freshness.test".to_string(),
@@ -1005,8 +1062,16 @@ impl GateEngine {
             let result = engine.gate_check(&freshness_request);
             assert!(result.is_ok(), "Expired scope should be handled gracefully");
             if let Ok(check_result) = result {
-                assert_eq!(check_result.decision, Verdict::Deny, "Expired scope should result in denial");
-                assert_ne!(check_result.rationale.freshness_state, CompatibilityFreshnessState::Fresh, "Should detect non-fresh state");
+                assert_eq!(
+                    check_result.decision,
+                    Verdict::Deny,
+                    "Expired scope should result in denial"
+                );
+                assert_ne!(
+                    check_result.rationale.freshness_state,
+                    CompatibilityFreshnessState::Fresh,
+                    "Should detect non-fresh state"
+                );
             }
 
             // Test: Concurrent operation simulation with scope mode conflicts
@@ -1033,7 +1098,10 @@ impl GateEngine {
 
             for handle in handles {
                 let result = handle.join().unwrap();
-                assert!(result.is_ok(), "Concurrent gate checks should complete without panic");
+                assert!(
+                    result.is_ok(),
+                    "Concurrent gate checks should complete without panic"
+                );
             }
 
             // Test: Explanation digest collision resistance
@@ -1059,8 +1127,11 @@ impl GateEngine {
 
             // Different requests should produce different digests
             for i in 0..digests.len() {
-                for j in (i+1)..digests.len() {
-                    assert_ne!(digests[i], digests[j], "Different requests should produce different explanation digests");
+                for j in (i + 1)..digests.len() {
+                    assert_ne!(
+                        digests[i], digests[j],
+                        "Different requests should produce different explanation digests"
+                    );
                 }
             }
 
@@ -1077,12 +1148,25 @@ impl GateEngine {
             let result = engine.gate_check(&recovery_request);
             assert!(result.is_ok(), "Recovery scenario should be handled");
             if let Ok(check_result) = result {
-                assert_eq!(check_result.decision, Verdict::Deny, "Should deny when requesting higher mode");
-                assert!(!check_result.rationale.recovery_hints.is_empty(), "Should provide recovery hints");
+                assert_eq!(
+                    check_result.decision,
+                    Verdict::Deny,
+                    "Should deny when requesting higher mode"
+                );
+                assert!(
+                    !check_result.rationale.recovery_hints.is_empty(),
+                    "Should provide recovery hints"
+                );
                 // Verify recovery hints don't contain injection attacks
                 for hint in &check_result.rationale.recovery_hints {
-                    assert!(!hint.contains("<script>"), "Recovery hints should not contain script injection");
-                    assert!(!hint.contains("DROP TABLE"), "Recovery hints should not contain SQL injection");
+                    assert!(
+                        !hint.contains("<script>"),
+                        "Recovery hints should not contain script injection"
+                    );
+                    assert!(
+                        !hint.contains("DROP TABLE"),
+                        "Recovery hints should not contain SQL injection"
+                    );
                 }
             }
 
@@ -1121,7 +1205,9 @@ impl GateEngine {
                     vec!["POLICY_COMPAT_SCOPE_MODE_SET".to_string()],
                 ),
             };
-            engine.scope_modes.insert("attenuation.scope".to_string(), attenuation_scope_mode);
+            engine
+                .scope_modes
+                .insert("attenuation.scope".to_string(), attenuation_scope_mode);
 
             let attenuation_request = GateCheckRequest {
                 package_id: "attenuation.test".to_string(),
@@ -1130,7 +1216,10 @@ impl GateEngine {
                 policy_context: BTreeMap::new(),
             };
             let result = engine.gate_check(&attenuation_request);
-            assert!(result.is_ok(), "Massive attenuation should be handled without memory issues");
+            assert!(
+                result.is_ok(),
+                "Massive attenuation should be handled without memory issues"
+            );
         }
     }
 

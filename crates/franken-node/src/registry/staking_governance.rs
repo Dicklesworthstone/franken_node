@@ -3769,15 +3769,13 @@ mod staking_governance_boundary_negative_tests {
         let mut scrubbed = json.to_string();
 
         // UUIDs → [UUID]
-        let uuid_re = Regex::new(
-            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-        ).unwrap();
+        let uuid_re =
+            Regex::new(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").unwrap();
         scrubbed = uuid_re.replace_all(&scrubbed, "[UUID]").to_string();
 
         // ISO timestamps → [TIMESTAMP]
-        let ts_re = Regex::new(
-            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?"
-        ).unwrap();
+        let ts_re =
+            Regex::new(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?").unwrap();
         scrubbed = ts_re.replace_all(&scrubbed, "[TIMESTAMP]").to_string();
 
         // Epoch timestamps → [EPOCH]
@@ -3810,8 +3808,8 @@ mod staking_governance_boundary_negative_tests {
             metadata: Some("compliance_check=passed,automated=true".to_string()),
         };
 
-        let json = serde_json::to_string_pretty(&audit_entry)
-            .expect("audit entry should serialize");
+        let json =
+            serde_json::to_string_pretty(&audit_entry).expect("audit entry should serialize");
         let scrubbed = scrub_registry_receipt(&json);
 
         insta::assert_snapshot!("staking_audit_entry_receipt", scrubbed);
@@ -3844,8 +3842,8 @@ mod staking_governance_boundary_negative_tests {
             },
         };
 
-        let json = serde_json::to_string_pretty(&slash_event)
-            .expect("slash event should serialize");
+        let json =
+            serde_json::to_string_pretty(&slash_event).expect("slash event should serialize");
         let scrubbed = scrub_registry_receipt(&json);
 
         insta::assert_snapshot!("slash_event_receipt", scrubbed);
@@ -3866,8 +3864,8 @@ mod staking_governance_boundary_negative_tests {
             reviewer_id: Some("appeal-board-senior".to_string()),
         };
 
-        let json = serde_json::to_string_pretty(&appeal_record)
-            .expect("appeal record should serialize");
+        let json =
+            serde_json::to_string_pretty(&appeal_record).expect("appeal record should serialize");
         let scrubbed = scrub_registry_receipt(&json);
 
         insta::assert_snapshot!("appeal_record_receipt", scrubbed);
@@ -3887,8 +3885,8 @@ mod staking_governance_boundary_negative_tests {
             slashed_at: None,
         };
 
-        let json = serde_json::to_string_pretty(&stake_record)
-            .expect("stake record should serialize");
+        let json =
+            serde_json::to_string_pretty(&stake_record).expect("stake record should serialize");
         let scrubbed = scrub_registry_receipt(&json);
 
         insta::assert_snapshot!("stake_record_receipt", scrubbed);
@@ -3899,55 +3897,63 @@ mod staking_governance_boundary_negative_tests {
         let mut state = TrustGovernanceState::default();
 
         // Add sample data
-        state.stakes.insert(1, StakeRecord {
-            id: StakeId(1),
-            publisher_id: PublisherId("pub-alpha".to_string()),
-            stake_amount: 1000,
-            risk_tier: RiskTier::Medium,
-            deposited_at: 1735689400,
-            state: StakeState::Active,
-            slashed_amount: 0,
-            appeal_deadline: None,
-            slashed_at: None,
-        });
+        state.stakes.insert(
+            1,
+            StakeRecord {
+                id: StakeId(1),
+                publisher_id: PublisherId("pub-alpha".to_string()),
+                stake_amount: 1000,
+                risk_tier: RiskTier::Medium,
+                deposited_at: 1735689400,
+                state: StakeState::Active,
+                slashed_amount: 0,
+                appeal_deadline: None,
+                slashed_at: None,
+            },
+        );
 
-        state.stakes.insert(2, StakeRecord {
-            id: StakeId(2),
-            publisher_id: PublisherId("pub-beta".to_string()),
-            stake_amount: 2000,
-            risk_tier: RiskTier::High,
-            deposited_at: 1735689500,
-            state: StakeState::Slashed,
-            slashed_amount: 750,
-            appeal_deadline: Some(1735689900),
-            slashed_at: Some(1735689600),
-        });
+        state.stakes.insert(
+            2,
+            StakeRecord {
+                id: StakeId(2),
+                publisher_id: PublisherId("pub-beta".to_string()),
+                stake_amount: 2000,
+                risk_tier: RiskTier::High,
+                deposited_at: 1735689500,
+                state: StakeState::Slashed,
+                slashed_amount: 750,
+                appeal_deadline: Some(1735689900),
+                slashed_at: Some(1735689600),
+            },
+        );
 
-        state.slash_events.insert(100, SlashEvent {
-            slash_id: 100,
-            stake_id: StakeId(2),
-            publisher_id: PublisherId("pub-beta".to_string()),
-            violation_type: ViolationType::MaliciousCode,
-            evidence_digest: "sha256:evidence123".to_string(),
-            penalty_amount: 750,
-            slashed_at: 1735689600,
-            slash_record: SlashRecord {
-                violation_id: "MALICIOUS-001".to_string(),
-                description: "Malicious code injection detected".to_string(),
+        state.slash_events.insert(
+            100,
+            SlashEvent {
+                slash_id: 100,
+                stake_id: StakeId(2),
+                publisher_id: PublisherId("pub-beta".to_string()),
+                violation_type: ViolationType::MaliciousCode,
+                evidence_digest: "sha256:evidence123".to_string(),
                 penalty_amount: 750,
                 slashed_at: 1735689600,
-                evidence: SlashEvidence::new(
-                    ViolationType::MaliciousCode,
-                    "Code injection found",
-                    "eval() call with user input",
-                    "static-analyzer",
-                    1735689600,
-                ),
+                slash_record: SlashRecord {
+                    violation_id: "MALICIOUS-001".to_string(),
+                    description: "Malicious code injection detected".to_string(),
+                    penalty_amount: 750,
+                    slashed_at: 1735689600,
+                    evidence: SlashEvidence::new(
+                        ViolationType::MaliciousCode,
+                        "Code injection found",
+                        "eval() call with user input",
+                        "static-analyzer",
+                        1735689600,
+                    ),
+                },
             },
-        });
+        );
 
-        let json = serde_json::to_string_pretty(&state)
-            .expect("governance state should serialize");
+        let json = serde_json::to_string_pretty(&state).expect("governance state should serialize");
         let scrubbed = scrub_registry_receipt(&json);
 
         insta::assert_snapshot!("trust_governance_state_receipt", scrubbed);
@@ -3975,16 +3981,26 @@ mod staking_governance_boundary_negative_tests {
             .expect("slash should succeed");
 
         let appeal_record = ledger
-            .file_appeal(stake_id, slash_event.slash_id, "False positive test appeal", 1300)
+            .file_appeal(
+                stake_id,
+                slash_event.slash_id,
+                "False positive test appeal",
+                1300,
+            )
             .expect("appeal should succeed");
 
         let _restore_result = ledger
-            .restore_appeal(appeal_record.appeal_id, AppealOutcome::Upheld, "Test restoration", "test-reviewer", 1400)
+            .restore_appeal(
+                appeal_record.appeal_id,
+                AppealOutcome::Upheld,
+                "Test restoration",
+                "test-reviewer",
+                1400,
+            )
             .expect("restore should succeed");
 
         // Serialize the complete ledger state showing full lifecycle
-        let json = serde_json::to_string_pretty(&ledger)
-            .expect("ledger should serialize");
+        let json = serde_json::to_string_pretty(&ledger).expect("ledger should serialize");
         let scrubbed = scrub_registry_receipt(&json);
 
         insta::assert_snapshot!("staking_ledger_complete_lifecycle_receipt", scrubbed);
@@ -3994,8 +4010,7 @@ mod staking_governance_boundary_negative_tests {
     fn golden_staking_policy_configuration_receipt() {
         let policy = StakePolicy::default_policy();
 
-        let json = serde_json::to_string_pretty(&policy)
-            .expect("policy should serialize");
+        let json = serde_json::to_string_pretty(&policy).expect("policy should serialize");
         let scrubbed = scrub_registry_receipt(&json);
 
         insta::assert_snapshot!("staking_policy_configuration_receipt", scrubbed);
@@ -4012,7 +4027,8 @@ mod staking_governance_boundary_negative_tests {
             .expect("deposit should succeed");
 
         // Test gate decision
-        let (allowed, event_code, detail) = gate.check_stake(&ledger, "gate-test-publisher", &RiskTier::Medium, 1200);
+        let (allowed, event_code, detail) =
+            gate.check_stake(&ledger, "gate-test-publisher", &RiskTier::Medium, 1200);
 
         // Create a structured receipt for the gate decision
         let gate_decision = serde_json::json!({
@@ -4031,8 +4047,8 @@ mod staking_governance_boundary_negative_tests {
             }
         });
 
-        let json = serde_json::to_string_pretty(&gate_decision)
-            .expect("gate decision should serialize");
+        let json =
+            serde_json::to_string_pretty(&gate_decision).expect("gate decision should serialize");
         let scrubbed = scrub_registry_receipt(&json);
 
         insta::assert_snapshot!("capability_stake_gate_decision_receipt", scrubbed);

@@ -4,10 +4,10 @@
 //! text is blocked at compile time. Scoreboard updates publish signed evidence
 //! links with SHA-256 digests for tamper detection.
 
+use crate::security::constant_time;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use crate::security::constant_time;
 
 use crate::capacity_defaults::aliases::MAX_BLOCKED_SOURCES;
 
@@ -242,7 +242,11 @@ impl ClaimCompiler {
                     error_code: error_codes::ERR_CLAIM_UNVERIFIABLE.to_string(),
                 };
             };
-            push_bounded(&mut evidence_uris, uri.to_string(), MAX_EVIDENCE_URIS_PER_CLAIM);
+            push_bounded(
+                &mut evidence_uris,
+                uri.to_string(),
+                MAX_EVIDENCE_URIS_PER_CLAIM,
+            );
         }
 
         // Compile: produce executable evidence contract
@@ -622,8 +626,8 @@ fn compute_snapshot_digest(
 #[cfg(test)]
 mod negative_tests {
     use super::*;
-    use tempfile::TempDir;
     use std::collections::BTreeMap;
+    use tempfile::TempDir;
 
     #[test]
     #[should_panic(expected = "memory exhaustion")]
@@ -681,14 +685,17 @@ mod negative_tests {
                 panic!("overflow");
             }
             index = index.saturating_add(1);
-            entries.insert(format!("entry_{}", i), ScoreboardEntry {
-                claim_id: "test".to_string(),
-                evidence_link: "link".to_string(),
-                signer_id: "signer".to_string(),
-                signing_key: "key".to_string(),
-                signed_digest: "digest".to_string(),
-                published_at_epoch_ms: 1000000000,
-            });
+            entries.insert(
+                format!("entry_{}", i),
+                ScoreboardEntry {
+                    claim_id: "test".to_string(),
+                    evidence_link: "link".to_string(),
+                    signer_id: "signer".to_string(),
+                    signing_key: "key".to_string(),
+                    signed_digest: "digest".to_string(),
+                    published_at_epoch_ms: 1000000000,
+                },
+            );
         }
     }
 
@@ -718,8 +725,14 @@ mod negative_tests {
         let is_expired_fail_closed = config.now_epoch_ms >= evidence.expires_at_epoch_ms;
         let is_expired_vulnerable = config.now_epoch_ms > evidence.expires_at_epoch_ms;
 
-        assert!(is_expired_fail_closed, "Fail-closed: should be expired at exact boundary");
-        assert!(!is_expired_vulnerable, "Vulnerable version incorrectly allows boundary");
+        assert!(
+            is_expired_fail_closed,
+            "Fail-closed: should be expired at exact boundary"
+        );
+        assert!(
+            !is_expired_vulnerable,
+            "Vulnerable version incorrectly allows boundary"
+        );
     }
 
     #[test]
@@ -737,7 +750,10 @@ mod negative_tests {
         let digest2 = compute_entry_digest(entry2_id, entry2_claim, "link", "signer", "key");
 
         // Digests must be different due to length prefixing
-        assert_ne!(digest1, digest2, "Hash collision detected - length prefixing failed");
+        assert_ne!(
+            digest1, digest2,
+            "Hash collision detected - length prefixing failed"
+        );
 
         // Verify domain separator is present
         assert!(digest1.len() == 64, "SHA-256 hex digest should be 64 chars");
@@ -766,16 +782,25 @@ mod negative_tests {
         // Test identical digests
         let digest_a = "42".repeat(32);
         let digest_b = "42".repeat(32);
-        assert!(constant_time::ct_eq(&digest_a, &digest_b), "Identical digests should be equal");
+        assert!(
+            constant_time::ct_eq(&digest_a, &digest_b),
+            "Identical digests should be equal"
+        );
 
         // Test first-char difference (timing must be constant regardless of difference position)
         let digest_c = "43".repeat(32);
-        assert!(!constant_time::ct_eq(&digest_a, &digest_c), "Digests differing in first chars should not be equal");
+        assert!(
+            !constant_time::ct_eq(&digest_a, &digest_c),
+            "Digests differing in first chars should not be equal"
+        );
 
         // Test last-char difference (timing must be constant regardless of difference position)
         let mut digest_d = "42".repeat(32);
-        digest_d.replace_range((digest_d.len()-2).., "43");
-        assert!(!constant_time::ct_eq(&digest_a, &digest_d), "Digests differing in last chars should not be equal");
+        digest_d.replace_range((digest_d.len() - 2).., "43");
+        assert!(
+            !constant_time::ct_eq(&digest_a, &digest_d),
+            "Digests differing in last chars should not be equal"
+        );
     }
 }
 
@@ -1858,9 +1883,7 @@ mod claim_compiler_boundary_negative_tests {
 
     #[test]
     fn negative_compiler_rejects_empty_signer_id() {
-        let result = std::panic::catch_unwind(|| {
-            ClaimCompiler::new("", "test-secret")
-        });
+        let result = std::panic::catch_unwind(|| ClaimCompiler::new("", "test-secret"));
 
         // Should either panic or return error, not succeed silently
         match result {
@@ -1878,9 +1901,7 @@ mod claim_compiler_boundary_negative_tests {
 
     #[test]
     fn negative_compiler_rejects_empty_secret() {
-        let result = std::panic::catch_unwind(|| {
-            ClaimCompiler::new("test-signer", "")
-        });
+        let result = std::panic::catch_unwind(|| ClaimCompiler::new("test-signer", ""));
 
         // Should either panic or return error, not succeed silently
         match result {
@@ -1967,8 +1988,8 @@ mod claim_compiler_boundary_negative_tests {
         assert!(result.is_err());
         match result {
             Err(msg) => assert!(
-                msg.contains(error_codes::ERR_CLAIM_EVIDENCE_MISSING) ||
-                msg.contains(error_codes::ERR_CLAIM_SYNTAX_INVALID)
+                msg.contains(error_codes::ERR_CLAIM_EVIDENCE_MISSING)
+                    || msg.contains(error_codes::ERR_CLAIM_SYNTAX_INVALID)
             ),
             Ok(_) => panic!("expected compilation failure for malformed evidence links"),
         }
@@ -2021,7 +2042,7 @@ mod claim_compiler_boundary_negative_tests {
         };
 
         let result = compiler.publish_scoreboard_update(
-            "",  // Empty update ID
+            "", // Empty update ID
             vec![contract],
             2000,
             "trace-empty-update-id",
@@ -2088,12 +2109,12 @@ mod claim_compiler_boundary_negative_tests {
         use crate::security::constant_time;
 
         let malicious_claim_ids = [
-            "claim\u{202E}fake\u{202C}",           // BiDi override attack
-            "claim\x1b[31mred\x1b[0m",             // ANSI escape injection
-            "claim\0null\r\n\t",                   // Control character injection
+            "claim\u{202E}fake\u{202C}",          // BiDi override attack
+            "claim\x1b[31mred\x1b[0m",            // ANSI escape injection
+            "claim\0null\r\n\t",                  // Control character injection
             "claim\"}{\"admin\":true,\"bypass\"", // JSON injection attempt
-            "claim/../../etc/passwd",              // Path traversal attempt
-            "claim\u{FEFF}BOM",                    // Byte order mark
+            "claim/../../etc/passwd",             // Path traversal attempt
+            "claim\u{FEFF}BOM",                   // Byte order mark
             "claim\u{200B}\u{200C}\u{200D}",      // Zero-width characters
             "claim<script>alert('XSS')</script>", // XSS attempt
             "claim'; DROP TABLE claims; --",      // SQL injection attempt
@@ -2110,25 +2131,42 @@ mod claim_compiler_boundary_negative_tests {
 
             // Test serialization safety
             let json = serde_json::to_string(&malicious_claim).expect("serialization should work");
-            let parsed: ExternalClaim = serde_json::from_str(&json).expect("deserialization should work");
+            let parsed: ExternalClaim =
+                serde_json::from_str(&json).expect("deserialization should work");
 
             // Verify malicious content is preserved exactly for forensics but contained
-            assert_eq!(parsed.claim_id, malicious_id, "claim ID should be preserved");
+            assert_eq!(
+                parsed.claim_id, malicious_id,
+                "claim ID should be preserved"
+            );
 
             // Verify JSON structure integrity
-            let json_value: serde_json::Value = serde_json::from_str(&json).expect("JSON should be valid");
-            let expected_keys = ["claim_id", "claim_text", "evidence_uris", "source_id", "submitted_at_epoch"];
+            let json_value: serde_json::Value =
+                serde_json::from_str(&json).expect("JSON should be valid");
+            let expected_keys = [
+                "claim_id",
+                "claim_text",
+                "evidence_uris",
+                "source_id",
+                "submitted_at_epoch",
+            ];
 
             if let Some(obj) = json_value.as_object() {
                 for key in obj.keys() {
-                    assert!(expected_keys.contains(&key.as_str()),
-                           "unexpected field '{}' - possible JSON injection", key);
+                    assert!(
+                        expected_keys.contains(&key.as_str()),
+                        "unexpected field '{}' - possible JSON injection",
+                        key
+                    );
                 }
             }
 
             // Test constant-time comparison for claim IDs
             let normal_id = "normal-claim-123";
-            assert!(!constant_time::ct_eq(malicious_id, normal_id), "claim ID comparison should be constant-time");
+            assert!(
+                !constant_time::ct_eq(malicious_id, normal_id),
+                "claim ID comparison should be constant-time"
+            );
 
             // Test claim compilation with malicious ID
             let compiler = ClaimCompiler::new();
@@ -2137,14 +2175,20 @@ mod claim_compiler_boundary_negative_tests {
             // Should either succeed (with ID preserved) or fail gracefully
             match result {
                 Ok(contract) => {
-                    assert_eq!(contract.claim_id, malicious_id, "compiled contract should preserve claim ID");
+                    assert_eq!(
+                        contract.claim_id, malicious_id,
+                        "compiled contract should preserve claim ID"
+                    );
                 }
                 Err(rejection) => {
                     // Rejection is acceptable for malicious content
-                    assert!(matches!(rejection.reason, ClaimRejectionReason::SyntaxInvalid |
-                                                     ClaimRejectionReason::InvalidSource |
-                                                     ClaimRejectionReason::Unverifiable |
-                                                     ClaimRejectionReason::Blocked));
+                    assert!(matches!(
+                        rejection.reason,
+                        ClaimRejectionReason::SyntaxInvalid
+                            | ClaimRejectionReason::InvalidSource
+                            | ClaimRejectionReason::Unverifiable
+                            | ClaimRejectionReason::Blocked
+                    ));
                 }
             }
         }
@@ -2163,11 +2207,19 @@ mod claim_compiler_boundary_negative_tests {
         };
 
         // Test serialization with massive payload
-        let json = serde_json::to_string(&massive_claim).expect("serialization should handle massive text");
-        assert!(json.len() >= massive_claim_text.len(), "JSON should include massive text");
+        let json = serde_json::to_string(&massive_claim)
+            .expect("serialization should handle massive text");
+        assert!(
+            json.len() >= massive_claim_text.len(),
+            "JSON should include massive text"
+        );
 
-        let parsed: ExternalClaim = serde_json::from_str(&json).expect("deserialization should work");
-        assert_eq!(parsed.claim_text, massive_claim_text, "massive text should be preserved");
+        let parsed: ExternalClaim =
+            serde_json::from_str(&json).expect("deserialization should work");
+        assert_eq!(
+            parsed.claim_text, massive_claim_text,
+            "massive text should be preserved"
+        );
 
         // Test claim compilation with massive payload
         let compiler = ClaimCompiler::new();
@@ -2180,8 +2232,10 @@ mod claim_compiler_boundary_negative_tests {
             }
             Err(rejection) => {
                 // Rejection of massive payloads is acceptable
-                assert!(matches!(rejection.reason, ClaimRejectionReason::SyntaxInvalid |
-                                                 ClaimRejectionReason::Unverifiable));
+                assert!(matches!(
+                    rejection.reason,
+                    ClaimRejectionReason::SyntaxInvalid | ClaimRejectionReason::Unverifiable
+                ));
             }
         }
 
@@ -2205,30 +2259,40 @@ mod claim_compiler_boundary_negative_tests {
                 submitted_at_epoch: 1234567890,
             };
 
-            let json = serde_json::to_string(&injection_claim).expect("injection serialization should work");
-            let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON should be valid");
+            let json = serde_json::to_string(&injection_claim)
+                .expect("injection serialization should work");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&json).expect("JSON should be valid");
 
             // Verify no additional fields were injected
-            assert!(parsed.get("admin").is_none(), "JSON injection should not create admin field");
-            assert!(parsed.get("bypass").is_none(), "JSON injection should not create bypass field");
+            assert!(
+                parsed.get("admin").is_none(),
+                "JSON injection should not create admin field"
+            );
+            assert!(
+                parsed.get("bypass").is_none(),
+                "JSON injection should not create bypass field"
+            );
         }
     }
 
     #[test]
     fn test_negative_evidence_uris_with_malicious_url_schemes() {
         let malicious_evidence_uris = vec![
-            vec!["file:///etc/passwd"],                    // Local file access
-            vec!["javascript:alert('XSS')"],              // JavaScript scheme
+            vec!["file:///etc/passwd"],                       // Local file access
+            vec!["javascript:alert('XSS')"],                  // JavaScript scheme
             vec!["data:text/html,<script>alert(1)</script>"], // Data URL injection
-            vec!["ftp://malicious.com/backdoor"],         // Non-HTTP scheme
-            vec!["ldap://malicious.com/inject"],          // LDAP injection
-            vec!["gopher://malicious.com/attack"],        // Gopher protocol
-            vec!["https://example.com/../../etc/passwd"], // Path traversal in URL
+            vec!["ftp://malicious.com/backdoor"],             // Non-HTTP scheme
+            vec!["ldap://malicious.com/inject"],              // LDAP injection
+            vec!["gopher://malicious.com/attack"],            // Gopher protocol
+            vec!["https://example.com/../../etc/passwd"],     // Path traversal in URL
             vec!["https://example.com?injection='; DROP TABLE evidence; --"], // SQL injection in query
             vec!["https://example.com\r\nHost: evil.com"], // HTTP header injection
             vec!["https://\u{202E}evil\u{202C}example.com"], // BiDi override in domain
             vec!["https://example.com", "https://evil.com"], // Mixed legitimate and malicious
-            (0..1000).map(|i| format!("https://spam{}.com", i)).collect(), // URI spam (1000 URIs)
+            (0..1000)
+                .map(|i| format!("https://spam{}.com", i))
+                .collect(), // URI spam (1000 URIs)
         ];
 
         for malicious_uris in malicious_evidence_uris {
@@ -2242,9 +2306,13 @@ mod claim_compiler_boundary_negative_tests {
 
             // Test serialization safety
             let json = serde_json::to_string(&malicious_claim).expect("serialization should work");
-            let parsed: ExternalClaim = serde_json::from_str(&json).expect("deserialization should work");
+            let parsed: ExternalClaim =
+                serde_json::from_str(&json).expect("deserialization should work");
 
-            assert_eq!(parsed.evidence_uris, malicious_uris, "URIs should be preserved for forensics");
+            assert_eq!(
+                parsed.evidence_uris, malicious_uris,
+                "URIs should be preserved for forensics"
+            );
 
             // Test claim compilation with malicious URIs
             let compiler = ClaimCompiler::new();
@@ -2258,10 +2326,13 @@ mod claim_compiler_boundary_negative_tests {
                 }
                 Err(rejection) => {
                     // Rejection of malicious URIs is expected
-                    assert!(matches!(rejection.reason, ClaimRejectionReason::InvalidSource |
-                                                     ClaimRejectionReason::EvidenceMissing |
-                                                     ClaimRejectionReason::Unverifiable |
-                                                     ClaimRejectionReason::Blocked));
+                    assert!(matches!(
+                        rejection.reason,
+                        ClaimRejectionReason::InvalidSource
+                            | ClaimRejectionReason::EvidenceMissing
+                            | ClaimRejectionReason::Unverifiable
+                            | ClaimRejectionReason::Blocked
+                    ));
                 }
             }
 
@@ -2285,11 +2356,7 @@ mod claim_compiler_boundary_negative_tests {
         let mut compiler = ClaimCompiler::new();
 
         // Add sources to blocklist
-        let blocked_sources = vec![
-            "malicious-source",
-            "spam-source",
-            "untrusted-source",
-        ];
+        let blocked_sources = vec!["malicious-source", "spam-source", "untrusted-source"];
 
         for source in &blocked_sources {
             compiler.block_source(source);
@@ -2297,15 +2364,15 @@ mod claim_compiler_boundary_negative_tests {
 
         // Test bypass attempts via case sensitivity
         let case_bypass_attempts = vec![
-            "MALICIOUS-SOURCE",      // Uppercase
-            "Malicious-Source",      // Mixed case
-            "malicious-source",      // Exact match (should be blocked)
-            "malicious-source\0",    // Null byte suffix
+            "MALICIOUS-SOURCE",         // Uppercase
+            "Malicious-Source",         // Mixed case
+            "malicious-source",         // Exact match (should be blocked)
+            "malicious-source\0",       // Null byte suffix
             "malicious-source\u{200B}", // Zero-width space suffix
-            "malicious\u{2010}source", // Unicode hyphen instead of ASCII
-            " malicious-source",     // Leading space
-            "malicious-source ",     // Trailing space
-            "malicious\u{00AD}source", // Soft hyphen
+            "malicious\u{2010}source",  // Unicode hyphen instead of ASCII
+            " malicious-source",        // Leading space
+            "malicious-source ",        // Trailing space
+            "malicious\u{00AD}source",  // Soft hyphen
         ];
 
         for bypass_source in case_bypass_attempts {
@@ -2349,8 +2416,10 @@ mod claim_compiler_boundary_negative_tests {
         }
 
         // Verify blocked sources are bounded
-        assert!(compiler.blocked_sources.len() <= MAX_BLOCKED_SOURCES,
-               "blocked sources should be bounded to prevent memory exhaustion");
+        assert!(
+            compiler.blocked_sources.len() <= MAX_BLOCKED_SOURCES,
+            "blocked sources should be bounded to prevent memory exhaustion"
+        );
 
         // Test with extremely long source IDs
         let long_source = "x".repeat(100_000); // 100KB source ID
@@ -2365,7 +2434,10 @@ mod claim_compiler_boundary_negative_tests {
         };
 
         let result = compiler.compile_claim(&long_source_claim);
-        assert!(result.is_err(), "extremely long blocked source should be rejected");
+        assert!(
+            result.is_err(),
+            "extremely long blocked source should be rejected"
+        );
         if let Err(rejection) = result {
             assert_eq!(rejection.reason, ClaimRejectionReason::Blocked);
         }
@@ -2408,18 +2480,21 @@ mod claim_compiler_boundary_negative_tests {
         // Test hash comparison with constant-time
         let hash1 = &collision_candidates[0].content_hash;
         let hash2 = &collision_candidates[1].content_hash;
-        assert!(!constant_time::ct_eq(hash1, hash2), "different hashes should not be equal");
+        assert!(
+            !constant_time::ct_eq(hash1, hash2),
+            "different hashes should not be equal"
+        );
 
         // Test with malicious hash formats
         let malicious_hashes = vec![
-            "not-a-hash",                     // Invalid format
-            "",                               // Empty hash
-            "sha256:",                        // Missing hash value
-            "md5:abcd1234",                   // Wrong algorithm
-            "sha256:not_hex_chars",           // Invalid hex
-            "sha256:" + &"g".repeat(64),      // Invalid hex characters
-            "sha256:" + &"a".repeat(63),      // Too short
-            "sha256:" + &"a".repeat(65),      // Too long
+            "not-a-hash",                // Invalid format
+            "",                          // Empty hash
+            "sha256:",                   // Missing hash value
+            "md5:abcd1234",              // Wrong algorithm
+            "sha256:not_hex_chars",      // Invalid hex
+            "sha256:" + &"g".repeat(64), // Invalid hex characters
+            "sha256:" + &"a".repeat(63), // Too short
+            "sha256:" + &"a".repeat(65), // Too long
             "sha256:0000000000000000000000000000000000000000000000000000000000000000", // All zeros (suspicious)
             "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", // All ones (suspicious)
         ];
@@ -2442,8 +2517,15 @@ mod claim_compiler_boundary_negative_tests {
         let hash = scoreboard.compute_evidence_hash(&large_evidence_uri);
 
         // Should produce valid hash regardless of input size
-        assert!(hash.starts_with("sha256:"), "hash should have proper prefix");
-        assert_eq!(hash.len(), 71, "SHA256 hash should be 64 hex chars + 7 char prefix");
+        assert!(
+            hash.starts_with("sha256:"),
+            "hash should have proper prefix"
+        );
+        assert_eq!(
+            hash.len(),
+            71,
+            "SHA256 hash should be 64 hex chars + 7 char prefix"
+        );
     }
 
     #[test]
@@ -2491,16 +2573,27 @@ mod claim_compiler_boundary_negative_tests {
                     assert_eq!(contract.claim_id, injection_claim.claim_id);
 
                     // Contract should escape/sanitize the claim text
-                    assert!(contract.executable_script.len() > 0, "contract should have executable script");
+                    assert!(
+                        contract.executable_script.len() > 0,
+                        "contract should have executable script"
+                    );
 
                     // Verify injection patterns are neutralized in the contract
-                    assert!(!contract.executable_script.contains("DROP TABLE"), "SQL injection should be neutralized");
-                    assert!(!contract.executable_script.contains("rm -rf"), "shell injection should be neutralized");
+                    assert!(
+                        !contract.executable_script.contains("DROP TABLE"),
+                        "SQL injection should be neutralized"
+                    );
+                    assert!(
+                        !contract.executable_script.contains("rm -rf"),
+                        "shell injection should be neutralized"
+                    );
                 }
                 Err(rejection) => {
                     // Rejection of code injection attempts is expected
-                    assert!(matches!(rejection.reason, ClaimRejectionReason::SyntaxInvalid |
-                                                     ClaimRejectionReason::Unverifiable));
+                    assert!(matches!(
+                        rejection.reason,
+                        ClaimRejectionReason::SyntaxInvalid | ClaimRejectionReason::Unverifiable
+                    ));
                 }
             }
         }
@@ -2518,12 +2611,17 @@ mod claim_compiler_boundary_negative_tests {
         match result {
             Ok(contract) => {
                 // If compilation succeeds, verify the contract is reasonably sized
-                assert!(contract.executable_script.len() < 50_000_000, "contract should not cause memory explosion");
+                assert!(
+                    contract.executable_script.len() < 50_000_000,
+                    "contract should not cause memory explosion"
+                );
             }
             Err(rejection) => {
                 // Rejection of massive claims is acceptable
-                assert!(matches!(rejection.reason, ClaimRejectionReason::SyntaxInvalid |
-                                                 ClaimRejectionReason::Unverifiable));
+                assert!(matches!(
+                    rejection.reason,
+                    ClaimRejectionReason::SyntaxInvalid | ClaimRejectionReason::Unverifiable
+                ));
             }
         }
     }
@@ -2534,12 +2632,12 @@ mod claim_compiler_boundary_negative_tests {
 
         // Test with various malicious key formats
         let malicious_keys = vec![
-            "",                                      // Empty key
-            "not-a-valid-key",                      // Invalid format
+            "",                                                                                  // Empty key
+            "not-a-valid-key", // Invalid format
             "-----BEGIN PRIVATE KEY-----\nmalicious\n-----END PRIVATE KEY-----", // Wrong key type
             "-----BEGIN PUBLIC KEY-----\n\n-----END PUBLIC KEY-----", // Empty key content
             "-----BEGIN PUBLIC KEY-----\nABCDEF\n-----END PUBLIC KEY-----", // Invalid base64
-            "x".repeat(10_000),                     // Extremely long key
+            "x".repeat(10_000), // Extremely long key
             "-----BEGIN PUBLIC KEY-----\n" + &"A".repeat(10_000) + "\n-----END PUBLIC KEY-----", // Oversized key
         ];
 
@@ -2568,14 +2666,20 @@ mod claim_compiler_boundary_negative_tests {
 
         // Should handle large data without memory issues
         assert!(signature.len() > 0, "signature should be generated");
-        assert!(signature.len() < 10_000, "signature should be reasonably sized");
+        assert!(
+            signature.len() < 10_000,
+            "signature should be reasonably sized"
+        );
 
         // Test with data containing potential injection patterns
         let injection_data = b"data\0with\0nulls\r\n\x1b[31mcolored\x1b[0m";
         let injection_signature = scoreboard.sign_data(injection_data);
 
         // Should produce valid signature regardless of data content
-        assert!(injection_signature.len() > 0, "signature should handle injection data");
+        assert!(
+            injection_signature.len() > 0,
+            "signature should handle injection data"
+        );
 
         // Test signature verification with timing attack resistance
         use crate::security::constant_time;
@@ -2584,7 +2688,10 @@ mod claim_compiler_boundary_negative_tests {
         let invalid_sig = "invalid-signature";
 
         // Verify constant-time comparison is used for signatures
-        assert!(!constant_time::ct_eq(&valid_sig, invalid_sig), "signature comparison should be constant-time");
+        assert!(
+            !constant_time::ct_eq(&valid_sig, invalid_sig),
+            "signature comparison should be constant-time"
+        );
     }
 
     #[test]
@@ -2605,8 +2712,16 @@ mod claim_compiler_boundary_negative_tests {
         let mut overflow_vec = vec!["item"; large_cap * 2]; // Start with more than capacity
         push_bounded(&mut overflow_vec, "new_item".to_string(), large_cap);
 
-        assert_eq!(overflow_vec.len(), large_cap, "should be reduced to capacity");
-        assert_eq!(overflow_vec[overflow_vec.len() - 1], "new_item", "latest item should be preserved");
+        assert_eq!(
+            overflow_vec.len(),
+            large_cap,
+            "should be reduced to capacity"
+        );
+        assert_eq!(
+            overflow_vec[overflow_vec.len() - 1],
+            "new_item",
+            "latest item should be preserved"
+        );
 
         // Test with zero capacity (should clear)
         let mut zero_cap_vec = vec!["a", "b", "c"];
@@ -2616,7 +2731,11 @@ mod claim_compiler_boundary_negative_tests {
         // Test with capacity 1 (minimum)
         let mut single_cap_vec = vec!["x", "y", "z"];
         push_bounded(&mut single_cap_vec, "w".to_string(), 1);
-        assert_eq!(single_cap_vec.len(), 1, "capacity 1 should keep only latest");
+        assert_eq!(
+            single_cap_vec.len(),
+            1,
+            "capacity 1 should keep only latest"
+        );
         assert_eq!(single_cap_vec[0], "w", "should keep new item");
 
         // Test arithmetic overflow protection in drain calculation
@@ -2684,11 +2803,15 @@ mod claim_compiler_boundary_negative_tests {
         use crate::security::constant_time;
 
         let test_hashes = vec![
-            ("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            (
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
             ("", ""), // Empty hashes
-            ("sha256:0000000000000000000000000000000000000000000000000000000000000000",
-             "sha256:0000000000000000000000000000000000000000000000000000000000000001"), // Single bit diff
+            (
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+            ), // Single bit diff
             ("very_short", "also_short"), // Different lengths
         ];
 
@@ -2708,8 +2831,14 @@ mod claim_compiler_boundary_negative_tests {
 
         // Test with malicious inputs designed to exploit timing differences
         let timing_attack_pairs = vec![
-            ("prefix_match_but_different_suffix_aaaa", "prefix_match_but_different_suffix_bbbb"),
-            ("almost_identical_but_last_char_a", "almost_identical_but_last_char_b"),
+            (
+                "prefix_match_but_different_suffix_aaaa",
+                "prefix_match_but_different_suffix_bbbb",
+            ),
+            (
+                "almost_identical_but_last_char_a",
+                "almost_identical_but_last_char_b",
+            ),
             ("\0\0\0null_bytes", "\0\0\0different"),
         ];
 
@@ -2740,9 +2869,11 @@ mod claim_compiler_boundary_negative_tests {
             // Fail-closed semantics: >= rejects at boundary (line 459 pattern)
             let is_stale = evidence_age >= max_age_ms;
 
-            assert_eq!(is_stale, should_be_stale,
+            assert_eq!(
+                is_stale, should_be_stale,
                 "Evidence age check failed for timestamp {} (age: {}, max: {})",
-                evidence_timestamp, evidence_age, max_age_ms);
+                evidence_timestamp, evidence_age, max_age_ms
+            );
         }
 
         // Test overflow protection in age calculation
@@ -2768,13 +2899,7 @@ mod claim_compiler_boundary_negative_tests {
             len as u64 // Note: this could overflow on 64-bit systems where usize > u64::MAX
         }
 
-        let test_lengths = vec![
-            0usize,
-            1usize,
-            1000usize,
-            u32::MAX as usize,
-            usize::MAX,
-        ];
+        let test_lengths = vec![0usize, 1usize, 1000usize, u32::MAX as usize, usize::MAX];
 
         for len in test_lengths {
             let converted = len_u64_safe(len);
@@ -2820,7 +2945,7 @@ mod claim_compiler_boundary_negative_tests {
         ];
 
         // Test that different domain separators produce different hash outputs
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let test_data = b"identical_input_data";
         let mut results = Vec::new();
 
@@ -2835,7 +2960,9 @@ mod claim_compiler_boundary_negative_tests {
         // All results should be different
         for i in 0..results.len() {
             for j in i + 1..results.len() {
-                assert_ne!(results[i], results[j],
+                assert_ne!(
+                    results[i],
+                    results[j],
                     "Domain separators {} and {} should produce different hashes",
                     String::from_utf8_lossy(domain_separators[i]),
                     String::from_utf8_lossy(domain_separators[j])
@@ -2863,7 +2990,10 @@ mod claim_compiler_boundary_negative_tests {
             let result2 = hasher2.finalize();
 
             if input1 != input2 {
-                assert_ne!(result1, result2, "Different inputs should produce different hashes");
+                assert_ne!(
+                    result1, result2,
+                    "Different inputs should produce different hashes"
+                );
             }
         }
     }
@@ -2871,8 +3001,8 @@ mod claim_compiler_boundary_negative_tests {
     #[test]
     fn test_comprehensive_claim_compiler_edge_cases() {
         // Comprehensive validation of edge cases in claim compiler patterns
-        use crate::security::constant_time;
         use super::push_bounded;
+        use crate::security::constant_time;
 
         // Test 1: Vector growth with malicious capacity manipulation
         let mut test_vec = Vec::new();
@@ -2893,9 +3023,9 @@ mod claim_compiler_boundary_negative_tests {
 
         // Test 2: Hash validation with edge cases
         let hash_test_cases = vec![
-            ("", ""), // Empty hashes
-            ("a", "a"), // Single char identical
-            ("a", "b"), // Single char different
+            ("", ""),                               // Empty hashes
+            ("a", "a"),                             // Single char identical
+            ("a", "b"),                             // Single char different
             (&"x".repeat(1000), &"x".repeat(1000)), // Large identical
             (&"x".repeat(1000), &"y".repeat(1000)), // Large different
         ];
@@ -2908,8 +3038,8 @@ mod claim_compiler_boundary_negative_tests {
 
         // Test 3: Boundary validation for compiler limits
         let test_configs = vec![
-            (0usize, 100usize), // Zero contracts, normal limit
-            (50usize, 100usize), // Under limit
+            (0usize, 100usize),   // Zero contracts, normal limit
+            (50usize, 100usize),  // Under limit
             (100usize, 100usize), // At limit
             (101usize, 100usize), // Over limit
         ];
@@ -2927,7 +3057,7 @@ mod claim_compiler_boundary_negative_tests {
 
         // Test 4: Time boundary edge cases
         let time_boundaries = vec![
-            (1000u64, 999u64, 1u64), // Just over limit
+            (1000u64, 999u64, 1u64),  // Just over limit
             (1000u64, 1000u64, 0u64), // At limit
             (1000u64, 1001u64, 0u64), // Under limit (saturating_sub protection)
         ];

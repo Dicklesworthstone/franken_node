@@ -931,7 +931,10 @@ mod tests {
 
         let missing = check_features(&required, &available);
 
-        assert_eq!(missing, vec!["telemetry".to_string(), "telemetry".to_string()]);
+        assert_eq!(
+            missing,
+            vec!["telemetry".to_string(), "telemetry".to_string()]
+        );
     }
 
     #[test]

@@ -392,33 +392,41 @@ impl<B: CheckpointBackend> CheckpointWriter<B> {
         let records = self.backend.load_all(orchestration_id)?;
         let (latest, mut events) = verify_chain(orchestration_id, trace_id, &records);
         if let Some(meta) = latest.as_ref() {
-            push_bounded(&mut events, CheckpointEvent {
-                event_code: FN_CK_002_CHECKPOINT_RESTORE.to_string(),
-                event_name: CHECKPOINT_RESTORE.to_string(),
-                orchestration_id: orchestration_id.to_string(),
-                iteration_count: meta.iteration_count,
-                checkpoint_hash: Some(meta.checkpoint_id.clone()),
-                previous_checkpoint_hash: meta.previous_checkpoint_hash.clone(),
-                progress_state_hash: Some(meta.progress_state_hash.clone()),
-                epoch: meta.epoch,
-                trace_id: trace_id.to_string(),
-                contract_status: "valid".to_string(),
-                wall_clock_time: now_unix_ms(),
-            }, MAX_EVENTS);
+            push_bounded(
+                &mut events,
+                CheckpointEvent {
+                    event_code: FN_CK_002_CHECKPOINT_RESTORE.to_string(),
+                    event_name: CHECKPOINT_RESTORE.to_string(),
+                    orchestration_id: orchestration_id.to_string(),
+                    iteration_count: meta.iteration_count,
+                    checkpoint_hash: Some(meta.checkpoint_id.clone()),
+                    previous_checkpoint_hash: meta.previous_checkpoint_hash.clone(),
+                    progress_state_hash: Some(meta.progress_state_hash.clone()),
+                    epoch: meta.epoch,
+                    trace_id: trace_id.to_string(),
+                    contract_status: "valid".to_string(),
+                    wall_clock_time: now_unix_ms(),
+                },
+                MAX_EVENTS,
+            );
         } else {
-            push_bounded(&mut events, CheckpointEvent {
-                event_code: FN_CK_002_CHECKPOINT_RESTORE.to_string(),
-                event_name: CHECKPOINT_MISSING.to_string(),
-                orchestration_id: orchestration_id.to_string(),
-                iteration_count: 0,
-                checkpoint_hash: None,
-                previous_checkpoint_hash: None,
-                progress_state_hash: None,
-                epoch: 0,
-                trace_id: trace_id.to_string(),
-                contract_status: "missing".to_string(),
-                wall_clock_time: now_unix_ms(),
-            }, MAX_EVENTS);
+            push_bounded(
+                &mut events,
+                CheckpointEvent {
+                    event_code: FN_CK_002_CHECKPOINT_RESTORE.to_string(),
+                    event_name: CHECKPOINT_MISSING.to_string(),
+                    orchestration_id: orchestration_id.to_string(),
+                    iteration_count: 0,
+                    checkpoint_hash: None,
+                    previous_checkpoint_hash: None,
+                    progress_state_hash: None,
+                    epoch: 0,
+                    trace_id: trace_id.to_string(),
+                    contract_status: "missing".to_string(),
+                    wall_clock_time: now_unix_ms(),
+                },
+                MAX_EVENTS,
+            );
         }
 
         Ok(CheckpointReadResult { latest, events })
@@ -692,7 +700,8 @@ fn verify_chain(
         );
 
         let valid_orchestration = constant_time::ct_eq(&record.orchestration_id, orchestration_id);
-        let valid_state_hash = constant_time::ct_eq(&computed_state_hash, &record.progress_state_hash);
+        let valid_state_hash =
+            constant_time::ct_eq(&computed_state_hash, &record.progress_state_hash);
         let valid_id = constant_time::ct_eq(&computed_id, &record.checkpoint_id);
         let valid_prev = match (&record.previous_checkpoint_hash, &last_valid_id) {
             (Some(a), Some(b)) => constant_time::ct_eq(a, b),
@@ -755,19 +764,23 @@ fn verify_chain(
         }
         chain_failed = true;
 
-        push_bounded(&mut events, CheckpointEvent {
-            event_code: FN_CK_003_HASH_CHAIN_FAILURE.to_string(),
-            event_name: CHECKPOINT_HASH_CHAIN_FAILURE.to_string(),
-            orchestration_id: orchestration_id.to_string(),
-            iteration_count: record.iteration_count,
-            checkpoint_hash: Some(record.checkpoint_id.clone()),
-            previous_checkpoint_hash: record.previous_checkpoint_hash.clone(),
-            progress_state_hash: Some(record.progress_state_hash.clone()),
-            epoch: record.epoch,
-            trace_id: trace_id.to_string(),
-            contract_status: format!("invalid:{reason}"),
-            wall_clock_time: now_unix_ms(),
-        }, MAX_EVENTS);
+        push_bounded(
+            &mut events,
+            CheckpointEvent {
+                event_code: FN_CK_003_HASH_CHAIN_FAILURE.to_string(),
+                event_name: CHECKPOINT_HASH_CHAIN_FAILURE.to_string(),
+                orchestration_id: orchestration_id.to_string(),
+                iteration_count: record.iteration_count,
+                checkpoint_hash: Some(record.checkpoint_id.clone()),
+                previous_checkpoint_hash: record.previous_checkpoint_hash.clone(),
+                progress_state_hash: Some(record.progress_state_hash.clone()),
+                epoch: record.epoch,
+                trace_id: trace_id.to_string(),
+                contract_status: format!("invalid:{reason}"),
+                wall_clock_time: now_unix_ms(),
+            },
+            MAX_EVENTS,
+        );
     }
 
     (latest_valid, events)
@@ -788,7 +801,11 @@ fn derive_checkpoint_id(
 ) -> CheckpointId {
     let mut hasher = Sha256::new();
     hasher.update(b"checkpoint_content_v3:length_prefixed:");
-    update_hash_field(&mut hasher, b"orchestration_id", orchestration_id.as_bytes());
+    update_hash_field(
+        &mut hasher,
+        b"orchestration_id",
+        orchestration_id.as_bytes(),
+    );
     update_hash_field(
         &mut hasher,
         b"iteration_count",
@@ -1938,11 +1955,7 @@ mod tests {
                 .contract_status
                 .contains("progress_state_hash_mismatch")
         );
-        assert!(
-            violation
-                .contract_status
-                .contains("checkpoint_id_mismatch")
-        );
+        assert!(violation.contract_status.contains("checkpoint_id_mismatch"));
     }
 
     #[test]
@@ -2020,9 +2033,11 @@ mod tests {
             )
             .expect("second checkpoint");
         let padded = format!(" {first} ");
-        writer
-            .backend_mut()
-            .tamper_previous_checkpoint_hash("orch-append-padded-prev", 1, Some(&padded));
+        writer.backend_mut().tamper_previous_checkpoint_hash(
+            "orch-append-padded-prev",
+            1,
+            Some(&padded),
+        );
 
         let err = writer
             .save_checkpoint(
@@ -2302,7 +2317,8 @@ mod tests {
 
         let unicode_orch_id = "🚀orchestration💫中文_ñ@mé";
         let unicode_trace_id = "🔍trace♦️测试\0null-byte";
-        let state = BTreeMap::from([("unicode_key_漢字".to_string(), "émoji_value_🎯".to_string())]);
+        let state =
+            BTreeMap::from([("unicode_key_漢字".to_string(), "émoji_value_🎯".to_string())]);
 
         let checkpoint_id = writer
             .save_checkpoint(
@@ -2355,9 +2371,11 @@ mod tests {
             .expect("save valid checkpoint");
 
         // Manually corrupt the JSON in the backend
-        writer
-            .backend_mut()
-            .tamper_progress_state("orch-corrupt", 0, "{invalid-json-missing-quotes-and-braces");
+        writer.backend_mut().tamper_progress_state(
+            "orch-corrupt",
+            0,
+            "{invalid-json-missing-quotes-and-braces",
+        );
 
         let err = writer
             .restore_checkpoint::<BTreeMap<String, String>>("trace-corrupt", "orch-corrupt")
@@ -2550,15 +2568,7 @@ mod tests {
         let state = BTreeMap::from([("time_test".to_string(), "value".to_string())]);
 
         let checkpoint_id = writer
-            .save_checkpoint(
-                &cx(),
-                &mut cancel,
-                "trace-time",
-                "orch-time",
-                1,
-                1,
-                &state,
-            )
+            .save_checkpoint(&cx(), &mut cancel, "trace-time", "orch-time", 1, 1, &state)
             .expect("checkpoint with current time");
 
         let restored = writer

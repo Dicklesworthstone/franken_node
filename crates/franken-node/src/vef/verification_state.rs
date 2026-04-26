@@ -1071,22 +1071,18 @@ mod tests {
 
         // Test malicious Unicode in entity IDs
         let malicious_entity_ids = vec![
-            "entity\u{202e}evil\u{200b}",       // Right-to-Left Override + Zero Width Space
-            "entity\u{0000}injection",          // Null byte injection
-            "entity\u{feff}bom",                // Byte Order Mark
-            "entity\u{2028}line\u{2029}para",   // Line/Paragraph separators
-            "entity\u{200c}\u{200d}joiners",    // Zero-width joiners
-            "entity\x00\x01\x02\x03\x1f",       // Control characters
+            "entity\u{202e}evil\u{200b}", // Right-to-Left Override + Zero Width Space
+            "entity\u{0000}injection",    // Null byte injection
+            "entity\u{feff}bom",          // Byte Order Mark
+            "entity\u{2028}line\u{2029}para", // Line/Paragraph separators
+            "entity\u{200c}\u{200d}joiners", // Zero-width joiners
+            "entity\x00\x01\x02\x03\x1f", // Control characters
         ];
 
         for (i, malicious_entity_id) in malicious_entity_ids.iter().enumerate() {
             // Initialize state for malicious entity ID
-            let init_result = mgr.initialize_entity(
-                malicious_entity_id,
-                RiskLevel::Low,
-                None,
-                100 + i as u64,
-            );
+            let init_result =
+                mgr.initialize_entity(malicious_entity_id, RiskLevel::Low, None, 100 + i as u64);
 
             match init_result {
                 Ok(()) => {
@@ -1110,7 +1106,7 @@ mod tests {
 
                     let transition_result = mgr.request_transition(&transition_request);
                     // Should handle Unicode gracefully
-                },
+                }
                 Err(_) => {
                     // Unicode rejection in entity IDs is also acceptable for security
                 }
@@ -1119,7 +1115,8 @@ mod tests {
 
         // Test Unicode in action names
         let clean_entity = "clean-entity";
-        mgr.initialize_entity(clean_entity, RiskLevel::Low, None, 1000).unwrap();
+        mgr.initialize_entity(clean_entity, RiskLevel::Low, None, 1000)
+            .unwrap();
 
         let malicious_actions = vec![
             "deploy\u{202e}reverse\u{200b}",
@@ -1142,10 +1139,10 @@ mod tests {
             match action_result {
                 Ok(ActionResult::Authorized) => {
                     // Unicode action accepted
-                },
+                }
                 Ok(ActionResult::Denied { .. }) => {
                     // Action denied for other reasons
-                },
+                }
                 Err(_) => {
                     // Unicode action rejection acceptable
                 }
@@ -1160,7 +1157,8 @@ mod tests {
 
         // Initialize entity at low risk
         let entity_id = "escalation-test";
-        mgr.initialize_entity(entity_id, RiskLevel::Low, None, 1000).unwrap();
+        mgr.initialize_entity(entity_id, RiskLevel::Low, None, 1000)
+            .unwrap();
 
         // Test direct escalation to critical without intermediate steps
         let critical_escalation = TransitionRequest {
@@ -1176,13 +1174,13 @@ mod tests {
         match critical_result {
             Ok(TransitionResult::Approved) => {
                 panic!("Direct escalation to Critical should be blocked without proof");
-            },
+            }
             Ok(TransitionResult::Blocked { reason }) => {
                 assert!(reason.contains("ERR_VEF_STATE") || reason.contains("proof"));
-            },
+            }
             Err(VefStateError::NoProof { .. }) => {
                 // Expected error for missing proof
-            },
+            }
             Err(other) => {
                 panic!("Unexpected error for escalation attempt: {:?}", other);
             }
@@ -1196,7 +1194,8 @@ mod tests {
             max_age_seconds: 100, // Will be stale at epoch 1200
         };
 
-        mgr.initialize_entity("stale-entity", RiskLevel::Low, Some(stale_proof), 1000).unwrap();
+        mgr.initialize_entity("stale-entity", RiskLevel::Low, Some(stale_proof), 1000)
+            .unwrap();
 
         let stale_escalation = TransitionRequest {
             entity_id: "stale-entity".to_string(),
@@ -1211,13 +1210,13 @@ mod tests {
         match stale_result {
             Ok(TransitionResult::Approved) => {
                 panic!("Escalation with stale proof should be blocked");
-            },
+            }
             Ok(TransitionResult::Blocked { reason }) => {
                 assert!(reason.contains("stale") || reason.contains("ERR_VEF_STATE_STALE_PROOF"));
-            },
+            }
             Err(VefStateError::StaleProof { .. }) => {
                 // Expected error for stale proof
-            },
+            }
             Err(other) => {
                 panic!("Unexpected error for stale proof: {:?}", other);
             }
@@ -1231,14 +1230,11 @@ mod tests {
             max_age_seconds: 1000,
         };
 
-        mgr.initialize_entity("rapid-entity", RiskLevel::Low, Some(fresh_proof), 1300).unwrap();
+        mgr.initialize_entity("rapid-entity", RiskLevel::Low, Some(fresh_proof), 1300)
+            .unwrap();
 
         // Try rapid escalation through all risk levels
-        let escalation_sequence = vec![
-            RiskLevel::Medium,
-            RiskLevel::High,
-            RiskLevel::Critical,
-        ];
+        let escalation_sequence = vec![RiskLevel::Medium, RiskLevel::High, RiskLevel::Critical];
 
         for (i, target_risk) in escalation_sequence.iter().enumerate() {
             let rapid_transition = TransitionRequest {
@@ -1254,11 +1250,11 @@ mod tests {
             match rapid_result {
                 Ok(TransitionResult::Approved) => {
                     // Transition approved
-                },
+                }
                 Ok(TransitionResult::Blocked { .. }) => {
                     // Transition blocked for security reasons
                     break;
-                },
+                }
                 Err(_) => {
                     // Error occurred, escalation blocked
                     break;
@@ -1320,16 +1316,16 @@ mod tests {
                     match transition_result {
                         Ok(_) => {
                             // Extreme proof handled
-                        },
+                        }
                         Err(VefStateError::StaleProof { age, .. }) => {
                             // Age calculation should not overflow
                             assert!(age <= u64::MAX);
-                        },
+                        }
                         Err(_) => {
                             // Other rejections acceptable
                         }
                     }
-                },
+                }
                 Err(_) => {
                     // Extreme proof rejection acceptable
                 }
@@ -1363,16 +1359,25 @@ mod tests {
             let original_entity = format!("original-{}", i);
             let manipulated_entity = format!("manipulated-{}", i);
 
-            mgr.initialize_entity(&original_entity, RiskLevel::Low, Some(original_proof), 2500).unwrap();
-            mgr.initialize_entity(&manipulated_entity, RiskLevel::Low, Some(manipulated_proof), 2500).unwrap();
+            mgr.initialize_entity(&original_entity, RiskLevel::Low, Some(original_proof), 2500)
+                .unwrap();
+            mgr.initialize_entity(
+                &manipulated_entity,
+                RiskLevel::Low,
+                Some(manipulated_proof),
+                2500,
+            )
+            .unwrap();
 
             // Both should be treated as separate entities with separate proofs
             let original_state = mgr.state(&original_entity).unwrap();
             let manipulated_state = mgr.state(&manipulated_entity).unwrap();
 
-            assert_ne!(original_state.proof.as_ref().unwrap().proof_id,
-                      manipulated_state.proof.as_ref().unwrap().proof_id,
-                      "Proof IDs should be distinct despite similarity");
+            assert_ne!(
+                original_state.proof.as_ref().unwrap().proof_id,
+                manipulated_state.proof.as_ref().unwrap().proof_id,
+                "Proof IDs should be distinct despite similarity"
+            );
         }
 
         // Test proof verification flag manipulation
@@ -1383,7 +1388,13 @@ mod tests {
             max_age_seconds: 1000,
         };
 
-        mgr.initialize_entity("unverified-entity", RiskLevel::Low, Some(unverified_proof), 3000).unwrap();
+        mgr.initialize_entity(
+            "unverified-entity",
+            RiskLevel::Low,
+            Some(unverified_proof),
+            3000,
+        )
+        .unwrap();
 
         let unverified_transition = TransitionRequest {
             entity_id: "unverified-entity".to_string(),
@@ -1398,10 +1409,10 @@ mod tests {
         match unverified_result {
             Ok(TransitionResult::Approved) => {
                 panic!("Transition with unverified proof should be blocked");
-            },
+            }
             Ok(TransitionResult::Blocked { reason }) => {
                 assert!(reason.contains("verified") || reason.contains("proof"));
-            },
+            }
             Err(_) => {
                 // Error rejection acceptable
             }
@@ -1428,9 +1439,12 @@ mod tests {
             max_age_seconds: 500,
         };
 
-        mgr.initialize_entity("fresh-entity", RiskLevel::Low, Some(fresh_proof), 4000).unwrap();
-        mgr.initialize_entity("stale-entity", RiskLevel::Low, Some(stale_proof), 4000).unwrap();
-        mgr.initialize_entity("no-proof-entity", RiskLevel::Low, None, 4000).unwrap();
+        mgr.initialize_entity("fresh-entity", RiskLevel::Low, Some(fresh_proof), 4000)
+            .unwrap();
+        mgr.initialize_entity("stale-entity", RiskLevel::Low, Some(stale_proof), 4000)
+            .unwrap();
+        mgr.initialize_entity("no-proof-entity", RiskLevel::Low, None, 4000)
+            .unwrap();
 
         // Test timing consistency across different proof states
         let mut fresh_timings = Vec::new();
@@ -1476,15 +1490,31 @@ mod tests {
         }
 
         // Timing differences should be minimal across different proof states
-        let avg_fresh: f64 = fresh_timings.iter().map(|d| d.as_nanos() as f64).sum::<f64>() / fresh_timings.len() as f64;
-        let avg_stale: f64 = stale_timings.iter().map(|d| d.as_nanos() as f64).sum::<f64>() / stale_timings.len() as f64;
-        let avg_no_proof: f64 = no_proof_timings.iter().map(|d| d.as_nanos() as f64).sum::<f64>() / no_proof_timings.len() as f64;
+        let avg_fresh: f64 = fresh_timings
+            .iter()
+            .map(|d| d.as_nanos() as f64)
+            .sum::<f64>()
+            / fresh_timings.len() as f64;
+        let avg_stale: f64 = stale_timings
+            .iter()
+            .map(|d| d.as_nanos() as f64)
+            .sum::<f64>()
+            / stale_timings.len() as f64;
+        let avg_no_proof: f64 = no_proof_timings
+            .iter()
+            .map(|d| d.as_nanos() as f64)
+            .sum::<f64>()
+            / no_proof_timings.len() as f64;
 
         let max_avg = avg_fresh.max(avg_stale).max(avg_no_proof);
         let min_avg = avg_fresh.min(avg_stale).min(avg_no_proof);
         let timing_ratio = max_avg / min_avg.max(1.0);
 
-        assert!(timing_ratio < 5.0, "Proof verification timing variance too high: {}", timing_ratio);
+        assert!(
+            timing_ratio < 5.0,
+            "Proof verification timing variance too high: {}",
+            timing_ratio
+        );
 
         // Test timing attacks on entity existence checks
         let mut existing_timings = Vec::new();
@@ -1517,11 +1547,24 @@ mod tests {
         }
 
         // Entity existence timing should not leak information
-        let avg_existing: f64 = existing_timings.iter().map(|d| d.as_nanos() as f64).sum::<f64>() / existing_timings.len() as f64;
-        let avg_nonexistent: f64 = nonexistent_timings.iter().map(|d| d.as_nanos() as f64).sum::<f64>() / nonexistent_timings.len() as f64;
+        let avg_existing: f64 = existing_timings
+            .iter()
+            .map(|d| d.as_nanos() as f64)
+            .sum::<f64>()
+            / existing_timings.len() as f64;
+        let avg_nonexistent: f64 = nonexistent_timings
+            .iter()
+            .map(|d| d.as_nanos() as f64)
+            .sum::<f64>()
+            / nonexistent_timings.len() as f64;
 
-        let existence_ratio = avg_existing.max(avg_nonexistent) / avg_existing.min(avg_nonexistent).max(1.0);
-        assert!(existence_ratio < 3.0, "Entity existence timing variance too high: {}", existence_ratio);
+        let existence_ratio =
+            avg_existing.max(avg_nonexistent) / avg_existing.min(avg_nonexistent).max(1.0);
+        assert!(
+            existence_ratio < 3.0,
+            "Entity existence timing variance too high: {}",
+            existence_ratio
+        );
     }
 
     /// Negative test: Concurrent state manipulation race conditions
@@ -1543,7 +1586,9 @@ mod tests {
                     verified_at_epoch: 5000,
                     max_age_seconds: 10000,
                 };
-                mgr_guard.initialize_entity(&entity_id, RiskLevel::Low, Some(proof), 5000).unwrap();
+                mgr_guard
+                    .initialize_entity(&entity_id, RiskLevel::Low, Some(proof), 5000)
+                    .unwrap();
             }
         }
 
@@ -1610,7 +1655,11 @@ mod tests {
         for i in 0..5 {
             let entity_id = format!("concurrent-entity-{}", i);
             let state = final_mgr.state(&entity_id);
-            assert!(state.is_some(), "Entity {} should still exist after concurrent operations", entity_id);
+            assert!(
+                state.is_some(),
+                "Entity {} should still exist after concurrent operations",
+                entity_id
+            );
 
             if let Some(state) = state {
                 assert_eq!(state.entity_id, entity_id);
@@ -1631,9 +1680,9 @@ mod tests {
 
         // Test near-maximum epoch timestamps
         let overflow_epochs = vec![
-            u64::MAX - 1000,  // Near maximum
-            u64::MAX,         // Maximum
-            0,                // Minimum
+            u64::MAX - 1000, // Near maximum
+            u64::MAX,        // Maximum
+            0,               // Minimum
         ];
 
         for (i, epoch) in overflow_epochs.iter().enumerate() {
@@ -1645,7 +1694,8 @@ mod tests {
                 max_age_seconds: 1000,
             };
 
-            let init_result = mgr.initialize_entity(&entity_id, RiskLevel::Low, Some(proof), *epoch);
+            let init_result =
+                mgr.initialize_entity(&entity_id, RiskLevel::Low, Some(proof), *epoch);
 
             match init_result {
                 Ok(()) => {
@@ -1663,16 +1713,16 @@ mod tests {
                     match transition_result {
                         Ok(_) => {
                             // Transition handled
-                        },
+                        }
                         Err(VefStateError::StaleProof { age, .. }) => {
                             // Age calculation should not overflow
                             assert!(age <= u64::MAX);
-                        },
+                        }
                         Err(_) => {
                             // Other rejections acceptable
                         }
                     }
-                },
+                }
                 Err(_) => {
                     // Extreme epoch rejection acceptable
                 }
@@ -1681,7 +1731,8 @@ mod tests {
 
         // Test transition counter overflow
         let counter_entity = "counter-overflow-test";
-        mgr.initialize_entity(counter_entity, RiskLevel::Low, None, 6000).unwrap();
+        mgr.initialize_entity(counter_entity, RiskLevel::Low, None, 6000)
+            .unwrap();
 
         // Force high transition count
         for stress_iteration in 0..1000 {
@@ -1712,14 +1763,16 @@ mod tests {
             max_age_seconds: 1000,
         };
 
-        mgr.initialize_entity("age-test", RiskLevel::Low, Some(age_test_proof), u64::MAX - 100).unwrap();
+        mgr.initialize_entity(
+            "age-test",
+            RiskLevel::Low,
+            Some(age_test_proof),
+            u64::MAX - 100,
+        )
+        .unwrap();
 
         // Test age calculation at various epochs
-        let test_epochs = vec![
-            u64::MAX - 99,
-            u64::MAX - 50,
-            u64::MAX,
-        ];
+        let test_epochs = vec![u64::MAX - 99, u64::MAX - 50, u64::MAX];
 
         for test_epoch in test_epochs {
             let age_transition = TransitionRequest {
@@ -1733,11 +1786,11 @@ mod tests {
 
             // Should handle age arithmetic without overflow panics
             match age_result {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(VefStateError::StaleProof { age, .. }) => {
                     // Age should be computed without overflow
                     assert!(age <= u64::MAX);
-                },
+                }
                 Err(_) => {}
             }
         }
@@ -1750,7 +1803,8 @@ mod tests {
 
         // Test transition bypass through risk level manipulation
         let bypass_entity = "bypass-test";
-        mgr.initialize_entity(bypass_entity, RiskLevel::Low, None, 7000).unwrap();
+        mgr.initialize_entity(bypass_entity, RiskLevel::Low, None, 7000)
+            .unwrap();
 
         // Try to authorize high-risk action without proper risk level
         let high_risk_action = ActionRequest {
@@ -1766,13 +1820,13 @@ mod tests {
         match bypass_result {
             Ok(ActionResult::Authorized) => {
                 panic!("High-risk action should be denied without proper risk escalation");
-            },
+            }
             Ok(ActionResult::Denied { reason }) => {
                 assert!(reason.contains("risk") || reason.contains("ERR_VEF_STATE_RISK_EXCEEDED"));
-            },
+            }
             Err(VefStateError::RiskExceeded { .. }) => {
                 // Expected error for risk mismatch
-            },
+            }
             Err(_) => {
                 // Other rejection reasons acceptable
             }
@@ -1780,8 +1834,8 @@ mod tests {
 
         // Test invalid transition patterns
         let invalid_transitions = vec![
-            (RiskLevel::Critical, RiskLevel::Low),    // Direct downgrade
-            (RiskLevel::High, RiskLevel::Medium),     // Step downgrade
+            (RiskLevel::Critical, RiskLevel::Low), // Direct downgrade
+            (RiskLevel::High, RiskLevel::Medium),  // Step downgrade
         ];
 
         for (i, (from_risk, to_risk)) in invalid_transitions.iter().enumerate() {
@@ -1795,7 +1849,8 @@ mod tests {
                 max_age_seconds: 1000,
             };
 
-            mgr.initialize_entity(&transition_entity, *from_risk, Some(high_risk_proof), 7500).unwrap();
+            mgr.initialize_entity(&transition_entity, *from_risk, Some(high_risk_proof), 7500)
+                .unwrap();
 
             // Try invalid transition
             let invalid_transition = TransitionRequest {
@@ -1811,13 +1866,13 @@ mod tests {
             match invalid_result {
                 Ok(TransitionResult::Approved) => {
                     // Some downgrade transitions might be allowed
-                },
+                }
                 Ok(TransitionResult::Blocked { reason }) => {
                     assert!(!reason.is_empty());
-                },
+                }
                 Err(VefStateError::InvalidTransition { .. }) => {
                     // Expected error for invalid transition
-                },
+                }
                 Err(_) => {
                     // Other rejection reasons acceptable
                 }
@@ -1832,7 +1887,13 @@ mod tests {
             max_age_seconds: 100, // Short age for testing
         };
 
-        mgr.initialize_entity("stale-bypass", RiskLevel::Low, Some(stale_bypass_proof), 8000).unwrap();
+        mgr.initialize_entity(
+            "stale-bypass",
+            RiskLevel::Low,
+            Some(stale_bypass_proof),
+            8000,
+        )
+        .unwrap();
 
         // Wait for proof to become stale, then try transition
         let stale_transition = TransitionRequest {
@@ -1848,13 +1909,13 @@ mod tests {
         match stale_bypass_result {
             Ok(TransitionResult::Approved) => {
                 panic!("Transition with stale proof should be blocked");
-            },
+            }
             Ok(TransitionResult::Blocked { reason }) => {
                 assert!(reason.contains("stale") || reason.contains("fresh"));
-            },
+            }
             Err(VefStateError::StaleProof { .. }) => {
                 // Expected error for stale proof
-            },
+            }
             Err(_) => {
                 // Other rejection reasons acceptable
             }

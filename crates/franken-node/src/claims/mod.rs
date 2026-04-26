@@ -475,32 +475,36 @@ mod tests {
 
         fn test_claim_roundtrip_invariance(claim: &ExternalClaim) {
             // Step 1: Serialize (encode) the original claim
-            let encoded_original = serde_json::to_string(&claim)
-                .expect("original claim should serialize");
+            let encoded_original =
+                serde_json::to_string(&claim).expect("original claim should serialize");
 
             // Step 2: Deserialize (decode) back to struct
-            let decoded_claim: ExternalClaim = serde_json::from_str(&encoded_original)
-                .expect("encoded claim should deserialize");
+            let decoded_claim: ExternalClaim =
+                serde_json::from_str(&encoded_original).expect("encoded claim should deserialize");
 
             // Step 3: Re-serialize (re-encode) the decoded struct
-            let re_encoded = serde_json::to_string(&decoded_claim)
-                .expect("decoded claim should re-serialize");
+            let re_encoded =
+                serde_json::to_string(&decoded_claim).expect("decoded claim should re-serialize");
 
             // MR assertion: encode/decode/re-encode invariance
-            assert_eq!(encoded_original, re_encoded,
+            assert_eq!(
+                encoded_original, re_encoded,
                 "Claim envelope serialization not invariant under roundtrip:\n\
                  Original:   {encoded_original}\n\
                  Re-encoded: {re_encoded}\n\
-                 This indicates serialization instability or data loss");
+                 This indicates serialization instability or data loss"
+            );
 
             // Verify structural equivalence too (catches non-canonical serialization)
-            assert_eq!(*claim, decoded_claim,
-                "Claim structure changed during roundtrip - data corruption detected");
+            assert_eq!(
+                *claim, decoded_claim,
+                "Claim structure changed during roundtrip - data corruption detected"
+            );
         }
 
         fn test_contract_roundtrip_invariance(contract: &CompiledContract) {
-            let encoded_original = serde_json::to_string(&contract)
-                .expect("original contract should serialize");
+            let encoded_original =
+                serde_json::to_string(&contract).expect("original contract should serialize");
 
             let decoded_contract: CompiledContract = serde_json::from_str(&encoded_original)
                 .expect("encoded contract should deserialize");
@@ -508,11 +512,15 @@ mod tests {
             let re_encoded = serde_json::to_string(&decoded_contract)
                 .expect("decoded contract should re-serialize");
 
-            assert_eq!(encoded_original, re_encoded,
-                "Contract envelope serialization not invariant under roundtrip");
+            assert_eq!(
+                encoded_original, re_encoded,
+                "Contract envelope serialization not invariant under roundtrip"
+            );
 
-            assert_eq!(*contract, decoded_contract,
-                "Contract structure changed during roundtrip");
+            assert_eq!(
+                *contract, decoded_contract,
+                "Contract structure changed during roundtrip"
+            );
         }
 
         #[test]
@@ -552,9 +560,7 @@ mod tests {
         #[test]
         fn mr_contract_envelope_roundtrip_invariance() {
             let claim = make_test_claim("mr-contract-roundtrip", "mr-source");
-            let compiler = ClaimCompiler::new(CompilerConfig::new(
-                "mr-signer", "mr-key", 10_000
-            ));
+            let compiler = ClaimCompiler::new(CompilerConfig::new("mr-signer", "mr-key", 10_000));
 
             if let CompilationResult::Compiled { contract, .. } = compiler.compile(&claim) {
                 test_contract_roundtrip_invariance(&contract);
@@ -573,27 +579,29 @@ mod tests {
         #[test]
         fn mr_compilation_result_roundtrip_invariance() {
             let claim = make_test_claim("mr-result-roundtrip", "mr-source");
-            let compiler = ClaimCompiler::new(CompilerConfig::new(
-                "mr-signer", "mr-key", 10_000
-            ));
+            let compiler = ClaimCompiler::new(CompilerConfig::new("mr-signer", "mr-key", 10_000));
 
             let result = compiler.compile(&claim);
 
             // Test CompilationResult roundtrip
-            let encoded_result = serde_json::to_string(&result)
-                .expect("compilation result should serialize");
+            let encoded_result =
+                serde_json::to_string(&result).expect("compilation result should serialize");
 
-            let decoded_result: CompilationResult = serde_json::from_str(&encoded_result)
-                .expect("encoded result should deserialize");
+            let decoded_result: CompilationResult =
+                serde_json::from_str(&encoded_result).expect("encoded result should deserialize");
 
-            let re_encoded_result = serde_json::to_string(&decoded_result)
-                .expect("decoded result should re-serialize");
+            let re_encoded_result =
+                serde_json::to_string(&decoded_result).expect("decoded result should re-serialize");
 
-            assert_eq!(encoded_result, re_encoded_result,
-                "CompilationResult serialization not invariant under roundtrip");
+            assert_eq!(
+                encoded_result, re_encoded_result,
+                "CompilationResult serialization not invariant under roundtrip"
+            );
 
-            assert_eq!(result, decoded_result,
-                "CompilationResult structure changed during roundtrip");
+            assert_eq!(
+                result, decoded_result,
+                "CompilationResult structure changed during roundtrip"
+            );
         }
 
         // === GOLDEN ARTIFACT TESTING ===
@@ -607,15 +615,15 @@ mod tests {
             let mut scrubbed = json.to_string();
 
             // UUIDs → [UUID]
-            let uuid_re = Regex::new(
-                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-            ).unwrap();
+            let uuid_re =
+                Regex::new(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+                    .unwrap();
             scrubbed = uuid_re.replace_all(&scrubbed, "[UUID]").to_string();
 
             // ISO timestamps → [TIMESTAMP]
-            let ts_re = Regex::new(
-                r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?"
-            ).unwrap();
+            let ts_re =
+                Regex::new(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?")
+                    .unwrap();
             scrubbed = ts_re.replace_all(&scrubbed, "[TIMESTAMP]").to_string();
 
             // Epoch timestamps → [EPOCH]
@@ -641,7 +649,8 @@ mod tests {
                 subject_version: "1.2.3".to_string(),
                 issuer_identity: "security-auditor-corp".to_string(),
                 claim_content: ClaimContent {
-                    summary: "Comprehensive security audit passed with minor recommendations".to_string(),
+                    summary: "Comprehensive security audit passed with minor recommendations"
+                        .to_string(),
                     detailed_findings: vec![
                         "No critical vulnerabilities found".to_string(),
                         "Input validation patterns are robust".to_string(),
@@ -681,8 +690,7 @@ mod tests {
         #[test]
         fn golden_external_claim_envelope_serialization() {
             let claim = canonical_external_claim();
-            let serialized = serde_json::to_string_pretty(&claim)
-                .expect("claim should serialize");
+            let serialized = serde_json::to_string_pretty(&claim).expect("claim should serialize");
             let scrubbed = scrub_claim_envelope(&serialized);
 
             insta::assert_snapshot!("external_claim_envelope", scrubbed);
@@ -694,7 +702,8 @@ mod tests {
             let config = CompilerConfig::new("test-signer", "test-key-id", 60);
             let compiler = ClaimCompiler::new(config);
 
-            let result = compiler.compile(&claim, "test-trace")
+            let result = compiler
+                .compile(&claim, "test-trace")
                 .expect("compilation should succeed");
 
             let contract_json = serde_json::to_string_pretty(&result.compiled_contract)
@@ -710,11 +719,12 @@ mod tests {
             let config = CompilerConfig::new("test-signer", "test-key-id", 60);
             let compiler = ClaimCompiler::new(config);
 
-            let result = compiler.compile(&claim, "test-trace")
+            let result = compiler
+                .compile(&claim, "test-trace")
                 .expect("compilation should succeed");
 
-            let result_json = serde_json::to_string_pretty(&result)
-                .expect("result should serialize");
+            let result_json =
+                serde_json::to_string_pretty(&result).expect("result should serialize");
             let scrubbed = scrub_claim_envelope(&result_json);
 
             insta::assert_snapshot!("compilation_result_envelope", scrubbed);
@@ -741,8 +751,8 @@ mod tests {
                     not_before: "2026-01-01T00:00:00Z".to_string(),
                 },
                 evidence_bundle: EvidenceBundle {
-                    evidence_refs: vec![], // Empty evidence
-                    attestation_signatures: vec![], // No signatures
+                    evidence_refs: vec![],                         // Empty evidence
+                    attestation_signatures: vec![],                // No signatures
                     provenance_chain: vec!["unknown".to_string()], // Minimal provenance
                 },
             };
@@ -832,17 +842,18 @@ mod tests {
             // Test that roundtrip serialization produces canonical results
             let claim = canonical_external_claim();
 
-            let serialized_1 = serde_json::to_string(&claim)
-                .expect("first serialization");
+            let serialized_1 = serde_json::to_string(&claim).expect("first serialization");
 
-            let deserialized: ExternalClaim = serde_json::from_str(&serialized_1)
-                .expect("deserialization should work");
+            let deserialized: ExternalClaim =
+                serde_json::from_str(&serialized_1).expect("deserialization should work");
 
-            let serialized_2 = serde_json::to_string(&deserialized)
-                .expect("second serialization");
+            let serialized_2 = serde_json::to_string(&deserialized).expect("second serialization");
 
             // Both serializations should be identical (canonical)
-            assert_eq!(serialized_1, serialized_2, "roundtrip serialization should be canonical");
+            assert_eq!(
+                serialized_1, serialized_2,
+                "roundtrip serialization should be canonical"
+            );
 
             let scrubbed = scrub_claim_envelope(&serialized_1);
             insta::assert_snapshot!("claim_envelope_roundtrip_canonical", scrubbed);

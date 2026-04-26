@@ -39,9 +39,9 @@
 
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 #[cfg(test)]
-use std::collections::{BTreeSet, BTreeMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::capacity_defaults::aliases::MAX_AUDIT_TRAIL_ENTRIES;
 
@@ -218,11 +218,25 @@ impl GovernorGate {
                 knob: RuntimeKnob::ConcurrencyLimit,
                 old_value: 64,
                 new_value: 128,
-                predicted_metrics: PredictedMetrics { latency_p99_ms: 100, throughput_rps: 1000, cpu_util_pct: 50, memory_mb: 512 },
+                predicted_metrics: PredictedMetrics {
+                    latency_p99_ms: 100,
+                    throughput_rps: 1000,
+                    cpu_util_pct: 50,
+                    memory_mb: 512,
+                },
             };
             let decision = gate.submit(empty_id_proposal);
-            assert!(matches!(decision, GovernorDecision::Approved | GovernorDecision::Rejected(_)), "empty proposal ID should still be processed");
-            assert!(!gate.audit_trail().is_empty(), "audit trail should record event even with empty proposal ID");
+            assert!(
+                matches!(
+                    decision,
+                    GovernorDecision::Approved | GovernorDecision::Rejected(_)
+                ),
+                "empty proposal ID should still be processed"
+            );
+            assert!(
+                !gate.audit_trail().is_empty(),
+                "audit trail should record event even with empty proposal ID"
+            );
 
             // Test: submit with extremely long proposal ID
             let mut gate = Self::with_defaults();
@@ -232,10 +246,20 @@ impl GovernorGate {
                 knob: RuntimeKnob::BatchSize,
                 old_value: 32,
                 new_value: 64,
-                predicted_metrics: PredictedMetrics { latency_p99_ms: 100, throughput_rps: 1000, cpu_util_pct: 50, memory_mb: 512 },
+                predicted_metrics: PredictedMetrics {
+                    latency_p99_ms: 100,
+                    throughput_rps: 1000,
+                    cpu_util_pct: 50,
+                    memory_mb: 512,
+                },
             };
             let _decision = gate.submit(long_id_proposal);
-            assert!(gate.audit_trail().iter().any(|entry| entry.proposal_id == long_id), "long proposal ID should be preserved in audit trail");
+            assert!(
+                gate.audit_trail()
+                    .iter()
+                    .any(|entry| entry.proposal_id == long_id),
+                "long proposal ID should be preserved in audit trail"
+            );
 
             // Test: submit with same old_value and new_value (no-op change)
             let mut gate = Self::with_defaults();
@@ -244,11 +268,22 @@ impl GovernorGate {
                 knob: RuntimeKnob::ConcurrencyLimit,
                 old_value: 64,
                 new_value: 64,
-                predicted_metrics: PredictedMetrics { latency_p99_ms: 100, throughput_rps: 1000, cpu_util_pct: 50, memory_mb: 512 },
+                predicted_metrics: PredictedMetrics {
+                    latency_p99_ms: 100,
+                    throughput_rps: 1000,
+                    cpu_util_pct: 50,
+                    memory_mb: 512,
+                },
             };
             let decision = gate.submit(no_change_proposal);
             // Should be processed (inner governor decides whether it's beneficial)
-            assert!(matches!(decision, GovernorDecision::Approved | GovernorDecision::Rejected(_)), "no-op change should be processed");
+            assert!(
+                matches!(
+                    decision,
+                    GovernorDecision::Approved | GovernorDecision::Rejected(_)
+                ),
+                "no-op change should be processed"
+            );
 
             // Test: submit with extreme metric values (boundary testing)
             let mut gate = Self::with_defaults();
@@ -261,11 +296,16 @@ impl GovernorGate {
                     latency_p99_ms: u64::MAX,
                     throughput_rps: 0,
                     cpu_util_pct: u64::MAX,
-                    memory_mb: u64::MAX
+                    memory_mb: u64::MAX,
                 },
             };
             let _decision = gate.submit(extreme_metrics_proposal);
-            assert!(gate.audit_trail().iter().any(|entry| entry.proposal_id == "extreme-metrics"), "extreme metrics proposal should be audited");
+            assert!(
+                gate.audit_trail()
+                    .iter()
+                    .any(|entry| entry.proposal_id == "extreme-metrics"),
+                "extreme metrics proposal should be audited"
+            );
 
             // Test: submit multiple proposals rapidly (stress audit trail)
             let mut gate = Self::with_defaults();
@@ -275,12 +315,20 @@ impl GovernorGate {
                     knob: RuntimeKnob::RetryBudget,
                     old_value: i as u64,
                     new_value: (i as u64).saturating_add(1),
-                    predicted_metrics: PredictedMetrics { latency_p99_ms: 100, throughput_rps: 1000, cpu_util_pct: 50, memory_mb: 512 },
+                    predicted_metrics: PredictedMetrics {
+                        latency_p99_ms: 100,
+                        throughput_rps: 1000,
+                        cpu_util_pct: 50,
+                        memory_mb: 512,
+                    },
                 };
                 let _decision = gate.submit(rapid_proposal);
             }
             // Audit trail should be bounded to MAX_AUDIT_TRAIL_ENTRIES
-            assert!(gate.audit_trail().len() <= MAX_AUDIT_TRAIL_ENTRIES, "audit trail should be bounded after rapid submissions");
+            assert!(
+                gate.audit_trail().len() <= MAX_AUDIT_TRAIL_ENTRIES,
+                "audit trail should be bounded after rapid submissions"
+            );
 
             // Test: submit with proposal containing special characters in ID
             let mut gate = Self::with_defaults();
@@ -290,10 +338,20 @@ impl GovernorGate {
                 knob: RuntimeKnob::CacheCapacity,
                 old_value: 1024,
                 new_value: 2048,
-                predicted_metrics: PredictedMetrics { latency_p99_ms: 100, throughput_rps: 1000, cpu_util_pct: 50, memory_mb: 512 },
+                predicted_metrics: PredictedMetrics {
+                    latency_p99_ms: 100,
+                    throughput_rps: 1000,
+                    cpu_util_pct: 50,
+                    memory_mb: 512,
+                },
             };
             let _decision = gate.submit(special_id_proposal);
-            assert!(gate.audit_trail().iter().any(|entry| entry.proposal_id == special_chars), "special characters in proposal ID should be preserved");
+            assert!(
+                gate.audit_trail()
+                    .iter()
+                    .any(|entry| entry.proposal_id == special_chars),
+                "special characters in proposal ID should be preserved"
+            );
 
             // Test: submit with zero old_value and new_value
             let mut gate = Self::with_defaults();
@@ -302,10 +360,18 @@ impl GovernorGate {
                 knob: RuntimeKnob::RetryBudget,
                 old_value: 0,
                 new_value: 0,
-                predicted_metrics: PredictedMetrics { latency_p99_ms: 0, throughput_rps: 0, cpu_util_pct: 0, memory_mb: 0 },
+                predicted_metrics: PredictedMetrics {
+                    latency_p99_ms: 0,
+                    throughput_rps: 0,
+                    cpu_util_pct: 0,
+                    memory_mb: 0,
+                },
             };
             let _decision = gate.submit(zero_values_proposal);
-            assert!(!gate.audit_trail().is_empty(), "zero values proposal should still generate audit events");
+            assert!(
+                !gate.audit_trail().is_empty(),
+                "zero values proposal should still generate audit events"
+            );
 
             // Test: submit with very large knob value changes
             let mut gate = Self::with_defaults();
@@ -314,10 +380,21 @@ impl GovernorGate {
                 knob: RuntimeKnob::ConcurrencyLimit,
                 old_value: 1,
                 new_value: u64::MAX,
-                predicted_metrics: PredictedMetrics { latency_p99_ms: 100, throughput_rps: 1000, cpu_util_pct: 50, memory_mb: 512 },
+                predicted_metrics: PredictedMetrics {
+                    latency_p99_ms: 100,
+                    throughput_rps: 1000,
+                    cpu_util_pct: 50,
+                    memory_mb: 512,
+                },
             };
             let decision = gate.submit(large_change_proposal);
-            assert!(matches!(decision, GovernorDecision::Approved | GovernorDecision::Rejected(_)), "large value changes should be processed");
+            assert!(
+                matches!(
+                    decision,
+                    GovernorDecision::Approved | GovernorDecision::Rejected(_)
+                ),
+                "large value changes should be processed"
+            );
 
             // Test: audit trail event ordering consistency
             let mut gate = Self::with_defaults();
@@ -326,17 +403,33 @@ impl GovernorGate {
                 knob: RuntimeKnob::BatchSize,
                 old_value: 64,
                 new_value: 128,
-                predicted_metrics: PredictedMetrics { latency_p99_ms: 100, throughput_rps: 1000, cpu_util_pct: 50, memory_mb: 512 },
+                predicted_metrics: PredictedMetrics {
+                    latency_p99_ms: 100,
+                    throughput_rps: 1000,
+                    cpu_util_pct: 50,
+                    memory_mb: 512,
+                },
             };
             let initial_count = gate.audit_trail().len();
             let _decision = gate.submit(ordering_proposal);
             let new_entries = &gate.audit_trail()[initial_count..];
 
             // Should have at least GOVERNOR_CANDIDATE_PROPOSED and GOVERNOR_SHADOW_EVAL_START
-            assert!(new_entries.len() >= 2, "should have at least candidate and shadow eval events");
+            assert!(
+                new_entries.len() >= 2,
+                "should have at least candidate and shadow eval events"
+            );
             if new_entries.len() >= 2 {
-                assert_eq!(new_entries[0].event_code, event_codes::GOVERNOR_CANDIDATE_PROPOSED, "first event should be candidate proposed");
-                assert_eq!(new_entries[1].event_code, event_codes::GOVERNOR_SHADOW_EVAL_START, "second event should be shadow eval start");
+                assert_eq!(
+                    new_entries[0].event_code,
+                    event_codes::GOVERNOR_CANDIDATE_PROPOSED,
+                    "first event should be candidate proposed"
+                );
+                assert_eq!(
+                    new_entries[1].event_code,
+                    event_codes::GOVERNOR_SHADOW_EVAL_START,
+                    "second event should be shadow eval start"
+                );
             }
 
             // Test: submit preserves all proposal fields in audit detail
@@ -346,12 +439,27 @@ impl GovernorGate {
                 knob: RuntimeKnob::DrainTimeoutMs,
                 old_value: 12345,
                 new_value: 54321,
-                predicted_metrics: PredictedMetrics { latency_p99_ms: 100, throughput_rps: 1000, cpu_util_pct: 50, memory_mb: 512 },
+                predicted_metrics: PredictedMetrics {
+                    latency_p99_ms: 100,
+                    throughput_rps: 1000,
+                    cpu_util_pct: 50,
+                    memory_mb: 512,
+                },
             };
             let _decision = gate.submit(detail_proposal);
-            let candidate_event = gate.audit_trail().iter().find(|entry| entry.event_code == event_codes::GOVERNOR_CANDIDATE_PROPOSED).unwrap();
-            assert!(candidate_event.detail.contains("12345"), "audit detail should contain old value");
-            assert!(candidate_event.detail.contains("54321"), "audit detail should contain new value");
+            let candidate_event = gate
+                .audit_trail()
+                .iter()
+                .find(|entry| entry.event_code == event_codes::GOVERNOR_CANDIDATE_PROPOSED)
+                .unwrap();
+            assert!(
+                candidate_event.detail.contains("12345"),
+                "audit detail should contain old value"
+            );
+            assert!(
+                candidate_event.detail.contains("54321"),
+                "audit detail should contain new value"
+            );
         }
     }
 
@@ -417,10 +525,15 @@ impl GovernorGate {
 
             // For each reverted policy, should have one audit event
             let new_audit_count = gate.audit_trail().len();
-            let revert_events = gate.audit_trail()[initial_audit_count..].iter()
+            let revert_events = gate.audit_trail()[initial_audit_count..]
+                .iter()
                 .filter(|entry| entry.event_code == event_codes::GOVERNOR_POLICY_REVERTED)
                 .count();
-            assert_eq!(revert_events, reverted.len(), "should have one audit event per reverted policy");
+            assert_eq!(
+                revert_events,
+                reverted.len(),
+                "should have one audit event per reverted policy"
+            );
 
             // Test: live_check with repeated calls should be consistent
             let mut gate = Self::with_defaults();
@@ -433,7 +546,10 @@ impl GovernorGate {
             let reverted1 = gate.live_check(&stable_metrics);
             let reverted2 = gate.live_check(&stable_metrics);
             // If no new policies were applied between calls, results should be the same
-            assert_eq!(reverted1, reverted2, "repeated live_check calls with same metrics should be consistent");
+            assert_eq!(
+                reverted1, reverted2,
+                "repeated live_check calls with same metrics should be consistent"
+            );
 
             // Test: live_check doesn't affect audit trail ordering
             let mut gate = Self::with_defaults();
@@ -450,7 +566,11 @@ impl GovernorGate {
             if final_count > initial_count {
                 let new_entries = &gate.audit_trail()[initial_count..];
                 for entry in new_entries {
-                    assert_eq!(entry.event_code, event_codes::GOVERNOR_POLICY_REVERTED, "all new entries should be revert events");
+                    assert_eq!(
+                        entry.event_code,
+                        event_codes::GOVERNOR_POLICY_REVERTED,
+                        "all new entries should be revert events"
+                    );
                 }
             }
 
@@ -468,9 +588,15 @@ impl GovernorGate {
             if !reverted.is_empty() {
                 let revert_entries = &gate.audit_trail()[initial_count..];
                 for (i, entry) in revert_entries.iter().enumerate() {
-                    assert!(!entry.proposal_id.is_empty() || reverted.is_empty(), "revert audit entries should have proposal IDs");
+                    assert!(
+                        !entry.proposal_id.is_empty() || reverted.is_empty(),
+                        "revert audit entries should have proposal IDs"
+                    );
                     if i < reverted.len() {
-                        assert_eq!(entry.proposal_id, reverted[i], "audit entry proposal ID should match reverted policy ID");
+                        assert_eq!(
+                            entry.proposal_id, reverted[i],
+                            "audit entry proposal ID should match reverted policy ID"
+                        );
                     }
                 }
             }
@@ -478,9 +604,24 @@ impl GovernorGate {
             // Test: live_check with boundary metric values
             let mut gate = Self::with_defaults();
             let boundary_test_cases = [
-                PredictedMetrics { latency_p99_ms: 1, throughput_rps: u64::MAX, cpu_util_pct: 0, memory_mb: 1 },
-                PredictedMetrics { latency_p99_ms: u64::MAX - 1, throughput_rps: 1, cpu_util_pct: 100, memory_mb: u64::MAX - 1 },
-                PredictedMetrics { latency_p99_ms: u32::MAX as u64, throughput_rps: u32::MAX as u64, cpu_util_pct: 50, memory_mb: u32::MAX as u64 },
+                PredictedMetrics {
+                    latency_p99_ms: 1,
+                    throughput_rps: u64::MAX,
+                    cpu_util_pct: 0,
+                    memory_mb: 1,
+                },
+                PredictedMetrics {
+                    latency_p99_ms: u64::MAX - 1,
+                    throughput_rps: 1,
+                    cpu_util_pct: 100,
+                    memory_mb: u64::MAX - 1,
+                },
+                PredictedMetrics {
+                    latency_p99_ms: u32::MAX as u64,
+                    throughput_rps: u32::MAX as u64,
+                    cpu_util_pct: 50,
+                    memory_mb: u32::MAX as u64,
+                },
             ];
 
             for (i, metrics) in boundary_test_cases.iter().enumerate() {
@@ -499,13 +640,20 @@ impl GovernorGate {
             let initial_count = gate.audit_trail().len();
             let _reverted = gate.live_check(&trigger_metrics);
 
-            let revert_entries: Vec<_> = gate.audit_trail()[initial_count..].iter()
+            let revert_entries: Vec<_> = gate.audit_trail()[initial_count..]
+                .iter()
                 .filter(|entry| entry.event_code == event_codes::GOVERNOR_POLICY_REVERTED)
                 .collect();
 
             for entry in revert_entries {
-                assert!(entry.detail.contains("auto-reverted"), "revert audit detail should indicate auto-revert");
-                assert!(entry.detail.contains("safety envelope"), "revert audit detail should mention safety envelope");
+                assert!(
+                    entry.detail.contains("auto-reverted"),
+                    "revert audit detail should indicate auto-revert"
+                );
+                assert!(
+                    entry.detail.contains("safety envelope"),
+                    "revert audit detail should mention safety envelope"
+                );
             }
 
             // Test: live_check handles audit trail overflow gracefully
@@ -532,7 +680,10 @@ impl GovernorGate {
             let _reverted = gate.live_check(&overflow_metrics);
 
             // Should maintain audit trail capacity bounds
-            assert!(gate.audit_trail().len() <= MAX_AUDIT_TRAIL_ENTRIES, "live_check should respect audit trail capacity limits");
+            assert!(
+                gate.audit_trail().len() <= MAX_AUDIT_TRAIL_ENTRIES,
+                "live_check should respect audit trail capacity limits"
+            );
 
             // Test: live_check return value consistency with audit events
             let mut gate = Self::with_defaults();
@@ -545,10 +696,15 @@ impl GovernorGate {
             let initial_count = gate.audit_trail().len();
             let reverted = gate.live_check(&check_metrics);
 
-            let new_revert_events = gate.audit_trail()[initial_count..].iter()
+            let new_revert_events = gate.audit_trail()[initial_count..]
+                .iter()
                 .filter(|entry| entry.event_code == event_codes::GOVERNOR_POLICY_REVERTED)
                 .count();
-            assert_eq!(reverted.len(), new_revert_events, "number of returned reverted policies should match number of audit events");
+            assert_eq!(
+                reverted.len(),
+                new_revert_events,
+                "number of returned reverted policies should match number of audit events"
+            );
         }
     }
 
@@ -580,84 +736,155 @@ impl GovernorGate {
             let mut gate = Self::with_defaults();
             let result = gate.reject_engine_internal_adjustment("");
             assert!(result.is_err(), "empty internal name should be rejected");
-            assert!(result.unwrap_err().contains(""), "error should contain the empty internal name");
-            assert!(!gate.audit_trail().is_empty(), "audit trail should record rejection");
+            assert!(
+                result.unwrap_err().contains(""),
+                "error should contain the empty internal name"
+            );
+            assert!(
+                !gate.audit_trail().is_empty(),
+                "audit trail should record rejection"
+            );
 
             // Test: reject with extremely long internal name
             let mut gate = Self::with_defaults();
             let long_name = "very_long_engine_internal_name_".repeat(100);
             let result = gate.reject_engine_internal_adjustment(&long_name);
             assert!(result.is_err(), "long internal name should be rejected");
-            assert!(result.unwrap_err().contains(&long_name), "error should contain the long internal name");
+            assert!(
+                result.unwrap_err().contains(&long_name),
+                "error should contain the long internal name"
+            );
 
             // Test: reject with special characters in internal name
             let mut gate = Self::with_defaults();
             let special_chars = "internal\n\t\r\0\u{FEFF}🦀\"\\{}[]";
             let result = gate.reject_engine_internal_adjustment(special_chars);
-            assert!(result.is_err(), "special characters in internal name should be rejected");
-            let audit_entry = gate.audit_trail().iter()
-                .find(|entry| entry.event_code == error_codes::ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION)
+            assert!(
+                result.is_err(),
+                "special characters in internal name should be rejected"
+            );
+            let audit_entry = gate
+                .audit_trail()
+                .iter()
+                .find(|entry| {
+                    entry.event_code == error_codes::ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION
+                })
                 .expect("should have boundary violation audit entry");
-            assert!(audit_entry.detail.contains(special_chars), "audit detail should contain special characters");
+            assert!(
+                audit_entry.detail.contains(special_chars),
+                "audit detail should contain special characters"
+            );
 
             // Test: reject with common engine-internal-like names
             let mut gate = Self::with_defaults();
             let internal_names = [
-                "heap_allocator", "gc_trigger", "thread_pool_core", "vm_bytecode",
-                "scheduler_quantum", "memory_manager", "instruction_cache", "register_allocator"
+                "heap_allocator",
+                "gc_trigger",
+                "thread_pool_core",
+                "vm_bytecode",
+                "scheduler_quantum",
+                "memory_manager",
+                "instruction_cache",
+                "register_allocator",
             ];
 
             for &name in &internal_names {
                 let result = gate.reject_engine_internal_adjustment(name);
-                assert!(result.is_err(), "engine internal name '{}' should be rejected", name);
-                assert!(result.unwrap_err().contains(name), "error should contain internal name '{}'", name);
+                assert!(
+                    result.is_err(),
+                    "engine internal name '{}' should be rejected",
+                    name
+                );
+                assert!(
+                    result.unwrap_err().contains(name),
+                    "error should contain internal name '{}'",
+                    name
+                );
             }
 
             // Verify all rejections were audited
-            let boundary_violations = gate.audit_trail().iter()
-                .filter(|entry| entry.event_code == error_codes::ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION)
+            let boundary_violations = gate
+                .audit_trail()
+                .iter()
+                .filter(|entry| {
+                    entry.event_code == error_codes::ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION
+                })
                 .count();
-            assert_eq!(boundary_violations, internal_names.len(), "all boundary violations should be audited");
+            assert_eq!(
+                boundary_violations,
+                internal_names.len(),
+                "all boundary violations should be audited"
+            );
 
             // Test: reject always uses empty proposal_id
             let mut gate = Self::with_defaults();
             let _result = gate.reject_engine_internal_adjustment("test_internal");
-            let audit_entry = gate.audit_trail().iter()
-                .find(|entry| entry.event_code == error_codes::ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION)
+            let audit_entry = gate
+                .audit_trail()
+                .iter()
+                .find(|entry| {
+                    entry.event_code == error_codes::ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION
+                })
                 .expect("should have boundary violation audit entry");
-            assert_eq!(audit_entry.proposal_id, "", "boundary violation audit should use empty proposal ID");
+            assert_eq!(
+                audit_entry.proposal_id, "",
+                "boundary violation audit should use empty proposal ID"
+            );
 
             // Test: reject error message format consistency
             let mut gate = Self::with_defaults();
             let test_internal = "consistency_test_internal";
             let result = gate.reject_engine_internal_adjustment(test_internal);
             let error_msg = result.unwrap_err();
-            assert!(error_msg.starts_with(error_codes::ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION), "error should start with error code");
-            assert!(error_msg.contains("cannot adjust"), "error should contain rejection reason");
-            assert!(error_msg.contains(test_internal), "error should contain internal name");
+            assert!(
+                error_msg.starts_with(error_codes::ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION),
+                "error should start with error code"
+            );
+            assert!(
+                error_msg.contains("cannot adjust"),
+                "error should contain rejection reason"
+            );
+            assert!(
+                error_msg.contains(test_internal),
+                "error should contain internal name"
+            );
 
             // Test: reject with unicode internal names
             let mut gate = Self::with_defaults();
-            let unicode_names = [
-                "内部引擎", "двигатель", "محرك", "エンジン", "🔧⚙️"
-            ];
+            let unicode_names = ["内部引擎", "двигатель", "محرك", "エンジン", "🔧⚙️"];
 
             for &name in &unicode_names {
                 let result = gate.reject_engine_internal_adjustment(name);
-                assert!(result.is_err(), "unicode internal name '{}' should be rejected", name);
+                assert!(
+                    result.is_err(),
+                    "unicode internal name '{}' should be rejected",
+                    name
+                );
                 let error_msg = result.unwrap_err();
-                assert!(error_msg.contains(name), "error should contain unicode name '{}'", name);
+                assert!(
+                    error_msg.contains(name),
+                    "error should contain unicode name '{}'",
+                    name
+                );
             }
 
             // Test: reject with names that look like RuntimeKnob variants
             let mut gate = Self::with_defaults();
             let knob_like_names = [
-                "ConcurrencyLimit", "BatchSize", "CacheCapacity", "DrainTimeoutMs", "RetryBudget"
+                "ConcurrencyLimit",
+                "BatchSize",
+                "CacheCapacity",
+                "DrainTimeoutMs",
+                "RetryBudget",
             ];
 
             for &name in &knob_like_names {
                 let result = gate.reject_engine_internal_adjustment(name);
-                assert!(result.is_err(), "knob-like name '{}' should be rejected as engine internal", name);
+                assert!(
+                    result.is_err(),
+                    "knob-like name '{}' should be rejected as engine internal",
+                    name
+                );
             }
 
             // Test: reject multiple times with same name (idempotency)
@@ -669,19 +896,32 @@ impl GovernorGate {
                 assert!(result.is_err(), "rejection {} should fail", i + 1);
             }
 
-            let violations = gate.audit_trail().iter()
-                .filter(|entry| entry.event_code == error_codes::ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION &&
-                               entry.detail.contains(repeated_name))
+            let violations = gate
+                .audit_trail()
+                .iter()
+                .filter(|entry| {
+                    entry.event_code == error_codes::ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION
+                        && entry.detail.contains(repeated_name)
+                })
                 .count();
-            assert_eq!(violations, 3, "should have 3 separate audit entries for repeated rejections");
+            assert_eq!(
+                violations, 3,
+                "should have 3 separate audit entries for repeated rejections"
+            );
 
             // Test: reject with null bytes in internal name
             let mut gate = Self::with_defaults();
             let null_name = "internal\0with\0nulls";
             let result = gate.reject_engine_internal_adjustment(null_name);
-            assert!(result.is_err(), "internal name with null bytes should be rejected");
+            assert!(
+                result.is_err(),
+                "internal name with null bytes should be rejected"
+            );
             let error_msg = result.unwrap_err();
-            assert!(error_msg.contains("internal"), "error should contain part of name before null");
+            assert!(
+                error_msg.contains("internal"),
+                "error should contain part of name before null"
+            );
 
             // Test: reject audit trail respects capacity bounds
             let mut gate = Self::with_defaults();
@@ -699,17 +939,32 @@ impl GovernorGate {
             }
 
             let _result = gate.reject_engine_internal_adjustment("overflow_test");
-            assert!(gate.audit_trail().len() <= MAX_AUDIT_TRAIL_ENTRIES, "reject should respect audit trail capacity");
+            assert!(
+                gate.audit_trail().len() <= MAX_AUDIT_TRAIL_ENTRIES,
+                "reject should respect audit trail capacity"
+            );
 
             // Test: reject audit detail format consistency
             let mut gate = Self::with_defaults();
             let format_test_name = "format_test_internal";
             let _result = gate.reject_engine_internal_adjustment(format_test_name);
-            let audit_entry = gate.audit_trail().iter()
-                .find(|entry| entry.event_code == error_codes::ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION)
+            let audit_entry = gate
+                .audit_trail()
+                .iter()
+                .find(|entry| {
+                    entry.event_code == error_codes::ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION
+                })
                 .expect("should have boundary violation audit entry");
-            assert!(audit_entry.detail.starts_with("rejected engine-core internal:"), "audit detail should have consistent format");
-            assert!(audit_entry.detail.contains(format_test_name), "audit detail should contain internal name");
+            assert!(
+                audit_entry
+                    .detail
+                    .starts_with("rejected engine-core internal:"),
+                "audit detail should have consistent format"
+            );
+            assert!(
+                audit_entry.detail.contains(format_test_name),
+                "audit detail should contain internal name"
+            );
         }
     }
 }
@@ -763,23 +1018,29 @@ impl KnobEnumeration {
                 knobs: vec![],
                 schema_version: "test".to_string(),
             };
-            assert_eq!(empty_enum.count(), 0, "empty enumeration should have count 0");
+            assert_eq!(
+                empty_enum.count(),
+                0,
+                "empty enumeration should have count 0"
+            );
 
             // Test: single knob enumeration has count 1
             let single_enum = KnobEnumeration {
-                knobs: vec![
-                    KnobDescriptor {
-                        knob: RuntimeKnob::ConcurrencyLimit,
-                        label: "single".to_string(),
-                        current_value: 64,
-                        locked: false,
-                        min_value: 1,
-                        max_value: 4096,
-                    }
-                ],
+                knobs: vec![KnobDescriptor {
+                    knob: RuntimeKnob::ConcurrencyLimit,
+                    label: "single".to_string(),
+                    current_value: 64,
+                    locked: false,
+                    min_value: 1,
+                    max_value: 4096,
+                }],
                 schema_version: "test".to_string(),
             };
-            assert_eq!(single_enum.count(), 1, "single knob enumeration should have count 1");
+            assert_eq!(
+                single_enum.count(),
+                1,
+                "single knob enumeration should have count 1"
+            );
 
             // Test: count matches actual vector length
             let multi_enum = KnobEnumeration {
@@ -811,8 +1072,16 @@ impl KnobEnumeration {
                 ],
                 schema_version: "test".to_string(),
             };
-            assert_eq!(multi_enum.count(), 3, "multi knob enumeration should have count 3");
-            assert_eq!(multi_enum.count(), multi_enum.knobs.len(), "count should match knobs vector length");
+            assert_eq!(
+                multi_enum.count(),
+                3,
+                "multi knob enumeration should have count 3"
+            );
+            assert_eq!(
+                multi_enum.count(),
+                multi_enum.knobs.len(),
+                "count should match knobs vector length"
+            );
 
             // Test: count doesn't change based on knob state (locked vs unlocked)
             let mixed_lock_enum = KnobEnumeration {
@@ -836,7 +1105,11 @@ impl KnobEnumeration {
                 ],
                 schema_version: "test".to_string(),
             };
-            assert_eq!(mixed_lock_enum.count(), 2, "count should include both locked and unlocked knobs");
+            assert_eq!(
+                mixed_lock_enum.count(),
+                2,
+                "count should include both locked and unlocked knobs"
+            );
 
             // Test: count is consistent with other methods
             let consistent_enum = KnobEnumeration {
@@ -860,8 +1133,11 @@ impl KnobEnumeration {
                 ],
                 schema_version: "test".to_string(),
             };
-            assert_eq!(consistent_enum.count(), consistent_enum.unlocked().len() + consistent_enum.locked().len(),
-                      "count should equal sum of locked + unlocked");
+            assert_eq!(
+                consistent_enum.count(),
+                consistent_enum.unlocked().len() + consistent_enum.locked().len(),
+                "count should equal sum of locked + unlocked"
+            );
         }
     }
 
@@ -878,7 +1154,11 @@ impl KnobEnumeration {
                 knobs: vec![],
                 schema_version: "test".to_string(),
             };
-            assert_eq!(empty_enum.get(&RuntimeKnob::ConcurrencyLimit), None, "empty enumeration should return None");
+            assert_eq!(
+                empty_enum.get(&RuntimeKnob::ConcurrencyLimit),
+                None,
+                "empty enumeration should return None"
+            );
 
             // Test: lookup with duplicate knobs returns first match
             let duplicate_desc = KnobDescriptor {
@@ -904,7 +1184,10 @@ impl KnobEnumeration {
                 schema_version: "test".to_string(),
             };
             let found = dup_enum.get(&RuntimeKnob::BatchSize).unwrap();
-            assert_eq!(found.label, "first", "should return first match for duplicates");
+            assert_eq!(
+                found.label, "first",
+                "should return first match for duplicates"
+            );
 
             // Test: lookup with all knobs present should find each one
             let full_enum = KnobEnumeration {
@@ -928,27 +1211,40 @@ impl KnobEnumeration {
                 ],
                 schema_version: "test".to_string(),
             };
-            assert!(full_enum.get(&RuntimeKnob::ConcurrencyLimit).is_some(), "should find ConcurrencyLimit");
-            assert!(full_enum.get(&RuntimeKnob::BatchSize).is_some(), "should find BatchSize");
-            assert!(full_enum.get(&RuntimeKnob::CacheCapacity).is_none(), "should not find CacheCapacity");
+            assert!(
+                full_enum.get(&RuntimeKnob::ConcurrencyLimit).is_some(),
+                "should find ConcurrencyLimit"
+            );
+            assert!(
+                full_enum.get(&RuntimeKnob::BatchSize).is_some(),
+                "should find BatchSize"
+            );
+            assert!(
+                full_enum.get(&RuntimeKnob::CacheCapacity).is_none(),
+                "should not find CacheCapacity"
+            );
 
             // Test: lookup preserves reference correctness
             let ref_test_enum = KnobEnumeration {
-                knobs: vec![
-                    KnobDescriptor {
-                        knob: RuntimeKnob::RetryBudget,
-                        label: "retry".to_string(),
-                        current_value: 3,
-                        locked: true,
-                        min_value: 0,
-                        max_value: 20,
-                    },
-                ],
+                knobs: vec![KnobDescriptor {
+                    knob: RuntimeKnob::RetryBudget,
+                    label: "retry".to_string(),
+                    current_value: 3,
+                    locked: true,
+                    min_value: 0,
+                    max_value: 20,
+                }],
                 schema_version: "test".to_string(),
             };
             let found_ref = ref_test_enum.get(&RuntimeKnob::RetryBudget).unwrap();
-            assert_eq!(found_ref.current_value, 3, "returned reference should point to correct descriptor");
-            assert_eq!(found_ref.locked, true, "returned reference should preserve locked state");
+            assert_eq!(
+                found_ref.current_value, 3,
+                "returned reference should point to correct descriptor"
+            );
+            assert_eq!(
+                found_ref.locked, true,
+                "returned reference should preserve locked state"
+            );
         }
     }
 
@@ -965,7 +1261,10 @@ impl KnobEnumeration {
                 knobs: vec![],
                 schema_version: "test".to_string(),
             };
-            assert!(empty_enum.unlocked().is_empty(), "empty enumeration should have no unlocked knobs");
+            assert!(
+                empty_enum.unlocked().is_empty(),
+                "empty enumeration should have no unlocked knobs"
+            );
 
             // Test: all locked knobs returns empty unlocked list
             let all_locked_enum = KnobEnumeration {
@@ -989,7 +1288,10 @@ impl KnobEnumeration {
                 ],
                 schema_version: "test".to_string(),
             };
-            assert!(all_locked_enum.unlocked().is_empty(), "all locked knobs should return empty unlocked list");
+            assert!(
+                all_locked_enum.unlocked().is_empty(),
+                "all locked knobs should return empty unlocked list"
+            );
 
             // Test: mixed locked/unlocked returns correct unlocked subset
             let mixed_enum = KnobEnumeration {
@@ -1023,13 +1325,25 @@ impl KnobEnumeration {
             };
             let unlocked = mixed_enum.unlocked();
             assert_eq!(unlocked.len(), 2, "should return 2 unlocked knobs");
-            assert!(unlocked.iter().any(|d| d.label == "unlocked1"), "should include first unlocked knob");
-            assert!(unlocked.iter().any(|d| d.label == "unlocked2"), "should include second unlocked knob");
-            assert!(!unlocked.iter().any(|d| d.label == "locked1"), "should not include locked knob");
+            assert!(
+                unlocked.iter().any(|d| d.label == "unlocked1"),
+                "should include first unlocked knob"
+            );
+            assert!(
+                unlocked.iter().any(|d| d.label == "unlocked2"),
+                "should include second unlocked knob"
+            );
+            assert!(
+                !unlocked.iter().any(|d| d.label == "locked1"),
+                "should not include locked knob"
+            );
 
             // Test: unlocked + locked = total count
-            assert_eq!(mixed_enum.unlocked().len() + mixed_enum.locked().len(), mixed_enum.count(),
-                      "unlocked + locked should equal total count");
+            assert_eq!(
+                mixed_enum.unlocked().len() + mixed_enum.locked().len(),
+                mixed_enum.count(),
+                "unlocked + locked should equal total count"
+            );
 
             // Test: all unlocked knobs returns all knobs
             let all_unlocked_enum = KnobEnumeration {
@@ -1053,8 +1367,11 @@ impl KnobEnumeration {
                 ],
                 schema_version: "test".to_string(),
             };
-            assert_eq!(all_unlocked_enum.unlocked().len(), all_unlocked_enum.count(),
-                      "all unlocked should return all knobs");
+            assert_eq!(
+                all_unlocked_enum.unlocked().len(),
+                all_unlocked_enum.count(),
+                "all unlocked should return all knobs"
+            );
         }
     }
 
@@ -1071,7 +1388,10 @@ impl KnobEnumeration {
                 knobs: vec![],
                 schema_version: "test".to_string(),
             };
-            assert!(empty_enum.locked().is_empty(), "empty enumeration should have no locked knobs");
+            assert!(
+                empty_enum.locked().is_empty(),
+                "empty enumeration should have no locked knobs"
+            );
 
             // Test: all unlocked knobs returns empty locked list
             let all_unlocked_enum = KnobEnumeration {
@@ -1095,7 +1415,10 @@ impl KnobEnumeration {
                 ],
                 schema_version: "test".to_string(),
             };
-            assert!(all_unlocked_enum.locked().is_empty(), "all unlocked knobs should return empty locked list");
+            assert!(
+                all_unlocked_enum.locked().is_empty(),
+                "all unlocked knobs should return empty locked list"
+            );
 
             // Test: mixed locked/unlocked returns correct locked subset
             let mixed_enum = KnobEnumeration {
@@ -1129,9 +1452,18 @@ impl KnobEnumeration {
             };
             let locked = mixed_enum.locked();
             assert_eq!(locked.len(), 2, "should return 2 locked knobs");
-            assert!(locked.iter().any(|d| d.label == "locked1"), "should include first locked knob");
-            assert!(locked.iter().any(|d| d.label == "locked2"), "should include second locked knob");
-            assert!(!locked.iter().any(|d| d.label == "unlocked1"), "should not include unlocked knob");
+            assert!(
+                locked.iter().any(|d| d.label == "locked1"),
+                "should include first locked knob"
+            );
+            assert!(
+                locked.iter().any(|d| d.label == "locked2"),
+                "should include second locked knob"
+            );
+            assert!(
+                !locked.iter().any(|d| d.label == "unlocked1"),
+                "should not include unlocked knob"
+            );
 
             // Test: all locked knobs returns all knobs
             let all_locked_enum = KnobEnumeration {
@@ -1155,26 +1487,30 @@ impl KnobEnumeration {
                 ],
                 schema_version: "test".to_string(),
             };
-            assert_eq!(all_locked_enum.locked().len(), all_locked_enum.count(),
-                      "all locked should return all knobs");
+            assert_eq!(
+                all_locked_enum.locked().len(),
+                all_locked_enum.count(),
+                "all locked should return all knobs"
+            );
 
             // Test: locked filter preserves reference correctness
             let ref_test_enum = KnobEnumeration {
-                knobs: vec![
-                    KnobDescriptor {
-                        knob: RuntimeKnob::RetryBudget,
-                        label: "ref_test".to_string(),
-                        current_value: 999,
-                        locked: true,
-                        min_value: 0,
-                        max_value: 20,
-                    },
-                ],
+                knobs: vec![KnobDescriptor {
+                    knob: RuntimeKnob::RetryBudget,
+                    label: "ref_test".to_string(),
+                    current_value: 999,
+                    locked: true,
+                    min_value: 0,
+                    max_value: 20,
+                }],
                 schema_version: "test".to_string(),
             };
             let locked_refs = ref_test_enum.locked();
             assert_eq!(locked_refs.len(), 1, "should find one locked knob");
-            assert_eq!(locked_refs[0].current_value, 999, "reference should point to correct descriptor");
+            assert_eq!(
+                locked_refs[0].current_value, 999,
+                "reference should point to correct descriptor"
+            );
         }
     }
 }
@@ -1201,7 +1537,13 @@ fn knob_range(knob: &RuntimeKnob) -> (u64, u64) {
             RuntimeKnob::RetryBudget,
         ] {
             let (min, max) = knob_range(&knob);
-            assert!(min < max, "min {} should be < max {} for {:?}", min, max, knob);
+            assert!(
+                min < max,
+                "min {} should be < max {} for {:?}",
+                min,
+                max,
+                knob
+            );
         }
 
         // Test: ranges should be reasonable (no zero maximums except retry budget minimum)
@@ -1256,28 +1598,53 @@ fn knob_range(knob: &RuntimeKnob) -> (u64, u64) {
             let (min, max) = knob_range(&knob);
             assert!(min <= u64::MAX, "min should fit in u64 for {:?}", knob);
             assert!(max <= u64::MAX, "max should fit in u64 for {:?}", knob);
-            assert!(max.saturating_sub(min) <= u64::MAX, "range span should not overflow for {:?}", knob);
+            assert!(
+                max.saturating_sub(min) <= u64::MAX,
+                "range span should not overflow for {:?}",
+                knob
+            );
         }
 
         // Test: ranges are power-of-two friendly where appropriate
         let (concur_min, concur_max) = knob_range(&RuntimeKnob::ConcurrencyLimit);
-        assert!(concur_max.is_power_of_two(), "ConcurrencyLimit max should be power of two");
+        assert!(
+            concur_max.is_power_of_two(),
+            "ConcurrencyLimit max should be power of two"
+        );
 
         let (batch_min, batch_max) = knob_range(&RuntimeKnob::BatchSize);
-        assert!(batch_max.is_power_of_two(), "BatchSize max should be power of two");
+        assert!(
+            batch_max.is_power_of_two(),
+            "BatchSize max should be power of two"
+        );
 
         let (cache_min, cache_max) = knob_range(&RuntimeKnob::CacheCapacity);
-        assert!(cache_min.is_power_of_two(), "CacheCapacity min should be power of two");
-        assert!(cache_max.is_power_of_two(), "CacheCapacity max should be power of two");
+        assert!(
+            cache_min.is_power_of_two(),
+            "CacheCapacity min should be power of two"
+        );
+        assert!(
+            cache_max.is_power_of_two(),
+            "CacheCapacity max should be power of two"
+        );
 
         // Test: timeout and retry ranges are sensible
         let (timeout_min, timeout_max) = knob_range(&RuntimeKnob::DrainTimeoutMs);
-        assert!(timeout_min >= 1000, "drain timeout should be at least 1 second");
-        assert!(timeout_max <= 5 * 60 * 1000, "drain timeout should be at most 5 minutes");
+        assert!(
+            timeout_min >= 1000,
+            "drain timeout should be at least 1 second"
+        );
+        assert!(
+            timeout_max <= 5 * 60 * 1000,
+            "drain timeout should be at most 5 minutes"
+        );
 
         let (retry_min, retry_max) = knob_range(&RuntimeKnob::RetryBudget);
         assert!(retry_min == 0, "retry budget should allow no retries");
-        assert!(retry_max <= 50, "retry budget should have reasonable upper bound");
+        assert!(
+            retry_max <= 50,
+            "retry budget should have reasonable upper bound"
+        );
 
         // Test: ranges allow meaningful optimization space
         for knob in [
@@ -1287,7 +1654,11 @@ fn knob_range(knob: &RuntimeKnob) -> (u64, u64) {
         ] {
             let (min, max) = knob_range(&knob);
             let ratio = max / min.max(1);
-            assert!(ratio >= 4, "optimization space should allow at least 4x range for {:?}", knob);
+            assert!(
+                ratio >= 4,
+                "optimization space should allow at least 4x range for {:?}",
+                knob
+            );
         }
 
         // Test: specific range relationships
@@ -1295,11 +1666,17 @@ fn knob_range(knob: &RuntimeKnob) -> (u64, u64) {
         let (batch_min, batch_max) = knob_range(&RuntimeKnob::BatchSize);
 
         // BatchSize max should be larger than ConcurrencyLimit max (more granular batching)
-        assert!(batch_max >= concur_max, "BatchSize should allow finer granularity than ConcurrencyLimit");
+        assert!(
+            batch_max >= concur_max,
+            "BatchSize should allow finer granularity than ConcurrencyLimit"
+        );
 
         // Test: cache capacity should be larger than batch sizes
         let (cache_min, cache_max) = knob_range(&RuntimeKnob::CacheCapacity);
-        assert!(cache_min >= batch_min, "CacheCapacity min should accommodate batch processing");
+        assert!(
+            cache_min >= batch_min,
+            "CacheCapacity min should accommodate batch processing"
+        );
 
         // Test: range midpoints are reasonable
         for knob in [
@@ -1311,7 +1688,11 @@ fn knob_range(knob: &RuntimeKnob) -> (u64, u64) {
         ] {
             let (min, max) = knob_range(&knob);
             let midpoint = (min + max) / 2;
-            assert!(midpoint > min && midpoint < max, "midpoint should be within range for {:?}", knob);
+            assert!(
+                midpoint > min && midpoint < max,
+                "midpoint should be within range for {:?}",
+                knob
+            );
         }
 
         // Test: ranges are suitable for binary search optimization
@@ -1322,7 +1703,11 @@ fn knob_range(knob: &RuntimeKnob) -> (u64, u64) {
         ] {
             let (min, max) = knob_range(&knob);
             let search_steps = (max / min).ilog2();
-            assert!(search_steps >= 4, "should allow sufficient binary search steps for {:?}", knob);
+            assert!(
+                search_steps >= 4,
+                "should allow sufficient binary search steps for {:?}",
+                knob
+            );
         }
 
         // Test: edge case values within ranges
@@ -1340,18 +1725,31 @@ fn knob_range(knob: &RuntimeKnob) -> (u64, u64) {
 
             // Test max boundary doesn't overflow when used in calculations
             assert!(max / 2 < max, "max/2 should not overflow for {:?}", knob);
-            assert!(max.saturating_add(1) >= max, "max+1 should saturate correctly for {:?}", knob);
+            assert!(
+                max.saturating_add(1) >= max,
+                "max+1 should saturate correctly for {:?}",
+                knob
+            );
         }
 
         // Test: ranges support common optimization patterns
         let (concur_min, concur_max) = knob_range(&RuntimeKnob::ConcurrencyLimit);
 
         // Should support doubling/halving
-        assert!(concur_min * 2 <= concur_max, "should support doubling from min");
-        assert!(concur_max / 2 >= concur_min, "should support halving from max");
+        assert!(
+            concur_min * 2 <= concur_max,
+            "should support doubling from min"
+        );
+        assert!(
+            concur_max / 2 >= concur_min,
+            "should support halving from max"
+        );
 
         // Should support 1.5x scaling
-        assert!(concur_min * 3 / 2 <= concur_max, "should support 1.5x scaling");
+        assert!(
+            concur_min * 3 / 2 <= concur_max,
+            "should support 1.5x scaling"
+        );
 
         // Test: timeout range covers real-world scenarios
         let (timeout_min, timeout_max) = knob_range(&RuntimeKnob::DrainTimeoutMs);
@@ -1360,7 +1758,10 @@ fn knob_range(knob: &RuntimeKnob) -> (u64, u64) {
         assert!(timeout_min <= 1_000, "should support fast drain timeouts");
 
         // Should cover slow operations (up to 5 minutes)
-        assert!(timeout_max >= 5 * 60 * 1_000, "should support slow drain timeouts");
+        assert!(
+            timeout_max >= 5 * 60 * 1_000,
+            "should support slow drain timeouts"
+        );
 
         // Test: retry budget covers standard patterns
         let (retry_min, retry_max) = knob_range(&RuntimeKnob::RetryBudget);
@@ -1369,7 +1770,10 @@ fn knob_range(knob: &RuntimeKnob) -> (u64, u64) {
         assert!(retry_min == 0, "should support no-retry strategy");
 
         // Should support exponential backoff (at least 3 retries)
-        assert!(retry_max >= 3, "should support exponential backoff patterns");
+        assert!(
+            retry_max >= 3,
+            "should support exponential backoff patterns"
+        );
 
         // Should not be excessive
         assert!(retry_max <= 100, "retry budget should not be excessive");
@@ -1388,21 +1792,40 @@ fn knob_range(knob: &RuntimeKnob) -> (u64, u64) {
             assert!(max < u64::MAX, "max should not be u64::MAX for {:?}", knob);
 
             // Should avoid extremely small ranges
-            assert!(max >= min + 2, "should have meaningful range for {:?}", knob);
+            assert!(
+                max >= min + 2,
+                "should have meaningful range for {:?}",
+                knob
+            );
         }
-        assert!(concur_max >= 1000, "concurrency limit max should allow reasonable parallelism");
+        assert!(
+            concur_max >= 1000,
+            "concurrency limit max should allow reasonable parallelism"
+        );
 
         let (batch_min, batch_max) = knob_range(&RuntimeKnob::BatchSize);
         assert!(batch_min > 0, "batch size min should be positive");
-        assert!(batch_max >= 1000, "batch size max should allow reasonable batching");
+        assert!(
+            batch_max >= 1000,
+            "batch size max should allow reasonable batching"
+        );
 
         let (cache_min, cache_max) = knob_range(&RuntimeKnob::CacheCapacity);
         assert!(cache_min > 0, "cache capacity min should be positive");
-        assert!(cache_max >= 1000, "cache capacity max should allow reasonable caching");
+        assert!(
+            cache_max >= 1000,
+            "cache capacity max should allow reasonable caching"
+        );
 
         let (timeout_min, timeout_max) = knob_range(&RuntimeKnob::DrainTimeoutMs);
-        assert!(timeout_min >= 100, "drain timeout min should allow reasonable responsiveness");
-        assert!(timeout_max <= 1_000_000, "drain timeout max should not be excessive");
+        assert!(
+            timeout_min >= 100,
+            "drain timeout min should allow reasonable responsiveness"
+        );
+        assert!(
+            timeout_max <= 1_000_000,
+            "drain timeout max should not be excessive"
+        );
 
         let (retry_min, retry_max) = knob_range(&RuntimeKnob::RetryBudget);
         assert_eq!(retry_min, 0, "retry budget should allow zero retries");
@@ -1417,8 +1840,16 @@ fn knob_range(knob: &RuntimeKnob) -> (u64, u64) {
             RuntimeKnob::RetryBudget,
         ] {
             let (min, max) = knob_range(&knob);
-            assert!(max < u64::MAX, "max value should not be at u64::MAX boundary for {:?}", knob);
-            assert!(max.saturating_sub(min) < u64::MAX, "range span should not overflow for {:?}", knob);
+            assert!(
+                max < u64::MAX,
+                "max value should not be at u64::MAX boundary for {:?}",
+                knob
+            );
+            assert!(
+                max.saturating_sub(min) < u64::MAX,
+                "range span should not overflow for {:?}",
+                knob
+            );
         }
 
         // Test: specific boundary value checks
@@ -1465,34 +1896,88 @@ impl DispatchHookPayload {
                 let env_key = Self::env_key(&knob);
 
                 // Should have proper prefix
-                assert!(env_key.starts_with("FRANKEN_GOV_"), "env key should have FRANKEN_GOV_ prefix: {}", env_key);
+                assert!(
+                    env_key.starts_with("FRANKEN_GOV_"),
+                    "env key should have FRANKEN_GOV_ prefix: {}",
+                    env_key
+                );
 
                 // Should be uppercase
-                assert!(env_key.chars().all(|c| c.is_ascii_uppercase() || c == '_'),
-                        "env key should be uppercase: {}", env_key);
+                assert!(
+                    env_key.chars().all(|c| c.is_ascii_uppercase() || c == '_'),
+                    "env key should be uppercase: {}",
+                    env_key
+                );
 
                 // Should not contain problematic shell characters
-                assert!(!env_key.contains(' '), "env key should not contain spaces: {}", env_key);
-                assert!(!env_key.contains('\t'), "env key should not contain tabs: {}", env_key);
-                assert!(!env_key.contains('\n'), "env key should not contain newlines: {}", env_key);
-                assert!(!env_key.contains('$'), "env key should not contain dollar signs: {}", env_key);
-                assert!(!env_key.contains('`'), "env key should not contain backticks: {}", env_key);
-                assert!(!env_key.contains('\"'), "env key should not contain quotes: {}", env_key);
-                assert!(!env_key.contains('\''), "env key should not contain single quotes: {}", env_key);
+                assert!(
+                    !env_key.contains(' '),
+                    "env key should not contain spaces: {}",
+                    env_key
+                );
+                assert!(
+                    !env_key.contains('\t'),
+                    "env key should not contain tabs: {}",
+                    env_key
+                );
+                assert!(
+                    !env_key.contains('\n'),
+                    "env key should not contain newlines: {}",
+                    env_key
+                );
+                assert!(
+                    !env_key.contains('$'),
+                    "env key should not contain dollar signs: {}",
+                    env_key
+                );
+                assert!(
+                    !env_key.contains('`'),
+                    "env key should not contain backticks: {}",
+                    env_key
+                );
+                assert!(
+                    !env_key.contains('\"'),
+                    "env key should not contain quotes: {}",
+                    env_key
+                );
+                assert!(
+                    !env_key.contains('\''),
+                    "env key should not contain single quotes: {}",
+                    env_key
+                );
 
                 // Should not be empty or just the prefix
-                assert!(env_key.len() > "FRANKEN_GOV_".len(), "env key should have content after prefix: {}", env_key);
+                assert!(
+                    env_key.len() > "FRANKEN_GOV_".len(),
+                    "env key should have content after prefix: {}",
+                    env_key
+                );
 
                 // Should be valid ASCII (no Unicode)
                 assert!(env_key.is_ascii(), "env key should be ASCII: {}", env_key);
             }
 
             // Test: specific known mappings are correct
-            assert_eq!(Self::env_key(&RuntimeKnob::ConcurrencyLimit), "FRANKEN_GOV_CONCURRENCY_LIMIT");
-            assert_eq!(Self::env_key(&RuntimeKnob::BatchSize), "FRANKEN_GOV_BATCH_SIZE");
-            assert_eq!(Self::env_key(&RuntimeKnob::CacheCapacity), "FRANKEN_GOV_CACHE_CAPACITY");
-            assert_eq!(Self::env_key(&RuntimeKnob::DrainTimeoutMs), "FRANKEN_GOV_DRAIN_TIMEOUT_MS");
-            assert_eq!(Self::env_key(&RuntimeKnob::RetryBudget), "FRANKEN_GOV_RETRY_BUDGET");
+            assert_eq!(
+                Self::env_key(&RuntimeKnob::ConcurrencyLimit),
+                "FRANKEN_GOV_CONCURRENCY_LIMIT"
+            );
+            assert_eq!(
+                Self::env_key(&RuntimeKnob::BatchSize),
+                "FRANKEN_GOV_BATCH_SIZE"
+            );
+            assert_eq!(
+                Self::env_key(&RuntimeKnob::CacheCapacity),
+                "FRANKEN_GOV_CACHE_CAPACITY"
+            );
+            assert_eq!(
+                Self::env_key(&RuntimeKnob::DrainTimeoutMs),
+                "FRANKEN_GOV_DRAIN_TIMEOUT_MS"
+            );
+            assert_eq!(
+                Self::env_key(&RuntimeKnob::RetryBudget),
+                "FRANKEN_GOV_RETRY_BUDGET"
+            );
 
             // Test: environment variable names are unique
             let mut seen_names = std::collections::BTreeSet::new();
@@ -1504,7 +1989,11 @@ impl DispatchHookPayload {
                 RuntimeKnob::RetryBudget,
             ] {
                 let env_key = Self::env_key(&knob);
-                assert!(seen_names.insert(env_key.clone()), "duplicate env key: {}", env_key);
+                assert!(
+                    seen_names.insert(env_key.clone()),
+                    "duplicate env key: {}",
+                    env_key
+                );
             }
 
             // Test: env keys are reasonable length (not too long for shell)
@@ -1516,8 +2005,18 @@ impl DispatchHookPayload {
                 RuntimeKnob::RetryBudget,
             ] {
                 let env_key = Self::env_key(&knob);
-                assert!(env_key.len() <= 64, "env key should not be excessively long: {} ({})", env_key, env_key.len());
-                assert!(env_key.len() >= 10, "env key should not be too short: {} ({})", env_key, env_key.len());
+                assert!(
+                    env_key.len() <= 64,
+                    "env key should not be excessively long: {} ({})",
+                    env_key,
+                    env_key.len()
+                );
+                assert!(
+                    env_key.len() >= 10,
+                    "env key should not be too short: {} ({})",
+                    env_key,
+                    env_key.len()
+                );
             }
         }
     }
@@ -1557,14 +2056,18 @@ impl GovernorGate {
                 .find(|s| s.knob == knob)
                 .is_some_and(|s| s.locked);
 
-            push_bounded(&mut knobs, KnobDescriptor {
-                knob,
-                label: knob.as_str().to_string(),
-                current_value,
-                locked,
-                min_value,
-                max_value,
-            }, MAX_KNOBS);
+            push_bounded(
+                &mut knobs,
+                KnobDescriptor {
+                    knob,
+                    label: knob.as_str().to_string(),
+                    current_value,
+                    locked,
+                    min_value,
+                    max_value,
+                },
+                MAX_KNOBS,
+            );
         }
 
         push_bounded(
@@ -1701,7 +2204,11 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
         // Test: capacity of 1 should maintain only the latest item
         let mut single_cap = vec!["old"];
         push_bounded(&mut single_cap, "new", 1);
-        assert_eq!(single_cap, vec!["new"], "capacity 1 should keep only latest");
+        assert_eq!(
+            single_cap,
+            vec!["new"],
+            "capacity 1 should keep only latest"
+        );
 
         // Test: saturating arithmetic prevents overflow in drain calculation
         let mut large_vec = vec![0; usize::MAX.saturating_sub(10)];
@@ -1714,18 +2221,30 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
         // Test: exact capacity boundary doesn't trigger eviction
         let mut exact_cap = vec![1, 2, 3];
         push_bounded(&mut exact_cap, 4, 4);
-        assert_eq!(exact_cap, vec![1, 2, 3, 4], "exact capacity should not evict");
+        assert_eq!(
+            exact_cap,
+            vec![1, 2, 3, 4],
+            "exact capacity should not evict"
+        );
 
         // Test: exceeding capacity by 1 evicts exactly 1 item
         let mut over_by_one = vec![1, 2, 3];
         push_bounded(&mut over_by_one, 4, 3);
-        assert_eq!(over_by_one, vec![2, 3, 4], "should evict oldest when over by 1");
+        assert_eq!(
+            over_by_one,
+            vec![2, 3, 4],
+            "should evict oldest when over by 1"
+        );
 
         // Test: drain range bounds are correctly calculated
         let mut bounds_test = vec![1, 2, 3, 4, 5, 6];
         push_bounded(&mut bounds_test, 7, 3);
         assert_eq!(bounds_test.len(), 3, "should respect capacity");
-        assert_eq!(bounds_test[bounds_test.len()-1], 7, "new item should be last");
+        assert_eq!(
+            bounds_test[bounds_test.len() - 1],
+            7,
+            "new item should be last"
+        );
     }
 }
 
@@ -2705,9 +3224,11 @@ mod tests {
             GovernorDecision::Rejected(RejectionReason::InvalidProposal(_))
         ));
         // Audit trail should record the rejection without the full massive ID
-        assert!(gate.audit_trail().iter().any(|e| {
-            e.event_code == error_codes::ERR_GOVERNOR_SHADOW_EVAL_FAILED
-        }));
+        assert!(
+            gate.audit_trail()
+                .iter()
+                .any(|e| { e.event_code == error_codes::ERR_GOVERNOR_SHADOW_EVAL_FAILED })
+        );
     }
 
     #[test]
@@ -2722,9 +3243,11 @@ mod tests {
             decision,
             GovernorDecision::Rejected(RejectionReason::InvalidProposal(_))
         ));
-        assert!(gate.audit_trail().iter().any(|e| {
-            e.event_code == error_codes::ERR_GOVERNOR_SHADOW_EVAL_FAILED
-        }));
+        assert!(
+            gate.audit_trail()
+                .iter()
+                .any(|e| { e.event_code == error_codes::ERR_GOVERNOR_SHADOW_EVAL_FAILED })
+        );
     }
 
     #[test]
@@ -2759,13 +3282,19 @@ mod tests {
 
         // Latest entries should still be present
         assert!(gate.audit_trail().iter().any(|e| {
-            e.proposal_id.contains(&format!("overflow-{}", MAX_AUDIT_TRAIL_ENTRIES.saturating_add(9)))
+            e.proposal_id.contains(&format!(
+                "overflow-{}",
+                MAX_AUDIT_TRAIL_ENTRIES.saturating_add(9)
+            ))
         }));
 
         // Earliest entries should be dropped
-        assert!(!gate.audit_trail().iter().any(|e| {
-            e.proposal_id.contains("overflow-0")
-        }));
+        assert!(
+            !gate
+                .audit_trail()
+                .iter()
+                .any(|e| { e.proposal_id.contains("overflow-0") })
+        );
     }
 
     #[test]
@@ -2787,9 +3316,11 @@ mod tests {
         // Key is that it doesn't panic and audit trail remains consistent
         assert!(gate.audit_trail().len() > 0);
         if !reverted.is_empty() {
-            assert!(gate.audit_trail().iter().any(|e| {
-                e.event_code == event_codes::GOVERNOR_POLICY_REVERTED
-            }));
+            assert!(
+                gate.audit_trail()
+                    .iter()
+                    .any(|e| { e.event_code == event_codes::GOVERNOR_POLICY_REVERTED })
+            );
         }
     }
 
@@ -2812,13 +3343,19 @@ mod tests {
             );
 
             // Current value may be outside advisory range, but ranges should be sane
-            assert!(desc.max_value > 0, "max_value should be positive for {}", desc.label);
+            assert!(
+                desc.max_value > 0,
+                "max_value should be positive for {}",
+                desc.label
+            );
         }
 
         // Should emit enumeration event even with extreme values
-        assert!(gate.audit_trail().iter().any(|e| {
-            e.event_code == GOV_008_KNOB_ENUMERATION
-        }));
+        assert!(
+            gate.audit_trail()
+                .iter()
+                .any(|e| { e.event_code == GOV_008_KNOB_ENUMERATION })
+        );
     }
 
     #[test]
@@ -2833,14 +3370,28 @@ mod tests {
 
         // Basic sanity checks - should not panic or produce empty/invalid payload
         assert!(!payload.env_vars.is_empty(), "env_vars should not be empty");
-        assert!(!payload.schema_version.is_empty(), "schema_version should not be empty");
-        assert_eq!(payload.applied_count, 1, "applied_count should reflect submitted proposal");
+        assert!(
+            !payload.schema_version.is_empty(),
+            "schema_version should not be empty"
+        );
+        assert_eq!(
+            payload.applied_count, 1,
+            "applied_count should reflect submitted proposal"
+        );
 
         // All env var values should be valid strings (not empty, no special chars that break shells)
         for (key, value) in &payload.env_vars {
             assert!(!key.is_empty(), "env var key should not be empty");
-            assert!(!value.is_empty(), "env var value should not be empty for key {}", key);
-            assert!(!value.contains('\0'), "env var value should not contain null bytes for key {}", key);
+            assert!(
+                !value.is_empty(),
+                "env var value should not be empty for key {}",
+                key
+            );
+            assert!(
+                !value.contains('\0'),
+                "env var value should not contain null bytes for key {}",
+                key
+            );
         }
     }
 
@@ -2858,12 +3409,24 @@ mod tests {
         assert!(payload.is_none());
 
         // Verify no side effects - original knob value unchanged
-        assert_eq!(gate.inner().knob_value(&RuntimeKnob::ConcurrencyLimit), Some(64));
+        assert_eq!(
+            gate.inner().knob_value(&RuntimeKnob::ConcurrencyLimit),
+            Some(64)
+        );
         assert_eq!(gate.inner().applied_count(), 0);
 
         // Should log rejection but not dispatch
-        assert!(gate.audit_trail().iter().any(|e| e.event_code.contains("ERR_GOVERNOR")));
-        assert!(!gate.audit_trail().iter().any(|e| e.event_code == GOV_010_KNOB_DISPATCHED));
+        assert!(
+            gate.audit_trail()
+                .iter()
+                .any(|e| e.event_code.contains("ERR_GOVERNOR"))
+        );
+        assert!(
+            !gate
+                .audit_trail()
+                .iter()
+                .any(|e| e.event_code == GOV_010_KNOB_DISPATCHED)
+        );
     }
 
     #[test]
@@ -2871,9 +3434,13 @@ mod tests {
         let mut gov = OptimizationGovernor::with_defaults();
 
         // Lock ALL knobs
-        for knob in [RuntimeKnob::ConcurrencyLimit, RuntimeKnob::BatchSize,
-                     RuntimeKnob::CacheCapacity, RuntimeKnob::DrainTimeoutMs,
-                     RuntimeKnob::RetryBudget] {
+        for knob in [
+            RuntimeKnob::ConcurrencyLimit,
+            RuntimeKnob::BatchSize,
+            RuntimeKnob::CacheCapacity,
+            RuntimeKnob::DrainTimeoutMs,
+            RuntimeKnob::RetryBudget,
+        ] {
             gov.lock_knob(knob);
         }
 
@@ -2888,7 +3455,11 @@ mod tests {
         assert_eq!(enumeration.unlocked().len(), 0);
 
         // Should still emit enumeration event
-        assert!(gate.audit_trail().iter().any(|e| e.event_code == GOV_008_KNOB_ENUMERATION));
+        assert!(
+            gate.audit_trail()
+                .iter()
+                .any(|e| e.event_code == GOV_008_KNOB_ENUMERATION)
+        );
     }
 
     #[test]
@@ -2897,10 +3468,10 @@ mod tests {
         gate.submit(good_proposal("before-zero-check"));
 
         let zero_metrics = PredictedMetrics {
-            latency_ms: 0,    // Zero latency impossible
-            throughput_rps: 0, // Zero throughput bad
+            latency_ms: 0,       // Zero latency impossible
+            throughput_rps: 0,   // Zero throughput bad
             error_rate_pct: 0.0, // This one might be OK
-            memory_mb: 0,     // Zero memory impossible
+            memory_mb: 0,        // Zero memory impossible
         };
 
         let reverted = gate.live_check(&zero_metrics);
@@ -2909,10 +3480,12 @@ mod tests {
         if !reverted.is_empty() {
             assert_eq!(reverted.len(), 1);
             assert_eq!(reverted[0], "before-zero-check");
-            assert!(gate.audit_trail().iter().any(|e|
-                e.event_code == event_codes::GOVERNOR_POLICY_REVERTED &&
-                e.detail.contains("auto-reverted")
-            ));
+            assert!(
+                gate.audit_trail()
+                    .iter()
+                    .any(|e| e.event_code == event_codes::GOVERNOR_POLICY_REVERTED
+                        && e.detail.contains("auto-reverted"))
+            );
         }
     }
 
@@ -2959,20 +3532,18 @@ mod tests {
 
         // Audit trail should handle Unicode gracefully
         assert!(gate.audit_trail().iter().any(|e| {
-            e.event_code == error_codes::ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION &&
-            e.detail.contains("engine-core internal")
+            e.event_code == error_codes::ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION
+                && e.detail.contains("engine-core internal")
         }));
     }
 
     #[test]
     fn negative_push_bounded_with_capacity_one_maintains_fifo_ordering() {
-        let mut entries = vec![
-            GateAuditEntry {
-                event_code: "first".into(),
-                proposal_id: "p-first".into(),
-                detail: "first entry".into(),
-            }
-        ];
+        let mut entries = vec![GateAuditEntry {
+            event_code: "first".into(),
+            proposal_id: "p-first".into(),
+            detail: "first entry".into(),
+        }];
 
         // Add many more entries with cap=1, should maintain FIFO
         for i in 0..10 {
@@ -3050,10 +3621,10 @@ mod tests {
 
         let malicious_unicode_patterns = [
             "\u{202E}\u{202D}fake_safe_proposal\u{202C}", // Right-to-left override
-            "proposal\u{000A}\u{000D}injected_newlines",   // CRLF injection
-            "\u{FEFF}bom_injection_\u{FFFE}proposal",       // BOM injection
-            "\u{200B}\u{200C}\u{200D}zero_width_chars",    // Zero-width chars
-            "控制字符\u{007F}\u{0000}\u{001F}proposal",      // Control chars with Unicode
+            "proposal\u{000A}\u{000D}injected_newlines",  // CRLF injection
+            "\u{FEFF}bom_injection_\u{FFFE}proposal",     // BOM injection
+            "\u{200B}\u{200C}\u{200D}zero_width_chars",   // Zero-width chars
+            "控制字符\u{007F}\u{0000}\u{001F}proposal",   // Control chars with Unicode
         ];
 
         for (i, pattern) in malicious_unicode_patterns.iter().enumerate() {
@@ -3075,7 +3646,13 @@ mod tests {
             let trail = gate.audit_trail();
             for entry in trail {
                 // All fields should remain valid UTF-8
-                assert!(entry.event_code.is_ascii() || entry.event_code.chars().all(|c| c.is_alphabetic() || c == '_'));
+                assert!(
+                    entry.event_code.is_ascii()
+                        || entry
+                            .event_code
+                            .chars()
+                            .all(|c| c.is_alphabetic() || c == '_')
+                );
                 assert!(!entry.proposal_id.contains('\0'));
                 assert!(!entry.detail.contains('\0'));
             }
@@ -3122,8 +3699,8 @@ mod tests {
                 GovernorDecision::Rejected(reason) => {
                     // Valid rejection reasons for extreme values
                     match reason {
-                        RejectionReason::EnvelopeViolation(_) |
-                        RejectionReason::InvalidProposal(_) => {
+                        RejectionReason::EnvelopeViolation(_)
+                        | RejectionReason::InvalidProposal(_) => {
                             // Expected for extreme values
                         }
                         _ => {
@@ -3137,7 +3714,11 @@ mod tests {
             }
 
             // Audit trail should remain coherent
-            assert!(gate.audit_trail().iter().any(|e| e.proposal_id.contains(test_id)));
+            assert!(
+                gate.audit_trail()
+                    .iter()
+                    .any(|e| e.proposal_id.contains(test_id))
+            );
         }
 
         // Test live check with overflow-prone metrics
@@ -3172,7 +3753,7 @@ mod tests {
             OptimizationProposal {
                 proposal_id: "concurrent_test_2".to_string(),
                 knob: RuntimeKnob::ConcurrencyLimit, // Same knob!
-                old_value: 20, // Assumes first was applied
+                old_value: 20,                       // Assumes first was applied
                 new_value: 30,
                 predicted_metrics: PredictedMetrics {
                     throughput: 120.0,
@@ -3203,24 +3784,31 @@ mod tests {
         let trail = gate.audit_trail();
 
         // Should have events for all three proposals
-        let proposal_ids: std::collections::HashSet<_> = trail.iter()
-            .map(|e| &e.proposal_id)
-            .collect();
+        let proposal_ids: std::collections::HashSet<_> =
+            trail.iter().map(|e| &e.proposal_id).collect();
         assert!(proposal_ids.contains("concurrent_test_1"));
         assert!(proposal_ids.contains("concurrent_test_2"));
         assert!(proposal_ids.contains("concurrent_test_3"));
 
         // Events for each proposal should follow proper order
-        for id in ["concurrent_test_1", "concurrent_test_2", "concurrent_test_3"] {
-            let proposal_events: Vec<_> = trail.iter()
-                .filter(|e| e.proposal_id == id)
-                .collect();
+        for id in [
+            "concurrent_test_1",
+            "concurrent_test_2",
+            "concurrent_test_3",
+        ] {
+            let proposal_events: Vec<_> = trail.iter().filter(|e| e.proposal_id == id).collect();
 
             // Should have at least PROPOSED and SHADOW_EVAL_START
-            assert!(proposal_events.iter().any(|e|
-                e.event_code == event_codes::GOVERNOR_CANDIDATE_PROPOSED));
-            assert!(proposal_events.iter().any(|e|
-                e.event_code == event_codes::GOVERNOR_SHADOW_EVAL_START));
+            assert!(
+                proposal_events
+                    .iter()
+                    .any(|e| e.event_code == event_codes::GOVERNOR_CANDIDATE_PROPOSED)
+            );
+            assert!(
+                proposal_events
+                    .iter()
+                    .any(|e| e.event_code == event_codes::GOVERNOR_SHADOW_EVAL_START)
+            );
         }
     }
 
@@ -3261,9 +3849,9 @@ mod tests {
                 old_value: 10000,
                 new_value: 1000,
                 predicted_metrics: PredictedMetrics {
-                    throughput: 80.0, // Worse performance
+                    throughput: 80.0,  // Worse performance
                     latency_p99: 70.0, // Worse latency
-                    memory_usage: 512,  // Less memory (good)
+                    memory_usage: 512, // Less memory (good)
                 },
             },
         ];
@@ -3276,21 +3864,30 @@ mod tests {
             match decision {
                 GovernorDecision::Approved => {
                     // Should have applied events
-                    assert!(gate.audit_trail().iter().any(|e|
-                        e.proposal_id == proposal_id &&
-                        e.event_code == event_codes::GOVERNOR_POLICY_APPLIED));
+                    assert!(
+                        gate.audit_trail()
+                            .iter()
+                            .any(|e| e.proposal_id == proposal_id
+                                && e.event_code == event_codes::GOVERNOR_POLICY_APPLIED)
+                    );
                 }
                 GovernorDecision::Rejected(reason) => {
                     // Should have rejection events with proper error codes
-                    assert!(gate.audit_trail().iter().any(|e|
-                        e.proposal_id == proposal_id &&
-                        e.event_code.starts_with("ERR_GOVERNOR_")));
+                    assert!(
+                        gate.audit_trail()
+                            .iter()
+                            .any(|e| e.proposal_id == proposal_id
+                                && e.event_code.starts_with("ERR_GOVERNOR_"))
+                    );
 
                     // Reason should be meaningful
                     match reason {
                         RejectionReason::NonBeneficial => {
-                            assert!(gate.audit_trail().iter().any(|e|
-                                e.detail.contains("NonBeneficial")));
+                            assert!(
+                                gate.audit_trail()
+                                    .iter()
+                                    .any(|e| e.detail.contains("NonBeneficial"))
+                            );
                         }
                         _ => {
                             // Other rejection reasons are valid
@@ -3303,7 +3900,11 @@ mod tests {
             }
 
             // Audit trail should maintain consistency
-            assert!(gate.audit_trail().iter().any(|e| e.proposal_id == proposal_id));
+            assert!(
+                gate.audit_trail()
+                    .iter()
+                    .any(|e| e.proposal_id == proposal_id)
+            );
         }
     }
 
@@ -3366,9 +3967,12 @@ mod tests {
 
             // If policies were reverted, should have proper audit entries
             if !reverted.is_empty() {
-                assert!(gate.audit_trail().iter().any(|e|
-                    e.event_code == event_codes::GOVERNOR_POLICY_REVERTED &&
-                    e.detail.contains("auto-reverted")));
+                assert!(
+                    gate.audit_trail()
+                        .iter()
+                        .any(|e| e.event_code == event_codes::GOVERNOR_POLICY_REVERTED
+                            && e.detail.contains("auto-reverted"))
+                );
             }
 
             // Audit trail should remain valid after invalid metrics
@@ -3378,7 +3982,8 @@ mod tests {
             }
 
             // Test engine boundary rejection after invalid metrics
-            let result = gate.reject_engine_internal_adjustment(&format!("post_invalid_metrics_{}", i));
+            let result =
+                gate.reject_engine_internal_adjustment(&format!("post_invalid_metrics_{}", i));
             assert!(result.is_err());
         }
     }
@@ -3463,7 +4068,7 @@ mod tests {
 
             // Perform live check
             let check_metrics = PredictedMetrics {
-                throughput: 90.0, // Below expected
+                throughput: 90.0,  // Below expected
                 latency_p99: 60.0, // Above expected
                 memory_usage: 3000,
             };
@@ -3483,8 +4088,11 @@ mod tests {
         // Should still accept new operations
         let final_test = gate.reject_engine_internal_adjustment("final_corruption_test");
         assert!(final_test.is_err());
-        assert!(gate.audit_trail().iter().any(|e|
-            e.event_code == error_codes::ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION));
+        assert!(
+            gate.audit_trail()
+                .iter()
+                .any(|e| e.event_code == error_codes::ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION)
+        );
     }
 
     #[test]
@@ -3519,11 +4127,13 @@ mod tests {
             // Verify audit trail preserves control characters without interpretation
             if let Some(last_entry) = gate.audit_trail().last() {
                 assert_eq!(last_entry.proposal_id.len(), malicious_id.len());
-                assert!(last_entry.proposal_id.contains('\u{202E}') ||
-                       last_entry.proposal_id.contains('\u{2066}') ||
-                       last_entry.proposal_id.contains('\u{200F}') ||
-                       last_entry.proposal_id.contains('\u{061C}'),
-                       "BiDi characters should be preserved in audit trail");
+                assert!(
+                    last_entry.proposal_id.contains('\u{202E}')
+                        || last_entry.proposal_id.contains('\u{2066}')
+                        || last_entry.proposal_id.contains('\u{200F}')
+                        || last_entry.proposal_id.contains('\u{061C}'),
+                    "BiDi characters should be preserved in audit trail"
+                );
             }
         }
     }
@@ -3536,9 +4146,9 @@ mod tests {
 
         // Extreme: Arithmetic overflow in value range calculations
         let overflow_scenarios = vec![
-            (u32::MAX - 1, 2),           // Would overflow on addition
-            (u32::MAX, 1),               // Maximum value increment
-            (0, u32::MAX),               // Zero to maximum jump
+            (u32::MAX - 1, 2),                // Would overflow on addition
+            (u32::MAX, 1),                    // Maximum value increment
+            (0, u32::MAX),                    // Zero to maximum jump
             (u32::MAX / 2, u32::MAX / 2 + 1), // Mid-point overflow
         ];
 
@@ -3586,7 +4196,10 @@ mod tests {
             // Submit large batches of proposals with varying characteristics
             for i in 0..500 {
                 let proposal = OptimizationProposal {
-                    proposal_id: format!("exhaust_batch_{}_{}_with_very_long_identifier_that_consumes_significant_memory_and_could_lead_to_resource_exhaustion_if_not_properly_bounded", batch, i),
+                    proposal_id: format!(
+                        "exhaust_batch_{}_{}_with_very_long_identifier_that_consumes_significant_memory_and_could_lead_to_resource_exhaustion_if_not_properly_bounded",
+                        batch, i
+                    ),
                     knob: match i % 4 {
                         0 => RuntimeKnob::ConcurrencyLimit,
                         1 => RuntimeKnob::BatchSize,
@@ -3606,13 +4219,18 @@ mod tests {
                 total_proposals = total_proposals.saturating_add(1);
 
                 // Verify capacity limits are enforced
-                assert!(gate.audit_trail().len() <= MAX_AUDIT_TRAIL_ENTRIES,
-                       "Audit trail should not exceed maximum capacity");
+                assert!(
+                    gate.audit_trail().len() <= MAX_AUDIT_TRAIL_ENTRIES,
+                    "Audit trail should not exceed maximum capacity"
+                );
 
                 // Should maintain performance under load
                 if i % 100 == 0 {
                     let snapshot = gate.snapshot();
-                    assert!(snapshot.is_some(), "Snapshot should remain available under load");
+                    assert!(
+                        snapshot.is_some(),
+                        "Snapshot should remain available under load"
+                    );
                 }
             }
 
@@ -3627,20 +4245,23 @@ mod tests {
 
         // Extreme: Floating-point precision manipulation attacks
         let precision_attacks = vec![
-            (f64::MAX, f64::MIN, 1000),                    // Extreme range values
-            (f64::INFINITY, f64::NEG_INFINITY, 2000),      // Infinite values
-            (f64::NAN, 100.0, 3000),                       // NaN injection
+            (f64::MAX, f64::MIN, 1000),                     // Extreme range values
+            (f64::INFINITY, f64::NEG_INFINITY, 2000),       // Infinite values
+            (f64::NAN, 100.0, 3000),                        // NaN injection
             (1.0000000000000002, 1.0000000000000001, 4000), // Precision epsilon
             (f64::MIN_POSITIVE, f64::MAX, 5000),            // Min-max combination
-            (0.0, -0.0, 6000),                             // Signed zero confusion
-            (1e308, 1e-308, 7000),                         // Extreme magnitude difference
-            (f64::EPSILON, 1.0 + f64::EPSILON, 8000),      // Machine epsilon boundary
+            (0.0, -0.0, 6000),                              // Signed zero confusion
+            (1e308, 1e-308, 7000),                          // Extreme magnitude difference
+            (f64::EPSILON, 1.0 + f64::EPSILON, 8000),       // Machine epsilon boundary
         ];
 
         for (throughput, latency, memory) in precision_attacks {
             let proposal = OptimizationProposal {
-                proposal_id: format!("precision_attack_{}_{}",
-                                   throughput.to_bits(), latency.to_bits()),
+                proposal_id: format!(
+                    "precision_attack_{}_{}",
+                    throughput.to_bits(),
+                    latency.to_bits()
+                ),
                 knob: RuntimeKnob::ConcurrencyLimit,
                 old_value: 64,
                 new_value: 128,
@@ -3666,7 +4287,11 @@ mod tests {
 
             // Verify live checks handle precision attacks
             let check_metrics = PredictedMetrics {
-                throughput: if throughput.is_finite() { throughput } else { 100.0 },
+                throughput: if throughput.is_finite() {
+                    throughput
+                } else {
+                    100.0
+                },
                 latency_p99: if latency.is_finite() { latency } else { 50.0 },
                 memory_usage: memory,
             };
@@ -3685,7 +4310,7 @@ mod tests {
             "proposal\",\"injected_field\":\"value\",\"fake\":\"",
             "detail\\\":{\\\"injection\\\":true}//",
             "\x00\x01\x02\x03\x04\x05\x06\x07", // Control characters
-            "🔥💀☠️⚠️🚨", // Emoji that might affect encoding
+            "🔥💀☠️⚠️🚨",                       // Emoji that might affect encoding
             "\u{200B}\u{200C}\u{200D}\u{FEFF}", // Zero-width characters
             "\\\"\n\r\t\x08\x0C/", // JSON escape sequence attacks (backspace and form feed)
         ];
@@ -3707,8 +4332,10 @@ mod tests {
 
             // Verify JSON structure integrity after injection attempts
             if let Ok(serialized) = serde_json::to_string(&gate) {
-                assert!(serde_json::from_str::<GovernorGate>(&serialized).is_ok(),
-                       "JSON should remain valid after injection attempts");
+                assert!(
+                    serde_json::from_str::<GovernorGate>(&serialized).is_ok(),
+                    "JSON should remain valid after injection attempts"
+                );
 
                 // Should not contain unescaped injection attempts
                 assert!(!serialized.contains(r#""malicious": "injection""#));
@@ -3735,7 +4362,9 @@ mod tests {
         use std::sync::{Arc, Mutex};
         use std::thread;
 
-        let gate = Arc::new(Mutex::new(GovernorGate::new(OptimizationGovernor::with_defaults())));
+        let gate = Arc::new(Mutex::new(GovernorGate::new(
+            OptimizationGovernor::with_defaults(),
+        )));
 
         // Extreme: Concurrent access patterns that could corrupt internal state
         let mut handles = vec![];
@@ -3762,7 +4391,7 @@ mod tests {
                             if let Ok(mut g) = gate_clone.lock() {
                                 let _ = g.submit(proposal);
                             }
-                        },
+                        }
                         1 => {
                             // Live check thread
                             let metrics = PredictedMetrics {
@@ -3773,19 +4402,20 @@ mod tests {
                             if let Ok(mut g) = gate_clone.lock() {
                                 let _ = g.live_check(&metrics);
                             }
-                        },
+                        }
                         2 => {
                             // Snapshot reading thread
                             if let Ok(g) = gate_clone.lock() {
                                 let _ = g.snapshot();
                             }
-                        },
+                        }
                         _ => {
                             // Engine boundary testing thread
                             if let Ok(mut g) = gate_clone.lock() {
-                                let _ = g.reject_engine_internal_adjustment(
-                                    &format!("boundary_test_{}", iteration)
-                                );
+                                let _ = g.reject_engine_internal_adjustment(&format!(
+                                    "boundary_test_{}",
+                                    iteration
+                                ));
                             }
                         }
                     }
@@ -3874,11 +4504,13 @@ mod tests {
 
                 // Track potential collisions using secure SHA-256 hash of actual proposal data
                 let mut hasher = Sha256::new();
-                hasher.update(b"collision_tracking_v1:");  // Domain separation
-                let proposal_json = serde_json::to_string(&proposal).expect("proposal serialization");
+                hasher.update(b"collision_tracking_v1:"); // Domain separation
+                let proposal_json =
+                    serde_json::to_string(&proposal).expect("proposal serialization");
                 hasher.update(proposal_json.as_bytes());
                 let hash_key = format!("{:02x}", hasher.finalize());
-                *collision_attempts.entry(hash_key).or_insert(0) = collision_attempts[&hash_key].saturating_add(1);
+                *collision_attempts.entry(hash_key).or_insert(0) =
+                    collision_attempts[&hash_key].saturating_add(1);
             }
 
             // Verify resistance to birthday attack scenarios
@@ -3886,10 +4518,8 @@ mod tests {
                 assert!(gate.audit_trail().len() <= MAX_AUDIT_TRAIL_ENTRIES);
 
                 // Should maintain distinct entries even with collision attempts
-                let unique_proposals: std::collections::HashSet<_> = gate.audit_trail()
-                    .iter()
-                    .map(|e| &e.proposal_id)
-                    .collect();
+                let unique_proposals: std::collections::HashSet<_> =
+                    gate.audit_trail().iter().map(|e| &e.proposal_id).collect();
 
                 // Should not lose entries due to hash collisions
                 assert!(unique_proposals.len() >= 2 || gate.audit_trail().is_empty());
@@ -3898,10 +4528,8 @@ mod tests {
 
         // Verify no hash collision has corrupted the audit trail structure
         let final_trail = gate.audit_trail();
-        let unique_event_codes: std::collections::HashSet<_> = final_trail
-            .iter()
-            .map(|e| &e.event_code)
-            .collect();
+        let unique_event_codes: std::collections::HashSet<_> =
+            final_trail.iter().map(|e| &e.event_code).collect();
 
         // Should preserve event code diversity despite collision attempts
         assert!(!unique_event_codes.is_empty());
@@ -3920,12 +4548,12 @@ mod tests {
         // Extreme: Precision attacks against safety envelope boundaries
         let boundary_attacks = vec![
             // Just inside/outside epsilon boundaries
-            (99.9999999999999, 100.0000000000001),   // Epsilon-level precision
-            (f64::MAX - 1.0, f64::MAX),               // Maximum boundary
-            (0.0, f64::MIN_POSITIVE),                 // Zero boundary
+            (99.9999999999999, 100.0000000000001), // Epsilon-level precision
+            (f64::MAX - 1.0, f64::MAX),            // Maximum boundary
+            (0.0, f64::MIN_POSITIVE),              // Zero boundary
             (1.0 - f64::EPSILON, 1.0 + f64::EPSILON), // Machine epsilon
-            (50.0 - 1e-15, 50.0 + 1e-15),            // Ultra-precision boundary
-            (1e-308, 1e308),                          // Extreme range
+            (50.0 - 1e-15, 50.0 + 1e-15),          // Ultra-precision boundary
+            (1e-308, 1e308),                       // Extreme range
             (1.7976931348623155e308, 1.7976931348623157e308), // Near-overflow
         ];
 
@@ -3947,8 +4575,16 @@ mod tests {
 
             // Test live check with precision boundary values
             let boundary_check = PredictedMetrics {
-                throughput: if boundary_low.is_finite() { boundary_low } else { 100.0 },
-                latency_p99: if boundary_high.is_finite() { boundary_high } else { 50.0 },
+                throughput: if boundary_low.is_finite() {
+                    boundary_low
+                } else {
+                    100.0
+                },
+                latency_p99: if boundary_high.is_finite() {
+                    boundary_high
+                } else {
+                    50.0
+                },
                 memory_usage: 2000,
             };
 
@@ -3969,8 +4605,8 @@ mod tests {
             // Test safety envelope calculation with extreme precision
             let extreme_metrics = PredictedMetrics {
                 throughput: 1.0000000000000002,  // Just above 1.0 in f64 precision
-                latency_p99: 1.0000000000000004,  // Next representable value
-                memory_usage: u32::MAX as usize,  // Maximum memory value
+                latency_p99: 1.0000000000000004, // Next representable value
+                memory_usage: u32::MAX as usize, // Maximum memory value
             };
             let _ = gate.live_check(&extreme_metrics);
         }
@@ -4023,8 +4659,11 @@ mod tests {
                 let _ = gate.submit(flood_proposal);
 
                 // Verify memory bounds are enforced
-                assert!(gate.audit_trail().len() <= MAX_AUDIT_TRAIL_ENTRIES,
-                       "Audit trail exceeded max entries at iteration {}", i);
+                assert!(
+                    gate.audit_trail().len() <= MAX_AUDIT_TRAIL_ENTRIES,
+                    "Audit trail exceeded max entries at iteration {}",
+                    i
+                );
             }
 
             // Attack 2: Large proposal IDs to exploit string memory allocation
@@ -4075,10 +4714,14 @@ mod tests {
             let _ = gate.submit(normalization_attack);
 
             // Verify trail preserves original unicode without expansion
-            let has_unicode_entry = gate.audit_trail().iter()
+            let has_unicode_entry = gate
+                .audit_trail()
+                .iter()
                 .any(|entry| entry.proposal_id.contains('\u{0041}'));
-            assert!(has_unicode_entry || gate.audit_trail().is_empty(),
-                   "Unicode characters should be preserved in audit trail");
+            assert!(
+                has_unicode_entry || gate.audit_trail().is_empty(),
+                "Unicode characters should be preserved in audit trail"
+            );
         }
 
         #[test]
@@ -4087,8 +4730,8 @@ mod tests {
             let mut gate = GovernorGate::with_defaults();
 
             // Attack 1: Interleaved proposal submission patterns
-            let proposals = (0..50).map(|i| {
-                OptimizationProposal {
+            let proposals = (0..50)
+                .map(|i| OptimizationProposal {
                     proposal_id: format!("concurrent_{}", i),
                     knob: match i % 4 {
                         0 => RuntimeKnob::ConcurrencyLimit,
@@ -4103,8 +4746,8 @@ mod tests {
                         latency_p99: (i as f64 * 0.8) % 100.0,
                         memory_usage: (i * 100) % 5000,
                     },
-                }
-            }).collect::<Vec<_>>();
+                })
+                .collect::<Vec<_>>();
 
             // Submit in rapid succession to stress concurrent handling
             for proposal in proposals {
@@ -4129,10 +4772,15 @@ mod tests {
             }
 
             // Verify audit trail maintains consistency despite collision attempts
-            let collision_entries: Vec<_> = gate.audit_trail().iter()
+            let collision_entries: Vec<_> = gate
+                .audit_trail()
+                .iter()
                 .filter(|entry| entry.proposal_id == collision_id)
                 .collect();
-            assert!(!collision_entries.is_empty(), "Should have recorded collision attempts");
+            assert!(
+                !collision_entries.is_empty(),
+                "Should have recorded collision attempts"
+            );
 
             // Attack 3: Rapid live_check calls during proposal submission
             for i in 0..20 {
@@ -4157,10 +4805,12 @@ mod tests {
 
             // Verify state consistency after concurrent operations
             assert!(gate.audit_trail().len() <= MAX_AUDIT_TRAIL_ENTRIES);
-            let unique_event_codes: HashSet<_> = gate.audit_trail().iter()
-                .map(|e| &e.event_code)
-                .collect();
-            assert!(!unique_event_codes.is_empty(), "Should maintain event code diversity");
+            let unique_event_codes: HashSet<_> =
+                gate.audit_trail().iter().map(|e| &e.event_code).collect();
+            assert!(
+                !unique_event_codes.is_empty(),
+                "Should maintain event code diversity"
+            );
         }
 
         #[test]
@@ -4184,21 +4834,24 @@ mod tests {
                 let decision = gate.submit(nan_proposal);
 
                 // System should handle NaN/infinite values gracefully
-                assert!(matches!(decision, GovernorDecision::Approved |
-                                GovernorDecision::Rejected(_) |
-                                GovernorDecision::Reverted(_) |
-                                GovernorDecision::ShadowOnly));
+                assert!(matches!(
+                    decision,
+                    GovernorDecision::Approved
+                        | GovernorDecision::Rejected(_)
+                        | GovernorDecision::Reverted(_)
+                        | GovernorDecision::ShadowOnly
+                ));
             }
 
             // Attack 2: Subnormal and extreme boundary values
             let boundary_values = vec![
-                f64::MIN_POSITIVE,     // Smallest positive normalized value
-                f64::EPSILON,          // Machine epsilon
-                1.0 - f64::EPSILON,    // Just below 1.0
-                1.0 + f64::EPSILON,    // Just above 1.0
-                f64::MAX,              // Maximum finite value
-                0.0,                   // Exact zero
-                -0.0,                  // Negative zero
+                f64::MIN_POSITIVE,       // Smallest positive normalized value
+                f64::EPSILON,            // Machine epsilon
+                1.0 - f64::EPSILON,      // Just below 1.0
+                1.0 + f64::EPSILON,      // Just above 1.0
+                f64::MAX,                // Maximum finite value
+                0.0,                     // Exact zero
+                -0.0,                    // Negative zero
                 2.2250738585072014e-308, // Subnormal
             ];
 
@@ -4247,10 +4900,16 @@ mod tests {
 
             // Verify no NaN or infinity values leaked into audit details
             for entry in gate.audit_trail() {
-                assert!(!entry.detail.to_lowercase().contains("nan"),
-                       "Audit detail should not contain NaN: {}", entry.detail);
-                assert!(!entry.detail.to_lowercase().contains("inf"),
-                       "Audit detail should not contain infinity: {}", entry.detail);
+                assert!(
+                    !entry.detail.to_lowercase().contains("nan"),
+                    "Audit detail should not contain NaN: {}",
+                    entry.detail
+                );
+                assert!(
+                    !entry.detail.to_lowercase().contains("inf"),
+                    "Audit detail should not contain infinity: {}",
+                    entry.detail
+                );
             }
         }
 
@@ -4334,22 +4993,31 @@ mod tests {
             }
 
             // Verify system preserved all proposal IDs without corruption
-            let preserved_attacks: Vec<_> = gate.audit_trail().iter()
+            let preserved_attacks: Vec<_> = gate
+                .audit_trail()
+                .iter()
                 .filter(|entry| {
-                    traversal_attacks.iter().any(|&attack| entry.proposal_id.contains(attack)) ||
-                    json_injection_attempts.iter().any(|&injection| entry.proposal_id.contains(injection))
+                    traversal_attacks
+                        .iter()
+                        .any(|&attack| entry.proposal_id.contains(attack))
+                        || json_injection_attempts
+                            .iter()
+                            .any(|&injection| entry.proposal_id.contains(injection))
                 })
                 .collect();
 
             // Should have preserved malicious strings as-is (no execution)
-            assert!(!preserved_attacks.is_empty(), "Should preserve injection attempts in audit trail");
+            assert!(
+                !preserved_attacks.is_empty(),
+                "Should preserve injection attempts in audit trail"
+            );
 
             // Attack 4: Unicode normalization and homograph attacks
             let unicode_attacks = vec![
                 "normal_text",
-                "Аdmin", // Cyrillic 'А' instead of Latin 'A'
-                "аpple", // Cyrillic 'а' instead of Latin 'a'
-                "micro_µ_vs_μ", // Micro sign vs Greek mu
+                "Аdmin",                // Cyrillic 'А' instead of Latin 'A'
+                "аpple",                // Cyrillic 'а' instead of Latin 'a'
+                "micro_µ_vs_μ",         // Micro sign vs Greek mu
                 "café_vs_cafe\u{0301}", // Precomposed vs decomposed
             ];
 
@@ -4382,18 +5050,22 @@ mod tests {
 
             // Attack 1: Integer overflow and underflow attempts
             let integer_boundary_attacks = vec![
-                (0, 1),                    // Minimum to minimum+1
-                (1, 0),                    // Minimum+1 to minimum
-                (u32::MAX - 1, u32::MAX),  // Near maximum
-                (u32::MAX, u32::MAX - 1),  // Maximum to near maximum
-                (u32::MAX, 0),             // Maximum to minimum (massive decrease)
-                (0, u32::MAX),             // Minimum to maximum (massive increase)
+                (0, 1),                           // Minimum to minimum+1
+                (1, 0),                           // Minimum+1 to minimum
+                (u32::MAX - 1, u32::MAX),         // Near maximum
+                (u32::MAX, u32::MAX - 1),         // Maximum to near maximum
+                (u32::MAX, 0),                    // Maximum to minimum (massive decrease)
+                (0, u32::MAX),                    // Minimum to maximum (massive increase)
                 (u32::MAX / 2, u32::MAX / 2 + 1), // Around midpoint
             ];
 
             for (i, (old_val, new_val)) in integer_boundary_attacks.iter().enumerate() {
-                for knob in [RuntimeKnob::ConcurrencyLimit, RuntimeKnob::BatchSize,
-                            RuntimeKnob::DrainTimeoutMs, RuntimeKnob::RetryBudget] {
+                for knob in [
+                    RuntimeKnob::ConcurrencyLimit,
+                    RuntimeKnob::BatchSize,
+                    RuntimeKnob::DrainTimeoutMs,
+                    RuntimeKnob::RetryBudget,
+                ] {
                     let boundary_proposal = OptimizationProposal {
                         proposal_id: format!("boundary_{}_{}_{}_{:?}", i, old_val, new_val, knob),
                         knob,
@@ -4408,10 +5080,13 @@ mod tests {
                     let decision = gate.submit(boundary_proposal);
 
                     // All boundary values should be processed (inner governor decides acceptance)
-                    assert!(matches!(decision, GovernorDecision::Approved |
-                                    GovernorDecision::Rejected(_) |
-                                    GovernorDecision::Reverted(_) |
-                                    GovernorDecision::ShadowOnly));
+                    assert!(matches!(
+                        decision,
+                        GovernorDecision::Approved
+                            | GovernorDecision::Rejected(_)
+                            | GovernorDecision::Reverted(_)
+                            | GovernorDecision::ShadowOnly
+                    ));
                 }
             }
 
@@ -4447,9 +5122,17 @@ mod tests {
                     old_value: old_val,
                     new_value: new_val,
                     predicted_metrics: PredictedMetrics {
-                        throughput: if i % 4 == 0 { f64::MAX } else { f64::MIN_POSITIVE },
+                        throughput: if i % 4 == 0 {
+                            f64::MAX
+                        } else {
+                            f64::MIN_POSITIVE
+                        },
                         latency_p99: 50.0,
-                        memory_usage: if i % 3 == 0 { usize::MAX.min(100_000_000) } else { 1 },
+                        memory_usage: if i % 3 == 0 {
+                            usize::MAX.min(100_000_000)
+                        } else {
+                            1
+                        },
                     },
                 };
                 let _ = gate.submit(oscillation_proposal);
@@ -4465,8 +5148,14 @@ mod tests {
                 // Check that extreme values are properly formatted in details
                 if entry.detail.contains("old=") && entry.detail.contains("new=") {
                     // Should contain valid integer representations, not overflowed values
-                    assert!(!entry.detail.contains("−"), "Should not contain minus sign corruption");
-                    assert!(!entry.detail.contains("overflow"), "Should not explicitly mention overflow");
+                    assert!(
+                        !entry.detail.contains("−"),
+                        "Should not contain minus sign corruption"
+                    );
+                    assert!(
+                        !entry.detail.contains("overflow"),
+                        "Should not explicitly mention overflow"
+                    );
                 }
             }
         }
@@ -4476,24 +5165,26 @@ mod tests {
             let mut gate = GovernorGate::with_defaults();
 
             // Attack 1: Rapid-fire submissions to disrupt ordering
-            let rapid_proposals: Vec<_> = (0..100).map(|i| {
-                OptimizationProposal {
-                    proposal_id: format!("rapid_{:03}", i), // Zero-padded for ordering tests
-                    knob: match i % 4 {
-                        0 => RuntimeKnob::ConcurrencyLimit,
-                        1 => RuntimeKnob::BatchSize,
-                        2 => RuntimeKnob::DrainTimeoutMs,
-                        _ => RuntimeKnob::RetryBudget,
-                    },
-                    old_value: i as u32,
-                    new_value: (i + 1) as u32,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: 100.0 + (i as f64),
-                        latency_p99: 50.0,
-                        memory_usage: 1500,
-                    },
-                }
-            }).collect();
+            let rapid_proposals: Vec<_> = (0..100)
+                .map(|i| {
+                    OptimizationProposal {
+                        proposal_id: format!("rapid_{:03}", i), // Zero-padded for ordering tests
+                        knob: match i % 4 {
+                            0 => RuntimeKnob::ConcurrencyLimit,
+                            1 => RuntimeKnob::BatchSize,
+                            2 => RuntimeKnob::DrainTimeoutMs,
+                            _ => RuntimeKnob::RetryBudget,
+                        },
+                        old_value: i as u32,
+                        new_value: (i + 1) as u32,
+                        predicted_metrics: PredictedMetrics {
+                            throughput: 100.0 + (i as f64),
+                            latency_p99: 50.0,
+                            memory_usage: 1500,
+                        },
+                    }
+                })
+                .collect();
 
             // Submit all proposals in rapid succession
             for proposal in rapid_proposals {
@@ -4505,8 +5196,11 @@ mod tests {
             for (trail_idx, entry) in gate.audit_trail().iter().enumerate() {
                 if entry.proposal_id.starts_with("rapid_") {
                     if let Some(last_idx) = last_seen_indices.get(&entry.proposal_id) {
-                        assert!(*last_idx < trail_idx,
-                               "Events for proposal {} are out of chronological order", entry.proposal_id);
+                        assert!(
+                            *last_idx < trail_idx,
+                            "Events for proposal {} are out of chronological order",
+                            entry.proposal_id
+                        );
                     }
                     last_seen_indices.insert(entry.proposal_id.clone(), trail_idx);
                 }
@@ -4540,21 +5234,37 @@ mod tests {
                 let post_check_trail_len = gate.audit_trail().len();
 
                 // Verify submit operations consistently add events
-                assert!(post_submit_trail_len >= baseline_trail_len,
-                       "Submit should add events to audit trail");
+                assert!(
+                    post_submit_trail_len >= baseline_trail_len,
+                    "Submit should add events to audit trail"
+                );
 
                 // live_check might or might not add events, but shouldn't corrupt ordering
-                assert!(post_check_trail_len >= post_submit_trail_len ||
-                       post_check_trail_len == post_submit_trail_len,
-                       "live_check should not remove audit events");
+                assert!(
+                    post_check_trail_len >= post_submit_trail_len
+                        || post_check_trail_len == post_submit_trail_len,
+                    "live_check should not remove audit events"
+                );
             }
 
             // Attack 3: Identical proposal IDs with different timing
             let collision_id = "timing_collision";
             let timing_metrics = vec![
-                PredictedMetrics { throughput: 90.0, latency_p99: 60.0, memory_usage: 1400 },
-                PredictedMetrics { throughput: 110.0, latency_p99: 40.0, memory_usage: 1600 },
-                PredictedMetrics { throughput: 100.0, latency_p99: 50.0, memory_usage: 1500 },
+                PredictedMetrics {
+                    throughput: 90.0,
+                    latency_p99: 60.0,
+                    memory_usage: 1400,
+                },
+                PredictedMetrics {
+                    throughput: 110.0,
+                    latency_p99: 40.0,
+                    memory_usage: 1600,
+                },
+                PredictedMetrics {
+                    throughput: 100.0,
+                    latency_p99: 50.0,
+                    memory_usage: 1500,
+                },
             ];
 
             for (i, metrics) in timing_metrics.iter().enumerate() {
@@ -4579,18 +5289,26 @@ mod tests {
             }
 
             // Verify ordering consistency despite timing collisions
-            let collision_events: Vec<_> = gate.audit_trail().iter()
+            let collision_events: Vec<_> = gate
+                .audit_trail()
+                .iter()
                 .enumerate()
                 .filter(|(_, entry)| entry.proposal_id == collision_id)
                 .collect();
 
-            assert!(!collision_events.is_empty(), "Should have recorded collision events");
+            assert!(
+                !collision_events.is_empty(),
+                "Should have recorded collision events"
+            );
 
             // Events for same proposal ID should appear in submission order
             for i in 1..collision_events.len() {
                 let (prev_idx, _) = collision_events[i - 1];
                 let (curr_idx, _) = collision_events[i];
-                assert!(prev_idx < curr_idx, "Collision events should maintain temporal ordering");
+                assert!(
+                    prev_idx < curr_idx,
+                    "Collision events should maintain temporal ordering"
+                );
             }
 
             // Final verification: audit trail should remain bounded and consistent
@@ -4598,9 +5316,14 @@ mod tests {
 
             // All events should have valid structure
             for entry in gate.audit_trail() {
-                assert!(!entry.event_code.is_empty(), "Event code should not be empty");
-                assert!(!entry.detail.is_empty() || entry.event_code.contains("ERROR"),
-                       "Detail should not be empty unless error event");
+                assert!(
+                    !entry.event_code.is_empty(),
+                    "Event code should not be empty"
+                );
+                assert!(
+                    !entry.detail.is_empty() || entry.event_code.contains("ERROR"),
+                    "Detail should not be empty unless error event"
+                );
             }
         }
 
@@ -4670,12 +5393,12 @@ mod tests {
 
             // Attack 3: Extreme metric ratios to exploit envelope calculation vulnerabilities
             let extreme_ratios = vec![
-                (1.0, 1000.0, 100),          // Very low throughput, high latency, low memory
-                (10000.0, 0.1, 100000),      // Very high throughput, low latency, high memory
-                (100.0, 500.0, 1),           // Balanced throughput/latency, minimal memory
-                (0.001, 0.001, 10000000),    // Minimal throughput/latency, extreme memory
-                (f64::MAX, 1.0, 1500),       // Extreme throughput, normal latency/memory
-                (100.0, f64::MAX, 1500),     // Normal throughput, extreme latency
+                (1.0, 1000.0, 100),       // Very low throughput, high latency, low memory
+                (10000.0, 0.1, 100000),   // Very high throughput, low latency, high memory
+                (100.0, 500.0, 1),        // Balanced throughput/latency, minimal memory
+                (0.001, 0.001, 10000000), // Minimal throughput/latency, extreme memory
+                (f64::MAX, 1.0, 1500),    // Extreme throughput, normal latency/memory
+                (100.0, f64::MAX, 1500),  // Normal throughput, extreme latency
             ];
 
             for (i, (throughput, latency, memory)) in extreme_ratios.iter().enumerate() {
@@ -4685,7 +5408,11 @@ mod tests {
                     old_value: 10,
                     new_value: 20,
                     predicted_metrics: PredictedMetrics {
-                        throughput: if throughput.is_finite() { *throughput } else { 100.0 },
+                        throughput: if throughput.is_finite() {
+                            *throughput
+                        } else {
+                            100.0
+                        },
                         latency_p99: if latency.is_finite() { *latency } else { 50.0 },
                         memory_usage: *memory as usize,
                     },
@@ -4694,8 +5421,16 @@ mod tests {
 
                 // Test envelope consistency with extreme ratios
                 let ratio_check = PredictedMetrics {
-                    throughput: if throughput.is_finite() && *throughput > 0.0 { *throughput / 2.0 } else { 50.0 },
-                    latency_p99: if latency.is_finite() && *latency > 0.0 { *latency / 2.0 } else { 25.0 },
+                    throughput: if throughput.is_finite() && *throughput > 0.0 {
+                        *throughput / 2.0
+                    } else {
+                        50.0
+                    },
+                    latency_p99: if latency.is_finite() && *latency > 0.0 {
+                        *latency / 2.0
+                    } else {
+                        25.0
+                    },
                     memory_usage: (*memory as usize / 2).max(1),
                 };
                 let _ = gate.live_check(&ratio_check);
@@ -4722,22 +5457,34 @@ mod tests {
             assert!(gate.audit_trail().len() <= MAX_AUDIT_TRAIL_ENTRIES);
 
             // Count envelope-related events
-            let envelope_events = gate.audit_trail().iter()
-                .filter(|entry| entry.event_code.contains("SAFETY") ||
-                               entry.detail.to_lowercase().contains("envelope"))
+            let envelope_events = gate
+                .audit_trail()
+                .iter()
+                .filter(|entry| {
+                    entry.event_code.contains("SAFETY")
+                        || entry.detail.to_lowercase().contains("envelope")
+                })
                 .count();
 
             // Should have some envelope-related activity due to extreme values
-            assert!(envelope_events > 0 || gate.audit_trail().is_empty(),
-                   "Should have recorded safety envelope activity");
+            assert!(
+                envelope_events > 0 || gate.audit_trail().is_empty(),
+                "Should have recorded safety envelope activity"
+            );
 
             // Verify no corruption in safety-related audit entries
             for entry in gate.audit_trail() {
-                if entry.event_code.contains("SAFETY") || entry.detail.to_lowercase().contains("envelope") {
-                    assert!(!entry.detail.to_lowercase().contains("nan"),
-                           "Safety events should not contain NaN");
-                    assert!(!entry.detail.to_lowercase().contains("inf"),
-                           "Safety events should not contain infinity");
+                if entry.event_code.contains("SAFETY")
+                    || entry.detail.to_lowercase().contains("envelope")
+                {
+                    assert!(
+                        !entry.detail.to_lowercase().contains("nan"),
+                        "Safety events should not contain NaN"
+                    );
+                    assert!(
+                        !entry.detail.to_lowercase().contains("inf"),
+                        "Safety events should not contain infinity"
+                    );
                 }
             }
         }
@@ -4750,9 +5497,10 @@ mod tests {
             for complexity_level in 0..10 {
                 for iteration in 0..20 {
                     // Create increasingly complex proposal patterns
-                    let complex_id = format!("complex_{}_{}_{}_{}_{}_{}",
-                                           complexity_level, iteration,
-                                           "layer1", "layer2", "layer3", "final");
+                    let complex_id = format!(
+                        "complex_{}_{}_{}_{}_{}_{}",
+                        complexity_level, iteration, "layer1", "layer2", "layer3", "final"
+                    );
 
                     let complex_proposal = OptimizationProposal {
                         proposal_id: complex_id,
@@ -4864,28 +5612,42 @@ mod tests {
             }
 
             // Verify system remained stable under resource pressure
-            assert!(gate.audit_trail().len() <= MAX_AUDIT_TRAIL_ENTRIES,
-                   "Audit trail should remain bounded under resource pressure");
+            assert!(
+                gate.audit_trail().len() <= MAX_AUDIT_TRAIL_ENTRIES,
+                "Audit trail should remain bounded under resource pressure"
+            );
 
             // Verify structural integrity of audit trail after stress test
             let mut event_code_counts = BTreeMap::new();
             for entry in gate.audit_trail() {
-                assert!(!entry.event_code.is_empty(), "Event code should not be corrupted");
-                assert!(!entry.proposal_id.is_empty() || entry.event_code.contains("ERROR"),
-                       "Proposal ID should not be corrupted");
+                assert!(
+                    !entry.event_code.is_empty(),
+                    "Event code should not be corrupted"
+                );
+                assert!(
+                    !entry.proposal_id.is_empty() || entry.event_code.contains("ERROR"),
+                    "Proposal ID should not be corrupted"
+                );
 
-                let count = event_code_counts.entry(entry.event_code.clone()).or_insert(0);
+                let count = event_code_counts
+                    .entry(entry.event_code.clone())
+                    .or_insert(0);
                 *count = count.saturating_add(1);
             }
 
             // Should maintain event code diversity despite stress
-            assert!(!event_code_counts.is_empty() || gate.audit_trail().is_empty(),
-                   "Should maintain event code diversity under stress");
+            assert!(
+                !event_code_counts.is_empty() || gate.audit_trail().is_empty(),
+                "Should maintain event code diversity under stress"
+            );
 
             // No single event code should dominate (indicating corruption)
             for (event_code, count) in event_code_counts {
-                assert!(count <= MAX_AUDIT_TRAIL_ENTRIES,
-                       "Event code {} should not exceed trail capacity", event_code);
+                assert!(
+                    count <= MAX_AUDIT_TRAIL_ENTRIES,
+                    "Event code {} should not exceed trail capacity",
+                    event_code
+                );
             }
         }
 
@@ -4895,12 +5657,12 @@ mod tests {
 
             // Attack 1: Platform-specific floating point edge cases
             let platform_float_tests = vec![
-                (std::f64::consts::E, std::f64::consts::PI),       // Mathematical constants
+                (std::f64::consts::E, std::f64::consts::PI), // Mathematical constants
                 (std::f64::consts::LN_2, std::f64::consts::LN_10), // Natural logarithms
-                (2.0_f64.powi(53), 2.0_f64.powi(53) + 1.0),       // IEEE 754 precision boundary
-                (1.0 / 3.0, 2.0 / 3.0),                           // Repeating decimals
-                (0.1 + 0.2, 0.3),                                  // Classic floating point issue
-                (f64::MAX / 2.0, f64::MAX / 3.0),                  // Large number divisions
+                (2.0_f64.powi(53), 2.0_f64.powi(53) + 1.0),  // IEEE 754 precision boundary
+                (1.0 / 3.0, 2.0 / 3.0),                      // Repeating decimals
+                (0.1 + 0.2, 0.3),                            // Classic floating point issue
+                (f64::MAX / 2.0, f64::MAX / 3.0),            // Large number divisions
             ];
 
             for (i, (float1, float2)) in platform_float_tests.iter().enumerate() {
@@ -4929,13 +5691,13 @@ mod tests {
             // Attack 2: String encoding and normalization edge cases
             let encoding_tests = vec![
                 "ASCII_only_test",                     // Basic ASCII
-                "UTF-8_test_café_naïve",              // UTF-8 accented characters
-                "Emoji_test_🦀_🔒_⚡_🌈",             // Emoji sequences
+                "UTF-8_test_café_naïve",               // UTF-8 accented characters
+                "Emoji_test_🦀_🔒_⚡_🌈",              // Emoji sequences
                 "Mixed_scripts_Ελληνικά_中文_العربية", // Multiple scripts
-                "Surrogate_pairs_𝕌𝕟𝕚𝕔𝕠𝕕𝕖",        // Surrogate pairs
-                "Zero_width_test\u{200B}invisible",   // Zero-width characters
-                "Directional\u{202E}override",        // Text direction override
-                "Normalization_cafe\u{0301}",         // Decomposed characters
+                "Surrogate_pairs_𝕌𝕟𝕚𝕔𝕠𝕕𝕖",             // Surrogate pairs
+                "Zero_width_test\u{200B}invisible",    // Zero-width characters
+                "Directional\u{202E}override",         // Text direction override
+                "Normalization_cafe\u{0301}",          // Decomposed characters
             ];
 
             for (i, test_string) in encoding_tests.iter().enumerate() {
@@ -4955,12 +5717,12 @@ mod tests {
 
             // Attack 3: Endianness and byte order edge cases
             let byte_order_values = vec![
-                0x01020304_u32,    // Big-endian pattern
-                0x04030201_u32,    // Little-endian pattern
-                0x12345678_u32,    // Classic test pattern
-                0x87654321_u32,    // Reversed pattern
-                0xDEADBEEF_u32,    // Well-known pattern
-                0xCAFEBABE_u32,    // Another well-known pattern
+                0x01020304_u32, // Big-endian pattern
+                0x04030201_u32, // Little-endian pattern
+                0x12345678_u32, // Classic test pattern
+                0x87654321_u32, // Reversed pattern
+                0xDEADBEEF_u32, // Well-known pattern
+                0xCAFEBABE_u32, // Another well-known pattern
             ];
 
             for (i, &byte_value) in byte_order_values.iter().enumerate() {
@@ -5007,12 +5769,15 @@ mod tests {
             // Attack 5: Time representation and timezone edge cases
             for time_test in 0..30 {
                 // Simulate different timestamp scenarios
-                let time_based_id = format!("time_edge_case_{}_{}",
-                                          time_test,
-                                          std::time::SystemTime::now()
-                                              .duration_since(std::time::UNIX_EPOCH)
-                                              .unwrap_or_default()
-                                              .as_nanos() % 1000);
+                let time_based_id = format!(
+                    "time_edge_case_{}_{}",
+                    time_test,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                        % 1000
+                );
 
                 let time_proposal = OptimizationProposal {
                     proposal_id: time_based_id,
@@ -5034,27 +5799,41 @@ mod tests {
             // Check that all audit entries maintain structural consistency
             for entry in gate.audit_trail() {
                 // Verify basic structure
-                assert!(!entry.event_code.is_empty(), "Event codes should remain valid");
-                assert!(entry.proposal_id.len() <= 10000, "Proposal IDs should be bounded");
+                assert!(
+                    !entry.event_code.is_empty(),
+                    "Event codes should remain valid"
+                );
+                assert!(
+                    entry.proposal_id.len() <= 10000,
+                    "Proposal IDs should be bounded"
+                );
                 assert!(entry.detail.len() <= 100000, "Details should be bounded");
 
                 // Verify no encoding corruption
-                assert!(entry.proposal_id.is_ascii() || entry.proposal_id.chars().all(|c| c != '\u{FFFD}'),
-                       "Proposal ID should not contain replacement characters");
+                assert!(
+                    entry.proposal_id.is_ascii()
+                        || entry.proposal_id.chars().all(|c| c != '\u{FFFD}'),
+                    "Proposal ID should not contain replacement characters"
+                );
 
                 // Verify no control character corruption (except allowed ones)
-                let has_dangerous_control = entry.detail.chars()
+                let has_dangerous_control = entry
+                    .detail
+                    .chars()
                     .any(|c| c.is_control() && c != '\n' && c != '\t' && c != '\r');
-                assert!(!has_dangerous_control || entry.detail.contains("control"),
-                       "Should not have unexpected control characters");
+                assert!(
+                    !has_dangerous_control || entry.detail.contains("control"),
+                    "Should not have unexpected control characters"
+                );
             }
 
             // Verify event code consistency
-            let unique_event_codes: HashSet<_> = gate.audit_trail().iter()
-                .map(|e| &e.event_code)
-                .collect();
-            assert!(!unique_event_codes.is_empty() || gate.audit_trail().is_empty(),
-                   "Should maintain event code diversity");
+            let unique_event_codes: HashSet<_> =
+                gate.audit_trail().iter().map(|e| &e.event_code).collect();
+            assert!(
+                !unique_event_codes.is_empty() || gate.audit_trail().is_empty(),
+                "Should maintain event code diversity"
+            );
         }
     }
 }

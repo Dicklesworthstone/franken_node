@@ -1747,11 +1747,28 @@ mod tests {
         let hash_b = sha256_json(&value_b).expect("hash B");
 
         // These should produce different hashes due to length prefixing
-        assert_ne!(hash_a, hash_b, "Different JSON structures should produce different hashes");
-        assert!(hash_a.starts_with("sha256:"), "Hash A should be well-formed");
-        assert!(hash_b.starts_with("sha256:"), "Hash B should be well-formed");
-        assert_eq!(hash_a.len(), 71, "Hash A should be 71 chars (sha256: + 64 hex)");
-        assert_eq!(hash_b.len(), 71, "Hash B should be 71 chars (sha256: + 64 hex)");
+        assert_ne!(
+            hash_a, hash_b,
+            "Different JSON structures should produce different hashes"
+        );
+        assert!(
+            hash_a.starts_with("sha256:"),
+            "Hash A should be well-formed"
+        );
+        assert!(
+            hash_b.starts_with("sha256:"),
+            "Hash B should be well-formed"
+        );
+        assert_eq!(
+            hash_a.len(),
+            71,
+            "Hash A should be 71 chars (sha256: + 64 hex)"
+        );
+        assert_eq!(
+            hash_b.len(),
+            71,
+            "Hash B should be 71 chars (sha256: + 64 hex)"
+        );
 
         // Test case 2: More subtle collision attempt with array concatenation
         let array_a = json!(["message", "authentication", "code"]);
@@ -1760,13 +1777,19 @@ mod tests {
         let hash_array_a = sha256_json(&array_a).expect("hash array A");
         let hash_array_b = sha256_json(&array_b).expect("hash array B");
 
-        assert_ne!(hash_array_a, hash_array_b, "Different arrays should produce different hashes");
+        assert_ne!(
+            hash_array_a, hash_array_b,
+            "Different arrays should produce different hashes"
+        );
 
         // Test case 3: Ensure same input produces same hash (deterministic)
         let value_c = json!({"test": "data", "number": 42});
         let hash_c1 = sha256_json(&value_c).expect("hash C1");
         let hash_c2 = sha256_json(&value_c).expect("hash C2");
 
-        assert_eq!(hash_c1, hash_c2, "Same input should produce same hash (deterministic)");
+        assert_eq!(
+            hash_c1, hash_c2,
+            "Same input should produce same hash (deterministic)"
+        );
     }
 }
