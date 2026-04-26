@@ -421,6 +421,10 @@ name = "evidence_ledger_chain_order_metamorphic"
 path = "tests/evidence_ledger_chain_order_metamorphic.rs"
 
 [[test]]
+name = "adversarial_trust_card_forgery"
+path = "tests/adversarial_trust_card_forgery.rs"
+
+[[test]]
 name = "sync_durability_regression"
 path = "tests/sync_durability_regression.rs"
 
