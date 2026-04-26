@@ -2146,6 +2146,50 @@ fn fleet_describe_json_reports_node_state_and_zone_context() {
 }
 
 #[test]
+fn ops_health_check_json_reports_local_state_and_build_metadata() {
+    let workspace = tempdir().expect("tempdir");
+    let evidence_path = workspace
+        .path()
+        .join(".franken-node/state/incidents/INC-OPS-001/evidence.v1.json");
+    std::fs::create_dir_all(
+        evidence_path
+            .parent()
+            .expect("incident evidence path should have parent"),
+    )
+    .expect("create incident evidence directory");
+    std::fs::write(&evidence_path, "{\"schema_version\":\"fixture\"}\n")
+        .expect("write incident evidence");
+
+    let expected_flush_timestamp =
+        chrono::DateTime::<Utc>::from(
+            std::fs::metadata(&evidence_path)
+                .expect("incident evidence metadata")
+                .modified()
+                .expect("incident evidence mtime"),
+        )
+        .to_rfc3339();
+
+    let output = run_cli_in_dir_with_env(workspace.path(), &["ops", "health-check", "--json"], &[]);
+    assert!(
+        output.status.success(),
+        "ops health-check --json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("ops health-check json");
+    assert!(payload["uptime_seconds"].as_u64().is_some());
+    assert_eq!(payload["active_session_count"], 0);
+    assert_eq!(
+        payload["last_successful_evidence_ledger_flush_timestamp"],
+        expected_flush_timestamp
+    );
+    assert_eq!(payload["build_version"], env!("CARGO_PKG_VERSION"));
+    assert_ne!(payload["git_sha"], "unknown");
+    assert_eq!(payload["pass"], true);
+}
+
+#[test]
 fn fleet_release_human_output_shape_is_stable() {
     let fleet_state = tempdir().expect("tempdir");
     let fleet_state_dir = fleet_state.path().join("fleet-state");
