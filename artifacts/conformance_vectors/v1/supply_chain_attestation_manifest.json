@@ -1,0 +1,57 @@
+{
+  "schema_version": "1.0",
+  "package": {
+    "name": "auth-guard",
+    "version": "1.2.3",
+    "publisher": "publisher@example.com",
+    "author": "author@example.com"
+  },
+  "entrypoint": "dist/main.js",
+  "capabilities": [
+    "fs_read",
+    "net_client"
+  ],
+  "behavioral_profile": {
+    "risk_tier": "medium",
+    "summary": "Reads local policy and performs outbound calls to policy oracle",
+    "declared_network_zones": [
+      "prod-us-east"
+    ]
+  },
+  "minimum_runtime_version": "0.1.0",
+  "provenance": {
+    "build_system": "github-actions",
+    "source_repository": "https://example.com/acme/extensions",
+    "source_revision": "abcdef1234567890",
+    "reproducibility_markers": [
+      "reproducible-build=true"
+    ],
+    "attestation_chain": [
+      {
+        "id": "att-01",
+        "attestation_type": "slsa",
+        "digest": "sha256:0123456789abcdef"
+      }
+    ]
+  },
+  "trust": {
+    "certification_level": "verified",
+    "revocation_status_pointer": "revocation://extensions/auth-guard",
+    "trust_card_reference": "trust-card://auth-guard@1.2.3"
+  },
+  "signature": {
+    "scheme": "threshold_ed25519",
+    "publisher_key_id": "key-publisher-01",
+    "signature": "QUJDREU=",
+    "threshold": {
+      "threshold": 2,
+      "total_signers": 3,
+      "signer_key_ids": [
+        "key-a",
+        "key-b",
+        "key-c"
+      ]
+    },
+    "signed_at": "2026-02-20T00:00:00Z"
+  }
+}

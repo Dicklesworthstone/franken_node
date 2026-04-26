@@ -518,6 +518,10 @@ name = "security_perfect_e2e_enforcement"
 path = "tests/security_perfect_e2e_enforcement.rs"
 
 [[test]]
+name = "cross_substrate_vector_consumer_conformance"
+path = "tests/cross_substrate_vector_consumer_conformance.rs"
+
+[[test]]
 name = "remote_api_conformance_harness"
 path = "tests/remote_api_conformance_harness.rs"
 required-features = ["control-plane"]

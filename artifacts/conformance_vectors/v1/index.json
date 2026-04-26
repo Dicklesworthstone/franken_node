@@ -1,0 +1,32 @@
+{
+  "schema_version": "franken-node/conformance-vectors/v1",
+  "source_bead_id": "bd-3humk",
+  "source_version": "v1",
+  "description": "Representative conformance vectors published for cross-substrate consumption by franken_engine and adjacent consumers.",
+  "vectors": [
+    {
+      "id": "decision_receipt",
+      "path": "artifacts/conformance_vectors/v1/decision_receipt.json",
+      "media_type": "application/json",
+      "rust_type": "frankenengine_node::security::decision_receipt::Receipt",
+      "source_fixture": "artifacts/golden/decision_receipt.json",
+      "proves": "High-impact decision receipt exports remain parseable for downstream audit and quarantine pipelines."
+    },
+    {
+      "id": "supply_chain_attestation_manifest",
+      "path": "artifacts/conformance_vectors/v1/supply_chain_attestation_manifest.json",
+      "media_type": "application/json",
+      "rust_type": "frankenengine_node::supply_chain::manifest::SignedExtensionManifest",
+      "source_fixture": "crates/franken-node/src/supply_chain/manifest.rs::tests::valid_manifest",
+      "proves": "Signed extension manifests remain parseable and valid against the current supply-chain contract."
+    },
+    {
+      "id": "vef_execution_receipt",
+      "path": "artifacts/conformance_vectors/v1/vef_execution_receipt.canonical.json",
+      "media_type": "application/json",
+      "rust_type": "frankenengine_node::connector::vef_execution_receipt::ExecutionReceipt",
+      "source_fixture": "artifacts/golden/vef_execution_receipt.bin",
+      "proves": "Canonical VEF execution receipt bytes remain parseable by the current evidence and receipt consumers."
+    }
+  ]
+}

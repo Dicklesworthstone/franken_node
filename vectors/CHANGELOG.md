@@ -3,6 +3,14 @@
 This changelog is required by `bd-s6y` gate policy.
 Any canonical vector update must add an entry that lists changed vector paths.
 
+## [Unreleased] - 2026-04-26
+
+### Added
+- Source `bd-3humk/v1`: `artifacts/conformance_vectors/v1/index.json`
+- Source `bd-3humk/v1`: `artifacts/conformance_vectors/v1/decision_receipt.json`
+- Source `bd-3humk/v1`: `artifacts/conformance_vectors/v1/supply_chain_attestation_manifest.json`
+- Source `bd-3humk/v1`: `artifacts/conformance_vectors/v1/vef_execution_receipt.canonical.json`
+
 ## [1.0.0] - 2026-02-22
 
 ### Added

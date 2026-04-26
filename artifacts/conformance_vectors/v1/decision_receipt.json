@@ -1,0 +1,23 @@
+{
+  "receipt_id": "01234567-89ab-cdef-0123-456789abcdef",
+  "action_name": "quarantine_extension",
+  "actor_identity": "security-admin@franken-node.prod",
+  "timestamp": "2026-01-01T00:00:00Z",
+  "input_hash": "a1b2c3d4e5f6789a1b2c3d4e5f6789a1b2c3d4e5f6789a1b2c3d4e5f6789a1b2c3d4",
+  "output_hash": "f6e5d4c3b2a19876f6e5d4c3b2a19876f6e5d4c3b2a19876f6e5d4c3b2a19876f6e5",
+  "decision": "approved",
+  "rationale": "Extension exhibits suspicious network behavior patterns consistent with data exfiltration",
+  "evidence_refs": [
+    "evidence:network-anomaly-detector:2026-001",
+    "evidence:behavioral-analysis:ext-scan-001",
+    "evidence:reputation-feed:threat-intel-db"
+  ],
+  "policy_rule_chain": [
+    "policy:network-egress-monitoring",
+    "policy:behavioral-reputation-gate",
+    "policy:quarantine-on-threat-match"
+  ],
+  "confidence": 4615482049018511565,
+  "rollback_command": "franken-node trust release --extension npm:@malware/data-stealer --audit-id AUD-2026-001",
+  "previous_receipt_hash": "previous-receipt-hash-abc123def456"
+}
