@@ -58,11 +58,14 @@ use crate::api::{
 use crate::cli::{
     BenchCommand, Cli, Command, DoctorCloseConditionArgs, DoctorCommand,
     DoctorPolicyActivationInput, FleetAgentArgs, FleetCommand, IncidentCommand, MigrateCommand,
-    RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs,
-    RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand, TrustCardCommand, TrustCommand,
-    VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
-    VerifyModuleArgs, VerifyReleaseArgs, load_doctor_policy_activation_input,
+    OpsCommand, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs, RemoteCapRevokeArgs,
+    RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand, TrustCardCommand,
+    TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs,
+    VerifyMigrationArgs, VerifyModuleArgs, VerifyReleaseArgs,
+    load_doctor_policy_activation_input,
 };
+use frankenengine_node::api::session_auth::{SessionConfig, SessionManager};
+use frankenengine_node::control_plane::ControlEpoch;
 use crate::policy::{
     bayesian_diagnostics::{BayesianDiagnostics, CandidateRef, Observation},
     decision_engine::{DecisionEngine, DecisionOutcome, DecisionReason},
@@ -98,6 +101,7 @@ use frankenengine_node::{
             Decision, Receipt, ReceiptQuery, append_signed_receipt, export_receipts_to_path,
             sign_receipt, write_receipts_markdown,
         },
+        epoch_scoped_keys::RootSecret,
         remote_cap::{
             CapabilityGate, CapabilityProvider, RemoteCap, RemoteCapError, RemoteOperation,
             RemoteScope,
@@ -145,7 +149,7 @@ use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
 mod migration;
@@ -204,6 +208,11 @@ const TRUST_SCAN_NPM_REGISTRY_BASE_URL: &str = "https://registry.npmjs.org";
 const TRUST_SCAN_OSV_QUERY_URL: &str = "https://api.osv.dev/v1/query";
 const TRUST_SCAN_DEPS_DEV_BASE_URL: &str = "https://api.deps.dev/v3alpha";
 const TRUST_SCAN_REMOTECAP_TOKEN_ENV: &str = "FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN";
+const OPS_HEALTH_LEDGER_FILE_CANDIDATES: &[&str] =
+    &["evidence_spill.jsonl", "durable_evidence_spill.jsonl", "spill.jsonl"];
+
+static OPS_HEALTH_CHECK_PROCESS_START: std::sync::LazyLock<Instant> =
+    std::sync::LazyLock::new(Instant::now);
 
 struct TrustCardCliRegistryState {
     path: PathBuf,
@@ -223,6 +232,16 @@ struct VerifyContractOutput {
     reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct OpsHealthCheckReport {
+    uptime_seconds: u64,
+    active_session_count: usize,
+    last_successful_evidence_ledger_flush_timestamp: Option<String>,
+    build_version: String,
+    git_sha: String,
+    pass: bool,
 }
 
 struct Ed25519SigningMaterial {
@@ -6097,6 +6116,140 @@ fn build_run_execution_receipt(
 
 fn run_execution_receipts_root(project_root: &Path) -> Result<PathBuf> {
     Ok(ensure_state_dir(project_root)?.join("execution-receipts"))
+}
+
+fn ops_health_check_report(project_root: &Path) -> Result<OpsHealthCheckReport> {
+    let last_successful_evidence_ledger_flush_timestamp =
+        latest_evidence_ledger_flush_timestamp(project_root)?;
+    let git_sha = option_env!("FRANKEN_NODE_GIT_SHA")
+        .unwrap_or("unknown")
+        .to_string();
+
+    Ok(OpsHealthCheckReport {
+        uptime_seconds: OPS_HEALTH_CHECK_PROCESS_START.elapsed().as_secs(),
+        active_session_count: ops_active_session_count(),
+        pass: last_successful_evidence_ledger_flush_timestamp.is_some() && git_sha != "unknown",
+        last_successful_evidence_ledger_flush_timestamp,
+        build_version: env!("CARGO_PKG_VERSION").to_string(),
+        git_sha,
+    })
+}
+
+fn ops_active_session_count() -> usize {
+    SessionManager::new(
+        SessionConfig::default(),
+        RootSecret::from_bytes([0x5A; 32]),
+        ControlEpoch::GENESIS,
+    )
+    .active_session_count()
+}
+
+fn latest_evidence_ledger_flush_timestamp(project_root: &Path) -> Result<Option<String>> {
+    let state_dir = project_root.join(".franken-node/state");
+    if !state_dir.exists() {
+        return Ok(None);
+    }
+
+    let mut newest = None;
+    for candidate in OPS_HEALTH_LEDGER_FILE_CANDIDATES {
+        update_newest_modified_from_path(&mut newest, &state_dir.join(candidate))?;
+    }
+
+    merge_newest_modified(
+        &mut newest,
+        newest_matching_file_mtime(&project_root.join(INCIDENT_EVIDENCE_RELATIVE_DIR), |path| {
+            path.file_name().and_then(|name| name.to_str()) == Some(INCIDENT_EVIDENCE_FILE_NAME)
+        })?,
+    );
+    merge_newest_modified(
+        &mut newest,
+        newest_matching_file_mtime(&state_dir.join("execution-receipts"), |path| {
+            path.extension().and_then(|ext| ext.to_str()) == Some("json")
+        })?,
+    );
+
+    Ok(newest.map(|timestamp| DateTime::<Utc>::from(timestamp).to_rfc3339()))
+}
+
+fn update_newest_modified_from_path(
+    newest: &mut Option<SystemTime>,
+    path: &Path,
+) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+
+    let modified = std::fs::metadata(path)
+        .with_context(|| format!("failed reading metadata for {}", path.display()))?
+        .modified()
+        .with_context(|| format!("failed reading mtime for {}", path.display()))?;
+    merge_newest_modified(newest, Some(modified));
+    Ok(())
+}
+
+fn merge_newest_modified(newest: &mut Option<SystemTime>, candidate: Option<SystemTime>) {
+    match (newest.as_ref(), candidate) {
+        (_, None) => {}
+        (None, Some(candidate)) => *newest = Some(candidate),
+        (Some(current), Some(candidate)) if candidate > *current => *newest = Some(candidate),
+        _ => {}
+    }
+}
+
+fn newest_matching_file_mtime<F>(root: &Path, predicate: F) -> Result<Option<SystemTime>>
+where
+    F: Fn(&Path) -> bool + Copy,
+{
+    if !root.exists() {
+        return Ok(None);
+    }
+
+    let mut newest = None;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in
+            std::fs::read_dir(&dir).with_context(|| format!("failed listing {}", dir.display()))?
+        {
+            let entry = entry.with_context(|| format!("failed reading {}", dir.display()))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("failed reading file type for {}", path.display()))?;
+            if file_type.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !file_type.is_file() || !predicate(&path) {
+                continue;
+            }
+            let modified = entry
+                .metadata()
+                .with_context(|| format!("failed reading metadata for {}", path.display()))?
+                .modified()
+                .with_context(|| format!("failed reading mtime for {}", path.display()))?;
+            merge_newest_modified(&mut newest, Some(modified));
+        }
+    }
+
+    Ok(newest)
+}
+
+fn emit_ops_health_check_report(report: &OpsHealthCheckReport, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(report)?);
+    } else {
+        let flush_timestamp = report
+            .last_successful_evidence_ledger_flush_timestamp
+            .as_deref()
+            .unwrap_or("none");
+        println!("ops health-check: pass={}", report.pass);
+        println!("  uptime_seconds={}", report.uptime_seconds);
+        println!("  active_session_count={}", report.active_session_count);
+        println!("  last_successful_evidence_ledger_flush_timestamp={flush_timestamp}");
+        println!("  build_version={}", report.build_version);
+        println!("  git_sha={}", report.git_sha);
+    }
+    Ok(())
 }
 
 fn list_active_run_receipts(receipts_root: &Path) -> Result<Vec<PathBuf>> {
@@ -20148,6 +20301,13 @@ fn main() -> Result<()> {
                     "{}",
                     render_incident_list(&entries, severity_filter.as_deref())
                 );
+            }
+        },
+
+        Command::Ops(sub) => match sub {
+            OpsCommand::HealthCheck(args) => {
+                let report = ops_health_check_report(Path::new("."))?;
+                emit_ops_health_check_report(&report, args.json)?;
             }
         },
 
