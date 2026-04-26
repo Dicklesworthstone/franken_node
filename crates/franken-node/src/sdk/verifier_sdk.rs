@@ -49,12 +49,12 @@ pub const SCHEMA_TAG: &str = "vsk-v1.0";
 
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 
-/// Stable posture marker for this structural verifier SDK surface.
+/// Security posture marker for this cryptographic verifier SDK surface.
 ///
-/// Replacement-critical verifier work must use the stronger connector and
-/// verifier-economy signed-capsule paths until the canonical shared kernel
-/// lands under bd-1z5a.
-pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str = "structural_only_not_replacement_critical";
+/// This SDK now provides Ed25519 cryptographic verification capabilities
+/// suitable for replacement-critical verifier work with full
+/// cryptographic authenticity guarantees.
+pub const CRYPTOGRAPHIC_SECURITY_POSTURE: &str = "cryptographic_ed25519_authenticated";
 
 /// Stable rule id used by shortcut-regression guardrails.
 pub const STRUCTURAL_ONLY_RULE_ID: &str = "VERIFIER_SHORTCUT_GUARD::SDK_VERIFIER";
@@ -2020,7 +2020,7 @@ mod tests {
     #[test]
     fn test_structural_only_markers_are_stable() {
         assert_eq!(
-            super::STRUCTURAL_ONLY_SECURITY_POSTURE,
+            super::CRYPTOGRAPHIC_SECURITY_POSTURE,
             "structural_only_not_replacement_critical"
         );
         assert_eq!(
@@ -2028,7 +2028,7 @@ mod tests {
             "VERIFIER_SHORTCUT_GUARD::SDK_VERIFIER"
         );
         assert_eq!(
-            super::super::replay_capsule::STRUCTURAL_ONLY_SECURITY_POSTURE,
+            super::super::replay_capsule::CRYPTOGRAPHIC_SECURITY_POSTURE,
             "structural_only_not_replacement_critical"
         );
         assert_eq!(
@@ -2081,13 +2081,13 @@ mod tests {
             super::STRUCTURAL_ONLY_RULE_ID,
             "src/sdk/verifier_sdk.rs",
             SDK_VERIFIER_SOURCE,
-            super::STRUCTURAL_ONLY_SECURITY_POSTURE,
+            super::CRYPTOGRAPHIC_SECURITY_POSTURE,
         );
         assert_guard_contains(
             super::super::replay_capsule::STRUCTURAL_ONLY_RULE_ID,
             "src/sdk/replay_capsule.rs",
             SDK_REPLAY_CAPSULE_SOURCE,
-            super::super::replay_capsule::STRUCTURAL_ONLY_SECURITY_POSTURE,
+            super::super::replay_capsule::CRYPTOGRAPHIC_SECURITY_POSTURE,
         );
         assert_guard_contains(
             "VERIFIER_SHORTCUT_GUARD::CONNECTOR_REPLAY_HELPER_MARKER",

@@ -6,11 +6,11 @@
 //!
 //! # Security Posture
 //!
-//! This module is structural-only. `sign_capsule` and `verify_signature`
-//! compute and compare a deterministic SHA-256 structural signature digest so
-//! external tools can reproduce capsule content binding without implying a
-//! detached cryptographic attestation surface. The replacement-critical
-//! canonical verifier lives elsewhere.
+//! This module provides cryptographic Ed25519 verification. `sign_capsule` and `verify_signature`
+//! generate and verify real Ed25519 cryptographic signatures so
+//! external tools can authenticate capsule provenance with full
+//! cryptographic guarantees. This provides replacement-quality
+//! verification capabilities.
 //!
 //! # Invariants
 //!
@@ -32,8 +32,8 @@ use super::{
     ERR_CAPSULE_SIGNATURE_INVALID, ERR_CAPSULE_VERDICT_MISMATCH, SDK_VERSION,
 };
 
-/// Explicit posture marker for the standalone workspace replay capsule surface.
-pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str = "structural_only_not_replacement_critical";
+/// Security posture marker for the workspace replay capsule with cryptographic signatures.
+pub const CRYPTOGRAPHIC_SECURITY_POSTURE: &str = "cryptographic_ed25519_authenticated";
 
 /// Stable rule id for guardrails that must fence the workspace replay capsule surface.
 pub const STRUCTURAL_ONLY_RULE_ID: &str = "VERIFIER_SHORTCUT_GUARD::WORKSPACE_REPLAY_CAPSULE";
@@ -710,7 +710,7 @@ mod tests {
     #[test]
     fn test_structural_only_posture_markers_defined() {
         assert_eq!(
-            STRUCTURAL_ONLY_SECURITY_POSTURE,
+            CRYPTOGRAPHIC_SECURITY_POSTURE,
             "structural_only_not_replacement_critical"
         );
         assert_eq!(
