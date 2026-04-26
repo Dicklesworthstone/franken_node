@@ -146,6 +146,10 @@ name = "remote_cap_replay_token_set_loom"
 path = "tests/remote_cap_replay_token_set_loom.rs"
 
 [[test]]
+name = "auth_failure_limiter_loom"
+path = "tests/auth_failure_limiter_loom.rs"
+
+[[test]]
 name = "isolation_rail_router"
 path = "tests/isolation_rail_router.rs"
 
@@ -428,6 +432,10 @@ path = "tests/evidence_ledger_chain_order_metamorphic.rs"
 [[test]]
 name = "adversarial_trust_card_forgery"
 path = "tests/adversarial_trust_card_forgery.rs"
+
+[[test]]
+name = "adversarial_supply_chain_poisoning"
+path = "tests/adversarial_supply_chain_poisoning.rs"
 
 [[test]]
 name = "sync_durability_regression"
