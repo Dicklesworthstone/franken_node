@@ -161,25 +161,35 @@ impl EvidenceEntry {
     }
 }
 
-fn entry_with_server_computed_size(entry: &EvidenceEntry) -> (EvidenceEntry, usize) {
-    let mut normalized = entry.clone();
+fn entry_with_server_computed_size(mut normalized: EvidenceEntry) -> (EvidenceEntry, usize) {
     normalized.size_bytes = 0;
+    let base_size = serialized_entry_size(&normalized);
+    let size_without_size_digits = base_size.saturating_sub(1);
 
-    let mut candidate_size = serialized_entry_size(&normalized);
-    for _ in 0..24 {
-        if normalized.size_bytes == candidate_size {
-            break;
+    // `size_bytes` is the only self-referential field in the serialized JSON, so
+    // the fixed point is `n = base_without_digits + digits10(n)`.
+    let mut digit_count = decimal_digit_count(base_size);
+    let candidate_size = loop {
+        let next_size = size_without_size_digits.saturating_add(digit_count);
+        let next_digit_count = decimal_digit_count(next_size);
+        if next_digit_count == digit_count {
+            break next_size;
         }
-        normalized.size_bytes = candidate_size;
-        let next_size = serialized_entry_size(&normalized);
-        if next_size == candidate_size {
-            break;
-        }
-        candidate_size = next_size;
-    }
+        digit_count = next_digit_count;
+    };
 
     normalized.size_bytes = candidate_size;
     (normalized, candidate_size)
+}
+
+fn decimal_digit_count(value: usize) -> usize {
+    let mut remaining = value;
+    let mut digits = 1;
+    while remaining >= 10 {
+        digits = digits.saturating_add(1);
+        remaining /= 10;
+    }
+    digits
 }
 
 fn serialized_entry_size(entry: &EvidenceEntry) -> usize {
@@ -549,24 +559,20 @@ impl EvidenceLedger {
             }
         }
 
-        let (mut normalized_entry, _) = entry_with_server_computed_size(entry);
-
         // SECURITY: Validate hash chain integrity if client provided prev_entry_hash
-        if !normalized_entry.prev_entry_hash.is_empty() {
+        if !entry.prev_entry_hash.is_empty() {
             let expected_hash = self.last_entry_hash.as_deref().unwrap_or("");
-            if !crate::security::constant_time::ct_eq(
-                expected_hash,
-                &normalized_entry.prev_entry_hash,
-            ) {
+            if !crate::security::constant_time::ct_eq(expected_hash, &entry.prev_entry_hash) {
                 return Err(LedgerError::HashChainBroken {
                     expected_hash: expected_hash.to_string(),
-                    provided_hash: normalized_entry.prev_entry_hash.clone(),
+                    provided_hash: entry.prev_entry_hash.clone(),
                 });
             }
         }
 
+        let mut normalized_entry = entry.clone();
         normalized_entry.prev_entry_hash = self.last_entry_hash.clone().unwrap_or_default();
-        let (normalized_entry, entry_size) = entry_with_server_computed_size(&normalized_entry);
+        let (normalized_entry, entry_size) = entry_with_server_computed_size(normalized_entry);
 
         if entry_size > self.capacity.max_bytes {
             eprintln!(
@@ -2369,6 +2375,72 @@ mod tests {
             ledger.current_bytes(),
             serialized_total,
             "ledger byte accounting must match the finalized retained entries"
+        );
+    }
+
+    #[test]
+    fn append_normalizes_client_size_bytes_without_changing_hash_chain_validation() {
+        let mut ledger = EvidenceLedger::new(LedgerCapacity::new(10, 100_000));
+        ledger
+            .append(make_entry("DEC-001", 1))
+            .expect("first append");
+
+        let expected_prev_hash = ledger
+            .last_entry_hash
+            .clone()
+            .expect("first append should establish chain hash");
+        let mut second_entry = make_entry("DEC-002", 2);
+        second_entry.size_bytes = usize::MAX;
+        second_entry.prev_entry_hash = expected_prev_hash;
+
+        ledger.append(second_entry).expect("second append");
+
+        let snapshot = ledger.snapshot();
+        let appended_entry = &snapshot.entries[1].1;
+        assert!(
+            appended_entry.size_bytes < usize::MAX,
+            "ledger must recompute server-owned size_bytes"
+        );
+        assert!(
+            !appended_entry.prev_entry_hash.is_empty(),
+            "hash chain linkage must still be finalized"
+        );
+    }
+
+    #[test]
+    fn server_computed_size_matches_serialized_length_across_digit_boundary() {
+        let mut found_digit_boundary = false;
+
+        for payload_size in 0..4096 {
+            let mut entry = test_entry("DEC-BOUNDARY", 1);
+            entry.payload = serde_json::json!({ "padding": "x".repeat(payload_size) });
+
+            let mut zero_sized = entry.clone();
+            zero_sized.size_bytes = 0;
+            let base_size = serialized_entry_size(&zero_sized);
+
+            let (normalized, computed_size) = entry_with_server_computed_size(entry);
+            let serialized_len = serde_json::to_string(&normalized)
+                .expect("normalized entry serialization")
+                .len();
+
+            assert_eq!(
+                computed_size, serialized_len,
+                "closed-form size solver must match actual serialized length"
+            );
+
+            let initial_guess = base_size
+                .saturating_sub(1)
+                .saturating_add(decimal_digit_count(base_size));
+            if decimal_digit_count(computed_size) != decimal_digit_count(initial_guess) {
+                found_digit_boundary = true;
+                break;
+            }
+        }
+
+        assert!(
+            found_digit_boundary,
+            "test should exercise a size_bytes decimal-boundary crossover"
         );
     }
 
