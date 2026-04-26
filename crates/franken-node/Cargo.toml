@@ -96,6 +96,7 @@ assert2 = "0.4.0"
 fsqlite = { path = "/dp/frankensqlite/crates/fsqlite", default-features = false, features = ["native"] }
 frankenengine-verifier-sdk = { path = "../../sdk/verifier" }
 fastapi_rust = { package = "fastapi-rust", path = "/dp/fastapi_rust/crates/fastapi", default-features = false }
+loom = "0.7"
 tokio = { workspace = true, features = ["sync", "time"] }
 regex = "1.11.1"
 sqlmodel = { path = "/dp/sqlmodel_rust/crates/sqlmodel", default-features = false }
@@ -139,6 +140,10 @@ path = "tests/remotecap_cli_wire_conformance.rs"
 [[test]]
 name = "remote_cap_enforcement"
 path = "tests/remote_cap_enforcement.rs"
+
+[[test]]
+name = "remote_cap_replay_token_set_loom"
+path = "tests/remote_cap_replay_token_set_loom.rs"
 
 [[test]]
 name = "isolation_rail_router"

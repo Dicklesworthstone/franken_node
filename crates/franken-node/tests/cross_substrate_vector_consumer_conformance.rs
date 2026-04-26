@@ -36,7 +36,23 @@ fn workspace_root() -> Result<PathBuf, String> {
 }
 
 fn read_workspace_bytes(relative_path: &str) -> Result<Vec<u8>, String> {
+    const MAX_VECTOR_BYTES: u64 = 16 * 1024 * 1024; // 16 MB limit for conformance vectors
+
     let path = workspace_root()?.join(relative_path);
+
+    // Check file size before reading to prevent memory exhaustion DoS attacks
+    let metadata = std::fs::metadata(&path)
+        .map_err(|err| format!("{} metadata must be readable: {err}", path.display()))?;
+
+    if metadata.len() > MAX_VECTOR_BYTES {
+        return Err(format!(
+            "{} size {} bytes exceeds maximum {} bytes for conformance vectors",
+            path.display(),
+            metadata.len(),
+            MAX_VECTOR_BYTES
+        ));
+    }
+
     std::fs::read(&path).map_err(|err| format!("{} must be readable: {err}", path.display()))
 }
 
