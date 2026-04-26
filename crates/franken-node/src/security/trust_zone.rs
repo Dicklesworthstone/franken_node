@@ -283,8 +283,10 @@ pub struct ZoneSegmentationEngine {
     key_zone_bindings: BTreeMap<String, Vec<String>>,
     /// Audit events emitted by the engine.
     events: Vec<ZoneAuditEvent>,
-    /// Whether freshness gate is satisfied (simulates bd-2sx integration).
-    freshness_valid: bool,
+    /// Timestamp when freshness was last validated (RFC3339 format).
+    freshness_timestamp: String,
+    /// Maximum age in seconds before freshness becomes stale.
+    freshness_max_age_seconds: u64,
 }
 
 impl ZoneSegmentationEngine {
@@ -295,13 +297,43 @@ impl ZoneSegmentationEngine {
             resource_zone_map: BTreeMap::new(),
             key_zone_bindings: BTreeMap::new(),
             events: Vec::new(),
-            freshness_valid: true,
+            freshness_timestamp: chrono::Utc::now().to_rfc3339(),
+            freshness_max_age_seconds: 300, // 5 minutes default
         }
     }
 
-    /// Set whether freshness proofs are considered valid (for testing).
+    /// Update freshness timestamp to current time (marks as fresh).
+    pub fn refresh_freshness(&mut self) {
+        self.freshness_timestamp = chrono::Utc::now().to_rfc3339();
+    }
+
+    /// Set freshness to an expired state (for testing stale conditions).
+    pub fn set_freshness_stale(&mut self) {
+        // Set timestamp to old value that exceeds max_age
+        let old_time = chrono::Utc::now() - chrono::Duration::seconds((self.freshness_max_age_seconds + 1) as i64);
+        self.freshness_timestamp = old_time.to_rfc3339();
+    }
+
+    /// Legacy compatibility method for testing (use refresh_freshness/set_freshness_stale instead).
     pub fn set_freshness_valid(&mut self, valid: bool) {
-        self.freshness_valid = valid;
+        if valid {
+            self.refresh_freshness();
+        } else {
+            self.set_freshness_stale();
+        }
+    }
+
+    /// Check if current freshness is still valid based on timestamp and max_age.
+    fn is_freshness_valid(&self) -> bool {
+        let now = chrono::Utc::now();
+        if let Ok(freshness_time) = chrono::DateTime::parse_from_rfc3339(&self.freshness_timestamp) {
+            let age_seconds = now.signed_duration_since(freshness_time.with_timezone(&chrono::Utc)).num_seconds();
+            // Fail-closed: if age calculation fails or exceeds max_age, consider stale
+            age_seconds >= 0 && (age_seconds as u64) < self.freshness_max_age_seconds
+        } else {
+            // Fail-closed: invalid timestamp format means stale
+            false
+        }
     }
 
     // -- Zone lifecycle -----------------------------------------------------
@@ -322,7 +354,7 @@ impl ZoneSegmentationEngine {
         if !self.zones.contains_key(zone_id) {
             return Err(SegmentationError::ZoneNotFound);
         }
-        if !self.freshness_valid {
+        if !self.is_freshness_valid() {
             return Err(SegmentationError::FreshnessStale);
         }
         self.zones.remove(zone_id);
