@@ -27,7 +27,7 @@ jobs:
           path: |
             ~/.cargo
             /tmp/rch_target_pane4
-          key: ${{ runner.os }}-coverage-report-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-coverage-report-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-coverage-report-
 
