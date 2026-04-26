@@ -1070,6 +1070,7 @@ pub mod sdk;
 pub mod security;
 pub mod storage;
 pub mod supply_chain;
+pub mod test_strategies;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 pub mod tools;
