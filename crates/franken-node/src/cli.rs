@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 
 /// Validate user content path arguments against path traversal attacks.
@@ -531,6 +531,10 @@ pub enum VerifyCommand {
     /// Verify release artifact signatures and checksums.
     #[command(name = "release")]
     Release(VerifyReleaseArgs),
+
+    /// Verify transparency log auditability and hash chain integrity.
+    #[command(name = "transparency-log")]
+    TransparencyLog(VerifyTransparencyLogArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -619,6 +623,21 @@ pub struct VerifyCorpusArgs {
     /// Request compatibility output for one previous major contract version.
     #[arg(long)]
     pub compat_version: Option<u16>,
+}
+
+#[derive(Debug, Parser)]
+pub struct VerifyTransparencyLogArgs {
+    /// Path to the transparency log file to verify.
+    #[arg(value_parser = parse_safe_content_pathbuf)]
+    pub log_path: PathBuf,
+
+    /// Public key file for signature verification.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub public_key: Option<PathBuf>,
+
+    /// Emit structured JSON output.
+    #[arg(long)]
+    pub json: bool,
 }
 
 // -- trust --
@@ -1038,6 +1057,8 @@ pub struct FleetAgentArgs {
 pub enum OpsCommand {
     /// Inspect process/runtime health signals.
     HealthCheck(OpsHealthCheckArgs),
+    /// Emit operator metrics in a scrape-friendly text format.
+    Metrics(OpsMetricsArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -1045,6 +1066,18 @@ pub struct OpsHealthCheckArgs {
     /// Emit JSON instead of human-readable output.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OpsMetricsFormat {
+    Prometheus,
+}
+
+#[derive(Debug, Parser)]
+pub struct OpsMetricsArgs {
+    /// Metrics output format.
+    #[arg(long, value_enum, default_value_t = OpsMetricsFormat::Prometheus)]
+    pub format: OpsMetricsFormat,
 }
 
 // -- incident --
@@ -1541,6 +1574,17 @@ mod parser_contract_extra_tests {
             panic!("expected ops health-check command");
         };
         assert!(args.json);
+    }
+
+    #[test]
+    fn ops_metrics_parses_prometheus_format() {
+        let cli = parse(&["franken-node", "ops", "metrics", "--format", "prometheus"])
+            .expect("ops metrics command should parse");
+
+        let Command::Ops(OpsCommand::Metrics(args)) = cli.command else {
+            panic!("expected ops metrics command");
+        };
+        assert_eq!(args.format, OpsMetricsFormat::Prometheus);
     }
 }
 

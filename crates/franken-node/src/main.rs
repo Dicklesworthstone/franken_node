@@ -60,11 +60,11 @@ use crate::api::{
 use crate::cli::{
     BenchCommand, Cli, Command, DoctorCloseConditionArgs, DoctorCommand,
     DoctorPolicyActivationInput, FleetAgentArgs, FleetCommand, IncidentCommand, MigrateCommand,
-    OpsCommand, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs, RemoteCapRevokeArgs,
-    RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand, TrustCardCommand,
-    TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs,
-    VerifyMigrationArgs, VerifyModuleArgs, VerifyReleaseArgs,
-    load_doctor_policy_activation_input,
+    OpsCommand, OpsMetricsFormat, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs,
+    RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand,
+    RuntimeLaneCommand, TrustCardCommand, TrustCommand, VerifyCommand,
+    VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs, VerifyModuleArgs,
+    VerifyReleaseArgs, VerifyTransparencyLogArgs, load_doctor_policy_activation_input,
 };
 use crate::api::session_auth::{SessionConfig, SessionManager};
 use frankenengine_node::control_plane::control_epoch::ControlEpoch;
@@ -86,7 +86,8 @@ use clap::Parser;
 use frankenengine_node::control_plane::fleet_transport::{
     FileFleetTransport, FleetAction as PersistedFleetAction,
     FleetActionRecord as PersistedFleetActionRecord, FleetConvergenceReceiptSignature,
-    FleetSharedState, FleetTargetKind as PersistedFleetTargetKind,
+    FleetSharedState, FleetTargetKind as PersistedFleetTargetKind, FLEET_ACTION_LOG_FILE,
+    FLEET_NODE_DIR,
     FleetTransport as PersistedFleetTransport, FleetTransportError,
     NodeHealth as PersistedNodeHealth, NodeStatus as PersistedNodeStatus,
     fleet_convergence_receipt_verdict, sign_fleet_convergence_receipt_payload,
@@ -246,6 +247,17 @@ struct OpsHealthCheckReport {
     build_version: String,
     git_sha: String,
     pass: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpsPrometheusMetricsReport {
+    health: OpsHealthCheckReport,
+    last_successful_evidence_ledger_flush_timestamp_seconds: u64,
+    evidence_ledger_spill_entries: u64,
+    incident_evidence_files: u64,
+    execution_receipts: u64,
+    fleet_active_quarantines: u64,
+    fleet_node_records: u64,
 }
 
 struct Ed25519SigningMaterial {
@@ -6254,6 +6266,326 @@ fn emit_ops_health_check_report(report: &OpsHealthCheckReport, json: bool) -> Re
         println!("  git_sha={}", report.git_sha);
     }
     Ok(())
+}
+
+fn ops_metrics_report(project_root: &Path) -> Result<OpsPrometheusMetricsReport> {
+    let health = ops_health_check_report(project_root)?;
+    let state_dir = project_root.join(".franken-node/state");
+    let execution_receipts_root = state_dir.join("execution-receipts");
+    let fleet_state_dir = resolve_ops_metrics_fleet_state_dir(project_root)?;
+
+    Ok(OpsPrometheusMetricsReport {
+        last_successful_evidence_ledger_flush_timestamp_seconds: health
+            .last_successful_evidence_ledger_flush_timestamp
+            .as_deref()
+            .map(parse_rfc3339_timestamp_to_unix_seconds)
+            .transpose()?
+            .unwrap_or(0),
+        evidence_ledger_spill_entries: count_evidence_ledger_spill_entries(&state_dir)?,
+        incident_evidence_files: count_matching_files(
+            &project_root.join(INCIDENT_EVIDENCE_RELATIVE_DIR),
+            |path| path.file_name().and_then(|name| name.to_str()) == Some(INCIDENT_EVIDENCE_FILE_NAME),
+        )?,
+        execution_receipts: u64::try_from(list_active_run_receipts(&execution_receipts_root)?.len())
+            .unwrap_or(u64::MAX),
+        fleet_active_quarantines: count_active_fleet_quarantines(&fleet_state_dir)?,
+        fleet_node_records: count_matching_files(&fleet_state_dir.join(FLEET_NODE_DIR), |_| true)?,
+        health,
+    })
+}
+
+fn resolve_ops_metrics_fleet_state_dir(project_root: &Path) -> Result<PathBuf> {
+    let config_path = project_root.join("franken_node.toml");
+    if !config_path.is_file() {
+        return Ok(project_root.join(".franken-node/state/fleet"));
+    }
+
+    let resolved = config::Config::resolve(Some(&config_path), CliOverrides::default())
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    if let Some(path) = &resolved.config.fleet.state_dir {
+        if path.is_absolute() {
+            return Ok(path.clone());
+        }
+        if let Some(source_root) = resolved.source_path.as_deref().and_then(Path::parent) {
+            return Ok(source_root.join(path));
+        }
+        return Ok(project_root.join(path));
+    }
+
+    Ok(project_root.join(".franken-node/state/fleet"))
+}
+
+fn parse_rfc3339_timestamp_to_unix_seconds(raw: &str) -> Result<u64> {
+    let timestamp = DateTime::parse_from_rfc3339(raw)
+        .with_context(|| format!("failed parsing RFC3339 timestamp `{raw}`"))?
+        .timestamp();
+    u64::try_from(timestamp)
+        .with_context(|| format!("timestamp `{raw}` resolved to negative unix seconds"))
+}
+
+fn count_evidence_ledger_spill_entries(state_dir: &Path) -> Result<u64> {
+    let mut total = 0_u64;
+    for candidate in OPS_HEALTH_LEDGER_FILE_CANDIDATES {
+        total = total.saturating_add(count_newline_delimited_records(&state_dir.join(candidate))?);
+    }
+    Ok(total)
+}
+
+fn count_newline_delimited_records(path: &Path) -> Result<u64> {
+    if !path.is_file() {
+        return Ok(0);
+    }
+
+    let file =
+        std::fs::File::open(path).with_context(|| format!("failed opening {}", path.display()))?;
+    let reader = std::io::BufReader::new(file);
+    let mut total = 0_u64;
+    for line in std::io::BufRead::lines(reader) {
+        let line = line.with_context(|| format!("failed reading {}", path.display()))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        total = total.saturating_add(1);
+    }
+    Ok(total)
+}
+
+fn count_active_fleet_quarantines(fleet_state_dir: &Path) -> Result<u64> {
+    let actions_path = fleet_state_dir.join(FLEET_ACTION_LOG_FILE);
+    if !actions_path.is_file() {
+        return Ok(0);
+    }
+
+    let file = std::fs::File::open(&actions_path)
+        .with_context(|| format!("failed opening {}", actions_path.display()))?;
+    let reader = std::io::BufReader::new(file);
+    let mut active_incidents = BTreeSet::new();
+    for (line_index, line) in std::io::BufRead::lines(reader).enumerate() {
+        let line = line.with_context(|| format!("failed reading {}", actions_path.display()))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record: PersistedFleetActionRecord = serde_json::from_str(&line).with_context(|| {
+            format!(
+                "failed parsing fleet action log {} line {}",
+                actions_path.display(),
+                line_index + 1
+            )
+        })?;
+        match record.action {
+            PersistedFleetAction::Quarantine { incident_id, .. } => {
+                active_incidents.insert(incident_id);
+            }
+            PersistedFleetAction::Release { incident_id, .. } => {
+                active_incidents.remove(&incident_id);
+            }
+            PersistedFleetAction::PolicyUpdate { .. } => {}
+        }
+    }
+    Ok(u64::try_from(active_incidents.len()).unwrap_or(u64::MAX))
+}
+
+fn count_matching_files<F>(root: &Path, predicate: F) -> Result<u64>
+where
+    F: Fn(&Path) -> bool + Copy,
+{
+    if !root.exists() {
+        return Ok(0);
+    }
+    if root.is_file() {
+        return Ok(if predicate(root) { 1 } else { 0 });
+    }
+
+    let mut total = 0_u64;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in
+            std::fs::read_dir(&dir).with_context(|| format!("failed listing {}", dir.display()))?
+        {
+            let entry = entry.with_context(|| format!("failed reading {}", dir.display()))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("failed reading file type for {}", path.display()))?;
+            if file_type.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if file_type.is_file() && predicate(&path) {
+                total = total.saturating_add(1);
+            }
+        }
+    }
+
+    Ok(total)
+}
+
+fn emit_ops_metrics_report(report: &OpsPrometheusMetricsReport, format: OpsMetricsFormat) -> Result<()> {
+    match format {
+        OpsMetricsFormat::Prometheus => {
+            println!("{}", render_ops_metrics_prometheus(report));
+            Ok(())
+        }
+    }
+}
+
+fn render_ops_metrics_prometheus(report: &OpsPrometheusMetricsReport) -> String {
+    use std::fmt::Write as _;
+
+    let mut rendered = String::new();
+    let health_pass = u8::from(report.health.pass);
+    write_prometheus_metric_prelude(
+        &mut rendered,
+        "franken_node_process_uptime_seconds",
+        "Process uptime in seconds reported by franken-node ops health-check.",
+        "gauge",
+    );
+    writeln!(
+        rendered,
+        "franken_node_process_uptime_seconds {}",
+        report.health.uptime_seconds
+    )
+    .expect("write metric");
+
+    write_prometheus_metric_prelude(
+        &mut rendered,
+        "franken_node_active_session_count",
+        "Active session count reported by franken-node ops health-check.",
+        "gauge",
+    );
+    writeln!(
+        rendered,
+        "franken_node_active_session_count {}",
+        report.health.active_session_count
+    )
+    .expect("write metric");
+
+    write_prometheus_metric_prelude(
+        &mut rendered,
+        "franken_node_last_successful_evidence_ledger_flush_timestamp_seconds",
+        "Unix timestamp of the last successful evidence-ledger flush; 0 means no successful flush was observed.",
+        "gauge",
+    );
+    writeln!(
+        rendered,
+        "franken_node_last_successful_evidence_ledger_flush_timestamp_seconds {}",
+        report.last_successful_evidence_ledger_flush_timestamp_seconds
+    )
+    .expect("write metric");
+
+    write_prometheus_metric_prelude(
+        &mut rendered,
+        "franken_node_build_info",
+        "Build version and git SHA labels for the running franken-node binary.",
+        "gauge",
+    );
+    writeln!(
+        rendered,
+        "franken_node_build_info{{version=\"{}\",git_sha=\"{}\"}} 1",
+        escape_prometheus_label_value(&report.health.build_version),
+        escape_prometheus_label_value(&report.health.git_sha)
+    )
+    .expect("write metric");
+
+    write_prometheus_metric_prelude(
+        &mut rendered,
+        "franken_node_health_pass",
+        "Whether franken-node ops health-check passed (1) or failed (0).",
+        "gauge",
+    );
+    writeln!(rendered, "franken_node_health_pass {health_pass}").expect("write metric");
+
+    write_prometheus_metric_prelude(
+        &mut rendered,
+        "franken_node_evidence_ledger_spill_entries",
+        "Count of newline-delimited evidence ledger spill entries present in local state files.",
+        "gauge",
+    );
+    writeln!(
+        rendered,
+        "franken_node_evidence_ledger_spill_entries {}",
+        report.evidence_ledger_spill_entries
+    )
+    .expect("write metric");
+
+    write_prometheus_metric_prelude(
+        &mut rendered,
+        "franken_node_incident_evidence_files",
+        "Count of incident evidence files present under .franken-node/state/incidents.",
+        "gauge",
+    );
+    writeln!(
+        rendered,
+        "franken_node_incident_evidence_files {}",
+        report.incident_evidence_files
+    )
+    .expect("write metric");
+
+    write_prometheus_metric_prelude(
+        &mut rendered,
+        "franken_node_execution_receipts",
+        "Count of active execution receipt JSON files present under .franken-node/state/execution-receipts.",
+        "gauge",
+    );
+    writeln!(
+        rendered,
+        "franken_node_execution_receipts {}",
+        report.execution_receipts
+    )
+    .expect("write metric");
+
+    write_prometheus_metric_prelude(
+        &mut rendered,
+        "franken_node_fleet_active_quarantines",
+        "Count of active fleet quarantines derived from the fleet action log.",
+        "gauge",
+    );
+    writeln!(
+        rendered,
+        "franken_node_fleet_active_quarantines {}",
+        report.fleet_active_quarantines
+    )
+    .expect("write metric");
+
+    write_prometheus_metric_prelude(
+        &mut rendered,
+        "franken_node_fleet_node_records",
+        "Count of persisted fleet node-status records.",
+        "gauge",
+    );
+    writeln!(
+        rendered,
+        "franken_node_fleet_node_records {}",
+        report.fleet_node_records
+    )
+    .expect("write metric");
+
+    rendered
+}
+
+fn write_prometheus_metric_prelude(
+    rendered: &mut String,
+    metric_name: &str,
+    help: &str,
+    metric_type: &str,
+) {
+    use std::fmt::Write as _;
+
+    writeln!(rendered, "# HELP {metric_name} {help}").expect("write metric help");
+    writeln!(rendered, "# TYPE {metric_name} {metric_type}").expect("write metric type");
+}
+
+fn escape_prometheus_label_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 fn list_active_run_receipts(receipts_root: &Path) -> Result<Vec<PathBuf>> {
@@ -18146,6 +18478,141 @@ fn handle_verify_release(args: &VerifyReleaseArgs) -> Result<()> {
     Ok(())
 }
 
+fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i32> {
+    use observability::evidence_ledger::{
+        EvidenceEntry, evidence_entry_hash_hex, verify_evidence_entry,
+    };
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    // Validate path
+    args.log_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in log path"))?;
+
+    // Read transparency log file
+    let file = File::open(&args.log_path)
+        .with_context(|| format!("Failed to open transparency log: {:?}", args.log_path))?;
+    let reader = BufReader::new(file);
+
+    let mut entries: Vec<EvidenceEntry> = Vec::new();
+    let mut line_number = 0;
+
+    for line in reader.lines() {
+        line_number += 1;
+        let line = line.with_context(|| format!("Failed to read line {}", line_number))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let entry: EvidenceEntry = serde_json::from_str(&line)
+            .with_context(|| format!("Invalid JSON at line {}: {}", line_number, line))?;
+        entries.push(entry);
+    }
+
+    if entries.is_empty() {
+        if args.json {
+            println!("{{\"status\":\"empty\",\"message\":\"No entries in transparency log\"}}");
+        } else {
+            eprintln!("Transparency log is empty");
+        }
+        return Ok(0);
+    }
+
+    let mut verification_errors = Vec::new();
+    let mut hash_chain_errors = Vec::new();
+    let mut signature_errors = Vec::new();
+
+    // Load verifying key if provided
+    let verifying_key = if let Some(key_path) = &args.public_key {
+        let raw = std::fs::read(key_path)
+            .with_context(|| format!("failed reading verifying key {}", key_path.display()))?;
+        Some(parse_verifying_key_from_blob(&raw).ok_or_else(|| {
+            anyhow::anyhow!(
+                "failed parsing Ed25519 verifying key from {}",
+                key_path.display()
+            )
+        })?)
+    } else {
+        None
+    };
+
+    // Verify hash chain and signatures
+    let mut expected_prev_hash: Option<String> = None;
+
+    for (index, entry) in entries.iter().enumerate() {
+        // Verify hash chain
+        if let Some(ref expected) = expected_prev_hash {
+            if entry.prev_entry_hash.is_empty() && index > 0 {
+                hash_chain_errors.push(format!(
+                    "Entry {} missing prev_entry_hash (expected: {})",
+                    index, expected
+                ));
+            } else if !entry.prev_entry_hash.is_empty() && entry.prev_entry_hash != *expected {
+                hash_chain_errors.push(format!(
+                    "Entry {} hash chain broken: expected {}, got {}",
+                    index, expected, entry.prev_entry_hash
+                ));
+            }
+        } else if index > 0 && entry.prev_entry_hash.is_empty() {
+            hash_chain_errors.push(format!(
+                "Entry {} missing prev_entry_hash",
+                index
+            ));
+        }
+
+        expected_prev_hash = Some(evidence_entry_hash_hex(entry));
+
+        // Verify signature if verifying key provided
+        if let Some(ref key) = verifying_key {
+            if let Err(e) = verify_evidence_entry(entry, key) {
+                signature_errors.push(format!("Entry {} signature invalid: {}", index, e));
+            }
+        }
+    }
+
+    let total_entries = entries.len();
+    let total_errors = hash_chain_errors.len() + signature_errors.len();
+
+    if args.json {
+        let result = serde_json::json!({
+            "status": if total_errors == 0 { "valid" } else { "invalid" },
+            "total_entries": total_entries,
+            "hash_chain_errors": hash_chain_errors,
+            "signature_errors": signature_errors,
+            "total_errors": total_errors
+        });
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        eprintln!("Transparency log verification results:");
+        eprintln!("  Total entries: {}", total_entries);
+        eprintln!("  Hash chain errors: {}", hash_chain_errors.len());
+        eprintln!("  Signature errors: {}", signature_errors.len());
+
+        if !hash_chain_errors.is_empty() {
+            eprintln!("\nHash chain errors:");
+            for error in &hash_chain_errors {
+                eprintln!("  - {}", error);
+            }
+        }
+
+        if !signature_errors.is_empty() {
+            eprintln!("\nSignature errors:");
+            for error in &signature_errors {
+                eprintln!("  - {}", error);
+            }
+        }
+
+        if total_errors == 0 {
+            eprintln!("\n✓ Transparency log verification PASSED");
+        } else {
+            eprintln!("\n✗ Transparency log verification FAILED");
+        }
+    }
+
+    Ok(if total_errors == 0 { 0 } else { 1 })
+}
+
 fn build_verify_output(
     command: &str,
     compat_version: Option<u16>,
@@ -19982,6 +20449,10 @@ fn main() -> Result<()> {
             VerifyCommand::Release(args) => {
                 handle_verify_release(&args)?;
             }
+            VerifyCommand::TransparencyLog(args) => {
+                let code = handle_verify_transparency_log(&args)?;
+                std::process::exit(code);
+            }
         },
 
         Command::Trust(sub) => match sub {
@@ -20313,6 +20784,10 @@ fn main() -> Result<()> {
                 let report = ops_health_check_report(Path::new("."))?;
                 emit_ops_health_check_report(&report, args.json)?;
             }
+            OpsCommand::Metrics(args) => {
+                let report = ops_metrics_report(Path::new("."))?;
+                emit_ops_metrics_report(&report, args.format)?;
+            }
         },
 
         Command::Registry(sub) => match sub {
@@ -20524,6 +20999,135 @@ mod state_bootstrap_tests {
         let result = ensure_state_dir(root);
         assert!(result.is_ok());
         assert!(root.join(".franken-node/state").is_dir());
+    }
+}
+
+#[cfg(test)]
+mod ops_metrics_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn ops_metrics_report_collects_prometheus_snapshot_from_local_state() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let state_dir = root.join(".franken-node/state");
+        let incidents_dir = state_dir.join("incidents");
+        let receipts_dir = state_dir.join("execution-receipts");
+        let fleet_dir = state_dir.join("fleet");
+        let active_receipt_dir = receipts_dir.join("active-receipt");
+        let archived_receipt_dir = receipts_dir.join("archive/2026-04-26");
+        let incident_one_dir = incidents_dir.join("INC-1");
+        let incident_two_dir = incidents_dir.join("INC-2");
+        let fleet_nodes_dir = fleet_dir.join(FLEET_NODE_DIR);
+
+        std::fs::create_dir_all(&incident_one_dir).expect("create first incident dir");
+        std::fs::create_dir_all(&incident_two_dir).expect("create second incident dir");
+        std::fs::create_dir_all(&active_receipt_dir).expect("create active receipt dir");
+        std::fs::create_dir_all(&archived_receipt_dir).expect("create archived receipt dir");
+        std::fs::create_dir_all(&fleet_nodes_dir).expect("create fleet node dir");
+
+        std::fs::write(state_dir.join("spill.jsonl"), "{\"entry\":1}\n{\"entry\":2}\n")
+            .expect("write spill file");
+        std::fs::write(
+            state_dir.join("durable_evidence_spill.jsonl"),
+            "{\"entry\":3}\n",
+        )
+        .expect("write durable spill file");
+        std::fs::write(
+            incident_one_dir.join(INCIDENT_EVIDENCE_FILE_NAME),
+            "{\"schema_version\":\"fixture-1\"}\n",
+        )
+        .expect("write first incident evidence");
+        std::fs::write(
+            incident_two_dir.join(INCIDENT_EVIDENCE_FILE_NAME),
+            "{\"schema_version\":\"fixture-2\"}\n",
+        )
+        .expect("write second incident evidence");
+        std::fs::write(
+            active_receipt_dir.join("receipt.json"),
+            "{\"schema_version\":\"receipt\"}\n",
+        )
+        .expect("write active execution receipt");
+        std::fs::write(
+            archived_receipt_dir.join("archived.json"),
+            "{\"schema_version\":\"receipt-archived\"}\n",
+        )
+        .expect("write archived execution receipt");
+        std::fs::write(fleet_nodes_dir.join("node-a.json"), "{\"node_id\":\"node-a\"}\n")
+            .expect("write first fleet node");
+        std::fs::write(fleet_nodes_dir.join("node-b.json"), "{\"node_id\":\"node-b\"}\n")
+            .expect("write second fleet node");
+
+        let actions = [
+            PersistedFleetActionRecord {
+                action_id: "fleet-op-1".to_string(),
+                emitted_at: Utc::now(),
+                action: PersistedFleetAction::Quarantine {
+                    zone_id: "all".to_string(),
+                    incident_id: "INC-1".to_string(),
+                    target_id: "sha256:artifact-one".to_string(),
+                    target_kind: PersistedFleetTargetKind::Artifact,
+                    reason: "fixture quarantine one".to_string(),
+                    quarantine_version: 1,
+                },
+            },
+            PersistedFleetActionRecord {
+                action_id: "fleet-op-2".to_string(),
+                emitted_at: Utc::now(),
+                action: PersistedFleetAction::Quarantine {
+                    zone_id: "all".to_string(),
+                    incident_id: "INC-2".to_string(),
+                    target_id: "sha256:artifact-two".to_string(),
+                    target_kind: PersistedFleetTargetKind::Artifact,
+                    reason: "fixture quarantine two".to_string(),
+                    quarantine_version: 2,
+                },
+            },
+            PersistedFleetActionRecord {
+                action_id: "fleet-op-3".to_string(),
+                emitted_at: Utc::now(),
+                action: PersistedFleetAction::Release {
+                    zone_id: "all".to_string(),
+                    incident_id: "INC-1".to_string(),
+                    reason: Some("fixture release".to_string()),
+                },
+            },
+        ];
+        let serialized_actions = actions
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("serialize fleet actions")
+            .join("\n");
+        std::fs::write(
+            fleet_dir.join(FLEET_ACTION_LOG_FILE),
+            format!("{serialized_actions}\n"),
+        )
+        .expect("write fleet actions log");
+
+        let report = ops_metrics_report(root).expect("collect ops metrics report");
+        assert_eq!(report.health.active_session_count, 0);
+        assert!(report.health.pass, "expected health-check to pass");
+        assert!(
+            report.last_successful_evidence_ledger_flush_timestamp_seconds > 0,
+            "expected flush timestamp seconds to be present"
+        );
+        assert_eq!(report.evidence_ledger_spill_entries, 3);
+        assert_eq!(report.incident_evidence_files, 2);
+        assert_eq!(report.execution_receipts, 1);
+        assert_eq!(report.fleet_active_quarantines, 1);
+        assert_eq!(report.fleet_node_records, 2);
+
+        let rendered = render_ops_metrics_prometheus(&report);
+        assert!(rendered.contains("# HELP franken_node_process_uptime_seconds "));
+        assert!(rendered.contains("franken_node_evidence_ledger_spill_entries 3"));
+        assert!(rendered.contains("franken_node_incident_evidence_files 2"));
+        assert!(rendered.contains("franken_node_execution_receipts 1"));
+        assert!(rendered.contains("franken_node_fleet_active_quarantines 1"));
+        assert!(rendered.contains("franken_node_fleet_node_records 2"));
+        assert!(rendered.contains("franken_node_health_pass 1"));
+        assert!(rendered.contains("franken_node_build_info{version=\""));
     }
 }
 
