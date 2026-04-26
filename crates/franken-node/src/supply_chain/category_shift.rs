@@ -74,6 +74,15 @@ pub const THRESHOLD_MIGRATION_VELOCITY: f64 = 3.0;
 /// Minimum compromise surface reduction factor (10x).
 pub const THRESHOLD_COMPROMISE_REDUCTION: f64 = 10.0;
 
+/// Default baseline compatibility percentage when corpus unavailable (90%).
+pub const BASELINE_COMPAT_PERCENT: f64 = 90.0;
+
+/// Default baseline throughput operations per second (100k).
+pub const BASELINE_THROUGHPUT_OPS: f64 = 100000.0;
+
+/// Default baseline latency P99 in milliseconds (5ms).
+pub const BASELINE_LATENCY_P99_MS: f64 = 5.0;
+
 // ── Enums ────────────────────────────────────────────────────────────────────
 
 /// Category threshold status.
@@ -1341,6 +1350,15 @@ struct BenchmarkThresholds {
     min_throughput_ops: u64,
 }
 
+/// Get configurable benchmark baseline defaults for fallback scenarios
+fn get_benchmark_baseline_defaults() -> (f64, f64, f64) {
+    (
+        BASELINE_COMPAT_PERCENT,    // compatibility percentage fallback
+        BASELINE_THROUGHPUT_OPS,    // throughput operations fallback
+        BASELINE_LATENCY_P99_MS,    // latency P99 fallback
+    )
+}
+
 #[derive(serde::Serialize, Debug)]
 pub struct BenchmarkValidationResult {
     pub passed: bool,
@@ -1356,8 +1374,11 @@ fn generate_benchmark_metrics(now_secs: u64) -> Result<RealBenchmarkMetrics, Cat
             msg: format!("failed to run benchmark suite: {}", e),
         })?;
 
+    // Get configurable baseline defaults for fallback scenarios
+    let (default_compat, default_throughput, default_latency) = get_benchmark_baseline_defaults();
+
     // Extract compatibility percentage from actual compatibility corpus results
-    let compatibility_percent = load_compatibility_corpus_pass_rate().unwrap_or(94.5); // fallback to baseline if corpus not available
+    let compatibility_percent = load_compatibility_corpus_pass_rate().unwrap_or(default_compat); // fallback to configurable baseline if corpus not available
 
     // Calculate throughput from benchmark scenarios
     let throughput_scenario = benchmark_report
@@ -1368,7 +1389,7 @@ fn generate_benchmark_metrics(now_secs: u64) -> Result<RealBenchmarkMetrics, Cat
                 || s.dimension == BenchmarkDimension::PerformanceUnderHardening
         })
         .map(|s| s.raw_value)
-        .unwrap_or(145000.0);
+        .unwrap_or(default_throughput);
 
     let throughput_ops_per_sec = throughput_scenario as u64;
 
@@ -1378,7 +1399,7 @@ fn generate_benchmark_metrics(now_secs: u64) -> Result<RealBenchmarkMetrics, Cat
         .iter()
         .find(|s| s.name.contains("latency") || s.name.contains("cold_start"))
         .map(|s| s.raw_value)
-        .unwrap_or(2.3);
+        .unwrap_or(default_latency);
 
     // Save benchmark results to artifacts folder for CI gating
     save_benchmark_results(&benchmark_report, now_secs)?;
