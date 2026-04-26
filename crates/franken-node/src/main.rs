@@ -21199,7 +21199,7 @@ mod run_trust_gate_tests {
             let serialization_result = serde_json::to_string(&contract_output);
             assert!(serialization_result.is_ok(), "Serialization should succeed");
 
-            let json_str = serialization_result.unwrap();
+            let json_str = serialization_result.expect("test struct should serialize to JSON without error");
 
             // Verify JSON injection is properly escaped
             assert!(
@@ -21229,7 +21229,7 @@ mod run_trust_gate_tests {
                 "Malicious dependency should serialize safely"
             );
 
-            let dep_json = dep_serialization.unwrap();
+            let dep_json = dep_serialization.expect("dependency struct should serialize to JSON without error");
 
             // Verify malicious content is preserved but escaped
             assert!(
@@ -21287,7 +21287,7 @@ mod run_trust_gate_tests {
                 "Extreme values should serialize"
             );
 
-            let extreme_json = extreme_serialization.unwrap();
+            let extreme_json = extreme_serialization.expect("extreme boundary test struct should serialize to JSON without error");
             assert!(
                 !extreme_json.is_empty(),
                 "Extreme serialization should produce output"
@@ -21393,7 +21393,7 @@ mod run_trust_gate_tests {
                     status
                 );
 
-                let json_str = serialization_result.unwrap();
+                let json_str = serialization_result.expect("trust status enum should serialize to JSON without error");
                 let deserialization_result: Result<RunDependencyTrustStatus, _> =
                     serde_json::from_str(&json_str);
                 assert!(
@@ -21401,7 +21401,7 @@ mod run_trust_gate_tests {
                     "Trust status should round-trip serialize/deserialize"
                 );
 
-                let deserialized = deserialization_result.unwrap();
+                let deserialized = deserialization_result.expect("trust status JSON should deserialize back to enum without error");
                 assert_eq!(
                     status, deserialized,
                     "Round-trip should preserve trust status"
@@ -21423,7 +21423,7 @@ mod run_trust_gate_tests {
                 );
 
                 // Verify snake_case serialization
-                let json_str = serialization_result.unwrap();
+                let json_str = serialization_result.expect("scan status enum should serialize to JSON without error");
                 match status {
                     TrustScanItemStatus::Created => {
                         assert!(
@@ -21515,7 +21515,7 @@ mod run_trust_gate_tests {
                     i
                 );
 
-                let json_str = serialization_result.unwrap();
+                let json_str = serialization_result.expect("boundary test item should serialize to JSON without error");
                 let deserialization_result: Result<TrustScanItem, _> =
                     serde_json::from_str(&json_str);
                 assert!(
@@ -21524,7 +21524,7 @@ mod run_trust_gate_tests {
                     i
                 );
 
-                let deserialized = deserialization_result.unwrap();
+                let deserialized = deserialization_result.expect("boundary test item JSON should deserialize without error");
                 assert_eq!(
                     item.status, deserialized.status,
                     "Enum status should be preserved in boundary test {}",
@@ -21554,12 +21554,12 @@ mod run_trust_gate_tests {
 
             // Simulate rapid serialization/deserialization
             for (i, (trust_status, scan_status)) in concurrent_operations.iter().enumerate() {
-                let trust_json = serde_json::to_string(trust_status).unwrap();
-                let scan_json = serde_json::to_string(scan_status).unwrap();
+                let trust_json = serde_json::to_string(trust_status).expect("trust status enum should serialize to JSON in concurrent test");
+                let scan_json = serde_json::to_string(scan_status).expect("scan status enum should serialize to JSON in concurrent test");
 
                 let trust_parsed: RunDependencyTrustStatus =
-                    serde_json::from_str(&trust_json).unwrap();
-                let scan_parsed: TrustScanItemStatus = serde_json::from_str(&scan_json).unwrap();
+                    serde_json::from_str(&trust_json).expect("trust status JSON should deserialize in concurrent test");
+                let scan_parsed: TrustScanItemStatus = serde_json::from_str(&scan_json).expect("scan status JSON should deserialize in concurrent test");
 
                 assert_eq!(
                     *trust_status, trust_parsed,
