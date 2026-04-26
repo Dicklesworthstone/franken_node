@@ -1,0 +1,5 @@
+examine_globs = [
+  "crates/franken-node/src/security/constant_time.rs",
+  "crates/franken-node/src/observability/evidence_ledger.rs",
+  "crates/franken-node/src/connector/canonical_serializer.rs",
+]

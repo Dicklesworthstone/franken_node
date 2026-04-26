@@ -1,0 +1,115 @@
+name: Cargo Mutants Gate
+
+on:
+  pull_request:
+    paths:
+      - '.cargo-mutants.toml'
+      - '.github/workflows/mutants-gate.yml'
+      - 'crates/franken-node/src/security/constant_time.rs'
+      - 'crates/franken-node/src/observability/evidence_ledger.rs'
+      - 'crates/franken-node/src/connector/canonical_serializer.rs'
+      - 'crates/franken-node/src/encoding/canonical_serializer.rs'
+      - 'crates/franken-node/src/observability/evidence_ledger_conformance_tests.rs'
+      - 'crates/franken-node/tests/canonical_serializer_conformance.rs'
+      - 'crates/franken-node/tests/canonical_serializer_metamorphic.rs'
+      - 'crates/franken-node/tests/canonical_serializer_real_inputs.rs'
+      - 'crates/franken-node/tests/evidence_ledger_chain_order_metamorphic.rs'
+      - 'crates/franken-node/tests/observability_evidence_ledger_regressions.rs'
+      - 'fuzz/fuzz_targets/fuzz_canonical_serializer_deserialize.rs'
+      - 'fuzz/fuzz_targets/fuzz_canonical_serializer_roundtrip.rs'
+      - 'fuzz/fuzz_targets/fuzz_constant_time_comparison.rs'
+      - 'fuzz/fuzz_targets/fuzz_evidence_ledger_entry_parse.rs'
+      - 'fuzz/fuzz_targets/fuzz_evidence_ledger_jsonl_spill.rs'
+
+jobs:
+  cargo-mutants:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: franken_node
+    steps:
+      - name: Check out franken_node
+        uses: actions/checkout@v4
+        with:
+          path: franken_node
+
+      - name: Check out franken_engine sibling
+        uses: actions/checkout@v4
+        with:
+          repository: Dicklesworthstone/franken_engine
+          path: franken_engine
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-mutants-${{ hashFiles('franken_node/Cargo.toml', 'franken_node/crates/franken-node/Cargo.toml', 'franken_node/sdk/verifier/Cargo.toml') }}
+
+      - name: Install rch
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/remote_compilation_helper/main/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: Run cargo-mutants
+        id: mutants
+        env:
+          RCH_VISIBILITY: summary
+        run: |
+          set +e
+          "$HOME/.local/bin/rch" exec -- cargo mutants \
+            --config .cargo-mutants.toml \
+            --package frankenengine-node \
+            --test-package frankenengine-node \
+            --cargo-test-arg=--lib \
+            --cargo-test-arg=--tests \
+            --in-place=false \
+            --no-shuffle \
+            --output mutants-output
+          status=$?
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Upload cargo-mutants output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-mutants-output
+          path: franken_node/mutants-output
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Summarize cargo-mutants results
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          import pathlib
+
+          outcomes_path = pathlib.Path("mutants-output/outcomes.json")
+          if not outcomes_path.exists():
+              print("mutants-output/outcomes.json was not produced")
+          else:
+              outcomes = json.loads(outcomes_path.read_text())
+              print(json.dumps(outcomes.get("summary", {}), indent=2, sort_keys=True))
+          PY
+
+      - name: Enforce cargo-mutants exit code
+        if: always()
+        env:
+          EXIT_CODE: ${{ steps.mutants.outputs.exit_code }}
+        run: |
+          code="${EXIT_CODE:-1}"
+          if [[ "$code" -ne 0 ]]; then
+            echo "cargo-mutants failed with exit code $code"
+            exit "$code"
+          fi
