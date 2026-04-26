@@ -331,8 +331,51 @@ fn update_hash_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
+fn compute_entry_hash_bytes(entry: &EvidenceEntry) -> EntryHash {
+    let mut hasher = Sha256::new();
+    hasher.update(b"evidence_entry_v1:");
+    hasher.update(&entry.schema_version.len().to_le_bytes());
+    hasher.update(entry.schema_version.as_bytes());
+    if let Some(entry_id) = &entry.entry_id {
+        hasher.update(&[1]);
+        hasher.update(&entry_id.len().to_le_bytes());
+        hasher.update(entry_id.as_bytes());
+    } else {
+        hasher.update(&[0]);
+    }
+    hasher.update(&entry.decision_id.len().to_le_bytes());
+    hasher.update(entry.decision_id.as_bytes());
+    let decision_kind = entry.decision_kind.label();
+    hasher.update(&decision_kind.len().to_le_bytes());
+    hasher.update(decision_kind.as_bytes());
+    hasher.update(&entry.decision_time.len().to_le_bytes());
+    hasher.update(entry.decision_time.as_bytes());
+    hasher.update(&entry.timestamp_ms.to_le_bytes());
+    hasher.update(&entry.trace_id.len().to_le_bytes());
+    hasher.update(entry.trace_id.as_bytes());
+    hasher.update(&entry.epoch_id.to_le_bytes());
+
+    // Hash the serialized payload for deterministic content representation
+    // without allocating a transient JSON buffer on the append hot path.
+    if update_hash_serialized_json_len_prefixed(&mut hasher, &entry.payload).is_err() {
+        hasher.update(0_u64.to_le_bytes());
+    }
+
+    hasher.update(&entry.size_bytes.to_le_bytes());
+    hasher.update(&entry.signature.len().to_le_bytes());
+    hasher.update(entry.signature.as_bytes());
+
+    // NOTE: prev_entry_hash is intentionally excluded to prevent circular dependency
+    hasher.finalize().into()
+}
+
 fn encode_entry_hash(hash: &EntryHash) -> String {
     hex::encode(hash)
+}
+
+/// Return the stable hash-chain digest for an evidence entry as lowercase hex.
+pub fn evidence_entry_hash_hex(entry: &EvidenceEntry) -> String {
+    encode_entry_hash(&compute_entry_hash_bytes(entry))
 }
 
 /// Sign an evidence entry using an Ed25519 signing key.
@@ -790,41 +833,7 @@ impl EvidenceLedger {
 
     /// Compute SHA-256 hash of an entry for hash chain integrity.
     fn compute_entry_hash(&self, entry: &EvidenceEntry) -> EntryHash {
-        let mut hasher = Sha256::new();
-        hasher.update(b"evidence_entry_v1:");
-        hasher.update(&entry.schema_version.len().to_le_bytes());
-        hasher.update(entry.schema_version.as_bytes());
-        if let Some(entry_id) = &entry.entry_id {
-            hasher.update(&[1]);
-            hasher.update(&entry_id.len().to_le_bytes());
-            hasher.update(entry_id.as_bytes());
-        } else {
-            hasher.update(&[0]);
-        }
-        hasher.update(&entry.decision_id.len().to_le_bytes());
-        hasher.update(entry.decision_id.as_bytes());
-        let decision_kind = entry.decision_kind.label();
-        hasher.update(&decision_kind.len().to_le_bytes());
-        hasher.update(decision_kind.as_bytes());
-        hasher.update(&entry.decision_time.len().to_le_bytes());
-        hasher.update(entry.decision_time.as_bytes());
-        hasher.update(&entry.timestamp_ms.to_le_bytes());
-        hasher.update(&entry.trace_id.len().to_le_bytes());
-        hasher.update(entry.trace_id.as_bytes());
-        hasher.update(&entry.epoch_id.to_le_bytes());
-
-        // Hash the serialized payload for deterministic content representation
-        // without allocating a transient JSON buffer on the append hot path.
-        if update_hash_serialized_json_len_prefixed(&mut hasher, &entry.payload).is_err() {
-            hasher.update(0_u64.to_le_bytes());
-        }
-
-        hasher.update(&entry.size_bytes.to_le_bytes());
-        hasher.update(&entry.signature.len().to_le_bytes());
-        hasher.update(entry.signature.as_bytes());
-
-        // NOTE: prev_entry_hash is intentionally excluded to prevent circular dependency
-        hasher.finalize().into()
+        compute_entry_hash_bytes(entry)
     }
 
     /// Create a new evidence ledger with the given capacity.
@@ -2735,6 +2744,18 @@ mod tests {
             ledger.compute_entry_hash(&base_entry),
             ledger.compute_entry_hash(&different_time),
             "hash chain must distinguish decision timestamp changes even without signatures"
+        );
+    }
+
+    #[test]
+    fn public_evidence_entry_hash_hex_matches_internal_chain_hash() {
+        let ledger = EvidenceLedger::new(LedgerCapacity::new(10, 100_000));
+        let entry = make_entry("DEC-001", 1);
+
+        assert_eq!(
+            evidence_entry_hash_hex(&entry),
+            encode_entry_hash(&ledger.compute_entry_hash(&entry)),
+            "public hash-chain helper must match the ledger's internal chain digest"
         );
     }
 
@@ -6637,5 +6658,88 @@ mod tests {
             serialized1, serialized2,
             "Serialized snapshots must be byte-for-byte identical"
         );
+    }
+
+    #[cfg(loom)]
+    #[doc(hidden)]
+    pub fn shared_evidence_ledger_concurrent_append_loom_model() {
+        use loom::thread;
+
+        loom::model(|| {
+            // Test concurrent appends with bounded capacity to verify:
+            // 1. Append ordering is deterministic
+            // 2. No duplicate entry hashes
+            // 3. Bounded capacity is respected
+            // 4. Total counts are consistent
+            let ledger = SharedEvidenceLedger::new(LedgerCapacity::new(3, 100_000));
+
+            let ledger_a = ledger.clone();
+            let ledger_b = ledger.clone();
+            let ledger_c = ledger.clone();
+
+            let handle_a = thread::spawn(move || {
+                ledger_a.append(make_entry("LOOM-A", 1)).expect("append A")
+            });
+
+            let handle_b = thread::spawn(move || {
+                ledger_b.append(make_entry("LOOM-B", 2)).expect("append B")
+            });
+
+            let handle_c = thread::spawn(move || {
+                ledger_c.append(make_entry("LOOM-C", 3)).expect("append C")
+            });
+
+            let id_a = handle_a.join().expect("join A");
+            let id_b = handle_b.join().expect("join B");
+            let id_c = handle_c.join().expect("join C");
+
+            // Verify all appends succeeded
+            let final_snapshot = ledger.snapshot();
+
+            // All three entries should be present (within capacity)
+            assert_eq!(final_snapshot.entries.len(), 3);
+            assert_eq!(final_snapshot.total_appended, 3);
+
+            // Entry IDs should be monotonic and unique
+            let mut ids = vec![id_a, id_b, id_c];
+            ids.sort();
+            assert_eq!(ids[0].0 + 1, ids[1].0);
+            assert_eq!(ids[1].0 + 1, ids[2].0);
+
+            // All entries should have unique epoch_ids
+            let mut epoch_ids: Vec<String> = final_snapshot
+                .entries
+                .iter()
+                .map(|(_, entry)| entry.epoch_id.clone())
+                .collect();
+            epoch_ids.sort();
+            epoch_ids.dedup();
+            assert_eq!(epoch_ids.len(), 3, "No duplicate epoch_ids allowed");
+
+            // Test bounded capacity with additional appends
+            let ledger_d = ledger.clone();
+            let ledger_e = ledger.clone();
+
+            let handle_d = thread::spawn(move || {
+                ledger_d.append(make_entry("LOOM-D", 4)).expect("append D")
+            });
+
+            let handle_e = thread::spawn(move || {
+                ledger_e.append(make_entry("LOOM-E", 5)).expect("append E")
+            });
+
+            handle_d.join().expect("join D");
+            handle_e.join().expect("join E");
+
+            let bounded_snapshot = ledger.snapshot();
+
+            // Should still be within capacity bound
+            assert!(bounded_snapshot.entries.len() <= 3, "Capacity should be bounded");
+            assert_eq!(bounded_snapshot.total_appended, 5);
+
+            // Some entries may have been evicted, but total_evicted + retained should equal total_appended
+            let retained = bounded_snapshot.entries.len() as u64;
+            assert_eq!(retained + bounded_snapshot.total_evicted, bounded_snapshot.total_appended);
+        });
     }
 }

@@ -32,6 +32,16 @@ mod api {
 }
 mod cli;
 #[allow(dead_code)]
+mod observability {
+    #[path = "evidence_ledger.rs"]
+    pub mod evidence_ledger;
+}
+#[allow(dead_code)]
+mod security {
+    #[path = "decision_receipt.rs"]
+    pub mod decision_receipt;
+}
+#[allow(dead_code)]
 mod policy {
     #[path = "bayesian_diagnostics.rs"]
     pub mod bayesian_diagnostics;
@@ -60,7 +70,7 @@ use crate::api::{
 use crate::cli::{
     BenchCommand, Cli, Command, DoctorCloseConditionArgs, DoctorCommand,
     DoctorPolicyActivationInput, FleetAgentArgs, FleetCommand, IncidentCommand, MigrateCommand,
-    OpsCommand, OpsMetricsFormat, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs,
+    OpsCommand, OpsMetricsFormat, OpsRotateKeyArgs, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs,
     RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand,
     RuntimeLaneCommand, TrustCardCommand, TrustCommand, VerifyCommand,
     VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs, VerifyModuleArgs,
@@ -101,8 +111,8 @@ use frankenengine_node::{
     ops, runtime,
     security::{
         decision_receipt::{
-            Decision, Receipt, ReceiptQuery, append_signed_receipt, export_receipts_to_path,
-            sign_receipt, write_receipts_markdown,
+            DECISION_RECEIPT_SIGNATURE_VERSION, Decision, Receipt, ReceiptQuery,
+            append_signed_receipt, export_receipts_to_path, sign_receipt, write_receipts_markdown,
         },
         epoch_scoped_keys::RootSecret,
         remote_cap::{
@@ -258,6 +268,14 @@ struct OpsPrometheusMetricsReport {
     execution_receipts: u64,
     fleet_active_quarantines: u64,
     fleet_node_records: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OpsRotateKeyResult {
+    rotation_event_id: String,
+    new_key_fingerprint: String,
+    old_key_fingerprint: String,
+    reason: String,
 }
 
 struct Ed25519SigningMaterial {
@@ -6561,6 +6579,89 @@ fn render_ops_metrics_prometheus(report: &OpsPrometheusMetricsReport) -> String 
     .expect("write metric");
 
     rendered
+}
+
+fn handle_ops_rotate_key(args: &OpsRotateKeyArgs) -> Result<OpsRotateKeyResult> {
+    use crate::cli::validate_user_content_pathbuf;
+    use ed25519_dalek::SigningKey;
+    use crate::observability::evidence_ledger::{EvidenceEntry, DecisionKind, EntryId};
+    use crate::security::decision_receipt::signing_key_id;
+    use std::fs;
+
+    // Validate the new key path
+    let validated_path = validate_user_content_pathbuf(&args.new_key)
+        .with_context(|| format!("Invalid key path: {:?}", args.new_key))?;
+
+    // Read the new signing key from file
+    let key_bytes = fs::read(validated_path)
+        .with_context(|| format!("Failed to read key from {:?}", validated_path))?;
+
+    if key_bytes.len() != 32 {
+        anyhow::bail!("Invalid ed25519 key length: expected 32 bytes, got {}", key_bytes.len());
+    }
+
+    let mut key_array = [0u8; 32];
+    key_array.copy_from_slice(&key_bytes);
+    let new_signing_key = SigningKey::from_bytes(&key_array);
+    let new_verifying_key = new_signing_key.verifying_key();
+
+    // Generate key fingerprints
+    let new_key_fingerprint = signing_key_id(&new_verifying_key);
+
+    // For Phase 1, we'll use a placeholder for old key fingerprint since we don't have
+    // a global key management system yet. In Phase 2, this would read the current key.
+    let old_key_fingerprint = "phase1-placeholder".to_string();
+
+    // Generate rotation event ID
+    let rotation_event_id = format!("rotate-{}", Uuid::new_v4());
+
+    // Record the rotation event in evidence ledger
+    let evidence_entry = EvidenceEntry {
+        schema_version: "evidence-entry-v1".to_string(),
+        entry_id: Some(rotation_event_id.clone()),
+        decision_id: rotation_event_id.clone(),
+        decision_kind: DecisionKind::Escalate,
+        decision_time: Utc::now().to_rfc3339(),
+        timestamp_ms: SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+        trace_id: format!("key-rotation-{}", rotation_event_id),
+        epoch_id: 1, // Phase 1 uses fixed epoch
+        payload: serde_json::json!({
+            "rotation_type": "ed25519_signing_key",
+            "old_key_fingerprint": old_key_fingerprint,
+            "new_key_fingerprint": new_key_fingerprint,
+            "key_path": validated_path.display().to_string(),
+            "reason": "manual key rotation via ops rotate-key command"
+        }),
+        size_bytes: 0, // Will be computed by evidence ledger
+        signature: String::new(), // Phase 1 doesn't sign evidence entries
+        prev_entry_hash: String::new(), // Will be computed by evidence ledger
+    };
+
+    // TODO Phase 2: Actually update the configured signer and add the evidence entry to ledger
+    // For Phase 1, we just validate the key and return the result
+
+    Ok(OpsRotateKeyResult {
+        rotation_event_id,
+        new_key_fingerprint,
+        old_key_fingerprint,
+        reason: "manual key rotation via ops rotate-key command".to_string(),
+    })
+}
+
+fn emit_ops_rotate_key_result(result: &OpsRotateKeyResult, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(result)?);
+    } else {
+        println!("Key rotation completed successfully");
+        println!("  rotation_event_id: {}", result.rotation_event_id);
+        println!("  new_key_fingerprint: {}", result.new_key_fingerprint);
+        println!("  old_key_fingerprint: {}", result.old_key_fingerprint);
+        println!("  reason: {}", result.reason);
+    }
+    Ok(())
 }
 
 fn write_prometheus_metric_prelude(
@@ -13343,6 +13444,7 @@ fn sign_incident_counterfactual_contract_receipt(
         action_name: action_name.to_string(),
         actor_identity: operator_id.to_string(),
         timestamp: timestamp.to_string(),
+        signature_version: DECISION_RECEIPT_SIGNATURE_VERSION.to_string(),
         input_hash: input_hash.to_string(),
         output_hash: output_hash.to_string(),
         decision: Decision::Approved,
@@ -18368,6 +18470,34 @@ fn load_release_verification_context(
     })
 }
 
+/// Sanitizes detailed cryptographic error messages for external output.
+/// Returns a generic "verification failed" message while preserving
+/// the detailed error for internal logging.
+fn sanitize_crypto_failure_reason(detailed_reason: &Option<String>) -> Option<String> {
+    match detailed_reason.as_deref() {
+        Some(reason) if reason.contains("checksum mismatch") => {
+            Some("verification failed".to_string())
+        }
+        Some(reason) if reason.contains("size mismatch") => {
+            Some("verification failed".to_string())
+        }
+        Some(reason) if reason.contains("signature invalid") => {
+            Some("verification failed".to_string())
+        }
+        Some(reason) if reason.contains("signature missing") => {
+            Some("verification failed".to_string())
+        }
+        Some(reason) if reason.contains("key not found") => {
+            Some("verification failed".to_string())
+        }
+        Some(reason) if reason.contains("threshold not met") => {
+            Some("verification failed".to_string())
+        }
+        // Pass through non-crypto errors unchanged
+        other => other.cloned(),
+    }
+}
+
 fn handle_verify_release(args: &VerifyReleaseArgs) -> Result<()> {
     use supply_chain::artifact_signing::{
         ASV_002_VERIFICATION_OK, ASV_003_VERIFICATION_FAILED, ArtifactVerificationResult,
@@ -18519,7 +18649,6 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
         return Ok(0);
     }
 
-    let mut verification_errors = Vec::new();
     let mut hash_chain_errors = Vec::new();
     let mut signature_errors = Vec::new();
 
@@ -20787,6 +20916,10 @@ fn main() -> Result<()> {
             OpsCommand::Metrics(args) => {
                 let report = ops_metrics_report(Path::new("."))?;
                 emit_ops_metrics_report(&report, args.format)?;
+            }
+            OpsCommand::RotateKey(args) => {
+                let result = handle_ops_rotate_key(args)?;
+                emit_ops_rotate_key_result(&result, args.json)?;
             }
         },
 

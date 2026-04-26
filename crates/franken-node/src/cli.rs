@@ -1059,6 +1059,9 @@ pub enum OpsCommand {
     HealthCheck(OpsHealthCheckArgs),
     /// Emit operator metrics in a scrape-friendly text format.
     Metrics(OpsMetricsArgs),
+    /// Rotate signing key for cryptographic agility.
+    #[command(name = "rotate-key")]
+    RotateKey(OpsRotateKeyArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -1078,6 +1081,16 @@ pub struct OpsMetricsArgs {
     /// Metrics output format.
     #[arg(long, value_enum, default_value_t = OpsMetricsFormat::Prometheus)]
     pub format: OpsMetricsFormat,
+}
+
+#[derive(Debug, Parser)]
+pub struct OpsRotateKeyArgs {
+    /// Path to new ed25519 signing key.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub new_key: PathBuf,
+    /// Emit JSON instead of human-readable output.
+    #[arg(long)]
+    pub json: bool,
 }
 
 // -- incident --

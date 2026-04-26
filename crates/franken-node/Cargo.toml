@@ -153,6 +153,14 @@ name = "auth_failure_limiter_loom"
 path = "tests/auth_failure_limiter_loom.rs"
 
 [[test]]
+name = "operator_process_start_initialization_loom"
+path = "tests/operator_process_start_initialization_loom.rs"
+
+[[test]]
+name = "evidence_ledger_append_ordering_loom"
+path = "tests/evidence_ledger_append_ordering_loom.rs"
+
+[[test]]
 name = "isolation_rail_router"
 path = "tests/isolation_rail_router.rs"
 

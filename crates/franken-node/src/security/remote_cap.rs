@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::Duration;
 
 use hmac::{Hmac, KeyInit, Mac};
@@ -38,7 +38,7 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ReplayTokenSet {
     inner: Arc<Mutex<ReplayTokenSetInner>>,
 }
@@ -53,6 +53,14 @@ impl Clone for ReplayTokenSet {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+        }
+    }
+}
+
+impl Default for ReplayTokenSet {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(ReplayTokenSetInner::default())),
         }
     }
 }
@@ -76,28 +84,8 @@ impl ReplayTokenSet {
         Self::insert_into_inner(inner, token_id)
     }
 
-    fn insert_into_inner(
-        mut inner: std::sync::MutexGuard<ReplayTokenSetInner>,
-        token_id: String,
-    ) -> bool {
-        if !inner.ids.insert(token_id.clone()) {
-            return false;
-        }
-
-        if inner.insertion_order.len() >= MAX_REPLAY_ENTRIES {
-            let overflow = inner
-                .insertion_order
-                .len()
-                .saturating_sub(MAX_REPLAY_ENTRIES)
-                .saturating_add(1);
-            let drain_len = overflow.min(inner.insertion_order.len());
-            let evicted_ids: Vec<_> = inner.insertion_order.drain(0..drain_len).collect();
-            for evicted in evicted_ids {
-                inner.ids.remove(&evicted);
-            }
-        }
-        inner.insertion_order.push(token_id);
-        true
+    fn insert_into_inner(mut inner: MutexGuard<ReplayTokenSetInner>, token_id: String) -> bool {
+        insert_replay_token(&mut inner, token_id)
     }
 
     fn insert(&mut self, token_id: String) -> bool {
@@ -164,6 +152,106 @@ impl ReplayTokenSet {
                 }
             }
         }
+    }
+}
+
+fn insert_replay_token(inner: &mut ReplayTokenSetInner, token_id: String) -> bool {
+    if !inner.ids.insert(token_id.clone()) {
+        return false;
+    }
+
+    if inner.insertion_order.len() >= MAX_REPLAY_ENTRIES {
+        let overflow = inner
+            .insertion_order
+            .len()
+            .saturating_sub(MAX_REPLAY_ENTRIES)
+            .saturating_add(1);
+        let drain_len = overflow.min(inner.insertion_order.len());
+        let evicted_ids: Vec<_> = inner.insertion_order.drain(0..drain_len).collect();
+        for evicted in evicted_ids {
+            inner.ids.remove(&evicted);
+        }
+    }
+    inner.insertion_order.push(token_id);
+    true
+}
+
+#[cfg(all(test, loom))]
+mod replay_token_set_loom_tests {
+    //! Run with:
+    //! `RUSTFLAGS="--cfg loom" cargo test --release replay_token_set_duplicate_insert_is_atomic -- --exact`
+
+    use super::{ReplayTokenSetInner, insert_replay_token};
+    use loom::sync::{Arc, Mutex};
+    use loom::thread;
+
+    #[derive(Debug, Clone, Default)]
+    struct LoomReplayTokenSet {
+        inner: Arc<Mutex<ReplayTokenSetInner>>,
+    }
+
+    impl LoomReplayTokenSet {
+        fn insert_if_new(&self, token_id: String) -> bool {
+            let mut inner = self.inner.lock().expect("loom lock");
+            insert_replay_token(&mut inner, token_id)
+        }
+
+        fn len(&self) -> usize {
+            self.inner.lock().expect("loom lock").ids.len()
+        }
+
+        fn contains(&self, token_id: &str) -> bool {
+            self.inner.lock().expect("loom lock").ids.contains(token_id)
+        }
+
+        fn ordered_ids(&self) -> Vec<String> {
+            self.inner
+                .lock()
+                .expect("loom lock")
+                .insertion_order
+                .clone()
+        }
+    }
+
+    #[test]
+    fn replay_token_set_duplicate_insert_is_atomic() {
+        loom::model(|| {
+            let replay_tokens = LoomReplayTokenSet::default();
+
+            let duplicate_a = replay_tokens.clone();
+            let duplicate_b = replay_tokens.clone();
+            let unique = replay_tokens.clone();
+
+            let duplicate_a = thread::spawn(move || duplicate_a.insert_if_new("dup-token".into()));
+            let duplicate_b = thread::spawn(move || duplicate_b.insert_if_new("dup-token".into()));
+            let unique = thread::spawn(move || unique.insert_if_new("unique-token".into()));
+
+            let duplicate_successes = usize::from(duplicate_a.join().expect("join"))
+                + usize::from(duplicate_b.join().expect("join"));
+
+            assert_eq!(duplicate_successes, 1);
+            assert!(unique.join().expect("join"));
+            assert_eq!(replay_tokens.len(), 2);
+            assert!(replay_tokens.contains("dup-token"));
+            assert!(replay_tokens.contains("unique-token"));
+
+            let ordered_ids = replay_tokens.ordered_ids();
+            assert_eq!(ordered_ids.len(), 2);
+            assert_eq!(
+                ordered_ids
+                    .iter()
+                    .filter(|token_id| token_id.as_str() == "dup-token")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                ordered_ids
+                    .iter()
+                    .filter(|token_id| token_id.as_str() == "unique-token")
+                    .count(),
+                1
+            );
+        });
     }
 }
 
