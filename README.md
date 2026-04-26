@@ -179,7 +179,9 @@ franken-node incident list --severity high
 | `franken-node trust revoke` | Revoke artifact or publisher trust | `franken-node trust revoke npm:@example/plugin@2.4.1` |
 | `franken-node trust quarantine` | Quarantine a suspicious artifact fleet-wide | `franken-node trust quarantine --artifact sha256:...` |
 | `franken-node fleet status` | Show policy and quarantine state across nodes | `franken-node fleet status --zone prod-us-east` |
+| `franken-node fleet describe` | Describe one fleet node with zone context and incident state | `franken-node fleet describe node-17 --zone prod-us-east` |
 | `franken-node fleet release` | Lift quarantine/revocation controls with receipts | `franken-node fleet release --incident INC-2026-0007` |
+| `franken-node ops health-check` | Inspect process and runtime health signals | `franken-node ops health-check --json` |
 | `franken-node incident bundle` | Export deterministic incident bundle from authoritative evidence | `franken-node incident bundle --id INC-2026-0007 --evidence-path ./incidents/INC-2026-0007/evidence.v1.json --verify` |
 | `franken-node incident replay` | Replay incident timeline locally | `franken-node incident replay --bundle ./INC-2026-0007.fnbundle --trusted-public-key ./keys/replay-trust-anchor.pub` |
 | `franken-node incident counterfactual` | Simulate alternative policy actions | `franken-node incident counterfactual --bundle ./INC-2026-0007.fnbundle --trusted-public-key ./keys/replay-trust-anchor.pub --policy strict` |
