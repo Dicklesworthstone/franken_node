@@ -10,6 +10,7 @@
 use frankenengine_node::observability::evidence_ledger::{
     DecisionKind, EvidenceEntry, EvidenceLedger, LedgerCapacity, test_entry,
 };
+use frankenengine_node::test_strategies;
 use proptest::prelude::*;
 
 fn build_ledger() -> EvidenceLedger {
@@ -29,7 +30,12 @@ fn append_all(entries: &[EvidenceEntry]) -> Vec<EvidenceEntry> {
             .append(entry.clone())
             .expect("append must succeed for in-budget test entries");
     }
-    ledger.snapshot().entries.into_iter().map(|(_, e)| e).collect()
+    ledger
+        .snapshot()
+        .entries
+        .into_iter()
+        .map(|(_, e)| e)
+        .collect()
 }
 
 /// MR1 (permutative, order-sensitive): swapping append order MUST change the
@@ -165,27 +171,10 @@ proptest! {
     /// between forward and reversed append orders.
     #[test]
     fn mr_pbt_chain_head_changes_under_swap(
-        id_a in "[A-Z]{3}-[0-9]{2}",
-        id_b in "[A-Z]{3}-[0-9]{2}",
-        epoch_a in 1u64..1_000,
-        epoch_b in 1u64..1_000,
-        kind_a in 0usize..7,
-        kind_b in 0usize..7,
+        e1 in test_strategies::evidence_ledger_entries(),
+        e2 in test_strategies::evidence_ledger_entries(),
     ) {
-        // Skip the degenerate equal-entry case — the MR only asserts
-        // sensitivity when inputs differ.
-        let kinds = [
-            DecisionKind::Admit,
-            DecisionKind::Deny,
-            DecisionKind::Quarantine,
-            DecisionKind::Release,
-            DecisionKind::Rollback,
-            DecisionKind::Throttle,
-            DecisionKind::Escalate,
-        ];
-        let e1 = mk_entry(&id_a, epoch_a, kinds[kind_a]);
-        let e2 = mk_entry(&id_b, epoch_b, kinds[kind_b]);
-        prop_assume!((id_a.as_str(), epoch_a, kind_a) != (id_b.as_str(), epoch_b, kind_b));
+        prop_assume!(e1 != e2);
 
         let forward = append_all(&[e1.clone(), e2.clone()]);
         let reversed = append_all(&[e2, e1]);

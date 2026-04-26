@@ -1,7 +1,8 @@
 use frankenengine_node::api::fleet_quarantine::{
-    ConvergencePhase, ConvergenceState, DecisionReceiptPayload, DecisionReceiptScope, FleetAction,
-    FleetStatus, QuarantineScope, RevocationScope, RevocationSeverity,
+    ConvergencePhase, ConvergenceState, DecisionReceipt, FleetAction, FleetStatus, QuarantineScope,
+    RevocationScope, RevocationSeverity,
 };
+use frankenengine_node::test_strategies;
 use proptest::prelude::*;
 
 fn bounded_string() -> impl Strategy<Value = String> {
@@ -107,46 +108,6 @@ fn fleet_action() -> impl Strategy<Value = FleetAction> {
     ]
 }
 
-fn decision_receipt_scope() -> impl Strategy<Value = DecisionReceiptScope> {
-    (
-        bounded_string(),
-        optional_bounded_string(),
-        prop::option::of(any::<u32>()),
-        prop::option::of(revocation_severity()),
-    )
-        .prop_map(
-            |(zone_id, tenant_id, affected_nodes, revocation_severity)| DecisionReceiptScope {
-                zone_id,
-                tenant_id,
-                affected_nodes,
-                revocation_severity,
-            },
-        )
-}
-
-fn decision_receipt_payload() -> impl Strategy<Value = DecisionReceiptPayload> {
-    (
-        bounded_string(),
-        optional_bounded_string(),
-        optional_bounded_string(),
-        decision_receipt_scope(),
-        bounded_string(),
-        bounded_string(),
-    )
-        .prop_map(
-            |(action_type, extension_id, incident_id, scope, reason, event_code)| {
-                DecisionReceiptPayload {
-                    action_type,
-                    extension_id,
-                    incident_id,
-                    scope,
-                    reason,
-                    event_code,
-                }
-            },
-        )
-}
-
 fn fleet_status() -> impl Strategy<Value = FleetStatus> {
     (
         bounded_string(),
@@ -189,10 +150,10 @@ proptest! {
     }
 
     #[test]
-    fn decision_receipt_payload_serde_roundtrip(payload in decision_receipt_payload()) {
-        let json = serde_json::to_string(&payload)?;
-        let decoded: DecisionReceiptPayload = serde_json::from_str(&json)?;
-        prop_assert_eq!(decoded, payload);
+    fn decision_receipt_serde_roundtrip(receipt in test_strategies::decision_receipts()) {
+        let json = serde_json::to_string(&receipt)?;
+        let decoded: DecisionReceipt = serde_json::from_str(&json)?;
+        prop_assert_eq!(decoded, receipt);
     }
 
     #[test]

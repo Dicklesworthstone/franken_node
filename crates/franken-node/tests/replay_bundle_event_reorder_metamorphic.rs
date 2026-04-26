@@ -4,33 +4,13 @@
 //! This tests that the bundle generation process correctly handles event ordering
 //! for events that occur at the same timestamp and are logically commutative.
 
+use frankenengine_node::test_strategies;
 use frankenengine_node::tools::replay_bundle::{
-    generate_replay_bundle, to_canonical_json, RawEvent, EventType,
+    RawEvent, generate_replay_bundle, to_canonical_json,
 };
 use proptest::prelude::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
-
-/// Generator for minimal valid RawEvent instances
-fn arb_raw_event() -> impl Strategy<Value = RawEvent> {
-    (
-        prop::string::string_regex("2026-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z").unwrap(),
-        prop::option::of(0u64..10000u64),
-        prop::string::string_regex("[a-z]{3,8}").unwrap(),
-    ).prop_map(|(timestamp, causal_parent, action)| {
-        RawEvent {
-            timestamp,
-            event_type: EventType::StateChange,
-            payload: json!({
-                "action": action,
-                "data": "test_data"
-            }),
-            causal_parent,
-            state_snapshot: None,
-            policy_version: Some("0.1.0".to_string()),
-        }
-    })
-}
 
 /// Reorders events that have the same timestamp
 fn reorder_concurrent_events(mut events: Vec<RawEvent>, seed: u64) -> Vec<RawEvent> {
@@ -86,7 +66,7 @@ proptest! {
     /// of logically concurrent events (same timestamp).
     #[test]
     fn mr_replay_bundle_concurrent_event_reorder_invariance(
-        events in prop::collection::vec(arb_raw_event(), 2..8),
+        events in prop::collection::vec(test_strategies::replay_bundle_entries(), 2..8),
         reorder_seed in any::<u64>()
     ) {
         let incident_id = "test-incident-metamorphic";
@@ -126,7 +106,7 @@ proptest! {
     /// This tests the INV-RB-DETERMINISTIC invariant directly.
     #[test]
     fn mr_replay_bundle_deterministic_generation(
-        events in prop::collection::vec(arb_raw_event(), 1..5)
+        events in prop::collection::vec(test_strategies::replay_bundle_entries(), 1..5)
     ) {
         let incident_id = "deterministic-test";
 
@@ -163,7 +143,7 @@ proptest! {
     /// This tests that JSON canonicalization correctly normalizes field ordering.
     #[test]
     fn mr_replay_bundle_payload_field_reorder_invariance(
-        mut events in prop::collection::vec(arb_raw_event(), 1..4),
+        mut events in prop::collection::vec(test_strategies::replay_bundle_entries(), 1..4),
         field_seed in any::<u64>()
     ) {
         let incident_id = "field-reorder-test";
