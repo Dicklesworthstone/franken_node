@@ -688,11 +688,11 @@ impl TransportFaultGate {
         let content_hash = {
             let mut h = Sha256::new();
             h.update(b"transport_fault_gate_hash_v1:");
-            h.update((SCHEMA_VERSION.len() as u64).to_le_bytes());
+            h.update(u64::try_from(SCHEMA_VERSION.len()).unwrap_or(u64::MAX).to_le_bytes());
             h.update(SCHEMA_VERSION.as_bytes());
-            h.update((BEAD_ID.len() as u64).to_le_bytes());
+            h.update(u64::try_from(BEAD_ID.len()).unwrap_or(u64::MAX).to_le_bytes());
             h.update(BEAD_ID.as_bytes());
-            h.update((SECTION.len() as u64).to_le_bytes());
+            h.update(u64::try_from(SECTION.len()).unwrap_or(u64::MAX).to_le_bytes());
             h.update(SECTION.as_bytes());
             h.update([u8::from(passed)]);
             h.update((total_tests as u64).to_le_bytes());
@@ -700,19 +700,19 @@ impl TransportFaultGate {
             h.update((failed_tests as u64).to_le_bytes());
             let results_json =
                 serde_json::to_string(&results).unwrap_or_else(|e| format!("__serde_err:{e}"));
-            h.update((results_json.len() as u64).to_le_bytes());
+            h.update(u64::try_from(results_json.len()).unwrap_or(u64::MAX).to_le_bytes());
             h.update(results_json.as_bytes());
-            h.update((protocols_tested.len() as u64).to_le_bytes());
+            h.update(u64::try_from(protocols_tested.len()).unwrap_or(u64::MAX).to_le_bytes());
             for p in &protocols_tested {
-                h.update((p.len() as u64).to_le_bytes());
+                h.update(u64::try_from(p.len()).unwrap_or(u64::MAX).to_le_bytes());
                 h.update(p.as_bytes());
             }
-            h.update((fault_modes_tested.len() as u64).to_le_bytes());
+            h.update(u64::try_from(fault_modes_tested.len()).unwrap_or(u64::MAX).to_le_bytes());
             for m in &fault_modes_tested {
-                h.update((m.len() as u64).to_le_bytes());
+                h.update(u64::try_from(m.len()).unwrap_or(u64::MAX).to_le_bytes());
                 h.update(m.as_bytes());
             }
-            h.update((seeds.len() as u64).to_le_bytes());
+            h.update(u64::try_from(seeds.len()).unwrap_or(u64::MAX).to_le_bytes());
             for &s in &seeds {
                 h.update(s.to_le_bytes());
             }
@@ -1309,29 +1309,29 @@ mod tests {
 
         let mut h = Sha256::new();
         h.update(b"transport_fault_gate_hash_v1:");
-        h.update((SCHEMA_VERSION.len() as u64).to_le_bytes());
+        h.update(u64::try_from(SCHEMA_VERSION.len()).unwrap_or(u64::MAX).to_le_bytes());
         h.update(SCHEMA_VERSION.as_bytes());
-        h.update((BEAD_ID.len() as u64).to_le_bytes());
+        h.update(u64::try_from(BEAD_ID.len()).unwrap_or(u64::MAX).to_le_bytes());
         h.update(BEAD_ID.as_bytes());
-        h.update((SECTION.len() as u64).to_le_bytes());
+        h.update(u64::try_from(SECTION.len()).unwrap_or(u64::MAX).to_le_bytes());
         h.update(SECTION.as_bytes());
         h.update([u8::from(verdict.passed)]);
         h.update((verdict.total_tests as u64).to_le_bytes());
         h.update((verdict.passed_tests as u64).to_le_bytes());
         h.update((verdict.failed_tests as u64).to_le_bytes());
-        h.update((results_json.len() as u64).to_le_bytes());
+        h.update(u64::try_from(results_json.len()).unwrap_or(u64::MAX).to_le_bytes());
         h.update(results_json.as_bytes());
-        h.update((verdict.protocols_tested.len() as u64).to_le_bytes());
+        h.update(u64::try_from(verdict.protocols_tested.len()).unwrap_or(u64::MAX).to_le_bytes());
         for protocol in &verdict.protocols_tested {
-            h.update((protocol.len() as u64).to_le_bytes());
+            h.update(u64::try_from(protocol.len()).unwrap_or(u64::MAX).to_le_bytes());
             h.update(protocol.as_bytes());
         }
-        h.update((verdict.fault_modes_tested.len() as u64).to_le_bytes());
+        h.update(u64::try_from(verdict.fault_modes_tested.len()).unwrap_or(u64::MAX).to_le_bytes());
         for fault_mode in &verdict.fault_modes_tested {
-            h.update((fault_mode.len() as u64).to_le_bytes());
+            h.update(u64::try_from(fault_mode.len()).unwrap_or(u64::MAX).to_le_bytes());
             h.update(fault_mode.as_bytes());
         }
-        h.update((verdict.seeds_used.len() as u64).to_le_bytes());
+        h.update(u64::try_from(verdict.seeds_used.len()).unwrap_or(u64::MAX).to_le_bytes());
         for seed in &verdict.seeds_used {
             h.update(seed.to_le_bytes());
         }

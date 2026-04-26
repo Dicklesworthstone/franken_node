@@ -24,6 +24,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::remote::eviction_saga::RemoteCapLookup;
+
 /// Maximum phase transitions before oldest-first eviction.
 const MAX_TRANSITIONS: usize = 4096;
 
@@ -383,8 +385,8 @@ impl EvictionSaga {
 
     /// Begin the upload phase. Requires a validated RemoteCap with
     /// ArtifactUpload scope.
-    pub fn begin_upload(&mut self, has_remote_cap: bool) -> Result<(), EvictionSagaError> {
-        if !has_remote_cap {
+    pub fn begin_upload(&mut self, remote_cap: RemoteCapLookup) -> Result<(), EvictionSagaError> {
+        if !remote_cap.is_granted() {
             return Err(EvictionSagaError::new(
                 ERR_ES_REMOTE_CAP_REQUIRED,
                 "ArtifactUpload RemoteCap required for upload phase",
@@ -396,17 +398,17 @@ impl EvictionSaga {
     }
 
     /// Mark upload as successful and transition to verification.
-    pub fn upload_complete(&mut self, has_remote_cap: bool) -> Result<(), EvictionSagaError> {
+    pub fn upload_complete(&mut self, remote_cap: RemoteCapLookup) -> Result<(), EvictionSagaError> {
         self.ensure_transition_allowed(SagaPhase::Verifying)?;
-        self.require_remote_cap_recheck(SagaPhase::Uploading, has_remote_cap, "upload_complete")?;
+        self.require_remote_cap_recheck(SagaPhase::Uploading, remote_cap, "upload_complete")?;
         self.tier_presence.l3_present = true;
         self.transition(SagaPhase::Verifying, ES_PHASE_VERIFY, "upload_done")
     }
 
     /// Mark verification as successful and transition to retirement.
-    pub fn verify_complete(&mut self, has_remote_cap: bool) -> Result<(), EvictionSagaError> {
+    pub fn verify_complete(&mut self, remote_cap: RemoteCapLookup) -> Result<(), EvictionSagaError> {
         self.ensure_transition_allowed(SagaPhase::Retiring)?;
-        self.require_remote_cap_recheck(SagaPhase::Verifying, has_remote_cap, "verify_complete")?;
+        self.require_remote_cap_recheck(SagaPhase::Verifying, remote_cap, "verify_complete")?;
         if !self.tier_presence.l3_present {
             return Err(EvictionSagaError::new(
                 ERR_ES_VERIFY_FAILED,
@@ -418,9 +420,9 @@ impl EvictionSaga {
     }
 
     /// Mark retirement complete; saga is done.
-    pub fn retire_complete(&mut self, has_remote_cap: bool) -> Result<(), EvictionSagaError> {
+    pub fn retire_complete(&mut self, remote_cap: RemoteCapLookup) -> Result<(), EvictionSagaError> {
         self.ensure_transition_allowed(SagaPhase::Complete)?;
-        self.require_remote_cap_recheck(SagaPhase::Retiring, has_remote_cap, "retire_complete")?;
+        self.require_remote_cap_recheck(SagaPhase::Retiring, remote_cap, "retire_complete")?;
         if !self.tier_presence.can_retire_l2() {
             return Err(EvictionSagaError::new(
                 ERR_ES_RETIRE_FAILED,
@@ -573,7 +575,7 @@ impl EvictionSaga {
     fn require_remote_cap_recheck(
         &mut self,
         expected_phase: SagaPhase,
-        has_remote_cap: bool,
+        remote_cap: RemoteCapLookup,
         operation: &str,
     ) -> Result<(), EvictionSagaError> {
         if self.current_phase != expected_phase {
@@ -581,7 +583,7 @@ impl EvictionSaga {
         }
 
         // Recheck success revalidates capability for the current phase.
-        if has_remote_cap {
+        if remote_cap.is_granted() {
             self.remote_cap_validated = true;
             return Ok(());
         }

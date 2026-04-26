@@ -298,28 +298,28 @@ pub fn compute_integrity_hash(bundle: &IncidentBundle) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"incident_bundle_retention_hash_v1:");
     // Length-prefix free-form string fields to prevent delimiter-collision attacks
-    hasher.update((bundle.bundle_id.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(bundle.bundle_id.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(bundle.bundle_id.as_bytes());
-    hasher.update((bundle.incident_id.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(bundle.incident_id.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(bundle.incident_id.as_bytes());
-    hasher.update((bundle.created_at.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(bundle.created_at.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(bundle.created_at.as_bytes());
     // Enum labels are from a fixed set (no attacker control), no length-prefix needed
     hasher.update(bundle.severity.label().as_bytes());
     hasher.update(bundle.retention_tier.label().as_bytes());
-    hasher.update((bundle.metadata.title.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(bundle.metadata.title.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(bundle.metadata.title.as_bytes());
-    hasher.update((bundle.metadata.detected_by.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(bundle.metadata.detected_by.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(bundle.metadata.detected_by.as_bytes());
     // INV-IBR-INTEGRITY: include component_ids and tags so tampering is detected
-    hasher.update((bundle.metadata.component_ids.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(bundle.metadata.component_ids.len()).unwrap_or(u64::MAX).to_le_bytes());
     for cid in &bundle.metadata.component_ids {
-        hasher.update((cid.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(cid.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(cid.as_bytes());
     }
-    hasher.update((bundle.metadata.tags.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(bundle.metadata.tags.len()).unwrap_or(u64::MAX).to_le_bytes());
     for tag in &bundle.metadata.tags {
-        hasher.update((tag.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(tag.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(tag.as_bytes());
     }
     // Fixed-size numeric fields need no length-prefix

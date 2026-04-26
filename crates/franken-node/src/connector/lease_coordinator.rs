@@ -177,9 +177,9 @@ pub fn select_coordinator(
     for candidate in &eligible_candidates {
         let mut h = Sha256::new();
         h.update(b"lease_coord_hash_v1:");
-        h.update((lease_id.len() as u64).to_le_bytes());
+        h.update(u64::try_from(lease_id.len()).unwrap_or(u64::MAX).to_le_bytes());
         h.update(lease_id.as_bytes());
-        h.update((candidate.node_id.len() as u64).to_le_bytes());
+        h.update(u64::try_from(candidate.node_id.len()).unwrap_or(u64::MAX).to_le_bytes());
         h.update(candidate.node_id.as_bytes());
         let digest = h.finalize();
         let hash = u64::from_le_bytes(digest[..8].try_into().unwrap_or([0u8; 8]));
@@ -258,9 +258,9 @@ pub fn verify_quorum(
         // Simulate signature verification: H(signer_id || content_hash) length-prefixed
         let mut h = Sha256::new();
         h.update(b"lease_coord_sign_v1:");
-        h.update((sig.signer_id.len() as u64).to_le_bytes());
+        h.update(u64::try_from(sig.signer_id.len()).unwrap_or(u64::MAX).to_le_bytes());
         h.update(sig.signer_id.as_bytes());
-        h.update((expected_content_hash.len() as u64).to_le_bytes());
+        h.update(u64::try_from(expected_content_hash.len()).unwrap_or(u64::MAX).to_le_bytes());
         h.update(expected_content_hash.as_bytes());
         let digest = h.finalize();
         let expected_sig = hex::encode(digest);
@@ -335,9 +335,9 @@ pub fn verify_quorum(
 pub fn compute_test_signature(signer_id: &str, content_hash: &str) -> String {
     let mut h = Sha256::new();
     h.update(b"lease_coord_sign_v1:");
-    h.update((signer_id.len() as u64).to_le_bytes());
+    h.update(u64::try_from(signer_id.len()).unwrap_or(u64::MAX).to_le_bytes());
     h.update(signer_id.as_bytes());
-    h.update((content_hash.len() as u64).to_le_bytes());
+    h.update(u64::try_from(content_hash.len()).unwrap_or(u64::MAX).to_le_bytes());
     h.update(content_hash.as_bytes());
     let digest = h.finalize();
     hex::encode(digest)
