@@ -55,9 +55,10 @@ use std::convert::TryInto;
 const MIN_SEEN_SIGNATURES: usize = 8192;
 const ED25519_SIGNATURE_BYTES: usize = 64;
 const SHA256_DIGEST_BYTES: usize = 32;
+const REPLAY_TIMESTAMP_BYTES: usize = 8;
+const REPLAY_KEY_BYTES: usize = REPLAY_TIMESTAMP_BYTES + ED25519_SIGNATURE_BYTES;
 type ReplaySignature = [u8; ED25519_SIGNATURE_BYTES];
-type ReplayTimestamp = [u8; 8];
-type ReplayKey = (ReplayTimestamp, ReplaySignature);
+type ReplayKey = [u8; REPLAY_KEY_BYTES];
 type EntryHash = [u8; SHA256_DIGEST_BYTES];
 
 // ── Event codes ─────────────────────────────────────────────────────
@@ -251,6 +252,13 @@ where
     hasher.update(len.to_le_bytes());
     hasher.update(&json_bytes);
     Ok(())
+}
+
+fn replay_key(timestamp_ms: u64, signature: &ReplaySignature) -> ReplayKey {
+    let mut replay_key = [0_u8; REPLAY_KEY_BYTES];
+    replay_key[..REPLAY_TIMESTAMP_BYTES].copy_from_slice(&timestamp_ms.to_le_bytes());
+    replay_key[REPLAY_TIMESTAMP_BYTES..].copy_from_slice(signature);
+    replay_key
 }
 
 fn entry_with_server_computed_size(mut normalized: EvidenceEntry) -> (EvidenceEntry, usize) {
@@ -737,22 +745,15 @@ impl EvidenceLedger {
     }
 
     fn is_replay_attack_ct_bytes(&self, timestamp_ms: u64, signature: &ReplaySignature) -> bool {
-        // bd-3ml3u fix: Remove early-return to prevent timing leaks about timestamp presence
-        // and signature position. Use constant-time comparison for both timestamp and signature.
-        let timestamp_bytes = timestamp_ms.to_le_bytes();
+        // bd-3ml3u fix: Remove early-return to prevent timing leaks about replay-key presence
+        // and position. Collapse the timestamp+signature pair into one fixed-width key so each
+        // retained entry needs only a single constant-time comparison.
+        let replay_key = replay_key(timestamp_ms, signature);
         let mut found_replay = false;
 
-        // Scan ALL entries without early return to prevent position/timestamp timing leaks
-        for (seen_timestamp_bytes, seen_signature) in &self.seen_signatures {
-            // Constant-time timestamp comparison (no branching on timestamp match)
-            let timestamp_match =
-                constant_time::ct_eq_bytes(&timestamp_bytes, seen_timestamp_bytes);
-
-            // Constant-time signature comparison
-            let signature_match = constant_time::ct_eq_bytes(signature, seen_signature);
-
-            // Accumulate result: replay detected if BOTH timestamp AND signature match
-            found_replay = found_replay || (timestamp_match && signature_match);
+        // Scan ALL entries without early return to prevent position timing leaks.
+        for seen_replay_key in &self.seen_signatures {
+            found_replay = found_replay || constant_time::ct_eq_bytes(&replay_key, seen_replay_key);
         }
         found_replay
     }
@@ -885,7 +886,7 @@ impl EvidenceLedger {
     fn remember_seen_signature(&mut self, timestamp_ms: u64, signature: ReplaySignature) {
         let replay_window = self.capacity.max_entries.max(MIN_SEEN_SIGNATURES);
         self.seen_signatures
-            .push_back((timestamp_ms.to_le_bytes(), signature));
+            .push_back(replay_key(timestamp_ms, &signature));
         while self.seen_signatures.len() > replay_window {
             self.seen_signatures.pop_front();
         }
@@ -5488,7 +5489,9 @@ mod tests {
 
         let mut entry = test_entry("TEST-REPLAY-BYTES", 7);
         sign_evidence_entry(&mut entry, &signing_key);
-        let expected_timestamp_bytes = entry.timestamp_ms.to_le_bytes();
+        let expected_signature =
+            decode_replay_signature(&entry.signature).expect("signed test entry should decode");
+        let expected_replay_key = replay_key(entry.timestamp_ms, &expected_signature);
 
         ledger.append(entry).expect("signed entry should append");
 
@@ -5496,7 +5499,7 @@ mod tests {
             .seen_signatures
             .front()
             .expect("replay window should capture the signed append");
-        assert_eq!(stored.0, expected_timestamp_bytes);
+        assert_eq!(*stored, expected_replay_key);
     }
 
     #[test]
