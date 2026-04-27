@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock, TryLockError};
 use std::time::Duration;
 
-use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -44,11 +44,11 @@ const MAX_INCIDENTS: usize = 2048;
 const MAX_ZONE_STATUS: usize = 2048;
 
 use super::error::ApiError;
-use super::middleware::{AuthIdentity, TraceContext};
 #[cfg(any(test, feature = "control-plane"))]
 use super::middleware::{
-    AuthMethod, EndpointGroup, EndpointLifecycle, PolicyHook, RouteMetadata, enforce_route_contract,
+    enforce_route_contract, AuthMethod, EndpointGroup, EndpointLifecycle, PolicyHook, RouteMetadata,
 };
+use super::middleware::{AuthIdentity, TraceContext};
 use super::trust_card_routes::ApiResponse;
 
 // ── Event Codes ───────────────────────────────────────────────────────────
@@ -89,6 +89,8 @@ pub const FLEET_ZONE_STATUS_CAPACITY_EXCEEDED: &str = "FLEET_ZONE_STATUS_CAPACIT
 /// Internal failure (e.g., durable transport persistence error) raised from the
 /// fleet control surface when a non-recoverable invariant is hit on the write path.
 pub const FLEET_INTERNAL: &str = "FLEET_INTERNAL";
+
+const FLEET_DECISION_SIGNED_PAYLOAD_DOMAIN: &[u8] = b"fleet_decision_receipt_payload_v1:";
 
 // ── Invariant Tags ────────────────────────────────────────────────────────
 
@@ -666,6 +668,14 @@ fn decision_receipt_payload_bytes(receipt: &DecisionReceipt) -> Vec<u8> {
     payload
 }
 
+fn decision_receipt_signed_payload_sha256(payload: &[u8]) -> String {
+    let mut payload_hasher = Sha256::new();
+    payload_hasher.update(FLEET_DECISION_SIGNED_PAYLOAD_DOMAIN);
+    payload_hasher.update((u64::try_from(payload.len()).unwrap_or(u64::MAX)).to_le_bytes());
+    payload_hasher.update(payload);
+    hex::encode(payload_hasher.finalize())
+}
+
 /// Create an Ed25519 signature envelope for a fleet decision receipt.
 ///
 /// # Examples
@@ -701,8 +711,6 @@ pub fn sign_decision_receipt(
     let payload = decision_receipt_payload_bytes(receipt);
     let signature = signing_key.sign(&payload);
     let verifying_key = signing_key.verifying_key();
-    let mut payload_hasher = Sha256::new();
-    payload_hasher.update(&payload);
 
     DecisionReceiptSignature {
         algorithm: "ed25519".to_string(),
@@ -712,7 +720,7 @@ pub fn sign_decision_receipt(
         key_source: key_source.to_string(),
         signing_identity: signing_identity.to_string(),
         trust_scope: "fleet_decision".to_string(),
-        signed_payload_sha256: hex::encode(payload_hasher.finalize()),
+        signed_payload_sha256: decision_receipt_signed_payload_sha256(&payload),
         signature_hex: hex::encode(signature.to_bytes()),
     }
 }
@@ -825,9 +833,7 @@ pub fn verify_decision_receipt_signature_with_trust_roots(
     }
 
     let payload = decision_receipt_payload_bytes(receipt);
-    let mut payload_hasher = Sha256::new();
-    payload_hasher.update(&payload);
-    let expected_payload_hash = hex::encode(payload_hasher.finalize());
+    let expected_payload_hash = decision_receipt_signed_payload_sha256(&payload);
     if !crate::security::constant_time::ct_eq(
         &signature.signed_payload_sha256,
         &expected_payload_hash,
@@ -841,7 +847,7 @@ pub fn verify_decision_receipt_signature_with_trust_roots(
     let Ok(signature) = Signature::from_slice(&signature_bytes) else {
         return false;
     };
-    verifying_key.verify(&payload, &signature).is_ok()
+    verifying_key.verify_strict(&payload, &signature).is_ok()
 }
 
 fn trusted_receipt_verifying_key(
@@ -1891,8 +1897,13 @@ impl SharedFleetControlOwner {
         // Phase 1: Acquire lock, do state updates, prepare persistence data
         let (result, maybe_action_record) = {
             let mut mgr = self.lock(trace)?;
-            mgr.quarantine_with_persistence_prep(&request.extension_id, &request.scope, identity, trace)
-                .map_err(|e| map_fleet_control_error("quarantine", trace, e))?
+            mgr.quarantine_with_persistence_prep(
+                &request.extension_id,
+                &request.scope,
+                identity,
+                trace,
+            )
+            .map_err(|e| map_fleet_control_error("quarantine", trace, e))?
         }; // Lock released here
 
         // Phase 2: Do persistence I/O without holding mutex
@@ -1915,7 +1926,8 @@ impl SharedFleetControlOwner {
             };
 
             if let Some(ref mut transport) = mgr.fleet_transport {
-                transport.publish_action(&action_record)
+                transport
+                    .publish_action(&action_record)
                     .map_err(|e| format!("Transport persistence failed: {}", e))
             } else {
                 Ok(())
@@ -2210,7 +2222,8 @@ impl FleetControlManager {
         identity: &AuthIdentity,
         trace: &TraceContext,
     ) -> Result<(FleetActionResult, Option<FleetActionRecord>), FleetControlError> {
-        let (result, action_record) = self.quarantine_internal(extension_id, scope, identity, trace)?;
+        let (result, action_record) =
+            self.quarantine_internal(extension_id, scope, identity, trace)?;
 
         // Don't persist here - return action record for external persistence
         Ok((result, action_record))
@@ -2223,10 +2236,13 @@ impl FleetControlManager {
         identity: &AuthIdentity,
         trace: &TraceContext,
     ) -> Result<FleetActionResult, FleetControlError> {
-        let (result, action_record) = self.quarantine_internal(extension_id, scope, identity, trace)?;
+        let (result, action_record) =
+            self.quarantine_internal(extension_id, scope, identity, trace)?;
 
         // Persist if transport available (synchronous, still holding lock)
-        if let (Some(action_record), Some(ref mut transport)) = (action_record, &mut self.fleet_transport) {
+        if let (Some(action_record), Some(ref mut transport)) =
+            (action_record, &mut self.fleet_transport)
+        {
             transport.publish_action(&action_record).map_err(|e| {
                 FleetControlError::internal(format!("Transport persistence failed: {}", e))
             })?;
@@ -4535,11 +4551,9 @@ mod tests {
     fn route_metadata_has_five_endpoints() {
         let routes = quarantine_route_metadata();
         assert_eq!(routes.len(), 5);
-        assert!(
-            routes
-                .iter()
-                .all(|r| r.group == EndpointGroup::FleetControl)
-        );
+        assert!(routes
+            .iter()
+            .all(|r| r.group == EndpointGroup::FleetControl));
     }
 
     #[test]
@@ -5032,10 +5046,9 @@ mod tests {
             first.receipt.receipt_id,
             "rcpt-fleet-op-18446744073709551615"
         );
-        assert!(
-            mgr.incidents
-                .contains_key("inc-fleet-op-18446744073709551615")
-        );
+        assert!(mgr
+            .incidents
+            .contains_key("inc-fleet-op-18446744073709551615"));
         assert!(mgr.operation_ids_exhausted);
 
         let err = mgr
@@ -5155,6 +5168,28 @@ mod tests {
             )
             .expect("receipt");
         assert_ne!(r1.payload_hash, r2.payload_hash);
+    }
+
+    #[test]
+    fn decision_receipt_signed_payload_hash_is_domain_separated() {
+        let signing_key = test_decision_signing_key(24);
+        let receipt = test_receipt_signed_by("op-domain-separated", &signing_key);
+        let signature = receipt.signature.as_ref().expect("signature");
+        let payload = decision_receipt_payload_bytes(&receipt);
+        let legacy_hash = hex::encode(Sha256::digest(&payload));
+
+        assert_ne!(
+            signature.signed_payload_sha256, legacy_hash,
+            "fleet decision receipts must not reuse the legacy bare payload hash"
+        );
+
+        let mut expected_hasher = Sha256::new();
+        expected_hasher.update(FLEET_DECISION_SIGNED_PAYLOAD_DOMAIN);
+        expected_hasher.update((u64::try_from(payload.len()).unwrap_or(u64::MAX)).to_le_bytes());
+        expected_hasher.update(&payload);
+        let expected_hash = hex::encode(expected_hasher.finalize());
+
+        assert_eq!(signature.signed_payload_sha256, expected_hash);
     }
 
     #[test]
