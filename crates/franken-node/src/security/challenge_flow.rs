@@ -14,7 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 
@@ -397,6 +397,9 @@ pub struct ChallengeMetrics {
     pub challenges_denied_total: u64,
 }
 
+type ProofVerifier =
+    dyn Fn(&ArtifactId, &ProofSubmission) -> Result<(), ChallengeError> + Send + Sync;
+
 // ---------------------------------------------------------------------------
 // Challenge record
 // ---------------------------------------------------------------------------
@@ -437,6 +440,7 @@ pub struct ChallengeFlowController {
     config: ChallengeConfig,
     metrics: ChallengeMetrics,
     next_id: u64,
+    proof_verifier: Option<Arc<ProofVerifier>>,
 }
 
 impl ChallengeFlowController {
@@ -448,7 +452,17 @@ impl ChallengeFlowController {
             config,
             metrics: ChallengeMetrics::default(),
             next_id: 1,
+            proof_verifier: None,
         }
+    }
+
+    pub fn with_proof_verifier<F>(config: ChallengeConfig, proof_verifier: F) -> Self
+    where
+        F: Fn(&ArtifactId, &ProofSubmission) -> Result<(), ChallengeError> + Send + Sync + 'static,
+    {
+        let mut controller = Self::new(config);
+        controller.proof_verifier = Some(Arc::new(proof_verifier));
+        controller
     }
 
     pub fn with_defaults() -> Self {
@@ -674,6 +688,12 @@ impl ChallengeFlowController {
             timestamp_ms,
             ChallengeState::ProofVerified,
         )?;
+        let proof_verifier = self.proof_verifier.as_ref().cloned().ok_or_else(|| {
+            ChallengeError::new(
+                ERR_PROOF_INVALID,
+                "proof verification requires an external verifier; deterministic placeholder verification is disabled",
+            )
+        })?;
 
         let (artifact_id, old_state) = {
             let challenge = self.challenges.get(challenge_id).ok_or_else(|| {
@@ -733,21 +753,10 @@ impl ChallengeFlowController {
                 }
             }
 
-            // SECURITY: Verify each submitted proof's cryptographic integrity
+            // SECURITY: Proof semantics are owned by the injected verifier; the
+            // controller itself refuses to synthesize acceptance from placeholder hashes.
             for proof in &challenge.received_proofs {
-                // Verify the proof data hash is consistent with the artifact being challenged
-                let expected_hash =
-                    Self::compute_expected_proof_hash(&challenge.artifact_id, &proof.proof_type)?;
-
-                if !crate::security::constant_time::ct_eq(&proof.data_hash, &expected_hash) {
-                    return Err(ChallengeError::new(
-                        ERR_PROOF_INVALID,
-                        &format!(
-                            "Proof data hash verification failed for type {}",
-                            proof.proof_type.label()
-                        ),
-                    ));
-                }
+                proof_verifier(&challenge.artifact_id, proof)?;
 
                 // Verify proof timestamp is within acceptable bounds
                 if proof.submitted_at_ms < challenge.created_at_ms {
@@ -769,8 +778,7 @@ impl ChallengeFlowController {
                     ));
                 }
                 let proof_age_ms = timestamp_ms - proof.submitted_at_ms;
-                if proof_age_ms >= 3600_000 {
-                    // 1 hour max age
+                if proof_age_ms >= challenge.timeout_ms {
                     return Err(ChallengeError::new(
                         ERR_PROOF_INVALID,
                         &format!(
@@ -959,10 +967,11 @@ impl ChallengeFlowController {
 
     // -- Internal -----------------------------------------------------------
 
-    /// Compute the expected proof hash for cryptographic verification.
+    /// Compute the deterministic test proof hash used by the in-file harness.
     ///
-    /// SECURITY: This provides domain separation between different proof types
-    /// and artifacts to prevent cross-proof attacks.
+    /// This helper is test-only because production proof acceptance now requires
+    /// an injected verifier with real proof semantics.
+    #[cfg(test)]
     fn compute_expected_proof_hash(
         artifact_id: &ArtifactId,
         proof_type: &RequiredProofType,
@@ -1156,6 +1165,29 @@ mod tests {
     use super::*;
 
     fn make_controller() -> ChallengeFlowController {
+        ChallengeFlowController::with_proof_verifier(
+            ChallengeConfig::default(),
+            |artifact_id, proof| {
+                let expected = ChallengeFlowController::compute_expected_proof_hash(
+                    artifact_id,
+                    &proof.proof_type,
+                )?;
+                if crate::security::constant_time::ct_eq(&proof.data_hash, &expected) {
+                    Ok(())
+                } else {
+                    Err(ChallengeError::new(
+                        ERR_PROOF_INVALID,
+                        format!(
+                            "Proof data hash verification failed for type {}",
+                            proof.proof_type.label()
+                        ),
+                    ))
+                }
+            },
+        )
+    }
+
+    fn make_controller_without_verifier() -> ChallengeFlowController {
         ChallengeFlowController::with_defaults()
     }
 
@@ -1385,6 +1417,24 @@ mod tests {
 
         assert_eq!(ctrl.metrics().challenges_promoted_total, 1);
         assert_eq!(ctrl.metrics().challenges_resolved_total, 1);
+    }
+
+    #[test]
+    fn verify_proof_without_external_verifier_fails_closed() {
+        let mut ctrl = make_controller_without_verifier();
+        let cid = issue_basic(&mut ctrl, 1000);
+
+        ctrl.submit_proof(&cid, make_proof(2000), "prover-1", 2000)
+            .unwrap();
+
+        let err = ctrl.verify_proof(&cid, "verifier-1", 3000).unwrap_err();
+
+        assert_eq!(err.code, ERR_PROOF_INVALID);
+        assert!(err.message.contains("external verifier"));
+        assert_eq!(
+            ctrl.get_challenge(&cid).unwrap().state,
+            ChallengeState::ProofReceived
+        );
     }
 
     // -- Denial paths --
@@ -1633,6 +1683,39 @@ mod tests {
         assert_eq!(
             ctrl.get_challenge(&cid).unwrap().state,
             ChallengeState::ProofReceived
+        );
+    }
+
+    #[test]
+    fn verify_proof_uses_configured_timeout_instead_of_hardcoded_hour() {
+        let config = ChallengeConfig {
+            timeout_ms: 7_200_000,
+            deny_on_timeout: true,
+        };
+        let mut ctrl =
+            ChallengeFlowController::with_proof_verifier(config, |artifact_id, proof| {
+                let expected = ChallengeFlowController::compute_expected_proof_hash(
+                    artifact_id,
+                    &proof.proof_type,
+                )?;
+                if crate::security::constant_time::ct_eq(&proof.data_hash, &expected) {
+                    Ok(())
+                } else {
+                    Err(ChallengeError::new(
+                        ERR_PROOF_INVALID,
+                        "proof digest mismatch",
+                    ))
+                }
+            });
+        let cid = issue_basic(&mut ctrl, 1000);
+        ctrl.submit_proof(&cid, make_proof(2000), "prover", 2000)
+            .unwrap();
+
+        ctrl.verify_proof(&cid, "verifier", 5_400_000).unwrap();
+
+        assert_eq!(
+            ctrl.get_challenge(&cid).unwrap().state,
+            ChallengeState::ProofVerified
         );
     }
 
@@ -2900,11 +2983,9 @@ mod tests {
             .submit_proof(&regression_cid, regression_proof, "regression_actor", 5_000)
             .unwrap_err();
         assert_eq!(regression_err.code, ERR_PROOF_INVALID);
-        assert!(
-            regression_err
-                .message
-                .contains("predate challenge creation")
-        );
+        assert!(regression_err
+            .message
+            .contains("predate challenge creation"));
 
         // Test timeout calculation with overflow protection
         let overflow_challenge = Challenge {
