@@ -213,6 +213,12 @@ fn push_length_prefixed(hasher: &mut Sha256, value: &str) {
     hasher.update(value.as_bytes());
 }
 
+/// Modern length-prefixed byte serialization (consistent with bundle.rs)
+fn push_length_prefixed_bytes(buffer: &mut Vec<u8>, bytes: &[u8]) {
+    buffer.extend_from_slice(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+    buffer.extend_from_slice(bytes);
+}
+
 /// Compute the deterministic replay hash for a capsule's payload and inputs.
 ///
 /// Uses length-prefixed encoding to prevent payload-input delimiter collision:
@@ -297,50 +303,50 @@ fn compute_signing_payload(capsule: &ReplayCapsule) -> String {
 /// capsule fields to prevent field injection attacks.
 fn ed25519_capsule_signature_payload(capsule: &ReplayCapsule) -> Vec<u8> {
     let mut payload = Vec::new();
-    payload.extend_from_slice(ED25519_CAPSULE_SIGNATURE_DOMAIN);
 
-    let mut hasher = Sha256::new();
-    hasher.update(b"verifier_sdk_capsule_signing_v1:");
-    for field in [
-        capsule.manifest.capsule_id.as_str(),
-        capsule.manifest.schema_version.as_str(),
-        capsule.manifest.description.as_str(),
-        capsule.manifest.claim_type.as_str(),
-        capsule.manifest.expected_output_hash.as_str(),
-        capsule.manifest.created_at.as_str(),
-        capsule.manifest.creator_identity.as_str(),
-        capsule.payload.as_str(),
-    ] {
-        push_length_prefixed(&mut hasher, field);
-    }
-    hasher.update(
-        u64::try_from(capsule.manifest.input_refs.len())
+    // Modern domain-separated length-prefixed construction (like bundle.rs)
+    push_length_prefixed_bytes(&mut payload, ED25519_CAPSULE_SIGNATURE_DOMAIN);
+    push_length_prefixed_bytes(&mut payload, capsule.manifest.schema_version.as_bytes());
+    push_length_prefixed_bytes(&mut payload, capsule.manifest.capsule_id.as_bytes());
+    push_length_prefixed_bytes(&mut payload, capsule.manifest.description.as_bytes());
+    push_length_prefixed_bytes(&mut payload, capsule.manifest.claim_type.as_bytes());
+    push_length_prefixed_bytes(&mut payload, capsule.manifest.expected_output_hash.as_bytes());
+    push_length_prefixed_bytes(&mut payload, capsule.manifest.created_at.as_bytes());
+    push_length_prefixed_bytes(&mut payload, capsule.manifest.creator_identity.as_bytes());
+    push_length_prefixed_bytes(&mut payload, capsule.payload.as_bytes());
+
+    // Serialize input_refs with length prefix
+    payload.extend_from_slice(
+        &u64::try_from(capsule.manifest.input_refs.len())
             .unwrap_or(u64::MAX)
             .to_le_bytes(),
     );
     for input_ref in &capsule.manifest.input_refs {
-        push_length_prefixed(&mut hasher, input_ref);
+        push_length_prefixed_bytes(&mut payload, input_ref.as_bytes());
     }
-    hasher.update(
-        u64::try_from(capsule.manifest.metadata.len())
+
+    // Serialize metadata with length prefix
+    payload.extend_from_slice(
+        &u64::try_from(capsule.manifest.metadata.len())
             .unwrap_or(u64::MAX)
             .to_le_bytes(),
     );
     for (key, value) in &capsule.manifest.metadata {
-        push_length_prefixed(&mut hasher, key);
-        push_length_prefixed(&mut hasher, value);
+        push_length_prefixed_bytes(&mut payload, key.as_bytes());
+        push_length_prefixed_bytes(&mut payload, value.as_bytes());
     }
-    hasher.update(
-        u64::try_from(capsule.inputs.len())
+
+    // Serialize inputs with length prefix
+    payload.extend_from_slice(
+        &u64::try_from(capsule.inputs.len())
             .unwrap_or(u64::MAX)
             .to_le_bytes(),
     );
     for (k, v) in &capsule.inputs {
-        push_length_prefixed(&mut hasher, k);
-        push_length_prefixed(&mut hasher, v);
+        push_length_prefixed_bytes(&mut payload, k.as_bytes());
+        push_length_prefixed_bytes(&mut payload, v.as_bytes());
     }
 
-    payload.extend_from_slice(&hasher.finalize());
     payload
 }
 
