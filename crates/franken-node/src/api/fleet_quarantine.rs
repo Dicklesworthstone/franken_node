@@ -1826,14 +1826,26 @@ struct SharedFleetControlOwner {
 }
 
 fn map_fleet_control_error(action: &str, trace: &TraceContext, err: FleetControlError) -> ApiError {
-    if matches!(err, FleetControlError::OperationIdExhausted { .. }) {
-        return ApiError::Internal {
-            detail: format!(
-                "{}: fleet control operation identifier space exhausted during {action}",
-                err.error_code()
-            ),
-            trace_id: trace.trace_id.clone(),
-        };
+    match &err {
+        FleetControlError::OperationIdExhausted { .. } => {
+            return ApiError::Internal {
+                detail: format!(
+                    "{}: fleet control operation identifier space exhausted during {action}",
+                    err.error_code()
+                ),
+                trace_id: trace.trace_id.clone(),
+            };
+        }
+        FleetControlError::Internal { .. } => {
+            return ApiError::Internal {
+                detail: format!(
+                    "{}: fleet control internal failure during {action}",
+                    err.error_code()
+                ),
+                trace_id: trace.trace_id.clone(),
+            };
+        }
+        _ => {}
     }
 
     let detail = match action {
@@ -1978,6 +1990,21 @@ pub fn activate_shared_fleet_control_manager_for_tests() {
     guard.activate();
 }
 
+/// Replaces the global fleet control manager for tests that need a custom persistence seam.
+#[cfg(any(test, feature = "control-plane"))]
+/// # Examples
+/// ```ignore
+/// let manager = FleetControlManager::new();
+/// replace_shared_fleet_control_manager_for_tests(manager);
+/// ```
+pub fn replace_shared_fleet_control_manager_for_tests(manager: FleetControlManager) {
+    let mut guard = match shared_fleet_control_manager().inner.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *guard = manager;
+}
+
 impl FleetControlManager {
     /// Create a new manager in safe-start (read-only) mode.
     /// INV-FLEET-SAFE-START: API starts read-only.
@@ -2053,6 +2080,25 @@ impl FleetControlManager {
             rollback_receipts: BTreeMap::new(),
             fleet_transport: Some(transport),
         })
+    }
+
+    /// Create a manager with file-based transport plus explicit signing material for
+    /// integration tests that must stay on the real persistence path.
+    #[cfg(any(test, feature = "control-plane"))]
+    pub fn with_file_transport_and_signing_key_for_tests(
+        transport: FileFleetTransport,
+        signing_key: ed25519_dalek::SigningKey,
+        key_source: &'static str,
+        signing_identity: &'static str,
+    ) -> Result<Self, PersistedFleetTransportError> {
+        Self::with_file_transport(
+            transport,
+            Some(FleetDecisionSigningMaterial {
+                signing_key,
+                key_source,
+                signing_identity,
+            }),
+        )
     }
 
     /// Create a manager without decision-receipt signing material for fail-closed tests.
@@ -4472,6 +4518,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn durable_internal_failure_maps_to_internal_api_error() {
+        let err = map_fleet_control_error(
+            "reconcile",
+            &test_trace(),
+            FleetControlError::internal("persist action log failed"),
+        );
+        assert!(matches!(err, ApiError::Internal { .. }));
+        if let ApiError::Internal { detail, .. } = err {
+            assert!(detail.contains(FLEET_INTERNAL));
+            assert!(detail.contains("reconcile"));
+        }
+    }
+
     // ── ConvergencePhase tests ────────────────────────────────────────────
 
     #[test]
@@ -4578,7 +4638,7 @@ mod tests {
             .quarantine(&admin_identity(), &test_trace(), &request)
             .expect_err("broken transport must fail closed");
         match err {
-            ApiError::BadRequest { detail, .. } => assert!(detail.contains(FLEET_INTERNAL)),
+            ApiError::Internal { detail, .. } => assert!(detail.contains(FLEET_INTERNAL)),
             other => panic!("unexpected error: {other:?}"),
         }
 

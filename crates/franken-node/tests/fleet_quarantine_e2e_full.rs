@@ -4,12 +4,16 @@ use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use chrono::Utc;
 use frankenengine_node::api::fleet_quarantine::{
-    FLEET_QUARANTINE_INITIATED, FLEET_RECONCILE_COMPLETED, FLEET_RELEASED, FleetActionResult,
-    FleetControlManager, QuarantineScope,
+    FLEET_INTERNAL, FLEET_QUARANTINE_INITIATED, FLEET_RECONCILE_COMPLETED, FLEET_RELEASED,
+    FleetActionResult, FleetControlManager, QuarantineRequest, QuarantineScope,
+    handle_quarantine, replace_shared_fleet_control_manager_for_tests,
+    reset_shared_fleet_control_manager_for_tests,
 };
+use frankenengine_node::api::error::ApiError;
 use frankenengine_node::api::middleware::{AuthIdentity, AuthMethod, TraceContext};
 use frankenengine_node::control_plane::fleet_transport::{
     FileFleetTransport, FleetAction as PersistedFleetAction, FleetActionRecord, FleetTargetKind,
@@ -19,6 +23,7 @@ use serde_json::{Value, json};
 use tempfile::tempdir;
 
 const SUITE: &str = "fleet_quarantine_e2e_full";
+static HANDLER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 struct JsonLineLog {
     path: PathBuf,
@@ -462,4 +467,46 @@ fn quarantine_release_reconcile_e2e_persists_real_state_and_jsonl_evidence() {
             .all(|entry| entry["data"]["match"] == true),
         "every structured assertion record must pass"
     );
+}
+
+#[test]
+fn quarantine_handler_reports_internal_error_for_broken_transport_persistence() {
+    let _guard = HANDLER_TEST_LOCK.lock().expect("handler test lock");
+    reset_shared_fleet_control_manager_for_tests();
+
+    let temp_dir = tempdir().expect("tempdir");
+    let state_root = temp_dir.path().join("broken-handler-transport");
+    let transport = FileFleetTransport::new(&state_root);
+    let mut manager = FleetControlManager::with_file_transport_and_signing_key_for_tests(
+        transport,
+        ed25519_dalek::SigningKey::from_bytes(&[61_u8; 32]),
+        "fleet-quarantine-e2e-full",
+        "fleet-handler-e2e",
+    )
+    .expect("create manager with file transport");
+    manager.activate();
+    fs::remove_file(state_root.join("actions.jsonl")).expect("remove transport action log");
+    replace_shared_fleet_control_manager_for_tests(manager);
+
+    let err = handle_quarantine(
+        &e2e_identity(),
+        &e2e_trace("broken-transport"),
+        &QuarantineRequest {
+            extension_id: "ext-broken-handler".to_string(),
+            scope: QuarantineScope {
+                zone_id: "zone-handler".to_string(),
+                tenant_id: None,
+                affected_nodes: 1,
+                reason: "transport persistence failure".to_string(),
+            },
+        },
+    )
+    .expect_err("broken transport must map to internal API failure");
+
+    match err {
+        ApiError::Internal { detail, .. } => assert!(detail.contains(FLEET_INTERNAL)),
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    reset_shared_fleet_control_manager_for_tests();
 }
