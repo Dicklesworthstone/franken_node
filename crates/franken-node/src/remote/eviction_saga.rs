@@ -853,15 +853,15 @@ impl EvictionSagaManager {
         for (id, saga) in &self.sagas {
             // Orphan: L2 retired but L3 absent
             if !saga.l2_present && !saga.l3_present {
-                orphans.push(format!("{id}: L2 retired but L3 absent"));
+                push_bounded(&mut orphans, format!("{id}: L2 retired but L3 absent"), DEFAULT_MAX_AUDIT_RECORDS);
             }
             // Orphan: L3 present but not verified and saga complete
             if saga.phase == SagaPhase::Complete && saga.l3_present && !saga.l3_verified {
-                orphans.push(format!("{id}: L3 present but unverified in Complete state"));
+                push_bounded(&mut orphans, format!("{id}: L3 present but unverified in Complete state"), DEFAULT_MAX_AUDIT_RECORDS);
             }
             // Orphan: stuck in Compensating (crash during compensation)
             if saga.phase == SagaPhase::Compensating {
-                orphans.push(format!("{id}: stuck in Compensating state"));
+                push_bounded(&mut orphans, format!("{id}: stuck in Compensating state"), DEFAULT_MAX_AUDIT_RECORDS);
             }
         }
 
