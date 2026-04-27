@@ -251,6 +251,24 @@ pub struct OperatorAuthorization {
     pub reason: String,
 }
 
+fn invalid_authorization_text(field: &str, value: &str) -> Option<String> {
+    if value.trim().is_empty() {
+        return Some(format!("{field} must not be empty"));
+    }
+    if value.trim() != value {
+        return Some(format!(
+            "{field} must not contain leading or trailing whitespace"
+        ));
+    }
+    if value.contains('\0') {
+        return Some(format!("{field} must not contain null bytes"));
+    }
+    if value.chars().any(char::is_control) {
+        return Some(format!("{field} must not contain control characters"));
+    }
+    None
+}
+
 impl OperatorAuthorization {
     /// Create a new authorization with a computed hash and signature.
     pub fn new(
@@ -298,6 +316,12 @@ impl OperatorAuthorization {
 
     /// Verify the authorization hash and signature are consistent.
     pub fn verify(&self, verification_key: &[u8]) -> bool {
+        if invalid_authorization_text("operator_id", &self.operator_id).is_some()
+            || invalid_authorization_text("reason", &self.reason).is_some()
+        {
+            return false;
+        }
+
         let mut hasher = Sha256::new();
         hasher.update(b"divergence_gate_auth_v1:");
         let canonical = format!(
@@ -868,16 +892,19 @@ impl ControlPlaneDivergenceGate {
             });
         }
 
+        if let Some(reason) = invalid_authorization_text("operator_id", &authorization.operator_id)
+        {
+            return Err(DivergenceGateError::UnauthorizedRecovery { reason });
+        }
+
+        if let Some(reason) = invalid_authorization_text("reason", &authorization.reason) {
+            return Err(DivergenceGateError::UnauthorizedRecovery { reason });
+        }
+
         // Verify authorization
         if !authorization.verify(verification_key) {
             return Err(DivergenceGateError::UnauthorizedRecovery {
                 reason: "authorization hash verification failed".to_string(),
-            });
-        }
-
-        if authorization.operator_id.is_empty() {
-            return Err(DivergenceGateError::UnauthorizedRecovery {
-                reason: "operator_id must not be empty".to_string(),
             });
         }
 
@@ -1011,8 +1038,8 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ControlPlaneDivergenceGate, DetectionResult, DivergenceGateError, GateState, MutationKind,
-        OperatorAuthorization, StateVector, event_codes,
+        event_codes, ControlPlaneDivergenceGate, DetectionResult, DivergenceGateError, GateState,
+        MutationKind, OperatorAuthorization, StateVector,
     };
 
     fn make_sv(epoch: u64, state: &str, parent: &str, node: &str) -> StateVector {
@@ -1139,10 +1166,9 @@ mod tests {
         let mut gate = ControlPlaneDivergenceGate::new("test");
         let (local, remote) = forked_pair();
         gate.check_propagation(&local, &remote, 2000, "trace-1");
-        assert!(
-            gate.events()
-                .contains(&event_codes::DG_001_DIVERGENCE_DETECTED.to_string())
-        );
+        assert!(gate
+            .events()
+            .contains(&event_codes::DG_001_DIVERGENCE_DETECTED.to_string()));
     }
 
     #[test]
@@ -1188,10 +1214,9 @@ mod tests {
         let result = gate.respond_halt(2001, "trace-2");
         assert!(result.is_ok());
         assert_eq!(gate.state(), GateState::Diverged);
-        assert!(
-            gate.events()
-                .contains(&event_codes::DG_003_RESPONSE_ACTIVATED.to_string())
-        );
+        assert!(gate
+            .events()
+            .contains(&event_codes::DG_003_RESPONSE_ACTIVATED.to_string()));
     }
 
     #[test]
@@ -1487,6 +1512,30 @@ mod tests {
     }
 
     #[test]
+    fn test_operator_authorization_empty_reason_fails_verification() {
+        let auth = OperatorAuthorization::new("op-1", 50, 3000, "", b"test-key");
+
+        assert!(!auth.verify(b"test-key"));
+    }
+
+    #[test]
+    fn test_operator_authorization_control_character_operator_fails_verification() {
+        let auth = OperatorAuthorization::new("op-\n1", 50, 3000, "reason", b"test-key");
+
+        assert!(!auth.verify(b"test-key"));
+    }
+
+    #[test]
+    fn test_recover_blank_reason_fails() {
+        let mut gate = ControlPlaneDivergenceGate::new("test");
+        let (local, remote) = forked_pair();
+        gate.check_propagation(&local, &remote, 2000, "trace-1");
+        let auth = OperatorAuthorization::new("operator-1", 9, 2001, "", b"test-key");
+        let result = gate.respond_recover(&auth, b"test-key", 10, 2001, "trace-2");
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_operator_authorization_serde() {
         let auth = OperatorAuthorization::new("op-1", 50, 3000, "reason", b"test-key");
         let json = serde_json::to_string(&auth).unwrap();
@@ -1704,10 +1753,9 @@ mod tests {
         let mut gate = ControlPlaneDivergenceGate::new("test");
         let (local, remote) = converged_pair();
         gate.check_propagation(&local, &remote, 2000, "trace-1");
-        assert!(
-            gate.events()
-                .contains(&event_codes::DG_005_FRESHNESS_VERIFIED.to_string())
-        );
+        assert!(gate
+            .events()
+            .contains(&event_codes::DG_005_FRESHNESS_VERIFIED.to_string()));
     }
 
     // --- QuarantinePartition serde ---

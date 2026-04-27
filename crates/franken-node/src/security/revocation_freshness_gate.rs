@@ -310,15 +310,20 @@ impl RevocationFreshnessGate {
         }
     }
 
-    /// Classify an action into its safety tier.
-    ///
-    /// Returns Advisory if the action is not in the tier table.
-    pub fn classify_action(&self, action_id: &str) -> SafetyTier {
+    fn matching_tier(&self, action_id: &str) -> Option<SafetyTier> {
         self.tier_table
             .iter()
             .filter(|(pattern, _)| action_id == pattern || action_id.starts_with(pattern.as_str()))
             .map(|(_, tier)| *tier)
             .max_by_key(|tier| tier.strictness())
+    }
+
+    /// Classify an action into its safety tier.
+    ///
+    /// Returns Advisory if the action is not in the tier table.
+    /// `check()` still fails closed for unclassified actions.
+    pub fn classify_action(&self, action_id: &str) -> SafetyTier {
+        self.matching_tier(action_id)
             .unwrap_or(SafetyTier::Advisory)
     }
 
@@ -433,7 +438,11 @@ impl RevocationFreshnessGate {
         validate_action_id(action_id)?;
         validate_trace_id(trace_id)?;
 
-        let tier = self.classify_action(action_id);
+        let Some(tier) = self.matching_tier(action_id) else {
+            return Err(FreshnessError::ProofTampered {
+                detail: format!("action_id {action_id:?} is not classified in the tier table"),
+            });
+        };
         if proof.tier != tier {
             return Err(FreshnessError::ProofTampered {
                 detail: format!(
@@ -875,13 +884,12 @@ mod tests {
             .check(&p, 100, true, false, "key_rotate", "tr-tier-first")
             .unwrap_err();
 
-        match err {
-            FreshnessError::ProofTampered { detail } => {
-                assert!(detail.contains("proof tier Advisory does not match action tier Critical"));
-                assert!(!detail.contains("signature mismatch"));
-            }
-            other => panic!("expected tier mismatch tamper error, got {other:?}"),
-        }
+        assert!(matches!(
+            &err,
+            FreshnessError::ProofTampered { detail }
+                if detail.contains("proof tier Advisory does not match action tier Critical")
+                    && !detail.contains("signature mismatch")
+        ));
         assert!(!g.is_nonce_consumed("n-tier-before-sig"));
     }
 
@@ -894,13 +902,36 @@ mod tests {
             .check(&p, 100, true, false, "unclassified_action", "tr-unknown")
             .unwrap_err();
 
-        match err {
-            FreshnessError::ProofTampered { detail } => {
-                assert!(detail.contains("proof tier Critical does not match action tier Advisory"));
-            }
-            other => panic!("expected tier mismatch tamper error, got {other:?}"),
-        }
+        assert!(matches!(
+            &err,
+            FreshnessError::ProofTampered { detail }
+                if detail.contains("is not classified in the tier table")
+        ));
         assert!(!g.is_nonce_consumed("n-unknown-action-tier"));
+    }
+
+    #[test]
+    fn unknown_action_with_advisory_proof_is_rejected() {
+        let mut g = gate();
+        let p = proof(SafetyTier::Advisory, 100, "n-unknown-action-advisory");
+
+        let err = g
+            .check(
+                &p,
+                100,
+                true,
+                false,
+                "unclassified_action",
+                "tr-unknown-advisory",
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            &err,
+            FreshnessError::ProofTampered { detail }
+                if detail.contains("is not classified in the tier table")
+        ));
+        assert!(!g.is_nonce_consumed("n-unknown-action-advisory"));
     }
 
     #[test]
@@ -1714,7 +1745,7 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err.code(), "ERR_RFG_TAMPERED");
-        assert!(format!("{err}").contains("does not match action tier Advisory"));
+        assert!(format!("{err}").contains("is not classified in the tier table"));
 
         // Test action classification manipulation through prefix matching
         let prefix_critical = proof(SafetyTier::Critical, 100, "prefix-critical");
@@ -1987,12 +2018,11 @@ mod tests {
 
             // Verify no two different logical proofs produce the same canonical payload
             let proof_description = format!("{:?}-{}", credentials, nonce);
-            if !seen_payloads.insert((payload.clone(), proof_description.clone())) {
-                panic!(
-                    "Collision detected: {} produces duplicate canonical payload",
-                    proof_description
-                );
-            }
+            assert!(
+                seen_payloads.insert((payload.clone(), proof_description.clone())),
+                "Collision detected: {} produces duplicate canonical payload",
+                proof_description
+            );
 
             // Test that empty credentials are handled properly
             if credentials.iter().any(|c| c.trim().is_empty()) {
