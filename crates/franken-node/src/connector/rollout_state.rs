@@ -427,12 +427,43 @@ impl Drop for TempFileGuard {
 /// If a file already exists at `path`, the version in it must be less than
 /// the version in `state`, otherwise `StaleVersion` is returned.
 pub fn persist(state: &RolloutState, path: &Path) -> Result<(), PersistError> {
-    let mut tracker = rollout_obligation_tracker()
+    persist_with_shared_tracker_and_rename_and_orphan(
+        state,
+        path,
+        ROLLOUT_PERSIST_TRACE_ID,
+        |from, to| std::fs::rename(from, to),
+        |from, to| std::fs::rename(from, to),
+    )
+}
+
+fn clone_rollout_obligation_tracker() -> Result<ObligationTracker, PersistError> {
+    rollout_obligation_tracker()
         .lock()
         .map_err(|_| PersistError::IoError {
             message: "rollout obligation tracker lock poisoned".to_string(),
-        })?;
-    persist_with_obligation_tracker(state, path, &mut tracker, ROLLOUT_PERSIST_TRACE_ID)
+        })
+        .map(|tracker| tracker.clone())
+}
+
+fn persist_with_shared_tracker_and_rename_and_orphan(
+    state: &RolloutState,
+    path: &Path,
+    trace_id: &str,
+    rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    orphan_rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), PersistError> {
+    // Clone the shared tracker handle under the outer mutex, then drop it
+    // before stale-load, temp-file, and rename work so unrelated callers do
+    // not queue behind filesystem latency on the global tracker mutex.
+    let mut tracker = clone_rollout_obligation_tracker()?;
+    persist_with_obligation_tracker_and_rename_and_orphan(
+        state,
+        path,
+        &mut tracker,
+        trace_id,
+        rename,
+        orphan_rename,
+    )
 }
 
 fn persist_with_obligation_tracker(
@@ -792,6 +823,56 @@ mod tests {
             leftovers.is_empty(),
             "found temp rollout leftovers: {leftovers:?}"
         );
+    }
+
+    #[test]
+    fn persist_releases_shared_tracker_mutex_before_rename() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("state.json");
+        let state = sample_state();
+        let (rename_entered_tx, rename_entered_rx) = std::sync::mpsc::channel();
+        let (allow_rename_tx, allow_rename_rx) = std::sync::mpsc::channel();
+
+        let handle = std::thread::spawn({
+            let path = path.clone();
+            let state = state.clone();
+            move || {
+                persist_with_shared_tracker_and_rename_and_orphan(
+                    &state,
+                    &path,
+                    "rollout-state-rename-lock-regression",
+                    |from, to| {
+                        rename_entered_tx
+                            .send(())
+                            .expect("rename barrier should notify test thread");
+                        allow_rename_rx
+                            .recv()
+                            .expect("test thread should release rename barrier");
+                        std::fs::rename(from, to)
+                    },
+                    |from, to| std::fs::rename(from, to),
+                )
+            }
+        });
+
+        rename_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("persist path should stall inside rename");
+
+        let tracker_guard = rollout_obligation_tracker()
+            .try_lock()
+            .expect("shared tracker mutex should be released before rename");
+        drop(tracker_guard);
+
+        allow_rename_tx
+            .send(())
+            .expect("rename barrier should resume persist thread");
+
+        handle
+            .join()
+            .expect("persist thread should complete")
+            .expect("persist should succeed after rename resumes");
+        assert_eq!(load(&path).unwrap(), state);
     }
 
     #[test]
