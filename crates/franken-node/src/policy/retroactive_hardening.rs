@@ -21,6 +21,21 @@ use sha2::{Digest, Sha256};
 use super::hardening_state_machine::HardeningLevel;
 use crate::security::constant_time;
 
+/// Maximum number of progress records to prevent memory exhaustion attacks.
+const MAX_HARDENING_PROGRESS_RECORDS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -333,12 +348,16 @@ impl RetroactiveHardeningPipeline {
             // [EVD-RETROHARDEN-003] identity verification
             let _event = EVD_RETROHARDEN_003;
 
-            progress.push(HardeningProgressRecord {
+            push_bounded(
+                &mut progress,
+                HardeningProgressRecord {
                 object_id: object.object_id.clone(),
                 artifacts_created,
                 repairability_before: repairability_before.score,
                 repairability_after: repairability_after.score,
-            });
+                },
+                MAX_HARDENING_PROGRESS_RECORDS,
+            );
 
             all_artifacts.extend(new_artifacts);
         }
