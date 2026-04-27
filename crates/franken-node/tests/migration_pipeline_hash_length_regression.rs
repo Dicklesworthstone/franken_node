@@ -20,22 +20,22 @@ fn test_4gb_plus_input_hash_length_cast() -> Result<(), Box<dyn std::error::Erro
     let huge_cohort = CohortDefinition {
         cohort_id: format!("huge_cohort_{}", huge_string),
         extensions: large_extension_names.into_iter().map(|name| ExtensionSpec {
-            name: name.clone(),
-            source_version: format!("1.0.0_{}", name),
-            target_version: format!("2.0.0_{}", name),
-            risk_tier: RiskTier::Low,
-            dependency_complexity: DependencyComplexity::Simple,
-            evidence: ExtensionEvidence {
-                corpus_coverage_bps: 9500,
-                validation_samples: 1000,
-                validation_failures: 0,
-                lockstep_samples: 1000,
-                lockstep_failures: 0,
-                required_capabilities: Vec::new(),
-                known_divergences: Vec::new(),
-                dependency_edges: Vec::new(),
-            },
-        }).collect(),
+                name: name.clone(),
+                source_version: format!("1.0.0_{}", name),
+                target_version: format!("2.0.0_{}", name),
+                risk_tier: RiskTier::Low,
+                dependency_complexity: DependencyComplexity::Simple,
+                evidence: ExtensionEvidence {
+                    corpus_coverage_bps: 9500,
+                    validation_samples: 1000,
+                    validation_failures: 0,
+                    lockstep_samples: 1000,
+                    lockstep_failures: 0,
+                    required_capabilities: Vec::new(),
+                    known_divergences: Vec::new(),
+                    dependency_edges: Vec::new(),
+                },
+            }).collect(),
         selection_criteria: format!("huge_criteria_{}", huge_string),
     };
 

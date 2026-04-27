@@ -601,7 +601,10 @@ impl SupplyChainE2EHarness {
         let signature_bytes = hex::decode(&contract.signature)?;
         let content_hash = {
             let mut hasher = Sha256::new();
-            hasher.update(contract.claim_text.as_bytes());
+            hasher.update(b"contract_sig_v1:");
+            let claim_text_bytes = contract.claim_text.as_bytes();
+            hasher.update(&u64::try_from(claim_text_bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+            hasher.update(claim_text_bytes);
             hasher.update(&contract.compiled_at_epoch_ms.to_le_bytes());
             hasher.finalize()
         };

@@ -751,6 +751,7 @@ pub fn create_verifier_sdk(verifier_identity: &str) -> VerifierSdk {
 ///
 /// The capsule is properly signed and has a valid expected_output_hash
 /// so that replay will produce a PASS verdict.
+#[cfg(any(test, feature = "test-support"))]
 pub fn build_reference_capsule() -> ReplayCapsule {
     let mut inputs = BTreeMap::new();
     inputs.insert("artifact_a".to_string(), "content_of_a".to_string());
@@ -784,15 +785,18 @@ pub fn build_reference_capsule() -> ReplayCapsule {
 }
 
 /// Build a reference capsule manifest for testing.
+#[cfg(any(test, feature = "test-support"))]
 pub fn build_reference_manifest() -> CapsuleManifest {
     build_reference_capsule().manifest
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn reference_signing_key() -> SigningKey {
     SigningKey::from_bytes(&[17; 32])
 }
 
 /// Build a reference verification session for testing (with one step, sealed).
+#[cfg(any(test, feature = "test-support"))]
 pub fn build_reference_session() -> Result<VerificationSession, VsdkError> {
     let capsule = build_reference_capsule();
     let result = replay_capsule(&capsule, "verifier://test@example.com")?;

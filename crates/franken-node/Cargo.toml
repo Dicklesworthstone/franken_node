@@ -650,6 +650,10 @@ path = "tests/e2e_marker_stream_lifecycle.rs"
 name = "e2e_audience_token_chain_lifecycle"
 path = "tests/e2e_audience_token_chain_lifecycle.rs"
 
+[[test]]
+name = "e2e_mmr_proofs_lifecycle"
+path = "tests/e2e_mmr_proofs_lifecycle.rs"
+
 [[bench]]
 name = "cuckoo_revocation_bench"
 harness = false

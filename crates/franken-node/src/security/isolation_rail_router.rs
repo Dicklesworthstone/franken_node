@@ -1343,7 +1343,7 @@ mod tests {
             workload_id: "test\x00\r\nid".to_string(),
             risk_score: f64::NAN,
             rail: IsolationRail::FullIsolation,
-            classified_at: "2026-02-21T00:00:00Z".to_string(),
+            classified_at: chrono::Utc::now().to_rfc3339(),
         };
 
         let json_result = serde_json::to_string(&classification);
