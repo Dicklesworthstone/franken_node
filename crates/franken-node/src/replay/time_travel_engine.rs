@@ -461,33 +461,49 @@ fn validate_environment_field(
 }
 
 fn validate_trace_identifier_field(field: &str, value: &str) -> Result<(), TimeTravelError> {
-    if value.trim().is_empty() {
+    // Check for empty or blank values (bd-165iq)
+    if value.is_empty() || value.trim().is_empty() {
         return Err(TimeTravelError::InvalidIdentifier {
             field: field.to_string(),
-            reason: "must not be blank".to_string(),
+            reason: "must not be blank or empty".to_string(),
         });
     }
+
+    // Check for leading or trailing whitespace (bd-165iq)
     if value.trim() != value {
         return Err(TimeTravelError::InvalidIdentifier {
             field: field.to_string(),
             reason: "must not include leading or trailing whitespace".to_string(),
         });
     }
+
+    // Check for control characters including newlines, tabs, carriage returns (bd-165iq)
     if value.chars().any(char::is_control) {
         return Err(TimeTravelError::InvalidIdentifier {
             field: field.to_string(),
-            reason: "must not contain control characters".to_string(),
+            reason: "must not contain control characters (newlines, tabs, etc.)".to_string(),
         });
     }
+
+    // Check for path-like strings that could be security risks (bd-165iq)
     if value == "."
         || value == ".."
         || value.contains('/')
         || value.contains('\\')
         || value.contains("..")
+        || value.starts_with('.')
     {
         return Err(TimeTravelError::InvalidIdentifier {
             field: field.to_string(),
-            reason: "must not be path-like".to_string(),
+            reason: "must not be path-like (no /, \\, .., or leading dots)".to_string(),
+        });
+    }
+
+    // Additional security check: reject suspicious path traversal patterns (bd-165iq)
+    if value.contains("..") || value.contains("/etc/") || value.contains("\\etc\\") {
+        return Err(TimeTravelError::InvalidIdentifier {
+            field: field.to_string(),
+            reason: "must not contain path traversal or system path references".to_string(),
         });
     }
 
@@ -4676,5 +4692,26 @@ mod tests {
                 .starts_with("overflow-input-"),
             "Built trace should preserve the newest bounded window"
         );
+    }
+
+    #[test]
+    fn bd_165iq_repro_path_like_and_control_chars_should_fail_validation() {
+        // This test reproduces the bug reported in bd-165iq.
+        // The validation should reject path-like strings and control characters.
+
+        // Test case 1: Path-like trace_id should fail validation
+        let trace1 = build_demo_trace("../../../etc/passwd", "valid_workflow", 1);
+        let result1 = trace1.validate();
+        assert!(result1.is_err(), "Path-like trace_id should fail validation");
+
+        // Test case 2: Control characters in workflow_name should fail validation
+        let trace2 = build_demo_trace("valid_trace", " workflow\n", 1);
+        let result2 = trace2.validate();
+        assert!(result2.is_err(), "Control characters and padding in workflow_name should fail validation");
+
+        // Test case 3: Both issues combined should fail validation
+        let trace3 = build_demo_trace("../../../etc/passwd", " workflow\n", 1);
+        let result3 = trace3.validate();
+        assert!(result3.is_err(), "Both path-like and control char issues should fail validation");
     }
 }
