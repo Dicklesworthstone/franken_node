@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::Duration;
 
+// bd-1vjbv: Modernized Ed25519 signature verification imports
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1429,8 +1431,7 @@ impl CapabilityProvider {
     /// ```
     #[must_use]
     pub fn audit_log(&self) -> Vec<RemoteCapAuditEvent> {
-        self.with_audit_log(|audit_log| audit_log.clone())
-            .unwrap_or_else(|_| Vec::new()) // Return empty vec on timeout
+        self.with_audit_log_fail_closed(|audit_log| audit_log.clone())
     }
 
     fn record_issue_denial(
@@ -1455,14 +1456,13 @@ impl CapabilityProvider {
     }
 
     fn push_audit(&self, event: RemoteCapAuditEvent) {
-        let _ = self.with_audit_log(|audit_log| {
+        self.with_audit_log_fail_closed(move |audit_log| {
             push_bounded(audit_log, event, MAX_AUDIT_LOG_ENTRIES);
-        }); // Ignore timeout errors for audit logging
+        });
     }
 
     fn audit_log_len(&self) -> usize {
-        self.with_audit_log(|audit_log| audit_log.len())
-            .unwrap_or(0) // Return 0 on timeout
+        self.with_audit_log_fail_closed(|audit_log| audit_log.len())
     }
 
     fn with_audit_log<R>(
@@ -1471,6 +1471,25 @@ impl CapabilityProvider {
     ) -> Result<R, RemoteCapError> {
         let mut audit_log = self.try_lock_audit_log_with_timeout(Duration::from_millis(100))?;
         Ok(action(&mut audit_log))
+    }
+
+    // Public audit paths must preserve audit state under contention. If the
+    // optimistic timeout expires, block for the real lock instead of returning
+    // a fabricated empty snapshot or dropping the event entirely.
+    fn with_audit_log_fail_closed<R>(
+        &self,
+        action: impl FnOnce(&mut Vec<RemoteCapAuditEvent>) -> R,
+    ) -> R {
+        match self.try_lock_audit_log_with_timeout(Duration::from_millis(100)) {
+            Ok(mut audit_log) => action(&mut audit_log),
+            Err(_) => {
+                let mut audit_log = self
+                    .audit_log
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                action(&mut audit_log)
+            }
+        }
     }
 
     fn try_lock_audit_log_with_timeout(
@@ -1502,7 +1521,9 @@ impl CapabilityProvider {
 /// Single enforcement point for all network-bound capability checks.
 #[derive(Clone)]
 pub struct CapabilityGate {
-    verification_secret: String,
+    // bd-1vjbv: Modernized signature verification - support both legacy HMAC and modern Ed25519
+    verification_secret: String, // Legacy HMAC-based verification (for compatibility)
+    verifying_key: Option<VerifyingKey>, // bd-1vjbv: Modern Ed25519 signature verification
     connectivity_mode: ConnectivityMode,
     consumed_tokens: ReplayTokenSet,
     revoked_tokens: HybridRevocationChecker,
@@ -1514,6 +1535,7 @@ impl fmt::Debug for CapabilityGate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CapabilityGate")
             .field("verification_secret", &"<redacted>")
+            .field("verifying_key", &if self.verifying_key.is_some() { "<present>" } else { "<none>" })
             .field("connectivity_mode", &self.connectivity_mode)
             .field("consumed_token_count", &self.consumed_tokens.len())
             .field("revoked_token_count", &self.revoked_tokens.len())
@@ -1539,6 +1561,7 @@ impl CapabilityGate {
         validate_secret_material(verification_secret, "verification")?;
         Ok(Self {
             verification_secret: verification_secret.to_string(),
+            verifying_key: None, // bd-1vjbv: Legacy constructor uses HMAC verification
             connectivity_mode: ConnectivityMode::Connected,
             consumed_tokens: ReplayTokenSet::default(),
             revoked_tokens: HybridRevocationChecker::default(),
@@ -1599,6 +1622,7 @@ impl CapabilityGate {
         validate_secret_material(verification_secret, "verification")?;
         Ok(Self {
             verification_secret: verification_secret.to_string(),
+            verifying_key: None, // bd-1vjbv: Legacy constructor uses HMAC verification
             connectivity_mode: ConnectivityMode::Connected,
             consumed_tokens: ReplayTokenSet::default(),
             revoked_tokens: HybridRevocationChecker::default(),
@@ -1632,6 +1656,62 @@ impl CapabilityGate {
         let mut gate = Self::with_durable_replay_store(verification_secret, store_dir)?;
         gate.connectivity_mode = mode;
         Ok(gate)
+    }
+
+    // bd-1vjbv: Modernized Ed25519 signature verification constructors
+
+    /// Create a gate with Ed25519 signature verification (modernized API).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use ed25519_dalek::SigningKey;
+    /// use frankenengine_node::security::remote_cap::{CapabilityGate, ConnectivityMode};
+    ///
+    /// let signing_key = SigningKey::from_bytes(&[1u8; 32]);
+    /// let verifying_key = signing_key.verifying_key();
+    /// let gate = CapabilityGate::with_ed25519_verifying_key(verifying_key);
+    /// assert_eq!(gate.mode(), ConnectivityMode::Connected);
+    /// ```
+    pub fn with_ed25519_verifying_key(verifying_key: VerifyingKey) -> Self {
+        Self {
+            verification_secret: String::new(), // Not used in Ed25519 mode
+            verifying_key: Some(verifying_key),
+            connectivity_mode: ConnectivityMode::Connected,
+            consumed_tokens: ReplayTokenSet::default(),
+            revoked_tokens: HybridRevocationChecker::default(),
+            replay_store: ReplayStoreBackend::from_env(),
+            audit_log: Vec::new(),
+        }
+    }
+
+    /// Create a gate with Ed25519 signature verification and durable replay store.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use ed25519_dalek::SigningKey;
+    /// use frankenengine_node::security::remote_cap::{CapabilityGate, ConnectivityMode};
+    ///
+    /// let signing_key = SigningKey::from_bytes(&[1u8; 32]);
+    /// let verifying_key = signing_key.verifying_key();
+    /// let store_dir = tempfile::tempdir().unwrap();
+    /// let gate = CapabilityGate::with_ed25519_and_replay_store(verifying_key, store_dir.path()).unwrap();
+    /// assert_eq!(gate.mode(), ConnectivityMode::Connected);
+    /// ```
+    pub fn with_ed25519_and_replay_store(
+        verifying_key: VerifyingKey,
+        store_dir: impl AsRef<Path>,
+    ) -> Result<Self, RemoteCapError> {
+        Ok(Self {
+            verification_secret: String::new(), // Not used in Ed25519 mode
+            verifying_key: Some(verifying_key),
+            connectivity_mode: ConnectivityMode::Connected,
+            consumed_tokens: ReplayTokenSet::default(),
+            revoked_tokens: HybridRevocationChecker::default(),
+            replay_store: ReplayStoreBackend::Durable(DurableReplayStore::open(store_dir)?),
+            audit_log: Vec::new(),
+        })
     }
 
     /// Change the connectivity policy enforced by the gate.
@@ -1938,8 +2018,18 @@ impl CapabilityGate {
             &cap.scope,
             cap.single_use,
         );
-        let expected_signature = keyed_digest(&self.verification_secret, &payload)?;
-        if !constant_time_eq(&cap.signature, &expected_signature) {
+
+        // bd-1vjbv: Modernized signature verification - support both HMAC (legacy) and Ed25519 (modern)
+        let signature_valid = if let Some(verifying_key) = &self.verifying_key {
+            // Modern Ed25519 signature verification
+            self.verify_ed25519_signature(&cap.signature, &payload, verifying_key)?
+        } else {
+            // Legacy HMAC verification for backwards compatibility
+            let expected_signature = keyed_digest(&self.verification_secret, &payload)?;
+            constant_time_eq(&cap.signature, &expected_signature)
+        };
+
+        if !signature_valid {
             let err = RemoteCapError::InvalidSignature;
             self.push_audit(build_audit_event(
                 "REMOTECAP_DENIED",
@@ -2206,6 +2296,40 @@ impl CapabilityGate {
 
     fn push_audit(&mut self, event: RemoteCapAuditEvent) {
         push_bounded(&mut self.audit_log, event, MAX_AUDIT_LOG_ENTRIES);
+    }
+
+    // bd-1vjbv: Ed25519 signature verification helper
+    fn verify_ed25519_signature(
+        &self,
+        signature_hex: &str,
+        payload: &str,
+        verifying_key: &VerifyingKey,
+    ) -> Result<bool, RemoteCapError> {
+        // Decode hex signature
+        let signature_bytes = hex::decode(signature_hex).map_err(|_| {
+            RemoteCapError::CryptoEngineUnavailable {
+                detail: "invalid hex signature format".to_string(),
+            }
+        })?;
+
+        if signature_bytes.len() != 64 {
+            return Ok(false); // Invalid signature length
+        }
+
+        // Convert to Ed25519 signature
+        let signature = match Signature::from_bytes(&signature_bytes[..64].try_into().unwrap()) {
+            signature => signature,
+        };
+
+        // Verify signature against payload with domain separation
+        let mut message = Vec::new();
+        message.extend_from_slice(b"remote_cap_ed25519_v1:");
+        message.extend_from_slice(payload.as_bytes());
+
+        match verifying_key.verify(&message, &signature) {
+            Ok(()) => Ok(true),
+            Err(_) => Ok(false), // Signature verification failed
+        }
     }
 }
 
@@ -5399,5 +5523,106 @@ mod remote_cap_comprehensive_negative_tests {
         handle
             .join()
             .expect("Background thread should complete successfully");
+    }
+
+    #[test]
+    fn provider_issue_waits_for_audit_lock_and_keeps_event() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let provider =
+            Arc::new(CapabilityProvider::new("secret-test-timeout").expect("valid provider"));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let provider_clone = Arc::clone(&provider);
+        let barrier_clone = Arc::clone(&barrier);
+        let handle = thread::spawn(move || {
+            let _guard = provider_clone
+                .try_lock_audit_log_with_timeout(Duration::from_millis(1000))
+                .expect("background thread should acquire audit lock");
+            barrier_clone.wait();
+            thread::sleep(Duration::from_millis(150));
+        });
+
+        barrier.wait();
+
+        let started = std::time::Instant::now();
+        let (cap, event) = provider
+            .issue(
+                "ops@example",
+                scope(),
+                1_700_000_000,
+                300,
+                true,
+                false,
+                "trace-contention-issue",
+            )
+            .expect("issue should block rather than drop the audit event");
+
+        handle
+            .join()
+            .expect("background thread should complete successfully");
+
+        assert!(
+            started.elapsed() >= Duration::from_millis(100),
+            "issue should wait past the optimistic timeout before falling back"
+        );
+        assert_eq!(event.event_code, "REMOTECAP_ISSUED");
+
+        let audit_log = provider.audit_log();
+        assert_eq!(audit_log.len(), 1);
+        let persisted = audit_log.last().expect("issued event should be persisted");
+        assert_eq!(persisted.token_id.as_deref(), Some(cap.token_id()));
+        assert_eq!(persisted.trace_id, "trace-contention-issue");
+    }
+
+    #[test]
+    fn provider_audit_log_waits_for_contention_instead_of_returning_empty() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let provider =
+            Arc::new(CapabilityProvider::new("secret-test-timeout").expect("valid provider"));
+        provider
+            .issue(
+                "ops@example",
+                scope(),
+                1_700_000_000,
+                300,
+                true,
+                false,
+                "trace-seeded-audit",
+            )
+            .expect("seed event should issue");
+
+        let barrier = Arc::new(Barrier::new(2));
+        let provider_clone = Arc::clone(&provider);
+        let barrier_clone = Arc::clone(&barrier);
+        let handle = thread::spawn(move || {
+            let _guard = provider_clone
+                .try_lock_audit_log_with_timeout(Duration::from_millis(1000))
+                .expect("background thread should acquire audit lock");
+            barrier_clone.wait();
+            thread::sleep(Duration::from_millis(150));
+        });
+
+        barrier.wait();
+
+        let started = std::time::Instant::now();
+        let audit_log = provider.audit_log();
+
+        handle
+            .join()
+            .expect("background thread should complete successfully");
+
+        assert!(
+            started.elapsed() >= Duration::from_millis(100),
+            "audit snapshot should wait instead of fabricating an empty view"
+        );
+        assert_eq!(audit_log.len(), 1);
+        assert_eq!(
+            audit_log[0].trace_id, "trace-seeded-audit",
+            "contention must not erase previously recorded audit state"
+        );
     }
 }
