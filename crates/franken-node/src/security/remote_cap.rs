@@ -2511,19 +2511,39 @@ fn is_repeated_secret_pattern(secret: &str, pattern: &str) -> bool {
 /// All actual hash operations in this module already use proper domain separators.
 fn estimated_secret_entropy_bits(secret: &str) -> f64 {
     let total = secret.len() as f64;
+
+    // Handle edge case of empty secret
+    if total == 0.0 || !total.is_finite() {
+        return 0.0;
+    }
+
     let mut counts = [0_usize; 256];
     for &byte in secret.as_bytes() {
         counts[usize::from(byte)] = counts[usize::from(byte)].saturating_add(1);
     }
-    counts
+
+    let entropy = counts
         .into_iter()
         .filter(|count| *count > 0)
         .map(|count| {
             let probability = count as f64 / total;
-            -probability * probability.log2()
+            // Guard against NaN/Infinity in logarithm operation
+            if probability <= 0.0 || !probability.is_finite() {
+                0.0
+            } else {
+                let log_prob = probability.log2();
+                if !log_prob.is_finite() {
+                    0.0
+                } else {
+                    -probability * log_prob
+                }
+            }
         })
-        .sum::<f64>()
-        * total
+        .sum::<f64>();
+
+    // Ensure final result is finite
+    let result = entropy * total;
+    if result.is_finite() { result } else { 0.0 }
 }
 
 fn replay_store_error(action: &str, path: &Path, source: std::io::Error) -> RemoteCapError {
