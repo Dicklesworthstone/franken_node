@@ -60,6 +60,23 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
 }
 
+/// SECURITY: Sanitizes identifiers for safe inclusion in audit log messages by escaping
+/// control characters, newlines, and other characters that could be used
+/// for log injection attacks.
+fn sanitize_log_identifier(identifier: &str) -> String {
+    identifier.chars()
+        .map(|c| match c {
+            '\n' => "\\n".to_string(),
+            '\r' => "\\r".to_string(),
+            '\t' => "\\t".to_string(),
+            '\0' => "\\0".to_string(),
+            '\\' => "\\\\".to_string(),
+            c if c.is_control() => format!("\\u{{{:04x}}}", c as u32),
+            c => c.to_string(),
+        })
+        .collect()
+}
+
 fn reindex_trace_steps(steps: &mut [TraceStep]) {
     for (idx, step) in steps.iter_mut().enumerate() {
         step.seq = u64::try_from(idx).unwrap_or(u64::MAX);
@@ -359,7 +376,7 @@ impl AuditEntry {
     pub fn new(event_code: &str, trace_id: &str, detail: &str, timestamp_ns: u64) -> Self {
         Self {
             event_code: event_code.to_string(),
-            trace_id: trace_id.to_string(),
+            trace_id: sanitize_log_identifier(trace_id),
             detail: detail.to_string(),
             timestamp_ns,
         }
@@ -729,7 +746,7 @@ impl TraceBuilder {
             AuditEntry::new(
                 event_codes::TTR_001,
                 trace_id,
-                &format!("Capture started for workflow '{workflow_name}'"),
+                &format!("Capture started for workflow '{}'", sanitize_log_identifier(workflow_name)),
                 now,
             ),
             MAX_AUDIT_LOG_ENTRIES,
