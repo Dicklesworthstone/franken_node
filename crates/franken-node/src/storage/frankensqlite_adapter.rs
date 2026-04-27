@@ -40,6 +40,7 @@ pub mod event_codes {
     pub const FRANKENSQLITE_ADAPTER_INIT: &str = "FRANKENSQLITE_ADAPTER_INIT";
     pub const FRANKENSQLITE_WRITE_SUCCESS: &str = "FRANKENSQLITE_WRITE_SUCCESS";
     pub const FRANKENSQLITE_WRITE_FAIL: &str = "FRANKENSQLITE_WRITE_FAIL";
+    pub const FRANKENSQLITE_AUDIT_LOG_TRUNCATED: &str = "FRANKENSQLITE_AUDIT_LOG_TRUNCATED";
     pub const FRANKENSQLITE_CRASH_RECOVERY: &str = "FRANKENSQLITE_CRASH_RECOVERY";
     pub const FRANKENSQLITE_REPLAY_START: &str = "FRANKENSQLITE_REPLAY_START";
     pub const FRANKENSQLITE_REPLAY_MISMATCH: &str = "FRANKENSQLITE_REPLAY_MISMATCH";
@@ -476,6 +477,7 @@ pub struct AdapterSummary {
     pub write_failures: usize,
     pub replay_count: usize,
     pub replay_mismatches: usize,
+    pub audit_log_truncated: bool,
     pub writes_by_tier: BTreeMap<String, usize>,
     pub schema_version: u32,
 }
@@ -494,6 +496,7 @@ pub struct FrankensqliteAdapter {
     write_failures: usize,
     replay_count: usize,
     replay_mismatches: usize,
+    audit_log_truncated: bool,
     writes_by_tier: BTreeMap<DurabilityTier, usize>,
     schema_versions: Vec<SchemaVersion>,
 }
@@ -525,6 +528,7 @@ impl FrankensqliteAdapter {
             write_failures: 0,
             replay_count: 0,
             replay_mismatches: 0,
+            audit_log_truncated: false,
             writes_by_tier: BTreeMap::new(),
             schema_versions: vec![SchemaVersion {
                 version: 1,
@@ -577,6 +581,17 @@ impl FrankensqliteAdapter {
         self.write_count = self.write_count.saturating_add(1);
 
         if class == PersistenceClass::AuditLog {
+            if !self.audit_log_truncated && self.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
+                self.audit_log_truncated = true;
+                self.emit_event(
+                    event_codes::FRANKENSQLITE_AUDIT_LOG_TRUNCATED,
+                    class.label(),
+                    format!(
+                        "audit replay window exceeded {} entries; gate is now fail-closed",
+                        MAX_AUDIT_LOG_ENTRIES
+                    ),
+                );
+            }
             push_bounded(
                 &mut self.audit_log,
                 (key.to_string(), value.to_vec()),
@@ -744,6 +759,7 @@ impl FrankensqliteAdapter {
             write_failures: self.write_failures,
             replay_count: self.replay_count,
             replay_mismatches: self.replay_mismatches,
+            audit_log_truncated: self.audit_log_truncated,
             writes_by_tier,
             schema_version: self.schema_version(),
         }
@@ -758,7 +774,10 @@ impl FrankensqliteAdapter {
     }
 
     pub fn gate_pass(&self) -> bool {
-        self.write_failures == 0 && self.replay_mismatches == 0 && self.write_count > 0
+        self.write_failures == 0
+            && self.replay_mismatches == 0
+            && !self.audit_log_truncated
+            && self.write_count > 0
     }
 
     /// Structured JSON report.
@@ -774,6 +793,7 @@ impl FrankensqliteAdapter {
                 "write_failures": summary.write_failures,
                 "replay_count": summary.replay_count,
                 "replay_mismatches": summary.replay_mismatches,
+                "audit_log_truncated": summary.audit_log_truncated,
                 "schema_version": summary.schema_version,
             },
             "persistence_classes": PersistenceClass::all().iter().map(|c| {
@@ -1467,6 +1487,7 @@ mod tests {
         assert!(!event_codes::FRANKENSQLITE_ADAPTER_INIT.is_empty());
         assert!(!event_codes::FRANKENSQLITE_WRITE_SUCCESS.is_empty());
         assert!(!event_codes::FRANKENSQLITE_WRITE_FAIL.is_empty());
+        assert!(!event_codes::FRANKENSQLITE_AUDIT_LOG_TRUNCATED.is_empty());
         assert!(!event_codes::FRANKENSQLITE_CRASH_RECOVERY.is_empty());
         assert!(!event_codes::FRANKENSQLITE_REPLAY_START.is_empty());
         assert!(!event_codes::FRANKENSQLITE_REPLAY_MISMATCH.is_empty());
@@ -1620,6 +1641,31 @@ mod tests {
         assert_eq!(results, vec![("audit-1".to_string(), false)]);
         assert_eq!(adapter.summary().replay_mismatches, 1);
         assert_eq!(adapter.audit_log.len(), 1);
+    }
+
+    #[test]
+    fn audit_log_window_truncation_fails_gate_closed() {
+        let mut adapter = FrankensqliteAdapter::default();
+
+        for idx in 0..=MAX_AUDIT_LOG_ENTRIES {
+            adapter
+                .write_legacy(
+                    PersistenceClass::AuditLog,
+                    &format!("audit-{idx:04}"),
+                    format!("value-{idx:04}").as_bytes(),
+                )
+                .expect("audit write should succeed");
+        }
+
+        let summary = adapter.summary();
+        assert!(summary.audit_log_truncated);
+        assert!(!adapter.gate_pass());
+        assert!(
+            adapter
+                .events()
+                .iter()
+                .any(|event| event.code == event_codes::FRANKENSQLITE_AUDIT_LOG_TRUNCATED)
+        );
     }
 
     #[test]

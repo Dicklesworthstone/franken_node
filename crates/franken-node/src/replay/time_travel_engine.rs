@@ -974,6 +974,7 @@ impl ReplayEngine {
         );
 
         let mut divergences = Vec::new();
+        let mut divergence_count = 0usize;
         let mut replay_duration_ns: u64 = 0;
 
         for step in &trace.steps {
@@ -1014,6 +1015,7 @@ impl ReplayEngine {
                     MAX_AUDIT_LOG_ENTRIES,
                 );
             } else {
+                divergence_count = divergence_count.saturating_add(1);
                 let kind = match (output_match, effects_match) {
                     (false, true) => DivergenceKind::OutputMismatch,
                     (true, false) => DivergenceKind::SideEffectMismatch,
@@ -1034,26 +1036,26 @@ impl ReplayEngine {
                     ),
                     MAX_AUDIT_LOG_ENTRIES,
                 );
-                push_bounded(
-                    &mut divergences,
-                    Divergence {
+                // Preserve the earliest divergences so replay diagnostics keep the
+                // first point of failure instead of silently evicting it.
+                if divergences.len() < MAX_DIVERGENCES {
+                    divergences.push(Divergence {
                         step_seq: step.seq,
                         kind,
                         expected_digest: original_output_digest,
                         actual_digest: replayed_output_digest,
                         explanation,
-                    },
-                    MAX_DIVERGENCES,
-                );
+                    });
+                }
             }
 
             replay_duration_ns = std::cmp::max(replay_duration_ns, step.timestamp_ns);
         }
 
-        let verdict = if divergences.is_empty() {
+        let verdict = if divergence_count == 0 {
             ReplayVerdict::Identical
         } else {
-            ReplayVerdict::Diverged(divergences.len())
+            ReplayVerdict::Diverged(divergence_count)
         };
 
         // TTR-007: Replay completed
@@ -1267,9 +1269,9 @@ mod tests {
         assert!(!error_codes::ERR_TTR_ENV_INVALID.is_empty());
         assert!(!error_codes::ERR_TTR_REPLAY_FAILED.is_empty());
         assert!(!error_codes::ERR_TTR_DUPLICATE_TRACE.is_empty());
+        assert!(!error_codes::ERR_TTR_TRACE_CAPACITY_EXCEEDED.is_empty());
         assert!(!error_codes::ERR_TTR_STEP_ORDER_VIOLATION.is_empty());
         assert!(!error_codes::ERR_TTR_TRACE_NOT_FOUND.is_empty());
-        assert!(!error_codes::ERR_TTR_TRACE_CAPACITY_EXCEEDED.is_empty());
     }
 
     // --- Schema version ---
@@ -1621,8 +1623,6 @@ mod tests {
             .register_trace(one_step_trace("mmm-newest"))
             .expect_err("overflow register must fail closed");
 
-        assert_eq!(engine.trace_count(), MAX_REGISTERED_TRACES);
-        assert!(engine.get_trace("zzz-oldest").is_some());
         assert!(matches!(
             err,
             TimeTravelError::TraceCapacityExceeded {
@@ -1630,6 +1630,8 @@ mod tests {
                 capacity
             } if trace_id == "mmm-newest" && capacity == MAX_REGISTERED_TRACES
         ));
+        assert_eq!(engine.trace_count(), MAX_REGISTERED_TRACES);
+        assert!(engine.get_trace("zzz-oldest").is_some());
         assert!(engine.get_trace("aaa-0000").is_some());
         assert!(engine.get_trace("mmm-newest").is_none());
     }
@@ -1652,8 +1654,6 @@ mod tests {
             .register_trace(one_step_trace("fill-overflow"))
             .expect_err("overflow register must fail closed after stale-order removal");
 
-        assert_eq!(engine.trace_count(), MAX_REGISTERED_TRACES);
-        assert!(engine.get_trace("stale-order").is_none());
         assert!(matches!(
             err,
             TimeTravelError::TraceCapacityExceeded {
@@ -1661,6 +1661,8 @@ mod tests {
                 capacity
             } if trace_id == "fill-overflow" && capacity == MAX_REGISTERED_TRACES
         ));
+        assert_eq!(engine.trace_count(), MAX_REGISTERED_TRACES);
+        assert!(engine.get_trace("stale-order").is_none());
         assert!(engine.get_trace("fill-overflow").is_none());
     }
 
@@ -1776,6 +1778,33 @@ mod tests {
         for div in &result.divergences {
             assert_eq!(div.kind, DivergenceKind::OutputMismatch);
         }
+    }
+
+    #[test]
+    fn replay_preserves_earliest_divergences_when_cap_is_exceeded() {
+        let mut engine = ReplayEngine::new();
+        let step_count = MAX_DIVERGENCES.saturating_add(5);
+        engine
+            .register_trace(build_demo_trace("div-cap", "test", step_count))
+            .expect("register should succeed");
+
+        fn bad_replay(step: &TraceStep, _env: &EnvironmentSnapshot) -> (Vec<u8>, Vec<SideEffect>) {
+            let mut output = step.output.clone();
+            output.push(0xFF);
+            (output, step.side_effects.clone())
+        }
+
+        let result = engine
+            .replay("div-cap", bad_replay)
+            .expect("replay should succeed");
+
+        assert_eq!(result.verdict, ReplayVerdict::Diverged(step_count));
+        assert_eq!(result.divergences.len(), MAX_DIVERGENCES);
+        assert_eq!(result.divergences.first().map(|div| div.step_seq), Some(0));
+        assert_eq!(
+            result.divergences.last().map(|div| div.step_seq),
+            Some(u64::try_from(MAX_DIVERGENCES.saturating_sub(1)).unwrap_or(u64::MAX))
+        );
     }
 
     #[test]
