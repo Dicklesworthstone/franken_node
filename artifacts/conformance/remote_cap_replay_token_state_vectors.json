@@ -1,0 +1,280 @@
+{
+  "schema_version": "franken-node/remote-cap-replay-token-state-conformance/v1",
+  "coverage": [
+    {
+      "spec_section": "docs/specs/remote_cap_contract.md",
+      "invariant": "INV-REMOTECAP-FAIL-CLOSED",
+      "level": "MUST",
+      "tested": true
+    },
+    {
+      "spec_section": "docs/specs/remote_cap_contract.md",
+      "invariant": "INV-REMOTECAP-AUDIT",
+      "level": "MUST",
+      "tested": true
+    },
+    {
+      "spec_section": "docs/specs/remote_cap_contract.md",
+      "invariant": "verify-without-consuming-single-use",
+      "level": "MUST",
+      "tested": true
+    },
+    {
+      "spec_section": "docs/specs/remote_cap_contract.md",
+      "invariant": "use-consumes-single-use",
+      "level": "MUST",
+      "tested": true
+    }
+  ],
+  "vectors": [
+    {
+      "name": "verify_then_use_then_replay_memory",
+      "store_mode": "memory",
+      "issued_tokens": [
+        {
+          "label": "primary",
+          "trace_id": "trace-replay-vector-primary",
+          "issued_at_epoch_secs": 1700200000,
+          "ttl_secs": 300,
+          "single_use": true,
+          "operations": [
+            "telemetry_export"
+          ],
+          "endpoint_prefixes": [
+            "https://telemetry.example.com/v1"
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "step": "preflight",
+          "kind": "recheck",
+          "token": "primary",
+          "operation": "telemetry_export",
+          "endpoint": "https://telemetry.example.com/v1/export",
+          "now_epoch_secs": 1700200005,
+          "trace_id": "trace-replay-preflight"
+        },
+        {
+          "step": "consume",
+          "kind": "authorize",
+          "token": "primary",
+          "operation": "telemetry_export",
+          "endpoint": "https://telemetry.example.com/v1/export",
+          "now_epoch_secs": 1700200010,
+          "trace_id": "trace-replay-consume"
+        },
+        {
+          "step": "replay-after-consume",
+          "kind": "recheck",
+          "token": "primary",
+          "operation": "telemetry_export",
+          "endpoint": "https://telemetry.example.com/v1/export",
+          "now_epoch_secs": 1700200011,
+          "trace_id": "trace-replay-after-consume"
+        }
+      ],
+      "transcript": [
+        {
+          "step": "preflight",
+          "kind": "recheck",
+          "token": "primary",
+          "status": "allowed",
+          "error_code": null,
+          "audit_event_code": "REMOTECAP_RECHECK_PASSED",
+          "denial_code": null,
+          "audit_log_len_after": 1,
+          "durable_marker_count": null
+        },
+        {
+          "step": "consume",
+          "kind": "authorize",
+          "token": "primary",
+          "status": "allowed",
+          "error_code": null,
+          "audit_event_code": "REMOTECAP_CONSUMED",
+          "denial_code": null,
+          "audit_log_len_after": 2,
+          "durable_marker_count": null
+        },
+        {
+          "step": "replay-after-consume",
+          "kind": "recheck",
+          "token": "primary",
+          "status": "denied",
+          "error_code": "REMOTECAP_REPLAY",
+          "audit_event_code": "REMOTECAP_DENIED",
+          "denial_code": "REMOTECAP_REPLAY",
+          "audit_log_len_after": 3,
+          "durable_marker_count": null
+        }
+      ]
+    },
+    {
+      "name": "scope_denial_does_not_consume_memory",
+      "store_mode": "memory",
+      "issued_tokens": [
+        {
+          "label": "primary",
+          "trace_id": "trace-scope-denial-primary",
+          "issued_at_epoch_secs": 1700201000,
+          "ttl_secs": 300,
+          "single_use": true,
+          "operations": [
+            "telemetry_export"
+          ],
+          "endpoint_prefixes": [
+            "https://telemetry.example.com/v1"
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "step": "wrong-operation-denied",
+          "kind": "authorize",
+          "token": "primary",
+          "operation": "artifact_upload",
+          "endpoint": "https://telemetry.example.com/v1/export",
+          "now_epoch_secs": 1700201005,
+          "trace_id": "trace-scope-denial-wrong-op"
+        },
+        {
+          "step": "consume-after-denial",
+          "kind": "authorize",
+          "token": "primary",
+          "operation": "telemetry_export",
+          "endpoint": "https://telemetry.example.com/v1/export",
+          "now_epoch_secs": 1700201006,
+          "trace_id": "trace-scope-denial-consume"
+        },
+        {
+          "step": "replay-after-consume",
+          "kind": "authorize",
+          "token": "primary",
+          "operation": "telemetry_export",
+          "endpoint": "https://telemetry.example.com/v1/export",
+          "now_epoch_secs": 1700201007,
+          "trace_id": "trace-scope-denial-replay"
+        }
+      ],
+      "transcript": [
+        {
+          "step": "wrong-operation-denied",
+          "kind": "authorize",
+          "token": "primary",
+          "status": "denied",
+          "error_code": "REMOTECAP_SCOPE_DENIED",
+          "audit_event_code": "REMOTECAP_DENIED",
+          "denial_code": "REMOTECAP_SCOPE_DENIED",
+          "audit_log_len_after": 1,
+          "durable_marker_count": null
+        },
+        {
+          "step": "consume-after-denial",
+          "kind": "authorize",
+          "token": "primary",
+          "status": "allowed",
+          "error_code": null,
+          "audit_event_code": "REMOTECAP_CONSUMED",
+          "denial_code": null,
+          "audit_log_len_after": 2,
+          "durable_marker_count": null
+        },
+        {
+          "step": "replay-after-consume",
+          "kind": "authorize",
+          "token": "primary",
+          "status": "denied",
+          "error_code": "REMOTECAP_REPLAY",
+          "audit_event_code": "REMOTECAP_DENIED",
+          "denial_code": "REMOTECAP_REPLAY",
+          "audit_log_len_after": 3,
+          "durable_marker_count": null
+        }
+      ]
+    },
+    {
+      "name": "durable_restart_rejects_consumed_token",
+      "store_mode": "durable",
+      "issued_tokens": [
+        {
+          "label": "primary",
+          "trace_id": "trace-durable-restart-primary",
+          "issued_at_epoch_secs": 1700202000,
+          "ttl_secs": 300,
+          "single_use": true,
+          "operations": [
+            "telemetry_export"
+          ],
+          "endpoint_prefixes": [
+            "https://telemetry.example.com/v1"
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "step": "consume-before-restart",
+          "kind": "authorize",
+          "token": "primary",
+          "operation": "telemetry_export",
+          "endpoint": "https://telemetry.example.com/v1/export",
+          "now_epoch_secs": 1700202005,
+          "trace_id": "trace-durable-consume"
+        },
+        {
+          "step": "restart-gate",
+          "kind": "restart_gate",
+          "token": null,
+          "operation": null,
+          "endpoint": null,
+          "now_epoch_secs": null,
+          "trace_id": null
+        },
+        {
+          "step": "replay-after-restart",
+          "kind": "authorize",
+          "token": "primary",
+          "operation": "telemetry_export",
+          "endpoint": "https://telemetry.example.com/v1/export",
+          "now_epoch_secs": 1700202006,
+          "trace_id": "trace-durable-replay"
+        }
+      ],
+      "transcript": [
+        {
+          "step": "consume-before-restart",
+          "kind": "authorize",
+          "token": "primary",
+          "status": "allowed",
+          "error_code": null,
+          "audit_event_code": "REMOTECAP_CONSUMED",
+          "denial_code": null,
+          "audit_log_len_after": 1,
+          "durable_marker_count": 1
+        },
+        {
+          "step": "restart-gate",
+          "kind": "restart_gate",
+          "token": null,
+          "status": "restarted",
+          "error_code": null,
+          "audit_event_code": null,
+          "denial_code": null,
+          "audit_log_len_after": 0,
+          "durable_marker_count": 1
+        },
+        {
+          "step": "replay-after-restart",
+          "kind": "authorize",
+          "token": "primary",
+          "status": "denied",
+          "error_code": "REMOTECAP_REPLAY",
+          "audit_event_code": "REMOTECAP_DENIED",
+          "denial_code": "REMOTECAP_REPLAY",
+          "audit_log_len_after": 1,
+          "durable_marker_count": 1
+        }
+      ]
+    }
+  ]
+}
