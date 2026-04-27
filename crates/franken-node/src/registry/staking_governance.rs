@@ -423,7 +423,7 @@ pub struct StakingAuditEntry {
 pub fn compute_evidence_hash(payload: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"staking_governance_evidence_v1:");
-    hasher.update((payload.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(payload.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(payload.as_bytes());
     hex::encode(hasher.finalize())
 }
@@ -438,7 +438,7 @@ pub fn compute_penalty_hash(
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"staking_governance_penalty_v1:");
-    hasher.update((evidence_hash.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(evidence_hash.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(evidence_hash.as_bytes());
     hasher.update(slash_fraction_bps.to_le_bytes());
     hasher.update(stake_amount.to_le_bytes());

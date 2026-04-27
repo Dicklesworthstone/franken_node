@@ -394,11 +394,11 @@ impl ReputationGraphApis {
         let content_hash = {
             let mut h = Sha256::new();
             h.update(b"reputation_graph_hash_v1:");
-            h.update((node_id.len() as u64).to_le_bytes());
+            h.update((u64::try_from(node_id.len()).unwrap_or(u64::MAX)).to_le_bytes());
             h.update(node_id.as_bytes());
             h.update(composite.to_le_bytes());
             h.update((edge_count as u64).to_le_bytes());
-            h.update((self.schema_version.len() as u64).to_le_bytes());
+            h.update((u64::try_from(self.schema_version.len()).unwrap_or(u64::MAX)).to_le_bytes());
             h.update(self.schema_version.as_bytes());
             hex::encode(h.finalize())
         };
@@ -482,11 +482,11 @@ impl ReputationGraphApis {
         let content_hash = {
             let mut h = Sha256::new();
             h.update(b"reputation_graph_hash_v1:");
-            h.update((self.nodes.len() as u64).to_le_bytes());
-            h.update((self.edges.len() as u64).to_le_bytes());
-            h.update((self.schema_version.len() as u64).to_le_bytes());
+            h.update((u64::try_from(self.nodes.len()).unwrap_or(u64::MAX)).to_le_bytes());
+            h.update((u64::try_from(self.edges.len()).unwrap_or(u64::MAX)).to_le_bytes());
+            h.update((u64::try_from(self.schema_version.len()).unwrap_or(u64::MAX)).to_le_bytes());
             h.update(self.schema_version.as_bytes());
-            h.update((self.audit_log.len() as u64).to_le_bytes());
+            h.update((u64::try_from(self.audit_log.len()).unwrap_or(u64::MAX)).to_le_bytes());
             hex::encode(h.finalize())
         };
         self.log(

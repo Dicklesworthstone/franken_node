@@ -483,16 +483,16 @@ impl CompatibilityCorrectnessMetrics {
         let content_hash = {
             let mut h = Sha256::new();
             h.update(b"compat_correctness_hash_v1:");
-            h.update((self.config.metric_version.len() as u64).to_le_bytes());
+            h.update((u64::try_from(self.config.metric_version.len()).unwrap_or(u64::MAX)).to_le_bytes());
             h.update(self.config.metric_version.as_bytes());
-            h.update((self.metrics.len() as u64).to_le_bytes());
-            h.update((segments.len() as u64).to_le_bytes());
+            h.update((u64::try_from(self.metrics.len()).unwrap_or(u64::MAX)).to_le_bytes());
+            h.update((u64::try_from(segments.len()).unwrap_or(u64::MAX)).to_le_bytes());
             for segment in &segments {
                 let api_family = segment.segment.api_family.label();
                 let risk_band = segment.segment.risk_band.label();
-                h.update((api_family.len() as u64).to_le_bytes());
+                h.update((u64::try_from(api_family.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(api_family.as_bytes());
-                h.update((risk_band.len() as u64).to_le_bytes());
+                h.update((u64::try_from(risk_band.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(risk_band.as_bytes());
                 h.update((segment.metric_count as u64).to_le_bytes());
                 h.update(segment.total_tests.to_le_bytes());
@@ -504,13 +504,13 @@ impl CompatibilityCorrectnessMetrics {
                 hash_f64(&mut h, segment.mean_detect_ms);
             }
             hash_f64(&mut h, overall);
-            h.update((flagged.len() as u64).to_le_bytes());
+            h.update((u64::try_from(flagged.len()).unwrap_or(u64::MAX)).to_le_bytes());
             for seg in &flagged {
                 let af = seg.api_family.label();
                 let rb = seg.risk_band.label();
-                h.update((af.len() as u64).to_le_bytes());
+                h.update((u64::try_from(af.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(af.as_bytes());
-                h.update((rb.len() as u64).to_le_bytes());
+                h.update((u64::try_from(rb.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(rb.as_bytes());
             }
             hex::encode(h.finalize())

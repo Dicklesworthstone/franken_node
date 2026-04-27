@@ -365,7 +365,7 @@ impl SafeExtensionOnboarding {
         let content_hash = {
             let mut h = Sha256::new();
             h.update(b"safe_extension_hash_v1:");
-            h.update((SCHEMA_VERSION.len() as u64).to_le_bytes());
+            h.update((u64::try_from(SCHEMA_VERSION.len()).unwrap_or(u64::MAX)).to_le_bytes());
             h.update(SCHEMA_VERSION.as_bytes());
             h.update((total_sessions as u64).to_le_bytes());
             h.update((completed as u64).to_le_bytes());
@@ -374,10 +374,10 @@ impl SafeExtensionOnboarding {
             h.update([u8::from(meets_ttfe)]);
             hash_f64(&mut h, overall_auto);
             hash_f64(&mut h, overall_friction);
-            h.update((phase_stats.len() as u64).to_le_bytes());
+            h.update((u64::try_from(phase_stats.len()).unwrap_or(u64::MAX)).to_le_bytes());
             for ps in &phase_stats {
                 let label = ps.phase.label();
-                h.update((label.len() as u64).to_le_bytes());
+                h.update((u64::try_from(label.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(label.as_bytes());
                 h.update((ps.total_sessions as u64).to_le_bytes());
                 hash_f64(&mut h, ps.avg_duration_seconds);
@@ -385,9 +385,9 @@ impl SafeExtensionOnboarding {
                 hash_f64(&mut h, ps.gate_pass_rate);
                 hash_f64(&mut h, ps.friction_score);
             }
-            h.update((bottleneck_phases.len() as u64).to_le_bytes());
+            h.update((u64::try_from(bottleneck_phases.len()).unwrap_or(u64::MAX)).to_le_bytes());
             for bp in &bottleneck_phases {
-                h.update((bp.len() as u64).to_le_bytes());
+                h.update((u64::try_from(bp.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(bp.as_bytes());
             }
             hex::encode(h.finalize())

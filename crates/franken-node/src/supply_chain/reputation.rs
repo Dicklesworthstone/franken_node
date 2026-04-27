@@ -788,7 +788,7 @@ fn compute_entry_hash(entry: &AuditEntry) -> String {
         entry.publisher_id.as_str(),
         event_json.as_str(),
     ] {
-        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(field.len()).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.update(field.as_bytes());
     }
     format!("sha256:{}", hex::encode(hasher.finalize()))

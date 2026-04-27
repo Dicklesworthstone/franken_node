@@ -1575,10 +1575,10 @@ impl SafeModeController {
         let computed_digest = {
             let mut hasher = Sha256::new();
             hasher.update(b"safe_mode_evidence_digest_v1:");
-            hasher.update((input.evidence_entries.len() as u64).to_le_bytes());
+            hasher.update((u64::try_from(input.evidence_entries.len()).unwrap_or(u64::MAX)).to_le_bytes());
             for (i, entry) in input.evidence_entries.iter().enumerate() {
                 hasher.update((i as u64).to_le_bytes());
-                hasher.update((entry.len() as u64).to_le_bytes());
+                hasher.update((u64::try_from(entry.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 hasher.update(entry.as_bytes());
                 // Validate each entry is non-empty (integrity check).
                 if entry.is_empty() {
@@ -1650,10 +1650,10 @@ impl SafeModeController {
     pub fn compute_evidence_digest(evidence_entries: &[String]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(b"safe_mode_evidence_digest_v1:");
-        hasher.update((evidence_entries.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(evidence_entries.len()).unwrap_or(u64::MAX)).to_le_bytes());
         for (i, entry) in evidence_entries.iter().enumerate() {
             hasher.update((i as u64).to_le_bytes());
-            hasher.update((entry.len() as u64).to_le_bytes());
+            hasher.update((u64::try_from(entry.len()).unwrap_or(u64::MAX)).to_le_bytes());
             hasher.update(entry.as_bytes());
         }
         format!("sha256:{}", hex::encode(hasher.finalize()))
@@ -1679,17 +1679,17 @@ fn compute_trust_proof_digest(
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"safe_mode_trust_proof_v1:");
-    hasher.update((timestamp.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(timestamp.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(timestamp.as_bytes());
-    hasher.update((trust_state_hash.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(trust_state_hash.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(trust_state_hash.as_bytes());
-    hasher.update((inconsistencies.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(inconsistencies.len()).unwrap_or(u64::MAX)).to_le_bytes());
     for inc in inconsistencies {
-        hasher.update((inc.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(inc.len()).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.update(inc.as_bytes());
     }
     let anomalies_json = serde_json::to_string(anomalies).unwrap_or_default();
-    hasher.update((anomalies_json.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(anomalies_json.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(anomalies_json.as_bytes());
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }

@@ -433,14 +433,14 @@ impl PerformanceHardeningMetrics {
         let content_hash = {
             let mut h = Sha256::new();
             h.update(b"perf_hardening_metrics_hash_v1:");
-            h.update((self.metric_version.len() as u64).to_le_bytes());
+            h.update((u64::try_from(self.metric_version.len()).unwrap_or(u64::MAX)).to_le_bytes());
             h.update(self.metric_version.as_bytes());
-            h.update((self.metrics.len() as u64).to_le_bytes());
-            h.update((categories.len() as u64).to_le_bytes());
+            h.update((u64::try_from(self.metrics.len()).unwrap_or(u64::MAX)).to_le_bytes());
+            h.update((u64::try_from(categories.len()).unwrap_or(u64::MAX)).to_le_bytes());
             hash_f64(&mut h, overall);
             for category in &categories {
                 let label = category.category.label();
-                h.update((label.len() as u64).to_le_bytes());
+                h.update((u64::try_from(label.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(label.as_bytes());
                 h.update((category.metric_count as u64).to_le_bytes());
                 hash_f64(&mut h, category.avg_overhead_ratio);
@@ -449,10 +449,10 @@ impl PerformanceHardeningMetrics {
                 hash_f64(&mut h, category.budget_ms);
                 h.update([u8::from(category.within_budget)]);
             }
-            h.update((flagged.len() as u64).to_le_bytes());
+            h.update((u64::try_from(flagged.len()).unwrap_or(u64::MAX)).to_le_bytes());
             for cat in &flagged {
                 let label = cat.label();
-                h.update((label.len() as u64).to_le_bytes());
+                h.update((u64::try_from(label.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(label.as_bytes());
             }
             hex::encode(h.finalize())

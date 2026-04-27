@@ -397,29 +397,29 @@ impl BenchmarkVersioning {
             let mut h = Sha256::new();
             h.update(b"version_benchmark_guide_hash_v1:");
             let from_label = from.label();
-            h.update((from_label.len() as u64).to_le_bytes());
+            h.update((u64::try_from(from_label.len()).unwrap_or(u64::MAX)).to_le_bytes());
             h.update(from_label.as_bytes());
             let to_label = to.label();
-            h.update((to_label.len() as u64).to_le_bytes());
+            h.update((u64::try_from(to_label.len()).unwrap_or(u64::MAX)).to_le_bytes());
             h.update(to_label.as_bytes());
             let compat_label = format!("{compatibility:?}");
-            h.update((compat_label.len() as u64).to_le_bytes());
+            h.update((u64::try_from(compat_label.len()).unwrap_or(u64::MAX)).to_le_bytes());
             h.update(compat_label.as_bytes());
-            h.update((breaking_changes.len() as u64).to_le_bytes());
+            h.update((u64::try_from(breaking_changes.len()).unwrap_or(u64::MAX)).to_le_bytes());
             for bc in &breaking_changes {
-                h.update((bc.len() as u64).to_le_bytes());
+                h.update((u64::try_from(bc.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(bc.as_bytes());
             }
-            h.update((steps.len() as u64).to_le_bytes());
+            h.update((u64::try_from(steps.len()).unwrap_or(u64::MAX)).to_le_bytes());
             for step in &steps {
                 h.update((step.step_number as u64).to_le_bytes());
-                h.update((step.action.len() as u64).to_le_bytes());
+                h.update((u64::try_from(step.action.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(step.action.as_bytes());
                 h.update([u8::from(step.automated)]);
             }
             h.update([u8::from(rollback)]);
             let effort_label = format!("{effort:?}");
-            h.update((effort_label.len() as u64).to_le_bytes());
+            h.update((u64::try_from(effort_label.len()).unwrap_or(u64::MAX)).to_le_bytes());
             h.update(effort_label.as_bytes());
             hex::encode(h.finalize())
         };
@@ -496,13 +496,13 @@ impl BenchmarkVersioning {
             let mut h = Sha256::new();
             h.update(b"version_benchmark_report_hash_v1:");
             let cur_label = self.current_version.label();
-            h.update((cur_label.len() as u64).to_le_bytes());
+            h.update((u64::try_from(cur_label.len()).unwrap_or(u64::MAX)).to_le_bytes());
             h.update(cur_label.as_bytes());
-            h.update((self.revisions.len() as u64).to_le_bytes());
+            h.update((u64::try_from(self.revisions.len()).unwrap_or(u64::MAX)).to_le_bytes());
             h.update((migration_count as u64).to_le_bytes());
-            h.update((deprecations.len() as u64).to_le_bytes());
+            h.update((u64::try_from(deprecations.len()).unwrap_or(u64::MAX)).to_le_bytes());
             for d in &deprecations {
-                h.update((d.len() as u64).to_le_bytes());
+                h.update((u64::try_from(d.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(d.as_bytes());
             }
             hex::encode(h.finalize())

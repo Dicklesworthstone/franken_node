@@ -14479,7 +14479,7 @@ fn build_registry_seed_request_with_config(
         let mut hasher = sha2::Sha256::new();
         hasher.update(b"registry_seed_attestation_v1:");
         for field in [name, publisher_id, version] {
-            hasher.update((field.len() as u64).to_le_bytes());
+            hasher.update((u64::try_from(field.len()).unwrap_or(u64::MAX)).to_le_bytes());
             hasher.update(field.as_bytes());
         }
         hex::encode(hasher.finalize())
@@ -14491,7 +14491,7 @@ fn build_registry_seed_request_with_config(
             let mut h = sha2::Sha256::new();
             h.update(b"registry_seed_content_v1:");
             for field in [name, version, "content"] {
-                h.update((field.len() as u64).to_le_bytes());
+                h.update((u64::try_from(field.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(field.as_bytes());
             }
             hex::encode(h.finalize())
@@ -14919,7 +14919,7 @@ fn persist_local_registry_artifact(
         stored_at_utc: published.registered_at.clone(),
         artifact_file_name,
         artifact_sha256: expected_hash,
-        artifact_size_bytes: package_bytes.len() as u64,
+        artifact_size_bytes: u64::try_from(package_bytes.len()).unwrap_or(u64::MAX),
         manifest_bytes_b64: BASE64_STANDARD.encode(&request.manifest_bytes),
         publisher_public_key_hex: hex::encode(verifying_key.as_bytes()),
         extension: published.clone(),
@@ -15635,9 +15635,9 @@ fn registry_publish_provenance_signature_payload(
         })?;
     let mut payload = Vec::new();
     payload.extend(b"registry_publish_provenance_v1:");
-    payload.extend((manifest_bytes.len() as u64).to_le_bytes());
+    payload.extend((u64::try_from(manifest_bytes.len()).unwrap_or(u64::MAX)).to_le_bytes());
     payload.extend(manifest_bytes);
-    payload.extend((canonical.len() as u64).to_le_bytes());
+    payload.extend((u64::try_from(canonical.len()).unwrap_or(u64::MAX)).to_le_bytes());
     payload.extend(canonical.as_bytes());
     Ok(payload)
 }
@@ -21407,12 +21407,12 @@ fn handle_debug_explain(args: &DebugExplainArgs) -> Result<()> {
     let mut hasher = Sha256::new();
     hasher.update(b"decision_receipt_chain_hash_v1:");
     if let Some(prev) = &signed.receipt.previous_receipt_hash {
-        hasher.update((prev.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(prev.len()).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.update(prev.as_bytes());
     } else {
         hasher.update(0u64.to_le_bytes());
     }
-    hasher.update((canonical_for_chain.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(canonical_for_chain.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(canonical_for_chain.as_bytes());
     let recomputed = hex::encode(hasher.finalize());
     if recomputed == signed.chain_hash {

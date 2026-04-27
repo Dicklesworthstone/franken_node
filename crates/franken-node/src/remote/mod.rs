@@ -718,7 +718,7 @@ mod remote_module_negative_tests {
         // Test length-prefixed domain separation (even better)
         let mut length_prefixed_hasher = Sha256::new();
         let domain = "fault_config_v1";
-        length_prefixed_hasher.update((domain.len() as u64).to_le_bytes());
+        length_prefixed_hasher.update((u64::try_from(domain.len()).unwrap_or(u64::MAX)).to_le_bytes());
         length_prefixed_hasher.update(domain.as_bytes());
         length_prefixed_hasher.update(config_json.as_bytes());
         let length_prefixed_hash = length_prefixed_hasher.finalize();

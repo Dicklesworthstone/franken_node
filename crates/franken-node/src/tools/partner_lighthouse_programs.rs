@@ -397,14 +397,14 @@ impl PartnerLighthousePrograms {
         let content_hash = {
             let mut h = Sha256::new();
             h.update(b"partner_lighthouse_hash_v1:");
-            h.update((self.schema_version.len() as u64).to_le_bytes());
+            h.update((u64::try_from(self.schema_version.len()).unwrap_or(u64::MAX)).to_le_bytes());
             h.update(self.schema_version.as_bytes());
             h.update((total_p as u64).to_le_bytes());
             h.update((total_d as u64).to_le_bytes());
             h.update((total_o as u64).to_le_bytes());
-            h.update((by_tier.len() as u64).to_le_bytes());
+            h.update((u64::try_from(by_tier.len()).unwrap_or(u64::MAX)).to_le_bytes());
             for (tier_name, count) in &by_tier {
-                h.update((tier_name.len() as u64).to_le_bytes());
+                h.update((u64::try_from(tier_name.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(tier_name.as_bytes());
                 h.update((*count as u64).to_le_bytes());
             }

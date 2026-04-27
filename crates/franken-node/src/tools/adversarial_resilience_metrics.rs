@@ -330,20 +330,20 @@ impl AdversarialResilienceMetrics {
         let content_hash = {
             let mut h = Sha256::new();
             h.update(b"adversarial_resilience_hash_v1:");
-            h.update((self.metric_version.len() as u64).to_le_bytes());
+            h.update((u64::try_from(self.metric_version.len()).unwrap_or(u64::MAX)).to_le_bytes());
             h.update(self.metric_version.as_bytes());
-            h.update((self.metrics.len() as u64).to_le_bytes());
-            h.update((campaigns.len() as u64).to_le_bytes());
+            h.update((u64::try_from(self.metrics.len()).unwrap_or(u64::MAX)).to_le_bytes());
+            h.update((u64::try_from(campaigns.len()).unwrap_or(u64::MAX)).to_le_bytes());
             if overall.is_finite() {
                 h.update(overall.to_le_bytes());
             } else {
                 // Use a fixed bit pattern for non-finite values to ensure INV-ARM-DETERMINISTIC.
                 h.update(0u64.to_le_bytes());
             }
-            h.update((flagged.len() as u64).to_le_bytes());
+            h.update((u64::try_from(flagged.len()).unwrap_or(u64::MAX)).to_le_bytes());
             for ct in &flagged {
                 let label = ct.label();
-                h.update((label.len() as u64).to_le_bytes());
+                h.update((u64::try_from(label.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(label.as_bytes());
             }
             hex::encode(h.finalize())

@@ -464,7 +464,7 @@ impl MigrationSpeedFailureMetrics {
         let content_hash = {
             let mut h = Sha256::new();
             h.update(b"migration_speed_metrics_hash_v1:");
-            h.update((self.metric_version.len() as u64).to_le_bytes());
+            h.update((u64::try_from(self.metric_version.len()).unwrap_or(u64::MAX)).to_le_bytes());
             h.update(self.metric_version.as_bytes());
             h.update((total as u64).to_le_bytes());
             h.update((success as u64).to_le_bytes());
@@ -472,25 +472,25 @@ impl MigrationSpeedFailureMetrics {
             hash_f64(&mut h, failure_rate);
             hash_f64(&mut h, avg_total);
             h.update([u8::from(exceeds)]);
-            h.update((phase_stats.len() as u64).to_le_bytes());
+            h.update((u64::try_from(phase_stats.len()).unwrap_or(u64::MAX)).to_le_bytes());
             for phase_stat in &phase_stats {
                 let label = phase_stat.phase.label();
-                h.update((label.len() as u64).to_le_bytes());
+                h.update((u64::try_from(label.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(label.as_bytes());
                 h.update((phase_stat.count as u64).to_le_bytes());
                 hash_f64(&mut h, phase_stat.avg_duration_ms);
                 h.update(phase_stat.p90_duration_ms.to_le_bytes());
             }
-            h.update((flagged_phases.len() as u64).to_le_bytes());
+            h.update((u64::try_from(flagged_phases.len()).unwrap_or(u64::MAX)).to_le_bytes());
             for phase in &flagged_phases {
                 let label = phase.label();
-                h.update((label.len() as u64).to_le_bytes());
+                h.update((u64::try_from(label.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(label.as_bytes());
             }
-            h.update((failure_stats.len() as u64).to_le_bytes());
+            h.update((u64::try_from(failure_stats.len()).unwrap_or(u64::MAX)).to_le_bytes());
             for failure_stat in &failure_stats {
                 let label = failure_stat.failure_type.label();
-                h.update((label.len() as u64).to_le_bytes());
+                h.update((u64::try_from(label.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(label.as_bytes());
                 h.update((failure_stat.count as u64).to_le_bytes());
                 hash_f64(&mut h, failure_stat.rate);

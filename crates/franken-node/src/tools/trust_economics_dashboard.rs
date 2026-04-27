@@ -491,9 +491,9 @@ impl TrustEconomicsDashboard {
         let content_hash = {
             let mut h = Sha256::new();
             h.update(b"trust_economics_hash_v1:");
-            h.update((self.config.model_version.len() as u64).to_le_bytes());
+            h.update((u64::try_from(self.config.model_version.len()).unwrap_or(u64::MAX)).to_le_bytes());
             h.update(self.config.model_version.as_bytes());
-            h.update((amplification.len() as u64).to_le_bytes());
+            h.update((u64::try_from(amplification.len()).unwrap_or(u64::MAX)).to_le_bytes());
             for a in &amplification {
                 if a.franken_vs_node_factor.is_finite() {
                     h.update(a.franken_vs_node_factor.to_le_bytes());
@@ -506,9 +506,9 @@ impl TrustEconomicsDashboard {
             } else {
                 h.update(f64::NAN.to_le_bytes());
             }
-            h.update((loss_summary.len() as u64).to_le_bytes());
+            h.update((u64::try_from(loss_summary.len()).unwrap_or(u64::MAX)).to_le_bytes());
             for (category, loss) in &loss_summary {
-                h.update((category.len() as u64).to_le_bytes());
+                h.update((u64::try_from(category.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(category.as_bytes());
                 if loss.is_finite() {
                     h.update(loss.to_le_bytes());
@@ -516,12 +516,12 @@ impl TrustEconomicsDashboard {
                     h.update(f64::NAN.to_le_bytes());
                 }
             }
-            h.update((recommendations.len() as u64).to_le_bytes());
+            h.update((u64::try_from(recommendations.len()).unwrap_or(u64::MAX)).to_le_bytes());
             for rec in &recommendations {
                 let obj_label = format!("{:?}", rec.objective);
-                h.update((obj_label.len() as u64).to_le_bytes());
+                h.update((u64::try_from(obj_label.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(obj_label.as_bytes());
-                h.update((rec.rationale.len() as u64).to_le_bytes());
+                h.update((u64::try_from(rec.rationale.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(rec.rationale.as_bytes());
             }
             hex::encode(h.finalize())

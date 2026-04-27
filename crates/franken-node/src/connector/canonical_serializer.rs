@@ -185,7 +185,7 @@ impl SignaturePreimage {
         let mut hasher = Sha256::new();
         hasher.update(b"canonical_serializer_hash_v1:");
         let bytes = self.to_bytes();
-        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(bytes.len()).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.update(&bytes);
         let digest = hex::encode(hasher.finalize());
         digest[..8].to_string()
@@ -898,7 +898,7 @@ fn is_ident_byte(byte: u8) -> bool {
 fn content_hash_prefix(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"canonical_serializer_hash_v1:");
-    hasher.update((data.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(data.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(data);
     let digest = hex::encode(hasher.finalize());
     digest[..8].to_string()
