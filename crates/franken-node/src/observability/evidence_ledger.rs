@@ -265,9 +265,41 @@ fn replay_key(timestamp_ms: u64, signature: &ReplaySignature) -> ReplayKey {
     replay_key
 }
 
+fn replay_key_seen_in_slice_ct(replay_key: &ReplayKey, seen_replay_keys: &[ReplayKey]) -> bool {
+    let mut found_match = false;
+    for seen_replay_key in seen_replay_keys {
+        found_match |= constant_time::ct_eq_bytes(replay_key, seen_replay_key);
+    }
+    found_match
+}
+
 fn entry_with_server_computed_size(mut normalized: EvidenceEntry) -> (EvidenceEntry, usize) {
     normalized.size_bytes = 0;
     let base_size = serialized_entry_size(&normalized);
+    let size_without_size_digits = base_size.saturating_sub(1);
+
+    // `size_bytes` is the only self-referential field in the serialized JSON, so
+    // the fixed point is `n = base_without_digits + digits10(n)`.
+    let mut digit_count = decimal_digit_count(base_size);
+    let candidate_size = loop {
+        let next_size = size_without_size_digits.saturating_add(digit_count);
+        let next_digit_count = decimal_digit_count(next_size);
+        if next_digit_count == digit_count {
+            break next_size;
+        }
+        digit_count = next_digit_count;
+    };
+
+    normalized.size_bytes = candidate_size;
+    (normalized, candidate_size)
+}
+
+fn entry_with_server_computed_size_with_payload_bytes(
+    mut normalized: EvidenceEntry,
+    payload_json_bytes: &[u8],
+) -> (EvidenceEntry, usize) {
+    normalized.size_bytes = 0;
+    let base_size = serialized_entry_size_with_payload_bytes(&normalized, payload_json_bytes);
     let size_without_size_digits = base_size.saturating_sub(1);
 
     // `size_bytes` is the only self-referential field in the serialized JSON, so
@@ -298,6 +330,24 @@ fn decimal_digit_count(value: usize) -> usize {
 
 fn serialized_entry_size(entry: &EvidenceEntry) -> usize {
     serialized_json_size(entry).unwrap_or(usize::MAX)
+}
+
+fn serialized_entry_size_with_payload_bytes(
+    entry: &EvidenceEntry,
+    payload_json_bytes: &[u8],
+) -> usize {
+    // Compute entry size using pre-computed payload JSON bytes to avoid duplicate serialization.
+    // We create a modified entry with a null payload, compute its size, then substitute
+    // the actual payload size.
+
+    let mut entry_without_payload = entry.clone();
+    entry_without_payload.payload = serde_json::Value::Null;
+
+    let base_size = serialized_json_size(&entry_without_payload).unwrap_or(usize::MAX);
+
+    // The null payload serializes as "null" (4 bytes), so we subtract that and add the actual payload size
+    let null_payload_size = 4; // "null"
+    base_size.saturating_sub(null_payload_size).saturating_add(payload_json_bytes.len())
 }
 
 /// Create a canonical representation of an EvidenceEntry for signature verification.
@@ -684,8 +734,8 @@ impl LedgerCapacity {
 /// Type alias for configuration-style usage.
 pub type LedgerConfig = LedgerCapacity;
 
-fn format_ledger_init_event(capacity: &LedgerCapacity) -> impl fmt::Display + '_ {
-    format_args!(
+fn format_ledger_init_event(capacity: &LedgerCapacity) -> String {
+    format!(
         "{}: evidence ledger initialized: max_entries={}, max_bytes={}",
         event_codes::LEDGER_CAPACITY_WARN,
         capacity.max_entries,
@@ -693,8 +743,8 @@ fn format_ledger_init_event(capacity: &LedgerCapacity) -> impl fmt::Display + '_
     )
 }
 
-fn format_ledger_zero_capacity_event(entry: &EvidenceEntry) -> impl fmt::Display + '_ {
-    format_args!(
+fn format_ledger_zero_capacity_event(entry: &EvidenceEntry) -> String {
+    format!(
         "{}: append rejected because max_entries=0, epoch={}",
         event_codes::LEDGER_CAPACITY_WARN,
         entry.epoch_id,
@@ -705,8 +755,8 @@ fn format_ledger_entry_too_large_event(
     entry_size: usize,
     max_bytes: usize,
     epoch_id: u64,
-) -> impl fmt::Display {
-    format_args!(
+) -> String {
+    format!(
         "{}: entry size {} exceeds max_bytes {}, epoch={}",
         event_codes::LEDGER_CAPACITY_WARN,
         entry_size,
@@ -719,8 +769,8 @@ fn format_ledger_append_event(
     id: EntryId,
     entry: &EvidenceEntry,
     entry_size: usize,
-) -> impl fmt::Display + '_ {
-    format_args!(
+) -> String {
+    format!(
         "{}: entry={}, decision={}, epoch={}, size={}",
         event_codes::LEDGER_APPEND,
         id,
@@ -734,8 +784,8 @@ fn format_ledger_eviction_event(
     evicted_id: EntryId,
     evicted_entry: &EvidenceEntry,
     evicted_size: usize,
-) -> impl fmt::Display + '_ {
-    format_args!(
+) -> String {
+    format!(
         "{}: evicted entry={}, decision={}, epoch={}, freed_bytes={}",
         event_codes::LEDGER_EVICTION,
         evicted_id,
@@ -745,8 +795,8 @@ fn format_ledger_eviction_event(
     )
 }
 
-fn format_ledger_spill_event(id: EntryId, bytes: usize) -> impl fmt::Display {
-    format_args!(
+fn format_ledger_spill_event(id: EntryId, bytes: usize) -> String {
+    format!(
         "{}: spill wrote entry={}, bytes={}",
         event_codes::LEDGER_SPILL,
         id,
@@ -834,7 +884,13 @@ impl EvidenceLedger {
 
         let epoch_id = entry.epoch_id;
         entry.prev_entry_hash = expected_prev_hash;
-        let (normalized_entry, entry_size) = entry_with_server_computed_size(entry);
+        let (normalized_entry, entry_size) = if let Some(ref payload_bytes) = payload_json_bytes {
+            // Use optimized version to avoid duplicate payload serialization
+            entry_with_server_computed_size_with_payload_bytes(entry, payload_bytes)
+        } else {
+            // Fallback to original version if payload serialization failed
+            entry_with_server_computed_size(entry)
+        };
 
         if entry_size > self.capacity.max_bytes {
             eprintln!(
@@ -869,13 +925,12 @@ impl EvidenceLedger {
         // and position. Collapse the timestamp+signature pair into one fixed-width key so each
         // retained entry needs only a single constant-time comparison.
         let replay_key = replay_key(timestamp_ms, signature);
-        let mut found_replay = false;
 
-        // Scan ALL entries without early return to prevent position timing leaks.
-        for seen_replay_key in &self.seen_signatures {
-            found_replay = found_replay || constant_time::ct_eq_bytes(&replay_key, seen_replay_key);
-        }
-        found_replay
+        // Scan both contiguous VecDeque slices without short-circuiting so replay-key
+        // position and wraparound layout cannot affect timing.
+        let (front, back) = self.seen_signatures.as_slices();
+        replay_key_seen_in_slice_ct(&replay_key, front)
+            | replay_key_seen_in_slice_ct(&replay_key, back)
     }
 
     fn append_prevalidated(
@@ -6285,6 +6340,50 @@ mod tests {
             time_first.as_nanos(),
             time_last.as_nanos(),
             timing_ratio
+        );
+    }
+
+    #[test]
+    fn replay_scan_checks_both_vecdeque_slices_after_wraparound() {
+        let mut ledger = EvidenceLedger::new(LedgerCapacity::new(8, 100_000));
+        ledger.seen_signatures = VecDeque::with_capacity(4);
+
+        for i in 0_u8..4 {
+            let mut signature = [0_u8; ED25519_SIGNATURE_BYTES];
+            signature[0] = i;
+            ledger.remember_seen_signature(u64::from(i), signature);
+        }
+
+        let _ = ledger.seen_signatures.pop_front();
+        let _ = ledger.seen_signatures.pop_front();
+
+        for i in 4_u8..6 {
+            let mut signature = [0_u8; ED25519_SIGNATURE_BYTES];
+            signature[0] = i;
+            ledger.remember_seen_signature(u64::from(i), signature);
+        }
+
+        let (front, back) = ledger.seen_signatures.as_slices();
+        assert!(
+            !front.is_empty() && !back.is_empty(),
+            "the regression must exercise a split VecDeque layout"
+        );
+
+        let mut wrapped_signature = [0_u8; ED25519_SIGNATURE_BYTES];
+        wrapped_signature[0] = 5;
+        let wrapped_replay_key = replay_key(5, &wrapped_signature);
+
+        assert!(
+            back.contains(&wrapped_replay_key),
+            "the target replay key should live in the wrapped-back slice"
+        );
+        assert!(
+            !front.contains(&wrapped_replay_key),
+            "the front slice should not already satisfy the replay lookup"
+        );
+        assert!(
+            ledger.is_replay_attack_ct_bytes(5, &wrapped_signature),
+            "the replay scan must continue into the wrapped-back slice"
         );
     }
 
