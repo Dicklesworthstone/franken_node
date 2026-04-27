@@ -20,7 +20,7 @@
 
 ## Containment
 
-1. Activate safe mode via `franken-node safe-mode enter --reason trust_corruption`.
+1. Activate safe mode via `POST /api/v1/control/safe-mode/enter` (CLI safe-mode command not yet implemented).
 2. Freeze all trust delegation operations.
 3. Block new trust chain extensions.
 4. Notify on-call security team via incident channel.
@@ -42,7 +42,7 @@
 
 ## Verification
 
-1. Run full trust re-verification pass: `franken-node trust verify --full`.
+1. Run full trust re-verification pass: `franken-node trust scan --deep --audit`.
 2. Confirm trust state hash matches expected value.
 3. Validate evidence ledger consistency end-to-end.
 4. Verify all trust delegations are policy-compliant.
@@ -63,8 +63,8 @@ pipeline completes successfully in a staging environment.
 
 ## Command References
 
-- `franken-node safe-mode enter --reason trust_corruption`
-- `franken-node trust verify --full`
+- `franken-node trust scan --deep --audit`
+- `franken-node ops health-check --json`
 - `POST /api/v1/control/safe-mode/enter`
 
 ## Cross-References

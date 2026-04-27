@@ -42,7 +42,7 @@
 
 ## Verification
 
-1. Run fleet health check: `franken-node fleet health --full`.
+1. Run fleet health check: `franken-node fleet status --verbose`.
 2. Confirm all re-admitted nodes pass trust verification.
 3. Validate workload scheduling resumes normally.
 4. Verify no residual quarantine flags on healthy nodes.
@@ -62,8 +62,8 @@ the simulated failure, and re-admit nodes through the graduated process.
 
 ## Command References
 
-- `franken-node quarantine list --status active`
-- `franken-node quarantine promote --node <node-id>`
+- `franken-node fleet status --zone <zone> --json`
+- `franken-node fleet release --incident <incident-id>`
 - `POST /api/v1/fleet/quarantine/activate`
 
 ## Cross-References

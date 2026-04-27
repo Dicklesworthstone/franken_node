@@ -45,7 +45,7 @@
 1. Confirm new epoch is fully committed and finalized.
 2. Validate epoch transition receipt with all required signatures.
 3. Verify trust state is consistent with new epoch parameters.
-4. Run epoch consistency check: `franken-node epoch verify --current`.
+4. Run epoch consistency check: `franken-node runtime epoch --local-epoch <current>`.
 
 ## Rollback
 
@@ -62,9 +62,9 @@ activates, and the retry-with-re-signing path completes successfully.
 
 ## Command References
 
-- `franken-node epoch status`
-- `franken-node epoch retry --timeout 600`
+- `franken-node runtime epoch --local-epoch <current> --json`
 - `POST /api/v1/control/epoch/retry`
+- `franken-node ops health-check --json`
 
 ## Cross-References
 
