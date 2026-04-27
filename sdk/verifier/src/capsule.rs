@@ -121,25 +121,28 @@ impl std::fmt::Display for CapsuleError {
                 "replay capsule Ed25519 signature has invalid length {length}"
             ),
             Self::Ed25519SignatureInvalid => {
-                write!(
-                    f,
-                    "replay capsule Ed25519 signature verification failed"
-                )
+                write!(f, "replay capsule Ed25519 signature verification failed")
             }
             Self::SchemaMismatch(msg) => {
                 write!(f, "{}: {msg}", ERR_CAPSULE_SCHEMA_MISMATCH)
             }
-            Self::ReplayDiverged { expected, actual } => {
+            Self::ReplayDiverged {
+                expected: _,
+                actual: _,
+            } => {
                 write!(
                     f,
-                    "{}: expected={expected}, actual={actual}",
+                    "{}: replay output hash mismatch (expected and actual digests redacted)",
                     ERR_CAPSULE_REPLAY_DIVERGED
                 )
             }
-            Self::VerdictMismatch { expected, actual } => {
+            Self::VerdictMismatch {
+                expected: _,
+                actual: _,
+            } => {
                 write!(
                     f,
-                    "{}: expected={expected}, actual={actual}",
+                    "{}: reproduced verdict mismatch (expected and actual verdicts redacted)",
                     ERR_CAPSULE_VERDICT_MISMATCH
                 )
             }
@@ -218,9 +221,17 @@ fn push_length_prefixed(hasher: &mut Sha256, value: &str) {
 fn compute_replay_hash(payload: &str, inputs: &BTreeMap<String, String>) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"verifier_sdk_capsule_replay_v1:");
-    hasher.update(u64::try_from(payload.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(
+        u64::try_from(payload.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     hasher.update(payload.as_bytes());
-    hasher.update(u64::try_from(inputs.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(
+        u64::try_from(inputs.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     for (k, v) in inputs {
         hasher.update(u64::try_from(k.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(k.as_bytes());
@@ -251,16 +262,28 @@ fn compute_signing_payload(capsule: &ReplayCapsule) -> String {
     ] {
         push_length_prefixed(&mut hasher, field);
     }
-    hasher.update(u64::try_from(capsule.manifest.input_refs.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(
+        u64::try_from(capsule.manifest.input_refs.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     for input_ref in &capsule.manifest.input_refs {
         push_length_prefixed(&mut hasher, input_ref);
     }
-    hasher.update(u64::try_from(capsule.manifest.metadata.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(
+        u64::try_from(capsule.manifest.metadata.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     for (key, value) in &capsule.manifest.metadata {
         push_length_prefixed(&mut hasher, key);
         push_length_prefixed(&mut hasher, value);
     }
-    hasher.update(u64::try_from(capsule.inputs.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(
+        u64::try_from(capsule.inputs.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     for (k, v) in &capsule.inputs {
         push_length_prefixed(&mut hasher, k);
         push_length_prefixed(&mut hasher, v);
@@ -290,16 +313,28 @@ fn ed25519_capsule_signature_payload(capsule: &ReplayCapsule) -> Vec<u8> {
     ] {
         push_length_prefixed(&mut hasher, field);
     }
-    hasher.update(u64::try_from(capsule.manifest.input_refs.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(
+        u64::try_from(capsule.manifest.input_refs.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     for input_ref in &capsule.manifest.input_refs {
         push_length_prefixed(&mut hasher, input_ref);
     }
-    hasher.update(u64::try_from(capsule.manifest.metadata.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(
+        u64::try_from(capsule.manifest.metadata.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     for (key, value) in &capsule.manifest.metadata {
         push_length_prefixed(&mut hasher, key);
         push_length_prefixed(&mut hasher, value);
     }
-    hasher.update(u64::try_from(capsule.inputs.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(
+        u64::try_from(capsule.inputs.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     for (k, v) in &capsule.inputs {
         push_length_prefixed(&mut hasher, k);
         push_length_prefixed(&mut hasher, v);
@@ -539,13 +574,15 @@ pub fn sign_capsule(signing_key: &SigningKey, capsule: &mut ReplayCapsule) {
 /// # }
 /// # Ok::<(), frankenengine_verifier_sdk::capsule::CapsuleError>(())
 /// ```
-pub fn verify_signature(verifying_key: &VerifyingKey, capsule: &ReplayCapsule) -> CapsuleResult<()> {
+pub fn verify_signature(
+    verifying_key: &VerifyingKey,
+    capsule: &ReplayCapsule,
+) -> CapsuleResult<()> {
     // Decode hex signature
-    let signature_bytes = hex::decode(&capsule.signature).map_err(|_| {
-        CapsuleError::Ed25519SignatureMalformed {
+    let signature_bytes =
+        hex::decode(&capsule.signature).map_err(|_| CapsuleError::Ed25519SignatureMalformed {
             length: capsule.signature.len(),
-        }
-    })?;
+        })?;
 
     if signature_bytes.len() != 64 {
         return Err(CapsuleError::Ed25519SignatureMalformed {
@@ -553,7 +590,12 @@ pub fn verify_signature(verifying_key: &VerifyingKey, capsule: &ReplayCapsule) -
         });
     }
 
-    let signature = Signature::from_bytes(&signature_bytes.try_into().unwrap());
+    let signature_array: [u8; 64] = signature_bytes.as_slice().try_into().map_err(|_| {
+        CapsuleError::Ed25519SignatureMalformed {
+            length: signature_bytes.len(),
+        }
+    })?;
+    let signature = Signature::from_bytes(&signature_array);
     let payload = ed25519_capsule_signature_payload(capsule);
 
     verifying_key
@@ -612,10 +654,7 @@ pub fn replay(
     let detail = if verdict == CapsuleVerdict::Pass {
         "replay output matches expected hash".to_string()
     } else {
-        format!(
-            "replay diverged: expected={}, actual={}",
-            capsule.manifest.expected_output_hash, actual_hash
-        )
+        "replay diverged: expected and actual digests redacted".to_string()
     };
 
     Ok(CapsuleReplayResult {
@@ -694,6 +733,13 @@ mod tests {
     /// Test verifying key matching the test signing key.
     fn test_verifying_key() -> VerifyingKey {
         VerifyingKey::from(&test_signing_key())
+    }
+
+    fn replay(
+        capsule: &ReplayCapsule,
+        verifier_identity: &str,
+    ) -> CapsuleResult<CapsuleReplayResult> {
+        super::replay(&test_verifying_key(), capsule, verifier_identity)
     }
 
     fn assert_manifest_tamper_rejected(case: &str, mutate: impl FnOnce(&mut ReplayCapsule)) {
@@ -2469,13 +2515,27 @@ mod tests {
             for error in error_variants {
                 let error_string = format!("{}", error);
 
-                // Error should contain the malicious content but in a safe way
-                // (Display trait should not process escape codes, just include them as-is)
-                assert!(
-                    error_string.contains(malicious_content)
-                        || error_string.contains(&malicious_content.escape_debug().to_string()),
-                    "Error display should include malicious content safely"
-                );
+                match error {
+                    CapsuleError::ReplayDiverged { .. } | CapsuleError::VerdictMismatch { .. } => {
+                        assert!(
+                            !error_string.contains(malicious_content)
+                                && !error_string
+                                    .contains(&malicious_content.escape_debug().to_string()),
+                            "Sensitive mismatch displays should redact attacker-controlled values"
+                        );
+                        assert!(error_string.contains("redacted"));
+                    }
+                    _ => {
+                        // Error should contain the malicious content but in a safe way
+                        // (Display trait should not process escape codes, just include them as-is)
+                        assert!(
+                            error_string.contains(malicious_content)
+                                || error_string
+                                    .contains(&malicious_content.escape_debug().to_string()),
+                            "Error display should include malicious content safely"
+                        );
+                    }
+                }
 
                 // Should not crash or cause undefined behavior
                 assert!(
@@ -2886,7 +2946,8 @@ mod tests {
             format!("verifier_sdk_capsule_replay_v1:{}", replay_data_payload),
             format!(
                 "{}payload",
-                u64::try_from(replay_data_payload.len()).unwrap_or(u64::MAX)
+                u64::try_from(replay_data_payload.len())
+                    .unwrap_or(u64::MAX)
                     .to_le_bytes()
                     .iter()
                     .map(|&b| b as char)
@@ -2894,7 +2955,8 @@ mod tests {
             ),
             format!(
                 "verifier_sdk_capsule_replay_v1:{}{}{}{}{}",
-                u64::try_from(replay_data_payload.len()).unwrap_or(u64::MAX)
+                u64::try_from(replay_data_payload.len())
+                    .unwrap_or(u64::MAX)
                     .to_le_bytes()
                     .iter()
                     .map(|&b| b as char)

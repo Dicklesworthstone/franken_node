@@ -111,16 +111,22 @@ impl fmt::Display for ProofFailure {
             Self::RootNotPinned { root_hash } => {
                 write!(f, "TLOG_ROOT_NOT_PINNED: {root_hash}")
             }
-            Self::PathInvalid { computed, expected } => {
+            Self::PathInvalid {
+                computed: _,
+                expected: _,
+            } => {
                 write!(
                     f,
-                    "TLOG_PATH_INVALID: computed={computed}, expected={expected}"
+                    "TLOG_PATH_INVALID: computed and expected Merkle roots redacted"
                 )
             }
-            Self::LeafMismatch { expected, actual } => {
+            Self::LeafMismatch {
+                expected: _,
+                actual: _,
+            } => {
                 write!(
                     f,
-                    "TLOG_LEAF_MISMATCH: expected={expected}, actual={actual}"
+                    "TLOG_LEAF_MISMATCH: expected and actual leaf hashes redacted"
                 )
             }
             Self::InvalidArtifactId { reason } => {
@@ -346,16 +352,22 @@ impl fmt::Display for TransparencyError {
             Self::RootNotPinned { root_hash } => {
                 write!(f, "TLOG_ROOT_NOT_PINNED: {root_hash}")
             }
-            Self::PathInvalid { computed, expected } => {
+            Self::PathInvalid {
+                computed: _,
+                expected: _,
+            } => {
                 write!(
                     f,
-                    "TLOG_PATH_INVALID: computed={computed}, expected={expected}"
+                    "TLOG_PATH_INVALID: computed and expected Merkle roots redacted"
                 )
             }
-            Self::LeafMismatch { expected, actual } => {
+            Self::LeafMismatch {
+                expected: _,
+                actual: _,
+            } => {
                 write!(
                     f,
-                    "TLOG_LEAF_MISMATCH: expected={expected}, actual={actual}"
+                    "TLOG_LEAF_MISMATCH: expected and actual leaf hashes redacted"
                 )
             }
         }
@@ -1303,12 +1315,16 @@ mod tests {
             expected: "b".into(),
         };
         assert!(e3.to_string().contains("TLOG_PATH_INVALID"));
+        assert!(!e3.to_string().contains("computed=a"));
+        assert!(!e3.to_string().contains("expected=b"));
 
         let e4 = TransparencyError::LeafMismatch {
             expected: "a".into(),
             actual: "b".into(),
         };
         assert!(e4.to_string().contains("TLOG_LEAF_MISMATCH"));
+        assert!(!e4.to_string().contains("expected=a"));
+        assert!(!e4.to_string().contains("actual=b"));
     }
 
     // === ProofFailure display ===
@@ -1324,6 +1340,13 @@ mod tests {
             root_hash: "x".into(),
         };
         assert!(f.to_string().contains("TLOG_ROOT_NOT_PINNED"));
+        let f_path = ProofFailure::PathInvalid {
+            computed: "computed-root".into(),
+            expected: "expected-root".into(),
+        };
+        assert!(f_path.to_string().contains("TLOG_PATH_INVALID"));
+        assert!(!f_path.to_string().contains("computed-root"));
+        assert!(!f_path.to_string().contains("expected-root"));
         let f2 = ProofFailure::InvalidArtifactId {
             reason: "bad".into(),
         };
@@ -1332,5 +1355,12 @@ mod tests {
             reason: "bad".into(),
         };
         assert!(f3.to_string().contains("TLOG_CONNECTOR_INVALID"));
+        let f_leaf = ProofFailure::LeafMismatch {
+            expected: "expected-leaf".into(),
+            actual: "actual-leaf".into(),
+        };
+        assert!(f_leaf.to_string().contains("TLOG_LEAF_MISMATCH"));
+        assert!(!f_leaf.to_string().contains("expected-leaf"));
+        assert!(!f_leaf.to_string().contains("actual-leaf"));
     }
 }

@@ -50,11 +50,11 @@ use std::{
 };
 
 use chrono::{SecondsFormat, Utc};
+use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
-use subtle::ConstantTimeEq;
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::Digest;
+use subtle::ConstantTimeEq;
 
 pub mod bundle;
 pub mod capsule;
@@ -391,7 +391,9 @@ pub enum VerifierSdkError {
     /// authentication. Operators who need the expected value for diagnostics
     /// can read it from `VerifierSdk::result_origin_nonce` (in-process) or
     /// from internal trace logs that include the SDK identity.
-    ResultOriginMismatch { actual: String },
+    ResultOriginMismatch {
+        actual: String,
+    },
     NonceCounterExhausted,
     /// Inbound bundle bytes exceeded the configured DoS-prevention cap.
     BundleTooLarge {
@@ -420,37 +422,41 @@ impl fmt::Display for VerifierSdkError {
                 formatter,
                 "replay bundle {bundle_id} for {verifier_identity} is structural-only and cannot satisfy authenticated verifier provenance"
             ),
-            Self::InvalidVerifierIdentity { actual, reason } => write!(
-                formatter,
-                "verifier identity is invalid: {reason}: got {actual}"
-            ),
-            Self::InvalidSessionId { actual, reason } => write!(
-                formatter,
-                "verification session id is invalid: {reason}: got {actual}"
-            ),
+            Self::InvalidVerifierIdentity { actual: _, reason } => {
+                write!(formatter, "verifier identity is invalid: {reason}")
+            }
+            Self::InvalidSessionId { actual: _, reason } => {
+                write!(formatter, "verification session id is invalid: {reason}")
+            }
             Self::EmptyTrustAnchor => write!(formatter, "trust anchor is empty"),
-            Self::MalformedTrustAnchor { actual } => write!(
+            Self::MalformedTrustAnchor { actual: _ } => write!(
                 formatter,
-                "trust anchor must be a canonical lowercase 64-nybble sha256 digest: got {actual}"
+                "trust anchor must be a canonical lowercase 64-nybble sha256 digest"
             ),
-            Self::TrustAnchorMismatch { expected, actual } => write!(
+            Self::TrustAnchorMismatch {
+                expected: _,
+                actual: _,
+            } => write!(
                 formatter,
-                "trust anchor mismatch: expected={expected}, actual={actual}"
+                "trust anchor mismatch (expected and actual digests redacted)"
             ),
             Self::SessionSealed(session_id) => {
                 write!(formatter, "verification session {session_id} is sealed")
             }
-            Self::SessionVerifierMismatch { expected, actual } => write!(
+            Self::SessionVerifierMismatch {
+                expected: _,
+                actual: _,
+            } => write!(
                 formatter,
-                "verification session verifier mismatch: expected={expected}, actual={actual}"
+                "verification session verifier mismatch (expected and actual verifier identities redacted)"
             ),
             Self::SessionProvenanceMismatch {
                 field,
-                expected,
-                actual,
+                expected: _,
+                actual: _,
             } => write!(
                 formatter,
-                "verification session provenance mismatch for {field}: expected={expected}, actual={actual}"
+                "verification session provenance mismatch for {field} (values redacted)"
             ),
             Self::SessionStepSequenceMismatch { expected, actual } => write!(
                 formatter,
@@ -458,19 +464,22 @@ impl fmt::Display for VerifierSdkError {
             ),
             Self::SessionStepSignatureMismatch {
                 step_index,
-                expected,
-                actual,
+                expected: _,
+                actual: _,
             } => write!(
                 formatter,
-                "verification session step signature mismatch at index {step_index}: expected={expected}, actual={actual}"
+                "verification session step signature mismatch at index {step_index} (signatures redacted)"
             ),
             Self::BoundedStateExceeded { surface, max } => write!(
                 formatter,
                 "verifier SDK bounded state exceeded for {surface}: max={max}"
             ),
-            Self::ResultSignatureMismatch { expected, actual } => write!(
+            Self::ResultSignatureMismatch {
+                expected: _,
+                actual: _,
+            } => write!(
                 formatter,
-                "verifier SDK result signature mismatch: expected={expected}, actual={actual}"
+                "verifier SDK result signature mismatch (expected and actual signatures redacted)"
             ),
             Self::ResultOriginMismatch { actual } => write!(
                 formatter,
@@ -844,7 +853,10 @@ impl VerifierSdk {
             AssertionResult {
                 assertion: "trust_anchor_verified".to_string(),
                 passed: true,
-                detail: format!("trust anchor {} matches bundle integrity", anchor_integrity_hash),
+                detail: format!(
+                    "trust anchor {} matches bundle integrity",
+                    anchor_integrity_hash
+                ),
             },
             AssertionResult {
                 assertion: "trust_state_signature_verified".to_string(),
@@ -903,27 +915,29 @@ impl VerifierSdk {
                 }
             })?;
 
-            self.verify_bundle_belongs_to_current_verifier(&verified).map_err(|e| {
-                VerifierSdkError::WorkflowStageValidationFailed {
+            self.verify_bundle_belongs_to_current_verifier(&verified)
+                .map_err(|e| VerifierSdkError::WorkflowStageValidationFailed {
                     stage: stage_name.clone(),
                     reason: format!("verifier identity check failed: {}", e),
-                }
-            })?;
+                })?;
 
             // Cryptographic verification
-            bundle::verify_signed_bundle(verifying_key, &verified, signature_bytes).map_err(|e| {
-                VerifierSdkError::WorkflowStageValidationFailed {
+            bundle::verify_signed_bundle(verifying_key, &verified, signature_bytes).map_err(
+                |e| VerifierSdkError::WorkflowStageValidationFailed {
                     stage: stage_name.clone(),
                     reason: format!("signature verification failed: {}", e),
-                }
-            })?;
+                },
+            )?;
 
             all_integrity_hashes.push(verified.integrity_hash.clone());
 
             assertions.push(AssertionResult {
                 assertion: format!("workflow_stage_{}_verified", stage_name),
                 passed: true,
-                detail: format!("stage {} structurally valid and cryptographically signed", stage_name),
+                detail: format!(
+                    "stage {} structurally valid and cryptographically signed",
+                    stage_name
+                ),
             });
         }
 
@@ -939,7 +953,11 @@ impl VerifierSdk {
         assertions.push(AssertionResult {
             assertion: "workflow_execution_verified".to_string(),
             passed: true,
-            detail: format!("workflow {} with {} stages verified", workflow_id, stages.len()),
+            detail: format!(
+                "workflow {} with {} stages verified",
+                workflow_id,
+                stages.len()
+            ),
         });
 
         self.build_result(
@@ -1284,11 +1302,12 @@ impl VerifierSdk {
         .map_err(|source| VerifierSdkError::Json(source.to_string()))?;
 
         // Decode the signature from hex
-        let signature_bytes = hex::decode(&result.verifier_signature)
-            .map_err(|_| VerifierSdkError::ResultSignatureMismatch {
+        let signature_bytes = hex::decode(&result.verifier_signature).map_err(|_| {
+            VerifierSdkError::ResultSignatureMismatch {
                 expected: "valid hex signature".to_string(),
                 actual: result.verifier_signature.clone(),
-            })?;
+            }
+        })?;
 
         if signature_bytes.len() != 64 {
             return Err(VerifierSdkError::ResultSignatureMismatch {
@@ -1424,7 +1443,10 @@ fn default_verifying_key() -> VerifyingKey {
     VerifyingKey::from(&default_signing_key())
 }
 
-fn facade_result_signature(signing_key: &ed25519_dalek::SigningKey, result: &VerificationResult) -> Result<String, VerifierSdkError> {
+fn facade_result_signature(
+    signing_key: &ed25519_dalek::SigningKey,
+    result: &VerificationResult,
+) -> Result<String, VerifierSdkError> {
     #[derive(Serialize)]
     struct SignatureView<'a> {
         operation: &'a VerificationOperation,
@@ -1457,8 +1479,7 @@ fn facade_result_signature(signing_key: &ed25519_dalek::SigningKey, result: &Ver
 }
 
 fn default_result_origin_nonce() -> String {
-    default_result_origin_nonce_fallible()
-        .unwrap_or_else(|_| random_result_origin_nonce())
+    default_result_origin_nonce_fallible().unwrap_or_else(|_| random_result_origin_nonce())
 }
 
 fn default_result_origin_nonce_fallible() -> Result<String, VerifierSdkError> {
@@ -2005,7 +2026,8 @@ mod tests {
         forged_result.checked_assertions[0].detail = "forged locally".to_string();
         forged_result.result_origin_nonce.clear();
         forged_result.verifier_signature =
-            facade_result_signature(&sdk.signing_key, &forged_result).expect("forged signature should compute");
+            facade_result_signature(&sdk.signing_key, &forged_result)
+                .expect("forged signature should compute");
 
         let err = sdk
             .record_session_step(&mut session, &forged_result)
@@ -2720,6 +2742,49 @@ mod tests {
     }
 
     #[test]
+    fn verifier_sdk_display_redacts_sensitive_mismatch_payloads() {
+        let trust_anchor_error = VerifierSdkError::TrustAnchorMismatch {
+            expected: "expected-anchor".to_string(),
+            actual: "actual-anchor".to_string(),
+        };
+        let verifier_identity_error = VerifierSdkError::InvalidVerifierIdentity {
+            actual: "verifier://attacker\nspoof".to_string(),
+            reason: "identity must use the external verifier:// scheme".to_string(),
+        };
+        let session_signature_error = VerifierSdkError::SessionStepSignatureMismatch {
+            step_index: 2,
+            expected: "expected-step-signature".to_string(),
+            actual: "actual-step-signature".to_string(),
+        };
+        let result_signature_error = VerifierSdkError::ResultSignatureMismatch {
+            expected: "expected-result-signature".to_string(),
+            actual: "actual-result-signature".to_string(),
+        };
+
+        let trust_anchor_display = trust_anchor_error.to_string();
+        assert!(trust_anchor_display.contains("redacted"));
+        assert!(!trust_anchor_display.contains("expected-anchor"));
+        assert!(!trust_anchor_display.contains("actual-anchor"));
+
+        let verifier_identity_display = verifier_identity_error.to_string();
+        assert!(
+            verifier_identity_display.contains("identity must use the external verifier:// scheme")
+        );
+        assert!(!verifier_identity_display.contains("verifier://attacker"));
+        assert!(!verifier_identity_display.contains("spoof"));
+
+        let session_signature_display = session_signature_error.to_string();
+        assert!(session_signature_display.contains("signatures redacted"));
+        assert!(!session_signature_display.contains("expected-step-signature"));
+        assert!(!session_signature_display.contains("actual-step-signature"));
+
+        let result_signature_display = result_signature_error.to_string();
+        assert!(result_signature_display.contains("signatures redacted"));
+        assert!(!result_signature_display.contains("expected-result-signature"));
+        assert!(!result_signature_display.contains("actual-result-signature"));
+    }
+
+    #[test]
     fn validate_bundle_accepts_same_verifier_bundle() {
         let sdk = create_verifier_sdk("verifier://alpha");
         let bundle = make_replay_bundle_bytes("verifier://alpha");
@@ -2871,7 +2936,7 @@ mod tests {
         let capsule = capsule::build_reference_capsule();
 
         let err = sdk
-            .verify_claim(&capsule)
+            .verify_claim(&test_verifying_key(), &capsule)
             .expect_err("whitespace-only verifier identity must be rejected");
 
         assert!(matches!(

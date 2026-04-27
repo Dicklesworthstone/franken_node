@@ -250,9 +250,9 @@ impl fmt::Display for BundleError {
             Self::InvalidArtifactPath { path } => {
                 write!(formatter, "replay bundle artifact path is invalid: {path}")
             }
-            Self::NonCanonicalField { field, actual } => write!(
+            Self::NonCanonicalField { field, actual: _ } => write!(
                 formatter,
-                "replay bundle field {field} must not contain surrounding whitespace: got {actual}"
+                "replay bundle field {field} must not contain surrounding whitespace"
             ),
             Self::ChunkPayloadLengthMismatch {
                 artifact_path,
@@ -264,16 +264,15 @@ impl fmt::Display for BundleError {
             ),
             Self::ChunkDigestMismatch {
                 artifact_path,
-                expected,
-                actual,
+                expected: _,
+                actual: _,
             } => write!(
                 formatter,
-                "replay bundle chunk {artifact_path} digest mismatch: expected {expected}, got {actual}"
+                "replay bundle chunk {artifact_path} digest mismatch (expected and actual digests redacted)"
             ),
-            Self::InvalidTimestamp { field, actual } => write!(
-                formatter,
-                "replay bundle field {field} must be RFC3339: got {actual}"
-            ),
+            Self::InvalidTimestamp { field, actual: _ } => {
+                write!(formatter, "replay bundle field {field} must be RFC3339")
+            }
             Self::NonMonotonicTimestamp {
                 previous,
                 current,
@@ -290,23 +289,29 @@ impl fmt::Display for BundleError {
             }
             Self::ArtifactDigestMismatch {
                 path,
-                expected,
-                actual,
+                expected: _,
+                actual: _,
             } => write!(
                 formatter,
-                "replay bundle artifact {path} digest mismatch: expected {expected}, got {actual}"
+                "replay bundle artifact {path} digest mismatch (expected and actual digests redacted)"
             ),
-            Self::IntegrityMismatch { expected, actual } => write!(
+            Self::IntegrityMismatch {
+                expected: _,
+                actual: _,
+            } => write!(
                 formatter,
-                "replay bundle integrity mismatch: expected {expected}, got {actual}"
+                "replay bundle integrity mismatch (expected and actual digests redacted)"
             ),
-            Self::SignatureMismatch { expected, actual } => write!(
+            Self::SignatureMismatch {
+                expected: _,
+                actual: _,
+            } => write!(
                 formatter,
-                "replay bundle signature mismatch: expected {expected}, got {actual}"
+                "replay bundle signature mismatch (expected and actual signatures redacted)"
             ),
-            Self::InvalidVerifierIdentity { actual } => write!(
+            Self::InvalidVerifierIdentity { actual: _ } => write!(
                 formatter,
-                "replay bundle verifier identity must use external verifier:// scheme with non-empty name: got {actual}"
+                "replay bundle verifier identity must use external verifier:// scheme with non-empty name"
             ),
             Self::EventPolicyVersionMismatch {
                 bundle_policy_version,
@@ -1309,6 +1314,51 @@ mod tests {
             BundleError::NonCanonicalField { field, actual }
                 if field == "timeline.event_type" && actual == " verification.started "
         ));
+    }
+
+    #[test]
+    fn bundle_error_display_redacts_verifier_and_digest_values() {
+        let verifier_error = BundleError::InvalidVerifierIdentity {
+            actual: "verifier://evil\nspoof".to_string(),
+        };
+        let field_error = BundleError::NonCanonicalField {
+            field: "bundle_id",
+            actual: " bundle-alpha ".to_string(),
+        };
+        let timestamp_error = BundleError::InvalidTimestamp {
+            field: "created_at",
+            actual: "not-a-timestamp".to_string(),
+        };
+        let digest_error = BundleError::IntegrityMismatch {
+            expected: "expected-digest".to_string(),
+            actual: "actual-digest".to_string(),
+        };
+        let signature_error = BundleError::SignatureMismatch {
+            expected: "expected-signature".to_string(),
+            actual: "actual-signature".to_string(),
+        };
+
+        let verifier_display = verifier_error.to_string();
+        assert!(!verifier_display.contains("verifier://evil"));
+        assert!(!verifier_display.contains("spoof"));
+
+        let field_display = field_error.to_string();
+        assert!(field_display.contains("bundle_id"));
+        assert!(!field_display.contains(" bundle-alpha "));
+
+        let timestamp_display = timestamp_error.to_string();
+        assert!(timestamp_display.contains("created_at"));
+        assert!(!timestamp_display.contains("not-a-timestamp"));
+
+        let digest_display = digest_error.to_string();
+        assert!(digest_display.contains("redacted"));
+        assert!(!digest_display.contains("expected-digest"));
+        assert!(!digest_display.contains("actual-digest"));
+
+        let signature_display = signature_error.to_string();
+        assert!(signature_display.contains("redacted"));
+        assert!(!signature_display.contains("expected-signature"));
+        assert!(!signature_display.contains("actual-signature"));
     }
 
     #[test]
