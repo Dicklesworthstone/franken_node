@@ -653,6 +653,8 @@ pub enum LedgerError {
         expected_hash: String,
         provided_hash: String,
     },
+    /// Entry contains control characters in metadata fields - prevents log injection.
+    InvalidControlCharacters { field: String, reason: String },
 }
 
 impl fmt::Display for LedgerError {
@@ -689,6 +691,9 @@ impl fmt::Display for LedgerError {
                     "hash chain broken: expected {} got {}",
                     expected_hash, provided_hash
                 )
+            }
+            Self::InvalidControlCharacters { field, reason } => {
+                write!(f, "control characters in {}: {}", field, reason)
             }
         }
     }
@@ -848,6 +853,28 @@ pub struct EvidenceLedger {
 }
 
 impl EvidenceLedger {
+    /// Validate that a string field contains no control characters that could enable log injection.
+    /// Rejects CR, LF, ESC, NUL, and other control characters (ASCII 0-31 except printable whitespace).
+    fn validate_text_field(field_name: &str, value: &str) -> Result<(), LedgerError> {
+        for (pos, byte) in value.bytes().enumerate() {
+            if byte < 32 && byte != b' ' && byte != b'\t' {
+                let control_char = match byte {
+                    0 => "NUL (0x00)".to_string(),
+                    9 => "TAB (0x09)".to_string(), // Allow tab in some contexts but flag for visibility
+                    10 => "LF (0x0A)".to_string(),
+                    13 => "CR (0x0D)".to_string(),
+                    27 => "ESC (0x1B)".to_string(),
+                    _ => format!("0x{:02X}", byte),
+                };
+                return Err(LedgerError::InvalidControlCharacters {
+                    field: field_name.to_string(),
+                    reason: format!("control character {} at position {}", control_char, pos),
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn validate_append(
         &self,
         mut entry: EvidenceEntry,
@@ -856,6 +883,18 @@ impl EvidenceLedger {
             eprintln!("{}", format_ledger_zero_capacity_event(&entry));
             return Err(LedgerError::ZeroEntryCapacity);
         }
+
+        // SECURITY: Validate text fields for control characters to prevent log injection attacks.
+        // Check before signature verification to fail-closed on malicious input.
+        Self::validate_text_field("schema_version", &entry.schema_version)?;
+        if let Some(ref entry_id) = entry.entry_id {
+            Self::validate_text_field("entry_id", entry_id)?;
+        }
+        Self::validate_text_field("decision_id", &entry.decision_id)?;
+        Self::validate_text_field("decision_time", &entry.decision_time)?;
+        Self::validate_text_field("trace_id", &entry.trace_id)?;
+        Self::validate_text_field("signature", &entry.signature)?;
+        Self::validate_text_field("prev_entry_hash", &entry.prev_entry_hash)?;
 
         let payload_json_bytes = serialized_json_bytes(&entry.payload).ok();
 
@@ -7170,5 +7209,113 @@ mod tests {
 
         ledger.release_replay_key_hash(7);
         assert!(!ledger.replay_key_hashes.contains_key(&7));
+    }
+
+    #[test]
+    fn control_character_validation_rejects_cr_lf_esc_nul() {
+        let mut ledger = EvidenceLedger::new(LedgerCapacity::new(10, 1024));
+
+        // Test CR (carriage return) in decision_id
+        let mut entry = test_entry("DEC\r001", 1);
+        assert!(matches!(
+            ledger.append_unsigned_entry(entry),
+            Err(LedgerError::InvalidControlCharacters { field, .. }) if field == "decision_id"
+        ));
+
+        // Test LF (line feed) in trace_id
+        entry = test_entry("DEC-001", 1);
+        entry.trace_id = "trace\n123".to_string();
+        assert!(matches!(
+            ledger.append_unsigned_entry(entry),
+            Err(LedgerError::InvalidControlCharacters { field, .. }) if field == "trace_id"
+        ));
+
+        // Test ESC in decision_time
+        entry = test_entry("DEC-001", 1);
+        entry.decision_time = "2024-01-01T\x1b[1m12:00:00Z".to_string();
+        assert!(matches!(
+            ledger.append_unsigned_entry(entry),
+            Err(LedgerError::InvalidControlCharacters { field, .. }) if field == "decision_time"
+        ));
+
+        // Test NUL byte in schema_version
+        entry = test_entry("DEC-001", 1);
+        entry.schema_version = "v1\0".to_string();
+        assert!(matches!(
+            ledger.append_unsigned_entry(entry),
+            Err(LedgerError::InvalidControlCharacters { field, .. }) if field == "schema_version"
+        ));
+
+        // Test other control characters
+        entry = test_entry("DEC-001", 1);
+        entry.signature = "abc\x01def".to_string(); // SOH control character
+        assert!(matches!(
+            ledger.append_unsigned_entry(entry),
+            Err(LedgerError::InvalidControlCharacters { field, .. }) if field == "signature"
+        ));
+    }
+
+    #[test]
+    fn control_character_validation_allows_normal_text() {
+        let mut ledger = EvidenceLedger::new(LedgerCapacity::new(10, 1024));
+
+        // Valid entry should work
+        let entry = test_entry("DEC-001", 1);
+        assert!(ledger.append_unsigned_entry(entry).is_ok());
+
+        // Entry with space and valid characters should work
+        let mut entry = test_entry("DEC 002", 1);
+        entry.trace_id = "trace-123-abc".to_string();
+        entry.decision_time = "2024-01-01T12:00:00Z".to_string();
+        entry.schema_version = "v1.2.3".to_string();
+        assert!(ledger.append_unsigned_entry(entry).is_ok());
+    }
+
+    #[test]
+    fn control_character_validation_checks_all_text_fields() {
+        let mut ledger = EvidenceLedger::new(LedgerCapacity::new(10, 1024));
+
+        // Test each text field individually
+        let test_cases = vec![
+            ("schema_version", |entry: &mut EvidenceEntry| entry.schema_version = "v1\r".to_string()),
+            ("decision_id", |entry: &mut EvidenceEntry| entry.decision_id = "DEC\n001".to_string()),
+            ("decision_time", |entry: &mut EvidenceEntry| entry.decision_time = "2024\x1b".to_string()),
+            ("trace_id", |entry: &mut EvidenceEntry| entry.trace_id = "trace\0".to_string()),
+            ("signature", |entry: &mut EvidenceEntry| entry.signature = "sig\x02".to_string()),
+            ("prev_entry_hash", |entry: &mut EvidenceEntry| entry.prev_entry_hash = "hash\x1f".to_string()),
+        ];
+
+        for (field_name, mutate_fn) in test_cases {
+            let mut entry = test_entry("DEC-001", 1);
+            mutate_fn(&mut entry);
+
+            assert!(matches!(
+                ledger.append_unsigned_entry(entry),
+                Err(LedgerError::InvalidControlCharacters { field, .. }) if field == field_name
+            ), "Expected InvalidControlCharacters for field {}", field_name);
+        }
+    }
+
+    #[test]
+    fn control_character_validation_checks_optional_entry_id() {
+        let mut ledger = EvidenceLedger::new(LedgerCapacity::new(10, 1024));
+
+        // Test entry_id validation when present
+        let mut entry = test_entry("DEC-001", 1);
+        entry.entry_id = Some("entry\r123".to_string());
+        assert!(matches!(
+            ledger.append_unsigned_entry(entry),
+            Err(LedgerError::InvalidControlCharacters { field, .. }) if field == "entry_id"
+        ));
+
+        // Test that None entry_id works
+        entry = test_entry("DEC-001", 1);
+        entry.entry_id = None;
+        assert!(ledger.append_unsigned_entry(entry).is_ok());
+
+        // Test that valid entry_id works
+        entry = test_entry("DEC-002", 1);
+        entry.entry_id = Some("entry-valid-123".to_string());
+        assert!(ledger.append_unsigned_entry(entry).is_ok());
     }
 }
