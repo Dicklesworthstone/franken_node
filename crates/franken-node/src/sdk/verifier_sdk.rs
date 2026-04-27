@@ -49,6 +49,9 @@ pub const SCHEMA_TAG: &str = "vsk-v1.0";
 
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 
+/// Maximum number of claims per verification request to prevent DoS via unbounded growth
+const MAX_CLAIMS_PER_REQUEST: usize = 1000;
+
 /// Security posture marker for this cryptographic verifier SDK surface.
 ///
 /// This SDK now provides Ed25519 cryptographic verification capabilities
@@ -349,17 +352,43 @@ impl VerifierSdk {
             detail: format!("{} claims", request.claims.len()),
         });
 
-        // Per-claim checks
-        for (i, claim) in request.claims.iter().enumerate() {
-            let ok = !claim.is_empty();
+        // Claims capacity check to prevent unbounded growth DoS
+        let claims_within_capacity = request.claims.len() <= MAX_CLAIMS_PER_REQUEST;
+        evidence.push(EvidenceEntry {
+            check_name: "claims_capacity_check".to_string(),
+            passed: claims_within_capacity,
+            detail: if claims_within_capacity {
+                format!("{} claims within limit of {}", request.claims.len(), MAX_CLAIMS_PER_REQUEST)
+            } else {
+                format!("{} claims exceeds limit of {}", request.claims.len(), MAX_CLAIMS_PER_REQUEST)
+            },
+        });
+
+        // Early failure if too many claims to prevent DoS
+        if !claims_within_capacity {
+            overall_pass = false;
+        }
+
+        // Per-claim checks (only if within capacity limits)
+        if claims_within_capacity {
+            for (i, claim) in request.claims.iter().enumerate() {
+                let ok = !claim.is_empty();
+                evidence.push(EvidenceEntry {
+                    check_name: format!("claim_{i}_non_empty"),
+                    passed: ok,
+                    detail: if ok {
+                        format!("claim[{i}] present")
+                    } else {
+                        format!("claim[{i}] is empty")
+                    },
+                });
+            }
+        } else {
+            // If too many claims, add a single summary entry instead of processing all
             evidence.push(EvidenceEntry {
-                check_name: format!("claim_{i}_non_empty"),
-                passed: ok,
-                detail: if ok {
-                    format!("claim[{i}] present")
-                } else {
-                    format!("claim[{i}] is empty")
-                },
+                check_name: "claims_skipped_due_to_capacity".to_string(),
+                passed: false,
+                detail: "Per-claim validation skipped due to excessive claims count".to_string(),
             });
         }
 
