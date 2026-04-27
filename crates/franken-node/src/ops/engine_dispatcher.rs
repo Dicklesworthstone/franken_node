@@ -1693,18 +1693,28 @@ impl EngineDispatcher {
     /// profile names in policy IDs to prevent information disclosure.
     fn generate_opaque_policy_id(profile: Profile, policy_mode: Option<&str>) -> String {
         // Use hash-based opaque identifiers to prevent profile name leakage
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        // Use cryptographic hash with domain separation to prevent collisions
+        use sha2::{Digest, Sha256};
 
-        let mut hasher = DefaultHasher::new();
-        profile.hash(&mut hasher);
+        let mut hasher = Sha256::new();
+        hasher.update(b"engine_dispatcher_policy_id_v1:");
+
+        let profile_str = format!("{:?}", profile);
+        hasher.update((profile_str.len() as u64).to_le_bytes());
+        hasher.update(profile_str.as_bytes());
+
         if let Some(mode) = policy_mode {
-            mode.hash(&mut hasher);
+            hasher.update(b"mode:");
+            hasher.update((mode.len() as u64).to_le_bytes());
+            hasher.update(mode.as_bytes());
+        } else {
+            hasher.update(b"no_mode");
         }
-        let policy_hash = hasher.finish();
+
+        let policy_hash = hasher.finalize();
 
         // Generate deterministic but opaque policy ID
-        format!("franken-policy-{:016x}", policy_hash)
+        format!("franken-policy-{}", hex::encode(&policy_hash[..8]))
     }
 
     /// Map franken-node Config to franken-engine OrchestratorConfig.

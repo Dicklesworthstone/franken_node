@@ -183,6 +183,7 @@ pub mod error_codes {
     pub const ERR_TTR_ENV_INVALID: &str = "ERR_TTR_ENV_INVALID";
     pub const ERR_TTR_REPLAY_FAILED: &str = "ERR_TTR_REPLAY_FAILED";
     pub const ERR_TTR_DUPLICATE_TRACE: &str = "ERR_TTR_DUPLICATE_TRACE";
+    pub const ERR_TTR_TRACE_CAPACITY_EXCEEDED: &str = "ERR_TTR_TRACE_CAPACITY_EXCEEDED";
     pub const ERR_TTR_STEP_ORDER_VIOLATION: &str = "ERR_TTR_STEP_ORDER_VIOLATION";
     pub const ERR_TTR_TRACE_NOT_FOUND: &str = "ERR_TTR_TRACE_NOT_FOUND";
 
@@ -234,6 +235,8 @@ pub enum TimeTravelError {
     ReplayFailed { trace_id: String, reason: String },
     /// A trace with this ID already exists.
     DuplicateTrace { trace_id: String },
+    /// The engine is already at trace-registration capacity.
+    TraceCapacityExceeded { trace_id: String, capacity: usize },
     /// Steps are not in the correct order.
     StepOrderViolation { trace_id: String, step_seq: u64 },
     /// Trace not found in engine.
@@ -302,6 +305,13 @@ impl fmt::Display for TimeTravelError {
                     f,
                     "[{0}] trace {trace_id} already exists",
                     error_codes::ERR_TTR_DUPLICATE_TRACE
+                )
+            }
+            Self::TraceCapacityExceeded { trace_id, capacity } => {
+                write!(
+                    f,
+                    "[{0}] replay engine trace capacity {capacity} exhausted while registering {trace_id}",
+                    error_codes::ERR_TTR_TRACE_CAPACITY_EXCEEDED
                 )
             }
             Self::StepOrderViolation { trace_id, step_seq } => {
@@ -905,10 +915,11 @@ impl ReplayEngine {
                 trace_id: trace.trace_id.clone(),
             });
         }
-        if self.traces.len() >= MAX_REGISTERED_TRACES
-            && let Some(oldest_trace_id) = self.trace_registration_order.pop_front()
-        {
-            self.traces.remove(&oldest_trace_id);
+        if self.traces.len() >= MAX_REGISTERED_TRACES {
+            return Err(TimeTravelError::TraceCapacityExceeded {
+                trace_id: trace.trace_id.clone(),
+                capacity: MAX_REGISTERED_TRACES,
+            });
         }
         self.trace_registration_order
             .push_back(trace.trace_id.clone());
@@ -1258,6 +1269,7 @@ mod tests {
         assert!(!error_codes::ERR_TTR_DUPLICATE_TRACE.is_empty());
         assert!(!error_codes::ERR_TTR_STEP_ORDER_VIOLATION.is_empty());
         assert!(!error_codes::ERR_TTR_TRACE_NOT_FOUND.is_empty());
+        assert!(!error_codes::ERR_TTR_TRACE_CAPACITY_EXCEEDED.is_empty());
     }
 
     // --- Schema version ---
@@ -1594,7 +1606,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_capacity_evicts_oldest_registered_trace() {
+    fn engine_capacity_rejects_new_trace_without_evicting_oldest() {
         let mut engine = ReplayEngine::new();
         engine
             .register_trace(one_step_trace("zzz-oldest"))
@@ -1605,14 +1617,21 @@ mod tests {
                 .expect("register should succeed");
         }
 
-        engine
+        let err = engine
             .register_trace(one_step_trace("mmm-newest"))
-            .expect("overflow register should succeed");
+            .expect_err("overflow register must fail closed");
 
         assert_eq!(engine.trace_count(), MAX_REGISTERED_TRACES);
-        assert!(engine.get_trace("zzz-oldest").is_none());
+        assert!(engine.get_trace("zzz-oldest").is_some());
+        assert!(matches!(
+            err,
+            TimeTravelError::TraceCapacityExceeded {
+                trace_id,
+                capacity
+            } if trace_id == "mmm-newest" && capacity == MAX_REGISTERED_TRACES
+        ));
         assert!(engine.get_trace("aaa-0000").is_some());
-        assert!(engine.get_trace("mmm-newest").is_some());
+        assert!(engine.get_trace("mmm-newest").is_none());
     }
 
     #[test]
@@ -1629,13 +1648,31 @@ mod tests {
                 .register_trace(one_step_trace(&format!("fill-{idx:04}")))
                 .expect("register should succeed");
         }
-        engine
+        let err = engine
             .register_trace(one_step_trace("fill-overflow"))
-            .expect("overflow register should succeed");
+            .expect_err("overflow register must fail closed after stale-order removal");
 
         assert_eq!(engine.trace_count(), MAX_REGISTERED_TRACES);
         assert!(engine.get_trace("stale-order").is_none());
-        assert!(engine.get_trace("fill-overflow").is_some());
+        assert!(matches!(
+            err,
+            TimeTravelError::TraceCapacityExceeded {
+                trace_id,
+                capacity
+            } if trace_id == "fill-overflow" && capacity == MAX_REGISTERED_TRACES
+        ));
+        assert!(engine.get_trace("fill-overflow").is_none());
+    }
+
+    #[test]
+    fn error_display_trace_capacity_exceeded() {
+        let err = TimeTravelError::TraceCapacityExceeded {
+            trace_id: "cap".to_string(),
+            capacity: MAX_REGISTERED_TRACES,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("ERR_TTR_TRACE_CAPACITY_EXCEEDED"));
+        assert!(msg.contains("capacity"));
     }
 
     // --- Identity replay (INV-TTR-DETERMINISM) ---
