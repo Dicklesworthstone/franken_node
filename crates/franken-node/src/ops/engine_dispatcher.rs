@@ -880,14 +880,31 @@ fn run_command_capture_output(cmd: &mut Command) -> io::Result<Output> {
 
     #[cfg(unix)]
     fn kill_process_group(process_group_id: u32) {
+        // SECURITY: Validate process group ID to prevent command injection and
+        // protect system-critical processes
         if process_group_id == 0 {
+            return; // Process group 0 is invalid
+        }
+        if process_group_id == 1 {
+            return; // Never kill init process
+        }
+        if process_group_id > 2_147_483_647 {
+            return; // PIDs beyond this range are invalid on most Unix systems
+        }
+
+        // Use -- separator to prevent argument injection and validate PID format
+        let pid_arg = format!("-{process_group_id}");
+
+        // SECURITY: Additional validation - ensure the formatted argument contains only
+        // expected characters (hyphen followed by digits)
+        if !pid_arg.chars().all(|c| c == '-' || c.is_ascii_digit()) {
             return;
         }
 
         let _ = Command::new("kill")
             .arg("-KILL")
             .arg("--")
-            .arg(format!("-{process_group_id}"))
+            .arg(pid_arg)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
