@@ -892,7 +892,7 @@ impl AntiEntropyReconciler {
 
             push_accepted_bounded(
                 &mut accepted,
-                record.clone(),
+                record,
                 replaced,
                 self.config.max_delta_batch,
             )?;
@@ -900,8 +900,8 @@ impl AntiEntropyReconciler {
 
         // Phase 2: apply all validated records atomically.
         let mut applied = 0usize;
-        for (record, replaced) in &accepted {
-            if local.insert(record.clone()) {
+        for (record, replaced) in accepted {
+            if local.insert(record) {
                 applied = applied.saturating_add(1);
                 self.push_event(ReconciliationEvent {
                     code: EVT_RECORD_ACCEPTED.to_string(),
