@@ -300,7 +300,8 @@ fn build_transcript_preimage(fields: &TranscriptFields<'_>) -> Vec<u8> {
 
     // Length-prefixed fields to prevent delimiter collision attacks.
     fn append_lp(buf: &mut Vec<u8>, field: &[u8]) {
-        buf.extend_from_slice(&(field.len() as u64).to_le_bytes());
+        let len_bytes = u64::try_from(field.len()).unwrap_or(u64::MAX).to_le_bytes();
+        buf.extend_from_slice(&len_bytes);
         buf.extend_from_slice(field);
     }
 
