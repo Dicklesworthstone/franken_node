@@ -45,7 +45,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::security::constant_time;
+use crate::security::{constant_time, crypto::{Ed25519Verifier, SignatureVerifier}};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hex;
 use sha2::{Digest, Sha256};
@@ -556,10 +556,11 @@ fn verify_evidence_entry_bytes_with_payload_bytes(
 ) -> Result<ReplaySignature, LedgerError> {
     let canonical_bytes = canonical_entry_bytes_with_payload_bytes(entry, payload_json_bytes);
     let signature_bytes = decode_replay_signature(&entry.signature)?;
-    let signature = Signature::from_bytes(&signature_bytes);
 
-    verifying_key
-        .verify(&canonical_bytes, &signature)
+    // Use trait-based verification for better abstraction
+    let verifier = Ed25519Verifier::new(*verifying_key);
+    verifier
+        .verify(&canonical_bytes, &signature_bytes)
         .map_err(|_| LedgerError::SignatureInvalid {
             reason: "signature verification failed: ManifestSignatureInvalid".to_string(),
         })?;
@@ -1572,10 +1573,9 @@ impl SpillWriter {
                     .map_err(|e| LedgerError::SpillError {
                         reason: format!("write: {e}"),
                     })?;
-                counting.flush().map_err(|e| LedgerError::SpillError {
-                    reason: format!("flush: {e}"),
-                })?;
                 Ok(json_bytes)
+                // NOTE: Generic spill intentionally leaves buffering policy to the caller's
+                // writer. Use sync_durability() or drop/close the writer to flush buffered bytes.
             }
             Self::File(file) => {
                 let mut counting = CountingWrite::new(file);
@@ -1600,7 +1600,9 @@ impl SpillWriter {
     /// Sync accumulated writes to durable storage for critical evidence preservation.
     fn sync_durability(&mut self) -> Result<(), LedgerError> {
         match self {
-            Self::Generic(_) => Ok(()), // No-op for generic writers
+            Self::Generic(writer) => writer.flush().map_err(|e| LedgerError::SpillError {
+                reason: format!("flush: {e}"),
+            }),
             Self::File(file) => {
                 file.flush().map_err(|e| LedgerError::SpillError {
                     reason: format!("flush: {e}"),
@@ -1968,6 +1970,7 @@ mod tests {
     use super::*;
     use ed25519_dalek::{SigningKey, VerifyingKey};
     use std::io;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     struct FailingWriteWriter;
@@ -2033,6 +2036,42 @@ mod tests {
         }
 
         fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct FlushCountingWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+        flush_count: Arc<AtomicUsize>,
+    }
+
+    impl FlushCountingWriter {
+        fn new() -> (Self, Arc<Mutex<Vec<u8>>>, Arc<AtomicUsize>) {
+            let buffer = Arc::new(Mutex::new(Vec::new()));
+            let flush_count = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    buffer: Arc::clone(&buffer),
+                    flush_count: Arc::clone(&flush_count),
+                },
+                buffer,
+                flush_count,
+            )
+        }
+    }
+
+    impl Write for FlushCountingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer
+                .lock()
+                .map_err(|_| io::Error::other("capture buffer lock poisoned"))?
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flush_count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -2655,6 +2694,32 @@ mod tests {
     }
 
     #[test]
+    fn spill_writer_generic_defers_flush_until_sync() {
+        let (writer, buffer, flush_count) = FlushCountingWriter::new();
+        let mut spill_writer = SpillWriter::Generic(Box::new(writer));
+        let entry = make_entry("DEC-SPILL-FLUSH", 10);
+
+        spill_writer
+            .append_json_entry(&entry)
+            .expect("generic spill writer should buffer between appends");
+
+        let captured = captured_text(&buffer);
+        let line = captured
+            .strip_suffix('\n')
+            .expect("spill output should end with newline");
+        let expected_line =
+            serde_json::to_string(&entry).expect("entry serialization should succeed");
+
+        assert_eq!(line, expected_line);
+        assert_eq!(flush_count.load(Ordering::SeqCst), 0);
+
+        spill_writer
+            .sync_durability()
+            .expect("explicit sync should flush generic writer");
+        assert_eq!(flush_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn spill_writer_file_buffers_jsonl_without_changing_bytes() {
         let dir = tempfile::tempdir().expect("should succeed");
         let spill_path = dir.path().join("buffered_spill.jsonl");
@@ -2664,7 +2729,7 @@ mod tests {
             .open(&spill_path)
             .expect("spill file should open");
         let mut spill_writer = SpillWriter::File(new_spill_file_writer(file));
-        let entry = make_entry("DEC-SPILL-FILE", 10);
+        let entry = make_entry("DEC-SPILL-FILE", 11);
 
         let json_bytes = spill_writer
             .append_json_entry(&entry)
@@ -3004,18 +3069,24 @@ mod tests {
     }
 
     #[test]
-    fn lab_spill_flush_failure_does_not_mutate_ledger() {
+    fn lab_spill_sync_flush_failure_preserves_buffered_entry() {
         let mut spill = LabSpillMode::new(
             LedgerCapacity::new(100, 100_000),
             Box::new(FailingFlushWriter),
         );
 
-        let result = spill.append(make_entry("DEC-001", 1));
+        let id = spill
+            .append(make_entry("DEC-001", 1))
+            .expect("append should stay buffered until sync");
+        assert_eq!(id, EntryId(1));
+        assert_eq!(spill.len(), 1);
+        assert!(!spill.is_empty());
+        assert_eq!(spill.snapshot().total_appended, 1);
 
+        let result = spill.sync_evidence_durability();
         assert!(matches!(result, Err(LedgerError::SpillError { .. })));
-        assert_eq!(spill.len(), 0);
-        assert!(spill.is_empty());
-        assert_eq!(spill.snapshot().total_appended, 0);
+        assert_eq!(spill.len(), 1);
+        assert_eq!(spill.snapshot().total_appended, 1);
     }
 
     #[test]

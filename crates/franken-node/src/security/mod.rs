@@ -5,6 +5,7 @@ pub mod bpet;
 pub mod challenge_flow;
 pub mod constant_time;
 pub mod copilot_engine;
+pub mod crypto;
 pub mod cuckoo_filter;
 pub mod decision_receipt;
 pub mod degraded_mode_audit;

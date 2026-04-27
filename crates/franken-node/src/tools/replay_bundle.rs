@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::security::constant_time;
+use crate::security::{constant_time, crypto::{Ed25519Verifier, SignatureVerifier, SignatureVerificationError}};
 
 pub(crate) const MAX_BUNDLE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_REPLAY_BUNDLE_BYTES: u64 = 64 * 1024 * 1024; // 64 MB limit for replay bundle JSON parsing
@@ -894,14 +894,13 @@ pub fn verify_replay_bundle_signature(
             detail: format!("expected 32 bytes, got {}", bytes.len()),
         }
     })?;
-    let verifying_key =
-        ed25519_dalek::VerifyingKey::from_bytes(&public_key_bytes).map_err(|source| {
-            ReplayBundleError::SignaturePublicKeyMalformed {
-                detail: source.to_string(),
-            }
-        })?;
+    let verifier = Ed25519Verifier::from_bytes(&public_key_bytes).map_err(|err| {
+        ReplayBundleError::SignaturePublicKeyMalformed {
+            detail: err.to_string(),
+        }
+    })?;
     let derived_key_id =
-        crate::supply_chain::artifact_signing::KeyId::from_verifying_key(&verifying_key)
+        crate::supply_chain::artifact_signing::KeyId::from_verifying_key(verifier.verifying_key())
             .to_string();
     if !constant_time::ct_eq(&signature.key_id, &derived_key_id) {
         tracing::warn!(
@@ -918,19 +917,8 @@ pub fn verify_replay_bundle_signature(
         return Err(ReplayBundleError::SignaturePayloadHashMismatch);
     }
 
-    let signature_bytes = hex::decode(&signature.signature_hex).map_err(|source| {
-        ReplayBundleError::SignatureMalformed {
-            detail: source.to_string(),
-        }
-    })?;
-    let signature_bytes: [u8; 64] = signature_bytes.try_into().map_err(|bytes: Vec<u8>| {
-        ReplayBundleError::SignatureMalformed {
-            detail: format!("expected 64 bytes, got {}", bytes.len()),
-        }
-    })?;
-    let signature = ed25519_dalek::Signature::from_bytes(&signature_bytes);
-    verifying_key
-        .verify(&payload, &signature)
+    verifier
+        .verify_hex(&payload, &signature.signature_hex)
         .map_err(|_| ReplayBundleError::SignatureInvalid)
 }
 

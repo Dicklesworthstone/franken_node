@@ -13,7 +13,7 @@ use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
-use crate::security::constant_time;
+use crate::security::{constant_time, crypto::{Ed25519Verifier, SignatureVerifier}};
 
 const MAX_TRANSITIONS: usize = 4096;
 const RELEASE_MANIFEST_SIGNATURE_DOMAIN: &[u8] = b"release_manifest_v1:";
@@ -453,13 +453,10 @@ pub fn verify_signature(
     data: &[u8],
     sig_bytes: &[u8],
 ) -> Result<(), ArtifactSigningError> {
-    let sig = ed25519_dalek::Signature::from_bytes(
-        sig_bytes
-            .try_into()
-            .map_err(|_| ArtifactSigningError::ManifestSignatureInvalid)?,
-    );
-    verifying_key
-        .verify_strict(data, &sig)
+    // Use trait-based verification for better abstraction
+    let verifier = Ed25519Verifier::new(*verifying_key);
+    verifier
+        .verify(data, sig_bytes)
         .map_err(|_| ArtifactSigningError::ManifestSignatureInvalid)
 }
 
