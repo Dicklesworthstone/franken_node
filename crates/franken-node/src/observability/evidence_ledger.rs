@@ -334,24 +334,24 @@ fn update_hash_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
 fn compute_entry_hash_bytes(entry: &EvidenceEntry) -> EntryHash {
     let mut hasher = Sha256::new();
     hasher.update(b"evidence_entry_v1:");
-    hasher.update(&entry.schema_version.len().to_le_bytes());
+    hasher.update(&u64::try_from(entry.schema_version.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(entry.schema_version.as_bytes());
     if let Some(entry_id) = &entry.entry_id {
         hasher.update(&[1]);
-        hasher.update(&entry_id.len().to_le_bytes());
+        hasher.update(&u64::try_from(entry_id.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(entry_id.as_bytes());
     } else {
         hasher.update(&[0]);
     }
-    hasher.update(&entry.decision_id.len().to_le_bytes());
+    hasher.update(&u64::try_from(entry.decision_id.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(entry.decision_id.as_bytes());
     let decision_kind = entry.decision_kind.label();
-    hasher.update(&decision_kind.len().to_le_bytes());
+    hasher.update(&u64::try_from(decision_kind.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(decision_kind.as_bytes());
-    hasher.update(&entry.decision_time.len().to_le_bytes());
+    hasher.update(&u64::try_from(entry.decision_time.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(entry.decision_time.as_bytes());
     hasher.update(&entry.timestamp_ms.to_le_bytes());
-    hasher.update(&entry.trace_id.len().to_le_bytes());
+    hasher.update(&u64::try_from(entry.trace_id.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(entry.trace_id.as_bytes());
     hasher.update(&entry.epoch_id.to_le_bytes());
 
@@ -362,7 +362,7 @@ fn compute_entry_hash_bytes(entry: &EvidenceEntry) -> EntryHash {
     }
 
     hasher.update(&entry.size_bytes.to_le_bytes());
-    hasher.update(&entry.signature.len().to_le_bytes());
+    hasher.update(&u64::try_from(entry.signature.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(entry.signature.as_bytes());
 
     // NOTE: prev_entry_hash is intentionally excluded to prevent circular dependency
