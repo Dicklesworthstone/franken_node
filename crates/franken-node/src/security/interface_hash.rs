@@ -216,10 +216,10 @@ pub enum InterfaceHashError {
 impl fmt::Display for InterfaceHashError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::HashMismatch { expected, computed } => {
+            Self::HashMismatch { .. } => {
                 write!(
                     f,
-                    "IFACE_HASH_MISMATCH: expected={expected}, computed={computed}"
+                    "IFACE_HASH_MISMATCH: expected and computed hashes redacted"
                 )
             }
             Self::DomainMismatch { expected, actual } => {
@@ -228,12 +228,8 @@ impl fmt::Display for InterfaceHashError {
                     "IFACE_DOMAIN_MISMATCH: expected={expected}, actual={actual}"
                 )
             }
-            Self::HashExpired { hash_hex } => {
-                write!(f, "IFACE_HASH_EXPIRED: {hash_hex}")
-            }
-            Self::HashMalformed { hash_hex } => {
-                write!(f, "IFACE_HASH_MALFORMED: {hash_hex}")
-            }
+            Self::HashExpired { .. } => write!(f, "IFACE_HASH_EXPIRED: hash redacted"),
+            Self::HashMalformed { .. } => write!(f, "IFACE_HASH_MALFORMED: hash redacted"),
         }
     }
 }
@@ -616,7 +612,10 @@ mod tests {
             expected: "aaa".into(),
             computed: "bbb".into(),
         };
-        assert!(e1.to_string().contains("IFACE_HASH_MISMATCH"));
+        let rendered = e1.to_string();
+        assert!(rendered.contains("IFACE_HASH_MISMATCH"));
+        assert!(!rendered.contains("aaa"));
+        assert!(!rendered.contains("bbb"));
 
         let e2 = InterfaceHashError::DomainMismatch {
             expected: "a".into(),
@@ -627,12 +626,16 @@ mod tests {
         let e3 = InterfaceHashError::HashExpired {
             hash_hex: "abc".into(),
         };
-        assert!(e3.to_string().contains("IFACE_HASH_EXPIRED"));
+        let rendered = e3.to_string();
+        assert!(rendered.contains("IFACE_HASH_EXPIRED"));
+        assert!(!rendered.contains("abc"));
 
         let e4 = InterfaceHashError::HashMalformed {
             hash_hex: "xxx".into(),
         };
-        assert!(e4.to_string().contains("IFACE_HASH_MALFORMED"));
+        let rendered = e4.to_string();
+        assert!(rendered.contains("IFACE_HASH_MALFORMED"));
+        assert!(!rendered.contains("xxx"));
     }
 
     // === RejectionCode display ===
@@ -1492,7 +1495,9 @@ mod interface_hash_comprehensive_negative_tests {
         let display = format!("{}", error_with_long_strings);
 
         assert!(display.contains("IFACE_HASH_MISMATCH"));
-        assert!(display.len() > 20000); // Should include both long strings
+        assert!(display.len() < 128);
+        assert!(!display.contains(&"a".repeat(32)));
+        assert!(!display.contains(&"b".repeat(32)));
     }
 
     #[test]

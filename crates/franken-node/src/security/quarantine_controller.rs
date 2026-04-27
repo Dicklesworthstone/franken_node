@@ -363,15 +363,23 @@ impl QuarantineController {
 
     #[must_use]
     pub fn verify_decision(&self, decision: &ControlDecision) -> bool {
-        if decision.principal_id != decision.signed_evidence.principal_id
-            || decision.action != decision.signed_evidence.action
+        if !constant_time::ct_eq(
+            &decision.principal_id,
+            &decision.signed_evidence.principal_id,
+        ) || decision.action != decision.signed_evidence.action
             || decision.posterior.to_bits() != decision.signed_evidence.posterior.to_bits()
             || decision.threshold.to_bits() != decision.signed_evidence.threshold.to_bits()
-            || decision.policy_version != decision.signed_evidence.policy_version
-            || decision.policy_hash != decision.signed_evidence.policy_hash
+            || !constant_time::ct_eq(
+                &decision.policy_version,
+                &decision.signed_evidence.policy_version,
+            )
+            || !constant_time::ct_eq(&decision.policy_hash, &decision.signed_evidence.policy_hash)
             || decision.evidence_count != decision.signed_evidence.evidence_count
-            || decision.evidence_hash != decision.signed_evidence.evidence_hash
-            || decision.scope != decision.signed_evidence.scope
+            || !constant_time::ct_eq(
+                &decision.evidence_hash,
+                &decision.signed_evidence.evidence_hash,
+            )
+            || !constant_time::ct_eq(&decision.scope, &decision.signed_evidence.scope)
         {
             return false;
         }
@@ -659,6 +667,28 @@ mod tests {
         assert!(controller.verify_decision(&decision));
 
         decision.threshold = 0.45;
+
+        assert!(!controller.verify_decision(&decision));
+    }
+
+    #[test]
+    fn verify_decision_rejects_top_level_evidence_hash_desync() {
+        let controller = QuarantineController::new(QuarantineThresholdPolicy::default(), "salt")
+            .expect("controller");
+        let mut decision = controller
+            .decide_for_posterior_with_context(
+                "ext:a",
+                0.91,
+                3,
+                "sha256:evidence",
+                "tenant-a/fleet-a",
+                "trace-a",
+            )
+            .expect("decision");
+
+        assert!(controller.verify_decision(&decision));
+
+        decision.evidence_hash = "sha256:evidencf".to_string();
 
         assert!(!controller.verify_decision(&decision));
     }

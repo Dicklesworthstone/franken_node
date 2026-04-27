@@ -1216,12 +1216,8 @@ impl fmt::Display for RemoteCapError {
                 self.code()
             ),
             Self::InvalidScope { detail } => write!(f, "{}: {detail}", self.code()),
-            Self::Revoked { token_id } => {
-                write!(f, "{}: token revoked ({token_id})", self.code())
-            }
-            Self::ReplayDetected { token_id } => {
-                write!(f, "{}: token replay detected ({token_id})", self.code())
-            }
+            Self::Revoked { .. } => write!(f, "{}: token revoked", self.code()),
+            Self::ReplayDetected { .. } => write!(f, "{}: token replay detected", self.code()),
             Self::ConnectivityModeDenied {
                 mode,
                 operation,
@@ -2335,9 +2331,9 @@ fn uses_known_weak_secret_material(secret: &str) -> bool {
     if normalized.is_empty() {
         return true;
     }
-    KNOWN_WEAK_SECRET_MATERIAL.iter().any(|pattern| {
-        normalized == *pattern || is_repeated_secret_pattern(&normalized, pattern)
-    })
+    KNOWN_WEAK_SECRET_MATERIAL
+        .iter()
+        .any(|pattern| normalized == *pattern || is_repeated_secret_pattern(&normalized, pattern))
 }
 
 fn is_repeated_secret_pattern(secret: &str, pattern: &str) -> bool {
@@ -2567,6 +2563,25 @@ mod tests {
             .expect_err("missing token must fail");
         assert_eq!(err.code(), "REMOTECAP_MISSING");
         assert_eq!(err.compatibility_code(), Some("ERR_REMOTE_CAP_REQUIRED"));
+    }
+
+    #[test]
+    fn revoked_and_replay_display_redact_token_ids() {
+        let token_id = "tok-secret-123";
+        let revoked = RemoteCapError::Revoked {
+            token_id: token_id.to_string(),
+        };
+        let replay = RemoteCapError::ReplayDetected {
+            token_id: token_id.to_string(),
+        };
+
+        let revoked_display = revoked.to_string();
+        let replay_display = replay.to_string();
+
+        assert_eq!(revoked_display, "REMOTECAP_REVOKED: token revoked");
+        assert_eq!(replay_display, "REMOTECAP_REPLAY: token replay detected");
+        assert!(!revoked_display.contains(token_id));
+        assert!(!replay_display.contains(token_id));
     }
 
     #[test]
