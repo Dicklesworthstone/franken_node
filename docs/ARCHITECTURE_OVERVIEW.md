@@ -59,7 +59,7 @@ FrankenNode organizes functionality into distinct product planes:
 
 **Entry Points:**
 - `src/migration/mod.rs` - Migration orchestration
-- CLI: `franken-node migrate analyze <path>`
+- CLI: `franken-node migrate audit <path>`
 
 ### 🔐 Trust & Supply Chain Domain (`supply_chain/`, `security/`)
 **Purpose:** Supply chain security, trust cards, policy enforcement  
@@ -85,7 +85,7 @@ FrankenNode organizes functionality into distinct product planes:
 **Entry Points:**
 - `src/api/fleet_quarantine.rs:FleetControlManager` 
 - `src/control_plane/` - Control plane services
-- CLI: `franken-node fleet quarantine`, `franken-node fleet release`
+- CLI: `franken-node fleet status`, `franken-node fleet release`
 
 ### 📊 Replay & Incidents Domain (`replay/`, `observability/`)
 **Purpose:** Deterministic replay, incident analysis, evidence capture  
@@ -98,7 +98,7 @@ FrankenNode organizes functionality into distinct product planes:
 **Entry Points:**
 - `src/replay/mod.rs` - Replay orchestration
 - `src/observability/evidence_ledger.rs` - Evidence capture
-- CLI: `franken-node replay`, `franken-node incident`
+- CLI: `franken-node incident replay`, `franken-node incident bundle`
 
 ### ⚙️ Runtime & Control Plane Domain (`runtime/`, `control_plane/`)
 **Purpose:** Runtime execution control, lane scheduling, engine dispatch  
@@ -123,7 +123,7 @@ FrankenNode organizes functionality into distinct product planes:
 
 **Entry Points:**
 - `src/remote/mod.rs` - Remote execution coordination
-- CLI: `franken-node remote`
+- CLI: `franken-node remotecap`
 
 ### ✅ Verifier & Evidence Domain (`vef/`, `verifier_economy/`, `sdk/verifier/`)
 **Purpose:** External verification, proof generation, verifier economy  
@@ -136,7 +136,7 @@ FrankenNode organizes functionality into distinct product planes:
 **Entry Points:**
 - `src/vef/mod.rs` - Verifier framework
 - `sdk/verifier/src/lib.rs` - External verifier SDK
-- CLI: `franken-node verify`, `franken-node proof`
+- CLI: `franken-node verify` (proof-related commands are under verify subcommands)
 
 ### 📈 Observability & Operations Domain (`observability/`, `ops/`)
 **Purpose:** Monitoring, telemetry, operational tooling  
