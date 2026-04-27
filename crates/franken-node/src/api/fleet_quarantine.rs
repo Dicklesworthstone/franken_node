@@ -808,9 +808,13 @@ pub fn verify_decision_receipt_signature_with_trust_roots(
     let Some(signature) = &receipt.signature else {
         return false;
     };
-    if !crate::security::constant_time::ct_eq(&signature.algorithm, "ed25519")
-        || !crate::security::constant_time::ct_eq(&signature.trust_scope, "fleet_decision")
-    {
+    // Compute both ct_eq results before reducing with `||` so the operator's short-circuit
+    // does not leak which signature header field mismatched.
+    let algorithm_matches =
+        crate::security::constant_time::ct_eq(&signature.algorithm, "ed25519");
+    let trust_scope_matches =
+        crate::security::constant_time::ct_eq(&signature.trust_scope, "fleet_decision");
+    if !algorithm_matches || !trust_scope_matches {
         return false;
     }
 

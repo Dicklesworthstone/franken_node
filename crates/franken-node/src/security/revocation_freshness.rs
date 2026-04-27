@@ -283,9 +283,13 @@ fn validate_override_receipt(
         }
     }
 
-    if !crate::security::constant_time::ct_eq(&receipt.action_id, &check.action_id)
-        || !crate::security::constant_time::ct_eq(&receipt.trace_id, &check.trace_id)
-    {
+    // Run both ct_eq calls before reducing with `||` so the operator's short-circuit
+    // does not leak which identifier (action_id vs trace_id) mismatched.
+    let action_id_matches =
+        crate::security::constant_time::ct_eq(&receipt.action_id, &check.action_id);
+    let trace_id_matches =
+        crate::security::constant_time::ct_eq(&receipt.trace_id, &check.trace_id);
+    if !action_id_matches || !trace_id_matches {
         return Err(FreshnessError::OverrideRequired {
             tier: check.tier.to_string(),
             age_secs: check.revocation_age_secs,
