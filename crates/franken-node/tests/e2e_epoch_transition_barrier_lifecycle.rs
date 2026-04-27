@@ -20,7 +20,9 @@
 //!   - EpochOverflow at u64::MAX rejected,
 //!   - BarrierIdMismatch: ACK with wrong barrier_id rejected,
 //!   - UnknownParticipant: ACK from non-registered participant rejected,
-//!   - record_drain_failure aborts with `DrainFailed` reason.
+//!   - record_drain_failure aborts with `DrainFailed` reason,
+//!   - terminal barriers retain transcript/audit evidence but still allow
+//!     participant unregister once no barrier is active.
 //!
 //! Bead: bd-2gj4n.
 //!
@@ -164,10 +166,7 @@ fn e2e_barrier_happy_path_commit_with_all_acks() {
     let outcome = barrier
         .try_commit(1_500, "trace-commit")
         .expect("commit ok");
-    assert_eq!(
-        outcome,
-        BarrierCommitOutcome::Committed { target_epoch: 8 }
-    );
+    assert_eq!(outcome, BarrierCommitOutcome::Committed { target_epoch: 8 });
     let active = barrier.active_barrier().expect("active");
     assert_eq!(active.phase, BarrierPhase::Committed);
     assert_eq!(barrier.completed_barrier_count(), 1);
@@ -183,9 +182,7 @@ fn e2e_barrier_timeout_auto_aborts() {
     barrier.register_participant("node-A");
     barrier.register_participant("node-B");
 
-    barrier
-        .propose(0, 1, 1_000, "trace-prop")
-        .expect("propose");
+    barrier.propose(0, 1, 1_000, "trace-prop").expect("propose");
 
     // Only node-A acks; node-B is missing.
     barrier
@@ -213,11 +210,7 @@ fn e2e_barrier_timeout_auto_aborts() {
                     missing_participants,
                 } => {
                     assert_eq!(missing_participants, vec!["node-B".to_string()]);
-                    h.log_phase(
-                        "timeout_auto_aborted",
-                        true,
-                        json!({"missing": "node-B"}),
-                    );
+                    h.log_phase("timeout_auto_aborted", true, json!({"missing": "node-B"}));
                 }
                 other => panic!("expected Timeout reason, got {other:?}"),
             }
@@ -360,9 +353,7 @@ fn e2e_barrier_unregister_blocked_during_active_barrier() {
 
     // Re-register and propose.
     barrier.register_participant("node-A");
-    barrier
-        .propose(0, 1, 1_000, "trace-prop")
-        .expect("propose");
+    barrier.propose(0, 1, 1_000, "trace-prop").expect("propose");
 
     // Unregister during active barrier → ConcurrentBarrier.
     let err = barrier
@@ -370,4 +361,69 @@ fn e2e_barrier_unregister_blocked_during_active_barrier() {
         .expect_err("unregister blocked");
     assert!(matches!(err, BarrierError::ConcurrentBarrier { .. }));
     h.log_phase("unregister_blocked_during_active", true, json!({}));
+
+    barrier
+        .record_drain_ack(DrainAck {
+            participant_id: "node-A".to_string(),
+            barrier_id: "barrier-000001".to_string(),
+            drained_items: 2,
+            elapsed_ms: 25,
+            trace_id: "trace-ack".to_string(),
+        })
+        .expect("ack ok before explicit abort");
+    let current_epoch = barrier
+        .abort(
+            AbortReason::Cancelled {
+                detail: "operator cancelled".to_string(),
+            },
+            1_050,
+            "trace-abort",
+        )
+        .expect("explicit abort");
+    assert_eq!(current_epoch, 0, "INV-BARRIER-ABORT-SAFE: epoch unchanged");
+
+    let transcript = barrier
+        .transcript()
+        .expect("transcript retained after abort");
+    assert_eq!(transcript.phase, BarrierPhase::Aborted);
+    let abort_sent_count = transcript
+        .entries
+        .iter()
+        .filter(|entry| entry.event_code == "BARRIER_ABORT_SENT")
+        .count();
+    assert_eq!(abort_sent_count, 1);
+    assert!(
+        transcript
+            .entries
+            .iter()
+            .any(|entry| entry.event_code == "BARRIER_ABORTED"),
+        "explicit abort should be present in transcript"
+    );
+    let transcript_lines: Vec<_> = transcript.export_jsonl().lines().collect();
+    assert_eq!(transcript_lines.len(), transcript.entries.len());
+    for line in transcript_lines {
+        let parsed: serde_json::Value =
+            serde_json::from_str(line).expect("transcript line should parse as JSON");
+        assert_eq!(parsed["barrier_id"], "barrier-000001");
+    }
+
+    let audit = barrier.audit_history();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0].outcome, "ABORTED");
+    assert_eq!(audit[0].acks_received, 1);
+    assert_eq!(
+        audit[0].abort_reason.as_deref(),
+        Some("cancelled: operator cancelled")
+    );
+    h.log_phase(
+        "explicit_abort_retains_audit",
+        true,
+        json!({"abort_sent_count": abort_sent_count}),
+    );
+
+    barrier
+        .unregister_participant("node-A")
+        .expect("terminal barrier should not block unregister");
+    assert_eq!(barrier.registered_participants().len(), 0);
+    h.log_phase("unregister_after_terminal_barrier", true, json!({}));
 }

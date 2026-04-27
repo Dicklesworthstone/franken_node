@@ -548,9 +548,13 @@ impl EpochTransitionBarrier {
 
     /// Unregister a participant (only when no barrier is active).
     pub fn unregister_participant(&mut self, participant_id: &str) -> Result<(), BarrierError> {
-        if let Some(active) = &self.active_barrier {
+        if self.is_barrier_active() {
             return Err(BarrierError::ConcurrentBarrier {
-                active_barrier_id: active.barrier_id.clone(),
+                active_barrier_id: self
+                    .active_barrier
+                    .as_ref()
+                    .map(|active| active.barrier_id.clone())
+                    .unwrap_or_default(),
             });
         }
         self.participants.remove(participant_id);

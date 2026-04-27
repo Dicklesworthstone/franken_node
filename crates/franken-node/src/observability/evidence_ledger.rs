@@ -39,7 +39,7 @@
 //! - `EVD-LEDGER-004`: capacity breach warning
 
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -263,6 +263,17 @@ fn replay_key(timestamp_ms: u64, signature: &ReplaySignature) -> ReplayKey {
     replay_key[..REPLAY_TIMESTAMP_BYTES].copy_from_slice(&timestamp_ms.to_le_bytes());
     replay_key[REPLAY_TIMESTAMP_BYTES..].copy_from_slice(signature);
     replay_key
+}
+
+/// bd-17pb5: Compute hash of replay key for miss prefilter.
+/// Uses domain separation to prevent collisions with other hash uses.
+fn replay_key_hash(replay_key: &ReplayKey) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"evidence_ledger_replay_key_v1:");
+    hasher.update(replay_key);
+    let hash_bytes = hasher.finalize();
+    // Use first 8 bytes as u64 hash value
+    u64::from_le_bytes(hash_bytes[..8].try_into().unwrap())
 }
 
 fn replay_key_seen_in_slice_ct(replay_key: &ReplayKey, seen_replay_keys: &[ReplayKey]) -> bool {
@@ -827,6 +838,9 @@ pub struct EvidenceLedger {
     /// Bounded replay-prevention window in append order, with precomputed
     /// timestamp bytes for the constant-time replay scan.
     seen_signatures: VecDeque<ReplayKey>,
+    /// bd-17pb5: Miss prefilter for replay-window scans. Contains hash values
+    /// of replay keys to quickly eliminate obvious misses before expensive CT scan.
+    replay_key_hashes: HashSet<u64>,
     /// Hash of the last appended entry for hash chain integrity
     last_entry_hash: Option<EntryHash>,
 }
@@ -926,6 +940,15 @@ impl EvidenceLedger {
         // retained entry needs only a single constant-time comparison.
         let replay_key = replay_key(timestamp_ms, signature);
 
+        // bd-17pb5: Use miss prefilter to quickly eliminate obvious misses.
+        // If the hash is not in our prefilter set, we know the key is definitely not present.
+        let replay_key_hash_value = replay_key_hash(&replay_key);
+        if !self.replay_key_hashes.contains(&replay_key_hash_value) {
+            // Definitely not present, skip expensive constant-time scan
+            return false;
+        }
+
+        // Hash collision possible - must do full constant-time scan.
         // Scan both contiguous VecDeque slices without short-circuiting so replay-key
         // position and wraparound layout cannot affect timing.
         let (front, back) = self.seen_signatures.as_slices();
@@ -1020,16 +1043,28 @@ impl EvidenceLedger {
             current_bytes: 0,
             verifying_key,
             seen_signatures: VecDeque::new(),
+            replay_key_hashes: HashSet::new(),
             last_entry_hash: None,
         }
     }
 
     fn remember_seen_signature(&mut self, timestamp_ms: u64, signature: ReplaySignature) {
         let replay_window = self.capacity.max_entries.max(MIN_SEEN_SIGNATURES);
-        self.seen_signatures
-            .push_back(replay_key(timestamp_ms, &signature));
+        let new_replay_key = replay_key(timestamp_ms, &signature);
+
+        // bd-17pb5: Add to miss prefilter hash set
+        let new_hash = replay_key_hash(&new_replay_key);
+        self.replay_key_hashes.insert(new_hash);
+
+        self.seen_signatures.push_back(new_replay_key);
+
+        // Remove old entries and their hashes when exceeding window size
         while self.seen_signatures.len() > replay_window {
-            self.seen_signatures.pop_front();
+            if let Some(old_replay_key) = self.seen_signatures.pop_front() {
+                // bd-17pb5: Remove from miss prefilter hash set
+                let old_hash = replay_key_hash(&old_replay_key);
+                self.replay_key_hashes.remove(&old_hash);
+            }
         }
     }
 
@@ -6966,5 +7001,62 @@ mod tests {
                 bounded_snapshot.total_appended
             );
         });
+    }
+
+    #[test]
+    fn test_replay_miss_prefilter_optimization() {
+        // bd-17pb5: Test that miss prefilter correctly handles both hits and misses
+        let (signing_key, verifying_key) = test_keys();
+        let capacity = LedgerCapacity::new(100, 100_000);
+        let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
+
+        // Add some entries to populate the replay window
+        for i in 1..=10 {
+            let entry = make_signed_entry(&format!("TEST-PREFILTER-{i:02}"), i, &signing_key);
+            ledger.append(entry).expect("append should succeed");
+        }
+
+        // Test that known signatures are detected as replay attacks
+        let existing_entry = make_signed_entry("TEST-PREFILTER-05", 5, &signing_key);
+        let signature_bytes = hex::decode(&existing_entry.signature).expect("valid hex");
+        assert!(
+            ledger.is_replay_attack_ct_bytes(existing_entry.timestamp_ms, &signature_bytes),
+            "Known signature should be detected as replay attack"
+        );
+
+        // Test that unknown signatures are not detected as replay attacks
+        let new_entry = make_signed_entry("TEST-PREFILTER-NEW", 999, &signing_key);
+        let new_signature_bytes = hex::decode(&new_entry.signature).expect("valid hex");
+        assert!(
+            !ledger.is_replay_attack_ct_bytes(new_entry.timestamp_ms, &new_signature_bytes),
+            "Unknown signature should not be detected as replay attack"
+        );
+
+        // Verify that the replay key hash set contains the expected number of entries
+        assert_eq!(
+            ledger.replay_key_hashes.len(),
+            10,
+            "Hash prefilter should contain all added signatures"
+        );
+
+        // Test that eviction also removes hashes from the prefilter
+        for i in 11..=150 {
+            let entry = make_signed_entry(&format!("TEST-PREFILTER-{i:03}"), i, &signing_key);
+            ledger.append(entry).expect("append should succeed");
+        }
+
+        // Verify that old entries are no longer detected (they should have been evicted)
+        let old_signature_bytes = hex::decode(&existing_entry.signature).expect("valid hex");
+        assert!(
+            !ledger.is_replay_attack_ct_bytes(existing_entry.timestamp_ms, &old_signature_bytes),
+            "Evicted signature should no longer be detected as replay attack"
+        );
+
+        // Verify prefilter size matches the replay window size
+        let expected_size = capacity.max_entries.max(MIN_SEEN_SIGNATURES);
+        assert!(
+            ledger.replay_key_hashes.len() <= expected_size,
+            "Hash prefilter should respect capacity bounds"
+        );
     }
 }

@@ -307,6 +307,10 @@ name = "control_lane_policy"
 path = "tests/control_lane_policy.rs"
 
 [[test]]
+name = "control_lane_policy_metamorphic"
+path = "tests/control_lane_policy_metamorphic.rs"
+
+[[test]]
 name = "registry_cli_e2e"
 path = "tests/registry_cli_e2e.rs"
 

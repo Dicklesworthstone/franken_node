@@ -7,7 +7,7 @@
 //! - JSON + CBOR export/import and query filtering
 //! - High-impact action receipt enforcement
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -25,6 +25,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::capacity_defaults::aliases::MAX_RECEIPT_CHAIN;
+use crate::lock_utils;
 
 /// Process-local receipt persistence lock.
 ///
@@ -158,7 +159,7 @@ pub struct ReceiptQuery {
 /// Replay protection tracker for used receipt nonces.
 #[derive(Debug, Default)]
 pub struct ReplayTracker {
-    used_nonces: Mutex<BTreeSet<String>>,
+    used_nonces: Mutex<VecDeque<String>>,
     max_tracked: usize,
 }
 
@@ -166,7 +167,7 @@ impl ReplayTracker {
     /// Create a new replay tracker with default capacity.
     pub fn new() -> Self {
         Self {
-            used_nonces: Mutex::new(BTreeSet::new()),
+            used_nonces: Mutex::new(VecDeque::new()),
             max_tracked: 10000, // Configurable capacity
         }
     }
@@ -174,7 +175,7 @@ impl ReplayTracker {
     /// Create a replay tracker with custom capacity.
     pub fn with_capacity(max_tracked: usize) -> Self {
         Self {
-            used_nonces: Mutex::new(BTreeSet::new()),
+            used_nonces: Mutex::new(VecDeque::new()),
             max_tracked,
         }
     }
@@ -182,22 +183,21 @@ impl ReplayTracker {
     /// Check if nonce was already used and mark it as used.
     /// Returns Ok(()) if nonce is fresh, Err if replayed.
     pub fn check_and_mark(&self, nonce: &str) -> Result<(), ReceiptError> {
-        let mut used = self.used_nonces.lock().unwrap();
+        let mut used = lock_utils::safe_lock(&self.used_nonces)
+            .map_err(|e| ReceiptError::Internal(format!("Failed to acquire replay tracker lock: {}", e)))?;
 
-        if used.contains(nonce) {
+        if used.contains(&nonce.to_string()) {
             return Err(ReceiptError::ReplayAttack {
                 nonce: nonce.to_string(),
             });
         }
 
-        // Add new nonce
-        used.insert(nonce.to_string());
+        // Add new nonce to the back (most recent)
+        used.push_back(nonce.to_string());
 
-        // Bounded capacity: remove oldest nonces if over limit
+        // Bounded capacity: remove oldest nonces from front if over limit
         while used.len() > self.max_tracked {
-            if let Some(oldest) = used.iter().next().cloned() {
-                used.remove(&oldest);
-            }
+            used.pop_front();
         }
 
         Ok(())
@@ -275,6 +275,8 @@ pub enum ReceiptError {
     UnsafePath { path: String, reason: String },
     #[error("unsupported format: {0}")]
     UnsupportedFormat(String),
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 impl Receipt {
@@ -2135,6 +2137,68 @@ mod tests {
                 assert_eq!(max_age_secs, MAX_RECEIPT_AGE_SECS);
             }
             other => panic!("expected StaleReceipt error, got: {:?}", other),
+        }
+    }
+
+    /// Test ReplayTracker proper chronological eviction (not lexicographic order)
+    #[test]
+    fn replay_tracker_evicts_oldest_nonces_chronologically() {
+        let tracker = ReplayTracker::with_capacity(3);
+
+        // Add nonces that would sort differently lexicographically vs chronologically
+        assert!(tracker.check_and_mark("nonce_z").is_ok());
+        assert!(tracker.check_and_mark("nonce_a").is_ok());
+        assert!(tracker.check_and_mark("nonce_m").is_ok());
+
+        // Adding 4th nonce should evict the first one ("nonce_z"), not the lexicographically first ("nonce_a")
+        assert!(tracker.check_and_mark("nonce_new").is_ok());
+
+        // "nonce_z" (oldest) should now be evicted and can be reused
+        assert!(tracker.check_and_mark("nonce_z").is_ok());
+
+        // "nonce_a" and "nonce_m" (newer) should still be tracked and cause replay errors
+        assert!(matches!(tracker.check_and_mark("nonce_a"), Err(ReceiptError::ReplayAttack { .. })));
+        assert!(matches!(tracker.check_and_mark("nonce_m"), Err(ReceiptError::ReplayAttack { .. })));
+    }
+
+    /// Test ReplayTracker handles concurrent access without panicking
+    #[test]
+    fn replay_tracker_handles_concurrent_access() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let tracker = Arc::new(ReplayTracker::with_capacity(100));
+        let handles: Vec<_> = (0..4).map(|thread_id| {
+            let tracker = Arc::clone(&tracker);
+            thread::spawn(move || {
+                for i in 0..25 {
+                    let nonce = format!("thread_{}_nonce_{}", thread_id, i);
+                    // Should not panic even under contention
+                    let _ = tracker.check_and_mark(&nonce);
+                }
+            })
+        }).collect();
+
+        for handle in handles {
+            handle.join().expect("Thread should not panic");
+        }
+    }
+
+    /// Test ReplayTracker rejects duplicate nonces
+    #[test]
+    fn replay_tracker_rejects_duplicate_nonces() {
+        let tracker = ReplayTracker::with_capacity(5);
+
+        assert!(tracker.check_and_mark("unique_nonce").is_ok());
+
+        // Second use should fail with replay attack error
+        let err = tracker.check_and_mark("unique_nonce").expect_err("duplicate nonce should be rejected");
+
+        match err {
+            ReceiptError::ReplayAttack { nonce } => {
+                assert_eq!(nonce, "unique_nonce");
+            }
+            other => panic!("expected ReplayAttack error, got: {:?}", other),
         }
     }
 }

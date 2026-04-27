@@ -3632,4 +3632,7 @@ mod tests {
             assert!(msg.contains("67108865"), "error should show actual size");
             assert!(msg.contains("67108864"), "error should show limit size");
         } else {
-            panic!("expected Fo
+            panic!("expected FormatError, got: {:?}", result);
+        }
+    }
+}
