@@ -1,11 +1,14 @@
 use frankenengine_node::supply_chain::trust_card::{
-    TrustCard, TrustCardInput, TrustCardRegistry, to_canonical_json, verify_card_signature,
+    to_canonical_json, verify_card_signature, TrustCard, TrustCardInput, TrustCardRegistry,
 };
 use hmac::{Hmac, KeyInit, Mac};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+
+#[path = "trust_card_canonical_encoding_conformance.rs"]
+mod trust_card_canonical_encoding_conformance;
 
 const TRUST_CARD_WIRE_VECTORS_JSON: &str =
     include_str!("../../../artifacts/conformance/trust_card_wire_vectors.json");

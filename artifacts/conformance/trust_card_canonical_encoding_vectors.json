@@ -1,0 +1,185 @@
+{
+  "schema_version": "franken-node/trust-card-canonical-encoding-conformance/v1",
+  "coverage": [
+    {
+      "spec_section": "docs/specs/section_10_4/bd-2yh_contract.md",
+      "invariant": "INV-TC-DETERMINISTIC",
+      "level": "MUST",
+      "tested": true
+    },
+    {
+      "spec_section": "docs/specs/section_10_4/bd-2yh_contract.md",
+      "invariant": "INV-TC-SIGNATURE",
+      "level": "MUST",
+      "tested": true
+    }
+  ],
+  "vectors": [
+    {
+      "name": "signed_card_baseline",
+      "registry_key_ascii": "trust-card-wire-conformance-key-v1",
+      "now_secs": 1745000000,
+      "trace_id": "trace-trust-card-wire-001",
+      "input": {
+        "extension": {
+          "extension_id": "npm:@acme/auth-guard",
+          "version": "1.2.3"
+        },
+        "publisher": {
+          "publisher_id": "publisher:acme-security",
+          "display_name": "ACME Security"
+        },
+        "certification_level": "gold",
+        "capability_declarations": [
+          {
+            "name": "network.egress",
+            "description": "Connects to the ACME policy API",
+            "risk": "medium"
+          },
+          {
+            "name": "fs.read",
+            "description": "Reads project policy files",
+            "risk": "low"
+          }
+        ],
+        "behavioral_profile": {
+          "network_access": true,
+          "filesystem_access": true,
+          "subprocess_access": false,
+          "profile_summary": "Reads local policy files and calls the ACME policy API."
+        },
+        "revocation_status": {
+          "status": "active"
+        },
+        "provenance_summary": {
+          "attestation_level": "slsa-3",
+          "source_uri": "https://registry.example.test/acme/auth-guard",
+          "artifact_hashes": [
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          ],
+          "verified_at": "2025-04-18T05:20:00Z"
+        },
+        "reputation_score_basis_points": 9234,
+        "reputation_trend": "improving",
+        "active_quarantine": false,
+        "dependency_trust_summary": [
+          {
+            "dependency_id": "npm:left-pad",
+            "trust_level": "audited"
+          },
+          {
+            "dependency_id": "npm:policy-client",
+            "trust_level": "verified"
+          }
+        ],
+        "last_verified_timestamp": "2025-04-18T05:20:00Z",
+        "user_facing_risk_assessment": {
+          "level": "medium",
+          "summary": "Network and file access are bounded by signed policy."
+        },
+        "evidence_refs": [
+          {
+            "evidence_id": "ev-wire-prov-001",
+            "evidence_type": "provenance_chain",
+            "verified_at_epoch": 1744999900,
+            "verification_receipt_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          },
+          {
+            "evidence_id": "ev-wire-rep-001",
+            "evidence_type": "reputation_signal",
+            "verified_at_epoch": 1744999950,
+            "verification_receipt_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          }
+        ]
+      },
+      "expected_card_hash": "8a06ee0efc346f9afcc3900491870dad83ae88d13f432e8b6e846d6a97150157",
+      "expected_registry_signature": "a4de6a2635c8d0cde0021d3359eaba6b3aa70b5999bf4d559180beb09c2ee1ba",
+      "expected_canonical_artifact": "artifacts/conformance/trust_card_wire/signed_card_baseline.canonical.json",
+      "expected_hash_preimage_artifact": "artifacts/conformance/trust_card_wire/signed_card_baseline.hash_preimage.canonical.json"
+    },
+    {
+      "name": "signed_card_input_order_normalized",
+      "registry_key_ascii": "trust-card-wire-conformance-key-v1",
+      "now_secs": 1745000000,
+      "trace_id": "trace-trust-card-wire-001",
+      "input": {
+        "extension": {
+          "extension_id": "npm:@acme/auth-guard",
+          "version": "1.2.3"
+        },
+        "publisher": {
+          "publisher_id": "publisher:acme-security",
+          "display_name": "ACME Security"
+        },
+        "certification_level": "gold",
+        "capability_declarations": [
+          {
+            "name": "fs.read",
+            "description": "Reads project policy files",
+            "risk": "low"
+          },
+          {
+            "name": "network.egress",
+            "description": "Connects to the ACME policy API",
+            "risk": "medium"
+          }
+        ],
+        "behavioral_profile": {
+          "network_access": true,
+          "filesystem_access": true,
+          "subprocess_access": false,
+          "profile_summary": "Reads local policy files and calls the ACME policy API."
+        },
+        "revocation_status": {
+          "status": "active"
+        },
+        "provenance_summary": {
+          "attestation_level": "slsa-3",
+          "source_uri": "https://registry.example.test/acme/auth-guard",
+          "artifact_hashes": [
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          ],
+          "verified_at": "2025-04-18T05:20:00Z"
+        },
+        "reputation_score_basis_points": 9234,
+        "reputation_trend": "improving",
+        "active_quarantine": false,
+        "dependency_trust_summary": [
+          {
+            "dependency_id": "npm:policy-client",
+            "trust_level": "verified"
+          },
+          {
+            "dependency_id": "npm:left-pad",
+            "trust_level": "audited"
+          }
+        ],
+        "last_verified_timestamp": "2025-04-18T05:20:00Z",
+        "user_facing_risk_assessment": {
+          "level": "medium",
+          "summary": "Network and file access are bounded by signed policy."
+        },
+        "evidence_refs": [
+          {
+            "evidence_id": "ev-wire-prov-001",
+            "evidence_type": "provenance_chain",
+            "verified_at_epoch": 1744999900,
+            "verification_receipt_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          },
+          {
+            "evidence_id": "ev-wire-rep-001",
+            "evidence_type": "reputation_signal",
+            "verified_at_epoch": 1744999950,
+            "verification_receipt_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          }
+        ]
+      },
+      "expected_card_hash": "8a06ee0efc346f9afcc3900491870dad83ae88d13f432e8b6e846d6a97150157",
+      "expected_registry_signature": "a4de6a2635c8d0cde0021d3359eaba6b3aa70b5999bf4d559180beb09c2ee1ba",
+      "expected_canonical_artifact": "artifacts/conformance/trust_card_wire/signed_card_baseline.canonical.json",
+      "expected_hash_preimage_artifact": "artifacts/conformance/trust_card_wire/signed_card_baseline.hash_preimage.canonical.json"
+    }
+  ]
+}
