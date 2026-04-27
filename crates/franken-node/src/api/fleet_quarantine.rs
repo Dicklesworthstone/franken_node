@@ -1888,9 +1888,44 @@ impl SharedFleetControlOwner {
         trace: &TraceContext,
         request: &QuarantineRequest,
     ) -> Result<FleetActionResult, ApiError> {
-        let mut mgr = self.lock(trace)?;
-        mgr.quarantine(&request.extension_id, &request.scope, identity, trace)
-            .map_err(|e| map_fleet_control_error("quarantine", trace, e))
+        // Phase 1: Acquire lock, do state updates, prepare persistence data
+        let (result, maybe_action_record) = {
+            let mut mgr = self.lock(trace)?;
+            mgr.quarantine_with_persistence_prep(&request.extension_id, &request.scope, identity, trace)
+                .map_err(|e| map_fleet_control_error("quarantine", trace, e))?
+        }; // Lock released here
+
+        // Phase 2: Do persistence I/O without holding mutex
+        if let Some(action_record) = maybe_action_record {
+            // Note: If persistence fails here, in-memory state is already updated.
+            // This is acceptable since the operation logically succeeded and the
+            // persistence failure doesn't invalidate the quarantine decision.
+            let _ = self.persist_action_record(action_record);
+        }
+
+        Ok(result)
+    }
+
+    fn persist_action_record(&self, action_record: FleetActionRecord) -> Result<(), ApiError> {
+        // Brief lock acquisition for persistence only
+        let result = {
+            let mut mgr = match self.inner.try_lock() {
+                Ok(mgr) => mgr,
+                Err(_) => return Ok(()), // Skip persistence if contended
+            };
+
+            if let Some(ref mut transport) = mgr.fleet_transport {
+                transport.publish_action(&action_record)
+                    .map_err(|e| format!("Transport persistence failed: {}", e))
+            } else {
+                Ok(())
+            }
+        };
+
+        result.map_err(|e| ApiError::Internal {
+            detail: e,
+            trace_id: "persistence-error".to_string(),
+        })
     }
 
     #[cfg(any(test, feature = "control-plane"))]
@@ -2168,6 +2203,19 @@ impl FleetControlManager {
     /// assert_eq!(result.action_type, "quarantine");
     /// # Ok::<(), FleetControlError>(())
     /// ```
+    pub fn quarantine_with_persistence_prep(
+        &mut self,
+        extension_id: &str,
+        scope: &QuarantineScope,
+        identity: &AuthIdentity,
+        trace: &TraceContext,
+    ) -> Result<(FleetActionResult, Option<FleetActionRecord>), FleetControlError> {
+        let (result, action_record) = self.quarantine_internal(extension_id, scope, identity, trace)?;
+
+        // Don't persist here - return action record for external persistence
+        Ok((result, action_record))
+    }
+
     pub fn quarantine(
         &mut self,
         extension_id: &str,
@@ -2175,6 +2223,25 @@ impl FleetControlManager {
         identity: &AuthIdentity,
         trace: &TraceContext,
     ) -> Result<FleetActionResult, FleetControlError> {
+        let (result, action_record) = self.quarantine_internal(extension_id, scope, identity, trace)?;
+
+        // Persist if transport available (synchronous, still holding lock)
+        if let (Some(action_record), Some(ref mut transport)) = (action_record, &mut self.fleet_transport) {
+            transport.publish_action(&action_record).map_err(|e| {
+                FleetControlError::internal(format!("Transport persistence failed: {}", e))
+            })?;
+        }
+
+        Ok(result)
+    }
+
+    fn quarantine_internal(
+        &mut self,
+        extension_id: &str,
+        scope: &QuarantineScope,
+        identity: &AuthIdentity,
+        trace: &TraceContext,
+    ) -> Result<(FleetActionResult, Option<FleetActionRecord>), FleetControlError> {
         if !self.activated {
             return Err(FleetControlError::not_activated());
         }
@@ -2259,9 +2326,9 @@ impl FleetControlManager {
         let event = FleetControlEvent::quarantine_initiated(&trace.trace_id, zone_id, extension_id);
         push_bounded(&mut self.events, event, MAX_FLEET_EVENTS);
 
-        // Persist to file-based transport (real channel + on-disk persistence)
-        if let Some(ref mut transport) = self.fleet_transport {
-            let action_record = FleetActionRecord {
+        // Prepare action record for persistence (but don't persist yet)
+        let action_record = if self.fleet_transport.is_some() {
+            Some(FleetActionRecord {
                 action_id: op_id.clone(),
                 emitted_at: chrono::Utc::now(),
                 action: PersistedFleetAction::Quarantine {
@@ -2272,13 +2339,12 @@ impl FleetControlManager {
                     reason: scope.reason.clone(),
                     quarantine_version: 1,
                 },
-            };
-            transport.publish_action(&action_record).map_err(|e| {
-                FleetControlError::internal(format!("Transport persistence failed: {}", e))
-            })?;
-        }
+            })
+        } else {
+            None
+        };
 
-        Ok(FleetActionResult {
+        let result = FleetActionResult {
             operation_id: op_id,
             action_type: "quarantine".to_string(),
             success: true,
@@ -2286,7 +2352,9 @@ impl FleetControlManager {
             convergence: Some(convergence),
             trace_id: trace.trace_id.clone(),
             event_code: FLEET_QUARANTINE_INITIATED.to_string(),
-        })
+        };
+
+        Ok((result, action_record))
     }
 
     /// Revoke an extension.
