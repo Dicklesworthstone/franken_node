@@ -653,21 +653,16 @@ impl FrankensqliteAdapter {
         self.write(&caller, class, key, value)
     }
 
-    /// Legacy read method for backwards compatibility.
-    /// WARNING: Uses system-level permissions. Migrate to read(caller, ...) for proper authorization.
-    #[deprecated(note = "Use read(caller, class, key) with explicit CallerContext")]
-    pub fn read_legacy(&mut self, class: PersistenceClass, key: &str) -> ReadResult {
-        let caller = CallerContext::system("legacy::adapter", "legacy-read");
-        // For backwards compatibility, unwrap the Result and return default on auth failure
-        self.read(&caller, class, key)
-            .unwrap_or_else(|_| ReadResult {
-                found: false,
-                key: key.to_string(),
-                value: None,
-                persistence_class: class,
-                tier: class.tier(),
-                cache_hit: false,
-            })
+    /// Legacy read entrypoint retained for migration surfaces that still name the
+    /// older API, but now requiring an explicit caller so authorization failures
+    /// fail closed instead of being downgraded into synthetic "not found" reads.
+    pub fn read_legacy(
+        &mut self,
+        caller: &CallerContext,
+        class: PersistenceClass,
+        key: &str,
+    ) -> Result<ReadResult, AdapterError> {
+        self.read(caller, class, key)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -831,6 +826,11 @@ pub trait FrankensqliteTestCallerExt {
 }
 
 #[cfg(any(test, feature = "test-support"))]
+pub trait FrankensqliteLegacySystemReadExt {
+    fn read_legacy(&mut self, class: PersistenceClass, key: &str) -> ReadResult;
+}
+
+#[cfg(any(test, feature = "test-support"))]
 impl FrankensqliteTestCallerExt for FrankensqliteAdapter {
     fn write(
         &mut self,
@@ -852,6 +852,15 @@ impl FrankensqliteTestCallerExt for FrankensqliteAdapter {
             tier: class.tier(),
             cache_hit: false,
         })
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl FrankensqliteLegacySystemReadExt for FrankensqliteAdapter {
+    fn read_legacy(&mut self, class: PersistenceClass, key: &str) -> ReadResult {
+        let caller = CallerContext::system("legacy::adapter", "legacy-read");
+        FrankensqliteAdapter::read_legacy(self, &caller, class, key)
+            .expect("legacy system caller should remain authorized")
     }
 }
 
@@ -2934,8 +2943,13 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         let denied_audit_read =
             adapter.read_legacy(&readonly_caller, PersistenceClass::AuditLog, "test");
         assert!(
-            denied_audit_read.is_err(),
-            "read-only should be denied audit log read"
+            matches!(
+                denied_audit_read,
+                Err(AdapterError::AuthorizationFailed(
+                    AuthorizationError::AccessDenied { .. }
+                ))
+            ),
+            "read-only audit reads must fail closed with authorization error"
         );
     }
 

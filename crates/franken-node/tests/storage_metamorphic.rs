@@ -1,5 +1,6 @@
 use frankenengine_node::storage::frankensqlite_adapter::{
-    AdapterSummary, CallerContext, FrankensqliteAdapter, PersistenceClass, ReadResult,
+    AdapterSummary, CallerContext, FrankensqliteAdapter, FrankensqliteLegacySystemReadExt,
+    PersistenceClass, ReadResult,
 };
 use frankenengine_node::storage::retrievability_gate::{
     ArtifactId, RG_EVICTION_BLOCKED, RetrievabilityConfig, RetrievabilityGate, SegmentId,
