@@ -64,6 +64,23 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
 }
 
+/// SECURITY: Sanitizes keys for safe inclusion in log messages by escaping
+/// control characters, newlines, and other characters that could be used
+/// for log injection attacks.
+fn sanitize_log_key(key: &str) -> String {
+    key.chars()
+        .map(|c| match c {
+            '\n' => "\\n".to_string(),
+            '\r' => "\\r".to_string(),
+            '\t' => "\\t".to_string(),
+            '\0' => "\\0".to_string(),
+            '\\' => "\\\\".to_string(),
+            c if c.is_control() => format!("\\u{{{:04x}}}", c as u32),
+            c => c.to_string(),
+        })
+        .collect()
+}
+
 pub const INV_FSA_TIER1_DURABLE: &str = "INV-FSA-TIER1-DURABLE";
 pub const INV_FSA_REPLAY_DETERMINISTIC: &str = "INV-FSA-REPLAY-DETERMINISTIC";
 pub const INV_FSA_CONCURRENT_SAFE: &str = "INV-FSA-CONCURRENT-SAFE";
@@ -569,7 +586,7 @@ impl FrankensqliteAdapter {
             self.emit_event(
                 event_codes::FRANKENSQLITE_WRITE_FAIL,
                 class.label(),
-                format!("key={key}, duplicate audit log entry rejected"),
+                format!("key={}, duplicate audit log entry rejected", sanitize_log_key(key)),
             );
             return Err(AdapterError::WriteFailure {
                 key: key.to_string(),
@@ -606,7 +623,7 @@ impl FrankensqliteAdapter {
         self.emit_event(
             event_codes::FRANKENSQLITE_WRITE_SUCCESS,
             class.label(),
-            format!("key={key}, tier={tier}, latency_us={latency}"),
+            format!("key={}, tier={tier}, latency_us={latency}", sanitize_log_key(key)),
         );
 
         Ok(WriteResult {
@@ -692,7 +709,7 @@ impl FrankensqliteAdapter {
                 self.emit_event(
                     event_codes::FRANKENSQLITE_REPLAY_MISMATCH,
                     "audit_log",
-                    format!("key={key}, mismatch detected"),
+                    format!("key={}, mismatch detected", sanitize_log_key(key)),
                 );
             }
             push_bounded(&mut results, (key.clone(), matches), MAX_AUDIT_LOG_ENTRIES);
