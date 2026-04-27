@@ -374,6 +374,19 @@ pub enum AuthzDecision {
     Deny { reason: String },
 }
 
+#[cfg(any(test, feature = "control-plane"))]
+fn emit_deferred_warn(log_task: impl FnOnce() + Send + 'static) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            log_task();
+        });
+    } else {
+        // Direct in-process callers can hit these helpers without a Tokio runtime.
+        // Return the fail-closed decision instead of panicking on the logging path.
+        log_task();
+    }
+}
+
 /// Check authorization against the policy hook.
 #[cfg(any(test, feature = "control-plane"))]
 pub fn authorize(
@@ -400,10 +413,12 @@ pub fn authorize(
         };
 
         // Schedule deferred logging to happen after response (prevents timing leaks)
-        tokio::spawn(async move {
+        let hook_id = hook.hook_id.clone();
+        let principal = identity.principal.clone();
+        emit_deferred_warn(move || {
             tracing::warn!(
-                hook_id = %hook.hook_id,
-                principal = %identity.principal,
+                hook_id = %hook_id,
+                principal = %principal,
                 "authorization denied: principal lacks required role"
             );
         });
@@ -462,7 +477,7 @@ pub fn enforce_route_contract(
         let actual_method_clone = identity.method.clone();
         let route_method_clone = route.method.clone();
         let route_path_clone = route.path.clone();
-        tokio::spawn(async move {
+        emit_deferred_warn(move || {
             tracing::warn!(
                 required_method = ?expected_method_clone,
                 actual_method = ?actual_method_clone,
@@ -581,7 +596,7 @@ pub fn check_rate_limit(limiter: &mut RateLimiter, trace_id: &str) -> Result<(),
             // Schedule deferred logging to happen after response (prevents timing leaks)
             let sustained_rps = limiter.config().sustained_rps;
             let burst_size = limiter.config().burst_size;
-            tokio::spawn(async move {
+            emit_deferred_warn(move || {
                 tracing::warn!(
                     sustained_rps = %sustained_rps,
                     burst_size = %burst_size,
@@ -1518,6 +1533,30 @@ mod tests {
     }
 
     #[test]
+    fn authorize_deny_without_runtime_does_not_panic() {
+        let identity = AuthIdentity {
+            principal: "test".to_string(),
+            method: AuthMethod::ApiKey,
+            roles: vec!["reader".to_string()],
+        };
+        let hook = PolicyHook {
+            hook_id: "fleet.admin".to_string(),
+            required_roles: vec!["fleet-admin".to_string()],
+        };
+
+        let result = std::panic::catch_unwind(|| authorize(&identity, &hook, "t-7-no-runtime"));
+
+        assert!(
+            result.is_ok(),
+            "authorize deny path should not require Tokio"
+        );
+        assert!(matches!(
+            result.expect("authorize result").expect("authz"),
+            AuthzDecision::Deny { .. }
+        ));
+    }
+
+    #[test]
     fn authorize_empty_roles_allows() {
         let identity = AuthIdentity {
             principal: "test".to_string(),
@@ -1868,6 +1907,44 @@ mod tests {
     }
 
     #[test]
+    fn negative_enforce_route_contract_without_runtime_does_not_panic() {
+        let identity = AuthIdentity {
+            principal: "wrong-method".to_string(),
+            method: AuthMethod::ApiKey,
+            roles: vec!["operator".to_string()],
+        };
+        let route = RouteMetadata {
+            method: "POST".to_string(),
+            path: "/v1/operator/mutate".to_string(),
+            group: EndpointGroup::Operator,
+            lifecycle: EndpointLifecycle::Stable,
+            auth_method: AuthMethod::BearerToken,
+            policy_hook: PolicyHook {
+                hook_id: "operator.mutate".to_string(),
+                required_roles: vec!["operator".to_string()],
+            },
+            trace_propagation: true,
+        };
+
+        let result = std::panic::catch_unwind(|| {
+            enforce_route_contract(&identity, &route, "trace-route-contract-no-runtime")
+        });
+
+        assert!(
+            result.is_ok(),
+            "route-contract deny path should not require Tokio"
+        );
+        assert!(matches!(
+            result
+                .expect("route-contract result")
+                .expect_err("expected auth failure"),
+            ApiError::AuthFailed { detail, trace_id }
+                if detail == "authentication method not permitted for this endpoint"
+                    && trace_id == "trace-route-contract-no-runtime"
+        ));
+    }
+
+    #[test]
     fn negative_rate_limiter_zero_burst_denies_and_normalizes_zero_rps() {
         let mut limiter = RateLimiter::new(RateLimitConfig {
             sustained_rps: 0,
@@ -1901,6 +1978,32 @@ mod tests {
                 retry_after_ms,
                 ..
             } if trace_id == "trace-rate-denied" && retry_after_ms >= 1
+        ));
+    }
+
+    #[test]
+    fn negative_check_rate_limit_without_runtime_does_not_panic() {
+        let mut limiter = RateLimiter::new(RateLimitConfig {
+            sustained_rps: 1,
+            burst_size: 0,
+            fail_closed: true,
+        });
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            check_rate_limit(&mut limiter, "trace-rate-denied-no-runtime")
+        }));
+
+        assert!(
+            result.is_ok(),
+            "rate-limit error path should not require Tokio"
+        );
+        assert!(matches!(
+            result.expect("rate limit result").expect_err("expected rate-limit error"),
+            ApiError::RateLimited {
+                trace_id,
+                retry_after_ms,
+                ..
+            } if trace_id == "trace-rate-denied-no-runtime" && retry_after_ms >= 1
         ));
     }
 
