@@ -1865,6 +1865,58 @@ fn package_manifest_declares_module_type(directory: &Path) -> Option<bool> {
     )
 }
 
+/// SECURITY: Validates that no component in the backup path is a symlink to prevent
+/// directory traversal attacks. Checks the backup root directory and all parent
+/// directories up to the project root.
+fn validate_backup_path_no_symlinks(
+    project_path: &Path,
+    backup_path: &Path,
+) -> anyhow::Result<()> {
+    let backup_root = project_path.join(MIGRATION_BACKUP_DIR);
+
+    // Check if backup root directory exists and is not a symlink
+    if backup_root.exists() {
+        let metadata = std::fs::symlink_metadata(&backup_root).map_err(|err| {
+            anyhow::anyhow!(
+                "failed reading backup root metadata {}: {err}",
+                backup_root.display()
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
+            anyhow::bail!(
+                "refusing to use symlinked backup root directory {}",
+                backup_root.display()
+            );
+        }
+    }
+
+    // Check each component of the backup path for symlinks
+    let mut current_path = backup_root;
+    if let Ok(relative_backup_path) = backup_path.strip_prefix(&backup_root) {
+        for component in relative_backup_path.components() {
+            if let std::path::Component::Normal(name) = component {
+                current_path = current_path.join(name);
+                if current_path.exists() {
+                    let metadata = std::fs::symlink_metadata(&current_path).map_err(|err| {
+                        anyhow::anyhow!(
+                            "failed reading backup path component metadata {}: {err}",
+                            current_path.display()
+                        )
+                    })?;
+                    if metadata.file_type().is_symlink() {
+                        anyhow::bail!(
+                            "refusing to use symlinked backup path component {}",
+                            current_path.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn write_migration_backup(
     project_path: &Path,
     source_path: &Path,
@@ -1877,6 +1929,10 @@ fn write_migration_backup(
         )
     })?;
     let backup_path = project_path.join(MIGRATION_BACKUP_DIR).join(relative_path);
+
+    // SECURITY: Validate no symlinks in backup path to prevent directory traversal
+    validate_backup_path_no_symlinks(project_path, &backup_path)?;
+
     if let Some(parent) = backup_path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| {
             anyhow::anyhow!(
