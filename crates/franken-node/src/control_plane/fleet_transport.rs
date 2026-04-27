@@ -18,10 +18,12 @@ use std::{
 #[cfg(feature = "asupersync-transport")]
 use crate::capacity_defaults::aliases::MAX_CONTROL_EVENTS;
 use crate::{
-    api::fleet_quarantine::{RevocationScope, RevocationSeverity},
     capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP},
     config::timeouts,
 };
+
+#[cfg(feature = "control-plane")]
+use crate::api::fleet_quarantine::{RevocationScope, RevocationSeverity};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::Signer;
 use rand::Rng;
@@ -211,6 +213,7 @@ pub enum FleetAction {
         policy_version: String,
         changed_fields: Vec<String>,
     },
+    #[cfg(feature = "control-plane")]
     Revoke {
         extension_id: String,
         scope: RevocationScope,
@@ -1571,6 +1574,7 @@ fn validate_action_record(action: &FleetActionRecord) -> Result<(), FleetTranspo
             validate_zone_id(zone_id)?;
             validate_action_text_field("policy_version", policy_version)?;
         }
+        #[cfg(feature = "control-plane")]
         FleetAction::Revoke { extension_id, scope } => {
             validate_zone_id(&scope.zone_id)?;
             validate_action_text_field("revoke extension_id", extension_id)?;
@@ -1906,6 +1910,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "control-plane")]
     fn revoke_action_record(
         action_id: impl Into<String>,
         emitted_at: &str,
@@ -2202,6 +2207,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "control-plane")]
     fn publish_action_accepts_valid_revoke() {
         let tempdir = tempdir().expect("tempdir");
         let root = tempdir.path().join("fleet-state");
@@ -2230,6 +2236,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "control-plane")]
     fn publish_action_rejects_revoke_with_blank_extension_id() {
         let tempdir = tempdir().expect("tempdir");
         let root = tempdir.path().join("fleet-state");
@@ -2264,6 +2271,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "control-plane")]
     fn publish_action_rejects_revoke_with_blank_reason() {
         let tempdir = tempdir().expect("tempdir");
         let root = tempdir.path().join("fleet-state");
