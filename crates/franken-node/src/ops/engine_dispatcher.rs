@@ -30,6 +30,45 @@ const LEGACY_SECURITY_EPOCH: u64 = 1; // Legacy security epoch for compatibility
 const STANDARD_SECURITY_EPOCH: u64 = 2; // Standard security epoch (Balanced profile)
 const CURRENT_SECURITY_EPOCH: u64 = 3; // Latest security epoch (Strict profile)
 
+/// Validate runtime path to prevent command injection attacks
+fn validate_runtime_path(runtime_path: &Path) -> Result<()> {
+    let path_str = runtime_path.to_string_lossy();
+
+    // Reject paths with shell metacharacters that could be used for injection
+    if path_str.contains(';') || path_str.contains('&') || path_str.contains('|')
+        || path_str.contains('`') || path_str.contains('$') || path_str.contains('\n')
+        || path_str.contains('\r') {
+        return Err(anyhow::anyhow!(
+            "Runtime path contains shell metacharacters: {}", path_str
+        ));
+    }
+
+    // Require absolute paths to prevent relative path manipulation
+    if !runtime_path.is_absolute() {
+        return Err(anyhow::anyhow!(
+            "Runtime path must be absolute: {}", path_str
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate target path to prevent command injection attacks
+fn validate_target_path(target_path: &Path) -> Result<()> {
+    let path_str = target_path.to_string_lossy();
+
+    // Reject paths with shell metacharacters
+    if path_str.contains(';') || path_str.contains('&') || path_str.contains('|')
+        || path_str.contains('`') || path_str.contains('$') || path_str.contains('\n')
+        || path_str.contains('\r') {
+        return Err(anyhow::anyhow!(
+            "Target path contains shell metacharacters: {}", path_str
+        ));
+    }
+
+    Ok(())
+}
+
 pub struct EngineDispatcher {
     engine_bin_path: String,
     configured_path: Option<PathBuf>,
@@ -1056,6 +1095,10 @@ impl EngineDispatcher {
                     app_path.display(),
                 );
             }
+
+            // Security: Validate runtime and target paths to prevent command injection
+            validate_runtime_path(&plan.runtime_path)?;
+            validate_target_path(&plan.target)?;
 
             let mut command = Command::new(&plan.runtime_path);
             command
