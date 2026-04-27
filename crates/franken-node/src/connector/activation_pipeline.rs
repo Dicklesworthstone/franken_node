@@ -15,6 +15,9 @@ const MAX_INPUT_STRING_LENGTH: usize = 64 * 1024; // 64KB
 /// Maximum number of capabilities to prevent resource exhaustion.
 const MAX_CAPABILITIES: usize = 1024;
 
+/// Maximum number of stage results to prevent memory exhaustion during activation.
+const MAX_ACTIVATION_STAGES: usize = 32;
+
 /// Activation stages in fixed execution order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActivationStage {
@@ -338,12 +341,16 @@ pub fn activate(input: &ActivationInput, executor: &dyn StageExecutor) -> Activa
 
     // Input validation (fail early on malformed/oversized inputs)
     if let Err(reason) = validate_activation_input(input) {
-        stages.push(StageResult {
-            stage: ActivationStage::SandboxCreate,
-            success: false,
-            error: Some(StageError::SandboxFailed { reason }),
-            timestamp: input.timestamp.clone(),
-        });
+        push_bounded(
+            &mut stages,
+            StageResult {
+                stage: ActivationStage::SandboxCreate,
+                success: false,
+                error: Some(StageError::SandboxFailed { reason }),
+                timestamp: input.timestamp.clone(),
+            },
+            MAX_ACTIVATION_STAGES,
+        );
         return ActivationTranscript {
             connector_id: input.connector_id.clone(),
             stages,
@@ -355,20 +362,28 @@ pub fn activate(input: &ActivationInput, executor: &dyn StageExecutor) -> Activa
     // Stage 1: SandboxCreate (INV-ACT-STAGE-ORDER: must be first)
     match executor.create_sandbox(&input.sandbox_config) {
         Ok(()) => {
-            stages.push(StageResult {
-                stage: ActivationStage::SandboxCreate,
-                success: true,
-                error: None,
-                timestamp: input.timestamp.clone(),
-            });
+            push_bounded(
+                &mut stages,
+                StageResult {
+                    stage: ActivationStage::SandboxCreate,
+                    success: true,
+                    error: None,
+                    timestamp: input.timestamp.clone(),
+                },
+                MAX_ACTIVATION_STAGES,
+            );
         }
         Err(reason) => {
-            stages.push(StageResult {
-                stage: ActivationStage::SandboxCreate,
-                success: false,
-                error: Some(StageError::SandboxFailed { reason }),
-                timestamp: input.timestamp.clone(),
-            });
+            push_bounded(
+                &mut stages,
+                StageResult {
+                    stage: ActivationStage::SandboxCreate,
+                    success: false,
+                    error: Some(StageError::SandboxFailed { reason }),
+                    timestamp: input.timestamp.clone(),
+                },
+                MAX_ACTIVATION_STAGES,
+            );
             return ActivationTranscript {
                 connector_id: input.connector_id.clone(),
                 stages,
