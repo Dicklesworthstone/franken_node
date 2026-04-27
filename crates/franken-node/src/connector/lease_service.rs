@@ -197,7 +197,7 @@ impl LeaseService {
 
         if self.next_id == u64::MAX {
             return Err(LeaseError::CapacityExceeded {
-                capacity: u64::MAX as usize,
+                capacity: usize::try_from(u64::MAX).unwrap_or(usize::MAX),
             });
         }
 
