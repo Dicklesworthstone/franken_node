@@ -468,8 +468,11 @@ pub fn measure_repairability(
         if seen.insert(artifact.artifact_type.label()) {
             let weight = artifact.artifact_type.repairability_weight();
             if weight.is_finite() {
-                score += weight;
-                count = count.saturating_add(1);
+                let new_score = score + weight;
+                if new_score.is_finite() {
+                    score = new_score;
+                    count = count.saturating_add(1);
+                }
             }
         }
     }
