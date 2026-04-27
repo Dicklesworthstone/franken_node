@@ -26,6 +26,7 @@ const MAX_SANITIZED_STRACE_LINES: usize = 65_536; // 64K syscall lines max
 const MAX_THREAD_HANDLES: usize = 64; // Maximum concurrent runtime threads
 const PIPE_READ_CHUNK_BYTES: usize = 64 * 1024;
 const DIVERGENCE_FIXTURE_LOCK_FILE: &str = ".lockstep-fixtures.lock";
+const DIVERGENCE_FIXTURE_LOCK_RETRY_BACKOFF_MILLIS: [u64; 3] = [100, 200, 400];
 
 #[derive(Debug, Deserialize)]
 struct LockstepCorpusManifest {
@@ -618,13 +619,44 @@ impl LockstepHarness {
                     path.display()
                 )
             })?;
-        file.lock().with_context(|| {
-            format!(
-                "failed locking lockstep divergence fixture lock {}",
-                path.display()
-            )
-        })?;
+        Self::lock_divergence_fixture_file(&file, &path)?;
         Ok(DivergenceFixturePersistLockGuard { file, path })
+    }
+
+    fn lock_divergence_fixture_file(file: &File, path: &Path) -> Result<()> {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() != ErrorKind::WouldBlock => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "failed locking lockstep divergence fixture lock {}",
+                        path.display()
+                    )
+                });
+            }
+            Err(_) => {}
+        }
+
+        for delay_millis in DIVERGENCE_FIXTURE_LOCK_RETRY_BACKOFF_MILLIS {
+            thread::sleep(Duration::from_millis(delay_millis));
+            match file.try_lock() {
+                Ok(()) => return Ok(()),
+                Err(err) if err.kind() != ErrorKind::WouldBlock => {
+                    return Err(err).with_context(|| {
+                        format!(
+                            "failed locking lockstep divergence fixture lock {}",
+                            path.display()
+                        )
+                    });
+                }
+                Err(_) => {}
+            }
+        }
+
+        anyhow::bail!(
+            "timed out locking lockstep divergence fixture lock {} after retries at 100ms/200ms/400ms",
+            path.display()
+        );
     }
 
     fn write_divergence_fixture_atomic(path: &Path, payload: &str) -> Result<()> {
@@ -2289,6 +2321,37 @@ mod tests {
             fixture["expected_output"]["oracle_verdict"],
             serde_json::Value::String("block_release".to_string())
         );
+    }
+
+    #[test]
+    fn emit_divergence_fixtures_fails_closed_when_fixture_flock_is_held() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app_path = temp.path().join("demo-app").join("index.js");
+        let report = sample_divergence_report(OracleVerdict::BlockRelease {
+            blocking_divergence_ids: vec!["div-1".to_string()],
+        });
+        let output_dir = LockstepHarness::fixture_output_dir(&app_path);
+        std::fs::create_dir_all(&output_dir).expect("fixture output dir");
+        let lock_path = output_dir.join(DIVERGENCE_FIXTURE_LOCK_FILE);
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .expect("open competing lock file");
+        lock_file.try_lock().expect("hold competing writer lock");
+
+        let err = LockstepHarness::emit_divergence_fixtures(&app_path, &report)
+            .expect_err("held flock must prevent fixture emission");
+        let message = format!("{err:#}");
+        assert!(message.contains("timed out locking lockstep divergence fixture lock"));
+        assert!(
+            !output_dir.join("div-1_min.json").exists(),
+            "fixture must not be published while competing flock is held"
+        );
+
+        lock_file.unlock().expect("release competing writer lock");
     }
 
     #[test]
