@@ -44,11 +44,11 @@ const MAX_INCIDENTS: usize = 2048;
 const MAX_ZONE_STATUS: usize = 2048;
 
 use super::error::ApiError;
+use super::middleware::{AuthIdentity, TraceContext};
 #[cfg(any(test, feature = "control-plane"))]
 use super::middleware::{
-    enforce_route_contract, AuthMethod, EndpointGroup, EndpointLifecycle, PolicyHook, RouteMetadata,
+    AuthMethod, EndpointGroup, EndpointLifecycle, PolicyHook, RouteMetadata, enforce_route_contract,
 };
-use super::middleware::{AuthIdentity, TraceContext};
 use super::trust_card_routes::ApiResponse;
 
 // ── Event Codes ───────────────────────────────────────────────────────────
@@ -1894,50 +1894,9 @@ impl SharedFleetControlOwner {
         trace: &TraceContext,
         request: &QuarantineRequest,
     ) -> Result<FleetActionResult, ApiError> {
-        // Phase 1: Acquire lock, do state updates, prepare persistence data
-        let (result, maybe_action_record) = {
-            let mut mgr = self.lock(trace)?;
-            mgr.quarantine_with_persistence_prep(
-                &request.extension_id,
-                &request.scope,
-                identity,
-                trace,
-            )
-            .map_err(|e| map_fleet_control_error("quarantine", trace, e))?
-        }; // Lock released here
-
-        // Phase 2: Do persistence I/O without holding mutex
-        if let Some(action_record) = maybe_action_record {
-            // Note: If persistence fails here, in-memory state is already updated.
-            // This is acceptable since the operation logically succeeded and the
-            // persistence failure doesn't invalidate the quarantine decision.
-            let _ = self.persist_action_record(action_record);
-        }
-
-        Ok(result)
-    }
-
-    fn persist_action_record(&self, action_record: FleetActionRecord) -> Result<(), ApiError> {
-        // Brief lock acquisition for persistence only
-        let result = {
-            let mut mgr = match self.inner.try_lock() {
-                Ok(mgr) => mgr,
-                Err(_) => return Ok(()), // Skip persistence if contended
-            };
-
-            if let Some(ref mut transport) = mgr.fleet_transport {
-                transport
-                    .publish_action(&action_record)
-                    .map_err(|e| format!("Transport persistence failed: {}", e))
-            } else {
-                Ok(())
-            }
-        };
-
-        result.map_err(|e| ApiError::Internal {
-            detail: e,
-            trace_id: "persistence-error".to_string(),
-        })
+        let mut mgr = self.lock(trace)?;
+        mgr.quarantine(&request.extension_id, &request.scope, identity, trace)
+            .map_err(|e| map_fleet_control_error("quarantine", trace, e))
     }
 
     #[cfg(any(test, feature = "control-plane"))]
@@ -2215,20 +2174,6 @@ impl FleetControlManager {
     /// assert_eq!(result.action_type, "quarantine");
     /// # Ok::<(), FleetControlError>(())
     /// ```
-    pub fn quarantine_with_persistence_prep(
-        &mut self,
-        extension_id: &str,
-        scope: &QuarantineScope,
-        identity: &AuthIdentity,
-        trace: &TraceContext,
-    ) -> Result<(FleetActionResult, Option<FleetActionRecord>), FleetControlError> {
-        let (result, action_record) =
-            self.quarantine_internal(extension_id, scope, identity, trace)?;
-
-        // Don't persist here - return action record for external persistence
-        Ok((result, action_record))
-    }
-
     pub fn quarantine(
         &mut self,
         extension_id: &str,
@@ -2236,28 +2181,6 @@ impl FleetControlManager {
         identity: &AuthIdentity,
         trace: &TraceContext,
     ) -> Result<FleetActionResult, FleetControlError> {
-        let (result, action_record) =
-            self.quarantine_internal(extension_id, scope, identity, trace)?;
-
-        // Persist if transport available (synchronous, still holding lock)
-        if let (Some(action_record), Some(ref mut transport)) =
-            (action_record, &mut self.fleet_transport)
-        {
-            transport.publish_action(&action_record).map_err(|e| {
-                FleetControlError::internal(format!("Transport persistence failed: {}", e))
-            })?;
-        }
-
-        Ok(result)
-    }
-
-    fn quarantine_internal(
-        &mut self,
-        extension_id: &str,
-        scope: &QuarantineScope,
-        identity: &AuthIdentity,
-        trace: &TraceContext,
-    ) -> Result<(FleetActionResult, Option<FleetActionRecord>), FleetControlError> {
         if !self.activated {
             return Err(FleetControlError::not_activated());
         }
@@ -2274,7 +2197,54 @@ impl FleetControlManager {
         let now = chrono::Utc::now().to_rfc3339();
         let incident_id = format!("inc-{op_id}");
 
-        // Create incident handle
+        // Build receipt (INV-FLEET-RECEIPT)
+        let receipt = self.build_receipt(
+            &op_id,
+            &identity.principal,
+            zone_id,
+            &now,
+            DecisionReceiptPayload::quarantine(extension_id, scope),
+        )?;
+
+        // Convergence state (INV-FLEET-CONVERGENCE)
+        let total_nodes = scope.affected_nodes;
+        let (progress_pct, eta_seconds, phase) = if total_nodes == 0 {
+            (0, None, ConvergencePhase::Pending)
+        } else {
+            (
+                0,
+                Some(total_nodes.saturating_mul(2)),
+                ConvergencePhase::Propagating,
+            )
+        };
+        let convergence = ConvergenceState {
+            converged_nodes: 0,
+            total_nodes,
+            progress_pct,
+            eta_seconds,
+            phase,
+        };
+
+        if let Some(ref mut transport) = self.fleet_transport {
+            let action_record = FleetActionRecord {
+                action_id: op_id.clone(),
+                emitted_at: chrono::Utc::now(),
+                action: PersistedFleetAction::Quarantine {
+                    zone_id: zone_id.to_string(),
+                    incident_id: incident_id.clone(),
+                    target_id: extension_id.to_string(),
+                    target_kind: FleetTargetKind::Extension,
+                    reason: scope.reason.clone(),
+                    quarantine_version: 1,
+                },
+            };
+            transport.publish_action(&action_record).map_err(|e| {
+                FleetControlError::internal(format!("Transport persistence failed: {}", e))
+            })?;
+        }
+
+        // Create incident handle after durable publication succeeds so failed transport writes
+        // do not leave in-memory quarantine state active without downstream propagation.
         let incident = IncidentHandle {
             incident_id: incident_id.clone(),
             extension_id: extension_id.to_string(),
@@ -2306,61 +2276,14 @@ impl FleetControlManager {
                 pending_convergences: Vec::new(),
             });
         zone.active_quarantines = zone.active_quarantines.saturating_add(1);
-
-        // Build receipt (INV-FLEET-RECEIPT)
-        let receipt = self.build_receipt(
-            &op_id,
-            &identity.principal,
-            zone_id,
-            &now,
-            DecisionReceiptPayload::quarantine(extension_id, scope),
-        )?;
-
-        // Convergence state (INV-FLEET-CONVERGENCE)
-        let total_nodes = scope.affected_nodes;
-        let (progress_pct, eta_seconds, phase) = if total_nodes == 0 {
-            (0, None, ConvergencePhase::Pending)
-        } else {
-            (
-                0,
-                Some(total_nodes.saturating_mul(2)),
-                ConvergencePhase::Propagating,
-            )
-        };
-        let convergence = ConvergenceState {
-            converged_nodes: 0,
-            total_nodes,
-            progress_pct,
-            eta_seconds,
-            phase,
-        };
         self.incident_convergences
             .insert(incident_id.clone(), convergence.clone());
         self.sync_zone_pending_convergences(zone_id);
 
-        // Emit event
         let event = FleetControlEvent::quarantine_initiated(&trace.trace_id, zone_id, extension_id);
         push_bounded(&mut self.events, event, MAX_FLEET_EVENTS);
 
-        // Prepare action record for persistence (but don't persist yet)
-        let action_record = if self.fleet_transport.is_some() {
-            Some(FleetActionRecord {
-                action_id: op_id.clone(),
-                emitted_at: chrono::Utc::now(),
-                action: PersistedFleetAction::Quarantine {
-                    zone_id: zone_id.to_string(),
-                    incident_id: incident_id.clone(),
-                    target_id: extension_id.to_string(),
-                    target_kind: FleetTargetKind::Extension,
-                    reason: scope.reason.clone(),
-                    quarantine_version: 1,
-                },
-            })
-        } else {
-            None
-        };
-
-        let result = FleetActionResult {
+        Ok(FleetActionResult {
             operation_id: op_id,
             action_type: "quarantine".to_string(),
             success: true,
@@ -2368,9 +2291,7 @@ impl FleetControlManager {
             convergence: Some(convergence),
             trace_id: trace.trace_id.clone(),
             event_code: FLEET_QUARANTINE_INITIATED.to_string(),
-        };
-
-        Ok((result, action_record))
+        })
     }
 
     /// Revoke an extension.
@@ -2866,6 +2787,29 @@ impl FleetControlManager {
         if zone_id.is_empty() {
             return Err(FleetControlError::scope_invalid(
                 "zone_id must not be empty",
+            ));
+        }
+        if zone_id.len() > 128 {
+            return Err(FleetControlError::scope_invalid(
+                "zone_id must be at most 128 characters",
+            ));
+        }
+        if zone_id == "." || zone_id == ".." || zone_id.contains("..") {
+            return Err(FleetControlError::scope_invalid(
+                "zone_id must not include traversal segments",
+            ));
+        }
+        if zone_id.contains('\0') {
+            return Err(FleetControlError::scope_invalid(
+                "zone_id must not contain null bytes",
+            ));
+        }
+        if !zone_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return Err(FleetControlError::scope_invalid(
+                "zone_id must match [a-zA-Z0-9._-]{1,128}",
             ));
         }
         Ok(zone_id)
@@ -4551,9 +4495,11 @@ mod tests {
     fn route_metadata_has_five_endpoints() {
         let routes = quarantine_route_metadata();
         assert_eq!(routes.len(), 5);
-        assert!(routes
-            .iter()
-            .all(|r| r.group == EndpointGroup::FleetControl));
+        assert!(
+            routes
+                .iter()
+                .all(|r| r.group == EndpointGroup::FleetControl)
+        );
     }
 
     #[test]
@@ -4605,6 +4551,44 @@ mod tests {
     }
 
     #[test]
+    fn owner_quarantine_fails_closed_when_transport_persistence_breaks() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path().join("fleet-state");
+        let transport = FileFleetTransport::new(root.clone());
+        let signing_material = FleetDecisionSigningMaterial {
+            signing_key: ed25519_dalek::SigningKey::from_bytes(&[31_u8; 32]),
+            key_source: "test",
+            signing_identity: "fleet-admin",
+        };
+        let mut manager =
+            FleetControlManager::with_file_transport(transport, Some(signing_material))
+                .expect("manager with transport");
+        manager.activate();
+        std::fs::remove_file(root.join("actions.jsonl")).expect("remove transport action log");
+
+        let owner = SharedFleetControlOwner {
+            inner: Mutex::new(manager),
+        };
+        let request = QuarantineRequest {
+            extension_id: "ext-broken-transport".to_string(),
+            scope: test_quarantine_scope(),
+        };
+
+        let err = owner
+            .quarantine(&admin_identity(), &test_trace(), &request)
+            .expect_err("broken transport must fail closed");
+        match err {
+            ApiError::BadRequest { detail, .. } => assert!(detail.contains(FLEET_INTERNAL)),
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let guard = owner.inner.lock().expect("owner lock");
+        assert_eq!(guard.incident_count(), 0);
+        assert!(guard.zones().is_empty());
+        assert!(guard.events().is_empty());
+    }
+
+    #[test]
     fn handle_revoke_succeeds() {
         let _guard = lock_handler_test_state();
         activate_shared_fleet_control_manager_for_tests();
@@ -4650,6 +4634,27 @@ mod tests {
             other => unreachable!("unexpected error: {other:?}"),
         };
         assert!(detail.contains(FLEET_SCOPE_INVALID));
+    }
+
+    #[test]
+    fn validated_zone_id_rejects_transport_unsafe_values() {
+        let invalid_zone_ids = vec![
+            "../zone-traversal".to_string(),
+            "zone\0null".to_string(),
+            "zone\r\nheader".to_string(),
+            "zone\u{200D}admin".to_string(),
+            format!("zone-{}", "x".repeat(200)),
+        ];
+
+        for zone_id in invalid_zone_ids {
+            let err = FleetControlManager::validated_zone_id(&zone_id).expect_err("invalid zone");
+            assert_eq!(err.error_code(), FLEET_SCOPE_INVALID);
+        }
+
+        assert_eq!(
+            FleetControlManager::validated_zone_id(" zone-us-east-1 ").unwrap(),
+            "zone-us-east-1"
+        );
     }
 
     #[test]
@@ -5046,9 +5051,10 @@ mod tests {
             first.receipt.receipt_id,
             "rcpt-fleet-op-18446744073709551615"
         );
-        assert!(mgr
-            .incidents
-            .contains_key("inc-fleet-op-18446744073709551615"));
+        assert!(
+            mgr.incidents
+                .contains_key("inc-fleet-op-18446744073709551615")
+        );
         assert!(mgr.operation_ids_exhausted);
 
         let err = mgr

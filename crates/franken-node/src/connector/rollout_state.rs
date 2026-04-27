@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread;
 use std::time::Duration;
 
@@ -339,8 +339,8 @@ pub fn persist_epoch_scoped(
     })
 }
 
-fn persist_lock_registry() -> &'static Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>> {
-    static LOCKS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+fn persist_lock_registry() -> &'static Mutex<BTreeMap<PathBuf, Weak<Mutex<()>>>> {
+    static LOCKS: OnceLock<Mutex<BTreeMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
     LOCKS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
@@ -374,11 +374,15 @@ fn persist_lock(path: &Path) -> Result<Arc<Mutex<()>>, PersistError> {
             message: "persist lock registry poisoned".to_string(),
         })
         .map(|mut locks| {
-            Arc::clone(
-                locks
-                    .entry(lock_key)
-                    .or_insert_with(|| Arc::new(Mutex::new(()))),
-            )
+            locks.retain(|_, weak_lock| weak_lock.upgrade().is_some());
+
+            if let Some(lock) = locks.get(&lock_key).and_then(Weak::upgrade) {
+                return lock;
+            }
+
+            let lock = Arc::new(Mutex::new(()));
+            locks.insert(lock_key, Arc::downgrade(&lock));
+            lock
         })
 }
 
@@ -1073,6 +1077,42 @@ mod tests {
             .expect("path A persist thread should complete")
             .expect("persist for path A should succeed after rename resumes");
         assert_eq!(load(&path_a).unwrap(), state_a);
+    }
+
+    #[test]
+    fn persist_lock_registry_prunes_dead_entries_for_old_paths() {
+        let dir = TempDir::new().unwrap();
+        let path_a = dir.path().join("state-a.json");
+        let path_b = dir.path().join("state-b.json");
+
+        let state_a = sample_state();
+        persist(&state_a, &path_a).expect("persist state a");
+
+        let mut state_b = sample_state();
+        state_b.connector_id = "connector-b".to_string();
+        persist(&state_b, &path_b).expect("persist state b");
+
+        let mut state_a_next = state_a.clone();
+        state_a_next.bump_version();
+        persist(&state_a_next, &path_a).expect("persist updated state a");
+
+        let registry = persist_lock_registry()
+            .lock()
+            .expect("persist lock registry");
+        let matching_keys = registry
+            .iter()
+            .filter(|(lock_key, _)| lock_key.starts_with(dir.path()))
+            .collect::<Vec<_>>();
+        assert!(
+            matching_keys.len() <= 1,
+            "dead persist-lock entries should be pruned for unique rollout paths: {matching_keys:?}"
+        );
+        assert!(
+            matching_keys
+                .iter()
+                .all(|(_, weak_lock)| weak_lock.upgrade().is_none()),
+            "registry should not retain strong references after persist completes"
+        );
     }
 
     #[test]
