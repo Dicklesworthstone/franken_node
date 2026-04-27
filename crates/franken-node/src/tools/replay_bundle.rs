@@ -148,12 +148,12 @@ pub enum ReplayBundleError {
     SignatureKeySourceUntrusted { key_source: String },
     #[error("replay bundle signature verification requires a trusted signer key id")]
     SignatureTrustAnchorMissing,
-    #[error("replay bundle signature key id `{actual}` is not trusted key id `{expected}`")]
-    SignatureKeyUntrusted { actual: String, expected: String },
+    #[error("replay bundle signature key id is not trusted")]
+    SignatureKeyUntrusted,
     #[error("replay bundle signature public key is malformed: {detail}")]
     SignaturePublicKeyMalformed { detail: String },
-    #[error("replay bundle signature key id `{claimed}` does not match public key `{derived}`")]
-    SignatureKeyIdMismatch { claimed: String, derived: String },
+    #[error("replay bundle signature key id does not match public key")]
+    SignatureKeyIdMismatch,
     #[error("replay bundle signed payload hash does not match integrity_hash")]
     SignaturePayloadHashMismatch,
     #[error("replay bundle signature bytes are malformed: {detail}")]
@@ -871,10 +871,12 @@ pub fn verify_replay_bundle_signature(
         });
     }
     if !constant_time::ct_eq(&signature.key_id, trusted_key_id) {
-        return Err(ReplayBundleError::SignatureKeyUntrusted {
-            actual: signature.key_id.clone(),
-            expected: trusted_key_id.to_string(),
-        });
+        tracing::warn!(
+            actual_key_id = %signature.key_id,
+            expected_key_id = %trusted_key_id,
+            "replay bundle signature key id does not match trusted key"
+        );
+        return Err(ReplayBundleError::SignatureKeyUntrusted);
     }
 
     let public_key_bytes = hex::decode(&signature.public_key_hex).map_err(|source| {
@@ -897,10 +899,12 @@ pub fn verify_replay_bundle_signature(
         crate::supply_chain::artifact_signing::KeyId::from_verifying_key(&verifying_key)
             .to_string();
     if !constant_time::ct_eq(&signature.key_id, &derived_key_id) {
-        return Err(ReplayBundleError::SignatureKeyIdMismatch {
-            claimed: signature.key_id.clone(),
-            derived: derived_key_id,
-        });
+        tracing::warn!(
+            claimed_key_id = %signature.key_id,
+            derived_key_id = %derived_key_id,
+            "replay bundle signature key id does not match derived key from public key"
+        );
+        return Err(ReplayBundleError::SignatureKeyIdMismatch);
     }
 
     let payload = replay_bundle_signature_payload(bundle);
@@ -940,10 +944,12 @@ pub fn verify_replay_bundle_signature_with_trust_set(
         .iter()
         .any(|trusted_key_id| constant_time::ct_eq(trusted_key_id, &signature.key_id))
     {
-        return Err(ReplayBundleError::SignatureKeyUntrusted {
-            actual: signature.key_id.clone(),
-            expected: "configured replay trust set".to_string(),
-        });
+        tracing::warn!(
+            actual_key_id = %signature.key_id,
+            trusted_key_count = trusted_key_ids.len(),
+            "replay bundle signature key id not found in configured trust set"
+        );
+        return Err(ReplayBundleError::SignatureKeyUntrusted);
     }
 
     verify_replay_bundle_signature(bundle, Some(&signature.key_id))
@@ -2078,10 +2084,7 @@ mod tests {
         let bundle = signed_fixture_bundle("INC-RPL-SIG-002");
         let err = verify_replay_bundle_signature(&bundle, Some("keyid:untrusted"))
             .expect_err("must reject untrusted key");
-        assert!(matches!(
-            err,
-            ReplayBundleError::SignatureKeyUntrusted { .. }
-        ));
+        assert!(matches!(err, ReplayBundleError::SignatureKeyUntrusted));
     }
 
     #[test]
@@ -2093,11 +2096,7 @@ mod tests {
         let err = verify_replay_bundle_signature(&bundle, Some(&forged_key_id))
             .expect_err("trusted key id must still match the public key");
 
-        assert!(matches!(
-            err,
-            ReplayBundleError::SignatureKeyIdMismatch { ref claimed, .. }
-                if claimed == &forged_key_id
-        ));
+        assert!(matches!(err, ReplayBundleError::SignatureKeyIdMismatch));
     }
 
     #[test]
