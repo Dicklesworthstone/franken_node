@@ -13,6 +13,9 @@ use crate::capacity_defaults::aliases::MAX_EVENTS;
 /// Report schema version.
 pub const SCHEMA_VERSION: &str = "incident-lab-v1.0";
 
+/// Minimum rollback window in seconds (5 minutes) to prevent timing attacks.
+const MIN_ROLLBACK_WINDOW_SECS: u64 = 300;
+
 fn len_to_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
 }
@@ -880,12 +883,16 @@ impl IncidentLab {
             });
         }
 
-        if self.config.rollback_window_secs == 0 {
+        if self.config.rollback_window_secs < MIN_ROLLBACK_WINDOW_SECS {
+            tracing::warn!(
+                "Rollback window too short: {} < {} seconds (plan_id={})",
+                self.config.rollback_window_secs, MIN_ROLLBACK_WINDOW_SECS, plan.plan_id
+            );
             return Err(LabError {
                 code: error_codes::ERR_ILAB_ROLLBACK_INVALID.to_string(),
                 message: format!(
-                    "Rollback window must be greater than zero (plan_id={})",
-                    plan.plan_id
+                    "Rollback window must be at least {} seconds, got {}",
+                    MIN_ROLLBACK_WINDOW_SECS, self.config.rollback_window_secs
                 ),
             });
         }
@@ -1814,6 +1821,23 @@ mod tests {
             .generate_rollout_contract(&synthesis, &scenario.mitigation)
             .expect_err("should fail");
         assert_eq!(err.code, error_codes::ERR_ILAB_ROLLBACK_INVALID);
+    }
+
+    #[test]
+    fn test_rollout_contract_rejects_short_rollback_window() {
+        let config = LabConfig::default()
+            .with_signer("validator-B")
+            .with_threshold(0.05)
+            .with_rollback_window(1); // Dangerously short: 1 second
+        let lab = IncidentLab::new(config);
+        let scenario =
+            make_test_scenario("t-rb-short", "p-rb-short", "validator-B", 0.5, 100.0, 10.0);
+        let synthesis = lab.compute_delta(&scenario).expect("should succeed");
+        let err = lab
+            .generate_rollout_contract(&synthesis, &scenario.mitigation)
+            .expect_err("should fail");
+        assert_eq!(err.code, error_codes::ERR_ILAB_ROLLBACK_INVALID);
+        assert!(err.message.contains("must be at least 300 seconds"));
     }
 
     #[test]
