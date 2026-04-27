@@ -18,6 +18,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use rand; // For jitter in lock timeout backoff
 #[cfg(feature = "http-client")]
 use url::Url;
 
@@ -1456,7 +1457,10 @@ impl CapabilityProvider {
     }
 
     fn push_audit(&self, event: RemoteCapAuditEvent) {
+        // Audit events must never be lost - use fail-closed semantics to ensure
+        // audit integrity even under high concurrency or error conditions.
         self.with_audit_log_fail_closed(move |audit_log| {
+            // Use push_bounded to prevent memory exhaustion while maintaining audit history
             push_bounded(audit_log, event, MAX_AUDIT_LOG_ENTRIES);
         });
     }
@@ -1480,14 +1484,29 @@ impl CapabilityProvider {
         &self,
         action: impl FnOnce(&mut Vec<RemoteCapAuditEvent>) -> R,
     ) -> R {
-        match self.try_lock_audit_log_with_timeout(Duration::from_millis(100)) {
+        // Try immediate lock acquisition first (non-blocking)
+        match self.audit_log.try_lock() {
             Ok(mut audit_log) => action(&mut audit_log),
-            Err(_) => {
-                let mut audit_log = self
-                    .audit_log
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            Err(TryLockError::Poisoned(poisoned)) => {
+                // Handle poisoned mutex by recovering the data
+                let mut audit_log = poisoned.into_inner();
                 action(&mut audit_log)
+            }
+            Err(TryLockError::WouldBlock) => {
+                // If immediate lock fails, try with a short timeout
+                match self.try_lock_audit_log_with_timeout(Duration::from_millis(50)) {
+                    Ok(mut audit_log) => action(&mut audit_log),
+                    Err(_) => {
+                        // Timeout occurred - use fail-closed semantics to prevent audit loss.
+                        // For audit operations, we must not drop events, so we'll use a blocking
+                        // lock with poisoned mutex recovery to ensure audit integrity.
+                        let mut audit_log = self
+                            .audit_log
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        action(&mut audit_log)
+                    }
+                }
             }
         }
     }
@@ -1498,20 +1517,34 @@ impl CapabilityProvider {
     ) -> Result<std::sync::MutexGuard<'_, Vec<RemoteCapAuditEvent>>, RemoteCapError> {
         let start = std::time::Instant::now();
         let mut backoff = Duration::from_millis(1);
+        let max_backoff = Duration::from_millis(5); // Cap backoff to avoid long delays
 
         loop {
             match self.audit_log.try_lock() {
                 Ok(guard) => return Ok(guard),
-                Err(TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
+                Err(TryLockError::Poisoned(poisoned)) => {
+                    // Poisoned mutex recovery - this ensures audit integrity even if
+                    // other threads panic while holding the lock
+                    return Ok(poisoned.into_inner())
+                }
                 Err(TryLockError::WouldBlock) => {
-                    if start.elapsed() >= timeout {
+                    let elapsed = start.elapsed();
+                    if elapsed >= timeout {
                         return Err(RemoteCapError::LockTimeout {
                             operation: "audit_log_access".to_string(),
                             timeout_ms: timeout.as_millis() as u64,
                         });
                     }
-                    std::thread::sleep(backoff);
-                    backoff = std::cmp::min(backoff * 2, Duration::from_millis(10));
+
+                    // Use exponential backoff with jitter to reduce contention
+                    let jitter = Duration::from_nanos(
+                        (rand::random::<u32>() % 1000) as u64 * 1000 // 0-1ms jitter
+                    );
+                    let sleep_duration = std::cmp::min(backoff.saturating_add(jitter), max_backoff);
+                    std::thread::sleep(sleep_duration);
+
+                    // Exponential backoff with saturation
+                    backoff = std::cmp::min(backoff.saturating_mul(2), max_backoff);
                 }
             }
         }
