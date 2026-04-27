@@ -463,7 +463,6 @@ impl fmt::Display for VerifierSdkError {
             ),
             Self::SessionStepSignatureMismatch {
                 step_index,
-                expected: _,
                 actual: _,
             } => write!(
                 formatter,
