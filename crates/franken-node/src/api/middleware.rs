@@ -19,15 +19,14 @@
 use crate::security::constant_time;
 use serde::{Deserialize, Serialize};
 #[cfg(any(test, feature = "control-plane"))]
+use sha2::{Digest, Sha256};
+#[cfg(any(test, feature = "control-plane"))]
 use std::collections::BTreeMap;
 #[cfg(any(test, feature = "control-plane"))]
 use std::time::Instant;
 
 #[cfg(any(test, feature = "control-plane"))]
 use super::error::ApiError;
-#[cfg(any(test, feature = "control-plane"))]
-use super::utf8_prefix;
-
 #[cfg(any(test, feature = "control-plane"))]
 const MAX_SAMPLES: usize = 4096;
 #[cfg(any(test, feature = "control-plane"))]
@@ -47,6 +46,28 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
         items.drain(0..drain_until);
     }
     items.extend(std::iter::once(item));
+}
+
+#[cfg(any(test, feature = "control-plane"))]
+fn credential_principal(label: &str, secret: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"control_plane_auth_principal_v1:");
+    let label_bytes = label.as_bytes();
+    hasher.update(
+        u64::try_from(label_bytes.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    hasher.update(label_bytes);
+    let secret_bytes = secret.as_bytes();
+    hasher.update(
+        u64::try_from(secret_bytes.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    hasher.update(secret_bytes);
+    let fingerprint = hex::encode(hasher.finalize());
+    format!("{label}:{}", &fingerprint[..16])
 }
 
 // ── Trace Context ──────────────────────────────────────────────────────────
@@ -264,7 +285,7 @@ pub fn authenticate(
                 });
             }
             Ok(AuthIdentity {
-                principal: format!("apikey:{}", utf8_prefix(key, 8)),
+                principal: credential_principal("apikey", key),
                 method: AuthMethod::ApiKey,
                 roles: vec!["reader".to_string()],
             })
@@ -294,7 +315,7 @@ pub fn authenticate(
                 });
             }
             Ok(AuthIdentity {
-                principal: format!("token:{}", utf8_prefix(token, 8)),
+                principal: credential_principal("token", token),
                 method: AuthMethod::BearerToken,
                 roles: vec!["operator".to_string(), "verifier".to_string()],
             })
@@ -323,7 +344,7 @@ pub fn authenticate(
                 });
             }
             Ok(AuthIdentity {
-                principal: format!("mtls:{}", utf8_prefix(propagated_identity, 16)),
+                principal: credential_principal("mtls", propagated_identity),
                 method: AuthMethod::MtlsClientCert,
                 roles: vec!["reader".to_string()], // SECURITY: default to minimal privilege
             })
@@ -570,7 +591,7 @@ pub fn check_rate_limit(limiter: &mut RateLimiter, trace_id: &str) -> Result<(),
             });
 
             Err(error_response)
-        },
+        }
     }
 }
 
@@ -1338,7 +1359,11 @@ mod tests {
             &keys,
         );
         let identity = result.expect("auth api key");
-        assert!(identity.principal.starts_with("apikey:"));
+        assert_eq!(
+            identity.principal,
+            credential_principal("apikey", "test-key-123")
+        );
+        assert!(!identity.principal.contains("test-key-123"));
     }
 
     #[test]
@@ -1351,7 +1376,11 @@ mod tests {
             &keys,
         );
         let identity = result.expect("auth bearer");
-        assert!(identity.principal.starts_with("token:"));
+        assert_eq!(
+            identity.principal,
+            credential_principal("token", "mytoken-abc")
+        );
+        assert!(!identity.principal.contains("mytoken-abc"));
     }
 
     #[test]
@@ -1364,8 +1393,10 @@ mod tests {
             &keys,
         );
         let identity = result.expect("auth api key");
-        let expected: String = "🔐鍵🙂abc123".chars().take(8).collect();
-        assert_eq!(identity.principal, format!("apikey:{expected}"));
+        assert_eq!(
+            identity.principal,
+            credential_principal("apikey", "🔐鍵🙂abc123")
+        );
     }
 
     #[test]
@@ -1378,8 +1409,10 @@ mod tests {
             &keys,
         );
         let identity = result.expect("auth bearer");
-        let expected: String = "令牌🙂abcXYZ".chars().take(8).collect();
-        assert_eq!(identity.principal, format!("token:{expected}"));
+        assert_eq!(
+            identity.principal,
+            credential_principal("token", "令牌🙂abcXYZ")
+        );
     }
 
     #[test]
@@ -1392,7 +1425,10 @@ mod tests {
             &keys,
         );
         let identity = result.expect("auth mtls");
-        assert_eq!(identity.principal, "mtls:fleet-service-ce");
+        assert_eq!(
+            identity.principal,
+            credential_principal("mtls", "fleet-service-cert")
+        );
     }
 
     #[test]
@@ -1433,7 +1469,10 @@ mod tests {
             &keys,
         );
         let identity = result.expect("auth mtls");
-        assert_eq!(identity.principal, "mtls:fleet-service-ce");
+        assert_eq!(
+            identity.principal,
+            credential_principal("mtls", "fleet-service-cert")
+        );
     }
 
     #[test]

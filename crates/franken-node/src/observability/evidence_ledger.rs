@@ -39,13 +39,16 @@
 //! - `EVD-LEDGER-004`: capacity breach warning
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::security::{constant_time, crypto::{Ed25519Verifier, SignatureVerifier}};
+use crate::security::{
+    constant_time,
+    crypto::{Ed25519Verifier, SignatureVerifier},
+};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hex;
 use sha2::{Digest, Sha256};
@@ -358,7 +361,9 @@ fn serialized_entry_size_with_payload_bytes(
 
     // The null payload serializes as "null" (4 bytes), so we subtract that and add the actual payload size
     let null_payload_size = 4; // "null"
-    base_size.saturating_sub(null_payload_size).saturating_add(payload_json_bytes.len())
+    base_size
+        .saturating_sub(null_payload_size)
+        .saturating_add(payload_json_bytes.len())
 }
 
 /// Create a canonical representation of an EvidenceEntry for signature verification.
@@ -777,11 +782,7 @@ fn format_ledger_entry_too_large_event(
     )
 }
 
-fn format_ledger_append_event(
-    id: EntryId,
-    entry: &EvidenceEntry,
-    entry_size: usize,
-) -> String {
+fn format_ledger_append_event(id: EntryId, entry: &EvidenceEntry, entry_size: usize) -> String {
     format!(
         "{}: entry={}, decision={}, epoch={}, size={}",
         event_codes::LEDGER_APPEND,
@@ -839,9 +840,9 @@ pub struct EvidenceLedger {
     /// Bounded replay-prevention window in append order, with precomputed
     /// timestamp bytes for the constant-time replay scan.
     seen_signatures: VecDeque<ReplayKey>,
-    /// bd-17pb5: Miss prefilter for replay-window scans. Contains hash values
-    /// of replay keys to quickly eliminate obvious misses before expensive CT scan.
-    replay_key_hashes: HashSet<u64>,
+    /// bd-17pb5: Miss prefilter for replay-window scans. Counts hash values of
+    /// replay keys so truncated-hash collisions cannot suppress retained keys.
+    replay_key_hashes: HashMap<u64, usize>,
     /// Hash of the last appended entry for hash chain integrity
     last_entry_hash: Option<EntryHash>,
 }
@@ -944,7 +945,10 @@ impl EvidenceLedger {
         // bd-17pb5: Use miss prefilter to quickly eliminate obvious misses.
         // If the hash is not in our prefilter set, we know the key is definitely not present.
         let replay_key_hash_value = replay_key_hash(&replay_key);
-        if !self.replay_key_hashes.contains(&replay_key_hash_value) {
+        if !matches!(
+            self.replay_key_hashes.get(&replay_key_hash_value),
+            Some(count) if *count > 0
+        ) {
             // Definitely not present, skip expensive constant-time scan
             return false;
         }
@@ -1044,8 +1048,30 @@ impl EvidenceLedger {
             current_bytes: 0,
             verifying_key,
             seen_signatures: VecDeque::new(),
-            replay_key_hashes: HashSet::new(),
+            replay_key_hashes: HashMap::new(),
             last_entry_hash: None,
+        }
+    }
+
+    fn retain_replay_key_hash(&mut self, replay_key_hash_value: u64) {
+        if let Some(count) = self.replay_key_hashes.get_mut(&replay_key_hash_value) {
+            *count = count.saturating_add(1);
+        } else {
+            self.replay_key_hashes.insert(replay_key_hash_value, 1);
+        }
+    }
+
+    fn release_replay_key_hash(&mut self, replay_key_hash_value: u64) {
+        let remove_entry = match self.replay_key_hashes.get_mut(&replay_key_hash_value) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                false
+            }
+            Some(_) => true,
+            None => false,
+        };
+        if remove_entry {
+            self.replay_key_hashes.remove(&replay_key_hash_value);
         }
     }
 
@@ -1053,18 +1079,18 @@ impl EvidenceLedger {
         let replay_window = self.capacity.max_entries.max(MIN_SEEN_SIGNATURES);
         let new_replay_key = replay_key(timestamp_ms, &signature);
 
-        // bd-17pb5: Add to miss prefilter hash set
+        // bd-17pb5: Add to miss prefilter index
         let new_hash = replay_key_hash(&new_replay_key);
-        self.replay_key_hashes.insert(new_hash);
+        self.retain_replay_key_hash(new_hash);
 
         self.seen_signatures.push_back(new_replay_key);
 
         // Remove old entries and their hashes when exceeding window size
         while self.seen_signatures.len() > replay_window {
             if let Some(old_replay_key) = self.seen_signatures.pop_front() {
-                // bd-17pb5: Remove from miss prefilter hash set
+                // bd-17pb5: Remove from miss prefilter index
                 let old_hash = replay_key_hash(&old_replay_key);
-                self.replay_key_hashes.remove(&old_hash);
+                self.release_replay_key_hash(old_hash);
             }
         }
     }
@@ -7103,7 +7129,7 @@ mod tests {
             "Unknown signature should not be detected as replay attack"
         );
 
-        // Verify that the replay key hash set contains the expected number of entries
+        // Verify that the replay key prefilter contains the expected number of entries
         assert_eq!(
             ledger.replay_key_hashes.len(),
             10,
@@ -7129,5 +7155,20 @@ mod tests {
             ledger.replay_key_hashes.len() <= expected_size,
             "Hash prefilter should respect capacity bounds"
         );
+    }
+
+    #[test]
+    fn replay_key_hash_prefilter_refcounts_collisions() {
+        let mut ledger = EvidenceLedger::new(LedgerCapacity::new(2, 1024));
+
+        ledger.retain_replay_key_hash(7);
+        ledger.retain_replay_key_hash(7);
+        assert_eq!(ledger.replay_key_hashes.get(&7), Some(&2));
+
+        ledger.release_replay_key_hash(7);
+        assert_eq!(ledger.replay_key_hashes.get(&7), Some(&1));
+
+        ledger.release_replay_key_hash(7);
+        assert!(!ledger.replay_key_hashes.contains_key(&7));
     }
 }

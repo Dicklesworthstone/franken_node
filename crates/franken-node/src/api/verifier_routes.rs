@@ -207,6 +207,18 @@ fn normalize_required_field(
     Ok(normalized.to_string())
 }
 
+fn require_optional_field(
+    value: Option<&str>,
+    field_name: &str,
+    trace_id: &str,
+) -> Result<String, ApiError> {
+    let raw = value.ok_or_else(|| ApiError::BadRequest {
+        detail: format!("verifier field `{field_name}` is required"),
+        trace_id: trace_id.to_string(),
+    })?;
+    normalize_required_field(raw, field_name, trace_id)
+}
+
 fn sha256_marker_from_parts(domain: &[u8], parts: &[&str]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(domain);
@@ -946,20 +958,26 @@ pub fn get_atc_metric_snapshot(
     let metric_id = normalize_required_field(metric_id, "metric_id", &trace.trace_id)?;
     let computation_id = "atc-comp-latest";
     let report = build_atc_report(&trace.trace_id, computation_id)?;
-    let snapshot = report
+    let Some(snapshot) = report
         .metric_snapshots
         .iter()
         .find(|snapshot| snapshot.metric_id == metric_id)
         .cloned()
-        .unwrap_or_else(|| {
-            atc_metric_snapshot_for(
-                computation_id,
+    else {
+        return with_verifier_route_state(&trace.trace_id, |state| {
+            state.append_audit(
+                "atc.verifier.metrics.read",
+                &identity.principal,
                 &metric_id,
-                &report.metric_snapshot_root_hash,
-                &report.proof_chain_root_hash,
-                &report.verifier_output_digest,
-            )
+                "not_found",
+                &trace.trace_id,
+            )?;
+            Err(ApiError::NotFound {
+                detail: format!("no ATC verifier metric recorded for metric_id `{metric_id}`"),
+                trace_id: trace.trace_id.clone(),
+            })
         });
+    };
 
     with_verifier_route_state(&trace.trace_id, |state| {
         state.append_audit(
@@ -993,14 +1011,24 @@ pub fn verify_atc_computation(
     let computation_id =
         normalize_required_field(computation_id, "computation_id", &trace.trace_id)?;
     let report = build_atc_report(&trace.trace_id, &computation_id)?;
-    let metric_matches = request
-        .metric_snapshot_root_hash
-        .as_deref()
-        .map_or(true, |root| ct_eq(root, &report.metric_snapshot_root_hash));
-    let proof_matches = request
-        .proof_chain_root_hash
-        .as_deref()
-        .map_or(true, |root| ct_eq(root, &report.proof_chain_root_hash));
+    let expected_metric_snapshot_root_hash = require_optional_field(
+        request.metric_snapshot_root_hash.as_deref(),
+        "metric_snapshot_root_hash",
+        &trace.trace_id,
+    )?;
+    let expected_proof_chain_root_hash = require_optional_field(
+        request.proof_chain_root_hash.as_deref(),
+        "proof_chain_root_hash",
+        &trace.trace_id,
+    )?;
+    let metric_matches = ct_eq(
+        &expected_metric_snapshot_root_hash,
+        &report.metric_snapshot_root_hash,
+    );
+    let proof_matches = ct_eq(
+        &expected_proof_chain_root_hash,
+        &report.proof_chain_root_hash,
+    );
     let aggregate_only = report.data_visibility == "aggregate_only"
         && report.metric_snapshots.iter().all(|snapshot| {
             snapshot.data_visibility == "aggregate_only" && !snapshot.raw_participant_data_included
@@ -1353,8 +1381,9 @@ mod tests {
         reset_verifier_state();
         let identity = test_identity();
         let trace = test_trace();
+        let report = get_atc_report(&identity, &trace, "atc-comp-test-003").expect("ATC report");
         let request = AtcVerificationRequest {
-            metric_snapshot_root_hash: None,
+            metric_snapshot_root_hash: Some(report.data.metric_snapshot_root_hash.clone()),
             proof_chain_root_hash: Some(format!("sha256:{}", "0".repeat(64))),
             verifier_parameters: std::collections::BTreeMap::new(),
         };
@@ -1365,6 +1394,52 @@ mod tests {
         assert_eq!(response.data.decision, "fail");
         assert!(response.data.deterministic);
         assert_eq!(response.data.data_visibility, "aggregate_only");
+    }
+
+    #[test]
+    fn atc_verify_endpoint_rejects_missing_metric_root() {
+        let _guard = test_guard();
+        reset_verifier_state();
+        let identity = test_identity();
+        let trace = test_trace();
+        let report = get_atc_report(&identity, &trace, "atc-comp-test-003").expect("ATC report");
+        let request = AtcVerificationRequest {
+            metric_snapshot_root_hash: None,
+            proof_chain_root_hash: Some(report.data.proof_chain_root_hash.clone()),
+            verifier_parameters: std::collections::BTreeMap::new(),
+        };
+
+        let err = verify_atc_computation(&identity, &trace, "atc-comp-test-003", &request)
+            .expect_err("missing metric root must fail closed");
+
+        assert!(matches!(err, ApiError::BadRequest { .. }));
+    }
+
+    #[test]
+    fn atc_metric_snapshot_unknown_metric_fails_closed_and_audits_not_found() {
+        let _guard = test_guard();
+        reset_verifier_state();
+        let identity = test_identity();
+        let trace = test_trace();
+
+        let err = get_atc_metric_snapshot(&identity, &trace, "totally_unknown_metric")
+            .expect_err("unknown metric must fail closed");
+
+        assert!(matches!(err, ApiError::NotFound { .. }));
+        let audit = query_audit_log(
+            &identity,
+            &trace,
+            &AuditLogQuery {
+                action: Some("atc.verifier.metrics.read".to_string()),
+                actor: Some("test-verifier".to_string()),
+                limit: Some(10),
+                since: None,
+            },
+        )
+        .expect("audit query");
+        assert_eq!(audit.data.len(), 1);
+        assert_eq!(audit.data[0].resource, "totally_unknown_metric");
+        assert_eq!(audit.data[0].outcome, "not_found");
     }
 
     #[test]
