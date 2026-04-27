@@ -33,29 +33,24 @@ impl CompromiseReductionHarness {
         // Domain separator
         hasher.update(b"compromise_reduction_entry_v1:");
 
-        // Hash all fields in a deterministic order
+        // Hash all fields with length prefixes to prevent collision
+        hasher.update((entry.bead_id.len() as u64).to_le_bytes());
         hasher.update(entry.bead_id.as_bytes());
-        hasher.update(b"|");
+        hasher.update((entry.generated_at_utc.len() as u64).to_le_bytes());
         hasher.update(entry.generated_at_utc.as_bytes());
-        hasher.update(b"|");
+        hasher.update((entry.trace_id.len() as u64).to_le_bytes());
         hasher.update(entry.trace_id.as_bytes());
-        hasher.update(b"|");
+        hasher.update((entry.campaign_name.len() as u64).to_le_bytes());
         hasher.update(entry.campaign_name.as_bytes());
-        hasher.update(b"|");
+        hasher.update((entry.campaign_version.len() as u64).to_le_bytes());
         hasher.update(entry.campaign_version.as_bytes());
-        hasher.update(b"|");
+        hasher.update((entry.reproducible_command.len() as u64).to_le_bytes());
         hasher.update(entry.reproducible_command.as_bytes());
-        hasher.update(b"|");
         hasher.update(&entry.minimum_required_ratio.to_le_bytes());
-        hasher.update(b"|");
         hasher.update(&entry.baseline_compromised.to_le_bytes());
-        hasher.update(b"|");
         hasher.update(&entry.hardened_compromised.to_le_bytes());
-        hasher.update(b"|");
         hasher.update(&entry.compromise_reduction_ratio.to_le_bytes());
-        hasher.update(b"|");
         hasher.update(&entry.total_attack_vectors.to_le_bytes());
-        hasher.update(b"|");
         hasher.update(&entry.containment_vectors.to_le_bytes());
 
         hex::encode(hasher.finalize())

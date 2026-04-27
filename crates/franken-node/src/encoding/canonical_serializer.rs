@@ -92,13 +92,25 @@ mod tests {
         payload_len: usize,
     ) -> ContentHash {
         let mut bytes = [0u8; 32];
+        // Use length-prefixed encoding to prevent delimiter collision attacks
+        let domain_prefix = domain.prefix();
+        let class_label = class.label();
+        let tier_label = class.tier().label();
+        let case_label = case.label;
+        let payload_len_str = payload_len.to_string();
+
         let material = format!(
-            "{}|{}|{}|{}|{}",
-            domain.prefix(),
-            class.label(),
-            class.tier().label(),
-            case.label,
-            payload_len
+            "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            domain_prefix.len(),
+            domain_prefix,
+            class_label.len(),
+            class_label,
+            tier_label.len(),
+            tier_label,
+            case_label.len(),
+            case_label,
+            payload_len_str.len(),
+            payload_len_str
         );
         for (index, byte) in material.bytes().enumerate() {
             let slot = index % bytes.len();
