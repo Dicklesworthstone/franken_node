@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::{DateTime, Utc};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::clock;
@@ -535,7 +535,7 @@ pub fn verify_receipt_with_audience(
         .map_err(ReceiptError::SignatureDecode)?;
     let signature = Signature::from_slice(&sig_bytes).map_err(|_| ReceiptError::SignatureBytes)?;
 
-    if public_key.verify(payload.as_bytes(), &signature).is_err() {
+    if public_key.verify_strict(payload.as_bytes(), &signature).is_err() {
         return Ok(false);
     }
 

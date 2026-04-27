@@ -505,7 +505,7 @@ pub fn verify_ed25519_signature(
         }
     })?;
     verifying_key
-        .verify(payload, &signature)
+        .verify_strict(payload, &signature)
         .map_err(|_| BundleError::Ed25519SignatureInvalid)
 }
 

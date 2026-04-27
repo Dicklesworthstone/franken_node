@@ -367,7 +367,6 @@ pub enum VerifierSdkError {
     },
     SessionStepSignatureMismatch {
         step_index: usize,
-        expected: String,
         actual: String,
     },
     BoundedStateExceeded {
@@ -1252,7 +1251,6 @@ impl VerifierSdk {
             if !constant_time_eq(&step.step_signature, &expected_signature) {
                 return Err(VerifierSdkError::SessionStepSignatureMismatch {
                     step_index: step.step_index,
-                    expected: expected_signature,
                     actual: step.step_signature.clone(),
                 });
             }
@@ -1320,7 +1318,7 @@ impl VerifierSdk {
 
         // Verify the Ed25519 signature
         self.verifying_key
-            .verify(&payload, &signature)
+            .verify_strict(&payload, &signature)
             .map_err(|_| VerifierSdkError::ResultSignatureMismatch {
                 expected: "valid Ed25519 signature".to_string(),
                 actual: result.verifier_signature.clone(),
@@ -2753,7 +2751,6 @@ mod tests {
         };
         let session_signature_error = VerifierSdkError::SessionStepSignatureMismatch {
             step_index: 2,
-            expected: "expected-step-signature".to_string(),
             actual: "actual-step-signature".to_string(),
         };
         let result_signature_error = VerifierSdkError::ResultSignatureMismatch {

@@ -599,7 +599,7 @@ pub fn verify_signature(
     let payload = ed25519_capsule_signature_payload(capsule);
 
     verifying_key
-        .verify(&payload, &signature)
+        .verify_strict(&payload, &signature)
         .map_err(|_| CapsuleError::Ed25519SignatureInvalid)
 }
 

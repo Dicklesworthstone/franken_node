@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
@@ -459,7 +459,7 @@ pub fn verify_signature(
             .map_err(|_| ArtifactSigningError::ManifestSignatureInvalid)?,
     );
     verifying_key
-        .verify(data, &sig)
+        .verify_strict(data, &sig)
         .map_err(|_| ArtifactSigningError::ManifestSignatureInvalid)
 }
 

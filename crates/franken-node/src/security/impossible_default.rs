@@ -482,8 +482,6 @@ impl Ed25519SignatureVerifier {
 
 impl SignatureVerifier for Ed25519SignatureVerifier {
     fn verify(&self, token: &CapabilityToken) -> bool {
-        use ed25519_dalek::Verifier;
-
         let Ok(sig_bytes) = hex::decode(&token.signature) else {
             return false;
         };
@@ -494,7 +492,7 @@ impl SignatureVerifier for Ed25519SignatureVerifier {
 
         let hash = token.content_hash();
         self.verifying_key
-            .verify(hash.as_bytes(), &signature)
+            .verify_strict(hash.as_bytes(), &signature)
             .is_ok()
     }
 }
