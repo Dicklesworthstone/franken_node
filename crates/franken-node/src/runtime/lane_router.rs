@@ -1047,17 +1047,11 @@ impl LaneRouter {
                     lane_state.metrics.queued = lane_state.queue.len();
                     lane_state.metrics.in_flight = lane_state.metrics.in_flight.saturating_add(1);
                     lane_state
-                        .metrics
-                        .queue_wait_samples_ms
-                        .push(now_ms.saturating_sub(queued.enqueued_at_ms));
-                    if lane_state.metrics.queue_wait_samples_ms.len() > MAX_QUEUE_WAIT_SAMPLES {
-                        let sample_count = lane_state.metrics.queue_wait_samples_ms.len();
-                        let overflow = sample_count.saturating_sub(MAX_QUEUE_WAIT_SAMPLES);
-                        lane_state
-                            .metrics
-                            .queue_wait_samples_ms
-                            .drain(0..overflow.min(sample_count));
-                    }
+                    push_bounded(
+                        &mut lane_state.metrics.queue_wait_samples_ms,
+                        now_ms.saturating_sub(queued.enqueued_at_ms),
+                        MAX_QUEUE_WAIT_SAMPLES,
+                    );
                     (op_id, lane_state.metrics.in_flight)
                 };
                 self.queued_operation_ids.remove(&promoted_op_id);
@@ -2684,10 +2678,12 @@ mod tests {
         // Manually insert a massive number of queue wait samples to test bounds
         let background_state = router.lanes.get_mut(&ProductLane::Background).unwrap();
 
-        // Fill beyond MAX_QUEUE_WAIT_SAMPLES with extreme values
+        // Fill beyond MAX_QUEUE_WAIT_SAMPLES with extreme values using bounded push
         for i in 0..(MAX_QUEUE_WAIT_SAMPLES * 2) {
-            background_state.metrics.queue_wait_samples_ms.push(
+            push_bounded(
+                &mut background_state.metrics.queue_wait_samples_ms,
                 i.saturating_mul(1000) as u64, // Large wait times that could cause issues
+                MAX_QUEUE_WAIT_SAMPLES,
             );
         }
 
