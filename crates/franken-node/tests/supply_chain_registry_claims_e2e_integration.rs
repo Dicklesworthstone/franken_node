@@ -418,7 +418,7 @@ impl SupplyChainE2EHarness {
                             "Scoreboard publication rejected"
                         );
 
-                        context.insert("rejection_reason".to_string(), format!("{:?}", reason));
+                        context.insert("rejection_reason".to_string(), "publication_rejected".to_string());
                         context.insert("error_code".to_string(), error_code);
 
                         self.log_operation(E2EOperationLog {
@@ -427,12 +427,12 @@ impl SupplyChainE2EHarness {
                             job_id,
                             duration_ms: start_time.elapsed().as_millis() as u64,
                             success: false,
-                            error: Some(format!("Publication rejected: {:?}", reason)),
+                            error: Some(format!("Publication rejected: sanitized error")),
                             context,
                             ..Default::default()
                         }).await;
 
-                        return Err(format!("Scoreboard publication failed: {:?}", reason).into());
+                        return Err(format!("Scoreboard publication failed: sanitized error").into());
                     }
                 }
             }
@@ -449,7 +449,7 @@ impl SupplyChainE2EHarness {
                     "Claim compilation rejected"
                 );
 
-                context.insert("rejection_reason".to_string(), format!("{:?}", reason));
+                context.insert("rejection_reason".to_string(), "compilation_rejected".to_string());
                 context.insert("error_code".to_string(), error_code);
 
                 self.log_operation(E2EOperationLog {
@@ -458,13 +458,13 @@ impl SupplyChainE2EHarness {
                     job_id,
                     duration_ms: start_time.elapsed().as_millis() as u64,
                     success: false,
-                    error: Some(format!("Compilation rejected: {:?}", reason)),
+                    error: Some(format!("Compilation rejected: sanitized error")),
                     context,
                     ..Default::default()
                 })
                 .await;
 
-                return Err(format!("Claim compilation failed: {:?}", reason).into());
+                return Err(format!("Claim compilation failed: sanitized error").into());
             }
         }
 

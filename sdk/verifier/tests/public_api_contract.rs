@@ -1116,8 +1116,8 @@ fn test_verifier_sdk_new_rejects_invalid_identities() -> Result<(), String> {
             }
             other => {
                 return Err(format!(
-                    "Expected InvalidVerifierIdentity for '{}' ({}), got {:?}",
-                    invalid_input, description, other
+                    "Expected InvalidVerifierIdentity for '{}' ({}), got error type mismatch",
+                    invalid_input, description
                 ));
             }
         }
@@ -1140,11 +1140,10 @@ fn test_verify_migration_artifact_rejects_structural_bundle() -> Result<(), Stri
             Ok(())
         }
         Ok(result) => Err(format!(
-            "expected structural bundle rejection, got success verdict {:?}",
-            result.verdict
+            "expected structural bundle rejection, got unexpected success"
         )),
         Err(other) => Err(format!(
-            "expected UnauthenticatedStructuralBundle, got {other:?}"
+            "expected UnauthenticatedStructuralBundle, got different error type"
         )),
     }
 }
@@ -1164,11 +1163,10 @@ fn test_verify_trust_state_rejects_structural_bundle() -> Result<(), String> {
             Ok(())
         }
         Ok(result) => Err(format!(
-            "expected structural bundle rejection, got success verdict {:?}",
-            result.verdict
+            "expected structural bundle rejection, got unexpected success"
         )),
         Err(other) => Err(format!(
-            "expected UnauthenticatedStructuralBundle, got {other:?}"
+            "expected UnauthenticatedStructuralBundle, got different error type"
         )),
     }
 }
@@ -1183,10 +1181,9 @@ fn test_verify_trust_state_rejects_malformed_trust_anchor() -> Result<(), String
             Ok(())
         }
         Ok(result) => Err(format!(
-            "expected malformed trust-anchor rejection, got success verdict {:?}",
-            result.verdict
+            "expected malformed trust-anchor rejection, got unexpected success"
         )),
-        Err(other) => Err(format!("expected MalformedTrustAnchor, got {other:?}")),
+        Err(other) => Err(format!("expected MalformedTrustAnchor, got different error type")),
     }
 }
 
@@ -1212,13 +1209,12 @@ fn test_create_session_rejects_malformed_session_ids() -> Result<(), String> {
             }
             Ok(session) => {
                 return Err(format!(
-                    "expected InvalidSessionId for {session_id:?}, got session {:?}",
-                    session.session_id
+                    "expected InvalidSessionId for session validation, got unexpected success"
                 ));
             }
             Err(other) => {
                 return Err(format!(
-                    "expected InvalidSessionId for {session_id:?}, got {other:?}"
+                    "expected InvalidSessionId for session validation, got different error type"
                 ));
             }
         }
@@ -1306,11 +1302,10 @@ fn test_execute_workflow_rejects_structural_bundle() -> Result<(), String> {
             Ok(())
         }
         Ok(result) => Err(format!(
-            "expected structural bundle rejection, got workflow verdict {:?}",
-            result.verdict
+            "expected structural bundle rejection, got unexpected workflow success"
         )),
         Err(other) => Err(format!(
-            "expected UnauthenticatedStructuralBundle, got {other:?}"
+            "expected UnauthenticatedStructuralBundle, got different error type"
         )),
     }
 }
@@ -1332,10 +1327,9 @@ fn test_execute_workflow_rejects_unsupported_sdk_version() -> Result<(), String>
             Ok(())
         }
         Ok(result) => Err(format!(
-            "expected unsupported sdk rejection, got workflow verdict {:?}",
-            result.verdict
+            "expected unsupported sdk rejection, got unexpected workflow success"
         )),
-        Err(other) => Err(format!("expected UnsupportedSdk, got {other:?}")),
+        Err(other) => Err(format!("expected UnsupportedSdk, got different error type")),
     }
 }
 
@@ -1613,8 +1607,8 @@ fn public_api_conformance_suite() {
         // Structured JSON-line output for CI parsing
         let json_result = json!({
             "test_id": test_case.id,
-            "category": format!("{:?}", test_case.category),
-            "level": format!("{:?}", test_case.level),
+            "category": test_case.category.to_string(),
+            "level": test_case.level.to_string(),
             "description": test_case.description,
             "verdict": verdict
         });
