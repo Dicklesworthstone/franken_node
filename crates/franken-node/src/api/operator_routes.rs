@@ -34,13 +34,15 @@ struct ProcessStartState {
 }
 
 static MONOTONIC_EPOCH: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
-// Atomic state machine: UNINIT=0, INITIALIZING=1, INITIALIZED=2
+const INIT_STATE_UNINITIALIZED: u8 = 0;
+const INIT_STATE_INITIALIZING: u8 = 1;
+const INIT_STATE_INITIALIZED: u8 = 2;
+
 static PROCESS_START_STATE: AtomicU8 = AtomicU8::new(0);
 static PROCESS_START_OFFSET_NANOS: AtomicU64 = AtomicU64::new(0);
 static PROCESS_START_WALL_CLOCK: std::sync::LazyLock<RwLock<String>> =
     std::sync::LazyLock::new(|| RwLock::new(String::new()));
 
-// Atomic state machine: UNINIT=0, INITIALIZING=1, INITIALIZED=2
 static OPERATOR_CONFIG_STATE: AtomicU8 = AtomicU8::new(0);
 static OPERATOR_CONFIG_VIEW: std::sync::LazyLock<RwLock<ConfigView>> =
     std::sync::LazyLock::new(|| {
@@ -62,6 +64,63 @@ fn duration_to_nanos(duration: std::time::Duration) -> u64 {
     duration.as_nanos().min(u64::MAX as u128) as u64
 }
 
+/// Reset an in-flight atomic initializer back to UNINIT if the install closure panics.
+struct AtomicInitResetGuard<'a> {
+    state: &'a AtomicU8,
+    armed: bool,
+}
+
+impl<'a> AtomicInitResetGuard<'a> {
+    fn new(state: &'a AtomicU8) -> Self {
+        Self { state, armed: true }
+    }
+
+    fn complete(mut self) {
+        self.armed = false;
+        self.state.store(INIT_STATE_INITIALIZED, Ordering::Release);
+    }
+}
+
+impl Drop for AtomicInitResetGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.state
+                .store(INIT_STATE_UNINITIALIZED, Ordering::Release);
+        }
+    }
+}
+
+fn run_atomic_initializer(state: &AtomicU8, install: impl FnOnce()) {
+    loop {
+        match state.load(Ordering::Acquire) {
+            INIT_STATE_INITIALIZED => return,
+            INIT_STATE_UNINITIALIZED => {
+                if state
+                    .compare_exchange(
+                        INIT_STATE_UNINITIALIZED,
+                        INIT_STATE_INITIALIZING,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_err()
+                {
+                    continue;
+                }
+
+                let guard = AtomicInitResetGuard::new(state);
+                install();
+                guard.complete();
+                return;
+            }
+            INIT_STATE_INITIALIZING => std::hint::spin_loop(),
+            invalid => {
+                debug_assert_eq!(invalid, INIT_STATE_INITIALIZED);
+                state.store(INIT_STATE_UNINITIALIZED, Ordering::Release);
+            }
+        }
+    }
+}
+
 fn install_process_start(offset_nanos: u64, wall_clock_rfc3339: String) {
     {
         let mut wall_clock = PROCESS_START_WALL_CLOCK
@@ -70,8 +129,6 @@ fn install_process_start(offset_nanos: u64, wall_clock_rfc3339: String) {
         *wall_clock = wall_clock_rfc3339;
     }
     PROCESS_START_OFFSET_NANOS.store(offset_nanos, Ordering::Relaxed);
-    // Atomically transition from INITIALIZING (1) to INITIALIZED (2)
-    PROCESS_START_STATE.store(2, Ordering::Release);
 }
 
 fn install_operator_config(config: &RuntimeConfig) {
@@ -79,48 +136,21 @@ fn install_operator_config(config: &RuntimeConfig) {
         .write()
         .unwrap_or_else(|poison| poison.into_inner());
     *view = ConfigView::from_runtime_config(config);
-    // Atomically transition from INITIALIZING (1) to INITIALIZED (2)
-    OPERATOR_CONFIG_STATE.store(2, Ordering::Release);
 }
 
 pub(crate) fn init_process_start() {
     #[cfg(test)]
     PROCESS_START_INIT_CALLS.fetch_add(1, Ordering::Relaxed);
 
-    // Fast path: already initialized
-    if PROCESS_START_STATE.load(Ordering::Acquire) == 2 {
-        return;
-    }
-
-    // Attempt to atomically transition from UNINIT (0) to INITIALIZING (1)
-    if PROCESS_START_STATE
-        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
-    {
-        // We won the race - perform initialization
+    run_atomic_initializer(&PROCESS_START_STATE, || {
         install_process_start(now_epoch_nanos(), chrono::Utc::now().to_rfc3339());
-    } else {
-        // Someone else is or was initializing - spin until initialized
-        while PROCESS_START_STATE.load(Ordering::Acquire) != 2 {
-            std::hint::spin_loop();
-        }
-    }
+    });
 }
 
 pub(crate) fn init_operator_config(config: &RuntimeConfig) {
-    // Attempt to atomically transition from UNINIT (0) to INITIALIZING (1)
-    if OPERATOR_CONFIG_STATE
-        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
-    {
-        // We won the race - perform initialization
+    run_atomic_initializer(&OPERATOR_CONFIG_STATE, || {
         install_operator_config(config);
-    } else {
-        // Someone else is or was initializing - spin until initialized
-        while OPERATOR_CONFIG_STATE.load(Ordering::Acquire) != 2 {
-            std::hint::spin_loop();
-        }
-    }
+    });
 }
 
 fn process_uptime_seconds() -> u64 {
@@ -129,7 +159,7 @@ fn process_uptime_seconds() -> u64 {
         return override_state.monotonic.elapsed().as_secs();
     }
 
-    if PROCESS_START_STATE.load(Ordering::Acquire) != 2 {
+    if PROCESS_START_STATE.load(Ordering::Acquire) != INIT_STATE_INITIALIZED {
         init_process_start();
     }
 
@@ -144,7 +174,7 @@ fn process_started_at_rfc3339() -> String {
         return override_state.wall_clock_rfc3339;
     }
 
-    if PROCESS_START_STATE.load(Ordering::Acquire) != 2 {
+    if PROCESS_START_STATE.load(Ordering::Acquire) != INIT_STATE_INITIALIZED {
         init_process_start();
     }
 
@@ -155,7 +185,7 @@ fn process_started_at_rfc3339() -> String {
 }
 
 fn operator_config_view() -> ConfigView {
-    if OPERATOR_CONFIG_STATE.load(Ordering::Acquire) != 2 {
+    if OPERATOR_CONFIG_STATE.load(Ordering::Acquire) != INIT_STATE_INITIALIZED {
         init_operator_config(&RuntimeConfig::default());
     }
 
@@ -791,6 +821,26 @@ mod tests {
     use super::*;
     use crate::api::middleware::AuthMethod;
     use crate::api::service::ControlPlaneService;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    fn reset_operator_route_state_for_tests() {
+        clear_process_start_override_for_tests();
+        PROCESS_START_OFFSET_NANOS.store(0, Ordering::Relaxed);
+        PROCESS_START_STATE.store(INIT_STATE_UNINITIALIZED, Ordering::Release);
+        PROCESS_START_INIT_CALLS.store(0, Ordering::Relaxed);
+
+        let mut wall_clock = PROCESS_START_WALL_CLOCK
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner());
+        wall_clock.clear();
+        drop(wall_clock);
+
+        OPERATOR_CONFIG_STATE.store(INIT_STATE_UNINITIALIZED, Ordering::Release);
+        let mut config_view = OPERATOR_CONFIG_VIEW
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *config_view = ConfigView::from_runtime_config(&RuntimeConfig::default());
+    }
 
     fn test_identity() -> AuthIdentity {
         AuthIdentity {
@@ -1854,5 +1904,68 @@ mod tests {
                 "All hook IDs should be unique"
             );
         }
+    }
+
+    #[test]
+    fn process_start_init_resets_state_after_panicking_initializer() {
+        let _lock = process_start_test_lock();
+        reset_operator_route_state_for_tests();
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            run_atomic_initializer(&PROCESS_START_STATE, || panic!("simulated init panic"));
+        }));
+
+        assert!(
+            panic.is_err(),
+            "panic injection should bubble to the caller"
+        );
+        assert_eq!(
+            PROCESS_START_STATE.load(Ordering::Acquire),
+            INIT_STATE_UNINITIALIZED,
+            "panicking initializer must not strand the state machine in INITIALIZING"
+        );
+
+        init_process_start();
+
+        assert_eq!(
+            PROCESS_START_STATE.load(Ordering::Acquire),
+            INIT_STATE_INITIALIZED
+        );
+        assert!(
+            !installed_process_start_wall_clock_for_tests().is_empty(),
+            "retry should install a real process-start snapshot"
+        );
+    }
+
+    #[test]
+    fn operator_config_init_resets_state_after_panicking_initializer() {
+        let _lock = process_start_test_lock();
+        reset_operator_route_state_for_tests();
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            run_atomic_initializer(&OPERATOR_CONFIG_STATE, || panic!("simulated init panic"));
+        }));
+
+        assert!(
+            panic.is_err(),
+            "panic injection should bubble to the caller"
+        );
+        assert_eq!(
+            OPERATOR_CONFIG_STATE.load(Ordering::Acquire),
+            INIT_STATE_UNINITIALIZED,
+            "panicking initializer must not strand the config state machine in INITIALIZING"
+        );
+
+        let custom_runtime_config =
+            crate::config::Config::for_profile(crate::config::Profile::LegacyRisky);
+        init_operator_config(&custom_runtime_config);
+
+        let installed = operator_config_view();
+        assert_eq!(
+            OPERATOR_CONFIG_STATE.load(Ordering::Acquire),
+            INIT_STATE_INITIALIZED
+        );
+        assert_eq!(installed.profile, "legacy-risky");
+        assert_eq!(installed.compatibility_mode, "legacy-risky");
     }
 }
