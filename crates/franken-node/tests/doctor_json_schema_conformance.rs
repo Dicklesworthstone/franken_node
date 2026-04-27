@@ -9,6 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "doctor_policy_activation_golden_vectors_conformance.rs"]
+mod doctor_policy_activation_golden_vectors_conformance;
+
 const DOCTOR_SPEC: &str = include_str!("../../../docs/specs/bootstrap_doctor_contract.md");
 const DOCTOR_CHECK_MATRIX: &str =
     include_str!("../../../artifacts/section_bootstrap/bd-1pk/doctor_checks_matrix.json");

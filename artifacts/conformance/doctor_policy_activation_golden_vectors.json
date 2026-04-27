@@ -1,0 +1,234 @@
+{
+  "schema_version": "franken-node/doctor-policy-activation-conformance/v1",
+  "coverage": [
+    {
+      "clause": "DOC-009 dominant verdict status mapping",
+      "vectors": [
+        "policy_allow",
+        "policy_warn",
+        "policy_block",
+        "policy_invalid_input"
+      ]
+    },
+    {
+      "clause": "DOC-010 decision engine outcome mapping",
+      "vectors": [
+        "policy_allow",
+        "policy_warn",
+        "policy_block",
+        "policy_invalid_input"
+      ]
+    },
+    {
+      "clause": "DOC-011 wording and pipeline failure mapping",
+      "vectors": [
+        "policy_allow",
+        "policy_warn",
+        "policy_block",
+        "policy_invalid_input"
+      ]
+    },
+    {
+      "clause": "policy activation report slice matches checked-in doctor golden",
+      "vectors": [
+        "policy_allow",
+        "policy_warn",
+        "policy_block",
+        "policy_invalid_input"
+      ]
+    },
+    {
+      "clause": "policy activation stderr JSONL slice uses canonical severity mapping",
+      "vectors": [
+        "policy_allow",
+        "policy_warn",
+        "policy_block",
+        "policy_invalid_input"
+      ]
+    }
+  ],
+  "vectors": [
+    {
+      "name": "policy_allow",
+      "trace_id": "doctor-policy-pass",
+      "policy_input": "doctor_policy_activation_pass.json",
+      "golden_report_path": "artifacts/section_bootstrap/bd-1pk/doctor_report_healthy.json",
+      "expected_policy_present": true,
+      "expected_dominant_verdict": "allow",
+      "expected_decision_reason": "TopCandidateAccepted",
+      "expected_chosen_candidate": "balanced_patch",
+      "expected_blocking_budget_ids": [],
+      "expected_policy_statuses": {
+        "DR-POLICY-009": "pass",
+        "DR-POLICY-010": "pass",
+        "DR-POLICY-011": "pass"
+      },
+      "expected_policy_logs": [
+        {
+          "check_code": "DR-POLICY-009",
+          "event_code": "DOC-009",
+          "status": "pass",
+          "level": "info",
+          "message": "Policy guardrails passed with dominant verdict allow across 6 monitors.",
+          "error_code": null,
+          "recovery_action": "ignore"
+        },
+        {
+          "check_code": "DR-POLICY-010",
+          "event_code": "DOC-010",
+          "status": "pass",
+          "level": "info",
+          "message": "Decision engine selected top candidate `balanced_patch`.",
+          "error_code": null,
+          "recovery_action": "ignore"
+        },
+        {
+          "check_code": "DR-POLICY-011",
+          "event_code": "DOC-011",
+          "status": "pass",
+          "level": "info",
+          "message": "Policy explanation wording passed diagnostic/guarantee separation checks.",
+          "error_code": null,
+          "recovery_action": "ignore"
+        }
+      ]
+    },
+    {
+      "name": "policy_warn",
+      "trace_id": "doctor-policy-warn",
+      "policy_input": "doctor_policy_activation_warn.json",
+      "golden_report_path": "artifacts/section_bootstrap/bd-1pk/doctor_report_degraded.json",
+      "expected_policy_present": true,
+      "expected_dominant_verdict": "warn",
+      "expected_decision_reason": "TopCandidateAccepted",
+      "expected_chosen_candidate": "balanced_patch",
+      "expected_blocking_budget_ids": [],
+      "expected_policy_statuses": {
+        "DR-POLICY-009": "warn",
+        "DR-POLICY-010": "pass",
+        "DR-POLICY-011": "pass"
+      },
+      "expected_policy_logs": [
+        {
+          "check_code": "DR-POLICY-009",
+          "event_code": "DOC-009",
+          "status": "warn",
+          "level": "warn",
+          "message": "Policy guardrails reported WARN with dominant verdict warn (blocking_budgets=0).",
+          "error_code": "FRANKEN_DOCTOR_DR_POLICY_009",
+          "recovery_action": "reconfigure"
+        },
+        {
+          "check_code": "DR-POLICY-010",
+          "event_code": "DOC-010",
+          "status": "pass",
+          "level": "info",
+          "message": "Decision engine selected top candidate `balanced_patch`.",
+          "error_code": null,
+          "recovery_action": "ignore"
+        },
+        {
+          "check_code": "DR-POLICY-011",
+          "event_code": "DOC-011",
+          "status": "pass",
+          "level": "info",
+          "message": "Policy explanation wording passed diagnostic/guarantee separation checks.",
+          "error_code": null,
+          "recovery_action": "ignore"
+        }
+      ]
+    },
+    {
+      "name": "policy_block",
+      "trace_id": "doctor-policy-block",
+      "policy_input": "doctor_policy_activation_block.json",
+      "golden_report_path": "artifacts/section_bootstrap/bd-1pk/doctor_report_failure.json",
+      "expected_policy_present": true,
+      "expected_dominant_verdict": "block",
+      "expected_decision_reason": "AllCandidatesBlocked",
+      "expected_chosen_candidate": null,
+      "expected_blocking_budget_ids": [
+        "conformal_risk"
+      ],
+      "expected_policy_statuses": {
+        "DR-POLICY-009": "fail",
+        "DR-POLICY-010": "fail",
+        "DR-POLICY-011": "pass"
+      },
+      "expected_policy_logs": [
+        {
+          "check_code": "DR-POLICY-009",
+          "event_code": "DOC-009",
+          "status": "fail",
+          "level": "error",
+          "message": "Policy guardrails reported BLOCK with budgets: conformal_risk.",
+          "error_code": "FRANKEN_DOCTOR_DR_POLICY_009",
+          "recovery_action": "escalate"
+        },
+        {
+          "check_code": "DR-POLICY-010",
+          "event_code": "DOC-010",
+          "status": "fail",
+          "level": "error",
+          "message": "Decision engine blocked all candidates after guardrail evaluation.",
+          "error_code": "FRANKEN_DOCTOR_DR_POLICY_010",
+          "recovery_action": "escalate"
+        },
+        {
+          "check_code": "DR-POLICY-011",
+          "event_code": "DOC-011",
+          "status": "pass",
+          "level": "info",
+          "message": "Policy explanation wording passed diagnostic/guarantee separation checks.",
+          "error_code": null,
+          "recovery_action": "ignore"
+        }
+      ]
+    },
+    {
+      "name": "policy_invalid_input",
+      "trace_id": "doctor-policy-invalid",
+      "policy_input": "doctor_policy_activation_invalid.json",
+      "golden_report_path": "artifacts/section_bootstrap/bd-1pk/doctor_report_invalid_input.json",
+      "expected_policy_present": false,
+      "expected_dominant_verdict": null,
+      "expected_decision_reason": null,
+      "expected_chosen_candidate": null,
+      "expected_blocking_budget_ids": [],
+      "expected_policy_statuses": {
+        "DR-POLICY-009": "fail",
+        "DR-POLICY-010": "fail",
+        "DR-POLICY-011": "fail"
+      },
+      "expected_policy_logs": [
+        {
+          "check_code": "DR-POLICY-009",
+          "event_code": "DOC-009",
+          "status": "fail",
+          "level": "error",
+          "message": "Policy activation input failed to load: failed parsing policy activation input /data/projects/franken_node/fixtures/policy_activation/doctor_policy_activation_invalid.json as JSON",
+          "error_code": "FRANKEN_DOCTOR_DR_POLICY_009",
+          "recovery_action": "escalate"
+        },
+        {
+          "check_code": "DR-POLICY-010",
+          "event_code": "DOC-010",
+          "status": "fail",
+          "level": "error",
+          "message": "Decision engine check skipped because policy activation input failed.",
+          "error_code": "FRANKEN_DOCTOR_DR_POLICY_010",
+          "recovery_action": "escalate"
+        },
+        {
+          "check_code": "DR-POLICY-011",
+          "event_code": "DOC-011",
+          "status": "fail",
+          "level": "error",
+          "message": "Policy explanation check skipped because decision pipeline did not run.",
+          "error_code": "FRANKEN_DOCTOR_DR_POLICY_011",
+          "recovery_action": "escalate"
+        }
+      ]
+    }
+  ]
+}
