@@ -38,6 +38,7 @@ const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 const ED25519_PUBLIC_KEY_HEX_LEN: usize = 64;
 const ED25519_SIGNATURE_HEX_LEN: usize = 128;
 const MAX_THRESHOLD_IDENTIFIER_BYTES: usize = 4096;
+const MAX_SEEN_KEY_PREALLOC: usize = 64;
 
 /// Threshold configuration: k-of-n quorum.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -544,7 +545,8 @@ fn verify_threshold_with_key_lookup(
         };
     }
 
-    let mut seen_key_ids: HashSet<&str> = HashSet::new();
+    let mut seen_key_ids: HashSet<&str> =
+        HashSet::with_capacity(artifact.signatures.len().min(MAX_SEEN_KEY_PREALLOC));
     let mut valid_count = 0u32;
     let mut first_failure: Option<FailureReason> = None;
 
