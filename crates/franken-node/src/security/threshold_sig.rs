@@ -143,8 +143,6 @@ pub struct CachedThresholdConfig {
     pub config: ThresholdConfig,
     /// Pre-parsed VerifyingKey objects indexed by key_id for O(1) lookup
     verifying_keys: HashMap<String, VerifyingKey>,
-    /// Known key IDs for fast unknown signer detection
-    known_key_ids: BTreeSet<String>,
 }
 
 impl CachedThresholdConfig {
@@ -155,8 +153,6 @@ impl CachedThresholdConfig {
         config.validate()?;
 
         let mut verifying_keys = HashMap::new();
-        let mut known_key_ids = BTreeSet::new();
-
         for signer in &config.signer_keys {
             if signer.public_key_hex.len() != ED25519_PUBLIC_KEY_HEX_LEN {
                 return Err(ThresholdError::ConfigInvalid {
@@ -177,13 +173,11 @@ impl CachedThresholdConfig {
                 })?;
 
             verifying_keys.insert(signer.key_id.clone(), verifying_key);
-            known_key_ids.insert(signer.key_id.clone());
         }
 
         Ok(CachedThresholdConfig {
             config,
             verifying_keys,
-            known_key_ids,
         })
     }
 
@@ -194,7 +188,7 @@ impl CachedThresholdConfig {
 
     /// Check if a key_id is known in this configuration
     pub fn contains_key_id(&self, key_id: &str) -> bool {
-        self.known_key_ids.contains(key_id)
+        self.verifying_keys.contains_key(key_id)
     }
 }
 
@@ -217,27 +211,31 @@ impl<'a> PreparedThresholdKeys<'a> {
 }
 
 trait VerifyingKeyLookup {
-    fn contains_key_id(&self, key_id: &str) -> bool;
-    fn get_verifying_key(&self, key_id: &str) -> Option<&VerifyingKey>;
+    fn lookup_verifying_key(&self, key_id: &str) -> VerifyingKeyLookupResult<'_>;
+}
+
+enum VerifyingKeyLookupResult<'a> {
+    Unknown,
+    Invalid,
+    Valid(&'a VerifyingKey),
 }
 
 impl VerifyingKeyLookup for CachedThresholdConfig {
-    fn contains_key_id(&self, key_id: &str) -> bool {
-        CachedThresholdConfig::contains_key_id(self, key_id)
-    }
-
-    fn get_verifying_key(&self, key_id: &str) -> Option<&VerifyingKey> {
-        CachedThresholdConfig::get_verifying_key(self, key_id)
+    fn lookup_verifying_key(&self, key_id: &str) -> VerifyingKeyLookupResult<'_> {
+        match self.verifying_keys.get(key_id) {
+            Some(verifying_key) => VerifyingKeyLookupResult::Valid(verifying_key),
+            None => VerifyingKeyLookupResult::Unknown,
+        }
     }
 }
 
 impl VerifyingKeyLookup for PreparedThresholdKeys<'_> {
-    fn contains_key_id(&self, key_id: &str) -> bool {
-        self.verifying_keys.contains_key(key_id)
-    }
-
-    fn get_verifying_key(&self, key_id: &str) -> Option<&VerifyingKey> {
-        self.verifying_keys.get(key_id).and_then(Option::as_ref)
+    fn lookup_verifying_key(&self, key_id: &str) -> VerifyingKeyLookupResult<'_> {
+        match self.verifying_keys.get(key_id) {
+            Some(Some(verifying_key)) => VerifyingKeyLookupResult::Valid(verifying_key),
+            Some(None) => VerifyingKeyLookupResult::Invalid,
+            None => VerifyingKeyLookupResult::Unknown,
+        }
     }
 }
 
@@ -565,8 +563,8 @@ fn verify_threshold_with_key_lookup(
             continue;
         }
 
-        // Check for unknown signer using the prepared key set (O(1) instead of O(n))
-        if !key_lookup.contains_key_id(&sig.key_id) {
+        let lookup_result = key_lookup.lookup_verifying_key(&sig.key_id);
+        if let VerifyingKeyLookupResult::Unknown = lookup_result {
             if first_failure.is_none() {
                 first_failure = Some(FailureReason::UnknownSigner {
                     signer_id: sig.signer_id.clone(),
@@ -586,8 +584,7 @@ fn verify_threshold_with_key_lookup(
             continue;
         }
 
-        // Verify signature using pre-parsed key (avoids hex decoding and key construction)
-        let Some(verifying_key) = key_lookup.get_verifying_key(&sig.key_id) else {
+        let VerifyingKeyLookupResult::Valid(verifying_key) = lookup_result else {
             if first_failure.is_none() {
                 first_failure = Some(FailureReason::InvalidSignature {
                     signer_id: sig.signer_id.clone(),
@@ -878,6 +875,26 @@ mod tests {
                 .verify_strict(&message, &parsed_signature)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn prepared_key_lookup_preserves_valid_invalid_and_unknown_cases() {
+        let (_sks, mut config) = test_config(2, 3);
+        config.signer_keys[1].public_key_hex = "abc".to_string();
+        let prepared_keys = PreparedThresholdKeys::new(&config);
+
+        assert!(matches!(
+            prepared_keys.lookup_verifying_key("signer-0"),
+            VerifyingKeyLookupResult::Valid(_)
+        ));
+        assert!(matches!(
+            prepared_keys.lookup_verifying_key("signer-1"),
+            VerifyingKeyLookupResult::Invalid
+        ));
+        assert!(matches!(
+            prepared_keys.lookup_verifying_key("signer-missing"),
+            VerifyingKeyLookupResult::Unknown
+        ));
     }
 
     #[test]
