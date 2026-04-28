@@ -458,9 +458,17 @@ fn verify_signature_with_parsed_key(
         return false;
     };
 
+    verify_parsed_signature_with_key(verifying_key, message_bytes, &signature)
+}
+
+fn verify_parsed_signature_with_key(
+    verifying_key: &VerifyingKey,
+    message_bytes: &[u8],
+    signature: &Signature,
+) -> bool {
     // Use pre-parsed VerifyingKey and pre-computed message bytes
     verifying_key
-        .verify_strict(message_bytes, &signature)
+        .verify_strict(message_bytes, signature)
         .is_ok()
 }
 
@@ -616,9 +624,18 @@ fn verify_threshold_with_key_lookup(
             continue;
         };
 
+        let Some(signature) = parse_signature(&sig.signature_hex) else {
+            if first_failure.is_none() {
+                first_failure = Some(FailureReason::InvalidSignature {
+                    signer_id: sig.signer_id.clone(),
+                });
+            }
+            continue;
+        };
+
         let message_bytes =
             message_bytes.get_or_insert_with(|| build_signing_message(&artifact.content_hash));
-        if !verify_signature_with_parsed_key(verifying_key, message_bytes, sig) {
+        if !verify_parsed_signature_with_key(verifying_key, message_bytes, &signature) {
             if first_failure.is_none() {
                 first_failure = Some(FailureReason::InvalidSignature {
                     signer_id: sig.signer_id.clone(),
