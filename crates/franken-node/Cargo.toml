@@ -120,7 +120,7 @@ required-features = ["test-support"]
 [[test]]
 name = "verifier_economy_conformance"
 path = "tests/verifier_economy_conformance.rs"
-required-features = ["extended-surfaces"]
+required-features = ["verifier-tools", "test-support"]
 
 [[test]]
 name = "incident_cli_e2e"
