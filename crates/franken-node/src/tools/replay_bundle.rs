@@ -809,8 +809,12 @@ pub fn generate_replay_bundle(
     // Use optimized functions with reusable gzip scratch buffer to avoid repeated allocations
     let mut gzip_scratch = GzipScratchBuffer::new();
 
-    let chunked_timeline =
-        chunk_timeline_with_cached_events(bundle_id, cached_timeline, &mut gzip_scratch)?;
+    let chunked_timeline = chunk_timeline_with_cached_events(
+        bundle_id,
+        &timeline,
+        cached_timeline,
+        &mut gzip_scratch,
+    )?;
     let manifest = derive_bundle_manifest_with_cached_timeline(
         &timeline,
         &initial_state_snapshot,
@@ -1615,8 +1619,12 @@ fn validate_bundle_structure(bundle: &ReplayBundle) -> Result<(), ReplayBundleEr
     }
 
     let mut gzip_scratch = GzipScratchBuffer::new();
-    let expected_chunks =
-        chunk_timeline_with_cached_events(expected_bundle_id, cached_timeline, &mut gzip_scratch)?;
+    let expected_chunks = chunk_timeline_with_cached_events(
+        expected_bundle_id,
+        &bundle.timeline,
+        cached_timeline,
+        &mut gzip_scratch,
+    )?;
     #[cfg(debug_assertions)]
     {
         let expected_via_legacy = chunk_timeline(expected_bundle_id, &bundle.timeline)?;
@@ -1672,41 +1680,6 @@ fn derive_created_at(timeline: &[TimelineEvent]) -> String {
         || DEFAULT_CREATED_AT.to_string(),
         |event| event.timestamp.clone(),
     )
-}
-
-fn derive_bundle_manifest(
-    timeline: &[TimelineEvent],
-    initial_state_snapshot: &Value,
-    policy_version: &str,
-    chunk_count: usize,
-) -> Result<BundleManifest, ReplayBundleError> {
-    let decision_sequence_hash =
-        compute_decision_sequence_hash(timeline, initial_state_snapshot, policy_version)?;
-    let timeline_value = canonicalize_value(&serde_json::to_value(timeline)?, "$.timeline")?;
-    let timeline_bytes = canonical_json_bytes(&timeline_value)?;
-    let compressed_size_bytes = gzip_size_bytes(&timeline_bytes)?;
-    let (first_timestamp, last_timestamp) = match (timeline.first(), timeline.last()) {
-        (Some(first), Some(last)) => (Some(first.timestamp.clone()), Some(last.timestamp.clone())),
-        _ => (None, None),
-    };
-    let time_span_micros = match (timeline.first(), timeline.last()) {
-        (Some(first), Some(last)) => {
-            let first_micros = normalize_timestamp(&first.timestamp)?.1;
-            let last_micros = normalize_timestamp(&last.timestamp)?.1;
-            u64::try_from(last_micros.saturating_sub(first_micros)).unwrap_or(0)
-        }
-        _ => 0,
-    };
-
-    Ok(BundleManifest {
-        event_count: timeline.len(),
-        first_timestamp,
-        last_timestamp,
-        time_span_micros,
-        compressed_size_bytes,
-        chunk_count: u32::try_from(chunk_count).unwrap_or(u32::MAX),
-        decision_sequence_hash,
-    })
 }
 
 fn derive_bundle_manifest_with_cached_timeline(
@@ -1899,7 +1872,6 @@ fn prepare_cached_timeline(
             .saturating_add(canonical_size);
 
         cached_events.push(CachedEvent {
-            event: event.clone(),
             canonical_bytes,
             canonical_size,
         });
@@ -1944,7 +1916,6 @@ fn prepare_cached_canonical_timeline(
             .saturating_add(canonical_size);
 
         cached_events.push(CachedEvent {
-            event: event.clone(),
             canonical_bytes,
             canonical_size,
         });
@@ -2001,11 +1972,13 @@ fn canonical_timeline_event_bytes(event: &TimelineEvent) -> Result<Vec<u8>, Repl
 /// Optimized chunk_timeline that uses cached canonical event bytes to avoid repeated serialization
 fn chunk_timeline_with_cached_events(
     bundle_id: Uuid,
+    timeline: &[TimelineEvent],
     cached_timeline: CachedTimeline,
     scratch: &mut GzipScratchBuffer,
 ) -> Result<CachedChunkedTimeline, ReplayBundleError> {
     let cached_events = cached_timeline.events;
     let canonical_timeline_bytes = cached_timeline.canonical_timeline_bytes;
+    debug_assert_eq!(timeline.len(), cached_events.len());
 
     if cached_events.is_empty() {
         return Ok(CachedChunkedTimeline {
@@ -2080,6 +2053,7 @@ fn chunk_timeline_with_cached_events(
 
     for (idx, bucket) in buckets.into_iter().enumerate() {
         let cached_events_bucket = &cached_events[bucket.start..bucket.end];
+        let timeline_bucket = &timeline[bucket.start..bucket.end];
 
         // Construct chunk bytes from pre-computed canonical event bytes
         let mut chunk_bytes = Vec::with_capacity(bucket.canonical_size);
@@ -2093,16 +2067,13 @@ fn chunk_timeline_with_cached_events(
         chunk_bytes.push(b']');
         debug_assert_eq!(chunk_bytes.len(), bucket.canonical_size);
 
-        let first_sequence_number = cached_events_bucket
+        let first_sequence_number = timeline_bucket
             .first()
-            .map_or(0, |cached| cached.event.sequence_number);
-        let last_sequence_number = cached_events_bucket
+            .map_or(0, |event| event.sequence_number);
+        let last_sequence_number = timeline_bucket
             .last()
-            .map_or(0, |cached| cached.event.sequence_number);
-        let events: Vec<TimelineEvent> = cached_events_bucket
-            .iter()
-            .map(|cached| cached.event.clone())
-            .collect();
+            .map_or(0, |event| event.sequence_number);
+        let events: Vec<TimelineEvent> = timeline_bucket.to_vec();
 
         chunks.push(BundleChunk {
             bundle_id,
@@ -2132,8 +2103,6 @@ struct GzipScratchBuffer {
 /// Cached canonical event data to avoid repeated serialization
 #[derive(Debug)]
 struct CachedEvent {
-    /// Original timeline event
-    event: TimelineEvent,
     /// Pre-computed canonical JSON bytes for this event
     canonical_bytes: Vec<u8>,
     /// Pre-computed canonical JSON length
