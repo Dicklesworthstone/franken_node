@@ -607,7 +607,7 @@ pub fn verify_threshold(
             }
 
             let prepared_keys = PreparedThresholdKeys::new(config);
-            verify_threshold_with_key_lookup(
+            verify_threshold_with_validated_artifact(
                 config.threshold,
                 &prepared_keys,
                 artifact,
@@ -641,7 +641,17 @@ pub fn verify_threshold_cached(
     trace_id: &str,
     timestamp: &str,
 ) -> VerificationResult {
-    verify_threshold_with_key_lookup(
+    if let Some(failure_reason) = artifact_identifier_failure(artifact) {
+        return failed_verification_result(
+            cached_config.config.threshold,
+            artifact,
+            trace_id,
+            timestamp,
+            failure_reason,
+        );
+    }
+
+    verify_threshold_with_validated_artifact(
         cached_config.config.threshold,
         cached_config,
         artifact,
@@ -650,23 +660,15 @@ pub fn verify_threshold_cached(
     )
 }
 
-fn verify_threshold_with_key_lookup(
+/// Runs the verification loop after artifact and connector identifiers have
+/// already passed `artifact_identifier_failure`.
+fn verify_threshold_with_validated_artifact(
     threshold: u32,
     key_lookup: &impl VerifyingKeyLookup,
     artifact: &PublicationArtifact,
     trace_id: &str,
     timestamp: &str,
 ) -> VerificationResult {
-    if let Some(failure_reason) = artifact_identifier_failure(artifact) {
-        return failed_verification_result(
-            threshold,
-            artifact,
-            trace_id,
-            timestamp,
-            failure_reason,
-        );
-    }
-
     let mut seen_key_ids: HashSet<&str> =
         HashSet::with_capacity(artifact.signatures.len().min(MAX_SEEN_KEY_PREALLOC));
     let mut valid_count = 0u32;
