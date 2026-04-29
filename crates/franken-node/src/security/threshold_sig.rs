@@ -569,6 +569,33 @@ enum PendingFailure<'a> {
     UnsafeSignerId(&'static str),
 }
 
+/// Tracks valid signer keys without allocating until a second distinct key appears.
+enum SeenKeyIds<'a> {
+    Empty,
+    One(&'a str),
+    Many(HashSet<&'a str>),
+}
+
+impl<'a> SeenKeyIds<'a> {
+    fn insert(&mut self, key_id: &'a str, capacity: usize) -> bool {
+        match self {
+            Self::Empty => {
+                *self = Self::One(key_id);
+                true
+            }
+            Self::One(first_key_id) if *first_key_id == key_id => false,
+            Self::One(first_key_id) => {
+                let mut key_ids = HashSet::with_capacity(capacity);
+                key_ids.insert(*first_key_id);
+                key_ids.insert(key_id);
+                *self = Self::Many(key_ids);
+                true
+            }
+            Self::Many(key_ids) => key_ids.insert(key_id),
+        }
+    }
+}
+
 impl PendingFailure<'_> {
     fn into_failure_reason(self) -> FailureReason {
         match self {
@@ -702,8 +729,8 @@ fn verify_threshold_with_validated_artifact(
     trace_id: &str,
     timestamp: &str,
 ) -> VerificationResult {
-    let mut seen_key_ids: HashSet<&str> =
-        HashSet::with_capacity(artifact.signatures.len().min(MAX_SEEN_KEY_PREALLOC));
+    let mut seen_key_ids = SeenKeyIds::Empty;
+    let seen_key_ids_capacity = artifact.signatures.len().min(MAX_SEEN_KEY_PREALLOC);
     let mut valid_count = 0u32;
     let mut first_failure: Option<PendingFailure<'_>> = None;
 
@@ -761,7 +788,7 @@ fn verify_threshold_with_validated_artifact(
         }
 
         // A signer key can only contribute once toward quorum.
-        if !seen_key_ids.insert(sig.key_id.as_str()) {
+        if !seen_key_ids.insert(sig.key_id.as_str(), seen_key_ids_capacity) {
             if first_failure.is_none() {
                 first_failure = Some(PendingFailure::DuplicateSigner(&sig.signer_id));
             }
