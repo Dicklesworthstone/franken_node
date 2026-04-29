@@ -1639,8 +1639,11 @@ fn derive_bundle_manifest_with_cached_timeline(
     canonical_timeline_bytes: &[u8],
     scratch: &mut GzipScratchBuffer,
 ) -> Result<BundleManifest, ReplayBundleError> {
-    let decision_sequence_hash =
-        compute_decision_sequence_hash(timeline, initial_state_snapshot, policy_version)?;
+    let decision_sequence_hash = compute_decision_sequence_hash_from_canonical_timeline(
+        initial_state_snapshot,
+        policy_version,
+        canonical_timeline_bytes,
+    )?;
     let compressed_size_bytes = scratch.gzip_size_bytes(canonical_timeline_bytes)?;
     let (first_timestamp, last_timestamp) = match (timeline.first(), timeline.last()) {
         (Some(first), Some(last)) => (Some(first.timestamp.clone()), Some(last.timestamp.clone())),
@@ -1664,6 +1667,36 @@ fn derive_bundle_manifest_with_cached_timeline(
         chunk_count: u32::try_from(chunk_count).unwrap_or(u32::MAX),
         decision_sequence_hash,
     })
+}
+
+fn compute_decision_sequence_hash_from_canonical_timeline(
+    initial_state_snapshot: &Value,
+    policy_version: &str,
+    canonical_timeline_bytes: &[u8],
+) -> Result<String, ReplayBundleError> {
+    let initial_state_snapshot = canonicalize_value(
+        initial_state_snapshot,
+        "$.decision_sequence.initial_state_snapshot",
+    )?;
+    let initial_state_snapshot_bytes = canonical_json_bytes(&initial_state_snapshot)?;
+    let policy_version_bytes = serde_json::to_vec(policy_version)?;
+
+    let mut canonical = Vec::with_capacity(
+        br#"{"initial_state_snapshot":,"policy_version":,"timeline":}"#
+            .len()
+            .saturating_add(initial_state_snapshot_bytes.len())
+            .saturating_add(policy_version_bytes.len())
+            .saturating_add(canonical_timeline_bytes.len()),
+    );
+    canonical.extend_from_slice(br#"{"initial_state_snapshot":"#);
+    canonical.extend_from_slice(&initial_state_snapshot_bytes);
+    canonical.extend_from_slice(br#","policy_version":"#);
+    canonical.extend_from_slice(&policy_version_bytes);
+    canonical.extend_from_slice(br#","timeline":"#);
+    canonical.extend_from_slice(canonical_timeline_bytes);
+    canonical.push(b'}');
+
+    Ok(sha256_hex(&canonical))
 }
 
 fn chunk_timeline(
