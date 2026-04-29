@@ -21,7 +21,10 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::security::{constant_time, crypto::{Ed25519Verifier, HexSignatureVerifier, SignatureVerificationError}};
+use crate::security::{
+    constant_time,
+    crypto::{Ed25519Verifier, HexSignatureVerifier, SignatureVerificationError},
+};
 
 pub(crate) const MAX_BUNDLE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_REPLAY_BUNDLE_BYTES: u64 = 64 * 1024 * 1024; // 64 MB limit for replay bundle JSON parsing
@@ -945,15 +948,13 @@ pub fn verify_replay_bundle_integrity_and_signature(
 
     // Then verify signature based on trust configuration
     match trust {
-        ReplayBundleTrust::NoTrustAnchor => {
-            verify_replay_bundle_signature(bundle, None)
-        },
+        ReplayBundleTrust::NoTrustAnchor => verify_replay_bundle_signature(bundle, None),
         ReplayBundleTrust::TrustedKey(key_id) => {
             verify_replay_bundle_signature(bundle, Some(key_id))
-        },
+        }
         ReplayBundleTrust::TrustedKeys(key_ids) => {
             verify_replay_bundle_signature_with_trust_set(bundle, key_ids)
-        },
+        }
     }
 }
 
@@ -992,7 +993,10 @@ pub fn replay_bundle_with_trusted_key(
     bundle: &ReplayBundle,
     trusted_key_id: &str,
 ) -> Result<ReplayOutcome, ReplayBundleError> {
-    verify_replay_bundle_integrity_and_signature(bundle, ReplayBundleTrust::TrustedKey(trusted_key_id))?;
+    verify_replay_bundle_integrity_and_signature(
+        bundle,
+        ReplayBundleTrust::TrustedKey(trusted_key_id),
+    )?;
     replay_bundle_after_signature_verification(bundle)
 }
 
@@ -1000,7 +1004,10 @@ pub fn replay_bundle_with_trusted_keys(
     bundle: &ReplayBundle,
     trusted_key_ids: &[String],
 ) -> Result<ReplayOutcome, ReplayBundleError> {
-    verify_replay_bundle_integrity_and_signature(bundle, ReplayBundleTrust::TrustedKeys(trusted_key_ids))?;
+    verify_replay_bundle_integrity_and_signature(
+        bundle,
+        ReplayBundleTrust::TrustedKeys(trusted_key_ids),
+    )?;
     replay_bundle_after_signature_verification(bundle)
 }
 
@@ -1125,7 +1132,10 @@ pub fn write_bundle_to_path_with_trusted_key(
     path: &Path,
     trusted_key_id: &str,
 ) -> Result<(), ReplayBundleError> {
-    verify_replay_bundle_integrity_and_signature(bundle, ReplayBundleTrust::TrustedKey(trusted_key_id))?;
+    verify_replay_bundle_integrity_and_signature(
+        bundle,
+        ReplayBundleTrust::TrustedKey(trusted_key_id),
+    )?;
     write_verified_bundle_to_path(bundle, path)
 }
 
@@ -1186,7 +1196,10 @@ pub fn read_bundle_from_path_with_trusted_keys(
     let reader = std::io::BufReader::new(file);
     let bundle: ReplayBundle = serde_json::from_reader(reader)?;
     validate_adversarial_bundle_shape(&bundle)?;
-    verify_replay_bundle_integrity_and_signature(&bundle, ReplayBundleTrust::TrustedKeys(trusted_key_ids))?;
+    verify_replay_bundle_integrity_and_signature(
+        &bundle,
+        ReplayBundleTrust::TrustedKeys(trusted_key_ids),
+    )?;
     Ok(bundle)
 }
 
@@ -1661,7 +1674,12 @@ fn derive_bundle_manifest_with_scratch(
     chunk_count: usize,
     _scratch: &mut GzipScratchBuffer,
 ) -> Result<BundleManifest, ReplayBundleError> {
-    derive_bundle_manifest(timeline, initial_state_snapshot, policy_version, chunk_count)
+    derive_bundle_manifest(
+        timeline,
+        initial_state_snapshot,
+        policy_version,
+        chunk_count,
+    )
 }
 
 fn chunk_timeline(
@@ -1749,101 +1767,6 @@ fn chunk_timeline(
             first_sequence_number,
             last_sequence_number,
             compressed_size_bytes: gzip_size_bytes(&chunk_bytes)?,
-            chunk_hash: sha256_hex(&chunk_bytes),
-            events,
-        });
-    }
-
-    Ok(chunks)
-}
-
-#[cfg(feature = "compression")]
-fn chunk_timeline_with_scratch(
-    bundle_id: Uuid,
-    timeline: &[TimelineEvent],
-    scratch: &mut GzipScratchBuffer,
-) -> Result<Vec<BundleChunk>, ReplayBundleError> {
-    if timeline.is_empty() {
-        return Ok(vec![BundleChunk {
-            bundle_id,
-            chunk_index: 0,
-            total_chunks: 1,
-            event_count: 0,
-            first_sequence_number: 0,
-            last_sequence_number: 0,
-            compressed_size_bytes: 0,
-            chunk_hash: sha256_hex(b"[]"),
-            events: Vec::new(),
-        }]);
-    }
-
-    let mut buckets: Vec<Vec<TimelineEvent>> = Vec::new();
-    let mut current_bucket: Vec<TimelineEvent> = Vec::new();
-    let mut current_size = 2_usize;
-    let max_event_size = MAX_BUNDLE_BYTES.saturating_sub(2);
-
-    for event in timeline {
-        let event_json = canonicalize_value(&serde_json::to_value(event)?, "$.timeline_event")?;
-        let event_size = canonical_json_len(&event_json)?;
-        if event_size >= max_event_size {
-            return Err(ReplayBundleError::OversizedEvent {
-                sequence_number: event.sequence_number,
-                size_bytes: event_size,
-                max_bytes: max_event_size,
-            });
-        }
-        let delimiter = usize::from(!current_bucket.is_empty());
-
-        if !current_bucket.is_empty()
-            && current_size
-                .saturating_add(delimiter)
-                .saturating_add(event_size)
-                > MAX_BUNDLE_BYTES
-        {
-            if buckets.len() >= MAX_CHUNKS_PER_BUNDLE {
-                return Err(ReplayBundleError::TooManyChunks {
-                    count: buckets.len().saturating_add(1),
-                    max: MAX_CHUNKS_PER_BUNDLE,
-                });
-            }
-            buckets.push(current_bucket);
-            current_bucket = Vec::new();
-            current_size = 2;
-        }
-
-        let delimiter = usize::from(!current_bucket.is_empty());
-        current_size = current_size
-            .saturating_add(delimiter)
-            .saturating_add(event_size);
-        current_bucket.push(event.clone());
-    }
-
-    if !current_bucket.is_empty() {
-        if buckets.len() >= MAX_CHUNKS_PER_BUNDLE {
-            return Err(ReplayBundleError::TooManyChunks {
-                count: buckets.len().saturating_add(1),
-                max: MAX_CHUNKS_PER_BUNDLE,
-            });
-        }
-        buckets.push(current_bucket);
-    }
-
-    let total_chunks = u32::try_from(buckets.len()).unwrap_or(u32::MAX);
-    let mut chunks = Vec::with_capacity(buckets.len());
-
-    for (idx, events) in buckets.into_iter().enumerate() {
-        let chunk_value = canonicalize_value(&serde_json::to_value(&events)?, "$.chunk_events")?;
-        let chunk_bytes = canonical_json_bytes(&chunk_value)?;
-        let first_sequence_number = events.first().map_or(0, |event| event.sequence_number);
-        let last_sequence_number = events.last().map_or(0, |event| event.sequence_number);
-        chunks.push(BundleChunk {
-            bundle_id,
-            chunk_index: u32::try_from(idx).unwrap_or(u32::MAX),
-            total_chunks,
-            event_count: events.len(),
-            first_sequence_number,
-            last_sequence_number,
-            compressed_size_bytes: scratch.gzip_size_bytes(&chunk_bytes)?,
             chunk_hash: sha256_hex(&chunk_bytes),
             events,
         });
@@ -1973,15 +1896,6 @@ fn chunk_timeline_with_cached_events(
     Ok(chunks)
 }
 
-#[cfg(not(feature = "compression"))]
-fn chunk_timeline_with_scratch(
-    bundle_id: Uuid,
-    timeline: &[TimelineEvent],
-    _scratch: &mut GzipScratchBuffer,
-) -> Result<Vec<BundleChunk>, ReplayBundleError> {
-    chunk_timeline(bundle_id, timeline)
-}
-
 #[cfg(feature = "compression")]
 /// Reusable gzip compression scratch buffer to avoid repeated allocations
 struct GzipScratchBuffer {
@@ -2002,9 +1916,7 @@ struct CachedEvent {
 #[cfg(feature = "compression")]
 impl GzipScratchBuffer {
     fn new() -> Self {
-        Self {
-            buffer: Vec::new(),
-        }
+        Self { buffer: Vec::new() }
     }
 
     fn gzip_size_bytes(&mut self, bytes: &[u8]) -> Result<u64, ReplayBundleError> {
@@ -2847,7 +2759,7 @@ mod tests {
                 assert_eq!(previous_index, 0);
                 assert_eq!(next_index, 1);
             }
-            _ => panic!("expected EvidenceEventsUnsorted"),
+            other => assert!(false, "expected EvidenceEventsUnsorted, got {other:?}"),
         }
     }
 
@@ -3130,17 +3042,16 @@ mod tests {
             Ok(bundle) => {
                 // If it succeeds, verify it's within bounds or chunked appropriately
                 let serialized = serde_json::to_string(&bundle).unwrap();
-                // Large bundles should either be rejected or chunked
-                if serialized.len() > MAX_BUNDLE_BYTES {
-                    panic!("oversized bundle should have been rejected or chunked");
-                }
+                // Large bundles should either be rejected or chunked.
+                assert!(
+                    serialized.len() <= MAX_BUNDLE_BYTES,
+                    "oversized bundle should have been rejected or chunked"
+                );
             }
             Err(ReplayBundleError::OversizedEvent { .. }) => {
                 // This is the expected behavior for oversized events
             }
-            Err(other) => {
-                panic!("unexpected error for oversized event: {:?}", other);
-            }
+            Err(other) => assert!(false, "unexpected error for oversized event: {other:?}"),
         }
     }
 
@@ -3616,8 +3527,8 @@ mod tests {
 
     #[test]
     fn replay_bundle_rejects_oversized_files() {
-        use tempfile::NamedTempFile;
         use std::io::Write;
+        use tempfile::NamedTempFile;
 
         // Create a temporary file larger than MAX_REPLAY_BUNDLE_BYTES
         let mut temp_file = NamedTempFile::new().expect("create temp file");
@@ -3627,7 +3538,9 @@ mod tests {
             r#"{{"type": "replay_bundle", "data": "{}"}}"#,
             "x".repeat((MAX_REPLAY_BUNDLE_BYTES as usize) + 1)
         );
-        temp_file.write_all(oversized_content.as_bytes()).expect("write oversized content");
+        temp_file
+            .write_all(oversized_content.as_bytes())
+            .expect("write oversized content");
         temp_file.flush().expect("flush temp file");
 
         // Test that reading the oversized file is rejected
@@ -3635,11 +3548,15 @@ mod tests {
         assert!(result.is_err(), "oversized bundle should be rejected");
 
         if let Err(ReplayBundleError::FormatError(msg)) = result {
-            assert!(msg.contains("exceeds maximum"), "error should mention size limit: {}", msg);
+            assert!(
+                msg.contains("exceeds maximum"),
+                "error should mention size limit: {}",
+                msg
+            );
             assert!(msg.contains("67108865"), "error should show actual size");
             assert!(msg.contains("67108864"), "error should show limit size");
         } else {
-            panic!("expected FormatError, got: {:?}", result);
+            assert!(false, "expected FormatError, got: {result:?}");
         }
     }
 }
