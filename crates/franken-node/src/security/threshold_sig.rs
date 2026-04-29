@@ -543,6 +543,32 @@ fn verify_parsed_signature_with_key(
         .is_ok()
 }
 
+enum PendingFailure<'a> {
+    UnknownSigner(&'a str),
+    InvalidSignature(&'a str),
+    DuplicateSigner(&'a str),
+    UnsafeSignerId(&'static str),
+}
+
+impl PendingFailure<'_> {
+    fn into_failure_reason(self) -> FailureReason {
+        match self {
+            Self::UnknownSigner(signer_id) => FailureReason::UnknownSigner {
+                signer_id: signer_id.to_string(),
+            },
+            Self::InvalidSignature(signer_id) => FailureReason::InvalidSignature {
+                signer_id: signer_id.to_string(),
+            },
+            Self::DuplicateSigner(signer_id) => FailureReason::DuplicateSigner {
+                signer_id: signer_id.to_string(),
+            },
+            Self::UnsafeSignerId(reason) => FailureReason::InvalidSignature {
+                signer_id: format!("unsafe signer_id: {reason}"),
+            },
+        }
+    }
+}
+
 /// Create an Ed25519 signature for a content hash.
 ///
 /// Requires the private signing key. The corresponding public key must be
@@ -644,7 +670,7 @@ fn verify_threshold_with_key_lookup(
     let mut seen_key_ids: HashSet<&str> =
         HashSet::with_capacity(artifact.signatures.len().min(MAX_SEEN_KEY_PREALLOC));
     let mut valid_count = 0u32;
-    let mut first_failure: Option<FailureReason> = None;
+    let mut first_failure: Option<PendingFailure<'_>> = None;
 
     // Build message bytes only if a signature reaches cryptographic verification.
     let mut message_bytes: Option<SigningMessage> = None;
@@ -654,9 +680,7 @@ fn verify_threshold_with_key_lookup(
         // control characters, invisible Unicode, or bidi tricks in verification logs
         if let Err(reason) = validate_safe_identifier(&sig.signer_id) {
             if first_failure.is_none() {
-                first_failure = Some(FailureReason::InvalidSignature {
-                    signer_id: format!("unsafe signer_id: {}", reason),
-                });
+                first_failure = Some(PendingFailure::UnsafeSignerId(reason));
             }
             continue;
         }
@@ -664,9 +688,7 @@ fn verify_threshold_with_key_lookup(
         let lookup_result = key_lookup.lookup_verifying_key(&sig.key_id);
         if let VerifyingKeyLookupResult::Unknown = lookup_result {
             if first_failure.is_none() {
-                first_failure = Some(FailureReason::UnknownSigner {
-                    signer_id: sig.signer_id.clone(),
-                });
+                first_failure = Some(PendingFailure::UnknownSigner(&sig.signer_id));
             }
             continue;
         }
@@ -675,27 +697,21 @@ fn verify_threshold_with_key_lookup(
         // Otherwise a valid signature can be replayed under an arbitrary label.
         if !constant_time::ct_eq(&sig.signer_id, &sig.key_id) {
             if first_failure.is_none() {
-                first_failure = Some(FailureReason::InvalidSignature {
-                    signer_id: sig.signer_id.clone(),
-                });
+                first_failure = Some(PendingFailure::InvalidSignature(&sig.signer_id));
             }
             continue;
         }
 
         let VerifyingKeyLookupResult::Valid(verifying_key) = lookup_result else {
             if first_failure.is_none() {
-                first_failure = Some(FailureReason::InvalidSignature {
-                    signer_id: sig.signer_id.clone(),
-                });
+                first_failure = Some(PendingFailure::InvalidSignature(&sig.signer_id));
             }
             continue;
         };
 
         let Some(signature) = parse_signature(&sig.signature_hex) else {
             if first_failure.is_none() {
-                first_failure = Some(FailureReason::InvalidSignature {
-                    signer_id: sig.signer_id.clone(),
-                });
+                first_failure = Some(PendingFailure::InvalidSignature(&sig.signer_id));
             }
             continue;
         };
@@ -704,9 +720,7 @@ fn verify_threshold_with_key_lookup(
             message_bytes.get_or_insert_with(|| SigningMessage::new(&artifact.content_hash));
         if !verify_parsed_signature_with_key(verifying_key, message_bytes.as_slice(), &signature) {
             if first_failure.is_none() {
-                first_failure = Some(FailureReason::InvalidSignature {
-                    signer_id: sig.signer_id.clone(),
-                });
+                first_failure = Some(PendingFailure::InvalidSignature(&sig.signer_id));
             }
             continue;
         }
@@ -714,9 +728,7 @@ fn verify_threshold_with_key_lookup(
         // A signer key can only contribute once toward quorum.
         if !seen_key_ids.insert(sig.key_id.as_str()) {
             if first_failure.is_none() {
-                first_failure = Some(FailureReason::DuplicateSigner {
-                    signer_id: sig.signer_id.clone(),
-                });
+                first_failure = Some(PendingFailure::DuplicateSigner(&sig.signer_id));
             }
             continue;
         }
@@ -728,10 +740,14 @@ fn verify_threshold_with_key_lookup(
     let failure_reason = if verified {
         None
     } else {
-        first_failure.or(Some(FailureReason::BelowThreshold {
-            have: valid_count,
-            need: threshold,
-        }))
+        first_failure
+            .map(PendingFailure::into_failure_reason)
+            .or_else(|| {
+                Some(FailureReason::BelowThreshold {
+                    have: valid_count,
+                    need: threshold,
+                })
+            })
     };
 
     VerificationResult {
