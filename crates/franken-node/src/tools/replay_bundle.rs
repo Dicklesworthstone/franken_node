@@ -1581,22 +1581,41 @@ fn validate_bundle_structure(bundle: &ReplayBundle) -> Result<(), ReplayBundleEr
         return Err(ReplayBundleError::CreatedAtMismatch);
     }
 
-    let expected_bundle_id =
-        deterministic_bundle_id(&bundle.incident_id, &expected_created_at, &bundle.timeline)?;
+    let cached_timeline = prepare_cached_timeline(&bundle.timeline)?;
+    let expected_bundle_id = deterministic_bundle_id_from_canonical_timeline(
+        &bundle.incident_id,
+        &expected_created_at,
+        &cached_timeline.canonical_timeline_bytes,
+    )?;
+    #[cfg(debug_assertions)]
+    {
+        let expected_via_legacy =
+            deterministic_bundle_id(&bundle.incident_id, &expected_created_at, &bundle.timeline)?;
+        debug_assert_eq!(expected_bundle_id, expected_via_legacy);
+    }
     if bundle.bundle_id != expected_bundle_id {
         return Err(ReplayBundleError::BundleIdMismatch);
     }
 
-    let expected_chunks = chunk_timeline(expected_bundle_id, &bundle.timeline)?;
-    if bundle.chunks != expected_chunks {
+    let mut gzip_scratch = GzipScratchBuffer::new();
+    let expected_chunks =
+        chunk_timeline_with_cached_events(expected_bundle_id, cached_timeline, &mut gzip_scratch)?;
+    #[cfg(debug_assertions)]
+    {
+        let expected_via_legacy = chunk_timeline(expected_bundle_id, &bundle.timeline)?;
+        debug_assert_eq!(expected_chunks.chunks, expected_via_legacy);
+    }
+    if bundle.chunks.as_slice() != expected_chunks.chunks.as_slice() {
         return Err(ReplayBundleError::ChunkLayoutMismatch);
     }
 
-    let expected_manifest = derive_bundle_manifest(
+    let expected_manifest = derive_bundle_manifest_with_cached_timeline(
         &bundle.timeline,
         &bundle.initial_state_snapshot,
         &bundle.policy_version,
-        expected_chunks.len(),
+        expected_chunks.chunks.len(),
+        &expected_chunks.canonical_timeline_bytes,
+        &mut gzip_scratch,
     )?;
     if bundle.manifest != expected_manifest {
         return Err(ReplayBundleError::ManifestMismatch);
