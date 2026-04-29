@@ -1809,12 +1809,13 @@ fn chunk_timeline_with_cached_events(
         });
     }
 
-    let mut buckets: Vec<Vec<&CachedEvent>> = Vec::new();
-    let mut current_bucket: Vec<&CachedEvent> = Vec::new();
+    let mut buckets: Vec<CachedEventBucket> = Vec::new();
+    let mut bucket_start = 0_usize;
+    let mut current_bucket_len = 0_usize;
     let mut current_size = 2_usize; // JSON array brackets
     let max_event_size = MAX_BUNDLE_BYTES.saturating_sub(2);
 
-    for cached_event in &cached_events {
+    for (idx, cached_event) in cached_events.iter().enumerate() {
         if cached_event.canonical_size >= max_event_size {
             return Err(ReplayBundleError::OversizedEvent {
                 sequence_number: cached_event.event.sequence_number,
@@ -1823,9 +1824,9 @@ fn chunk_timeline_with_cached_events(
             });
         }
 
-        let delimiter = usize::from(!current_bucket.is_empty());
+        let delimiter = usize::from(current_bucket_len != 0);
 
-        if !current_bucket.is_empty()
+        if current_bucket_len != 0
             && current_size
                 .saturating_add(delimiter)
                 .saturating_add(cached_event.canonical_size)
@@ -1837,33 +1838,45 @@ fn chunk_timeline_with_cached_events(
                     max: MAX_CHUNKS_PER_BUNDLE,
                 });
             }
-            buckets.push(current_bucket);
-            current_bucket = Vec::new();
+            buckets.push(CachedEventBucket {
+                start: bucket_start,
+                end: idx,
+                canonical_size: current_size,
+            });
+            bucket_start = idx;
+            current_bucket_len = 0;
             current_size = 2;
         }
 
+        let delimiter = usize::from(current_bucket_len != 0);
         current_size = current_size
             .saturating_add(delimiter)
             .saturating_add(cached_event.canonical_size);
-        current_bucket.push(cached_event);
+        current_bucket_len = current_bucket_len.saturating_add(1);
     }
 
-    if !current_bucket.is_empty() {
+    if current_bucket_len != 0 {
         if buckets.len() >= MAX_CHUNKS_PER_BUNDLE {
             return Err(ReplayBundleError::TooManyChunks {
                 count: buckets.len().saturating_add(1),
                 max: MAX_CHUNKS_PER_BUNDLE,
             });
         }
-        buckets.push(current_bucket);
+        buckets.push(CachedEventBucket {
+            start: bucket_start,
+            end: cached_events.len(),
+            canonical_size: current_size,
+        });
     }
 
     let total_chunks = u32::try_from(buckets.len()).unwrap_or(u32::MAX);
     let mut chunks = Vec::with_capacity(buckets.len());
 
-    for (idx, cached_events_bucket) in buckets.into_iter().enumerate() {
+    for (idx, bucket) in buckets.into_iter().enumerate() {
+        let cached_events_bucket = &cached_events[bucket.start..bucket.end];
+
         // Construct chunk bytes from pre-computed canonical event bytes
-        let mut chunk_bytes = Vec::new();
+        let mut chunk_bytes = Vec::with_capacity(bucket.canonical_size);
         chunk_bytes.push(b'[');
         for (i, cached_event) in cached_events_bucket.iter().enumerate() {
             if i > 0 {
@@ -1872,13 +1885,18 @@ fn chunk_timeline_with_cached_events(
             chunk_bytes.extend_from_slice(&cached_event.canonical_bytes);
         }
         chunk_bytes.push(b']');
+        debug_assert_eq!(chunk_bytes.len(), bucket.canonical_size);
 
+        let first_sequence_number = cached_events_bucket
+            .first()
+            .map_or(0, |cached| cached.event.sequence_number);
+        let last_sequence_number = cached_events_bucket
+            .last()
+            .map_or(0, |cached| cached.event.sequence_number);
         let events: Vec<TimelineEvent> = cached_events_bucket
             .iter()
             .map(|cached| cached.event.clone())
             .collect();
-        let first_sequence_number = events.first().map_or(0, |event| event.sequence_number);
-        let last_sequence_number = events.last().map_or(0, |event| event.sequence_number);
 
         chunks.push(BundleChunk {
             bundle_id,
@@ -1910,6 +1928,13 @@ struct CachedEvent {
     /// Pre-computed canonical JSON bytes for this event
     canonical_bytes: Vec<u8>,
     /// Pre-computed canonical JSON length
+    canonical_size: usize,
+}
+
+#[derive(Debug)]
+struct CachedEventBucket {
+    start: usize,
+    end: usize,
     canonical_size: usize,
 }
 
