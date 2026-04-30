@@ -1,0 +1,1 @@
+{"schema_version":"evidence-ledger-v1","entry_id":"entry-seed","decision_id":"decision-seed","decision_kind":"admit","decision_time":"2026-04-30T00:00:00Z","timestamp_ms":1777507200000,"trace_id":"trace-seed","epoch_id":1,"payload":{"source":"seed"},"size_bytes":0,"signature":"","prev_entry_hash":""}
