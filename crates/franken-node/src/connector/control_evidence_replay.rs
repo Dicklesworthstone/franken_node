@@ -534,8 +534,8 @@ fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
         return;
     }
     if vec.len() >= max {
-        let overflow = vec.len() - max + 1;
-        vec.drain(0..overflow);
+        let overflow = vec.len().saturating_sub(max).saturating_add(1);
+        vec.drain(0..overflow.min(vec.len()));
     }
     vec.push(item);
 }
