@@ -896,12 +896,6 @@ impl ObligationGuard {
     pub fn is_resolved(&self) -> bool {
         self.resolved
     }
-
-    /// Consume the guard, returning the obligation ID without triggering drop rollback.
-    pub fn into_id(mut self) -> ObligationId {
-        self.resolved = true;
-        self.obligation_id.clone()
-    }
 }
 
 impl Drop for ObligationGuard {
@@ -1407,19 +1401,19 @@ mod tests {
         );
     }
 
-    // 36. ObligationGuard into_id consumes without drop rollback
+    // 36. ObligationGuard ID access does not disarm drop rollback
     #[test]
-    fn test_guard_into_id() {
+    fn test_guard_id_clone_preserves_drop_rollback() {
         let mut t = make_tracker();
-        let guard = t
-            .reserve_guard(ObligationFlow::Fencing, vec![], 1000, "trace-1")
-            .unwrap();
-        let id = guard.obligation_id.clone();
-        let extracted = guard.into_id();
-        assert_eq!(extracted, id);
+        let id = {
+            let guard = t
+                .reserve_guard(ObligationFlow::Fencing, vec![], 1000, "trace-1")
+                .unwrap();
+            guard.obligation_id.clone()
+        };
         assert_eq!(
             t.get_obligation(&id).unwrap().state,
-            ObligationState::Reserved
+            ObligationState::RolledBack
         );
     }
 
