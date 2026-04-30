@@ -13,6 +13,9 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::fmt;
+use std::ops::{Deref, DerefMut};
+use zeroize::Zeroize;
 
 use crate::security::constant_time;
 
@@ -247,23 +250,85 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LabConfig {
     pub operator_id: String,
-    pub signing_secret: String,
+    pub signing_secret: LabSigningSecret,
     pub valid_from_epoch_ms: u64,
     pub valid_until_epoch_ms: u64,
     pub rollback_trigger: String,
     pub rollback_policy: String,
 }
 
+/// Signing secret material scrubbed when replaced or dropped.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LabSigningSecret(String);
+
+impl LabSigningSecret {
+    #[must_use]
+    pub fn new(secret: impl Into<String>) -> Self {
+        Self(secret.into())
+    }
+}
+
+impl fmt::Debug for LabSigningSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+impl Deref for LabSigningSecret {
+    type Target = String;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for LabSigningSecret {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl From<String> for LabSigningSecret {
+    fn from(secret: String) -> Self {
+        Self::new(secret)
+    }
+}
+
+impl From<&str> for LabSigningSecret {
+    fn from(secret: &str) -> Self {
+        Self::new(secret)
+    }
+}
+
+impl Zeroize for LabSigningSecret {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl Drop for LabSigningSecret {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
 impl Default for LabConfig {
     fn default() -> Self {
         Self {
             operator_id: "lab-operator".to_string(),
-            signing_secret: "lab-dev-secret".to_string(),
+            signing_secret: LabSigningSecret::new("lab-dev-secret"),
             valid_from_epoch_ms: 0,
             valid_until_epoch_ms: u64::MAX,
             rollback_trigger: "loss_delta < 0 OR error_rate > 0.05".to_string(),
             rollback_policy: "revert-to-baseline".to_string(),
         }
+    }
+}
+
+impl Zeroize for LabConfig {
+    fn zeroize(&mut self) {
+        self.signing_secret.zeroize();
     }
 }
 
@@ -1603,6 +1668,19 @@ mod tests {
         let rollout_sig = sign_structured("secret", b"mitigation_rollout_sign_v1:", &[b"test"]);
         let rollback_sig = sign_structured("secret", b"mitigation_rollback_sign_v1:", &[b"test"]);
         assert_ne!(rollout_sig, rollback_sig);
+    }
+
+    #[test]
+    fn lab_config_explicit_zeroize_clears_signing_secret() {
+        let mut config = LabConfig {
+            signing_secret: LabSigningSecret::new("operator-rollout-signing-secret"),
+            ..LabConfig::default()
+        };
+
+        Zeroize::zeroize(&mut config);
+
+        assert!(config.signing_secret.is_empty());
+        assert_eq!(config.operator_id, "lab-operator");
     }
 
     #[test]
