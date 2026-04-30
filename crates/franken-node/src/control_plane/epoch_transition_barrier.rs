@@ -358,7 +358,7 @@ impl fmt::Display for BarrierError {
 }
 
 /// Configuration for the barrier protocol.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BarrierConfig {
     /// Global barrier timeout ceiling in milliseconds.
     pub global_timeout_ms: u64,
@@ -833,7 +833,7 @@ impl EpochTransitionBarrier {
                     // Note: Real implementation would wait for abort ACKs here
                     // For now, document the safety requirement
                     return Err(BarrierError::AbortConfirmationRequired {
-                        missing_participants: barrier.participants.clone(),
+                        missing_participants: barrier.participants.iter().cloned().collect::<Vec<_>>(),
                     });
                 } else {
                     // LIVENESS-FIRST: Immediate abort (original behavior)

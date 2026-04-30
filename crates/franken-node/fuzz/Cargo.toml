@@ -11,6 +11,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+serde_json = "1.0"
 
 [dependencies.frankenengine-node]
 path = ".."
@@ -32,6 +33,27 @@ bench = false
 [[bin]]
 name = "replay_bundle_roundtrip"
 path = "fuzz_targets/replay_bundle_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "checkpoint_adversarial"
+path = "fuzz_targets/checkpoint_adversarial.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "checkpoint_record_parse"
+path = "fuzz_targets/checkpoint_record_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trust_card_snapshot_parse"
+path = "fuzz_targets/trust_card_snapshot_parse.rs"
 test = false
 doc = false
 bench = false
