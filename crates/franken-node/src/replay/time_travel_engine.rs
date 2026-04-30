@@ -1155,11 +1155,11 @@ impl ReplayEngine {
                                 drift_ns, CLOCK_DRIFT_TOLERANCE_NS
                             );
 
-                            // TTR-007: Clock drift detected
+                            // TTR-006: Clock drift detected
                             push_bounded(
                                 &mut self.audit_log,
                                 AuditEntry::new(
-                                    "TTR-007",
+                                    event_codes::TTR_006,
                                     trace_id,
                                     &explanation,
                                     step.timestamp_ns,
