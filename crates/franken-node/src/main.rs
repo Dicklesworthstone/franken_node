@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 #![cfg(not(test))]
 
+pub use frankenengine_node::{ActionableError, lock_utils};
+
 // The api and policy modules are included via #[path] so the bin target
 // can use a subset of functions from these files. The lib target uses
 // them fully; the bin only needs selected items, so dead_code is expected.
@@ -40,6 +42,8 @@ mod observability {
 mod security {
     #[path = "constant_time.rs"]
     pub mod constant_time;
+    #[path = "crypto.rs"]
+    pub mod crypto;
     #[path = "decision_receipt.rs"]
     pub mod decision_receipt;
     #[path = "epoch_scoped_keys.rs"]

@@ -1067,7 +1067,6 @@ pub mod runtime;
 pub mod schema_versions;
 #[cfg(feature = "verifier-tools")]
 pub mod sdk;
-pub mod crypto;
 pub mod security;
 pub mod storage;
 pub mod supply_chain;
