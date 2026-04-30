@@ -262,29 +262,6 @@ pub fn evaluate_admission(
         || projected.regime_shift_probability
             >= thresholds.max_regime_shift_probability_for_staged_rollout;
 
-    if !needs_evidence {
-        events.push(gate_event(
-            event_codes::ADMISSION_ALLOWED,
-            "info",
-            trace_id,
-            "admission accepted without additional constraints".to_string(),
-        ));
-        if events.len() > MAX_EVENTS {
-            let overflow = events.len() - MAX_EVENTS;
-            events.drain(0..overflow);
-        }
-        return AdmissionDecision {
-            verdict: GateVerdict::Allow,
-            baseline,
-            projected,
-            delta,
-            thresholds,
-            additional_evidence_required: Vec::new(),
-            staged_rollout: None,
-            events,
-        };
-    }
-
     if severe {
         let rollout = build_staged_rollout_plan(target_version, projected);
         events.push(gate_event(
@@ -320,6 +297,29 @@ pub fn evaluate_admission(
                 baseline, projected, thresholds,
             ),
             staged_rollout: Some(rollout),
+            events,
+        };
+    }
+
+    if !needs_evidence {
+        events.push(gate_event(
+            event_codes::ADMISSION_ALLOWED,
+            "info",
+            trace_id,
+            "admission accepted without additional constraints".to_string(),
+        ));
+        if events.len() > MAX_EVENTS {
+            let overflow = events.len() - MAX_EVENTS;
+            events.drain(0..overflow);
+        }
+        return AdmissionDecision {
+            verdict: GateVerdict::Allow,
+            baseline,
+            projected,
+            delta,
+            thresholds,
+            additional_evidence_required: Vec::new(),
+            staged_rollout: None,
             events,
         };
     }
