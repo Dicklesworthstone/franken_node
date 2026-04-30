@@ -1893,10 +1893,7 @@ fn package_manifest_declares_module_type(project_root: &Path, directory: &Path) 
 /// SECURITY: Creates backup directory structure safely, preventing TOCTOU race conditions
 /// where symlinks could be placed between validation and directory creation.
 /// Creates each directory component incrementally with symlink validation at each step.
-fn create_backup_directory_safe(
-    project_path: &Path,
-    backup_path: &Path,
-) -> anyhow::Result<()> {
+fn create_backup_directory_safe(project_path: &Path, backup_path: &Path) -> anyhow::Result<()> {
     let backup_root = project_path.join(MIGRATION_BACKUP_DIR);
 
     // Ensure backup root exists and validate it's not a symlink
@@ -1985,9 +1982,9 @@ fn validate_backup_path_no_symlinks(project_path: &Path, backup_path: &Path) -> 
         }
     }
 
-    // Check each component of the backup path for symlinks
-    let mut current_path = backup_root;
     if let Ok(relative_backup_path) = backup_path.strip_prefix(&backup_root) {
+        // Check each component of the backup path for symlinks
+        let mut current_path = backup_root;
         for component in relative_backup_path.components() {
             if let std::path::Component::Normal(name) = component {
                 current_path = current_path.join(name);
