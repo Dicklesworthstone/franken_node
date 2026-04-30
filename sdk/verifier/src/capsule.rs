@@ -310,7 +310,10 @@ fn ed25519_capsule_signature_payload(capsule: &ReplayCapsule) -> Vec<u8> {
     push_length_prefixed_bytes(&mut payload, capsule.manifest.capsule_id.as_bytes());
     push_length_prefixed_bytes(&mut payload, capsule.manifest.description.as_bytes());
     push_length_prefixed_bytes(&mut payload, capsule.manifest.claim_type.as_bytes());
-    push_length_prefixed_bytes(&mut payload, capsule.manifest.expected_output_hash.as_bytes());
+    push_length_prefixed_bytes(
+        &mut payload,
+        capsule.manifest.expected_output_hash.as_bytes(),
+    );
     push_length_prefixed_bytes(&mut payload, capsule.manifest.created_at.as_bytes());
     push_length_prefixed_bytes(&mut payload, capsule.manifest.creator_identity.as_bytes());
     push_length_prefixed_bytes(&mut payload, capsule.payload.as_bytes());
