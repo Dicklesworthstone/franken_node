@@ -234,6 +234,61 @@ impl<'a> PreparedThresholdKeys<'a> {
         }
         Self { verifying_keys }
     }
+
+    fn new_validated(config: &'a ThresholdConfig) -> Result<Self, ThresholdError> {
+        if config.threshold == 0 {
+            return Err(ThresholdError::ConfigInvalid {
+                reason: "threshold must be > 0".to_string(),
+            });
+        }
+        if config.threshold > config.total_signers {
+            return Err(ThresholdError::ConfigInvalid {
+                reason: format!(
+                    "threshold {} exceeds total_signers {}",
+                    config.threshold, config.total_signers
+                ),
+            });
+        }
+        if u32::try_from(config.signer_keys.len()).unwrap_or(u32::MAX) != config.total_signers {
+            return Err(ThresholdError::ConfigInvalid {
+                reason: format!(
+                    "signer_keys count {} != total_signers {}",
+                    config.signer_keys.len(),
+                    config.total_signers
+                ),
+            });
+        }
+
+        let mut seen_key_ids = HashSet::with_capacity(config.signer_keys.len());
+        let mut seen_public_keys = HashSet::with_capacity(config.signer_keys.len());
+        let mut verifying_keys = HashMap::with_capacity(config.signer_keys.len());
+        for signer in &config.signer_keys {
+            if let Err(reason) = validate_safe_identifier(&signer.key_id) {
+                return Err(ThresholdError::ConfigInvalid {
+                    reason: format!("invalid signer key_id '{}': {}", signer.key_id, reason),
+                });
+            }
+
+            if !seen_key_ids.insert(signer.key_id.as_str()) {
+                return Err(ThresholdError::ConfigInvalid {
+                    reason: format!("duplicate signer key_id {}", signer.key_id),
+                });
+            }
+            let canonical_public_key_hex = CanonicalPublicKeyHex::new(&signer.public_key_hex);
+            if !seen_public_keys.insert(canonical_public_key_hex) {
+                return Err(ThresholdError::ConfigInvalid {
+                    reason: format!("duplicate signer public_key_hex {}", signer.public_key_hex),
+                });
+            }
+
+            verifying_keys.insert(
+                signer.key_id.as_str(),
+                parse_verifying_key(&signer.public_key_hex),
+            );
+        }
+
+        Ok(Self { verifying_keys })
+    }
 }
 
 trait VerifyingKeyLookup {
@@ -640,8 +695,8 @@ pub fn verify_threshold(
     trace_id: &str,
     timestamp: &str,
 ) -> VerificationResult {
-    match config.validate() {
-        Ok(()) => {
+    match PreparedThresholdKeys::new_validated(config) {
+        Ok(prepared_keys) => {
             if let Some(failure_reason) = artifact_identifier_failure(artifact) {
                 return failed_verification_result(
                     config.threshold,
@@ -656,7 +711,6 @@ pub fn verify_threshold(
                 return below_threshold_result(config.threshold, artifact, trace_id, timestamp, 0);
             }
 
-            let prepared_keys = PreparedThresholdKeys::new(config);
             verify_threshold_with_validated_artifact(
                 config.threshold,
                 &prepared_keys,
