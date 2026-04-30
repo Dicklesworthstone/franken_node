@@ -611,10 +611,12 @@ impl RegionTree {
         // Step 2: Recursively close children first
         // INV-REGION-DETERMINISTIC-CLOSE
         for child_id in &children {
-            let child_node = self.nodes.get(child_id.as_str());
-            if let Some(cn) = child_node
-                && cn.state != RegionState::Closed
-            {
+            let needs_close = self
+                .nodes
+                .get(child_id.as_str())
+                .map(|cn| cn.state != RegionState::Closed)
+                .unwrap_or(false);
+            if needs_close {
                 let child_events = self.close(child_id, timestamp_ms)?;
                 all_events.extend(child_events);
             }
