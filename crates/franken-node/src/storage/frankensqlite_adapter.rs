@@ -47,6 +47,7 @@ pub mod event_codes {
 }
 
 const AUDIT_LOG_TRUNCATED_REPLAY_SENTINEL: &str = "__audit_log_window_truncated__";
+const MAX_AUDIT_REPLAY_RESULTS: usize = MAX_AUDIT_LOG_ENTRIES + 1;
 
 // ---------------------------------------------------------------------------
 // Invariant constants
@@ -707,21 +708,7 @@ impl FrankensqliteAdapter {
         self.replay_count = self.replay_count.saturating_add(1);
 
         // Clone to avoid borrow conflict with self.emit_event.
-        let log_snapshot: Vec<_> = self.audit_log.clone();
         let mut results = Vec::new();
-        for (key, expected) in &log_snapshot {
-            let stored = self.store.get(&(PersistenceClass::AuditLog, key.clone()));
-            let matches = stored.is_some_and(|v| constant_time::ct_eq_bytes(v, expected));
-            if !matches {
-                self.replay_mismatches = self.replay_mismatches.saturating_add(1);
-                self.emit_event(
-                    event_codes::FRANKENSQLITE_REPLAY_MISMATCH,
-                    "audit_log",
-                    format!("key={}, mismatch detected", sanitize_log_key(key)),
-                );
-            }
-            push_bounded(&mut results, (key.clone(), matches), MAX_AUDIT_LOG_ENTRIES);
-        }
         if self.audit_log_truncated {
             self.replay_mismatches = self.replay_mismatches.saturating_add(1);
             self.emit_event(
@@ -735,7 +722,26 @@ impl FrankensqliteAdapter {
             push_bounded(
                 &mut results,
                 (AUDIT_LOG_TRUNCATED_REPLAY_SENTINEL.to_string(), false),
-                MAX_AUDIT_LOG_ENTRIES,
+                MAX_AUDIT_REPLAY_RESULTS,
+            );
+        }
+
+        let log_snapshot: Vec<_> = self.audit_log.clone();
+        for (key, expected) in &log_snapshot {
+            let stored = self.store.get(&(PersistenceClass::AuditLog, key.clone()));
+            let matches = stored.is_some_and(|v| constant_time::ct_eq_bytes(v, expected));
+            if !matches {
+                self.replay_mismatches = self.replay_mismatches.saturating_add(1);
+                self.emit_event(
+                    event_codes::FRANKENSQLITE_REPLAY_MISMATCH,
+                    "audit_log",
+                    format!("key={}, mismatch detected", sanitize_log_key(key)),
+                );
+            }
+            push_bounded(
+                &mut results,
+                (key.clone(), matches),
+                MAX_AUDIT_REPLAY_RESULTS,
             );
         }
         results
@@ -1714,7 +1720,7 @@ mod tests {
     fn audit_log_window_truncation_fails_gate_closed() {
         let mut adapter = FrankensqliteAdapter::default();
 
-        for idx in 0..=MAX_AUDIT_LOG_ENTRIES {
+        for idx in 0..=(MAX_AUDIT_LOG_ENTRIES + 2) {
             adapter
                 .write_legacy(
                     PersistenceClass::AuditLog,
@@ -1752,11 +1758,22 @@ mod tests {
 
         let replay_results = adapter.replay();
 
-        assert!(
+        assert_eq!(
+            replay_results.first(),
+            Some(&(AUDIT_LOG_TRUNCATED_REPLAY_SENTINEL.to_string(), false)),
+            "truncated audit replay must surface the sentinel before bounded audit entries"
+        );
+        assert_eq!(
+            replay_results.len(),
+            MAX_AUDIT_REPLAY_RESULTS,
+            "sentinel metadata must not evict the bounded audit replay window"
+        );
+        assert_eq!(
             replay_results
                 .iter()
-                .any(|(key, matches)| key == AUDIT_LOG_TRUNCATED_REPLAY_SENTINEL && !matches),
-            "truncated audit replay must not look like a fully verified replay"
+                .filter(|(key, _)| key != AUDIT_LOG_TRUNCATED_REPLAY_SENTINEL)
+                .count(),
+            MAX_AUDIT_LOG_ENTRIES
         );
         assert_eq!(adapter.summary().replay_mismatches, 1);
         assert!(
