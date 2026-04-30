@@ -76,7 +76,7 @@ fn auth_failure_rank_cmp(
 #[cfg(any(test, feature = "control-plane"))]
 fn write_auth_failure_event<W: Write>(writer: &mut W, event: &AuthFailureEvent) -> io::Result<()> {
     writer.write_all(b"AUTH_FAILURE_EVENT: ")?;
-    serde_json::to_writer(writer, event).map_err(io::Error::other)?;
+    serde_json::to_writer(&mut *writer, event).map_err(io::Error::other)?;
     writer.write_all(b"\n")
 }
 
@@ -441,15 +441,9 @@ pub enum AuthzDecision {
 
 #[cfg(any(test, feature = "control-plane"))]
 fn emit_deferred_warn(log_task: impl FnOnce() + Send + 'static) {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.spawn(async move {
-            log_task();
-        });
-    } else {
-        // Direct in-process callers can hit these helpers without a Tokio runtime.
-        // Return the fail-closed decision instead of panicking on the logging path.
-        log_task();
-    }
+    // Keep the authorization path independent of an async runtime. Callers must
+    // get the fail-closed decision even when no executor is linked or running.
+    log_task();
 }
 
 /// Check authorization against the policy hook.
@@ -837,7 +831,8 @@ impl AuthFailureLimiter {
     /// Get current failure statistics for monitoring.
     pub fn get_failure_stats(&self) -> AuthFailureStats {
         let mut unique_source_ips = 0usize;
-        let mut top_source_failures = Vec::with_capacity(TOP_AUTH_FAILURE_SOURCES);
+        let mut top_source_failures: Vec<(String, u64)> =
+            Vec::with_capacity(TOP_AUTH_FAILURE_SOURCES);
 
         for (ip, state) in &self.source_states {
             if state.failure_count == 0 {
@@ -889,11 +884,9 @@ impl AuthFailureLimiter {
         config: &RateLimitConfig,
         source_ip: &str,
     ) -> &'a mut AuthFailureSourceState {
-        if let Some(state) = source_states.get_mut(source_ip) {
-            return state;
-        }
-
-        if source_states.len() >= MAX_AUTH_FAILURE_SOURCES {
+        if !source_states.contains_key(source_ip)
+            && source_states.len() >= MAX_AUTH_FAILURE_SOURCES
+        {
             Self::evict_lowest_priority_source_from(source_states);
         }
 
@@ -1035,11 +1028,9 @@ impl PerformanceRateLimiter {
         config: &RateLimitConfig,
         source_ip: &str,
     ) -> &'a mut PerformanceSourceState {
-        if let Some(state) = source_states.get_mut(source_ip) {
-            return state;
-        }
-
-        if source_states.len() >= MAX_AUTH_FAILURE_SOURCES {
+        if !source_states.contains_key(source_ip)
+            && source_states.len() >= MAX_AUTH_FAILURE_SOURCES
+        {
             Self::evict_lowest_priority_source_from(source_states);
         }
 
