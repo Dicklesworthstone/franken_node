@@ -25,6 +25,7 @@ Versioned named remote computation registry with canonical name enforcement (`do
 | CR_LOOKUP_MALFORMED | Name fails canonical check |
 | CR_VERSION_UPGRADED | Registry version bumped |
 | CR_DISPATCH_GATED | Dispatch authorized or denied |
+| CR_REGISTRY_REJECTED | Registry mutation rejected before state change |
 
 ## Error Codes
 | Code | Trigger |

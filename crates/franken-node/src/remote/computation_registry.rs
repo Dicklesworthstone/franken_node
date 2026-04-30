@@ -1537,7 +1537,10 @@ mod tests {
             .expect("capacity rejection must be audited");
         assert_eq!(event.event_code, CR_REGISTRY_REJECTED);
         assert_eq!(event.trace_id, "trace-overflow");
-        assert_eq!(event.computation_name.as_deref(), Some("overflow.action.v1"));
+        assert_eq!(
+            event.computation_name.as_deref(),
+            Some("overflow.action.v1")
+        );
         assert!(!registry.entries.contains_key("overflow.action.v1"));
     }
 

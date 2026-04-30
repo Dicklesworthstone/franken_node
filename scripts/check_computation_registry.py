@@ -28,7 +28,8 @@ def _checks():
     
     # Event codes
     event_codes = ["CR_REGISTRY_LOADED", "CR_LOOKUP_SUCCESS", "CR_LOOKUP_UNKNOWN",
-                   "CR_LOOKUP_MALFORMED", "CR_VERSION_UPGRADED", "CR_DISPATCH_GATED"]
+                   "CR_LOOKUP_MALFORMED", "CR_VERSION_UPGRADED", "CR_DISPATCH_GATED",
+                   "CR_REGISTRY_REJECTED"]
     missing_events = [c for c in event_codes if c not in src]
     check("EVENT_CODES", len(missing_events) == 0,
           f"{len(event_codes) - len(missing_events)}/{len(event_codes)} event codes" +
