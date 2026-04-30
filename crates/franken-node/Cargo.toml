@@ -220,6 +220,11 @@ name = "sdk_verifier_public_api_fuzz_harness"
 path = "tests/sdk_verifier_public_api_fuzz_harness.rs"
 
 [[test]]
+name = "traceparent_parser_fuzz_harness"
+path = "tests/traceparent_parser_fuzz_harness.rs"
+required-features = ["control-plane"]
+
+[[test]]
 name = "sdk_verifier_public_api_golden_conformance"
 path = "tests/sdk_verifier_public_api_golden_conformance.rs"
 
