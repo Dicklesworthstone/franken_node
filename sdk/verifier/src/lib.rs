@@ -1434,10 +1434,17 @@ impl VerificationSession {
 /// ```
 pub fn create_verifier_sdk(verifier_identity: impl Into<String>) -> VerifierSdk {
     // For testing: if counter is close to MAX, reset it to avoid test failures
-    let current = SESSION_NONCE_COUNTER.load(std::sync::atomic::Ordering::Relaxed);
-    if current > u64::MAX - 1000 {
-        SESSION_NONCE_COUNTER.store(1, std::sync::atomic::Ordering::Relaxed);
-    }
+    let _ = SESSION_NONCE_COUNTER.fetch_update(
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        |counter| {
+            if counter > u64::MAX - 1000 {
+                Some(1)
+            } else {
+                None
+            }
+        },
+    );
     VerifierSdk::new(verifier_identity)
 }
 
