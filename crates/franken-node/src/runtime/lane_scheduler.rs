@@ -14,7 +14,7 @@
 //! - INV-LANE-HOT-RELOAD: policy changes take effect without restart
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 
 /// Schema version for lane metrics exports.
@@ -762,10 +762,13 @@ pub struct LaneTelemetrySnapshot {
 /// - [`LaneConfig`]: Per-lane configuration (concurrency, starvation thresholds)
 pub struct LaneScheduler {
     policy: LaneMappingPolicy,
-    counters: BTreeMap<String, LaneCounters>,
-    active_tasks: BTreeMap<String, TaskAssignment>,
+    /// Runtime counters: optimized with HashMap for SIMD-accelerated lookups
+    counters: HashMap<String, LaneCounters>,
+    /// Active task tracking: optimized with HashMap for frequent task ID lookups
+    active_tasks: HashMap<String, TaskAssignment>,
     /// Per-lane queued work stays FIFO, so front-pop promotion must remain O(1).
-    queued_tasks: BTreeMap<String, VecDeque<QueuedTaskAssignment>>,
+    /// Optimized with HashMap for frequent lane-based queue access.
+    queued_tasks: HashMap<String, VecDeque<QueuedTaskAssignment>>,
     audit_log: Vec<LaneAuditRecord>,
     max_audit_log_entries: usize,
     max_queued_tasks_per_lane: usize,
@@ -787,8 +790,8 @@ impl LaneScheduler {
             return Err(LaneSchedulerError::InvalidPolicy { detail });
         }
 
-        let mut counters = BTreeMap::new();
-        let mut queued_tasks = BTreeMap::new();
+        let mut counters = HashMap::new();
+        let mut queued_tasks = HashMap::new();
         for config in policy.lane_configs.values() {
             counters.insert(
                 config.lane.as_str().to_string(),
@@ -800,7 +803,7 @@ impl LaneScheduler {
         Ok(Self {
             policy,
             counters,
-            active_tasks: BTreeMap::new(),
+            active_tasks: HashMap::new(),
             queued_tasks,
             audit_log: Vec::new(),
             max_audit_log_entries: max_audit_log_entries.max(1),
@@ -1302,7 +1305,7 @@ impl LaneScheduler {
 
     /// Get current lane counters.
     /// INV-LANE-TELEMETRY-ACCURATE
-    pub fn lane_counters(&self) -> &BTreeMap<String, LaneCounters> {
+    pub fn lane_counters(&self) -> &HashMap<String, LaneCounters> {
         &self.counters
     }
 
