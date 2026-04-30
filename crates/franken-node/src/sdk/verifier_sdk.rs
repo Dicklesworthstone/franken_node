@@ -319,6 +319,7 @@ impl VerifierSdk {
         }
 
         let mut evidence = Vec::new();
+        let mut overall_pass = true;
 
         // Check artifact_id
         evidence.push(EvidenceEntry {
@@ -358,9 +359,17 @@ impl VerifierSdk {
             check_name: "claims_capacity_check".to_string(),
             passed: claims_within_capacity,
             detail: if claims_within_capacity {
-                format!("{} claims within limit of {}", request.claims.len(), MAX_CLAIMS_PER_REQUEST)
+                format!(
+                    "{} claims within limit of {}",
+                    request.claims.len(),
+                    MAX_CLAIMS_PER_REQUEST
+                )
             } else {
-                format!("{} claims exceeds limit of {}", request.claims.len(), MAX_CLAIMS_PER_REQUEST)
+                format!(
+                    "{} claims exceeds limit of {}",
+                    request.claims.len(),
+                    MAX_CLAIMS_PER_REQUEST
+                )
             },
         });
 
@@ -409,7 +418,7 @@ impl VerifierSdk {
             },
         });
 
-        let all_pass = evidence.iter().all(|e| e.passed);
+        let all_pass = overall_pass && evidence.iter().all(|e| e.passed);
         let failures: Vec<String> = evidence
             .iter()
             .filter(|e| !e.passed)
