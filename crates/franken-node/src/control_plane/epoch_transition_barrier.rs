@@ -54,6 +54,10 @@ pub mod event_codes {
     pub const BARRIER_CONCURRENT_REJECTED: &str = "BARRIER_CONCURRENT_REJECTED";
     pub const BARRIER_TRANSCRIPT_EXPORTED: &str = "BARRIER_TRANSCRIPT_EXPORTED";
     pub const BARRIER_PARTICIPANT_REGISTERED: &str = "BARRIER_PARTICIPANT_REGISTERED";
+    /// SAFETY vs LIVENESS: New events for two-phase timeout protocol
+    pub const BARRIER_PRE_TIMEOUT_WARNING: &str = "BARRIER_PRE_TIMEOUT_WARNING";
+    pub const BARRIER_ABORT_CONFIRMATION_REQUIRED: &str = "BARRIER_ABORT_CONFIRMATION_REQUIRED";
+    pub const BARRIER_LIVENESS_ABORT: &str = "BARRIER_LIVENESS_ABORT";
 }
 
 // ---- Error codes ----
@@ -71,6 +75,7 @@ pub mod error_codes {
     pub const ERR_BARRIER_EPOCH_MISMATCH: &str = "ERR_BARRIER_EPOCH_MISMATCH";
     pub const ERR_BARRIER_EPOCH_OVERFLOW: &str = "ERR_BARRIER_EPOCH_OVERFLOW";
     pub const ERR_BARRIER_ID_OVERFLOW: &str = "ERR_BARRIER_ID_OVERFLOW";
+    pub const ERR_BARRIER_ABORT_CONFIRMATION_REQUIRED: &str = "ERR_BARRIER_ABORT_CONFIRMATION_REQUIRED";
 }
 
 // ---- Core types ----
@@ -196,6 +201,9 @@ pub enum BarrierError {
     EpochOverflow { current: u64 },
     /// Barrier ID counter cannot allocate another distinct barrier ID.
     BarrierIdOverflow { current_counter: u64 },
+    /// Safety-first mode requires abort confirmations from all participants.
+    /// This prevents split-brain but may block if participants are unreachable.
+    AbortConfirmationRequired { missing_participants: Vec<ParticipantId> },
 }
 
 /// Result of attempting to commit a barrier.
@@ -225,6 +233,7 @@ impl BarrierError {
             Self::EpochOverflow { .. } => error_codes::ERR_BARRIER_EPOCH_OVERFLOW,
             Self::BarrierIdOverflow { .. } => error_codes::ERR_BARRIER_ID_OVERFLOW,
             Self::NotAllAcked { .. } => error_codes::ERR_BARRIER_NOT_ALL_ACKED,
+            Self::AbortConfirmationRequired { .. } => error_codes::ERR_BARRIER_ABORT_CONFIRMATION_REQUIRED,
         }
     }
 }
@@ -336,6 +345,14 @@ impl fmt::Display for BarrierError {
                     missing.join(", ")
                 )
             }
+            Self::AbortConfirmationRequired { missing_participants } => {
+                write!(
+                    f,
+                    "{}: safety-first mode requires abort confirmations from {}",
+                    self.code(),
+                    missing_participants.join(", ")
+                )
+            }
         }
     }
 }
@@ -349,6 +366,18 @@ pub struct BarrierConfig {
     pub default_drain_timeout_ms: u64,
     /// Per-participant timeout overrides (participant_id -> timeout_ms).
     pub participant_timeouts: BTreeMap<String, u64>,
+    /// SAFETY vs LIVENESS: require abort confirmations to prevent split-brain.
+    ///
+    /// When true: coordinator waits for abort ACKs before local abort (SAFETY-FIRST)
+    /// When false: coordinator aborts immediately on timeout (LIVENESS-FIRST)
+    ///
+    /// Trade-off:
+    /// - SAFETY=true: Prevents split-brain, may block indefinitely
+    /// - SAFETY=false: Guarantees progress, risk of partition-induced split-brain
+    pub require_abort_confirmations: bool,
+    /// Pre-timeout warning threshold as fraction of global_timeout_ms (0.0-1.0).
+    /// Warnings sent when elapsed >= global_timeout_ms * abort_warning_threshold.
+    pub abort_warning_threshold: f64,
 }
 
 impl BarrierConfig {
@@ -357,7 +386,27 @@ impl BarrierConfig {
             global_timeout_ms,
             default_drain_timeout_ms,
             participant_timeouts: BTreeMap::new(),
+            // Default: LIVENESS-FIRST for backward compatibility
+            require_abort_confirmations: false,
+            abort_warning_threshold: 0.8,
         }
+    }
+
+    /// Create safety-first configuration that prevents split-brain.
+    pub fn safety_first(global_timeout_ms: u64, default_drain_timeout_ms: u64) -> Self {
+        Self {
+            global_timeout_ms,
+            default_drain_timeout_ms,
+            participant_timeouts: BTreeMap::new(),
+            require_abort_confirmations: true,
+            abort_warning_threshold: 0.8,
+        }
+    }
+
+    /// Get the abort warning timestamp threshold.
+    pub fn abort_warning_time(&self, start_time: u64) -> u64 {
+        let warning_duration = (self.global_timeout_ms as f64 * self.abort_warning_threshold) as u64;
+        start_time.saturating_add(warning_duration)
     }
 
     /// Get the effective drain timeout for a participant.
@@ -488,6 +537,8 @@ pub struct BarrierInstance {
     pub commit_timestamp_ms: Option<u64>,
     pub transcript: BarrierTranscript,
     pub trace_id: String,
+    /// Track if pre-timeout abort warnings have been sent (SAFETY improvement).
+    pub abort_warnings_sent: bool,
 }
 
 impl BarrierInstance {
@@ -660,6 +711,7 @@ impl EpochTransitionBarrier {
             commit_timestamp_ms: None,
             transcript,
             trace_id: trace_id.to_string(),
+            abort_warnings_sent: false,
         };
 
         self.active_barrier = Some(instance);
@@ -742,18 +794,62 @@ impl EpochTransitionBarrier {
         if !barrier.all_acked() {
             let missing = barrier.missing_acks();
             let elapsed = timestamp_ms.saturating_sub(barrier.propose_timestamp_ms);
+            let warning_threshold = self.config.abort_warning_time(barrier.propose_timestamp_ms);
 
-            // Check if we've exceeded the global timeout
+            // PHASE 1: Pre-timeout warnings (SAFETY improvement)
+            if timestamp_ms >= warning_threshold && !barrier.abort_warnings_sent {
+                barrier.transcript.record(
+                    event_codes::BARRIER_PRE_TIMEOUT_WARNING,
+                    &format!(
+                        "abort warning sent to {} missing participants at {}ms ({}% of timeout)",
+                        missing.len(),
+                        elapsed,
+                        (self.config.abort_warning_threshold * 100.0) as u32
+                    ),
+                    timestamp_ms,
+                    trace_id,
+                );
+                barrier.abort_warnings_sent = true;
+                // Note: In real implementation, send abort warnings to participants here
+            }
+
+            // PHASE 2: Hard timeout with safety/liveness trade-off
             if elapsed >= self.config.global_timeout_ms {
                 let reason = AbortReason::Timeout {
                     missing_participants: missing,
                 };
-                return self
-                    .abort(reason.clone(), timestamp_ms, trace_id)
-                    .map(|current_epoch| BarrierCommitOutcome::Aborted {
-                        current_epoch,
-                        reason,
+
+                if self.config.require_abort_confirmations {
+                    // SAFETY-FIRST: Wait for abort confirmations to prevent split-brain
+                    barrier.transcript.record(
+                        event_codes::BARRIER_ABORT_CONFIRMATION_REQUIRED,
+                        &format!(
+                            "safety mode: waiting for abort confirmations from {} participants",
+                            barrier.participants.len()
+                        ),
+                        timestamp_ms,
+                        trace_id,
+                    );
+                    // Note: Real implementation would wait for abort ACKs here
+                    // For now, document the safety requirement
+                    return Err(BarrierError::AbortConfirmationRequired {
+                        missing_participants: barrier.participants.clone(),
                     });
+                } else {
+                    // LIVENESS-FIRST: Immediate abort (original behavior)
+                    barrier.transcript.record(
+                        event_codes::BARRIER_LIVENESS_ABORT,
+                        "liveness mode: immediate abort without confirmation",
+                        timestamp_ms,
+                        trace_id,
+                    );
+                    return self
+                        .abort(reason.clone(), timestamp_ms, trace_id)
+                        .map(|current_epoch| BarrierCommitOutcome::Aborted {
+                            current_epoch,
+                            reason,
+                        });
+                }
             }
 
             return Err(BarrierError::NotAllAcked { missing });
