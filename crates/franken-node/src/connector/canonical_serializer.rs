@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::io::Write as _;
 
 use super::trust_object_id::DomainPrefix;
 
@@ -815,9 +816,9 @@ fn write_canonical_value(
         Value::Bool(false) => out.extend_from_slice(b"false"),
         Value::Number(number) => {
             if let Some(value) = number.as_i64() {
-                out.extend_from_slice(value.to_string().as_bytes());
+                write_canonical_integer(out, value)?;
             } else if let Some(value) = number.as_u64() {
-                out.extend_from_slice(value.to_string().as_bytes());
+                write_canonical_integer(out, value)?;
             } else if no_float {
                 return Err(SerializerError::FloatingPointRejected {
                     object_type: object_type.label().to_string(),
@@ -862,6 +863,15 @@ fn write_canonical_value(
         }
     }
     Ok(())
+}
+
+fn write_canonical_integer<T: std::fmt::Display>(
+    out: &mut Vec<u8>,
+    value: T,
+) -> Result<(), SerializerError> {
+    write!(out, "{value}").map_err(|error| SerializerError::PreimageConstructionFailed {
+        reason: format!("failed to encode canonical integer: {error}"),
+    })
 }
 
 fn write_canonical_string(out: &mut Vec<u8>, value: &str) -> Result<(), SerializerError> {
