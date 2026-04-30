@@ -1358,7 +1358,9 @@ mod dgis_migration_gate_hardening_negative_tests {
         let encode_fields = |phase: &str, separator: &str, data: &str| {
             let mut encoded = Vec::new();
             for field in [phase, separator, data] {
-                encoded.extend_from_slice(&(u64::try_from(field.len()).unwrap_or(u64::MAX)).to_le_bytes());
+                encoded.extend_from_slice(
+                    &(u64::try_from(field.len()).unwrap_or(u64::MAX)).to_le_bytes(),
+                );
                 encoded.extend_from_slice(field.as_bytes());
             }
             encoded
