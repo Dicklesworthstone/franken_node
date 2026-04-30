@@ -426,6 +426,19 @@ impl TrustRecord {
         hasher.update(len_to_u64(self.payload.len()).to_le_bytes());
         hasher.update(&self.payload);
         hasher.update(self.mmr_pos.to_le_bytes());
+        hasher.update(len_to_u64(self.marker_hash.len()).to_le_bytes());
+        hasher.update(self.marker_hash.as_bytes());
+        if let Some(proof) = &self.inclusion_proof {
+            hasher.update(proof.leaf_index.to_le_bytes());
+            hasher.update(proof.tree_size.to_le_bytes());
+            hasher.update(len_to_u64(proof.leaf_hash.len()).to_le_bytes());
+            hasher.update(proof.leaf_hash.as_bytes());
+            hasher.update(len_to_u64(proof.audit_path.len()).to_le_bytes());
+            for h in &proof.audit_path {
+                hasher.update(len_to_u64(h.len()).to_le_bytes());
+                hasher.update(h.as_bytes());
+            }
+        }
         hasher.finalize().into()
     }
 
