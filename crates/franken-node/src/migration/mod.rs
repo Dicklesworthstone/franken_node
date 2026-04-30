@@ -1922,7 +1922,7 @@ fn create_backup_directory_safe(project_path: &Path, backup_path: &Path) -> anyh
 
     // Create each subdirectory component incrementally with symlink validation
     if let Ok(relative_backup_path) = backup_path.strip_prefix(&backup_root) {
-        let mut current_path = backup_root;
+        let mut current_path = backup_root.clone();
 
         for component in relative_backup_path.components() {
             if let std::path::Component::Normal(name) = component {
@@ -1984,7 +1984,7 @@ fn validate_backup_path_no_symlinks(project_path: &Path, backup_path: &Path) -> 
 
     if let Ok(relative_backup_path) = backup_path.strip_prefix(&backup_root) {
         // Check each component of the backup path for symlinks
-        let mut current_path = backup_root;
+        let mut current_path = backup_root.clone();
         for component in relative_backup_path.components() {
             if let std::path::Component::Normal(name) = component {
                 current_path = current_path.join(name);
