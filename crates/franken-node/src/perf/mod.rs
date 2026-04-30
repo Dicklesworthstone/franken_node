@@ -14,6 +14,10 @@ mod tests {
     };
 
     fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+        if cap == 0 {
+            items.clear();
+            return;
+        }
         if items.len() >= cap {
             let overflow = items.len().saturating_sub(cap).saturating_add(1);
             items.drain(0..overflow.min(items.len()));
