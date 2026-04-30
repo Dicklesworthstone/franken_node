@@ -18,6 +18,10 @@ use frankenengine_node::runtime::checkpoint::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
+use tempfile::TempDir;
 
 const MAX_ORCHESTRATION_ID_LEN: usize = 256;
 const MAX_CHECKPOINT_ID_LEN: usize = 128;
@@ -44,6 +48,148 @@ impl From<CheckpointError> for HarnessCheckpointError {
             CheckpointError::HashChainViolation { reason, .. } => Self::HashChain(reason),
             _ => Self::CheckpointOperation(error.to_string()),
         }
+    }
+}
+
+/// Real file-based checkpoint backend for mock-free integration testing.
+///
+/// Uses temporary files with line-delimited JSON to persist checkpoint records.
+/// Each orchestration_id gets its own file within a temporary directory.
+///
+/// This replaces InMemoryCheckpointBackend to test real file I/O paths,
+/// serialization edge cases, and filesystem error handling.
+#[derive(Debug)]
+pub struct TempFileCheckpointBackend {
+    temp_dir: TempDir,
+    base_path: PathBuf,
+}
+
+impl TempFileCheckpointBackend {
+    /// Create a new temporary file-based checkpoint backend.
+    ///
+    /// Creates a temporary directory that will be automatically cleaned up
+    /// when the backend is dropped.
+    pub fn new() -> Result<Self, CheckpointError> {
+        let temp_dir = TempDir::new()
+            .map_err(|e| CheckpointError::Backend(format!("failed to create temp dir: {}", e)))?;
+
+        let base_path = temp_dir.path().to_path_buf();
+
+        eprintln!("[TEMP_CHECKPOINT_BACKEND] Created at: {}", base_path.display());
+
+        Ok(Self {
+            temp_dir,
+            base_path,
+        })
+    }
+
+    /// Get the file path for a specific orchestration_id.
+    ///
+    /// Each orchestration gets its own file to avoid cross-contamination
+    /// and enable parallel test execution.
+    fn file_path_for_orchestration(&self, orchestration_id: &str) -> PathBuf {
+        // Sanitize orchestration_id for filesystem safety
+        let safe_id = orchestration_id
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect::<String>();
+
+        self.base_path.join(format!("{}.jsonl", safe_id))
+    }
+
+    /// Log operation for debugging test failures.
+    fn log_operation(&self, operation: &str, orchestration_id: &str, details: &str) {
+        let file_path = self.file_path_for_orchestration(orchestration_id);
+        eprintln!(
+            "[TEMP_CHECKPOINT_BACKEND] {} orchestration='{}' file='{}' details='{}'",
+            operation,
+            orchestration_id,
+            file_path.display(),
+            details
+        );
+    }
+}
+
+impl CheckpointBackend for TempFileCheckpointBackend {
+    fn save(&mut self, record: CheckpointRecord) -> Result<bool, CheckpointError> {
+        let orchestration_id = &record.orchestration_id;
+        let file_path = self.file_path_for_orchestration(orchestration_id);
+
+        // Check if record already exists (idempotency)
+        if file_path.exists() {
+            let existing_records = self.load_all(orchestration_id)?;
+            for existing in existing_records {
+                if existing.checkpoint_id == record.checkpoint_id
+                    && existing.iteration_count == record.iteration_count
+                    && existing.epoch == record.epoch {
+                    self.log_operation("SAVE_DUPLICATE", orchestration_id,
+                        &format!("checkpoint_id={:?} iteration={} epoch={}",
+                                record.checkpoint_id, record.iteration_count, record.epoch));
+                    return Ok(false); // Record already exists
+                }
+            }
+        }
+
+        // Serialize record as JSON line
+        let json_line = serde_json::to_string(&record)
+            .map_err(|e| CheckpointError::Serialization(format!("failed to serialize record: {}", e)))?;
+
+        // Append to file (create if doesn't exist)
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file_path)
+            .map_err(|e| CheckpointError::Backend(format!("failed to open checkpoint file '{}': {}", file_path.display(), e)))?;
+
+        writeln!(file, "{}", json_line)
+            .map_err(|e| CheckpointError::Backend(format!("failed to write to checkpoint file '{}': {}", file_path.display(), e)))?;
+
+        file.sync_all()
+            .map_err(|e| CheckpointError::Backend(format!("failed to sync checkpoint file '{}': {}", file_path.display(), e)))?;
+
+        self.log_operation("SAVE_NEW", orchestration_id,
+            &format!("checkpoint_id={:?} iteration={} epoch={} file_size={}",
+                    record.checkpoint_id, record.iteration_count, record.epoch,
+                    file_path.metadata().map(|m| m.len()).unwrap_or(0)));
+
+        Ok(true) // New record was inserted
+    }
+
+    fn load_all(&self, orchestration_id: &str) -> Result<Vec<CheckpointRecord>, CheckpointError> {
+        let file_path = self.file_path_for_orchestration(orchestration_id);
+
+        if !file_path.exists() {
+            self.log_operation("LOAD_NO_FILE", orchestration_id, "file does not exist");
+            return Ok(Vec::new()); // No records for this orchestration
+        }
+
+        let file = fs::File::open(&file_path)
+            .map_err(|e| CheckpointError::Backend(format!("failed to open checkpoint file '{}': {}", file_path.display(), e)))?;
+
+        let reader = BufReader::new(file);
+        let mut records = Vec::new();
+
+        for (line_num, line_result) in reader.lines().enumerate() {
+            let line = line_result
+                .map_err(|e| CheckpointError::Backend(format!("failed to read line {} from '{}': {}", line_num + 1, file_path.display(), e)))?;
+
+            if line.trim().is_empty() {
+                continue; // Skip empty lines
+            }
+
+            let record: CheckpointRecord = serde_json::from_str(&line)
+                .map_err(|e| CheckpointError::Serialization(format!("failed to deserialize record from line {} in '{}': {}", line_num + 1, file_path.display(), e)))?;
+
+            records.push(record);
+        }
+
+        // Sort by iteration_count and epoch to ensure consistent ordering
+        records.sort_by_key(|r| (r.iteration_count, r.epoch, r.wall_clock_time));
+
+        self.log_operation("LOAD_SUCCESS", orchestration_id,
+            &format!("loaded {} records from file", records.len()));
+
+        Ok(records)
     }
 }
 
@@ -300,7 +446,8 @@ fn validate_checkpoint_record_round_trip(
 fn validate_checkpoint_writer_operations(
     vectors: &[(CheckpointId, String, u64, u64, u64, FuzzState)],
 ) -> Result<Vec<CheckpointEvent>, HarnessCheckpointError> {
-    let backend = InMemoryCheckpointBackend::new();
+    let backend = TempFileCheckpointBackend::new()
+        .map_err(|e| HarnessCheckpointError::Backend(e.to_string()))?;
     let mut writer = CheckpointWriter::new(backend);
     let mut events = Vec::new();
 
@@ -457,7 +604,8 @@ fn fuzz_checkpoint_event_audit_trail_consistency() {
 
 #[test]
 fn fuzz_checkpoint_writer_progress_regression_detection() {
-    let backend = InMemoryCheckpointBackend::new();
+    let backend = TempFileCheckpointBackend::new()
+        .expect("temp file backend should initialize");
     let mut writer = CheckpointWriter::new(backend);
     let state = FuzzState::new(1);
 
@@ -623,7 +771,8 @@ fn fuzz_checkpoint_id_determinism() {
 
 #[test]
 fn fuzz_checkpoint_hash_chain_validation() {
-    let backend = InMemoryCheckpointBackend::new();
+    let backend = TempFileCheckpointBackend::new()
+        .expect("temp file backend should initialize");
     let mut writer = CheckpointWriter::new(backend);
     let state = FuzzState::new(1);
 
