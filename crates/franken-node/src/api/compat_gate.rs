@@ -55,6 +55,8 @@ pub mod error_codes {
     pub const ERR_COMPAT_SHIM_CAPACITY: &str = "ERR_COMPAT_SHIM_CAPACITY";
     /// Error code for predicate capacity exceeded.
     pub const ERR_COMPAT_PREDICATE_CAPACITY: &str = "ERR_COMPAT_PREDICATE_CAPACITY";
+    /// Error code for scope capacity exceeded.
+    pub const ERR_COMPAT_SCOPE_CAPACITY: &str = "ERR_COMPAT_SCOPE_CAPACITY";
     /// Error code for trace ID exhausted.
     pub const ERR_COMPAT_TRACE_ID_EXHAUSTED: &str = "ERR_COMPAT_TRACE_ID_EXHAUSTED";
     /// Error code for receipt ID exhausted.
@@ -65,7 +67,11 @@ pub mod error_codes {
 // Invariant constants
 // ---------------------------------------------------------------------------
 
-use crate::capacity_defaults::aliases::{MAX_EVENTS, MAX_PREDICATES, MAX_RECEIPTS, MAX_SHIMS};
+use crate::capacity_defaults::aliases::{
+    MAX_ENTRIES, MAX_EVENTS, MAX_PREDICATES, MAX_RECEIPTS, MAX_SHIMS,
+};
+
+const MAX_SCOPES: usize = MAX_ENTRIES;
 
 /// Invariant: all gate decisions visible via structured API responses.
 pub const INV_PCG_VISIBLE: &str = "INV-PCG-VISIBLE";
@@ -268,6 +274,7 @@ impl std::error::Error for CompatGateRegistrationError {}
 pub enum CompatGateOperationError {
     TraceIdSpaceExhausted,
     ReceiptIdSpaceExhausted,
+    ScopeCapacityExceeded { capacity: usize },
 }
 
 impl CompatGateOperationError {
@@ -275,6 +282,7 @@ impl CompatGateOperationError {
         match self {
             Self::TraceIdSpaceExhausted => error_codes::ERR_COMPAT_TRACE_ID_EXHAUSTED,
             Self::ReceiptIdSpaceExhausted => error_codes::ERR_COMPAT_RECEIPT_ID_EXHAUSTED,
+            Self::ScopeCapacityExceeded { .. } => error_codes::ERR_COMPAT_SCOPE_CAPACITY,
         }
     }
 }
@@ -284,6 +292,10 @@ impl fmt::Display for CompatGateOperationError {
         match self {
             Self::TraceIdSpaceExhausted => f.write_str("compat gate trace ID space exhausted"),
             Self::ReceiptIdSpaceExhausted => f.write_str("compat gate receipt ID space exhausted"),
+            Self::ScopeCapacityExceeded { capacity } => write!(
+                f,
+                "compat gate scope capacity exceeded: capacity={capacity}"
+            ),
         }
     }
 }
@@ -486,8 +498,12 @@ impl CompatGateService {
     }
 
     /// Set the current mode for a scope.
-    pub fn set_scope_mode(&mut self, scope: &str, mode: CompatMode) {
-        self.scopes.insert(scope.to_string(), mode);
+    pub fn set_scope_mode(
+        &mut self,
+        scope: &str,
+        mode: CompatMode,
+    ) -> Result<(), CompatGateOperationError> {
+        self.insert_scope_mode(scope.to_string(), mode)
     }
 
     /// Query the current mode for a scope.
@@ -498,6 +514,21 @@ impl CompatGateService {
             receipt_id: String::new(),
             policy_predicate: self.predicates.first().cloned(),
         })
+    }
+
+    fn insert_scope_mode(
+        &mut self,
+        scope: String,
+        mode: CompatMode,
+    ) -> Result<(), CompatGateOperationError> {
+        if !self.scopes.contains_key(&scope) && self.scopes.len() >= MAX_SCOPES {
+            return Err(CompatGateOperationError::ScopeCapacityExceeded {
+                capacity: MAX_SCOPES,
+            });
+        }
+
+        self.scopes.insert(scope, mode);
+        Ok(())
     }
 
     /// Query all registered shims, optionally filtered by scope.
@@ -638,8 +669,7 @@ impl CompatGateService {
         };
 
         if approved {
-            self.scopes
-                .insert(request.scope_id.clone(), request.to_mode);
+            self.insert_scope_mode(request.scope_id.clone(), request.to_mode)?;
 
             self.emit_event(
                 PCG_003_TRANSITION_APPROVED,
@@ -829,7 +859,8 @@ mod tests {
 
     fn make_service_with_scope() -> CompatGateService {
         let mut svc = CompatGateService::new();
-        svc.set_scope_mode("project-1", CompatMode::Balanced);
+        svc.set_scope_mode("project-1", CompatMode::Balanced)
+            .unwrap();
         svc.register_shim(ShimMetadata {
             shim_id: "shim-buffer".into(),
             description: "Buffer compatibility shim".into(),
@@ -1324,8 +1355,9 @@ mod tests {
     #[test]
     fn non_interference_different_scopes() {
         let mut svc = CompatGateService::new();
-        svc.set_scope_mode("scope-a", CompatMode::Strict);
-        svc.set_scope_mode("scope-b", CompatMode::LegacyRisky);
+        svc.set_scope_mode("scope-a", CompatMode::Strict).unwrap();
+        svc.set_scope_mode("scope-b", CompatMode::LegacyRisky)
+            .unwrap();
         assert!(svc.check_non_interference("scope-a", "scope-b"));
     }
 
@@ -1387,7 +1419,8 @@ mod tests {
     #[test]
     fn register_predicate_rejects_capacity_overflow_without_eviction() {
         let mut svc = CompatGateService::new();
-        svc.set_scope_mode("project-1", CompatMode::Balanced);
+        svc.set_scope_mode("project-1", CompatMode::Balanced)
+            .unwrap();
         for idx in 0..MAX_PREDICATES {
             svc.register_predicate(make_predicate(format!("predicate-{idx}")))
                 .expect("predicate fill should succeed");
@@ -1422,6 +1455,65 @@ mod tests {
             !svc.predicates
                 .iter()
                 .any(|predicate| predicate.predicate_id == "predicate-overflow")
+        );
+    }
+
+    #[test]
+    fn scope_registry_rejects_new_scopes_at_capacity_without_eviction() {
+        let mut svc = CompatGateService::new();
+        for idx in 0..MAX_SCOPES {
+            svc.scopes
+                .insert(format!("scope-{idx}"), CompatMode::Strict);
+        }
+
+        let err = svc
+            .set_scope_mode("scope-overflow", CompatMode::Balanced)
+            .expect_err("overflow scope must be rejected");
+
+        assert_eq!(
+            err,
+            CompatGateOperationError::ScopeCapacityExceeded {
+                capacity: MAX_SCOPES
+            }
+        );
+        assert_eq!(err.code(), error_codes::ERR_COMPAT_SCOPE_CAPACITY);
+        assert_eq!(svc.scopes.len(), MAX_SCOPES);
+        assert!(svc.query_mode("scope-overflow").is_none());
+
+        svc.set_scope_mode("scope-0", CompatMode::LegacyRisky)
+            .expect("existing scopes remain updatable at capacity");
+        assert_eq!(
+            svc.query_mode("scope-0").map(|response| response.mode),
+            Some(CompatMode::LegacyRisky)
+        );
+
+        let transition_err = svc
+            .request_transition(&ModeTransitionRequest {
+                scope_id: "transition-overflow".into(),
+                from_mode: CompatMode::Strict,
+                to_mode: CompatMode::Balanced,
+                justification: "operator-approved escalation".into(),
+                requestor: "secops".into(),
+            })
+            .expect_err("approved overflow transition must fail closed");
+
+        assert_eq!(
+            transition_err,
+            CompatGateOperationError::ScopeCapacityExceeded {
+                capacity: MAX_SCOPES
+            }
+        );
+        assert!(svc.query_mode("transition-overflow").is_none());
+        assert!(
+            !svc.events()
+                .iter()
+                .any(|event| event.scope == "transition-overflow")
+        );
+        assert!(
+            !svc
+                .query_receipts(Some("transition-overflow"), None)
+                .iter()
+                .any(|receipt| receipt.scope == "transition-overflow")
         );
     }
 
@@ -1653,7 +1745,8 @@ mod tests {
     #[test]
     fn predicate_capacity_error_does_not_replace_query_mode_predicate() {
         let mut svc = CompatGateService::new();
-        svc.set_scope_mode("project-1", CompatMode::Balanced);
+        svc.set_scope_mode("project-1", CompatMode::Balanced)
+            .unwrap();
         for idx in 0..MAX_PREDICATES {
             svc.register_predicate(make_predicate(format!("predicate-{idx}")))
                 .expect("predicate fill should succeed");
@@ -1748,7 +1841,8 @@ mod compat_gate_additional_negative_tests {
 
     fn service_with_balanced_scope() -> CompatGateService {
         let mut svc = CompatGateService::new();
-        svc.set_scope_mode("project-extra", CompatMode::Balanced);
+        svc.set_scope_mode("project-extra", CompatMode::Balanced)
+            .unwrap();
         svc
     }
 
@@ -1856,7 +1950,8 @@ mod compat_gate_additional_negative_tests {
     #[test]
     fn same_scope_non_interference_check_is_negative() {
         let mut svc = CompatGateService::new();
-        svc.set_scope_mode("shared-scope", CompatMode::Strict);
+        svc.set_scope_mode("shared-scope", CompatMode::Strict)
+            .unwrap();
 
         assert!(!svc.check_non_interference("shared-scope", "shared-scope"));
     }
@@ -2015,7 +2110,8 @@ mod compat_gate_fresh_negative_tests {
     #[test]
     fn legacy_risky_scope_gate_check_is_audit_not_silent_allow() {
         let mut svc = CompatGateService::new();
-        svc.set_scope_mode("legacy-scope", CompatMode::LegacyRisky);
+        svc.set_scope_mode("legacy-scope", CompatMode::LegacyRisky)
+            .unwrap();
 
         let response = svc
             .gate_check(&GateCheckRequest {
@@ -2038,7 +2134,8 @@ mod compat_gate_fresh_negative_tests {
     #[test]
     fn denied_gate_check_does_not_mutate_existing_scope_mode() {
         let mut svc = CompatGateService::new();
-        svc.set_scope_mode("strict-scope", CompatMode::Strict);
+        svc.set_scope_mode("strict-scope", CompatMode::Strict)
+            .unwrap();
 
         let response = svc
             .gate_check(&GateCheckRequest {
@@ -2059,7 +2156,8 @@ mod compat_gate_fresh_negative_tests {
     #[test]
     fn denied_gate_check_records_failed_event_but_no_transition_event() {
         let mut svc = CompatGateService::new();
-        svc.set_scope_mode("strict-scope", CompatMode::Strict);
+        svc.set_scope_mode("strict-scope", CompatMode::Strict)
+            .unwrap();
 
         svc.gate_check(&GateCheckRequest {
             package_id: "pkg-risky".to_string(),
@@ -2122,7 +2220,8 @@ mod compat_gate_fresh_negative_tests {
     #[test]
     fn denied_wrong_from_mode_transition_does_not_drain_existing_events() {
         let mut svc = CompatGateService::new();
-        svc.set_scope_mode("project-denied", CompatMode::Balanced);
+        svc.set_scope_mode("project-denied", CompatMode::Balanced)
+            .unwrap();
         svc.gate_check(&GateCheckRequest {
             package_id: "seed".to_string(),
             requested_mode: CompatMode::Strict,
@@ -2149,7 +2248,8 @@ mod compat_gate_fresh_negative_tests {
     #[test]
     fn terminal_trace_exhaustion_on_transition_leaves_no_receipt() {
         let mut svc = CompatGateService::new();
-        svc.set_scope_mode("terminal-trace", CompatMode::Balanced);
+        svc.set_scope_mode("terminal-trace", CompatMode::Balanced)
+            .unwrap();
         svc.trace_counter = u64::MAX;
         svc.trace_epoch = u64::MAX;
 
@@ -2266,7 +2366,8 @@ mod compat_gate_malformed_payload_tests {
         let service = Arc::new(Mutex::new(CompatGateService::new()));
         {
             let mut svc = service.lock().unwrap();
-            svc.set_scope_mode("concurrent-scope", CompatMode::Balanced);
+            svc.set_scope_mode("concurrent-scope", CompatMode::Balanced)
+                .unwrap();
         }
 
         let barrier = Arc::new(Barrier::new(8));
@@ -2427,7 +2528,8 @@ mod compat_gate_malformed_payload_tests {
     #[test]
     fn security_edge_case_policy_injection_in_request_fields() {
         let mut svc = CompatGateService::new();
-        svc.set_scope_mode("policy-test", CompatMode::Balanced);
+        svc.set_scope_mode("policy-test", CompatMode::Balanced)
+            .unwrap();
 
         // Test various injection patterns in request fields
         let injection_patterns = vec![
@@ -2653,7 +2755,7 @@ mod compat_gate_malformed_payload_tests {
         ];
 
         for (scope, mode) in scopes {
-            svc.set_scope_mode(scope, mode);
+            svc.set_scope_mode(scope, mode).unwrap();
         }
 
         // Test cross-scope contamination resistance
@@ -2733,7 +2835,8 @@ mod compat_gate_malformed_payload_tests {
     #[test]
     fn security_edge_case_event_tampering_resistance() {
         let mut svc = CompatGateService::new();
-        svc.set_scope_mode("event-test", CompatMode::Balanced);
+        svc.set_scope_mode("event-test", CompatMode::Balanced)
+            .unwrap();
 
         // Perform operations that generate events
         let operations = vec![
