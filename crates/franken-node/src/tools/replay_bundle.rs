@@ -1547,6 +1547,7 @@ fn uuid_v7_from_seed(timestamp_ms: u64, entropy: &[u8; 32]) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
+#[cfg(debug_assertions)]
 fn compute_decision_sequence_hash(
     timeline: &[TimelineEvent],
     initial_state_snapshot: &Value,
@@ -1756,6 +1757,7 @@ fn compute_decision_sequence_hash_from_canonical_timeline(
     Ok(sha256_hex(&canonical))
 }
 
+#[cfg(debug_assertions)]
 fn chunk_timeline(
     bundle_id: Uuid,
     timeline: &[TimelineEvent],
