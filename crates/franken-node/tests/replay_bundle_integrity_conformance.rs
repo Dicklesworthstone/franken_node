@@ -1,10 +1,11 @@
 use frankenengine_node::tools::replay_bundle::{
-    generate_replay_bundle, to_canonical_json, validate_bundle_integrity, RawEvent, ReplayBundle, EventType,
+    generate_replay_bundle, to_canonical_json, validate_bundle_integrity, EventType, RawEvent,
+    ReplayBundle,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::path::Path;
 use std::fs;
+use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
@@ -290,6 +291,36 @@ fn replay_bundle_integrity_vectors_match_runtime_contract() -> TestResult {
         println!("REPLAY_BUNDLE_CONFORMANCE_GENERATED={}", rendered);
     }
 
+    Ok(())
+}
+
+#[test]
+fn replay_bundle_preserves_last_original_causal_parent_after_timestamp_sort() -> TestResult {
+    let events = vec![
+        RawEvent::new(
+            "2026-02-20T10:00:00.000200Z",
+            EventType::PolicyEval,
+            json!({"decision":"quarantine"}),
+        )
+        .with_causal_parent(2),
+        RawEvent::new(
+            "2026-02-20T10:00:00.000100Z",
+            EventType::ExternalSignal,
+            json!({"signal":"anomaly"}),
+        ),
+    ];
+
+    let bundle = generate_replay_bundle("INC-CAUSAL-LAST-PARENT", &events)
+        .map_err(|err| format!("bundle generation must preserve remapped parent: {err}"))?;
+    assert_eq!(bundle.timeline[0].payload, json!({"signal":"anomaly"}));
+    assert_eq!(bundle.timeline[0].causal_parent, None);
+    assert_eq!(bundle.timeline[1].payload, json!({"decision":"quarantine"}));
+    assert_eq!(bundle.timeline[1].causal_parent, Some(1));
+    assert!(
+        validate_bundle_integrity(&bundle)
+            .map_err(|err| format!("remapped parent bundle must validate: {err}"))?,
+        "remapped parent bundle must pass integrity validation"
+    );
     Ok(())
 }
 
