@@ -602,9 +602,29 @@ impl RateLimiter {
         }
     }
 
-    /// Check if a request is allowed. Returns `Ok(())` if allowed or
-    /// `Err(retry_after_ms)` if rate limited.
-    pub fn check(&mut self) -> Result<(), u64> {
+    /// Check if a request is allowed without consuming a token.
+    pub fn peek(&mut self) -> Result<(), u64> {
+        self.update_tokens();
+        if self.tokens >= 1.0 {
+            Ok(())
+        } else {
+            let wait_secs = (1.0 - self.tokens) / f64::from(self.config.sustained_rps);
+            let wait_ms = (wait_secs * 1000.0).ceil() as u64;
+            Err(wait_ms.max(1))
+        }
+    }
+
+    /// Consume a token unconditionally (assumes peek() was already checked).
+    pub fn consume(&mut self) {
+        self.update_tokens();
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+        } else {
+            self.tokens = 0.0;
+        }
+    }
+
+    fn update_tokens(&mut self) {
         let now = Instant::now();
         let elapsed = now.saturating_duration_since(self.last_check).as_secs_f64();
         self.last_check = now;
@@ -624,6 +644,12 @@ impl RateLimiter {
         if self.tokens > f64::from(self.config.burst_size) {
             self.tokens = f64::from(self.config.burst_size);
         }
+    }
+
+    /// Check if a request is allowed. Returns `Ok(())` if allowed or
+    /// `Err(retry_after_ms)` if rate limited. Consumes a token on success.
+    pub fn check(&mut self) -> Result<(), u64> {
+        self.update_tokens();
 
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
@@ -772,6 +798,9 @@ impl AuthFailureLimiter {
         retry_after_ms: Option<u64>,
     ) {
         let source_count = self.increment_source_failure_count(source_ip);
+        if let Some(state) = self.source_states.get_mut(source_ip) {
+            state.rate_limiter.consume();
+        }
         self.emit_failure_event(
             source_ip,
             failure_type,
@@ -806,6 +835,16 @@ impl AuthFailureLimiter {
         // Emit via observability surface (structured logging for now).
         // In production, this would be routed to metrics/alerting systems.
         let _ = write_auth_failure_event(&mut io::stderr().lock(), &event);
+    }
+
+    /// Record successful authentication, clearing any failure history for this source.
+    pub fn record_success(&mut self, source_ip: &str) {
+        if let Some(state) = self.source_states.get_mut(source_ip) {
+            state.failure_count = 0;
+            // We do not refund tokens because `check_auth_attempt` (which uses peek) 
+            // no longer consumes them. We just clear the failure count so the 
+            // legitimate user can be evicted from the bounded map.
+        }
     }
 
     /// Record authentication failure for an invalid or empty credential.
@@ -925,7 +964,7 @@ impl AuthFailureLimiter {
         source_ip: &str,
     ) -> Result<(), (u64, u64)> {
         let state = Self::ensure_source_state_in(source_states, config, source_ip);
-        match state.rate_limiter.check() {
+        match state.rate_limiter.peek() {
             Ok(()) => Ok(()),
             Err(retry_after_ms) => {
                 *global_failure_count = global_failure_count.saturating_add(1);
@@ -1378,7 +1417,10 @@ where
 
     // Step 3: Authentication
     let identity = match authenticate(auth_header, &route.auth_method, &trace_id, authorized_keys) {
-        Ok(id) => id,
+        Ok(id) => {
+            auth_failure_limiter.record_success(source_ip);
+            id
+        }
         Err(err) => {
             // Record authentication failure for incident response visibility
             let failure_type = classify_auth_failure(&err);
