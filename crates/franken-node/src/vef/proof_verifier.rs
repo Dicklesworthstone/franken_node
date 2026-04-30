@@ -466,28 +466,31 @@ impl ProofVerifier {
                 push_bounded(
                     &mut deny_reasons,
                     format!(
-                    "confidence {} below minimum {}",
-                    proof.confidence, predicate.min_confidence
-                ));
+                        "confidence {} below minimum {}",
+                        proof.confidence, predicate.min_confidence
+                    ),
+                    PREDICATE_EVIDENCE_CAPACITY,
+                );
             }
             all_satisfied = false;
         }
         push_bounded(
             &mut evidence,
             PredicateEvidence {
-            predicate_id: predicate.predicate_id.clone(),
-            action_class: proof.action_class.clone(),
-            satisfied: confidence_satisfied,
-            reason: if confidence_satisfied {
-                format!(
-                    "confidence {} meets minimum {}",
-                    proof.confidence, predicate.min_confidence
-                )
-            } else {
-                format!(
-                    "confidence {} below minimum {}",
-                    proof.confidence, predicate.min_confidence
-                )
+                predicate_id: predicate.predicate_id.clone(),
+                action_class: proof.action_class.clone(),
+                satisfied: confidence_satisfied,
+                reason: if confidence_satisfied {
+                    format!(
+                        "confidence {} meets minimum {}",
+                        proof.confidence, predicate.min_confidence
+                    )
+                } else {
+                    format!(
+                        "confidence {} below minimum {}",
+                        proof.confidence, predicate.min_confidence
+                    )
+                },
             },
             PREDICATE_EVIDENCE_CAPACITY,
         );
@@ -513,20 +516,21 @@ impl ProofVerifier {
         push_bounded(
             &mut evidence,
             PredicateEvidence {
-            predicate_id: predicate.predicate_id.clone(),
-            action_class: proof.action_class.clone(),
-            satisfied: witness_satisfied,
-            reason: if witness_satisfied {
-                format!(
-                    "witness count {} meets requirement",
-                    proof.witness_references.len()
-                )
-            } else {
-                format!(
-                    "witness count {} below required {}",
-                    proof.witness_references.len(),
-                    predicate.min_witness_count
-                )
+                predicate_id: predicate.predicate_id.clone(),
+                action_class: proof.action_class.clone(),
+                satisfied: witness_satisfied,
+                reason: if witness_satisfied {
+                    format!(
+                        "witness count {} meets requirement",
+                        proof.witness_references.len()
+                    )
+                } else {
+                    format!(
+                        "witness count {} below required {}",
+                        proof.witness_references.len(),
+                        predicate.min_witness_count
+                    )
+                },
             },
             PREDICATE_EVIDENCE_CAPACITY,
         );
@@ -542,8 +546,7 @@ impl ProofVerifier {
                 &mut deny_reasons,
                 format!(
                     "policy version hash mismatch: proof='{}' predicate='{}'",
-                    proof.policy_version_hash,
-                    predicate.policy_version_hash
+                    proof.policy_version_hash, predicate.policy_version_hash
                 ),
                 PREDICATE_EVIDENCE_CAPACITY,
             );
@@ -552,16 +555,17 @@ impl ProofVerifier {
         push_bounded(
             &mut evidence,
             PredicateEvidence {
-            predicate_id: predicate.predicate_id.clone(),
-            action_class: proof.action_class.clone(),
-            satisfied: policy_version_satisfied,
-            reason: if policy_version_satisfied {
-                "policy version hash matches".to_string()
-            } else {
-                format!(
-                    "policy version mismatch: proof='{}' vs predicate='{}'",
-                    proof.policy_version_hash, predicate.policy_version_hash
-                )
+                predicate_id: predicate.predicate_id.clone(),
+                action_class: proof.action_class.clone(),
+                satisfied: policy_version_satisfied,
+                reason: if policy_version_satisfied {
+                    "policy version hash matches".to_string()
+                } else {
+                    format!(
+                        "policy version mismatch: proof='{}' vs predicate='{}'",
+                        proof.policy_version_hash, predicate.policy_version_hash
+                    )
+                },
             },
             PREDICATE_EVIDENCE_CAPACITY,
         );
@@ -678,7 +682,11 @@ impl VerificationGate {
             ),
         };
         self.emit_event(request_received_event.clone());
-        push_bounded(&mut report_events, request_received_event, REPORT_EVENT_CAPACITY);
+        push_bounded(
+            &mut report_events,
+            request_received_event,
+            REPORT_EVENT_CAPACITY,
+        );
 
         // Format validation
         if request.proof.proof_id.is_empty() {
@@ -765,7 +773,11 @@ impl VerificationGate {
             ),
         };
         self.emit_event(report_finalized_event.clone());
-        push_bounded(&mut report_events, report_finalized_event, REPORT_EVENT_CAPACITY);
+        push_bounded(
+            &mut report_events,
+            report_finalized_event,
+            REPORT_EVENT_CAPACITY,
+        );
 
         let report = VerificationReport {
             schema_version: PROOF_VERIFIER_SCHEMA_VERSION.to_string(),

@@ -61,7 +61,7 @@ fn test_time_boundary_fail_closed_semantics() {
     proof.expires_at_millis = NOW;
     let result = verifier.validate_proof(&proof, &predicate, NOW, "test");
     assert!(result.is_ok());
-    let (_decision, _) = result.unwrap();
+    let (decision, _) = result.unwrap();
     assert!(
         matches!(decision, TrustDecision::Deny(_)),
         "Proof expiring exactly at current time should be denied (fail-closed)"
@@ -71,7 +71,7 @@ fn test_time_boundary_fail_closed_semantics() {
     proof.expires_at_millis = NOW - 1;
     let result = verifier.validate_proof(&proof, &predicate, NOW, "test");
     assert!(result.is_ok());
-    let (_decision, _) = result.unwrap();
+    let (decision, _) = result.unwrap();
     assert!(matches!(decision, TrustDecision::Deny(_)));
 
     // Test 3: Proof expires 1ms after current time (should pass expiry check)
@@ -120,7 +120,7 @@ fn test_freshness_boundary_conditions() {
     proof.generated_at_millis = NOW + 1000;
     let result = verifier.validate_proof(&proof, &predicate, NOW, "test");
     assert!(result.is_ok());
-    let (_decision, evidence) = result.unwrap();
+    let (decision, evidence) = result.unwrap();
     assert!(matches!(decision, TrustDecision::Deny(_)));
     let freshness_evidence = evidence
         .iter()
@@ -198,28 +198,28 @@ fn test_confidence_score_edge_cases() {
     assert!(proof.confidence >= 80, "Should be above degrade threshold");
     let result = verifier.validate_proof(&proof, &predicate, NOW, "test");
     assert!(result.is_ok());
-    let (_decision, _) = result.unwrap();
+    let (decision, _) = result.unwrap();
     assert!(matches!(decision, TrustDecision::Degrade(_)));
 
     // Test 3: Confidence below degrade threshold (should deny)
     proof.confidence = 70; // Below degrade threshold of 80
     let result = verifier.validate_proof(&proof, &predicate, NOW, "test");
     assert!(result.is_ok());
-    let (_decision, _) = result.unwrap();
+    let (decision, _) = result.unwrap();
     assert!(matches!(decision, TrustDecision::Deny(_)));
 
     // Test 4: Zero confidence (should deny)
     proof.confidence = 0;
     let result = verifier.validate_proof(&proof, &predicate, NOW, "test");
     assert!(result.is_ok());
-    let (_decision, _) = result.unwrap();
+    let (decision, _) = result.unwrap();
     assert!(matches!(decision, TrustDecision::Deny(_)));
 
     // Test 5: Maximum confidence (should pass)
     proof.confidence = 100;
     let result = verifier.validate_proof(&proof, &predicate, NOW, "test");
     assert!(result.is_ok());
-    let (_decision, _) = result.unwrap();
+    let (_, evidence) = result.unwrap();
     // Should pass confidence check but may fail others
     let conf_evidence = evidence
         .iter()
@@ -257,7 +257,7 @@ fn test_witness_count_edge_cases() {
     predicate.min_witness_count = 2;
     let result = verifier.validate_proof(&proof, &predicate, NOW, "test");
     assert!(result.is_ok());
-    let (_decision, evidence) = result.unwrap();
+    let (decision, evidence) = result.unwrap();
     assert!(matches!(decision, TrustDecision::Deny(_)));
     let witness_evidence = evidence
         .iter()
