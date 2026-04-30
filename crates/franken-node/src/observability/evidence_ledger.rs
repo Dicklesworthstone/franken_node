@@ -345,6 +345,48 @@ fn decimal_digit_count(value: usize) -> usize {
     digits
 }
 
+fn decimal_digit_count_u64(value: u64) -> usize {
+    let mut remaining = value;
+    let mut digits: usize = 1;
+    while remaining >= 10 {
+        digits = digits.saturating_add(1);
+        remaining /= 10;
+    }
+    digits
+}
+
+fn json_string_size(value: &str) -> usize {
+    let mut bytes = 2_usize;
+    for character in value.chars() {
+        bytes = bytes.saturating_add(match character {
+            '"' | '\\' | '\u{08}' | '\u{0c}' | '\n' | '\r' | '\t' => 2,
+            '\u{00}'..='\u{1f}' => 6,
+            other => other.len_utf8(),
+        });
+    }
+    bytes
+}
+
+fn json_field_size(field_name: &str, value_size: usize) -> usize {
+    field_name
+        .len()
+        .saturating_add(3)
+        .saturating_add(value_size)
+}
+
+fn add_json_field_size(
+    total: &mut usize,
+    field_count: &mut usize,
+    field_name: &str,
+    value_size: usize,
+) {
+    if *field_count > 0 {
+        *total = (*total).saturating_add(1);
+    }
+    *field_count = (*field_count).saturating_add(1);
+    *total = (*total).saturating_add(json_field_size(field_name, value_size));
+}
+
 fn serialized_entry_size(entry: &EvidenceEntry) -> usize {
     serialized_json_size(entry).unwrap_or(usize::MAX)
 }
@@ -353,20 +395,83 @@ fn serialized_entry_size_with_payload_bytes(
     entry: &EvidenceEntry,
     payload_json_bytes: &[u8],
 ) -> usize {
-    // Compute entry size using pre-computed payload JSON bytes to avoid duplicate serialization.
-    // We create a modified entry with a null payload, compute its size, then substitute
-    // the actual payload size.
-
-    let mut entry_without_payload = entry.clone();
-    entry_without_payload.payload = serde_json::Value::Null;
-
-    let base_size = serialized_json_size(&entry_without_payload).unwrap_or(usize::MAX);
-
-    // The null payload serializes as "null" (4 bytes), so we subtract that and add the actual payload size
-    let null_payload_size = 4; // "null"
-    base_size
-        .saturating_sub(null_payload_size)
-        .saturating_add(payload_json_bytes.len())
+    // Mirror serde_json's compact derived-struct layout without cloning the entry
+    // or re-serializing the already materialized payload bytes.
+    let mut size = 2_usize;
+    let mut field_count = 0_usize;
+    add_json_field_size(
+        &mut size,
+        &mut field_count,
+        "schema_version",
+        json_string_size(&entry.schema_version),
+    );
+    add_json_field_size(
+        &mut size,
+        &mut field_count,
+        "entry_id",
+        entry.entry_id.as_deref().map_or(4, json_string_size),
+    );
+    add_json_field_size(
+        &mut size,
+        &mut field_count,
+        "decision_id",
+        json_string_size(&entry.decision_id),
+    );
+    add_json_field_size(
+        &mut size,
+        &mut field_count,
+        "decision_kind",
+        json_string_size(entry.decision_kind.label()),
+    );
+    add_json_field_size(
+        &mut size,
+        &mut field_count,
+        "decision_time",
+        json_string_size(&entry.decision_time),
+    );
+    add_json_field_size(
+        &mut size,
+        &mut field_count,
+        "timestamp_ms",
+        decimal_digit_count_u64(entry.timestamp_ms),
+    );
+    add_json_field_size(
+        &mut size,
+        &mut field_count,
+        "trace_id",
+        json_string_size(&entry.trace_id),
+    );
+    add_json_field_size(
+        &mut size,
+        &mut field_count,
+        "epoch_id",
+        decimal_digit_count_u64(entry.epoch_id),
+    );
+    add_json_field_size(
+        &mut size,
+        &mut field_count,
+        "payload",
+        payload_json_bytes.len(),
+    );
+    add_json_field_size(
+        &mut size,
+        &mut field_count,
+        "size_bytes",
+        decimal_digit_count(entry.size_bytes),
+    );
+    add_json_field_size(
+        &mut size,
+        &mut field_count,
+        "signature",
+        json_string_size(&entry.signature),
+    );
+    add_json_field_size(
+        &mut size,
+        &mut field_count,
+        "prev_entry_hash",
+        json_string_size(&entry.prev_entry_hash),
+    );
+    size
 }
 
 /// Create a canonical representation of an EvidenceEntry for signature verification.
@@ -6242,6 +6347,46 @@ mod tests {
                 Some(payload_json_bytes.as_slice())
             ),
             "pre-serialized payload bytes must preserve the entry hash contract"
+        );
+    }
+
+    #[test]
+    fn pre_serialized_payload_size_matches_serde_json_struct_layout() {
+        let mut entry = make_entry("DEC-\"ESCAPED\"-\\-UNICODE-🙂", 23);
+        entry.schema_version = "evidence\tv1.0".to_string();
+        entry.entry_id = Some("ENTRY-\"quoted\"-\\-漢字".to_string());
+        entry.decision_time = "2026-04-23T12:00:00Z\tUTC".to_string();
+        entry.trace_id = "trace-\\-\"-🙂".to_string();
+        entry.payload = serde_json::json!({
+            "nested": {
+                "quoted": "\"value\"",
+                "unicode": "🙂漢字",
+                "array": [1, true, null, {"tab": "\t"}]
+            }
+        });
+        entry.size_bytes = 12_345;
+        entry.signature = "ab".repeat(64);
+        entry.prev_entry_hash = "cd".repeat(32);
+
+        let payload_json_bytes =
+            serde_json::to_vec(&entry.payload).expect("payload serialization should succeed");
+
+        assert_eq!(
+            serialized_entry_size_with_payload_bytes(&entry, &payload_json_bytes),
+            serde_json::to_string(&entry)
+                .expect("entry serialization should succeed")
+                .len(),
+            "borrowed size accounting must stay byte-for-byte aligned with serde_json"
+        );
+
+        let (normalized, computed_size) =
+            entry_with_server_computed_size_with_payload_bytes(entry, &payload_json_bytes);
+        assert_eq!(
+            computed_size,
+            serde_json::to_string(&normalized)
+                .expect("normalized entry serialization should succeed")
+                .len(),
+            "fixed-point size normalization must remain exact after avoiding the payload clone"
         );
     }
 
