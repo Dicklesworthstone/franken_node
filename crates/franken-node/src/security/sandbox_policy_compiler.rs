@@ -273,7 +273,9 @@ impl ProfileTracker {
 
         self.current_profile = new_profile;
         self.compiled_policy = compile_policy(new_profile);
-        push_bounded(&mut self.audit_log, audit.clone(), MAX_AUDIT_LOG_ENTRIES);
+        // SECURITY: Audit logs must never silently drop events - use unbounded push
+        // for security audit records rather than risking silent audit trail loss
+        self.audit_log.push(audit.clone());
         Ok(audit)
     }
 
