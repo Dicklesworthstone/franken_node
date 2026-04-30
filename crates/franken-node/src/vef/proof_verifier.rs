@@ -528,7 +528,8 @@ impl ProofVerifier {
                     predicate.min_witness_count
                 )
             },
-        });
+            PREDICATE_EVIDENCE_CAPACITY,
+        );
 
         // Check 6: Policy version binding
         let policy_version_satisfied = if self.config.enforce_policy_version {
@@ -562,7 +563,8 @@ impl ProofVerifier {
                     proof.policy_version_hash, predicate.policy_version_hash
                 )
             },
-        });
+            PREDICATE_EVIDENCE_CAPACITY,
+        );
 
         // Determine final decision
         let decision = if !deny_reasons.is_empty() {
@@ -676,7 +678,7 @@ impl VerificationGate {
             ),
         };
         self.emit_event(request_received_event.clone());
-        report_events.push(request_received_event);
+        push_bounded(&mut report_events, request_received_event, REPORT_EVENT_CAPACITY);
 
         // Format validation
         if request.proof.proof_id.is_empty() {
@@ -732,7 +734,7 @@ impl VerificationGate {
         // Propagate verifier events (via emit_event to respect push_bounded)
         for event in verifier.events().iter().cloned() {
             self.emit_event(event.clone());
-            report_events.push(event);
+            push_bounded(&mut report_events, event, REPORT_EVENT_CAPACITY);
         }
 
         let decision_event = VerifierEvent {
@@ -744,7 +746,7 @@ impl VerificationGate {
             ),
         };
         self.emit_event(decision_event.clone());
-        report_events.push(decision_event);
+        push_bounded(&mut report_events, decision_event, REPORT_EVENT_CAPACITY);
 
         let report_digest = compute_report_digest(
             &request.request_id,
@@ -763,7 +765,7 @@ impl VerificationGate {
             ),
         };
         self.emit_event(report_finalized_event.clone());
-        report_events.push(report_finalized_event);
+        push_bounded(&mut report_events, report_finalized_event, REPORT_EVENT_CAPACITY);
 
         let report = VerificationReport {
             schema_version: PROOF_VERIFIER_SCHEMA_VERSION.to_string(),
@@ -795,7 +797,7 @@ impl VerificationGate {
     ) -> Vec<Result<VerificationReport, VerifierError>> {
         let mut reports = Vec::with_capacity(requests.len());
         for request in requests {
-            reports.push(self.verify(request));
+            push_bounded(&mut reports, self.verify(request), requests.len());
         }
         reports
     }
@@ -876,15 +878,6 @@ fn compute_report_digest(
     hasher.update(&bytes);
     let digest = hasher.finalize();
     Ok(format!("sha256:{}", hex::encode(digest)))
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
-        items.drain(0..overflow);
-    }
-    items.push(item);
 }
 
 // Tests
