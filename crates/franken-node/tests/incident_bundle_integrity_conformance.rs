@@ -5,7 +5,7 @@ use frankenengine_node::tools::replay_bundle::{
     IncidentEvidencePackage, IncidentSeverity, ReplayBundle, ReplayBundleError,
     ReplayBundleSigningMaterial, generate_replay_bundle_from_evidence,
     read_bundle_from_path_with_trusted_key, read_incident_evidence_package, sign_replay_bundle,
-    validate_bundle_integrity, verify_replay_bundle_signature,
+    to_canonical_json, validate_bundle_integrity, verify_replay_bundle_signature,
     write_bundle_to_path_with_trusted_key,
 };
 use serde_json::json;
@@ -15,6 +15,7 @@ use std::process::{Command, Output};
 
 const INCIDENT_BUNDLE_INTEGRITY_VECTORS: &[&str] = &[
     "valid_bundle_round_trip",
+    "authoritative_input_byte_identical",
     "tampered_signature_rejection",
     "missing_evidence_ref_rejection",
     "future_dated_promotion_input_rejection",
@@ -178,8 +179,9 @@ fn write_evidence_package(path: &Path, package: &IncidentEvidencePackage) {
 
 #[test]
 fn incident_bundle_integrity_conformance_vectors_cover_required_contract() {
-    assert_eq!(INCIDENT_BUNDLE_INTEGRITY_VECTORS.len(), 4);
+    assert_eq!(INCIDENT_BUNDLE_INTEGRITY_VECTORS.len(), 5);
     assert!(INCIDENT_BUNDLE_INTEGRITY_VECTORS.contains(&"valid_bundle_round_trip"));
+    assert!(INCIDENT_BUNDLE_INTEGRITY_VECTORS.contains(&"authoritative_input_byte_identical"));
     assert!(INCIDENT_BUNDLE_INTEGRITY_VECTORS.contains(&"tampered_signature_rejection"));
     assert!(INCIDENT_BUNDLE_INTEGRITY_VECTORS.contains(&"missing_evidence_ref_rejection"));
     assert!(INCIDENT_BUNDLE_INTEGRITY_VECTORS.contains(&"future_dated_promotion_input_rejection"));
@@ -217,6 +219,31 @@ fn incident_bundle_integrity_conformance_valid_bundle_round_trip() {
         loaded_bundle.trust_artifact_refs,
         vec!["refs/trust/trust-card.json".to_string()]
     );
+}
+
+#[test]
+fn incident_bundle_integrity_conformance_authoritative_input_is_byte_identical() {
+    let package = fixture_evidence_package("INC-CONF-BYTE-IDENTICAL-001");
+
+    let first_bundle = generate_replay_bundle_from_evidence(&package)
+        .expect("first authoritative evidence package should generate bundle");
+    let second_bundle = generate_replay_bundle_from_evidence(&package)
+        .expect("second authoritative evidence package should generate bundle");
+
+    assert!(validate_bundle_integrity(&first_bundle).expect("first bundle integrity"));
+    assert!(validate_bundle_integrity(&second_bundle).expect("second bundle integrity"));
+
+    let first_wire = to_canonical_json(&first_bundle).expect("first canonical replay bundle");
+    let second_wire = to_canonical_json(&second_bundle).expect("second canonical replay bundle");
+
+    assert_eq!(
+        first_wire, second_wire,
+        "bd-2fqyv.4.1 requires identical authoritative evidence-package input to yield byte-identical replay bundles"
+    );
+    assert_eq!(first_bundle.bundle_id, second_bundle.bundle_id);
+    assert_eq!(first_bundle.integrity_hash, second_bundle.integrity_hash);
+    assert_eq!(first_bundle.evidence_refs, package.evidence_refs);
+    assert_eq!(second_bundle.evidence_refs, package.evidence_refs);
 }
 
 #[test]
