@@ -9,14 +9,13 @@
 //! Follows the canonical_serializer_fuzz_harness pattern with structure-aware
 //! checkpoint state generation and invariant enforcement.
 
+use frankenengine_node::runtime::bounded_mask::{CancellationState, CapabilityContext};
 use frankenengine_node::runtime::checkpoint::{
-    CHECKPOINT_MISSING, CHECKPOINT_RESTORE, CHECKPOINT_SAVE, CheckpointBackend, CheckpointError,
-    CheckpointEvent, CheckpointId, CheckpointMeta, CheckpointReadResult, CheckpointRecord,
-    CheckpointWriter, FN_CK_001_CHECKPOINT_SAVE, FN_CK_002_CHECKPOINT_RESTORE,
-    InMemoryCheckpointBackend, RestoredCheckpoint,
+    CHECKPOINT_RESTORE, CHECKPOINT_SAVE, CheckpointBackend, CheckpointContract, CheckpointError,
+    CheckpointEvent, CheckpointId, CheckpointMeta, CheckpointRecord, CheckpointWriter,
+    FN_CK_001_CHECKPOINT_SAVE, FN_CK_002_CHECKPOINT_RESTORE,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
@@ -25,11 +24,7 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 const MAX_ORCHESTRATION_ID_LEN: usize = 256;
-const MAX_CHECKPOINT_ID_LEN: usize = 128;
 const MAX_PROGRESS_STATE_JSON_LEN: usize = 4096;
-const MAX_ITERATION_COUNT: u64 = 1_000_000;
-const MAX_EPOCH: u64 = 100_000;
-const MAX_WALL_CLOCK_TIME: u64 = 2_000_000_000; // Year 2033
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HarnessCheckpointError {
@@ -37,7 +32,6 @@ enum HarnessCheckpointError {
     Backend(String),
     HashChain(String),
     InvalidState,
-    ProgressRegression,
     CheckpointOperation(String),
 }
 
@@ -61,7 +55,7 @@ impl From<CheckpointError> for HarnessCheckpointError {
 /// serialization edge cases, and filesystem error handling.
 #[derive(Debug)]
 pub struct TempFileCheckpointBackend {
-    temp_dir: TempDir,
+    _temp_dir: TempDir,
     base_path: PathBuf,
 }
 
@@ -82,7 +76,7 @@ impl TempFileCheckpointBackend {
         );
 
         Ok(Self {
-            temp_dir,
+            _temp_dir: temp_dir,
             base_path,
         })
     }
@@ -263,6 +257,34 @@ impl CheckpointBackend for TempFileCheckpointBackend {
     }
 }
 
+fn checkpoint_id(seed: &str) -> CheckpointId {
+    seed.to_string()
+}
+
+fn save_checkpoint_with_temp_backend(
+    writer: &mut CheckpointWriter<TempFileCheckpointBackend>,
+    orchestration_id: &str,
+    iteration_count: u64,
+    epoch: u64,
+    state: &FuzzState,
+    trace_id: &str,
+) -> Result<CheckpointId, CheckpointError> {
+    let cx = CapabilityContext::new(
+        "cx-runtime-checkpoint-harness",
+        "operator-checkpoint-harness",
+    );
+    let mut cancellation = CancellationState::new();
+    writer.save_checkpoint(
+        &cx,
+        &mut cancellation,
+        trace_id,
+        orchestration_id,
+        iteration_count,
+        epoch,
+        state,
+    )
+}
+
 #[test]
 fn tempfile_checkpoint_backend_isolates_path_colliding_orchestration_ids() {
     let mut backend =
@@ -276,7 +298,7 @@ fn tempfile_checkpoint_backend_isolates_path_colliding_orchestration_ids() {
         "distinct orchestration IDs must not collapse onto one JSONL file"
     );
 
-    let checkpoint_id = CheckpointId::from_deterministic("path-collision-checkpoint");
+    let checkpoint_id = checkpoint_id("path-collision-checkpoint");
     backend
         .save(CheckpointRecord {
             checkpoint_id: checkpoint_id.clone(),
@@ -371,51 +393,13 @@ fn seed_orchestration_ids() -> Vec<String> {
 /// Generate seed checkpoint IDs
 fn seed_checkpoint_ids() -> Vec<CheckpointId> {
     vec![
-        CheckpointId::from_deterministic("test-checkpoint-001"),
-        CheckpointId::from_deterministic("checkpoint-minimal"),
-        CheckpointId::from_deterministic("a"),
-        CheckpointId::from_deterministic("checkpoint-boundary-test"),
-        CheckpointId::from_deterministic(&"x".repeat(64)),
-        CheckpointId::from_deterministic("checkpoint-unicode-名前"),
-        CheckpointId::from_deterministic("checkpoint-special!@#$%"),
-    ]
-}
-
-/// Generate seed iteration counts for progress testing
-fn seed_iteration_counts() -> Vec<u64> {
-    vec![
-        0,                       // Initial
-        1,                       // First iteration
-        100,                     // Typical
-        1000,                    // Large
-        MAX_ITERATION_COUNT / 2, // Mid-range
-        MAX_ITERATION_COUNT - 1, // Near maximum
-        u64::MAX,                // Maximum value (edge case)
-    ]
-}
-
-/// Generate seed epochs for checkpoint testing
-fn seed_epochs() -> Vec<u64> {
-    vec![
-        0,             // Genesis epoch
-        1,             // First epoch
-        100,           // Typical
-        MAX_EPOCH / 2, // Mid-range
-        MAX_EPOCH - 1, // Near maximum
-        u64::MAX,      // Maximum value
-    ]
-}
-
-/// Generate seed wall clock times
-fn seed_wall_clock_times() -> Vec<u64> {
-    vec![
-        0,                       // Unix epoch start
-        1000000000,              // Year 2001
-        1640995200,              // Year 2022
-        1704067200,              // Year 2024
-        MAX_WALL_CLOCK_TIME / 2, // Mid-range
-        MAX_WALL_CLOCK_TIME - 1, // Near future
-        u64::MAX,                // Far future
+        checkpoint_id("test-checkpoint-001"),
+        checkpoint_id("checkpoint-minimal"),
+        checkpoint_id("a"),
+        checkpoint_id("checkpoint-boundary-test"),
+        "x".repeat(64),
+        checkpoint_id("checkpoint-unicode-名前"),
+        checkpoint_id("checkpoint-special!@#$%"),
     ]
 }
 
@@ -575,7 +559,7 @@ fn validate_checkpoint_writer_operations(
     let mut writer = CheckpointWriter::new(backend);
     let mut events = Vec::new();
 
-    for (checkpoint_id, orchestration_id, iteration_count, epoch, wall_clock_time, state) in
+    for (_checkpoint_id, orchestration_id, iteration_count, epoch, _wall_clock_time, state) in
         vectors.iter().take(5)
     {
         // Skip invalid orchestration IDs
@@ -583,21 +567,21 @@ fn validate_checkpoint_writer_operations(
             continue;
         }
 
-        let result = writer.save(
-            checkpoint_id.clone(),
+        let event_count_before_save = writer.decision_stream().len();
+        let result = save_checkpoint_with_temp_backend(
+            &mut writer,
             orchestration_id,
             *iteration_count,
             *epoch,
-            *wall_clock_time,
             state,
             "fuzz-trace",
         );
 
         match result {
-            Ok(save_events) => {
-                events.extend(save_events);
+            Ok(_) => {
+                events.extend_from_slice(&writer.decision_stream()[event_count_before_save..]);
             }
-            Err(CheckpointError::ProgressRegression { .. }) => {
+            Err(CheckpointError::HashChainViolation { .. }) => {
                 // Expected for non-monotonic iteration counts
                 continue;
             }
@@ -689,6 +673,7 @@ fn fuzz_checkpoint_event_audit_trail_consistency() {
             epoch: 1,
             wall_clock_time: 1640995200,
             trace_id: "trace-001".to_string(),
+            contract_status: "saved".to_string(),
         },
         CheckpointEvent {
             event_code: FN_CK_002_CHECKPOINT_RESTORE.to_string(),
@@ -701,6 +686,7 @@ fn fuzz_checkpoint_event_audit_trail_consistency() {
             epoch: 1,
             wall_clock_time: 1640995300,
             trace_id: "trace-002".to_string(),
+            contract_status: "valid".to_string(),
         },
     ];
 
@@ -733,18 +719,15 @@ fn fuzz_checkpoint_writer_progress_regression_detection() {
     let state = FuzzState::new(1);
 
     // Establish initial checkpoint
-    let checkpoint_id = CheckpointId::from_deterministic("regression-test");
-    writer
-        .save(
-            checkpoint_id.clone(),
-            "regression-orch",
-            100, // iteration_count
-            10,  // epoch
-            1000000000,
-            &state,
-            "trace-initial",
-        )
-        .expect("initial checkpoint should save");
+    save_checkpoint_with_temp_backend(
+        &mut writer,
+        "regression-orch",
+        100, // iteration_count
+        10,  // epoch
+        &state,
+        "trace-initial",
+    )
+    .expect("initial checkpoint should save");
 
     // Test regression detection scenarios
     let regression_cases = vec![
@@ -757,12 +740,11 @@ fn fuzz_checkpoint_writer_progress_regression_detection() {
     ];
 
     for (iteration, epoch, should_fail) in regression_cases {
-        let result = writer.save(
-            checkpoint_id.clone(),
+        let result = save_checkpoint_with_temp_backend(
+            &mut writer,
             "regression-orch",
             iteration,
             epoch,
-            1000000000 + iteration,
             &state,
             &format!("trace-{}-{}", iteration, epoch),
         );
@@ -801,7 +783,7 @@ fn fuzz_checkpoint_state_recovery_consistency() {
 
         // Test through checkpoint record
         let record = CheckpointRecord {
-            checkpoint_id: CheckpointId::from_deterministic("state-recovery-test"),
+            checkpoint_id: checkpoint_id("state-recovery-test"),
             orchestration_id: "state-test-orch".to_string(),
             iteration_count: state.counter,
             epoch: 1,
@@ -857,12 +839,10 @@ fn fuzz_checkpoint_backend_operations() {
         }
         Err(e) => {
             // Some errors are acceptable for invalid inputs
-            match e {
-                HarnessCheckpointError::InvalidState => {
-                    // Expected for invalid inputs
-                }
-                _ => panic!("Unexpected checkpoint backend error: {:?}", e),
-            }
+            assert!(
+                matches!(e, HarnessCheckpointError::InvalidState),
+                "Unexpected checkpoint backend error: {e:?}"
+            );
         }
     }
 }
@@ -872,8 +852,8 @@ fn fuzz_checkpoint_id_determinism() {
     for i in 0..10 {
         let input = format!("deterministic-test-{}", i);
 
-        let id1 = CheckpointId::from_deterministic(&input);
-        let id2 = CheckpointId::from_deterministic(&input);
+        let id1 = checkpoint_id(&input);
+        let id2 = checkpoint_id(&input);
 
         assert_eq!(
             id1, id2,
@@ -898,17 +878,15 @@ fn fuzz_checkpoint_hash_chain_validation() {
     let mut writer = CheckpointWriter::new(backend);
     let state = FuzzState::new(1);
 
-    let checkpoint_id = CheckpointId::from_deterministic("hash-chain-test");
     let orch_id = "hash-chain-orch";
 
     // Create a sequence of checkpoints
     for i in 1..=5 {
-        let result = writer.save(
-            checkpoint_id.clone(),
+        let result = save_checkpoint_with_temp_backend(
+            &mut writer,
             orch_id,
             i,
             1,
-            1000000000 + i,
             &state,
             &format!("trace-chain-{}", i),
         );
@@ -918,19 +896,19 @@ fn fuzz_checkpoint_hash_chain_validation() {
 
     // Verify we can read the result
     let read_result = writer
-        .read(orch_id, "trace-read")
+        .read_latest_valid("trace-read", orch_id)
         .expect("should read checkpoint chain");
 
-    match read_result.latest {
-        Some(latest) => {
-            assert_eq!(
-                latest.iteration_count, 5,
-                "Latest checkpoint should be iteration 5"
-            );
-            assert_eq!(latest.orchestration_id, orch_id);
-        }
-        None => panic!("Should have latest checkpoint after chain creation"),
-    }
+    let latest = read_result.latest.as_ref();
+    assert_eq!(
+        latest.map(|meta| meta.iteration_count),
+        Some(5),
+        "Latest checkpoint should be iteration 5"
+    );
+    assert_eq!(
+        latest.map(|meta| meta.orchestration_id.as_str()),
+        Some(orch_id)
+    );
 
     // Should have generated appropriate events
     assert!(
