@@ -34,6 +34,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::runtime::clock;
+use fs2::FileExt;
 
 pub const FLEET_SHARED_STATE_SCHEMA: &str = "franken-node/fleet-transport-state/v1";
 pub const FLEET_ACTION_LOG_FILE: &str = "actions.jsonl";
@@ -1145,7 +1146,7 @@ impl FileFleetTransport {
                             ))
                         })?;
                     }
-                    temp_file.sync_data().map_err(|err| {
+                    temp_file.sync_all().map_err(|err| {
                         FleetTransportError::io(format!(
                             "failed syncing compacted fleet action log {}: {err}",
                             temp_path.display()
