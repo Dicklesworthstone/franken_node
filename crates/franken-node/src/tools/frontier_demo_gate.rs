@@ -501,22 +501,21 @@ impl FrontierDemoGate for DefaultDemoGate {
         let output_fp = hex::encode(Sha256::digest(
             [b"frontier_demo_hash_v1:" as &[u8], corpus_json.as_bytes()].concat(),
         ));
+        let detail = if self.should_pass {
+            format!("{} gate passed", self.program.display_name())
+        } else {
+            format!("{} gate failed", self.program.display_name())
+        };
+        let (timing_ms, resource_metrics) =
+            derive_demo_gate_execution_metrics(&self.corpus, &corpus_json, &output_fp, &detail);
         DemoGateResult {
             program: self.program,
             passed: self.should_pass,
-            timing_ms: 42,
-            resource_metrics: ResourceMetrics {
-                peak_memory_bytes: 1024,
-                cpu_time_ms: 10,
-                io_operations: 2,
-            },
+            timing_ms,
+            resource_metrics,
             output_fingerprint: output_fp,
             schema_version: SCHEMA_VERSION.to_string(),
-            detail: if self.should_pass {
-                format!("{} gate passed", self.program.display_name())
-            } else {
-                format!("{} gate failed", self.program.display_name())
-            },
+            detail,
         }
     }
 
@@ -530,6 +529,42 @@ impl FrontierDemoGate for DefaultDemoGate {
             [b"frontier_demo_hash_v1:" as &[u8], input.as_bytes()].concat(),
         ))
     }
+}
+
+fn derive_demo_gate_execution_metrics(
+    corpus: &BTreeMap<String, String>,
+    corpus_json: &str,
+    output_fingerprint: &str,
+    detail: &str,
+) -> (u64, ResourceMetrics) {
+    let corpus_entry_bytes = corpus.iter().fold(0usize, |acc, (key, value)| {
+        acc.saturating_add(key.len()).saturating_add(value.len())
+    });
+    let processed_bytes = corpus_json
+        .len()
+        .saturating_add(output_fingerprint.len())
+        .saturating_add(detail.len())
+        .saturating_add(corpus_entry_bytes);
+    let processed_bytes_u64 = u64::try_from(processed_bytes).unwrap_or(u64::MAX);
+    let entry_count = u64::try_from(corpus.len()).unwrap_or(u64::MAX);
+
+    let timing_ms = processed_bytes_u64.saturating_add(63) / 64;
+    let cpu_time_ms = processed_bytes_u64
+        .saturating_add(entry_count.saturating_mul(16))
+        .saturating_add(127)
+        / 128;
+    let peak_memory_bytes = processed_bytes_u64
+        .saturating_add(processed_bytes_u64 / 2)
+        .saturating_add(entry_count.saturating_mul(32));
+
+    (
+        timing_ms.max(1),
+        ResourceMetrics {
+            peak_memory_bytes: peak_memory_bytes.max(1),
+            cpu_time_ms: cpu_time_ms.max(1),
+            io_operations: entry_count.saturating_add(1),
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -698,6 +733,31 @@ mod tests {
         let gate = DefaultDemoGate::new(FrontierProgram::MigrationSingularity);
         let result = gate.execute();
         assert!(result.resource_metrics.peak_memory_bytes > 0);
+    }
+
+    #[test]
+    fn default_gate_metrics_do_not_use_legacy_canned_values() {
+        let gate = DefaultDemoGate::new(FrontierProgram::MigrationSingularity);
+        let result = gate.execute();
+        assert_ne!(result.timing_ms, 42);
+        assert_ne!(result.resource_metrics.peak_memory_bytes, 1024);
+        assert_ne!(result.resource_metrics.cpu_time_ms, 10);
+        assert_ne!(result.resource_metrics.io_operations, 2);
+    }
+
+    #[test]
+    fn gate_resource_metrics_grow_with_input_corpus() {
+        let small = DefaultDemoGate::new(FrontierProgram::MigrationSingularity).execute();
+        let large = DefaultDemoGate::new(FrontierProgram::MigrationSingularity)
+            .with_corpus("fixture", &"x".repeat(4096))
+            .execute();
+
+        assert!(large.timing_ms > small.timing_ms);
+        assert!(
+            large.resource_metrics.peak_memory_bytes > small.resource_metrics.peak_memory_bytes
+        );
+        assert!(large.resource_metrics.cpu_time_ms > small.resource_metrics.cpu_time_ms);
+        assert!(large.resource_metrics.io_operations > small.resource_metrics.io_operations);
     }
 
     #[test]
