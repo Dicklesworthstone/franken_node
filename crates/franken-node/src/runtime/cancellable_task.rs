@@ -1086,24 +1086,28 @@ impl CancellationRuntime {
         });
 
         // INV-CXT-NESTED-PROPAGATION: propagate to children
+        let mut propagated_events = Vec::new();
         for child_id in &child_ids {
-            if let Some(child) = self.tasks.get_mut(child_id)
-                && child.phase == TaskPhase::Running
-            {
-                child.phase = TaskPhase::CancelRequested;
-                child.cancel_requested_ms = Some(timestamp_ms);
+            if let Some(child) = self.tasks.get_mut(child_id) {
+                if child.phase == TaskPhase::Running {
+                    child.phase = TaskPhase::CancelRequested;
+                    child.cancel_requested_ms = Some(timestamp_ms);
 
-                self.emit_audit(CancellableTaskAuditEvent {
-                    event_code: event_codes::FN_CX_009.to_string(),
-                    task_id: child_id.clone(),
-                    from_phase: TaskPhase::Running,
-                    to_phase: TaskPhase::CancelRequested,
-                    timestamp_ms,
-                    trace_id: trace_id.to_string(),
-                    detail: format!("cancel propagated from parent {}", task_id),
-                    schema_version: SCHEMA_VERSION.to_string(),
-                });
+                    propagated_events.push(CancellableTaskAuditEvent {
+                        event_code: event_codes::FN_CX_009.to_string(),
+                        task_id: child_id.clone(),
+                        from_phase: TaskPhase::Running,
+                        to_phase: TaskPhase::CancelRequested,
+                        timestamp_ms,
+                        trace_id: trace_id.to_string(),
+                        detail: format!("cancel propagated from parent {}", task_id),
+                        schema_version: SCHEMA_VERSION.to_string(),
+                    });
+                }
             }
+        }
+        for event in propagated_events {
+            self.emit_audit(event);
         }
 
         self.tasks
@@ -1641,7 +1645,7 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     }
     if items.len() >= cap {
         let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
