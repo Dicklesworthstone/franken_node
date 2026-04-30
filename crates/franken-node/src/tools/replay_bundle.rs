@@ -214,6 +214,13 @@ pub enum ReplayBundleError {
         previous_index: usize,
         next_index: usize,
     },
+    #[error(
+        "replay bundle chunks are not in sequential order: expected chunk {expected_index} but found chunk {actual_index}"
+    )]
+    ChunksOutOfSequence {
+        expected_index: u32,
+        actual_index: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
@@ -1737,7 +1744,54 @@ fn validate_bundle_structure(bundle: &ReplayBundle) -> Result<(), ReplayBundleEr
         return Err(ReplayBundleError::ManifestMismatch);
     }
 
+    // Validate chunk ordering to ensure deterministic replay (INV-RB-CHUNKING)
+    validate_chunk_ordering(bundle)?;
+
     validate_replay_bundle_refs(bundle)?;
+
+    Ok(())
+}
+
+/// Validates that replay bundle chunks are in sequential order (INV-RB-CHUNKING).
+///
+/// Ensures chunks have consecutive indices starting from 0, which is critical
+/// for deterministic replay - chunks processed out of order could result in
+/// events being replayed in wrong sequence, violating determinism guarantee.
+fn validate_chunk_ordering(bundle: &ReplayBundle) -> Result<(), ReplayBundleError> {
+    // Single chunk or empty chunks don't need ordering validation
+    if bundle.chunks.len() <= 1 {
+        return Ok(());
+    }
+
+    for (expected_index, chunk) in bundle.chunks.iter().enumerate() {
+        let expected_index = u32::try_from(expected_index).unwrap_or(u32::MAX);
+        if chunk.chunk_index != expected_index {
+            return Err(ReplayBundleError::ChunksOutOfSequence {
+                expected_index,
+                actual_index: chunk.chunk_index,
+            });
+        }
+
+        // Validate total_chunks is consistent across all chunks
+        let expected_total = u32::try_from(bundle.chunks.len()).unwrap_or(u32::MAX);
+        if chunk.total_chunks != expected_total {
+            return Err(ReplayBundleError::FormatError(
+                format!("chunk {} has inconsistent total_chunks: expected {} but found {}",
+                        chunk.chunk_index, expected_total, chunk.total_chunks)
+            ));
+        }
+
+        // Validate sequence numbers are monotonic across chunks
+        if expected_index > 0 {
+            let prev_chunk = &bundle.chunks[expected_index as usize - 1];
+            if chunk.first_sequence_number <= prev_chunk.last_sequence_number {
+                return Err(ReplayBundleError::FormatError(
+                    format!("chunk {} sequence range overlaps with previous chunk: {} <= {}",
+                            chunk.chunk_index, chunk.first_sequence_number, prev_chunk.last_sequence_number)
+                ));
+            }
+        }
+    }
 
     Ok(())
 }

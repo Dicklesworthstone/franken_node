@@ -393,6 +393,10 @@ pub enum VerifierSdkError {
     ResultOriginMismatch {
         actual: String,
     },
+    InvalidTransparencyLogEntry {
+        index: usize,
+        reason: String,
+    },
     NonceCounterExhausted,
     /// Inbound bundle bytes exceeded the configured DoS-prevention cap.
     BundleTooLarge {
@@ -484,6 +488,10 @@ impl fmt::Display for VerifierSdkError {
                 "verifier SDK result origin mismatch: submitted={actual} \
                  (expected nonce redacted to prevent oracle leakage of the \
                  server-side per-instance result_origin_nonce)"
+            ),
+            Self::InvalidTransparencyLogEntry { index, reason } => write!(
+                formatter,
+                "transparency log entry {index} is invalid: {reason}"
             ),
             Self::NonceCounterExhausted => write!(
                 formatter,
@@ -1035,6 +1043,7 @@ impl VerifierSdk {
         self.validate_current_verifier_identity()?;
         self.verify_result_belongs_to_current_verifier(result)?;
         ensure_bounded_capacity(log.len(), MAX_TRANSPARENCY_LOG_ENTRIES, "transparency_log")?;
+        validate_transparency_log_history(log)?;
         let result_hash = transparency_log_leaf_hash(result)?;
         let mut leaf_hashes: Vec<String> =
             log.iter().map(|entry| entry.result_hash.clone()).collect();
@@ -1630,6 +1639,109 @@ fn transparency_merkle_parent_hash(left: &str, right: &str) -> String {
     bundle::hash(&payload)
 }
 
+fn validate_transparency_log_history(log: &[TransparencyLogEntry]) -> Result<(), VerifierSdkError> {
+    for (index, entry) in log.iter().enumerate() {
+        if !is_canonical_sha256_hex(&entry.result_hash) {
+            return Err(VerifierSdkError::InvalidTransparencyLogEntry {
+                index,
+                reason: "result_hash must be a canonical lowercase 64-nybble sha256 digest"
+                    .to_string(),
+            });
+        }
+        if let Err(source) = chrono::DateTime::parse_from_rfc3339(&entry.timestamp) {
+            return Err(VerifierSdkError::InvalidTransparencyLogEntry {
+                index,
+                reason: format!("timestamp must be RFC3339: {source}"),
+            });
+        }
+        if let Err(source) = validate_verifier_identity(&entry.verifier_id) {
+            return Err(VerifierSdkError::InvalidTransparencyLogEntry {
+                index,
+                reason: source.to_string(),
+            });
+        }
+        if entry.merkle_proof.len() < 3 {
+            return Err(VerifierSdkError::InvalidTransparencyLogEntry {
+                index,
+                reason: "merkle_proof must include root, leaf_index, and tree_size".to_string(),
+            });
+        }
+
+        let root = entry.merkle_proof[0].strip_prefix("root:").ok_or_else(|| {
+            VerifierSdkError::InvalidTransparencyLogEntry {
+                index,
+                reason: "merkle_proof[0] must start with root:".to_string(),
+            }
+        })?;
+        if !is_canonical_sha256_hex(root) {
+            return Err(VerifierSdkError::InvalidTransparencyLogEntry {
+                index,
+                reason: "merkle_proof root must be a canonical lowercase 64-nybble sha256 digest"
+                    .to_string(),
+            });
+        }
+
+        let leaf_index =
+            parse_transparency_proof_usize(index, &entry.merkle_proof[1], "leaf_index")?;
+        if leaf_index != index {
+            return Err(VerifierSdkError::InvalidTransparencyLogEntry {
+                index,
+                reason: format!("leaf_index must equal append position {index}"),
+            });
+        }
+
+        let tree_size = parse_transparency_proof_usize(index, &entry.merkle_proof[2], "tree_size")?;
+        let expected_tree_size = index.saturating_add(1);
+        if tree_size != expected_tree_size {
+            return Err(VerifierSdkError::InvalidTransparencyLogEntry {
+                index,
+                reason: format!("tree_size must equal {expected_tree_size}"),
+            });
+        }
+
+        for step in &entry.merkle_proof[3..] {
+            let Some(sibling_hash) = step
+                .strip_prefix("left:")
+                .or_else(|| step.strip_prefix("right:"))
+            else {
+                return Err(VerifierSdkError::InvalidTransparencyLogEntry {
+                    index,
+                    reason: "merkle_proof sibling steps must start with left: or right:"
+                        .to_string(),
+                });
+            };
+            if !is_canonical_sha256_hex(sibling_hash) {
+                return Err(VerifierSdkError::InvalidTransparencyLogEntry {
+                    index,
+                    reason:
+                        "merkle_proof sibling hash must be a canonical lowercase 64-nybble sha256 digest"
+                            .to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_transparency_proof_usize(
+    entry_index: usize,
+    encoded: &str,
+    field: &'static str,
+) -> Result<usize, VerifierSdkError> {
+    let value = encoded.strip_prefix(&format!("{field}:")).ok_or_else(|| {
+        VerifierSdkError::InvalidTransparencyLogEntry {
+            index: entry_index,
+            reason: format!("merkle_proof field must start with {field}:"),
+        }
+    })?;
+    value
+        .parse::<usize>()
+        .map_err(|source| VerifierSdkError::InvalidTransparencyLogEntry {
+            index: entry_index,
+            reason: format!("{field} must parse as usize: {source}"),
+        })
+}
+
 fn transparency_log_leaf_hash(result: &VerificationResult) -> Result<String, VerifierSdkError> {
     let result_bytes =
         serde_json::to_vec(result).map_err(|source| VerifierSdkError::Json(source.to_string()))?;
@@ -2170,6 +2282,44 @@ mod tests {
             }
         ));
         assert_eq!(log.len(), MAX_TRANSPARENCY_LOG_ENTRIES);
+    }
+
+    #[test]
+    fn transparency_log_rejects_malformed_existing_result_hash() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let result = sdk
+            .build_result(
+                VerificationOperation::Claim,
+                VerificationVerdict::Pass,
+                vec![AssertionResult {
+                    assertion: "capsule_replay_verified".to_string(),
+                    passed: true,
+                    detail: "same verifier".to_string(),
+                }],
+                "artifact-hash-alpha".to_string(),
+            )
+            .expect("same verifier result should be built");
+        let mut log = vec![TransparencyLogEntry {
+            result_hash: "not-a-canonical-digest".to_string(),
+            timestamp: current_utc_timestamp(),
+            verifier_id: "verifier://alpha".to_string(),
+            merkle_proof: vec![
+                format!("root:{}", bundle::hash(b"valid-root")),
+                "leaf_index:0".to_string(),
+                "tree_size:1".to_string(),
+            ],
+        }];
+
+        let err = sdk
+            .append_transparency_log(&mut log, &result)
+            .expect_err("malformed existing transparency entry must fail closed");
+
+        assert!(matches!(
+            err,
+            VerifierSdkError::InvalidTransparencyLogEntry { index: 0, .. }
+        ));
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].result_hash, "not-a-canonical-digest");
     }
 
     #[test]
