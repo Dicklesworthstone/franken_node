@@ -510,6 +510,7 @@ pub fn build_evidence_entry(
         payload,
         size_bytes: 0,
         signature: String::new(),
+        prev_entry_hash: String::new(),
     }
 }
 

@@ -27,6 +27,7 @@ pub mod test_support {
             payload: serde_json::Value::Null,
             size_bytes: 0,
             signature: String::new(),
+            prev_entry_hash: String::new(),
         }
     }
 
@@ -102,6 +103,7 @@ mod tests {
             payload: serde_json::Value::Null,
             size_bytes: 0,
             signature: String::new(),
+            prev_entry_hash: String::new(),
         }
     }
 
