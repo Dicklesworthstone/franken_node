@@ -150,22 +150,21 @@ policy are library/API surfaces; there is not currently a top-level
 ### 4.2 Programmatic SDK
 
 ```rust
-use franken_node::policy::compatibility_gate::{GateEngine, GateCheckRequest, CompatMode};
+use franken_node::api::compat_gate::{CompatGateService, GateCheckRequest, CompatMode, GateDecision};
 
-let signing_key = load_signing_key()?; // Vec<u8>
-let mut engine = GateEngine::new(signing_key);
+let mut service = CompatGateService::new();
 let request = GateCheckRequest {
     package_id: "npm:@acme/auth".into(),
     requested_mode: CompatMode::Balanced,
     scope: "tenant-1".into(),
-    policy_context: ctx,
+    policy_context: Some(ctx.into()),
 };
-let decision = engine.gate_check(&request)?;
+let response = service.gate_check(&request)?;
 
-match decision.verdict {
-    Verdict::Allow => { /* proceed with shimmed behavior */ },
-    Verdict::Deny => { /* reject with rationale */ },
-    Verdict::Audit => { /* proceed but record for review */ },
+match response.decision {
+    GateDecision::Allow => { /* proceed with shimmed behavior */ },
+    GateDecision::Deny => { /* reject with rationale */ },
+    GateDecision::Audit => { /* proceed but record for review */ },
 }
 ```
 
