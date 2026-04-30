@@ -1199,14 +1199,15 @@ impl ReplayEngine {
             } else {
                 divergence_count = divergence_count.saturating_add(1);
 
-                // Handle clock drift divergence separately
                 if clock_drift_detected {
                     if let Some(drift_divergence) = clock_drift_divergence {
                         if divergences.len() < MAX_DIVERGENCES {
                             divergences.push(drift_divergence);
                         }
                     }
-                } else {
+                }
+
+                if !output_match || !effects_match {
                     // Handle output/effects mismatches
                     let kind = match (output_match, effects_match) {
                         (false, true) => DivergenceKind::OutputMismatch,
