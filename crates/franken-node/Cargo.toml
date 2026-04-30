@@ -216,6 +216,10 @@ name = "verifier_sdk_capsule_replay"
 path = "../../tests/conformance/verifier_sdk_capsule_replay.rs"
 
 [[test]]
+name = "verifier_session_monotonic"
+path = "../../tests/conformance/verifier_session_monotonic.rs"
+
+[[test]]
 name = "sdk_verifier_public_api_fuzz_harness"
 path = "tests/sdk_verifier_public_api_fuzz_harness.rs"
 
