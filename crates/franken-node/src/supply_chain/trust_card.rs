@@ -17,6 +17,7 @@ use std::{
     time::Duration,
 };
 
+use fs2::FileExt;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
