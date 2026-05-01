@@ -70,6 +70,161 @@ fn write_text_fixture(path: &Path, contents: &str) {
         .unwrap_or_else(|err| panic!("failed writing {}: {err}", path.display()));
 }
 
+fn read_json_fixture(path: &Path) -> serde_json::Value {
+    let raw = std::fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("failed reading {}: {err}", path.display()));
+    serde_json::from_str(&raw)
+        .unwrap_or_else(|err| panic!("invalid JSON in {}: {err}", path.display()))
+}
+
+fn write_json_fixture(path: &Path, value: &serde_json::Value) {
+    write_text_fixture(
+        path,
+        &serde_json::to_string_pretty(value).expect("serialize JSON fixture"),
+    );
+}
+
+fn write_valid_corpus_manifest(path: &Path) {
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let manifest = serde_json::json!({
+        "schema_version": "corpus-v1.0",
+        "bead_id": "bd-p9cuk-test-corpus",
+        "timestamp": timestamp,
+        "fixtures": [
+            {
+                "fixture_id": "fixture-core-001",
+                "api_surface": "fs.readFile",
+                "band": "core",
+                "expected_behavior": "utf8 read matches Node semantics",
+                "node_version": "22.0.0",
+                "deterministic": true,
+                "spec_section": "fs"
+            },
+            {
+                "fixture_id": "fixture-high-value-001",
+                "api_surface": "process.env",
+                "band": "high_value",
+                "expected_behavior": "environment lookup preserves missing values",
+                "node_version": "22.0.0",
+                "deterministic": true,
+                "spec_section": "process"
+            },
+            {
+                "fixture_id": "fixture-edge-001",
+                "api_surface": "path.join",
+                "band": "edge",
+                "expected_behavior": "path normalization handles empty components",
+                "node_version": "22.0.0",
+                "deterministic": true,
+                "spec_section": "path"
+            },
+            {
+                "fixture_id": "fixture-unsafe-001",
+                "api_surface": "child_process.spawn",
+                "band": "unsafe",
+                "expected_behavior": "unsafe process launch is policy-gated",
+                "node_version": "22.0.0",
+                "deterministic": true,
+                "spec_section": "child_process"
+            }
+        ],
+        "summary": {
+            "total_fixtures": 4,
+            "by_band": {
+                "core": 1,
+                "high_value": 1,
+                "edge": 1,
+                "unsafe": 1
+            }
+        }
+    });
+    write_text_fixture(
+        path,
+        &serde_json::to_string_pretty(&manifest).expect("serialize corpus manifest"),
+    );
+}
+
+const COMPAT_REPORT_API_FAMILIES: &[&str] = &[
+    "buffer",
+    "child_process",
+    "cluster",
+    "crypto",
+    "events",
+    "fs",
+    "http",
+    "net",
+    "os",
+    "path",
+    "querystring",
+    "stream",
+    "timers",
+    "tls",
+    "url",
+    "zlib",
+];
+const COMPAT_REPORT_BANDS: &[&str] = &["core", "high-value", "edge"];
+const COMPAT_REPORT_RISK_BANDS: &[&str] = &["critical", "high", "medium", "low"];
+
+fn valid_compatibility_report() -> serde_json::Value {
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let mut per_test_results = Vec::new();
+    for index in 0..512usize {
+        per_test_results.push(serde_json::json!({
+            "test_id": format!("compat-case-{index:04}"),
+            "api_family": COMPAT_REPORT_API_FAMILIES[index % COMPAT_REPORT_API_FAMILIES.len()],
+            "band": COMPAT_REPORT_BANDS[index % COMPAT_REPORT_BANDS.len()],
+            "risk_band": COMPAT_REPORT_RISK_BANDS[index % COMPAT_REPORT_RISK_BANDS.len()],
+            "status": "pass",
+        }));
+    }
+
+    serde_json::json!({
+        "corpus": {
+            "corpus_version": "compat-corpus-e2e-v1",
+            "franken_node_version": "0.1.0-test",
+            "lockstep_oracle_version": "lockstep-e2e-v1",
+            "result_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "generated_at_utc": timestamp,
+        },
+        "totals": {
+            "total_test_cases": per_test_results.len(),
+            "passed_test_cases": per_test_results.len(),
+            "failed_test_cases": 0,
+            "errored_test_cases": 0,
+            "skipped_test_cases": 0,
+            "overall_pass_rate_pct": 100.0,
+        },
+        "thresholds": {
+            "overall_pass_rate_min_pct": 95.0,
+            "per_family_pass_rate_min_pct": 80.0,
+            "band_pass_rate_min_pct": {
+                "core": 95.0,
+                "high-value": 95.0,
+                "edge": 95.0,
+            },
+        },
+        "previous_release": {
+            "overall_pass_rate_pct": 99.0,
+        },
+        "ci_gate": {
+            "threshold_met": true,
+            "release_blocked": false,
+            "regression_detected": false,
+        },
+        "failing_tests_tracking": [],
+        "reproducibility": {
+            "deterministic_seed": "verify-corpus-e2e-seed",
+            "same_inputs_same_digest": true,
+            "external_repro_command": "franken-node verify corpus compatibility-report.json --kind compatibility-report --json",
+        },
+        "per_test_results": per_test_results,
+    })
+}
+
+fn write_valid_compatibility_report(path: &Path) {
+    write_json_fixture(path, &valid_compatibility_report());
+}
+
 fn write_authoritative_migration_record(
     project_root: &Path,
     migration_id: &str,
@@ -150,6 +305,56 @@ fn run_cli_with_string_args(args: &[String]) -> Output {
     run_cli(&borrowed_args)
 }
 
+fn run_verify_corpus(corpus_path: &Path, kind: Option<&str>) -> Output {
+    let mut args = vec![
+        "verify".to_string(),
+        "corpus".to_string(),
+        corpus_path.to_string_lossy().to_string(),
+    ];
+    if let Some(kind) = kind {
+        args.push("--kind".to_string());
+        args.push(kind.to_string());
+    }
+    args.push("--json".to_string());
+    run_cli_with_string_args(&args)
+}
+
+fn assert_verify_corpus_failed_invariant(
+    corpus_path: &Path,
+    kind: Option<&str>,
+    invariant_id: &str,
+) -> serde_json::Value {
+    let output = run_verify_corpus(corpus_path, kind);
+    assert!(
+        !output.status.success(),
+        "verify corpus should fail for invariant {invariant_id}; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload = parse_json_stdout(&output);
+    assert_eq!(payload["command"], "verify corpus");
+    assert_eq!(payload["verdict"], "FAIL");
+    assert_eq!(payload["exit_code"], 1);
+    assert!(
+        payload["details"]["failed_invariants"]
+            .as_array()
+            .expect("failed invariants array")
+            .iter()
+            .any(|invariant| invariant["invariant_id"] == invariant_id),
+        "missing failed invariant {invariant_id}: {payload:#?}"
+    );
+    assert!(
+        payload["details"]["events"]
+            .as_array()
+            .expect("events array")
+            .iter()
+            .any(|event| event["event"] == "corpus_invariant_failed"
+                && event["invariant_id"] == invariant_id),
+        "missing structured failure event for {invariant_id}: {payload:#?}"
+    );
+    payload
+}
+
 fn path_scrubbers(paths: &[(&Path, &str)]) -> Vec<(String, String)> {
     let mut scrubbers = paths
         .iter()
@@ -180,6 +385,14 @@ fn scrub_paths_in_json(value: &mut serde_json::Value, scrubbers: &[(String, Stri
         }
         serde_json::Value::Object(map) => {
             for (key, nested) in map {
+                if key == "trace_id" && nested.as_str().is_some() {
+                    *nested = serde_json::Value::String("[trace-id]".to_string());
+                    continue;
+                }
+                if key == "timestamp" && nested.as_str().is_some() {
+                    *nested = serde_json::Value::String("[timestamp]".to_string());
+                    continue;
+                }
                 if key == "sha256"
                     && let Some(hash) = nested.as_str()
                     && is_sha256_hex(hash)
@@ -197,6 +410,30 @@ fn scrub_paths_in_json(value: &mut serde_json::Value, scrubbers: &[(String, Stri
     }
 }
 
+fn compact_verify_corpus_snapshot(value: &mut serde_json::Value) {
+    if value.get("command").and_then(serde_json::Value::as_str) != Some("verify corpus") {
+        return;
+    }
+    let Some(details) = value
+        .get_mut("details")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    if details.contains_key("matched_artifacts") {
+        details.insert(
+            "matched_artifacts".to_string(),
+            serde_json::Value::String("[validation-reports]".to_string()),
+        );
+    }
+    if details.contains_key("events") {
+        details.insert(
+            "events".to_string(),
+            serde_json::Value::String("[event-stream]".to_string()),
+        );
+    }
+}
+
 fn verify_json_matrix_case(
     name: &str,
     args: Vec<String>,
@@ -204,6 +441,7 @@ fn verify_json_matrix_case(
 ) -> serde_json::Value {
     let output = run_cli_with_string_args(&args);
     let mut stdout_json = parse_json_stdout(&output);
+    compact_verify_corpus_snapshot(&mut stdout_json);
     let repo_root = repo_root();
     let mut scrubbers = path_scrubbers(&[(&repo_root, "[repo]")]);
     scrubbers.extend(path_scrubbers(scrubbed_paths));
@@ -671,7 +909,7 @@ fn verify_compatibility_fails_when_runtime_is_missing_from_path() {
 fn verify_corpus_accepts_existing_artifact_path() {
     let temp = TempDir::new().expect("temp dir");
     let corpus_file = temp.path().join("sample-corpus.json");
-    std::fs::write(&corpus_file, b"{\"events\":[]}\n").expect("write corpus fixture");
+    write_valid_corpus_manifest(&corpus_file);
 
     let output = run_cli(&[
         "verify",
@@ -690,6 +928,208 @@ fn verify_corpus_accepts_existing_artifact_path() {
     assert_eq!(payload["command"], "verify corpus");
     assert_eq!(payload["verdict"], "PASS");
     assert_eq!(payload["exit_code"], 0);
+    assert_eq!(payload["details"]["requested_kind"], "auto");
+    assert_eq!(payload["details"]["matched_count"], 1);
+    assert_eq!(
+        payload["details"]["matched_artifacts"][0]["validation_kind"],
+        "corpus-manifest"
+    );
+    assert_eq!(
+        payload["details"]["failed_invariants"],
+        serde_json::json!([])
+    );
+    assert!(
+        payload["details"]["events"]
+            .as_array()
+            .expect("events array")
+            .iter()
+            .any(|event| event["event"] == "corpus_validation_completed"
+                && event["passed"] == serde_json::Value::Bool(true)),
+        "verify corpus should emit completion event with pass=true: {payload:#?}"
+    );
+}
+
+#[test]
+fn verify_corpus_rejects_existing_but_unsupported_json() {
+    let temp = TempDir::new().expect("temp dir");
+    let corpus_file = temp.path().join("sample-corpus.json");
+    std::fs::write(&corpus_file, b"{\"events\":[]}\n").expect("write corpus fixture");
+
+    let output = run_cli(&[
+        "verify",
+        "corpus",
+        corpus_file
+            .to_str()
+            .expect("corpus fixture path must be valid UTF-8"),
+        "--json",
+    ]);
+    assert!(
+        !output.status.success(),
+        "verify corpus should fail existing unsupported JSON instead of passing on path existence"
+    );
+    let payload = parse_json_stdout(&output);
+    assert_eq!(payload["command"], "verify corpus");
+    assert_eq!(payload["verdict"], "FAIL");
+    assert_eq!(payload["exit_code"], 1);
+    assert!(
+        payload["details"]["failed_invariants"]
+            .as_array()
+            .expect("failed invariants array")
+            .iter()
+            .any(|invariant| invariant["invariant_id"] == "VCORPUS-KIND-SUPPORTED"),
+        "unsupported corpus JSON should report the failed semantic invariant: {payload:#?}"
+    );
+}
+
+#[test]
+fn verify_corpus_accepts_compatibility_report_path() {
+    let report_path = repo_root().join("artifacts/13/compatibility_corpus_results.json");
+    let output = run_verify_corpus(&report_path, Some("compatibility-report"));
+    assert!(
+        output.status.success(),
+        "verify corpus should pass for the compatibility report; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload = parse_json_stdout(&output);
+    assert_eq!(payload["command"], "verify corpus");
+    assert_eq!(payload["verdict"], "PASS");
+    assert_eq!(
+        payload["details"]["selected_validation_kind"],
+        "compatibility-report"
+    );
+    assert_eq!(payload["details"]["case_count"], serde_json::json!(560));
+    assert!(
+        payload["details"]["events"]
+            .as_array()
+            .expect("events array")
+            .iter()
+            .any(|event| event["event"] == "coverage_summary_emitted"
+                && event["validation_kind"] == "compatibility-report"),
+        "compatibility report should emit a coverage event: {payload:#?}"
+    );
+}
+
+#[test]
+fn verify_corpus_rejects_duplicate_manifest_fixture_ids_from_generated_fixture() {
+    let temp = TempDir::new().expect("temp dir");
+    let corpus_file = temp.path().join("duplicate-corpus.json");
+    write_valid_corpus_manifest(&corpus_file);
+    let mut manifest = read_json_fixture(&corpus_file);
+    let duplicate_id = manifest["fixtures"][0]["fixture_id"].clone();
+    manifest["fixtures"][1]["fixture_id"] = duplicate_id;
+    write_json_fixture(&corpus_file, &manifest);
+
+    assert_verify_corpus_failed_invariant(
+        &corpus_file,
+        Some("corpus-manifest"),
+        "VCORPUS-MANIFEST-UNIQUE-IDS",
+    );
+}
+
+#[test]
+fn verify_corpus_rejects_undersized_generated_manifest() {
+    let temp = TempDir::new().expect("temp dir");
+    let corpus_file = temp.path().join("undersized-corpus.json");
+    write_valid_corpus_manifest(&corpus_file);
+    let mut manifest = read_json_fixture(&corpus_file);
+    manifest["fixtures"]
+        .as_array_mut()
+        .expect("fixtures array")
+        .truncate(3);
+    manifest["summary"]["total_fixtures"] = serde_json::json!(3);
+    manifest["summary"]["by_band"]
+        .as_object_mut()
+        .expect("by_band object")
+        .remove("unsafe");
+    write_json_fixture(&corpus_file, &manifest);
+
+    assert_verify_corpus_failed_invariant(
+        &corpus_file,
+        Some("corpus-manifest"),
+        "VCORPUS-MANIFEST-MIN-CASES",
+    );
+}
+
+#[test]
+fn verify_corpus_rejects_stale_manifest() {
+    let temp = TempDir::new().expect("temp dir");
+    let corpus_file = temp.path().join("stale-corpus.json");
+    write_valid_corpus_manifest(&corpus_file);
+    let mut manifest = read_json_fixture(&corpus_file);
+    manifest["timestamp"] =
+        serde_json::json!((chrono::Utc::now() - chrono::Duration::days(181)).to_rfc3339());
+    write_json_fixture(&corpus_file, &manifest);
+
+    let payload = assert_verify_corpus_failed_invariant(
+        &corpus_file,
+        Some("corpus-manifest"),
+        "VCORPUS-MANIFEST-FRESHNESS",
+    );
+    assert!(
+        payload["details"]["events"]
+            .as_array()
+            .expect("events array")
+            .iter()
+            .any(|event| event["event"] == "stale_evidence_detected"
+                && event["invariant_id"] == "VCORPUS-MANIFEST-FRESHNESS"),
+        "stale manifests should emit stale evidence event: {payload:#?}"
+    );
+}
+
+#[test]
+fn verify_corpus_rejects_report_missing_required_api_family() {
+    let temp = TempDir::new().expect("temp dir");
+    let report_file = temp.path().join("compat-report-missing-family.json");
+    let mut report =
+        read_json_fixture(&repo_root().join("artifacts/13/compatibility_corpus_results.json"));
+    for row in report["per_test_results"]
+        .as_array_mut()
+        .expect("per_test_results array")
+    {
+        if row["api_family"] == "zlib" {
+            row["api_family"] = serde_json::json!("fs");
+        }
+    }
+    write_json_fixture(&report_file, &report);
+
+    assert_verify_corpus_failed_invariant(
+        &report_file,
+        Some("compatibility-report"),
+        "VCORPUS-REPORT-FAMILY-COVERAGE",
+    );
+}
+
+#[test]
+fn verify_corpus_rejects_artifact_report_invalid_risk_band() {
+    let temp = TempDir::new().expect("temp dir");
+    let report_file = temp.path().join("compat-report-invalid-risk.json");
+    let mut report =
+        read_json_fixture(&repo_root().join("artifacts/13/compatibility_corpus_results.json"));
+    report["per_test_results"][0]["risk_band"] = serde_json::json!("catastrophic");
+    write_json_fixture(&report_file, &report);
+
+    assert_verify_corpus_failed_invariant(
+        &report_file,
+        Some("compatibility-report"),
+        "VCORPUS-REPORT-ROW-SHAPE",
+    );
+}
+
+#[test]
+fn verify_corpus_rejects_report_threshold_regression() {
+    let temp = TempDir::new().expect("temp dir");
+    let report_file = temp.path().join("compat-report-regression.json");
+    let mut report =
+        read_json_fixture(&repo_root().join("artifacts/13/compatibility_corpus_results.json"));
+    report["previous_release"]["overall_pass_rate_pct"] = serde_json::json!(99.99);
+    write_json_fixture(&report_file, &report);
+
+    assert_verify_corpus_failed_invariant(
+        &report_file,
+        Some("compatibility-report"),
+        "VCORPUS-REPORT-NO-REGRESSION",
+    );
 }
 
 #[test]
@@ -722,10 +1162,168 @@ fn verify_corpus_rejects_unsupported_compat_version_before_path_checks() {
 }
 
 #[test]
+fn verify_corpus_accepts_compatibility_report_kind() {
+    let temp = TempDir::new().expect("temp dir");
+    let report_file = temp.path().join("compatibility-report.json");
+    write_valid_compatibility_report(&report_file);
+
+    let output = run_verify_corpus(&report_file, Some("compatibility-report"));
+    assert!(
+        output.status.success(),
+        "verify corpus should pass for a complete compatibility report; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload = parse_json_stdout(&output);
+    assert_eq!(payload["command"], "verify corpus");
+    assert_eq!(payload["verdict"], "PASS");
+    assert_eq!(payload["details"]["requested_kind"], "compatibility-report");
+    assert_eq!(
+        payload["details"]["selected_validation_kind"],
+        "compatibility-report"
+    );
+    assert_eq!(payload["details"]["case_count"], 512);
+    assert!(
+        payload["details"]["events"]
+            .as_array()
+            .expect("events array")
+            .iter()
+            .any(|event| event["event"] == "coverage_summary_emitted"
+                && event["validation_kind"] == "compatibility-report"),
+        "compatibility-report validation should emit coverage summary: {payload:#?}"
+    );
+}
+
+#[test]
+fn verify_corpus_rejects_duplicate_manifest_fixture_ids() {
+    let temp = TempDir::new().expect("temp dir");
+    let corpus_file = temp.path().join("duplicate-fixtures.json");
+    write_valid_corpus_manifest(&corpus_file);
+    let mut manifest = read_json_fixture(&corpus_file);
+    manifest["fixtures"][1]["fixture_id"] = manifest["fixtures"][0]["fixture_id"].clone();
+    write_json_fixture(&corpus_file, &manifest);
+
+    assert_verify_corpus_failed_invariant(
+        &corpus_file,
+        Some("corpus-manifest"),
+        "VCORPUS-MANIFEST-UNIQUE-IDS",
+    );
+}
+
+#[test]
+fn verify_corpus_rejects_undersized_manifest() {
+    let temp = TempDir::new().expect("temp dir");
+    let corpus_file = temp.path().join("undersized-corpus.json");
+    write_valid_corpus_manifest(&corpus_file);
+    let mut manifest = read_json_fixture(&corpus_file);
+    manifest["fixtures"]
+        .as_array_mut()
+        .expect("fixtures array")
+        .pop();
+    manifest["summary"]["total_fixtures"] = serde_json::json!(3);
+    manifest["summary"]["by_band"]["unsafe"] = serde_json::json!(0);
+    write_json_fixture(&corpus_file, &manifest);
+
+    assert_verify_corpus_failed_invariant(
+        &corpus_file,
+        Some("corpus-manifest"),
+        "VCORPUS-MANIFEST-MIN-CASES",
+    );
+}
+
+#[test]
+fn verify_corpus_rejects_stale_manifest_evidence() {
+    let temp = TempDir::new().expect("temp dir");
+    let corpus_file = temp.path().join("stale-corpus.json");
+    write_valid_corpus_manifest(&corpus_file);
+    let mut manifest = read_json_fixture(&corpus_file);
+    manifest["timestamp"] = serde_json::json!("2020-01-01T00:00:00Z");
+    write_json_fixture(&corpus_file, &manifest);
+
+    let payload = assert_verify_corpus_failed_invariant(
+        &corpus_file,
+        Some("corpus-manifest"),
+        "VCORPUS-MANIFEST-FRESHNESS",
+    );
+    assert!(
+        payload["details"]["events"]
+            .as_array()
+            .expect("events array")
+            .iter()
+            .any(|event| event["event"] == "stale_evidence_detected"
+                && event["invariant_id"] == "VCORPUS-MANIFEST-FRESHNESS"),
+        "stale corpus evidence should emit stale_evidence_detected: {payload:#?}"
+    );
+}
+
+#[test]
+fn verify_corpus_rejects_missing_required_report_family() {
+    let temp = TempDir::new().expect("temp dir");
+    let report_file = temp.path().join("missing-family-report.json");
+    let mut report = valid_compatibility_report();
+    for row in report["per_test_results"]
+        .as_array_mut()
+        .expect("per-test results")
+    {
+        if row["api_family"] == "zlib" {
+            row["api_family"] = serde_json::json!("fs");
+        }
+    }
+    write_json_fixture(&report_file, &report);
+
+    assert_verify_corpus_failed_invariant(
+        &report_file,
+        Some("compatibility-report"),
+        "VCORPUS-REPORT-FAMILY-COVERAGE",
+    );
+}
+
+#[test]
+fn verify_corpus_rejects_invalid_report_risk_band() {
+    let temp = TempDir::new().expect("temp dir");
+    let report_file = temp.path().join("invalid-risk-report.json");
+    let mut report = valid_compatibility_report();
+    report["per_test_results"][0]["risk_band"] = serde_json::json!("severe");
+    write_json_fixture(&report_file, &report);
+
+    assert_verify_corpus_failed_invariant(
+        &report_file,
+        Some("compatibility-report"),
+        "VCORPUS-REPORT-ROW-SHAPE",
+    );
+}
+
+#[test]
+fn verify_corpus_rejects_threshold_regression() {
+    let temp = TempDir::new().expect("temp dir");
+    let report_file = temp.path().join("regressed-report.json");
+    let mut report = valid_compatibility_report();
+    report["per_test_results"][0]["status"] = serde_json::json!("fail");
+    report["totals"]["passed_test_cases"] = serde_json::json!(511);
+    report["totals"]["failed_test_cases"] = serde_json::json!(1);
+    report["totals"]["overall_pass_rate_pct"] = serde_json::json!(99.8);
+    report["previous_release"]["overall_pass_rate_pct"] = serde_json::json!(100.0);
+    report["failing_tests_tracking"] = serde_json::json!([
+        {
+            "test_id": "compat-case-0000",
+            "investigation_bead_id": "bd-p9cuk-regression",
+            "investigation_status": "open"
+        }
+    ]);
+    write_json_fixture(&report_file, &report);
+
+    assert_verify_corpus_failed_invariant(
+        &report_file,
+        Some("compatibility-report"),
+        "VCORPUS-REPORT-NO-REGRESSION",
+    );
+}
+
+#[test]
 fn verify_json_outputs_match_golden_matrix() {
     let corpus_temp = TempDir::new().expect("corpus temp dir");
     let corpus_file = corpus_temp.path().join("sample-corpus.json");
-    std::fs::write(&corpus_file, b"{\"events\":[]}\n").expect("write corpus fixture");
+    write_valid_corpus_manifest(&corpus_file);
 
     let release_temp = TempDir::new().expect("release temp dir");
     let release_dir = release_temp.path().join("release");

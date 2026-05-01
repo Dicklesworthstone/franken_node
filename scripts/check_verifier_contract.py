@@ -52,7 +52,7 @@ MAIN_MARKERS = [
     "VerifyCommand::Migration(args)",
     "VerifyCommand::Compatibility(args)",
     "VerifyCommand::Corpus(args)",
-    "VERIFY_CLI_CONTRACT_VERSION",
+    "schema_versions::VERIFY_CLI_CONTRACT",
 ]
 
 

@@ -113,6 +113,7 @@ use frankenengine_node::control_plane::fleet_transport::{
 };
 #[cfg(test)]
 use frankenengine_node::tools::replay_bundle::{fixture_incident_events, generate_replay_bundle};
+pub use frankenengine_node::{capacity_defaults, connector, control_plane, supply_chain};
 use frankenengine_node::{
     config::{self, CliOverrides, Profile},
     ops, runtime,
@@ -137,9 +138,9 @@ use frankenengine_node::{
         trust_card::{
             BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
             DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
-            ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCard,
-            TrustCardError, TrustCardInput, TrustCardListFilter, TrustCardMutation,
-            TrustCardRegistry, TrustCardSyncReport, SnapshotSourceContext, render_comparison_human,
+            ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, SnapshotSourceContext,
+            TrustCard, TrustCardError, TrustCardInput, TrustCardListFilter, TrustCardMutation,
+            TrustCardRegistry, TrustCardSyncReport, render_comparison_human,
             render_trust_card_human, to_canonical_json as trust_card_to_json,
         },
     },
@@ -162,7 +163,6 @@ use frankenengine_node::{
         },
     },
 };
-pub use frankenengine_node::{capacity_defaults, connector, control_plane, supply_chain};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
@@ -221,8 +221,7 @@ const VERIFY_MIGRATION_EVIDENCE_PATH_FIELDS: &[&str] = &[
     "lockstep_record_path",
 ];
 const VERIFY_CORPUS_SEARCH_ROOTS: &[&str] = &["fixtures", "vectors"];
-const VERIFY_CORPUS_SUPPORTED_KINDS: &[&str] =
-    &["auto", "corpus-manifest", "compatibility-report"];
+const VERIFY_CORPUS_SUPPORTED_KINDS: &[&str] = &["auto", "corpus-manifest", "compatibility-report"];
 const VERIFY_CORPUS_MIN_FIXTURE_CASES: usize = 4;
 const VERIFY_CORPUS_MIN_COMPAT_REPORT_CASES: usize = 500;
 const VERIFY_CORPUS_MAX_EVIDENCE_AGE_DAYS: i64 = 180;
@@ -5219,7 +5218,7 @@ fn export_signed_receipts(
     let receipt = Receipt::new(
         action_name,
         actor_identity,
-        "franken-node",  // audience binding
+        "franken-node", // audience binding
         &serde_json::json!({
             "command": action_name,
             "actor": actor_identity,
@@ -5775,8 +5774,9 @@ fn emit_migration_audit_report(rendered: &str, out_path: Option<&Path>) -> Resul
 }
 
 fn handle_bench_run(args: &cli::BenchRunArgs) -> Result<()> {
-    let report = benchmark_suite_run_default_suite_for_cli(args.scenario.as_deref(), args.fixture_mode)
-        .map_err(|err| anyhow::anyhow!("benchmark suite run failed: {err}"))?;
+    let report =
+        benchmark_suite_run_default_suite_for_cli(args.scenario.as_deref(), args.fixture_mode)
+            .map_err(|err| anyhow::anyhow!("benchmark suite run failed: {err}"))?;
     let rendered =
         benchmark_suite_to_json(&report).context("failed serializing benchmark suite report")?;
     if let Some(output) = &args.output {
@@ -7681,9 +7681,13 @@ fn maybe_auto_quarantine_run_dependencies(
         .trust
         .card_cache_ttl_secs
         .unwrap_or(config::timeouts::TRUST_CARD_CACHE_TTL_SECS);
-    let mut registry =
-        TrustCardRegistry::load_authoritative_state(&registry_path, cache_ttl, now_secs, SnapshotSourceContext::TrustedFile)
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    let mut registry = TrustCardRegistry::load_authoritative_state(
+        &registry_path,
+        cache_ttl,
+        now_secs,
+        SnapshotSourceContext::TrustedFile,
+    )
+    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     let now_rfc3339 = rfc3339_timestamp_from_secs(now_secs);
     let mut quarantined = Vec::new();
 
@@ -12423,8 +12427,13 @@ fn trust_card_cli_registry(now_secs: u64) -> Result<TrustCardCliRegistryState> {
         .trust
         .card_cache_ttl_secs
         .unwrap_or(config::timeouts::TRUST_CARD_CACHE_TTL_SECS);
-    let registry = TrustCardRegistry::load_authoritative_state(&path, cache_ttl, now_secs, SnapshotSourceContext::TrustedFile)
-        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    let registry = TrustCardRegistry::load_authoritative_state(
+        &path,
+        cache_ttl,
+        now_secs,
+        SnapshotSourceContext::TrustedFile,
+    )
+    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     Ok(TrustCardCliRegistryState {
         path,
         registry,
@@ -12725,8 +12734,13 @@ fn trust_scan_registry_state(
     ensure_state_dir(project_root)?;
     let path = project_root.join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
     let registry = if path.is_file() {
-        TrustCardRegistry::load_authoritative_state(&path, 60, now_secs, SnapshotSourceContext::TrustedFile)
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?
+        TrustCardRegistry::load_authoritative_state(
+            &path,
+            60,
+            now_secs,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?
     } else {
         let registry = TrustCardRegistry::default();
         registry
@@ -13651,7 +13665,7 @@ fn build_run_preflight_receipt(
     Receipt::new(
         "run_preflight_trust_gate",
         "franken-node run",
-        "franken-node",  // audience binding
+        "franken-node", // audience binding
         &serde_json::json!({
             "app_path": app_path.display().to_string(),
             "project_root": project_root.display().to_string(),
@@ -14352,7 +14366,7 @@ fn sign_incident_counterfactual_contract_receipt(
         timestamp: timestamp.to_string(),
         signature_version: DECISION_RECEIPT_SIGNATURE_VERSION.to_string(),
         nonce: Uuid::now_v7().simple().to_string(),
-        audience: "franken-node".to_string(),  // audience binding
+        audience: "franken-node".to_string(), // audience binding
         input_hash: input_hash.to_string(),
         output_hash: output_hash.to_string(),
         decision: Decision::Approved,
@@ -21345,7 +21359,10 @@ fn verify_corpus_timestamp_fresh(timestamp: Option<&str>) -> (bool, String) {
     };
     let age = Utc::now().signed_duration_since(parsed);
     if age.num_seconds() < -86_400 {
-        return (false, "timestamp is more than one day in the future".to_string());
+        return (
+            false,
+            "timestamp is more than one day in the future".to_string(),
+        );
     }
     if age.num_days() > VERIFY_CORPUS_MAX_EVIDENCE_AGE_DAYS {
         return (
@@ -21357,7 +21374,10 @@ fn verify_corpus_timestamp_fresh(timestamp: Option<&str>) -> (bool, String) {
             ),
         );
     }
-    (true, format!("timestamp age {} days", age.num_days().max(0)))
+    (
+        true,
+        format!("timestamp age {} days", age.num_days().max(0)),
+    )
 }
 
 fn detect_verify_corpus_kind(
@@ -21381,10 +21401,7 @@ fn detect_verify_corpus_kind(
     }
 }
 
-fn validate_corpus_manifest(
-    path: &Path,
-    data: &serde_json::Value,
-) -> VerifyCorpusValidationReport {
+fn validate_corpus_manifest(path: &Path, data: &serde_json::Value) -> VerifyCorpusValidationReport {
     let fixtures = data
         .get("fixtures")
         .and_then(serde_json::Value::as_array)
@@ -21400,10 +21417,7 @@ fn validate_corpus_manifest(
     invariants.push(verify_corpus_invariant(
         "VCORPUS-MANIFEST-SCHEMA",
         schema_version == Some("corpus-v1.0"),
-        format!(
-            "schema_version={}",
-            schema_version.unwrap_or("<missing>")
-        ),
+        format!("schema_version={}", schema_version.unwrap_or("<missing>")),
         "set schema_version to corpus-v1.0",
     ));
 
@@ -21661,7 +21675,12 @@ fn validate_compatibility_report(
         let band = verify_corpus_string(row, "band");
         let risk_band = verify_corpus_string(row, "risk_band");
         let status = verify_corpus_string(row, "status");
-        if id.is_none() || family.is_none() || band.is_none() || risk_band.is_none() || status.is_none() {
+        if id.is_none()
+            || family.is_none()
+            || band.is_none()
+            || risk_band.is_none()
+            || status.is_none()
+        {
             row_shape_errors += 1;
             continue;
         }
@@ -21778,7 +21797,8 @@ fn validate_compatibility_report(
         "keep totals.overall_pass_rate_pct synchronized with per-test rows",
     ));
 
-    let overall_threshold = verify_corpus_f64(&thresholds, "overall_pass_rate_min_pct").unwrap_or(95.0);
+    let overall_threshold =
+        verify_corpus_f64(&thresholds, "overall_pass_rate_min_pct").unwrap_or(95.0);
     invariants.push(verify_corpus_invariant(
         "VCORPUS-REPORT-OVERALL-THRESHOLD",
         recomputed_overall >= overall_threshold,
@@ -21786,7 +21806,8 @@ fn validate_compatibility_report(
         "raise pass rate above the configured overall threshold before release",
     ));
 
-    let family_floor = verify_corpus_f64(&thresholds, "per_family_pass_rate_min_pct").unwrap_or(80.0);
+    let family_floor =
+        verify_corpus_f64(&thresholds, "per_family_pass_rate_min_pct").unwrap_or(80.0);
     let low_families = family_breakdown
         .iter()
         .filter_map(|(family, (total, passed))| {
@@ -21830,7 +21851,8 @@ fn validate_compatibility_report(
         "fix or track failing cases until every band meets its configured threshold",
     ));
 
-    let previous_rate = verify_corpus_f64(&previous_release, "overall_pass_rate_pct").unwrap_or(0.0);
+    let previous_rate =
+        verify_corpus_f64(&previous_release, "overall_pass_rate_pct").unwrap_or(0.0);
     invariants.push(verify_corpus_invariant(
         "VCORPUS-REPORT-NO-REGRESSION",
         recomputed_overall >= previous_rate,
@@ -21889,7 +21911,8 @@ fn validate_compatibility_report(
         .get("reproducibility")
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
-    let reproducibility_complete = verify_corpus_string(&reproducibility, "deterministic_seed").is_some()
+    let reproducibility_complete = verify_corpus_string(&reproducibility, "deterministic_seed")
+        .is_some()
         && reproducibility
             .get("same_inputs_same_digest")
             .and_then(serde_json::Value::as_bool)
@@ -22006,10 +22029,171 @@ fn validate_corpus_artifact(
     }
 }
 
+fn log_verify_corpus_report(trace_id: &str, report: &VerifyCorpusValidationReport) {
+    let corpus_id = report.corpus_id.as_deref().unwrap_or("<unknown>");
+    let validation_kind = report.validation_kind.label();
+    tracing::info!(
+        target: "franken_node::verify_corpus",
+        event = "corpus_manifest_loaded",
+        trace_id,
+        corpus_id,
+        manifest_path = report.manifest_path.as_str(),
+        validation_kind,
+        case_count = report.case_count,
+    );
+
+    let coverage_summary = report.coverage_summary.to_string();
+    tracing::info!(
+        target: "franken_node::verify_corpus",
+        event = "coverage_summary_emitted",
+        trace_id,
+        corpus_id,
+        manifest_path = report.manifest_path.as_str(),
+        validation_kind,
+        case_count = report.case_count,
+        coverage_summary = coverage_summary.as_str(),
+    );
+
+    for invariant in report
+        .invariants
+        .iter()
+        .filter(|invariant| !invariant.passed)
+    {
+        tracing::info!(
+            target: "franken_node::verify_corpus",
+            event = "corpus_invariant_failed",
+            trace_id,
+            corpus_id,
+            manifest_path = report.manifest_path.as_str(),
+            validation_kind,
+            invariant_id = invariant.id.as_str(),
+            severity = invariant.severity.as_str(),
+            message = invariant.message.as_str(),
+            remediation_hint = invariant.remediation_hint.as_str(),
+        );
+        if invariant.id.contains("FRESHNESS") {
+            tracing::warn!(
+                target: "franken_node::verify_corpus",
+                event = "stale_evidence_detected",
+                trace_id,
+                corpus_id,
+                manifest_path = report.manifest_path.as_str(),
+                validation_kind,
+                invariant_id = invariant.id.as_str(),
+                message = invariant.message.as_str(),
+            );
+        }
+    }
+}
+
+fn verify_corpus_events(
+    trace_id: &str,
+    report: &VerifyCorpusValidationReport,
+) -> Vec<serde_json::Value> {
+    let manifest_path = report.manifest_path.clone();
+    let corpus_id = report.corpus_id.clone();
+    let coverage_summary = report.coverage_summary.clone();
+    let validation_kind = report.validation_kind.label();
+    let mut events = vec![
+        serde_json::json!({
+            "event": "corpus_validation_started",
+            "trace_id": trace_id,
+            "corpus_id": &corpus_id,
+            "manifest_path": &manifest_path,
+            "validation_kind": validation_kind,
+            "case_count": report.case_count,
+            "coverage_summary": &coverage_summary,
+        }),
+        serde_json::json!({
+            "event": "corpus_manifest_loaded",
+            "trace_id": trace_id,
+            "corpus_id": &report.corpus_id,
+            "manifest_path": &report.manifest_path,
+            "validation_kind": validation_kind,
+            "case_count": report.case_count,
+            "coverage_summary": &report.coverage_summary,
+        }),
+    ];
+
+    for invariant in &report.invariants {
+        if !invariant.passed {
+            events.push(serde_json::json!({
+                "event": "corpus_invariant_failed",
+                "trace_id": trace_id,
+                "corpus_id": &report.corpus_id,
+                "manifest_path": &report.manifest_path,
+                "validation_kind": validation_kind,
+                "case_count": report.case_count,
+                "coverage_summary": &report.coverage_summary,
+                "invariant_id": &invariant.id,
+                "severity": &invariant.severity,
+                "message": &invariant.message,
+                "remediation_hint": &invariant.remediation_hint,
+            }));
+            if invariant.id.contains("FRESHNESS") {
+                events.push(serde_json::json!({
+                    "event": "stale_evidence_detected",
+                    "trace_id": trace_id,
+                    "corpus_id": &report.corpus_id,
+                    "manifest_path": &report.manifest_path,
+                    "validation_kind": validation_kind,
+                    "case_count": report.case_count,
+                    "coverage_summary": &report.coverage_summary,
+                    "invariant_id": &invariant.id,
+                    "message": &invariant.message,
+                    "remediation_hint": &invariant.remediation_hint,
+                }));
+            }
+        }
+    }
+
+    events.push(serde_json::json!({
+        "event": "coverage_summary_emitted",
+        "trace_id": trace_id,
+        "corpus_id": &report.corpus_id,
+        "manifest_path": &report.manifest_path,
+        "validation_kind": validation_kind,
+        "case_count": report.case_count,
+        "coverage_summary": &report.coverage_summary,
+    }));
+    events.push(serde_json::json!({
+        "event": "corpus_validation_completed",
+        "trace_id": trace_id,
+        "corpus_id": &report.corpus_id,
+        "manifest_path": &report.manifest_path,
+        "validation_kind": validation_kind,
+        "case_count": report.case_count,
+        "coverage_summary": &report.coverage_summary,
+        "passed": report.passed,
+    }));
+
+    events
+}
+
 fn emit_verify_corpus(args: &VerifyCorpusArgs) -> i32 {
     if let Some(error_payload) = validate_verify_compat("verify corpus", args.compat_version) {
         return emit_verify_output("verify corpus", &error_payload, args.json);
     }
+
+    let Some(requested_kind) = parse_verify_corpus_kind(&args.kind) else {
+        let payload = build_verify_output_with_details(
+            "verify corpus",
+            args.compat_version,
+            "ERROR",
+            "error",
+            2,
+            format!(
+                "unsupported --kind `{}`; supported kinds: {}",
+                args.kind,
+                VERIFY_CORPUS_SUPPORTED_KINDS.join(", ")
+            ),
+            Some(serde_json::json!({
+                "requested_kind": args.kind,
+                "supported_kinds": VERIFY_CORPUS_SUPPORTED_KINDS,
+            })),
+        );
+        return emit_verify_output("verify corpus", &payload, args.json);
+    };
 
     let raw_path = args.corpus_path.as_os_str().to_string_lossy();
     let raw = raw_path.trim();
@@ -22024,6 +22208,15 @@ fn emit_verify_corpus(args: &VerifyCorpusArgs) -> i32 {
         );
         return emit_verify_output("verify corpus", &payload, args.json);
     }
+
+    let trace_id = format!("trace-verify-corpus-{}", Uuid::now_v7());
+    tracing::info!(
+        target: "franken_node::verify_corpus",
+        event = "corpus_validation_started",
+        trace_id = trace_id.as_str(),
+        query = raw,
+        requested_kind = requested_kind.label(),
+    );
 
     let mut matches = BTreeSet::new();
     if args.corpus_path.is_absolute() && args.corpus_path.exists() {
@@ -22079,32 +22272,140 @@ fn emit_verify_corpus(args: &VerifyCorpusArgs) -> i32 {
         }
     }
 
-    let passed = !matches.is_empty();
-    let reason = if passed {
-        let sample_path = matches
+    let payload = if !matches.is_empty() {
+        let reports = matches
             .iter()
-            .next()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| raw.to_string());
-        format!(
-            "corpus path `{raw}` matched {} artifact(s); sample match: {sample_path}",
-            matches.len()
+            .map(|path| validate_corpus_artifact(path, requested_kind))
+            .collect::<Vec<_>>();
+        for report in &reports {
+            log_verify_corpus_report(trace_id.as_str(), report);
+        }
+        let semantic_passed = reports.iter().all(|report| report.passed);
+        let selected_report = reports
+            .iter()
+            .find(|report| !report.passed)
+            .or_else(|| reports.first());
+        let selected_path = selected_report
+            .map(|report| report.manifest_path.as_str())
+            .unwrap_or(raw);
+        let selected_validation_kind = selected_report
+            .map(|report| report.validation_kind.label())
+            .unwrap_or_else(|| requested_kind.label());
+        let selected_case_count = selected_report.map_or(0, |report| report.case_count);
+        let validation_reports = reports
+            .iter()
+            .map(|report| serde_json::to_value(report).unwrap_or_else(|_| serde_json::json!({})))
+            .collect::<Vec<_>>();
+        let events = reports
+            .iter()
+            .flat_map(|report| verify_corpus_events(trace_id.as_str(), report))
+            .collect::<Vec<_>>();
+        let failed_invariants = reports
+            .iter()
+            .flat_map(|report| {
+                report
+                    .invariants
+                    .iter()
+                    .filter(|invariant| !invariant.passed)
+                    .map(|invariant| {
+                        serde_json::json!({
+                            "manifest_path": &report.manifest_path,
+                            "validation_kind": report.validation_kind.label(),
+                            "invariant_id": &invariant.id,
+                            "severity": &invariant.severity,
+                            "message": &invariant.message,
+                            "remediation_hint": &invariant.remediation_hint,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        tracing::info!(
+            target: "franken_node::verify_corpus",
+            event = "corpus_validation_completed",
+            trace_id = trace_id.as_str(),
+            query = raw,
+            requested_kind = requested_kind.label(),
+            matched_count = reports.len(),
+            passed = semantic_passed,
+        );
+        build_verify_output_with_details(
+            "verify corpus",
+            args.compat_version,
+            if semantic_passed { "PASS" } else { "FAIL" },
+            if semantic_passed { "pass" } else { "fail" },
+            if semantic_passed { 0 } else { 1 },
+            if semantic_passed {
+                format!(
+                    "corpus path `{raw}` matched {} artifact(s) and all semantic validation invariants passed; sample match: {selected_path}",
+                    reports.len()
+                )
+            } else {
+                format!(
+                    "corpus path `{raw}` matched {} artifact(s), but semantic validation failed; sample match: {selected_path}",
+                    reports.len()
+                )
+            },
+            Some(serde_json::json!({
+                "trace_id": trace_id.as_str(),
+                "query": raw,
+                "requested_kind": requested_kind.label(),
+                "matched_count": reports.len(),
+                "selected_path": selected_path,
+                "selected_validation_kind": selected_validation_kind,
+                "case_count": selected_case_count,
+                "matched_artifacts": validation_reports,
+                "failed_invariants": failed_invariants,
+                "events": events,
+            })),
         )
     } else {
-        format!(
-            "no corpus artifact matched `{raw}` in direct path or roots: {}",
-            VERIFY_CORPUS_SEARCH_ROOTS.join(", ")
+        tracing::info!(
+            target: "franken_node::verify_corpus",
+            event = "corpus_validation_completed",
+            trace_id = trace_id.as_str(),
+            query = raw,
+            requested_kind = requested_kind.label(),
+            matched_count = 0usize,
+            passed = false,
+        );
+        build_verify_output_with_details(
+            "verify corpus",
+            args.compat_version,
+            "FAIL",
+            "fail",
+            1,
+            format!(
+                "no corpus artifact matched `{raw}` in direct path or roots: {}",
+                VERIFY_CORPUS_SEARCH_ROOTS.join(", ")
+            ),
+            Some(serde_json::json!({
+                "trace_id": trace_id.as_str(),
+                "query": raw,
+                "requested_kind": requested_kind.label(),
+                "matched_count": 0,
+                "searched_roots": VERIFY_CORPUS_SEARCH_ROOTS,
+                "failed_invariants": [{
+                    "validation_kind": requested_kind.label(),
+                    "invariant_id": "VCORPUS-DISCOVERY-MATCH",
+                    "severity": "error",
+                    "message": format!("no corpus artifact matched `{raw}`"),
+                    "remediation_hint": "pass an existing corpus artifact path or a corpus name under fixtures/ or vectors/",
+                }],
+                "events": [{
+                    "event": "corpus_validation_completed",
+                    "trace_id": trace_id.as_str(),
+                    "corpus_id": null,
+                    "manifest_path": raw,
+                    "validation_kind": requested_kind.label(),
+                    "case_count": 0,
+                    "coverage_summary": {},
+                    "passed": false,
+                }],
+            })),
         )
     };
 
-    let payload = build_verify_output(
-        "verify corpus",
-        args.compat_version,
-        if passed { "PASS" } else { "FAIL" },
-        if passed { "pass" } else { "fail" },
-        if passed { 0 } else { 1 },
-        reason,
-    );
     emit_verify_output("verify corpus", &payload, args.json)
 }
 
@@ -23993,8 +24294,13 @@ mod run_trust_gate_tests {
         write_fixture_registry_to(tmp.path());
 
         let registry_path = tmp.path().join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
-        let mut registry =
-            TrustCardRegistry::load_authoritative_state(&registry_path, 60, 2_000, SnapshotSourceContext::TrustedFile).expect("load");
+        let mut registry = TrustCardRegistry::load_authoritative_state(
+            &registry_path,
+            60,
+            2_000,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect("load");
         registry
             .update(
                 "npm:@acme/auth-guard",
@@ -24352,8 +24658,13 @@ mod run_trust_gate_tests {
         assert_eq!(quarantined, vec!["npm:@acme/auth-guard".to_string()]);
 
         let registry_path = tmp.path().join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
-        let mut registry =
-            TrustCardRegistry::load_authoritative_state(&registry_path, 60, 3_000, SnapshotSourceContext::TrustedFile).expect("load");
+        let mut registry = TrustCardRegistry::load_authoritative_state(
+            &registry_path,
+            60,
+            3_000,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect("load");
         let card = registry
             .read("npm:@acme/auth-guard", 3_000, "trace-test-auto-quarantine")
             .expect("read")

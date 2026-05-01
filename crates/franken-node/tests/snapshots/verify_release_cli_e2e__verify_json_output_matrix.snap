@@ -239,7 +239,19 @@ expression: matrix
       "verdict": "PASS",
       "status": "pass",
       "exit_code": 0,
-      "reason": "corpus path `[corpus]` matched 1 artifact(s); sample match: [corpus]"
+      "reason": "corpus path `[corpus]` matched 1 artifact(s) and all semantic validation invariants passed; sample match: [corpus]",
+      "details": {
+        "trace_id": "[trace-id]",
+        "query": "[corpus]",
+        "requested_kind": "auto",
+        "matched_count": 1,
+        "selected_path": "[corpus]",
+        "selected_validation_kind": "corpus-manifest",
+        "case_count": 4,
+        "matched_artifacts": "[validation-reports]",
+        "failed_invariants": [],
+        "events": "[event-stream]"
+      }
     },
     "stderr": ""
   },
