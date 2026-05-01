@@ -19,6 +19,10 @@ use crate::capacity_defaults::aliases::MAX_EVENTS;
 const MAX_CHECKPOINT_RECORDS_PER_STREAM: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
         let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow.min(items.len()));

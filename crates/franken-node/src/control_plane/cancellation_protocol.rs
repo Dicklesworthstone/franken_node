@@ -42,7 +42,7 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     }
     if items.len() >= cap {
         let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
@@ -776,6 +776,7 @@ impl Default for CancellationProtocol {
 // ---- Cancellation-aware health check (for health_gate integration) ----
 
 /// A health check that verifies cancellation readiness.
+#[cfg(any(test, feature = "test-support"))]
 pub fn cancellation_readiness_check(protocol: &CancellationProtocol) -> bool {
     // The system is cancellation-ready if there are no stuck workflows
     // (i.e., no workflows in Draining phase that have timed out without completing)
@@ -787,6 +788,7 @@ pub fn cancellation_readiness_check(protocol: &CancellationProtocol) -> bool {
 
 /// Generate a timing report as CSV rows.
 /// Returns (header, rows) suitable for writing to a CSV file.
+#[cfg(any(test, feature = "test-support"))]
 pub fn generate_timing_report(protocol: &CancellationProtocol) -> (String, Vec<String>) {
     let header = "workflow_id,phase,request_ms,drain_start_ms,drain_complete_ms,finalize_ms,drain_duration_ms,timed_out,leaks".to_string();
     let rows: Vec<String> = protocol
@@ -1541,6 +1543,34 @@ mod tests {
             proto.audit_log().last().unwrap().event_code,
             event_codes::CAN_006
         );
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_without_appending() {
+        let mut items = vec!["old"];
+        super::push_bounded(&mut items, "new", 0);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_overfull_vector_trims_to_capacity() {
+        let mut items = vec![1, 2, 3, 4];
+        super::push_bounded(&mut items, 5, 2);
+        assert_eq!(items, vec![4, 5]);
+    }
+
+    #[test]
+    fn push_bounded_exact_capacity_evicts_oldest_entry() {
+        let mut items = vec!["first", "second"];
+        super::push_bounded(&mut items, "third", 2);
+        assert_eq!(items, vec!["second", "third"]);
+    }
+
+    #[test]
+    fn push_bounded_capacity_one_keeps_only_newest_entry() {
+        let mut items = vec!["stale"];
+        super::push_bounded(&mut items, "fresh", 1);
+        assert_eq!(items, vec!["fresh"]);
     }
 
     // ── NEGATIVE-PATH TESTS: Security & Robustness ──────────────────

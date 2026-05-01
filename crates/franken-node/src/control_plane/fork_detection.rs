@@ -336,11 +336,7 @@ impl DivergenceDetector {
         }) {
             return;
         }
-        if self.history.len() >= MAX_HISTORY {
-            // Drop the oldest half to amortize the cost.
-            self.history.drain(..MAX_HISTORY / 2);
-        }
-        self.history.push(sv);
+        push_bounded(&mut self.history, sv, MAX_HISTORY);
     }
 
     /// Compare two StateVectors and return the detection result.

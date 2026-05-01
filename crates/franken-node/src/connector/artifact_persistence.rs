@@ -288,7 +288,8 @@ impl ArtifactStore {
         let seq_list = self.sequences.entry(artifact_type).or_default();
         if seq_list.len() >= MAX_SEQUENCE_PER_TYPE {
             let overflow = seq_list.len().saturating_sub(MAX_SEQUENCE_PER_TYPE).saturating_add(1);
-            for id in seq_list.drain(0..overflow) {
+            let safe_overflow = overflow.min(seq_list.len());
+            for id in seq_list.drain(0..safe_overflow) {
                 self.artifacts.remove(&id);
             }
         }
