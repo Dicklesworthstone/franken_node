@@ -1070,7 +1070,7 @@ pub enum OpsCommand {
     ConfigAudit(OpsConfigAuditArgs),
     /// Emit operator metrics in a scrape-friendly text format.
     Metrics(OpsMetricsArgs),
-    /// [PHASE 1 ONLY] Validate new signing key (does NOT update signer config or ledger).
+    /// Validate a new signing key as a non-remediating preview (does NOT rotate).
     #[command(name = "rotate-key")]
     RotateKey(OpsRotateKeyArgs),
 }
@@ -1116,7 +1116,7 @@ pub struct OpsMetricsArgs {
 
 #[derive(Debug, Parser)]
 pub struct OpsRotateKeyArgs {
-    /// Path to new ed25519 signing key. WARNING: Phase 1 validates key but does NOT update signer config.
+    /// Path to new ed25519 signing key. Preview only: does NOT update signer config or evidence ledger.
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub new_key: PathBuf,
     /// Emit JSON instead of human-readable output.

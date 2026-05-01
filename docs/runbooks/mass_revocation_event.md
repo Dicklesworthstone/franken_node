@@ -5,7 +5,7 @@
 **Estimated Recovery Time**: 1 hour
 **Required Permissions**: operator, security_admin, revocation_authority
 **Operator Privilege Level**: P1
-**Last Reviewed**: 2026-02-21
+**Last Reviewed**: 2026-05-01
 **Review Cadence**: per_release_cycle
 
 ## Detection
@@ -38,14 +38,23 @@
 1. If revocations are legitimate, resume processing at controlled rate.
 2. If revocations are illegitimate, revert revocation batch from snapshot.
 3. Re-issue trust delegations for incorrectly revoked entities.
-4. Update revocation policy to prevent recurrence.
+4. If a signing key is compromised, do not treat `franken-node ops rotate-key`
+   as remediation. It is a preview-only validator that leaves the old key
+   active and appends no evidence entry.
+5. Use `franken-node ops rotate-key --new-key <path> --json` only to validate
+   candidate key material before a supported signer-config and evidence-ledger
+   rotation procedure.
+6. Update revocation policy to prevent recurrence.
 
 ## Verification
 
 1. Confirm revocation list consistency across all fleet nodes.
 2. Validate that legitimate revocations are honored fleet-wide.
 3. Verify that incorrectly revoked entities have restored access.
-4. Run trust state audit: `franken-node trust scan --deep --audit`.
+4. For any key-rotation emergency, confirm `ops rotate-key` output reports
+   `status=preview_only`, `actual_rotation_occurred=false`, and a non-success
+   exit before treating it as validation-only evidence.
+5. Run trust state audit: `franken-node trust scan --deep --audit`.
 
 ## Rollback
 
@@ -64,6 +73,7 @@ and selective rollback restores test delegations correctly.
 
 - `franken-node trust revoke --batch fixtures/revocations/test_batch.json`
 - `franken-node trust sync --restore-from snapshots/pre_revocation.json` (restore trust state from snapshot)
+- `franken-node ops rotate-key --new-key ./keys/candidate.ed25519 --json` (preview-only validation; not remediation)
 - `POST /api/v1/trust/revocations/pause`
 
 ## Cross-References
