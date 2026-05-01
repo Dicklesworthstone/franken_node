@@ -18,7 +18,13 @@ fn run_secure_extension_heavy_bench() -> Vec<u8> {
         .env("FRANKEN_NODE_BENCH_CPU", "deterministic-test-cpu")
         .env("FRANKEN_NODE_BENCH_MEMORY_MB", "32768")
         .env("FRANKEN_NODE_BENCH_TIMESTAMP_UTC", "2026-02-21T00:00:00Z")
-        .args(["bench", "run", "--scenario", "secure-extension-heavy"])
+        .args([
+            "bench",
+            "run",
+            "--scenario",
+            "secure-extension-heavy",
+            "--fixture-mode",
+        ])
         .output()
         .expect("failed to run franken-node bench run");
 
@@ -49,6 +55,15 @@ fn assert_signed_benchmark_report(bytes: &[u8]) -> Value {
     );
     assert_eq!(report["hardware_profile"]["cpu"], "deterministic-test-cpu");
     assert_eq!(report["hardware_profile"]["memory_mb"], 32768);
+    assert_eq!(report["evidence_mode"], "fixture_only");
+    assert_eq!(report["profile"], "strict");
+    assert_eq!(report["security_controls"]["fixture_mode"], true);
+    assert!(
+        report["trace_id"]
+            .as_str()
+            .is_some_and(|trace_id| trace_id.starts_with("bench-")),
+        "signed report must include deterministic trace_id: {report}"
+    );
 
     let scenarios = report["scenarios"]
         .as_array()
@@ -61,11 +76,43 @@ fn assert_signed_benchmark_report(bytes: &[u8]) -> Value {
     assert_eq!(scenarios[0]["name"], "secure-extension-heavy");
     assert_eq!(scenarios[0]["dimension"], "performance_under_hardening");
     assert_eq!(scenarios[0]["iterations"], 5);
+    assert_eq!(
+        scenarios[0]["raw_samples"]
+            .as_array()
+            .expect("raw samples must be present")
+            .len(),
+        5
+    );
+    assert_eq!(
+        scenarios[0]["raw_samples"][0]["source"],
+        "fixture_only_deterministic"
+    );
     assert!(
         scenarios[0]["variance_pct"]
             .as_f64()
             .is_some_and(f64::is_finite),
         "variance must be finite in signed report: {report}"
+    );
+    assert_eq!(report["sample_policy"]["min_measured_samples"], 3);
+    assert_eq!(report["sample_policy"]["total_sample_count"], 5);
+    assert_eq!(report["sample_policy"]["total_warmup_count"], 2);
+
+    let events = report["events"]
+        .as_array()
+        .expect("signed report must include structured benchmark events");
+    for expected in ["BS-001", "BS-010", "BS-002", "BS-003", "BS-008", "BS-006"] {
+        assert!(
+            events.iter().any(|event| event["code"] == expected),
+            "report must include event {expected}: {report}"
+        );
+    }
+    assert!(
+        events
+            .iter()
+            .all(|event| event["trace_id"] == report["trace_id"]
+                && event["profile"] == "strict"
+                && event.get("scenario_id").is_some()),
+        "every event must carry trace/profile/scenario metadata: {report}"
     );
 
     report
@@ -89,6 +136,47 @@ fn bench_run_secure_extension_heavy_is_byte_stable() {
     );
 }
 
+#[test]
+fn bench_run_default_path_emits_measured_evidence() {
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let output = command
+        .current_dir(repo_root())
+        .env("FRANKEN_NODE_BENCH_CPU", "deterministic-test-cpu")
+        .env("FRANKEN_NODE_BENCH_MEMORY_MB", "32768")
+        .env("FRANKEN_NODE_BENCH_TIMESTAMP_UTC", "2026-02-21T00:00:00Z")
+        .args(["bench", "run", "--scenario", "secure-extension-heavy"])
+        .output()
+        .expect("failed to run franken-node measured bench run");
+
+    assert!(
+        output.status.success(),
+        "measured bench command failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let report: Value = serde_json::from_slice(&output.stdout).expect("bench stdout must be JSON");
+    assert_eq!(report["evidence_mode"], "measured");
+    assert_eq!(report["security_controls"]["fixture_mode"], false);
+    assert_eq!(
+        report["scenarios"][0]["raw_samples"][0]["source"],
+        "measured_product_workload"
+    );
+    assert!(
+        report["scenarios"][0]["raw_samples"]
+            .as_array()
+            .is_some_and(|samples| samples.len() >= 3),
+        "measured report must carry raw samples: {report}"
+    );
+    assert_eq!(report["sample_policy"]["min_measured_samples"], 3);
+    assert!(
+        report["events"]
+            .as_array()
+            .is_some_and(|events| events.iter().any(|event| event["code"] == "BS-008")),
+        "measured report must include scenario completion event: {report}"
+    );
+}
+
 fn run_bench_with_invalid_scenario() -> std::process::Output {
     let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
     command
@@ -99,6 +187,19 @@ fn run_bench_with_invalid_scenario() -> std::process::Output {
         .args(["bench", "run", "--scenario", "nonexistent-invalid-scenario"])
         .output()
         .expect("failed to run franken-node bench run with invalid scenario")
+}
+
+fn run_bench_with_forced_scenario_failure() -> std::process::Output {
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    command
+        .current_dir(repo_root())
+        .env("FRANKEN_NODE_BENCH_CPU", "deterministic-test-cpu")
+        .env("FRANKEN_NODE_BENCH_MEMORY_MB", "32768")
+        .env("FRANKEN_NODE_BENCH_TIMESTAMP_UTC", "2026-02-21T00:00:00Z")
+        .env("FRANKEN_NODE_BENCH_FAIL_SCENARIO", "secure-extension-heavy")
+        .args(["bench", "run", "--scenario", "secure-extension-heavy"])
+        .output()
+        .expect("failed to run franken-node bench run with forced scenario failure")
 }
 
 fn run_bench_to_nonexistent_output() -> std::process::Output {
@@ -112,10 +213,13 @@ fn run_bench_to_nonexistent_output() -> std::process::Output {
         .env("FRANKEN_NODE_BENCH_MEMORY_MB", "32768")
         .env("FRANKEN_NODE_BENCH_TIMESTAMP_UTC", "2026-02-21T00:00:00Z")
         .args([
-            "bench", "run",
-            "--scenario", "secure-extension-heavy",
+            "bench",
+            "run",
+            "--scenario",
+            "secure-extension-heavy",
+            "--fixture-mode",
             "--output",
-            nonexistent_path.to_str().unwrap()
+            nonexistent_path.to_str().unwrap(),
         ])
         .output()
         .expect("failed to run franken-node bench run with nonexistent output")
@@ -132,8 +236,10 @@ fn assert_structured_error_response(stderr: &[u8]) -> Value {
 
     // Look for structured error patterns (JSON or key-value pairs)
     assert!(
-        stderr_str.contains("error") || stderr_str.contains("Error") ||
-        stderr_str.contains("failed") || stderr_str.contains("invalid"),
+        stderr_str.contains("error")
+            || stderr_str.contains("Error")
+            || stderr_str.contains("failed")
+            || stderr_str.contains("invalid"),
         "stderr must contain error indication: {}",
         stderr_str
     );
@@ -166,8 +272,7 @@ fn bench_run_invalid_scenario_returns_structured_error() {
         if let Ok(stdout_json) = serde_json::from_slice::<Value>(&output.stdout) {
             // If it's JSON, it should be an error structure, not a benchmark report
             assert!(
-                stdout_json.get("error").is_some() ||
-                stdout_json.get("scenarios").is_none(),
+                stdout_json.get("error").is_some() || stdout_json.get("scenarios").is_none(),
                 "stdout JSON should be error response, not benchmark report: {}",
                 stdout_json
             );
@@ -177,10 +282,40 @@ fn bench_run_invalid_scenario_returns_structured_error() {
     // Validate structured error information in stderr
     let error_info = assert_structured_error_response(&output.stderr);
     assert!(
-        error_info["contains_error"].as_bool().unwrap_or(false) ||
-        error_info.get("error").is_some(),
+        error_info["contains_error"].as_bool().unwrap_or(false)
+            || error_info.get("error").is_some(),
         "stderr must contain structured error information: {}",
         error_info
+    );
+}
+
+#[test]
+fn bench_run_forced_scenario_failure_returns_structured_error() {
+    let output = run_bench_with_forced_scenario_failure();
+
+    assert!(
+        !output.status.success(),
+        "forced measured scenario failure must exit nonzero"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "forced failure must not emit a benchmark report to stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let error_info = assert_structured_error_response(&output.stderr);
+    let stderr_content = error_info["stderr_content"].as_str().unwrap_or("");
+    assert!(
+        stderr_content.contains("benchmark suite run failed"),
+        "stderr must preserve the CLI failure boundary: {stderr_content}"
+    );
+    assert!(
+        stderr_content.contains("secure-extension-heavy"),
+        "stderr must identify the failing scenario: {stderr_content}"
+    );
+    assert!(
+        stderr_content.contains("forced failure via FRANKEN_NODE_BENCH_FAIL_SCENARIO"),
+        "stderr must expose the runner failure reason: {stderr_content}"
     );
 }
 
@@ -200,10 +335,10 @@ fn bench_run_nonexistent_output_path_fails_gracefully() {
 
     // Should mention the path/file issue
     assert!(
-        stderr_content.contains("path") ||
-        stderr_content.contains("file") ||
-        stderr_content.contains("directory") ||
-        stderr_content.contains("output"),
+        stderr_content.contains("path")
+            || stderr_content.contains("file")
+            || stderr_content.contains("directory")
+            || stderr_content.contains("output"),
         "error message should reference path/file issue: {}",
         stderr_content
     );
@@ -221,10 +356,13 @@ fn bench_run_successful_execution_logs_expected_events() {
         .env("FRANKEN_NODE_BENCH_MEMORY_MB", "32768")
         .env("FRANKEN_NODE_BENCH_TIMESTAMP_UTC", "2026-02-21T00:00:00Z")
         .args([
-            "bench", "run",
-            "--scenario", "secure-extension-heavy",
+            "bench",
+            "run",
+            "--scenario",
+            "secure-extension-heavy",
+            "--fixture-mode",
             "--output",
-            output_path.to_str().unwrap()
+            output_path.to_str().unwrap(),
         ])
         .output()
         .expect("failed to run franken-node bench run with output file");
@@ -242,8 +380,7 @@ fn bench_run_successful_execution_logs_expected_events() {
     );
 
     // Validate file contains valid benchmark report
-    let file_contents = std::fs::read(&output_path)
-        .expect("read benchmark output file");
+    let file_contents = std::fs::read(&output_path).expect("read benchmark output file");
     let file_report = assert_signed_benchmark_report(&file_contents);
 
     // Validate stderr contains expected log events (no errors)
@@ -251,17 +388,21 @@ fn bench_run_successful_execution_logs_expected_events() {
 
     // Should not contain error indicators
     assert!(
-        !stderr_str.contains("error") && !stderr_str.contains("Error") &&
-        !stderr_str.contains("failed") && !stderr_str.contains("panic"),
+        !stderr_str.contains("error")
+            && !stderr_str.contains("Error")
+            && !stderr_str.contains("failed")
+            && !stderr_str.contains("panic"),
         "successful bench run should not log errors: stderr={}",
         stderr_str
     );
 
     // Should contain progress or completion indicators
     assert!(
-        stderr_str.contains("bench") || stderr_str.contains("scenario") ||
-        stderr_str.contains("complete") || stderr_str.contains("writing") ||
-        stderr_str.is_empty(), // Empty stderr is also acceptable for successful runs
+        stderr_str.contains("bench")
+            || stderr_str.contains("scenario")
+            || stderr_str.contains("complete")
+            || stderr_str.contains("writing")
+            || stderr_str.is_empty(), // Empty stderr is also acceptable for successful runs
         "successful bench run should log progress/completion events or be silent: stderr={}",
         stderr_str
     );
@@ -269,6 +410,19 @@ fn bench_run_successful_execution_logs_expected_events() {
     // Validate report structure matches expected schema
     assert_eq!(file_report["suite_version"], "1.0.0");
     assert_eq!(file_report["scoring_formula_version"], "sf-v1");
+    let output_path_string = output_path.display().to_string();
+    assert_eq!(
+        file_report["evidence_path"].as_str(),
+        Some(output_path_string.as_str())
+    );
+    assert!(
+        file_report["events"].as_array().is_some_and(|events| {
+            events
+                .iter()
+                .all(|event| event["evidence_path"].as_str() == Some(output_path_string.as_str()))
+        }),
+        "file-backed bench report events must include output evidence_path: {file_report}"
+    );
     assert!(
         file_report["scenarios"]
             .as_array()

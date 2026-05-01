@@ -45,6 +45,9 @@ pub const BS_SCORE_COMPUTED: &str = "BS-004";
 pub const BS_REGRESSION_DETECTED: &str = "BS-005";
 pub const BS_SUITE_COMPLETED: &str = "BS-006";
 pub const BS_DETERMINISM_CHECK_PASSED: &str = "BS-007";
+pub const BS_SCENARIO_COMPLETED: &str = "BS-008";
+pub const BS_SCENARIO_FAILED: &str = "BS-009";
+pub const BS_FIXTURE_MODE_USED: &str = "BS-010";
 
 // ---------------------------------------------------------------------------
 // Invariant constants
@@ -212,10 +215,16 @@ impl HardwareProfile {
     pub fn fingerprint(&self) -> String {
         let mut hasher = sha2::Sha256::new();
         sha2::Digest::update(&mut hasher, b"benchmark_suite_fingerprint_v1:" as &[u8]);
-        sha2::Digest::update(&mut hasher, (u64::try_from(self.cpu.len()).unwrap_or(u64::MAX)).to_le_bytes());
+        sha2::Digest::update(
+            &mut hasher,
+            (u64::try_from(self.cpu.len()).unwrap_or(u64::MAX)).to_le_bytes(),
+        );
         sha2::Digest::update(&mut hasher, self.cpu.as_bytes());
         sha2::Digest::update(&mut hasher, self.memory_mb.to_le_bytes());
-        sha2::Digest::update(&mut hasher, (u64::try_from(self.os.len()).unwrap_or(u64::MAX)).to_le_bytes());
+        sha2::Digest::update(
+            &mut hasher,
+            (u64::try_from(self.os.len()).unwrap_or(u64::MAX)).to_le_bytes(),
+        );
         sha2::Digest::update(&mut hasher, self.os.as_bytes());
         hex::encode(sha2::Digest::finalize(hasher))
     }
@@ -364,13 +373,19 @@ impl BenchmarkSecurityControls {
         let disabled = env_flag("FRANKEN_NODE_BENCH_SECURITY_DISABLED");
         BenchmarkSecurityControls {
             sandbox_enforced: !disabled && !env_flag("FRANKEN_NODE_BENCH_SANDBOX_DISABLED"),
-            trust_verification_enabled: !disabled
-                && !env_flag("FRANKEN_NODE_BENCH_TRUST_DISABLED"),
+            trust_verification_enabled: !disabled && !env_flag("FRANKEN_NODE_BENCH_TRUST_DISABLED"),
             revocation_freshness_enforced: !disabled
                 && !env_flag("FRANKEN_NODE_BENCH_REVOCATION_DISABLED"),
             fixture_mode: false,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BenchmarkSamplePolicy {
+    pub min_measured_samples: usize,
+    pub total_sample_count: usize,
+    pub total_warmup_count: u32,
 }
 
 /// Complete benchmark suite report.
@@ -385,6 +400,10 @@ pub struct BenchmarkReport {
     pub profile: String,
     pub security_controls: BenchmarkSecurityControls,
     pub git_revision: Option<String>,
+    pub trace_id: String,
+    pub evidence_path: Option<String>,
+    pub sample_policy: BenchmarkSamplePolicy,
+    pub events: Vec<BenchmarkEvent>,
     pub scenarios: Vec<ScenarioResult>,
     pub aggregate_score: u32,
     pub provenance_hash: String,
@@ -399,7 +418,10 @@ impl BenchmarkReport {
             serde_json::to_string(&report_for_hash).unwrap_or_else(|e| format!("__serde_err:{e}"));
         let mut hasher = sha2::Sha256::new();
         sha2::Digest::update(&mut hasher, b"benchmark_suite_json_v1:" as &[u8]);
-        sha2::Digest::update(&mut hasher, (u64::try_from(json.len()).unwrap_or(u64::MAX)).to_le_bytes());
+        sha2::Digest::update(
+            &mut hasher,
+            (u64::try_from(json.len()).unwrap_or(u64::MAX)).to_le_bytes(),
+        );
         sha2::Digest::update(&mut hasher, json.as_bytes());
         format!("sha256:{}", hex::encode(sha2::Digest::finalize(hasher)))
     }
@@ -518,7 +540,10 @@ impl fmt::Display for BenchRunError {
                 "scenario `{scenario}` cannot produce authoritative evidence with disabled security controls: {detail}"
             ),
             Self::ScenarioExecutionFailed { scenario, detail } => {
-                write!(f, "scenario `{scenario}` failed during measured execution: {detail}")
+                write!(
+                    f,
+                    "scenario `{scenario}` failed during measured execution: {detail}"
+                )
             }
         }
     }
@@ -594,6 +619,30 @@ pub fn detect_regressions(
     findings
 }
 
+pub fn regression_events(
+    report: &BenchmarkReport,
+    findings: &[RegressionFinding],
+) -> Vec<BenchmarkEvent> {
+    findings
+        .iter()
+        .map(|finding| BenchmarkEvent {
+            code: BS_REGRESSION_DETECTED.to_string(),
+            scenario: Some(finding.scenario_name.clone()),
+            scenario_id: Some(finding.scenario_name.clone()),
+            trace_id: report.trace_id.clone(),
+            profile: report.profile.clone(),
+            evidence_path: report.evidence_path.clone(),
+            detail: format!(
+                "current={:.3} baseline={:.3} change_pct={:.2} threshold_pct={:.2}",
+                finding.current_value,
+                finding.baseline_value,
+                finding.change_pct,
+                finding.threshold_pct
+            ),
+        })
+        .collect()
+}
+
 fn validate_measurements(
     scenario: &ScenarioDefinition,
     raw_measurements: &[f64],
@@ -624,15 +673,44 @@ fn validate_sample_values(
 }
 
 fn validate_report(report: &BenchmarkReport) -> Result<(), BenchRunError> {
-    if report.evidence_mode == BenchmarkEvidenceMode::Measured && report.security_controls.fixture_mode {
+    if report.evidence_mode == BenchmarkEvidenceMode::Measured
+        && report.security_controls.fixture_mode
+    {
         return Err(BenchRunError::NonFiniteReportValue {
             detail: "measured report cannot carry fixture_mode=true".to_string(),
+        });
+    }
+    if report.trace_id.trim().is_empty() {
+        return Err(BenchRunError::NonFiniteReportValue {
+            detail: "report trace_id must be non-empty".to_string(),
+        });
+    }
+    let actual_sample_count = report
+        .scenarios
+        .iter()
+        .map(|scenario| scenario.raw_samples.len())
+        .sum::<usize>();
+    if report.sample_policy.total_sample_count != actual_sample_count {
+        return Err(BenchRunError::NonFiniteReportValue {
+            detail: format!(
+                "sample_policy.total_sample_count={} does not match actual sample count={actual_sample_count}",
+                report.sample_policy.total_sample_count
+            ),
         });
     }
     for scenario in &report.scenarios {
         if scenario.raw_samples.is_empty() {
             return Err(BenchRunError::EmptyMeasurements {
                 scenario: scenario.name.clone(),
+            });
+        }
+        if report.evidence_mode == BenchmarkEvidenceMode::Measured
+            && scenario.raw_samples.len() < report.sample_policy.min_measured_samples
+        {
+            return Err(BenchRunError::InsufficientSamples {
+                scenario: scenario.name.clone(),
+                required: report.sample_policy.min_measured_samples,
+                actual: scenario.raw_samples.len(),
             });
         }
         if scenario
@@ -684,19 +762,31 @@ fn env_flag(name: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Structured event emitted during benchmark execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BenchmarkEvent {
     pub code: String,
     pub scenario: Option<String>,
+    pub scenario_id: Option<String>,
+    pub trace_id: String,
+    pub profile: String,
+    pub evidence_path: Option<String>,
     pub detail: String,
 }
 
 impl fmt::Display for BenchmarkEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(ref scenario) = self.scenario {
-            write!(f, "[{}] {}: {}", self.code, scenario, self.detail)
+            write!(
+                f,
+                "[{}] trace_id={} profile={} {}: {}",
+                self.code, self.trace_id, self.profile, scenario, self.detail
+            )
         } else {
-            write!(f, "[{}] {}", self.code, self.detail)
+            write!(
+                f,
+                "[{}] trace_id={} profile={} {}",
+                self.code, self.trace_id, self.profile, self.detail
+            )
         }
     }
 }
@@ -832,6 +922,8 @@ pub struct SuiteConfig {
     pub regression_threshold_pct: f64,
     pub profile: String,
     pub git_revision: Option<String>,
+    pub trace_id: String,
+    pub evidence_path: Option<String>,
 }
 
 impl SuiteConfig {
@@ -852,6 +944,8 @@ impl SuiteConfig {
             regression_threshold_pct: DEFAULT_REGRESSION_THRESHOLD_PCT,
             profile: "strict".to_string(),
             git_revision: Some("test-git-revision".to_string()),
+            trace_id: "benchmark-suite-test-trace".to_string(),
+            evidence_path: Some("artifacts/benchmark-suite/test-report.json".to_string()),
         }
     }
 
@@ -866,11 +960,22 @@ impl SuiteConfig {
         let git_revision = std::env::var("FRANKEN_NODE_BENCH_GIT_REVISION")
             .ok()
             .or_else(|| option_env!("VERGEN_GIT_SHA").map(ToString::to_string));
+        let cpu = std::env::var("FRANKEN_NODE_BENCH_CPU")
+            .unwrap_or_else(|_| std::env::consts::ARCH.to_string());
+        let profile =
+            std::env::var("FRANKEN_NODE_PROFILE").unwrap_or_else(|_| "strict".to_string());
+        let trace_id = std::env::var("FRANKEN_NODE_BENCH_TRACE_ID")
+            .unwrap_or_else(|_| benchmark_trace_id(&timestamp_utc, &profile, &cpu));
+        let evidence_path = std::env::var("FRANKEN_NODE_BENCH_EVIDENCE_PATH")
+            .ok()
+            .and_then(|value| {
+                let trimmed = value.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            });
 
         SuiteConfig {
             hardware_profile: HardwareProfile {
-                cpu: std::env::var("FRANKEN_NODE_BENCH_CPU")
-                    .unwrap_or_else(|_| std::env::consts::ARCH.to_string()),
+                cpu,
                 memory_mb,
                 os: std::env::consts::OS.to_string(),
             },
@@ -881,11 +986,28 @@ impl SuiteConfig {
             },
             timestamp_utc,
             regression_threshold_pct: DEFAULT_REGRESSION_THRESHOLD_PCT,
-            profile: std::env::var("FRANKEN_NODE_PROFILE")
-                .unwrap_or_else(|_| "strict".to_string()),
+            profile,
             git_revision,
+            trace_id,
+            evidence_path,
         }
     }
+}
+
+fn benchmark_trace_id(timestamp_utc: &str, profile: &str, cpu: &str) -> String {
+    let mut hasher = sha2::Sha256::new();
+    sha2::Digest::update(&mut hasher, b"benchmark_suite_trace_v1:" as &[u8]);
+    for value in [timestamp_utc, profile, cpu] {
+        sha2::Digest::update(
+            &mut hasher,
+            (u64::try_from(value.len()).unwrap_or(u64::MAX)).to_le_bytes(),
+        );
+        sha2::Digest::update(&mut hasher, value.as_bytes());
+    }
+    format!(
+        "bench-{}",
+        &hex::encode(sha2::Digest::finalize(hasher))[..16]
+    )
 }
 
 /// The benchmark suite harness that executes scenarios and produces reports.
@@ -1049,8 +1171,6 @@ impl BenchmarkSuite {
         scenario: &ScenarioDefinition,
         raw_samples: &[RawMeasurement],
     ) -> Result<ScenarioResult, BenchRunError> {
-        let raw_measurements = validate_sample_values(scenario, raw_samples)?;
-
         self.emit_event(
             BS_SCENARIO_STARTED,
             Some(&scenario.name),
@@ -1059,6 +1179,14 @@ impl BenchmarkSuite {
                 scenario.name, scenario.iterations
             ),
         );
+
+        let raw_measurements = match validate_sample_values(scenario, raw_samples) {
+            Ok(values) => values,
+            Err(err) => {
+                self.emit_event(BS_SCENARIO_FAILED, Some(&scenario.name), &err.to_string());
+                return Err(err);
+            }
+        };
 
         for sample in raw_samples {
             self.emit_event(
@@ -1098,6 +1226,16 @@ impl BenchmarkSuite {
                 &format!("variance {cv:.2}% <= {MAX_VARIANCE_PCT}% threshold"),
             );
         }
+
+        self.emit_event(
+            BS_SCENARIO_COMPLETED,
+            Some(&scenario.name),
+            &format!(
+                "sample_count={} warmup_count={} score={score}/100 variance={cv:.2}%",
+                raw_samples.len(),
+                scenario.warmup_iterations
+            ),
+        );
 
         Ok(ScenarioResult {
             dimension: scenario.dimension,
@@ -1151,6 +1289,14 @@ impl BenchmarkSuite {
     ) -> Result<BenchmarkReport, BenchRunError> {
         let mut results = Vec::new();
 
+        if evidence_mode == BenchmarkEvidenceMode::FixtureOnly {
+            self.emit_event(
+                BS_FIXTURE_MODE_USED,
+                None,
+                "fixture-only deterministic measurements are quarantined from release evidence",
+            );
+        }
+
         for scenario in &self.scenarios.clone() {
             if let Some(raw) = sample_sets.get(&scenario.name) {
                 let result = self.execute_scenario_samples(scenario, raw)?;
@@ -1177,6 +1323,18 @@ impl BenchmarkSuite {
             ),
         );
 
+        let sample_policy = BenchmarkSamplePolicy {
+            min_measured_samples: MIN_MEASURED_SAMPLES,
+            total_sample_count: results.iter().map(|result| result.raw_samples.len()).sum(),
+            total_warmup_count: self
+                .scenarios
+                .iter()
+                .filter(|scenario| sample_sets.contains_key(&scenario.name))
+                .map(|scenario| scenario.warmup_iterations)
+                .fold(0u32, u32::saturating_add),
+        };
+        let events = self.events.clone();
+
         let mut report = BenchmarkReport {
             suite_version: SUITE_VERSION.to_string(),
             scoring_formula_version: SCORING_FORMULA_VERSION.to_string(),
@@ -1187,6 +1345,10 @@ impl BenchmarkSuite {
             profile: self.config.profile.clone(),
             security_controls,
             git_revision: self.config.git_revision.clone(),
+            trace_id: self.config.trace_id.clone(),
+            evidence_path: self.config.evidence_path.clone(),
+            sample_policy,
+            events,
             scenarios: results,
             aggregate_score: aggregate,
             provenance_hash: String::new(),
@@ -1212,6 +1374,10 @@ impl BenchmarkSuite {
             BenchmarkEvent {
                 code: code.to_string(),
                 scenario: scenario.map(String::from),
+                scenario_id: scenario.map(String::from),
+                trace_id: self.config.trace_id.clone(),
+                profile: self.config.profile.clone(),
+                evidence_path: self.config.evidence_path.clone(),
                 detail: detail.to_string(),
             },
             MAX_EVENTS,
@@ -1239,7 +1405,10 @@ pub fn from_json(json: &str) -> Result<BenchmarkReport, serde_json::Error> {
 fn deterministic_seed(name: &str) -> u64 {
     let mut hasher = sha2::Sha256::new();
     sha2::Digest::update(&mut hasher, b"benchmark_suite_seed_v1:" as &[u8]);
-    sha2::Digest::update(&mut hasher, (u64::try_from(name.len()).unwrap_or(u64::MAX)).to_le_bytes());
+    sha2::Digest::update(
+        &mut hasher,
+        (u64::try_from(name.len()).unwrap_or(u64::MAX)).to_le_bytes(),
+    );
     sha2::Digest::update(&mut hasher, name.as_bytes());
     let digest = sha2::Digest::finalize(hasher);
     let mut bytes = [0_u8; 8];
@@ -1501,7 +1670,10 @@ fn digest_rounds(label: &str, iteration: u32, rounds: u32) -> [u8; 32] {
     for round in 0..rounds {
         let mut hasher = sha2::Sha256::new();
         sha2::Digest::update(&mut hasher, b"benchmark_measured_workload_v1:");
-        sha2::Digest::update(&mut hasher, (u64::try_from(label.len()).unwrap_or(u64::MAX)).to_le_bytes());
+        sha2::Digest::update(
+            &mut hasher,
+            (u64::try_from(label.len()).unwrap_or(u64::MAX)).to_le_bytes(),
+        );
         sha2::Digest::update(&mut hasher, label.as_bytes());
         sha2::Digest::update(&mut hasher, iteration.to_le_bytes());
         sha2::Digest::update(&mut hasher, round.to_le_bytes());
@@ -1652,6 +1824,17 @@ pub fn render_human_summary(report: &BenchmarkReport) -> String {
             "suite_version={} scoring_formula={} timestamp={}",
             report.suite_version, report.scoring_formula_version, report.timestamp_utc
         ),
+        format!(
+            "evidence_mode={} profile={} fixture_mode={}",
+            report.evidence_mode, report.profile, report.security_controls.fixture_mode
+        ),
+        format!(
+            "trace_id={} evidence_path={} samples={} warmups={}",
+            report.trace_id,
+            report.evidence_path.as_deref().unwrap_or("stdout"),
+            report.sample_policy.total_sample_count,
+            report.sample_policy.total_warmup_count
+        ),
     ];
 
     for scenario in &report.scenarios {
@@ -1684,18 +1867,12 @@ mod tests {
         vec![RawMeasurement::fixture(0, value, "2026-02-21T00:00:00Z")]
     }
 
-    fn fixture_report_metadata() -> (
-        BenchmarkEvidenceMode,
-        String,
-        BenchmarkSecurityControls,
-        Option<String>,
-    ) {
-        (
-            BenchmarkEvidenceMode::FixtureOnly,
-            "strict".to_string(),
-            BenchmarkSecurityControls::fixture_only(),
-            Some("test-git-revision".to_string()),
-        )
+    fn fixture_sample_policy(total_sample_count: usize) -> BenchmarkSamplePolicy {
+        BenchmarkSamplePolicy {
+            min_measured_samples: MIN_MEASURED_SAMPLES,
+            total_sample_count,
+            total_warmup_count: 0,
+        }
     }
 
     #[test]
@@ -1889,6 +2066,10 @@ mod tests {
             profile: "strict".to_string(),
             security_controls: BenchmarkSecurityControls::fixture_only(),
             git_revision: Some("test-git-revision".to_string()),
+            trace_id: "benchmark-suite-test-trace".to_string(),
+            evidence_path: Some("artifacts/benchmark-suite/test-report.json".to_string()),
+            sample_policy: fixture_sample_policy(1),
+            events: Vec::new(),
             scenarios: vec![ScenarioResult {
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
@@ -1934,6 +2115,10 @@ mod tests {
             profile: "strict".to_string(),
             security_controls: BenchmarkSecurityControls::fixture_only(),
             git_revision: Some("test-git-revision".to_string()),
+            trace_id: "benchmark-suite-test-trace".to_string(),
+            evidence_path: Some("artifacts/benchmark-suite/test-report.json".to_string()),
+            sample_policy: fixture_sample_policy(1),
+            events: Vec::new(),
             scenarios: vec![ScenarioResult {
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
@@ -1984,6 +2169,10 @@ mod tests {
             profile: "strict".to_string(),
             security_controls: BenchmarkSecurityControls::fixture_only(),
             git_revision: Some("test-git-revision".to_string()),
+            trace_id: "benchmark-suite-test-trace".to_string(),
+            evidence_path: Some("artifacts/benchmark-suite/test-report.json".to_string()),
+            sample_policy: fixture_sample_policy(1),
+            events: Vec::new(),
             scenarios: vec![ScenarioResult {
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
@@ -2013,6 +2202,12 @@ mod tests {
         let findings = detect_regressions(&baseline, &current, 10.0);
         assert_eq!(findings.len(), 1, "Should detect one regression");
         assert!(findings[0].change_pct > 10.0);
+
+        let events = regression_events(&current, &findings);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].code, BS_REGRESSION_DETECTED);
+        assert_eq!(events[0].scenario_id.as_deref(), Some("cold_start_latency"));
+        assert_eq!(events[0].trace_id, "benchmark-suite-test-trace");
     }
 
     #[test]
@@ -2035,6 +2230,10 @@ mod tests {
             profile: "strict".to_string(),
             security_controls: BenchmarkSecurityControls::fixture_only(),
             git_revision: Some("test-git-revision".to_string()),
+            trace_id: "benchmark-suite-test-trace".to_string(),
+            evidence_path: Some("artifacts/benchmark-suite/test-report.json".to_string()),
+            sample_policy: fixture_sample_policy(1),
+            events: Vec::new(),
             scenarios: vec![ScenarioResult {
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
@@ -2085,6 +2284,10 @@ mod tests {
             profile: "strict".to_string(),
             security_controls: BenchmarkSecurityControls::fixture_only(),
             git_revision: Some("test-git-revision".to_string()),
+            trace_id: "benchmark-suite-test-trace".to_string(),
+            evidence_path: Some("artifacts/benchmark-suite/test-report.json".to_string()),
+            sample_policy: fixture_sample_policy(1),
+            events: Vec::new(),
             scenarios: vec![ScenarioResult {
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
@@ -2131,7 +2334,7 @@ mod tests {
 
         let mut measurements = BTreeMap::new();
         measurements.insert("test_scenario".to_string(), vec![5.0; 5]);
-        let _report = suite
+        let report = suite
             .run(&measurements)
             .expect("finite benchmark data should run");
 
@@ -2140,7 +2343,67 @@ mod tests {
         assert!(event_codes.contains(&BS_SCENARIO_STARTED));
         assert!(event_codes.contains(&BS_MEASUREMENT_RECORDED));
         assert!(event_codes.contains(&BS_SCORE_COMPUTED));
+        assert!(event_codes.contains(&BS_SCENARIO_COMPLETED));
         assert!(event_codes.contains(&BS_SUITE_COMPLETED));
+        assert_eq!(report.events.as_slice(), suite.events());
+        assert!(suite.events().iter().all(|event| {
+            event.trace_id == "benchmark-suite-test-trace"
+                && event.profile == "strict"
+                && event.evidence_path.as_deref()
+                    == Some("artifacts/benchmark-suite/test-report.json")
+        }));
+        assert!(
+            suite
+                .events()
+                .iter()
+                .any(|event| event.scenario_id.as_deref() == Some("test_scenario"))
+        );
+        assert_eq!(report.sample_policy.total_sample_count, 5);
+    }
+
+    #[test]
+    fn test_fixture_mode_emits_quarantine_event() {
+        let config = SuiteConfig::with_defaults();
+        let report = run_default_suite_with_config_and_mode(
+            config,
+            Some("cold_start_latency"),
+            BenchmarkEvidenceMode::FixtureOnly,
+        )
+        .expect("fixture run should succeed");
+
+        assert!(
+            report
+                .events
+                .iter()
+                .any(|event| event.code == BS_FIXTURE_MODE_USED)
+        );
+        assert_eq!(report.evidence_mode, BenchmarkEvidenceMode::FixtureOnly);
+        assert!(report.security_controls.fixture_mode);
+    }
+
+    #[test]
+    fn test_failed_scenario_emits_failure_event() {
+        let config = SuiteConfig::with_defaults();
+        let mut suite = BenchmarkSuite::new(config);
+        let scenario = ScenarioDefinition {
+            dimension: BenchmarkDimension::PerformanceUnderHardening,
+            name: "test_scenario".to_string(),
+            unit: "ms".to_string(),
+            iterations: 1,
+            warmup_iterations: 0,
+            sandbox_required: false,
+            scoring: ScoringConfig::lower_is_better(1.0, 10.0),
+        };
+
+        let err = suite
+            .execute_scenario_samples(&scenario, &[])
+            .expect_err("empty samples must fail");
+
+        assert!(matches!(err, BenchRunError::EmptyMeasurements { .. }));
+        assert!(suite.events().iter().any(|event| {
+            event.code == BS_SCENARIO_FAILED
+                && event.scenario_id.as_deref() == Some("test_scenario")
+        }));
     }
 
     #[test]
@@ -2163,6 +2426,10 @@ mod tests {
             profile: "strict".to_string(),
             security_controls: BenchmarkSecurityControls::fixture_only(),
             git_revision: Some("test-git-revision".to_string()),
+            trace_id: "benchmark-suite-test-trace".to_string(),
+            evidence_path: Some("artifacts/benchmark-suite/test-report.json".to_string()),
+            sample_policy: fixture_sample_policy(0),
+            events: Vec::new(),
             scenarios: vec![],
             aggregate_score: 0,
             provenance_hash: String::new(),
@@ -2284,6 +2551,10 @@ mod tests {
             profile: "strict".to_string(),
             security_controls: BenchmarkSecurityControls::fixture_only(),
             git_revision: Some("test-git-revision".to_string()),
+            trace_id: "benchmark-suite-test-trace".to_string(),
+            evidence_path: Some("artifacts/benchmark-suite/test-report.json".to_string()),
+            sample_policy: fixture_sample_policy(1),
+            events: Vec::new(),
             scenarios: vec![ScenarioResult {
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
@@ -2382,9 +2653,12 @@ mod tests {
             BenchmarkEvidenceMode::FixtureOnly,
         )
         .expect("first run");
-        let second =
-            run_default_suite_with_config_and_mode(config, None, BenchmarkEvidenceMode::FixtureOnly)
-                .expect("second run");
+        let second = run_default_suite_with_config_and_mode(
+            config,
+            None,
+            BenchmarkEvidenceMode::FixtureOnly,
+        )
+        .expect("second run");
 
         assert_eq!(first.aggregate_score, second.aggregate_score);
         assert_eq!(first.scenarios, second.scenarios);
@@ -2521,11 +2795,20 @@ mod tests {
                 node: Some("22.0.0".to_string()),
                 bun: Some("1.1.0".to_string()),
             },
+            evidence_mode: BenchmarkEvidenceMode::FixtureOnly,
+            profile: "strict".to_string(),
+            security_controls: BenchmarkSecurityControls::fixture_only(),
+            git_revision: Some("test-git-revision".to_string()),
+            trace_id: "benchmark-suite-test-trace".to_string(),
+            evidence_path: Some("artifacts/benchmark-suite/test-report.json".to_string()),
+            sample_policy: fixture_sample_policy(1),
+            events: Vec::new(),
             scenarios: vec![ScenarioResult {
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
                 raw_value: 125.0,
                 unit: "ms".to_string(),
+                raw_samples: fixture_samples(125.0),
                 confidence_interval: ConfidenceInterval {
                     lower: 123.0,
                     upper: 127.0,
@@ -2589,14 +2872,18 @@ mod tests {
     #[test]
     fn test_default_suite_duplicate_filter_is_deterministic() {
         let config = SuiteConfig::with_defaults();
-        let first = run_default_suite_with_config(
+        let first = run_default_suite_with_config_and_mode(
             config.clone(),
             Some("cold_start_latency,cold_start_latency"),
+            BenchmarkEvidenceMode::FixtureOnly,
         )
         .expect("duplicate filter should dedupe");
-        let second =
-            run_default_suite_with_config(config, Some("cold_start_latency,cold_start_latency"))
-                .expect("duplicate filter should dedupe deterministically");
+        let second = run_default_suite_with_config_and_mode(
+            config,
+            Some("cold_start_latency,cold_start_latency"),
+            BenchmarkEvidenceMode::FixtureOnly,
+        )
+        .expect("duplicate filter should dedupe deterministically");
 
         assert_eq!(first.scenarios.len(), 1);
         assert_eq!(second.scenarios.len(), 1);
@@ -2605,6 +2892,95 @@ mod tests {
             &first.provenance_hash,
             &second.provenance_hash
         ));
+    }
+
+    #[test]
+    fn test_default_suite_measured_mode_records_raw_samples_and_security_metadata() {
+        let config = SuiteConfig::with_defaults();
+        let report = run_default_suite_with_config(config, Some("secure-extension-heavy"))
+            .expect("measured default suite should run");
+
+        assert_eq!(report.evidence_mode, BenchmarkEvidenceMode::Measured);
+        assert_eq!(report.profile, "strict");
+        assert!(!report.security_controls.fixture_mode);
+        assert!(report.security_controls.sandbox_enforced);
+        assert!(report.security_controls.trust_verification_enabled);
+        assert_eq!(report.scenarios.len(), 1);
+        assert_eq!(report.scenarios[0].raw_samples.len(), 5);
+        assert!(
+            report.scenarios[0]
+                .raw_samples
+                .iter()
+                .all(|sample| sample.source == "measured_product_workload")
+        );
+    }
+
+    #[test]
+    fn test_fixture_mode_is_explicitly_quarantined() {
+        let config = SuiteConfig::with_defaults();
+        let report = run_default_suite_with_config_and_mode(
+            config,
+            Some("secure-extension-heavy"),
+            BenchmarkEvidenceMode::FixtureOnly,
+        )
+        .expect("fixture suite should run");
+
+        assert_eq!(report.evidence_mode, BenchmarkEvidenceMode::FixtureOnly);
+        assert!(report.security_controls.fixture_mode);
+        assert!(
+            report.scenarios[0]
+                .raw_samples
+                .iter()
+                .all(|sample| sample.source == "fixture_only_deterministic")
+        );
+    }
+
+    #[test]
+    fn test_measured_mode_rejects_disabled_security_controls() {
+        let scenario = ScenarioDefinition {
+            dimension: BenchmarkDimension::PerformanceUnderHardening,
+            name: "secure-extension-heavy".to_string(),
+            unit: "ms".to_string(),
+            iterations: 5,
+            warmup_iterations: 0,
+            sandbox_required: true,
+            scoring: ScoringConfig::lower_is_better(250.0, 1000.0),
+        };
+
+        let err = measured_samples_for_scenario(
+            &scenario,
+            &BenchmarkSecurityControls {
+                sandbox_enforced: false,
+                trust_verification_enabled: true,
+                revocation_freshness_enforced: true,
+                fixture_mode: false,
+            },
+        )
+        .expect_err("disabled sandbox must fail closed");
+
+        assert!(matches!(
+            err,
+            BenchRunError::SecurityControlsDisabled { .. }
+        ));
+    }
+
+    #[test]
+    fn test_measured_mode_rejects_insufficient_samples() {
+        let scenario = ScenarioDefinition {
+            dimension: BenchmarkDimension::PerformanceUnderHardening,
+            name: "secure-extension-heavy".to_string(),
+            unit: "ms".to_string(),
+            iterations: 2,
+            warmup_iterations: 0,
+            sandbox_required: true,
+            scoring: ScoringConfig::lower_is_better(250.0, 1000.0),
+        };
+
+        let err =
+            measured_samples_for_scenario(&scenario, &BenchmarkSecurityControls::measured_secure())
+                .expect_err("measured mode must enforce the sample floor");
+
+        assert!(matches!(err, BenchRunError::InsufficientSamples { .. }));
     }
 
     #[test]

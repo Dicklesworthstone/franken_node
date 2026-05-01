@@ -10,7 +10,10 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 SCRIPT = ROOT / "scripts" / "check_benchmark_suite.py"
+
+from scripts import check_benchmark_suite as checker
 
 
 def run_script(*args: str) -> subprocess.CompletedProcess:
@@ -141,6 +144,80 @@ class TestRustImplementation:
         data = json.loads(result.stdout)
         check = next(c for c in data["checks"] if c["check"] == "rust_test_count")
         assert check["pass"] is True, f"Should have >= 15 tests: {check['detail']}"
+
+    def test_measured_boundary_check_passes(self):
+        result = run_script("--json")
+        data = json.loads(result.stdout)
+        check = next(c for c in data["checks"] if c["check"] == "rust_measured_evidence_boundary")
+        assert check["pass"] is True
+
+    def test_default_cli_measured_provider_check_passes(self):
+        result = run_script("--json")
+        data = json.loads(result.stdout)
+        check = next(c for c in data["checks"] if c["check"] == "rust_default_cli_uses_measured_provider")
+        assert check["pass"] is True, check["detail"]
+
+    def test_bench_run_e2e_real_and_failure_coverage_passes(self):
+        result = run_script("--json")
+        data = json.loads(result.stdout)
+        check = next(c for c in data["checks"] if c["check"] == "bench_run_e2e_real_and_failure_coverage")
+        assert check["pass"] is True, check["detail"]
+
+    def test_default_cli_measured_provider_check_rejects_fixture_default(self, tmp_path, monkeypatch):
+        impl = tmp_path / "benchmark_suite.rs"
+        impl.write_text(
+            """
+pub fn run_default_suite_for_cli(
+    scenario_filter: Option<&str>,
+    fixture_mode: bool,
+) -> Result<BenchmarkReport, BenchRunError> {
+    let evidence_mode = if fixture_mode {
+        BenchmarkEvidenceMode::FixtureOnly
+    } else {
+        BenchmarkEvidenceMode::FixtureOnly
+    };
+    run_default_suite_with_config_and_mode(SuiteConfig::for_cli(), scenario_filter, evidence_mode)
+}
+
+fn measured_sample_map() {
+    BenchmarkSecurityControls::from_env(false);
+    let _ = "measured_product_workload";
+    let _ = "fixture_only_deterministic";
+    let _ = "FRANKEN_NODE_BENCH_FAIL_SCENARIO";
+}
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(checker, "RUST_IMPL_PATH", impl)
+        checker.RESULTS.clear()
+
+        check = checker.check_rust_default_cli_uses_measured_provider()
+
+        assert check["pass"] is False
+        assert "default_cli_measured_else_branch" in check["detail"]
+
+    def test_bench_run_e2e_coverage_check_rejects_missing_forced_failure(self, tmp_path, monkeypatch):
+        e2e = tmp_path / "bench_run_e2e.rs"
+        e2e.write_text(
+            """
+fn bench_run_default_path_emits_measured_evidence() {
+    let _ = "--fixture-mode";
+    let _ = "fixture_only_deterministic";
+    let _ = "raw_samples";
+    let _ = "security_controls";
+}
+
+fn bench_run_invalid_scenario_returns_structured_error() {}
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(checker, "BENCH_E2E_PATH", e2e)
+        checker.RESULTS.clear()
+
+        check = checker.check_bench_run_e2e_real_and_failure_coverage()
+
+        assert check["pass"] is False
+        assert "forced_runner_failure_test" in check["detail"]
 
 
 class TestPolicyDocument:

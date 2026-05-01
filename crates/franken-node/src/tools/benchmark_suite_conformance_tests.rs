@@ -592,6 +592,13 @@ mod benchmark_suite_edge_cases {
                 name: name.to_string(),
                 raw_value,
                 unit: "ms".to_string(),
+                raw_samples: vec![RawMeasurement {
+                    iteration: 0,
+                    value: raw_value,
+                    started_at_utc: "2026-02-21T00:00:00Z".to_string(),
+                    finished_at_utc: "2026-02-21T00:00:00Z".to_string(),
+                    source: "fixture_only_deterministic".to_string(),
+                }],
                 confidence_interval: ConfidenceInterval {
                     lower: raw_value - 5.0,
                     upper: raw_value + 5.0,
@@ -601,6 +608,10 @@ mod benchmark_suite_edge_cases {
                 variance_pct: 2.0,
             })
             .collect();
+        let total_sample_count = scenario_results
+            .iter()
+            .map(|scenario| scenario.raw_samples.len())
+            .sum();
 
         BenchmarkReport {
             suite_version: "1.0.0".to_string(),
@@ -616,6 +627,18 @@ mod benchmark_suite_edge_cases {
                 node: None,
                 bun: None,
             },
+            evidence_mode: BenchmarkEvidenceMode::FixtureOnly,
+            profile: "strict".to_string(),
+            security_controls: BenchmarkSecurityControls::fixture_only(),
+            git_revision: Some("test-git-revision".to_string()),
+            trace_id: "benchmark-suite-test-trace".to_string(),
+            evidence_path: Some("artifacts/benchmark-suite/test-report.json".to_string()),
+            sample_policy: BenchmarkSamplePolicy {
+                min_measured_samples: 3,
+                total_sample_count,
+                total_warmup_count: 0,
+            },
+            events: Vec::new(),
             scenarios: scenario_results,
             aggregate_score: 50,
             provenance_hash: "test".to_string(),

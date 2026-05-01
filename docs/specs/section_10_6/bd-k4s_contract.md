@@ -44,6 +44,9 @@ public reporting.
 | BS-005 | Regression detected; metric degraded beyond threshold. |
 | BS-006 | Benchmark suite completed; aggregate report emitted. |
 | BS-007 | Deterministic check passed; variance within 5% threshold. |
+| BS-008 | Individual benchmark scenario completed with sample count, warmup count, score, and variance. |
+| BS-009 | Individual benchmark scenario failed before producing authoritative evidence. |
+| BS-010 | Fixture-only deterministic measurement mode used; result is quarantined from release evidence. |
 
 ## Invariants
 
@@ -121,7 +124,7 @@ Formula version is embedded in every result for attribution.
 - Unit tests for result serialization/deserialization roundtrip.
 - Unit tests for deterministic fixture selection logic.
 - Regression detection: automatic flagging when metrics degrade beyond threshold.
-- Structured logs: BS-001 through BS-007 with trace IDs and scenario metadata.
+- Structured logs: BS-001 through BS-010 with trace IDs, scenario IDs, profile, and evidence path when file-backed output is produced.
 
 ## Expected Artifacts
 

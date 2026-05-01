@@ -15,12 +15,184 @@ source: crates/franken-node/tests/cli_subcommand_goldens.rs
     "node": null,
     "bun": null
   },
+  "evidence_mode": "fixture_only",
+  "profile": "strict",
+  "security_controls": {
+    "sandbox_enforced": true,
+    "trust_verification_enabled": true,
+    "revocation_freshness_enforced": true,
+    "fixture_mode": true
+  },
+  "git_revision": null,
+  "trace_id": "bench-7df41e8687782e9c",
+  "evidence_path": null,
+  "sample_policy": {
+    "min_measured_samples": 3,
+    "total_sample_count": 5,
+    "total_warmup_count": 2
+  },
+  "events": [
+    {
+      "code": "BS-001",
+      "scenario": null,
+      "scenario_id": null,
+      "trace_id": "bench-7df41e8687782e9c",
+      "profile": "strict",
+      "evidence_path": null,
+      "detail": "Suite initialized"
+    },
+    {
+      "code": "BS-010",
+      "scenario": null,
+      "scenario_id": null,
+      "trace_id": "bench-7df41e8687782e9c",
+      "profile": "strict",
+      "evidence_path": null,
+      "detail": "fixture-only deterministic measurements are quarantined from release evidence"
+    },
+    {
+      "code": "BS-002",
+      "scenario": "secure-extension-heavy",
+      "scenario_id": "secure-extension-heavy",
+      "trace_id": "bench-7df41e8687782e9c",
+      "profile": "strict",
+      "evidence_path": null,
+      "detail": "Starting secure-extension-heavy (5 iterations)"
+    },
+    {
+      "code": "BS-003",
+      "scenario": "secure-extension-heavy",
+      "scenario_id": "secure-extension-heavy",
+      "trace_id": "bench-7df41e8687782e9c",
+      "profile": "strict",
+      "evidence_path": null,
+      "detail": "sample=0 value=395.999 ms source=fixture_only_deterministic"
+    },
+    {
+      "code": "BS-003",
+      "scenario": "secure-extension-heavy",
+      "scenario_id": "secure-extension-heavy",
+      "trace_id": "bench-7df41e8687782e9c",
+      "profile": "strict",
+      "evidence_path": null,
+      "detail": "sample=1 value=402.455 ms source=fixture_only_deterministic"
+    },
+    {
+      "code": "BS-003",
+      "scenario": "secure-extension-heavy",
+      "scenario_id": "secure-extension-heavy",
+      "trace_id": "bench-7df41e8687782e9c",
+      "profile": "strict",
+      "evidence_path": null,
+      "detail": "sample=2 value=395.061 ms source=fixture_only_deterministic"
+    },
+    {
+      "code": "BS-003",
+      "scenario": "secure-extension-heavy",
+      "scenario_id": "secure-extension-heavy",
+      "trace_id": "bench-7df41e8687782e9c",
+      "profile": "strict",
+      "evidence_path": null,
+      "detail": "sample=3 value=385.049 ms source=fixture_only_deterministic"
+    },
+    {
+      "code": "BS-003",
+      "scenario": "secure-extension-heavy",
+      "scenario_id": "secure-extension-heavy",
+      "trace_id": "bench-7df41e8687782e9c",
+      "profile": "strict",
+      "evidence_path": null,
+      "detail": "sample=4 value=389.349 ms source=fixture_only_deterministic"
+    },
+    {
+      "code": "BS-003",
+      "scenario": "secure-extension-heavy",
+      "scenario_id": "secure-extension-heavy",
+      "trace_id": "bench-7df41e8687782e9c",
+      "profile": "strict",
+      "evidence_path": null,
+      "detail": "mean=393.583 ms, CI=[385.313, 401.852]"
+    },
+    {
+      "code": "BS-004",
+      "scenario": "secure-extension-heavy",
+      "scenario_id": "secure-extension-heavy",
+      "trace_id": "bench-7df41e8687782e9c",
+      "profile": "strict",
+      "evidence_path": null,
+      "detail": "score=81/100 (formula: sf-v1)"
+    },
+    {
+      "code": "BS-007",
+      "scenario": "secure-extension-heavy",
+      "scenario_id": "secure-extension-heavy",
+      "trace_id": "bench-7df41e8687782e9c",
+      "profile": "strict",
+      "evidence_path": null,
+      "detail": "variance 1.69% <= 5% threshold"
+    },
+    {
+      "code": "BS-008",
+      "scenario": "secure-extension-heavy",
+      "scenario_id": "secure-extension-heavy",
+      "trace_id": "bench-7df41e8687782e9c",
+      "profile": "strict",
+      "evidence_path": null,
+      "detail": "sample_count=5 warmup_count=2 score=81/100 variance=1.69%"
+    },
+    {
+      "code": "BS-006",
+      "scenario": null,
+      "scenario_id": null,
+      "trace_id": "bench-7df41e8687782e9c",
+      "profile": "strict",
+      "evidence_path": null,
+      "detail": "Completed 1 scenarios, aggregate score: 81/100"
+    }
+  ],
   "scenarios": [
     {
       "dimension": "performance_under_hardening",
       "name": "secure-extension-heavy",
       "raw_value": 393.582628263279,
       "unit": "ms",
+      "raw_samples": [
+        {
+          "iteration": 0,
+          "value": 395.99900950558384,
+          "started_at_utc": "2026-02-21T00:00:00Z",
+          "finished_at_utc": "2026-02-21T00:00:00Z",
+          "source": "fixture_only_deterministic"
+        },
+        {
+          "iteration": 1,
+          "value": 402.4554216056494,
+          "started_at_utc": "2026-02-21T00:00:00Z",
+          "finished_at_utc": "2026-02-21T00:00:00Z",
+          "source": "fixture_only_deterministic"
+        },
+        {
+          "iteration": 2,
+          "value": 395.0606497594281,
+          "started_at_utc": "2026-02-21T00:00:00Z",
+          "finished_at_utc": "2026-02-21T00:00:00Z",
+          "source": "fixture_only_deterministic"
+        },
+        {
+          "iteration": 3,
+          "value": 385.0491429420633,
+          "started_at_utc": "2026-02-21T00:00:00Z",
+          "finished_at_utc": "2026-02-21T00:00:00Z",
+          "source": "fixture_only_deterministic"
+        },
+        {
+          "iteration": 4,
+          "value": 389.34891750367046,
+          "started_at_utc": "2026-02-21T00:00:00Z",
+          "finished_at_utc": "2026-02-21T00:00:00Z",
+          "source": "fixture_only_deterministic"
+        }
+      ],
       "confidence_interval": {
         "lower": 385.3127899356244,
         "upper": 401.8524665909336
@@ -31,5 +203,5 @@ source: crates/franken-node/tests/cli_subcommand_goldens.rs
     }
   ],
   "aggregate_score": 81,
-  "provenance_hash": "sha256:4d8177e45f25e30c31ceba969dd919277cfebe2819b938694000076b5add34cb"
+  "provenance_hash": "sha256:ef01f7e61e73184e626dd9134b8604b3b7792f820a7afc5cfc18316b5e62080d"
 }

@@ -543,6 +543,10 @@ name = "bench_conformance_matrix"
 path = "tests/bench_conformance_matrix.rs"
 
 [[test]]
+name = "bench_run_e2e"
+path = "tests/bench_run_e2e.rs"
+
+[[test]]
 name = "canonical_serializer_metamorphic"
 path = "tests/canonical_serializer_metamorphic.rs"
 

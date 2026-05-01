@@ -437,7 +437,13 @@ fn bench_run_secure_extension_heavy_json_output() -> Result<(), Box<dyn Error>> 
         .env("FRANKEN_NODE_BENCH_CPU", "deterministic-golden-cpu")
         .env("FRANKEN_NODE_BENCH_MEMORY_MB", "32768")
         .env("FRANKEN_NODE_BENCH_TIMESTAMP_UTC", "2026-02-21T00:00:00Z")
-        .args(["bench", "run", "--scenario", "secure-extension-heavy"])
+        .args([
+            "bench",
+            "run",
+            "--scenario",
+            "secure-extension-heavy",
+            "--fixture-mode",
+        ])
         .assert()
         .success();
 

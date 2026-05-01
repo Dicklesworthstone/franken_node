@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
 from typing import Any
 
 
@@ -24,6 +24,8 @@ SPEC_PATH = ROOT / "docs" / "specs" / "section_10_6" / "bd-k4s_contract.md"
 POLICY_PATH = ROOT / "docs" / "policy" / "benchmark_suite.md"
 RUST_IMPL_PATH = ROOT / "crates" / "franken-node" / "src" / "tools" / "benchmark_suite.rs"
 TOOLS_MOD_PATH = ROOT / "crates" / "franken-node" / "src" / "tools" / "mod.rs"
+BENCH_E2E_PATH = ROOT / "crates" / "franken-node" / "tests" / "bench_run_e2e.rs"
+FRANKEN_NODE_CARGO_TOML = ROOT / "crates" / "franken-node" / "Cargo.toml"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -142,7 +144,18 @@ def check_event_codes_in_spec() -> dict[str, Any]:
     if not SPEC_PATH.is_file():
         return _check("event_codes_in_spec", False, "spec file missing")
     text = SPEC_PATH.read_text()
-    required = ["BS-001", "BS-002", "BS-003", "BS-004", "BS-005", "BS-006", "BS-007"]
+    required = [
+        "BS-001",
+        "BS-002",
+        "BS-003",
+        "BS-004",
+        "BS-005",
+        "BS-006",
+        "BS-007",
+        "BS-008",
+        "BS-009",
+        "BS-010",
+    ]
     missing = [code for code in required if code not in text]
     passed = len(missing) == 0
     detail = "all present" if passed else f"missing: {', '.join(missing)}"
@@ -198,7 +211,18 @@ def check_rust_event_codes() -> dict[str, Any]:
     if not RUST_IMPL_PATH.is_file():
         return _check("rust_event_codes", False, "impl file missing")
     text = RUST_IMPL_PATH.read_text()
-    required = ["BS-001", "BS-002", "BS-003", "BS-004", "BS-005", "BS-006", "BS-007"]
+    required = [
+        "BS-001",
+        "BS-002",
+        "BS-003",
+        "BS-004",
+        "BS-005",
+        "BS-006",
+        "BS-007",
+        "BS-008",
+        "BS-009",
+        "BS-010",
+    ]
     missing = [code for code in required if code not in text]
     passed = len(missing) == 0
     detail = "all present" if passed else f"missing: {', '.join(missing)}"
@@ -245,6 +269,89 @@ def check_rust_regression_detection() -> dict[str, Any]:
     text = RUST_IMPL_PATH.read_text()
     found = "detect_regressions" in text and "RegressionFinding" in text
     return _check("rust_regression_detection", found)
+
+
+def check_rust_measured_evidence_boundary() -> dict[str, Any]:
+    if not RUST_IMPL_PATH.is_file():
+        return _check("rust_measured_evidence_boundary", False, "impl file missing")
+    text = RUST_IMPL_PATH.read_text()
+    required = [
+        "BenchmarkEvidenceMode",
+        "Measured",
+        "FixtureOnly",
+        "measured_samples_for_scenario",
+        "fixture_measurement_sample_map",
+        "FRANKEN_NODE_BENCH_SECURITY_DISABLED",
+        "raw_samples",
+        "trace_id",
+        "evidence_path",
+        "sample_policy",
+        "events",
+        "BenchmarkSamplePolicy",
+        "BS_FIXTURE_MODE_USED",
+    ]
+    missing = [item for item in required if item not in text]
+    passed = not missing
+    detail = "measured/fixture boundary present" if passed else f"missing: {', '.join(missing)}"
+    return _check("rust_measured_evidence_boundary", passed, detail)
+
+
+def check_rust_default_cli_uses_measured_provider() -> dict[str, Any]:
+    if not RUST_IMPL_PATH.is_file():
+        return _check("rust_default_cli_uses_measured_provider", False, "impl file missing")
+    text = RUST_IMPL_PATH.read_text()
+    default_cli_pattern = re.compile(
+        r"pub fn run_default_suite_for_cli\([\s\S]*?"
+        r"let evidence_mode = if fixture_mode \{[\s\S]*?"
+        r"BenchmarkEvidenceMode::FixtureOnly[\s\S]*?"
+        r"\} else \{[\s\S]*?"
+        r"BenchmarkEvidenceMode::Measured[\s\S]*?"
+        r"run_default_suite_with_config_and_mode\(SuiteConfig::for_cli\(\), scenario_filter, evidence_mode\)",
+        re.MULTILINE,
+    )
+    required = {
+        "default_cli_measured_else_branch": bool(default_cli_pattern.search(text)),
+        "measured_security_from_env": "BenchmarkSecurityControls::from_env(false)" in text,
+        "measured_source_marker": '"measured_product_workload"' in text,
+        "fixture_source_marker": '"fixture_only_deterministic"' in text,
+        "forced_failure_hook": "FRANKEN_NODE_BENCH_FAIL_SCENARIO" in text,
+    }
+    missing = [name for name, present in required.items() if not present]
+    passed = not missing
+    detail = (
+        "default CLI path uses measured provider; fixture provider requires --fixture-mode"
+        if passed
+        else f"missing: {', '.join(missing)}"
+    )
+    return _check("rust_default_cli_uses_measured_provider", passed, detail)
+
+
+def check_bench_run_e2e_real_and_failure_coverage() -> dict[str, Any]:
+    if not BENCH_E2E_PATH.is_file():
+        return _check("bench_run_e2e_real_and_failure_coverage", False, "bench_run_e2e.rs missing")
+    text = BENCH_E2E_PATH.read_text()
+    manifest_text = FRANKEN_NODE_CARGO_TOML.read_text() if FRANKEN_NODE_CARGO_TOML.is_file() else ""
+    required = {
+        "registered_cargo_test_target": 'name = "bench_run_e2e"' in manifest_text
+        and 'path = "tests/bench_run_e2e.rs"' in manifest_text,
+        "measured_default_test": "bench_run_default_path_emits_measured_evidence" in text,
+        "fixture_mode_test": "--fixture-mode" in text and "fixture_only_deterministic" in text,
+        "invalid_scenario_test": "bench_run_invalid_scenario_returns_structured_error" in text,
+        "forced_runner_failure_test": "FRANKEN_NODE_BENCH_FAIL_SCENARIO" in text,
+        "raw_samples_assertion": "raw_samples" in text,
+        "security_metadata_assertion": "security_controls" in text,
+        "trace_metadata_assertion": "trace_id" in text,
+        "sample_policy_assertion": "sample_policy" in text,
+        "event_log_assertion": "BS-008" in text and "BS-010" in text,
+    }
+    missing = [name for name, present in required.items() if not present]
+    passed = not missing
+    detail = (
+        "bench_run_e2e covers measured default, fixture quarantine, invalid scenario, forced runner failure, raw samples, security metadata, sample policy, and event logs"
+        if passed
+        else f"missing: {', '.join(missing)}"
+    )
+    return _check("bench_run_e2e_real_and_failure_coverage", passed, detail)
 
 
 def check_rust_json_roundtrip_test() -> dict[str, Any]:
@@ -320,6 +427,9 @@ def run_all_checks() -> list[dict[str, Any]]:
     check_rust_scoring_formula()
     check_rust_confidence_interval()
     check_rust_regression_detection()
+    check_rust_measured_evidence_boundary()
+    check_rust_default_cli_uses_measured_provider()
+    check_bench_run_e2e_real_and_failure_coverage()
     check_rust_json_roundtrip_test()
     check_rust_dimension_coverage_test()
     check_rust_test_count()
