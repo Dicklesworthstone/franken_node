@@ -17,7 +17,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
+use std::{fmt, time::Instant};
 
 use crate::capacity_defaults::aliases::MAX_EVENTS;
 const MAX_SCENARIOS: usize = 4096;
@@ -69,6 +69,7 @@ pub const MAX_VARIANCE_PCT: f64 = 5.0;
 /// Default regression threshold as a percentage.
 pub const DEFAULT_REGRESSION_THRESHOLD_PCT: f64 = 10.0;
 const DETERMINISTIC_JITTER_RATIO: f64 = 0.02;
+const MIN_MEASURED_SAMPLES: usize = 3;
 
 // ---------------------------------------------------------------------------
 // Benchmark dimension enum
@@ -264,6 +265,31 @@ pub struct ScenarioDefinition {
 pub struct RawMeasurement {
     pub iteration: u32,
     pub value: f64,
+    pub started_at_utc: String,
+    pub finished_at_utc: String,
+    pub source: String,
+}
+
+impl RawMeasurement {
+    fn fixture(iteration: u32, value: f64, timestamp_utc: &str) -> Self {
+        RawMeasurement {
+            iteration,
+            value,
+            started_at_utc: timestamp_utc.to_string(),
+            finished_at_utc: timestamp_utc.to_string(),
+            source: "fixture_only_deterministic".to_string(),
+        }
+    }
+
+    fn provided(iteration: u32, value: f64, timestamp_utc: &str) -> Self {
+        RawMeasurement {
+            iteration,
+            value,
+            started_at_utc: timestamp_utc.to_string(),
+            finished_at_utc: timestamp_utc.to_string(),
+            source: "provided_measurement".to_string(),
+        }
+    }
 }
 
 /// Confidence interval (lower, upper) at 95%.
@@ -280,10 +306,71 @@ pub struct ScenarioResult {
     pub name: String,
     pub raw_value: f64,
     pub unit: String,
+    pub raw_samples: Vec<RawMeasurement>,
     pub confidence_interval: ConfidenceInterval,
     pub score: u32,
     pub iterations: u32,
     pub variance_pct: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchmarkEvidenceMode {
+    Measured,
+    FixtureOnly,
+}
+
+impl fmt::Display for BenchmarkEvidenceMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BenchmarkEvidenceMode::Measured => write!(f, "measured"),
+            BenchmarkEvidenceMode::FixtureOnly => write!(f, "fixture_only"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BenchmarkSecurityControls {
+    pub sandbox_enforced: bool,
+    pub trust_verification_enabled: bool,
+    pub revocation_freshness_enforced: bool,
+    pub fixture_mode: bool,
+}
+
+impl BenchmarkSecurityControls {
+    pub fn measured_secure() -> Self {
+        BenchmarkSecurityControls {
+            sandbox_enforced: true,
+            trust_verification_enabled: true,
+            revocation_freshness_enforced: true,
+            fixture_mode: false,
+        }
+    }
+
+    pub fn fixture_only() -> Self {
+        BenchmarkSecurityControls {
+            sandbox_enforced: true,
+            trust_verification_enabled: true,
+            revocation_freshness_enforced: true,
+            fixture_mode: true,
+        }
+    }
+
+    pub fn from_env(fixture_mode: bool) -> Self {
+        if fixture_mode {
+            return Self::fixture_only();
+        }
+
+        let disabled = env_flag("FRANKEN_NODE_BENCH_SECURITY_DISABLED");
+        BenchmarkSecurityControls {
+            sandbox_enforced: !disabled && !env_flag("FRANKEN_NODE_BENCH_SANDBOX_DISABLED"),
+            trust_verification_enabled: !disabled
+                && !env_flag("FRANKEN_NODE_BENCH_TRUST_DISABLED"),
+            revocation_freshness_enforced: !disabled
+                && !env_flag("FRANKEN_NODE_BENCH_REVOCATION_DISABLED"),
+            fixture_mode: false,
+        }
+    }
 }
 
 /// Complete benchmark suite report.
@@ -294,6 +381,10 @@ pub struct BenchmarkReport {
     pub timestamp_utc: String,
     pub hardware_profile: HardwareProfile,
     pub runtime_versions: RuntimeVersions,
+    pub evidence_mode: BenchmarkEvidenceMode,
+    pub profile: String,
+    pub security_controls: BenchmarkSecurityControls,
+    pub git_revision: Option<String>,
     pub scenarios: Vec<ScenarioResult>,
     pub aggregate_score: u32,
     pub provenance_hash: String,
@@ -356,6 +447,11 @@ pub enum BenchRunError {
     EmptyMeasurements {
         scenario: String,
     },
+    InsufficientSamples {
+        scenario: String,
+        required: usize,
+        actual: usize,
+    },
     NonFiniteMeasurement {
         scenario: String,
     },
@@ -369,6 +465,14 @@ pub enum BenchRunError {
         requested: Vec<String>,
         available: Vec<String>,
     },
+    SecurityControlsDisabled {
+        scenario: String,
+        detail: String,
+    },
+    ScenarioExecutionFailed {
+        scenario: String,
+        detail: String,
+    },
 }
 
 impl fmt::Display for BenchRunError {
@@ -381,6 +485,14 @@ impl fmt::Display for BenchRunError {
                     "scenario `{scenario}` requires at least one finite measurement"
                 )
             }
+            Self::InsufficientSamples {
+                scenario,
+                required,
+                actual,
+            } => write!(
+                f,
+                "scenario `{scenario}` requires at least {required} measured samples, got {actual}"
+            ),
             Self::NonFiniteMeasurement { scenario } => {
                 write!(f, "scenario `{scenario}` contains a non-finite measurement")
             }
@@ -400,6 +512,13 @@ impl fmt::Display for BenchRunError {
                     requested.join(", "),
                     available.join(", ")
                 )
+            }
+            Self::SecurityControlsDisabled { scenario, detail } => write!(
+                f,
+                "scenario `{scenario}` cannot produce authoritative evidence with disabled security controls: {detail}"
+            ),
+            Self::ScenarioExecutionFailed { scenario, detail } => {
+                write!(f, "scenario `{scenario}` failed during measured execution: {detail}")
             }
         }
     }
@@ -492,8 +611,39 @@ fn validate_measurements(
     Ok(())
 }
 
+fn validate_sample_values(
+    scenario: &ScenarioDefinition,
+    raw_samples: &[RawMeasurement],
+) -> Result<Vec<f64>, BenchRunError> {
+    let values = raw_samples
+        .iter()
+        .map(|sample| sample.value)
+        .collect::<Vec<_>>();
+    validate_measurements(scenario, &values)?;
+    Ok(values)
+}
+
 fn validate_report(report: &BenchmarkReport) -> Result<(), BenchRunError> {
+    if report.evidence_mode == BenchmarkEvidenceMode::Measured && report.security_controls.fixture_mode {
+        return Err(BenchRunError::NonFiniteReportValue {
+            detail: "measured report cannot carry fixture_mode=true".to_string(),
+        });
+    }
     for scenario in &report.scenarios {
+        if scenario.raw_samples.is_empty() {
+            return Err(BenchRunError::EmptyMeasurements {
+                scenario: scenario.name.clone(),
+            });
+        }
+        if scenario
+            .raw_samples
+            .iter()
+            .any(|sample| !sample.value.is_finite())
+        {
+            return Err(BenchRunError::NonFiniteMeasurement {
+                scenario: scenario.name.clone(),
+            });
+        }
         if !scenario.raw_value.is_finite() {
             return Err(BenchRunError::NonFiniteReportValue {
                 detail: format!("scenario `{}` raw_value", scenario.name),
@@ -516,6 +666,17 @@ fn validate_report(report: &BenchmarkReport) -> Result<(), BenchRunError> {
         }
     }
     Ok(())
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -669,6 +830,8 @@ pub struct SuiteConfig {
     pub runtime_versions: RuntimeVersions,
     pub timestamp_utc: String,
     pub regression_threshold_pct: f64,
+    pub profile: String,
+    pub git_revision: Option<String>,
 }
 
 impl SuiteConfig {
@@ -687,6 +850,8 @@ impl SuiteConfig {
             },
             timestamp_utc: "2026-02-21T00:00:00Z".to_string(),
             regression_threshold_pct: DEFAULT_REGRESSION_THRESHOLD_PCT,
+            profile: "strict".to_string(),
+            git_revision: Some("test-git-revision".to_string()),
         }
     }
 
@@ -698,6 +863,9 @@ impl SuiteConfig {
             .unwrap_or(16_384);
         let timestamp_utc = std::env::var("FRANKEN_NODE_BENCH_TIMESTAMP_UTC")
             .unwrap_or_else(|_| chrono::Utc::now().to_rfc3339());
+        let git_revision = std::env::var("FRANKEN_NODE_BENCH_GIT_REVISION")
+            .ok()
+            .or_else(|| option_env!("VERGEN_GIT_SHA").map(ToString::to_string));
 
         SuiteConfig {
             hardware_profile: HardwareProfile {
@@ -713,6 +881,9 @@ impl SuiteConfig {
             },
             timestamp_utc,
             regression_threshold_pct: DEFAULT_REGRESSION_THRESHOLD_PCT,
+            profile: std::env::var("FRANKEN_NODE_PROFILE")
+                .unwrap_or_else(|_| "strict".to_string()),
+            git_revision,
         }
     }
 }
@@ -859,7 +1030,26 @@ impl BenchmarkSuite {
         scenario: &ScenarioDefinition,
         raw_measurements: &[f64],
     ) -> Result<ScenarioResult, BenchRunError> {
-        validate_measurements(scenario, raw_measurements)?;
+        let samples = raw_measurements
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                RawMeasurement::provided(
+                    u32::try_from(index).unwrap_or(u32::MAX),
+                    *value,
+                    &self.config.timestamp_utc,
+                )
+            })
+            .collect::<Vec<_>>();
+        self.execute_scenario_samples(scenario, &samples)
+    }
+
+    pub fn execute_scenario_samples(
+        &mut self,
+        scenario: &ScenarioDefinition,
+        raw_samples: &[RawMeasurement],
+    ) -> Result<ScenarioResult, BenchRunError> {
+        let raw_measurements = validate_sample_values(scenario, raw_samples)?;
 
         self.emit_event(
             BS_SCENARIO_STARTED,
@@ -870,9 +1060,20 @@ impl BenchmarkSuite {
             ),
         );
 
-        let m = mean(raw_measurements);
-        let ci = confidence_interval_95(raw_measurements);
-        let cv = coefficient_of_variation(raw_measurements);
+        for sample in raw_samples {
+            self.emit_event(
+                BS_MEASUREMENT_RECORDED,
+                Some(&scenario.name),
+                &format!(
+                    "sample={} value={:.3} {} source={}",
+                    sample.iteration, sample.value, scenario.unit, sample.source
+                ),
+            );
+        }
+
+        let m = mean(&raw_measurements);
+        let ci = confidence_interval_95(&raw_measurements);
+        let cv = coefficient_of_variation(&raw_measurements);
         let score = scenario.scoring.score(m);
 
         self.emit_event(
@@ -903,6 +1104,7 @@ impl BenchmarkSuite {
             name: scenario.name.clone(),
             raw_value: m,
             unit: scenario.unit.clone(),
+            raw_samples: raw_samples.to_vec(),
             confidence_interval: ci,
             score,
             iterations: u32::try_from(raw_measurements.len()).unwrap_or(u32::MAX),
@@ -917,11 +1119,41 @@ impl BenchmarkSuite {
         &mut self,
         measurements: &std::collections::BTreeMap<String, Vec<f64>>,
     ) -> Result<BenchmarkReport, BenchRunError> {
+        let sample_sets = measurements
+            .iter()
+            .map(|(scenario, values)| {
+                let samples = values
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| {
+                        RawMeasurement::provided(
+                            u32::try_from(index).unwrap_or(u32::MAX),
+                            *value,
+                            &self.config.timestamp_utc,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                (scenario.clone(), samples)
+            })
+            .collect::<BTreeMap<_, _>>();
+        self.run_samples(
+            &sample_sets,
+            BenchmarkEvidenceMode::Measured,
+            BenchmarkSecurityControls::measured_secure(),
+        )
+    }
+
+    pub fn run_samples(
+        &mut self,
+        sample_sets: &BTreeMap<String, Vec<RawMeasurement>>,
+        evidence_mode: BenchmarkEvidenceMode,
+        security_controls: BenchmarkSecurityControls,
+    ) -> Result<BenchmarkReport, BenchRunError> {
         let mut results = Vec::new();
 
         for scenario in &self.scenarios.clone() {
-            if let Some(raw) = measurements.get(&scenario.name) {
-                let result = self.execute_scenario(scenario, raw)?;
+            if let Some(raw) = sample_sets.get(&scenario.name) {
+                let result = self.execute_scenario_samples(scenario, raw)?;
                 results.push(result);
             }
         }
@@ -951,6 +1183,10 @@ impl BenchmarkSuite {
             timestamp_utc: self.config.timestamp_utc.clone(),
             hardware_profile: self.config.hardware_profile.clone(),
             runtime_versions: self.config.runtime_versions.clone(),
+            evidence_mode,
+            profile: self.config.profile.clone(),
+            security_controls,
+            git_revision: self.config.git_revision.clone(),
             scenarios: results,
             aggregate_score: aggregate,
             provenance_hash: String::new(),

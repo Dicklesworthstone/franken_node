@@ -620,6 +620,10 @@ pub struct VerifyCorpusArgs {
     /// Path to the corpus manifest to verify.
     pub corpus_path: PathBuf,
 
+    /// Validation kind: auto, corpus-manifest, or compatibility-report.
+    #[arg(long, default_value = "auto")]
+    pub kind: String,
+
     /// Emit structured JSON output.
     #[arg(long)]
     pub json: bool,

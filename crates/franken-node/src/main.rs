@@ -212,7 +212,41 @@ const VERIFY_MIGRATION_IDS: &[&str] = &[
     "bpet_migration_gate",
     "dgis_migration_gate",
 ];
+const VERIFY_MIGRATION_EVIDENCE_SCHEMA_VERSION: &str = "franken-node/migration-evidence/v1";
+const VERIFY_MIGRATION_EVIDENCE_PATH_FIELDS: &[&str] = &[
+    "audit_report_path",
+    "rewrite_manifest_path",
+    "rollback_artifact_path",
+    "validation_record_path",
+    "lockstep_record_path",
+];
 const VERIFY_CORPUS_SEARCH_ROOTS: &[&str] = &["fixtures", "vectors"];
+const VERIFY_CORPUS_SUPPORTED_KINDS: &[&str] =
+    &["auto", "corpus-manifest", "compatibility-report"];
+const VERIFY_CORPUS_MIN_FIXTURE_CASES: usize = 4;
+const VERIFY_CORPUS_MIN_COMPAT_REPORT_CASES: usize = 500;
+const VERIFY_CORPUS_MAX_EVIDENCE_AGE_DAYS: i64 = 180;
+const VERIFY_CORPUS_REQUIRED_MANIFEST_BANDS: &[&str] = &["core", "high_value", "edge", "unsafe"];
+const VERIFY_CORPUS_REQUIRED_REPORT_BANDS: &[&str] = &["core", "high-value", "edge"];
+const VERIFY_CORPUS_REQUIRED_RISK_BANDS: &[&str] = &["critical", "high", "medium", "low"];
+const VERIFY_CORPUS_REQUIRED_API_FAMILIES: &[&str] = &[
+    "buffer",
+    "child_process",
+    "cluster",
+    "crypto",
+    "events",
+    "fs",
+    "http",
+    "net",
+    "os",
+    "path",
+    "querystring",
+    "stream",
+    "timers",
+    "tls",
+    "url",
+    "zlib",
+];
 const TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH: &str =
     ".franken-node/state/trust-card-registry.v1.json";
 const INCIDENT_EVIDENCE_RELATIVE_DIR: &str = ".franken-node/state/incidents";
@@ -254,6 +288,59 @@ struct VerifyContractOutput {
     reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerifyCorpusKindRequest {
+    Auto,
+    CorpusManifest,
+    CompatibilityReport,
+}
+
+impl VerifyCorpusKindRequest {
+    fn label(self) -> &'static str {
+        match self {
+            VerifyCorpusKindRequest::Auto => "auto",
+            VerifyCorpusKindRequest::CorpusManifest => "corpus-manifest",
+            VerifyCorpusKindRequest::CompatibilityReport => "compatibility-report",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum VerifyCorpusArtifactKind {
+    CorpusManifest,
+    CompatibilityReport,
+}
+
+impl VerifyCorpusArtifactKind {
+    fn label(self) -> &'static str {
+        match self {
+            VerifyCorpusArtifactKind::CorpusManifest => "corpus-manifest",
+            VerifyCorpusArtifactKind::CompatibilityReport => "compatibility-report",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct VerifyCorpusInvariant {
+    id: String,
+    severity: String,
+    passed: bool,
+    message: String,
+    remediation_hint: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct VerifyCorpusValidationReport {
+    manifest_path: String,
+    validation_kind: VerifyCorpusArtifactKind,
+    corpus_id: Option<String>,
+    case_count: usize,
+    coverage_summary: serde_json::Value,
+    invariants: Vec<VerifyCorpusInvariant>,
+    passed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -19986,6 +20073,124 @@ fn migration_record_status(record: &serde_json::Map<String, serde_json::Value>) 
         .unwrap_or_else(|| "pending".to_string())
 }
 
+fn extract_record_bool(
+    record: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Option<bool> {
+    record.get(field).and_then(serde_json::Value::as_bool)
+}
+
+fn verify_migration_search_locations(
+    project_root: &Path,
+    normalized_id: &str,
+    lane_source: Option<&Path>,
+) -> Vec<serde_json::Value> {
+    let mut locations = vec![serde_json::json!({
+        "kind": "state_record",
+        "path": migration_state_dir(project_root)
+            .join(format!("{normalized_id}.json"))
+            .display()
+            .to_string(),
+    })];
+
+    if let Some(lane_source) = lane_source {
+        locations.push(serde_json::json!({
+            "kind": "lane_source",
+            "path": lane_source.display().to_string(),
+            "authority": "diagnostic_only",
+        }));
+    }
+
+    locations
+}
+
+fn push_verify_migration_invariant_failure(
+    failures: &mut Vec<serde_json::Value>,
+    invariant_id: &str,
+    field: &str,
+    observed: serde_json::Value,
+    expected: impl Into<String>,
+    remediation_hint: impl Into<String>,
+) {
+    failures.push(serde_json::json!({
+        "invariant_id": invariant_id,
+        "field": field,
+        "observed": observed,
+        "expected": expected.into(),
+        "severity": "error",
+        "remediation_hint": remediation_hint.into(),
+    }));
+}
+
+fn verify_migration_project_root_matches(project_root: &Path, declared: &str) -> bool {
+    let declared_path = Path::new(declared);
+    let declared_path = if declared_path.is_absolute() {
+        declared_path.to_path_buf()
+    } else {
+        project_root.join(declared_path)
+    };
+    let Ok(expected) = project_root.canonicalize() else {
+        return false;
+    };
+    let Ok(observed) = declared_path.canonicalize() else {
+        return false;
+    };
+    observed == expected
+}
+
+fn evaluate_migration_evidence_path(
+    project_root: &Path,
+    field: &str,
+    raw_path: &str,
+) -> serde_json::Value {
+    match resolve_relative_path_within_root(
+        project_root,
+        Path::new(raw_path),
+        "migration evidence artifact",
+    ) {
+        Ok(resolved) => {
+            let exists = resolved.is_file();
+            serde_json::json!({
+                "field": field,
+                "path": raw_path,
+                "resolved_path": resolved.display().to_string(),
+                "exists": exists,
+            })
+        }
+        Err(err) => serde_json::json!({
+            "field": field,
+            "path": raw_path,
+            "exists": false,
+            "error": err.to_string(),
+        }),
+    }
+}
+
+fn evaluate_migration_evidence_artifacts(
+    project_root: &Path,
+    record: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    VERIFY_MIGRATION_EVIDENCE_PATH_FIELDS
+        .iter()
+        .filter_map(|field| {
+            extract_record_string(record, field)
+                .map(|raw_path| evaluate_migration_evidence_path(project_root, field, &raw_path))
+        })
+        .collect()
+}
+
+fn summarize_verify_migration_failures(failures: &[serde_json::Value]) -> String {
+    failures
+        .iter()
+        .filter_map(|failure| {
+            failure
+                .get("invariant_id")
+                .and_then(serde_json::Value::as_str)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn evaluate_migration_post_condition(
     project_root: &Path,
     condition: &serde_json::Value,
@@ -20148,6 +20353,238 @@ fn summarize_post_condition_results(results: &[serde_json::Value]) -> String {
         failures.len(),
         results.len(),
         failures.join(", ")
+    )
+}
+
+fn build_verify_migration_record_output(
+    project_root: &Path,
+    normalized_id: &str,
+    record_path: &Path,
+    record: &serde_json::Map<String, serde_json::Value>,
+    compat_version: Option<u16>,
+) -> VerifyContractOutput {
+    tracing::info!(
+        migration_id = normalized_id,
+        record_path = %record_path.display(),
+        "migration_verify_started"
+    );
+
+    let status = migration_record_status(record);
+    let schema_version = extract_record_string(record, "schema_version");
+    let record_migration_id = extract_record_string(record, "migration_id")
+        .map(|value| normalize_verify_identifier(&value));
+    let declared_project_root = extract_record_string(record, "project_root");
+    let declared_post_conditions_met = extract_record_bool(record, "post_conditions_met");
+    let post_conditions = evaluate_migration_post_conditions(project_root, record);
+    let evaluated_post_conditions_met = post_conditions.iter().all(|entry| {
+        entry
+            .get("passed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    });
+    let evidence_artifacts = evaluate_migration_evidence_artifacts(project_root, record);
+    let evidence_artifact_present = evidence_artifacts.iter().any(|artifact| {
+        artifact
+            .get("exists")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    });
+    let mut failures = Vec::new();
+    let mut missing_fields = Vec::new();
+
+    match schema_version.as_deref() {
+        Some(VERIFY_MIGRATION_EVIDENCE_SCHEMA_VERSION) => {}
+        Some(observed) => push_verify_migration_invariant_failure(
+            &mut failures,
+            "MIGRATION_EVIDENCE_SCHEMA_UNSUPPORTED",
+            "schema_version",
+            serde_json::Value::String(observed.to_string()),
+            VERIFY_MIGRATION_EVIDENCE_SCHEMA_VERSION,
+            "write a migration evidence record using the supported schema version",
+        ),
+        None => {
+            missing_fields.push("schema_version");
+            push_verify_migration_invariant_failure(
+                &mut failures,
+                "MIGRATION_EVIDENCE_SCHEMA_MISSING",
+                "schema_version",
+                serde_json::Value::Null,
+                VERIFY_MIGRATION_EVIDENCE_SCHEMA_VERSION,
+                "include schema_version in the migration evidence record",
+            );
+        }
+    }
+
+    match record_migration_id.as_deref() {
+        Some(observed) if observed == normalized_id => {}
+        Some(observed) => push_verify_migration_invariant_failure(
+            &mut failures,
+            "MIGRATION_EVIDENCE_ID_MISMATCH",
+            "migration_id",
+            serde_json::Value::String(observed.to_string()),
+            normalized_id,
+            "write evidence for the requested migration id or verify the matching id",
+        ),
+        None => {
+            missing_fields.push("migration_id");
+            push_verify_migration_invariant_failure(
+                &mut failures,
+                "MIGRATION_EVIDENCE_ID_MISSING",
+                "migration_id",
+                serde_json::Value::Null,
+                normalized_id,
+                "include migration_id in the migration evidence record",
+            );
+        }
+    }
+
+    match declared_project_root.as_deref() {
+        Some(declared) if verify_migration_project_root_matches(project_root, declared) => {}
+        Some(declared) => push_verify_migration_invariant_failure(
+            &mut failures,
+            "MIGRATION_EVIDENCE_PROJECT_ROOT_MISMATCH",
+            "project_root",
+            serde_json::Value::String(declared.to_string()),
+            project_root.display().to_string(),
+            "regenerate evidence from the same project root being verified",
+        ),
+        None => {
+            missing_fields.push("project_root");
+            push_verify_migration_invariant_failure(
+                &mut failures,
+                "MIGRATION_EVIDENCE_PROJECT_ROOT_MISSING",
+                "project_root",
+                serde_json::Value::Null,
+                project_root.display().to_string(),
+                "include the project_root that produced the migration evidence",
+            );
+        }
+    }
+
+    if !matches!(status.as_str(), "applied" | "rolled_back") {
+        push_verify_migration_invariant_failure(
+            &mut failures,
+            "MIGRATION_EVIDENCE_STATUS_NOT_SUCCESSFUL",
+            "status",
+            serde_json::Value::String(status.clone()),
+            "applied or rolled_back",
+            "complete the migration, validation, or rollback before using this evidence as PASS",
+        );
+    }
+
+    if let Some(false) = declared_post_conditions_met {
+        push_verify_migration_invariant_failure(
+            &mut failures,
+            "MIGRATION_EVIDENCE_POST_CONDITIONS_DECLARED_FAILED",
+            "post_conditions_met",
+            serde_json::Value::Bool(false),
+            "true",
+            "rerun migration validation until recorded post_conditions_met is true",
+        );
+    }
+
+    if !evaluated_post_conditions_met {
+        push_verify_migration_invariant_failure(
+            &mut failures,
+            "MIGRATION_EVIDENCE_POST_CONDITIONS_FAILED",
+            "post_conditions",
+            serde_json::Value::Bool(false),
+            "all declared post-conditions pass",
+            "fix missing or invalid post-condition artifacts and regenerate evidence",
+        );
+    }
+
+    if post_conditions.is_empty() && declared_post_conditions_met != Some(true) {
+        missing_fields.push("post_conditions");
+        push_verify_migration_invariant_failure(
+            &mut failures,
+            "MIGRATION_EVIDENCE_POST_CONDITIONS_MISSING",
+            "post_conditions",
+            serde_json::Value::Null,
+            "post_conditions array or post_conditions_met=true",
+            "record validated post-conditions or an explicit post_conditions_met=true result",
+        );
+    }
+
+    if evidence_artifacts.is_empty() {
+        missing_fields.push("evidence_artifact_path");
+        push_verify_migration_invariant_failure(
+            &mut failures,
+            "MIGRATION_EVIDENCE_ARTIFACT_MISSING",
+            "evidence_artifacts",
+            serde_json::Value::Null,
+            VERIFY_MIGRATION_EVIDENCE_PATH_FIELDS.join(", "),
+            "include at least one audit, rewrite, rollback, validation, or lockstep evidence artifact path",
+        );
+    } else if !evidence_artifact_present {
+        push_verify_migration_invariant_failure(
+            &mut failures,
+            "MIGRATION_EVIDENCE_ARTIFACT_UNREADABLE",
+            "evidence_artifacts",
+            serde_json::Value::Array(evidence_artifacts.clone()),
+            "at least one evidence artifact exists under the project root",
+            "write evidence artifact files before verifying migration success",
+        );
+    }
+
+    let diff_summary = summarize_post_condition_results(&post_conditions);
+    let passed = failures.is_empty();
+    if passed {
+        tracing::info!(
+            migration_id = normalized_id,
+            record_path = %record_path.display(),
+            status = status.as_str(),
+            "migration_verify_completed"
+        );
+    } else {
+        tracing::warn!(
+            migration_id = normalized_id,
+            record_path = %record_path.display(),
+            status = status.as_str(),
+            failures = %summarize_verify_migration_failures(&failures),
+            "migration_verify_completed"
+        );
+    }
+
+    let reason = if passed {
+        format!(
+            "migration `{normalized_id}` has authoritative `{status}` evidence and all required invariants passed"
+        )
+    } else {
+        format!(
+            "migration `{normalized_id}` evidence at {} is not authoritative: {}",
+            record_path.display(),
+            summarize_verify_migration_failures(&failures)
+        )
+    };
+
+    build_verify_output_with_details(
+        "verify migration",
+        compat_version,
+        if passed { "PASS" } else { "FAIL" },
+        if passed { "pass" } else { "fail" },
+        if passed { 0 } else { 1 },
+        reason,
+        Some(serde_json::json!({
+            "migration_id": normalized_id,
+            "record_migration_id": record_migration_id,
+            "record_path": record_path.display().to_string(),
+            "status": status,
+            "authority": if passed { "authoritative" } else { "invalid" },
+            "schema_version": schema_version,
+            "expected_schema_version": VERIFY_MIGRATION_EVIDENCE_SCHEMA_VERSION,
+            "project_root": declared_project_root,
+            "expected_project_root": project_root.display().to_string(),
+            "searched_locations": verify_migration_search_locations(project_root, normalized_id, None),
+            "post_conditions_met": evaluated_post_conditions_met && declared_post_conditions_met.unwrap_or(true),
+            "declared_post_conditions_met": declared_post_conditions_met,
+            "evaluated_post_conditions_met": evaluated_post_conditions_met,
+            "post_conditions": post_conditions,
+            "evidence_artifacts": evidence_artifacts,
+            "invariant_failures": failures,
+            "missing_fields": missing_fields,
+            "diff_summary": diff_summary,
+        })),
     )
 }
 
@@ -20512,56 +20949,13 @@ fn emit_verify_migration(args: &VerifyMigrationArgs) -> i32 {
     let payload = if let Some(record_path) = record_path {
         match std::fs::read_to_string(&record_path) {
             Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
-                Ok(serde_json::Value::Object(record)) => {
-                    let status = migration_record_status(&record);
-                    let post_conditions =
-                        evaluate_migration_post_conditions(&project_root, &record);
-                    let post_conditions_met = post_conditions.iter().all(|entry| {
-                        entry
-                            .get("passed")
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(false)
-                    });
-                    let diff_summary = summarize_post_condition_results(&post_conditions);
-                    let passed =
-                        matches!(status.as_str(), "applied" | "rolled_back") && post_conditions_met;
-                    let reason = match status.as_str() {
-                        "applied" if post_conditions_met => format!(
-                            "migration `{}` is applied and all declared post-conditions passed",
-                            normalized
-                        ),
-                        "rolled_back" if post_conditions_met => format!(
-                            "migration `{}` is rolled back cleanly and all declared rollback conditions passed",
-                            normalized
-                        ),
-                        "pending" => format!(
-                            "migration `{}` is still pending in {}",
-                            normalized,
-                            record_path.display()
-                        ),
-                        _ => format!(
-                            "migration `{}` recorded status `{status}` and {diff_summary}",
-                            normalized
-                        ),
-                    };
-
-                    build_verify_output_with_details(
-                        "verify migration",
-                        args.compat_version,
-                        if passed { "PASS" } else { "FAIL" },
-                        if passed { "pass" } else { "fail" },
-                        if passed { 0 } else { 1 },
-                        reason,
-                        Some(serde_json::json!({
-                            "migration_id": normalized,
-                            "record_path": record_path.display().to_string(),
-                            "status": status,
-                            "post_conditions_met": post_conditions_met,
-                            "post_conditions": post_conditions,
-                            "diff_summary": diff_summary,
-                        })),
-                    )
-                }
+                Ok(serde_json::Value::Object(record)) => build_verify_migration_record_output(
+                    &project_root,
+                    &normalized,
+                    &record_path,
+                    &record,
+                    args.compat_version,
+                ),
                 Ok(_) => build_verify_output(
                     "verify migration",
                     args.compat_version,
@@ -20598,14 +20992,19 @@ fn emit_verify_migration(args: &VerifyMigrationArgs) -> i32 {
             ),
         }
     } else if let Some(lane_source) = resolve_verify_migration_lane_source(&normalized) {
+        tracing::warn!(
+            migration_id = normalized.as_str(),
+            lane_source = %lane_source.display(),
+            "evidence_missing"
+        );
         build_verify_output_with_details(
             "verify migration",
             args.compat_version,
-            "PASS",
-            "pass",
-            0,
+            "UNPROVEN",
+            "unproven",
+            1,
             format!(
-                "migration lane `{}` resolved to {} with no state record present under {}",
+                "migration lane `{}` resolved to {} but no authoritative migration evidence record was found under {}; source presence is diagnostic only",
                 normalized,
                 lane_source.display(),
                 migration_state_dir(&project_root).display()
@@ -20614,9 +21013,20 @@ fn emit_verify_migration(args: &VerifyMigrationArgs) -> i32 {
                 "migration_id": normalized,
                 "record_path": serde_json::Value::Null,
                 "status": "source_present",
+                "authority": "diagnostic_only",
                 "post_conditions_met": serde_json::Value::Null,
-                "diff_summary": "no state record declared",
+                "diff_summary": "source present without migration evidence is unproven",
                 "lane_source": lane_source.display().to_string(),
+                "searched_locations": verify_migration_search_locations(&project_root, &normalized, Some(&lane_source)),
+                "missing_fields": ["migration_evidence_record"],
+                "invariant_failures": [{
+                    "invariant_id": "MIGRATION_EVIDENCE_RECORD_MISSING",
+                    "field": "record_path",
+                    "observed": serde_json::Value::Null,
+                    "expected": "state record under .franken-node/state/migrations",
+                    "severity": "error",
+                    "remediation_hint": "run migration audit/rewrite/validate and persist the migration evidence record before treating this result as PASS"
+                }],
             })),
         )
     } else {
@@ -20636,8 +21046,19 @@ fn emit_verify_migration(args: &VerifyMigrationArgs) -> i32 {
                 "migration_id": normalized,
                 "record_path": serde_json::Value::Null,
                 "status": "missing",
+                "authority": "missing",
                 "post_conditions_met": false,
                 "diff_summary": "no migration record or lane source resolved",
+                "searched_locations": verify_migration_search_locations(&project_root, &normalized, None),
+                "missing_fields": ["migration_evidence_record", "lane_source"],
+                "invariant_failures": [{
+                    "invariant_id": "MIGRATION_TARGET_UNKNOWN",
+                    "field": "migration_id",
+                    "observed": args.migration_id,
+                    "expected": summarize_expected_ids(VERIFY_MIGRATION_IDS, VERIFY_MIGRATION_IDS.len()),
+                    "severity": "error",
+                    "remediation_hint": "verify a known migration lane or create an authoritative migration evidence record for this id"
+                }],
             })),
         )
     };
