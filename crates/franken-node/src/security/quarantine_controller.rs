@@ -344,8 +344,8 @@ impl QuarantineController {
     pub fn verify_signature(&self, entry: &SignedEvidenceEntry) -> bool {
         let mut is_valid = true;
 
-        is_valid &= constant_time::ct_eq(entry.event_code.as_bytes(), EVD_QUAR_CTRL_001.as_bytes());
-        is_valid &= constant_time::ct_eq(entry.policy_version.as_bytes(), QUARANTINE_POLICY_VERSION.as_bytes());
+        is_valid &= constant_time::ct_eq(&entry.event_code, EVD_QUAR_CTRL_001);
+        is_valid &= constant_time::ct_eq(&entry.policy_version, QUARANTINE_POLICY_VERSION);
         is_valid &= constant_time::ct_eq(&entry.policy_hash, &self.policy_hash());
         
         is_valid &= entry.posterior.is_finite();

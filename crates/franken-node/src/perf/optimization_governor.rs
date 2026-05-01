@@ -1687,7 +1687,7 @@ fn knob_range(knob: &RuntimeKnob) -> (u64, u64) {
             RuntimeKnob::RetryBudget,
         ] {
             let (min, max) = knob_range(&knob);
-            let midpoint = (min + max) / 2;
+            let midpoint = min.saturating_add(max.saturating_sub(min) / 2);
             assert!(
                 midpoint > min && midpoint < max,
                 "midpoint should be within range for {:?}",

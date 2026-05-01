@@ -512,7 +512,7 @@ impl GateEngine {
         self.shims
             .iter()
             .filter(|shim| {
-                scope.is_none_or(|scope_id| {
+                scope.map_or(true, |scope_id| {
                     shim.scope_id == scope_id || shim.scope_id.as_str() == "*"
                 })
             })

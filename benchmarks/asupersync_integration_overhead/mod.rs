@@ -131,6 +131,7 @@ pub fn percentile(sorted: &[u64], p: f64) -> f64 {
     if sorted.len() == 1 {
         return sorted[0] as f64;
     }
+    let p = p.clamp(0.0, 100.0);
     let rank = p / 100.0 * (sorted.len() - 1) as f64;
     let lower = rank.floor() as usize;
     let upper = rank.ceil() as usize;

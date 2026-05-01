@@ -255,6 +255,7 @@ impl ClaimCompiler {
             &claim.claim_text,
             &evidence_uris,
             source_id,
+            self.config.now_epoch_ms,
         );
         let signature = sign_contract(
             &contract_digest,
@@ -319,6 +320,7 @@ fn compute_contract_digest(
     claim_text: &str,
     evidence_uris: &[String],
     source_id: &str,
+    compiled_at_epoch_ms: u64,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"claim_compiler_hash_v1:");
@@ -329,6 +331,7 @@ fn compute_contract_digest(
         update_len_prefixed(&mut hasher, uri.as_bytes());
     }
     update_len_prefixed(&mut hasher, source_id.as_bytes());
+    hasher.update(compiled_at_epoch_ms.to_le_bytes());
     hex::encode(hasher.finalize())
 }
 
@@ -475,6 +478,7 @@ impl ScoreboardPipeline {
                 &contract.claim_text,
                 &contract.evidence_uris,
                 &contract.source_id,
+                contract.compiled_at_epoch_ms,
             );
             if !constant_time::ct_eq_bytes(
                 contract.contract_digest.as_bytes(),
@@ -1070,6 +1074,7 @@ mod tests {
                     &contract.claim_text,
                     &contract.evidence_uris,
                     &contract.source_id,
+                    contract.compiled_at_epoch_ms,
                 );
                 assert!(constant_time::ct_eq_bytes(
                     contract.contract_digest.as_bytes(),
@@ -1652,6 +1657,7 @@ mod tests {
                 &contract.claim_text,
                 &contract.evidence_uris,
                 &contract.source_id,
+                contract.compiled_at_epoch_ms,
             );
             contract.contract_digest = replacement_digest;
             contract.signature =

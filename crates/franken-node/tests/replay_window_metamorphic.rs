@@ -44,7 +44,7 @@ fn insert_nonce(gate: &mut RevocationFreshnessGate, nonce: &str, trace_id: &str)
     let proof = proof_for(nonce);
     let result = gate.check(&proof, CURRENT_EPOCH, true, false, ACTION_ID, trace_id);
     assert!(
-        result.as_ref().is_ok_and(|decision| decision.allowed),
+        result.as_ref().map_or(false, |decision| decision.allowed),
         "fresh nonce {nonce} should be accepted, got {result:?}"
     );
 }

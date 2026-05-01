@@ -31,7 +31,7 @@ fn validate_user_content_path(path: &str) -> Result<&Path> {
     }
 
     // Reject .. segments (directory traversal)
-    if path.split('/').any(|segment| segment == "..") {
+    if path.split(&['/', '\\'][..]).any(|segment| segment == "..") {
         anyhow::bail!("Path traversal (..) not allowed: {}", path);
     }
 
@@ -52,7 +52,7 @@ fn validate_system_binary_path(path: &str) -> Result<&Path> {
     }
 
     // Reject .. segments (directory traversal)
-    if path.split('/').any(|segment| segment == "..") {
+    if path.split(&['/', '\\'][..]).any(|segment| segment == "..") {
         anyhow::bail!("Path traversal (..) not allowed: {}", path);
     }
 

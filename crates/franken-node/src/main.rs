@@ -114,7 +114,6 @@ use frankenengine_node::control_plane::fleet_transport::{
 #[cfg(test)]
 use frankenengine_node::tools::replay_bundle::{fixture_incident_events, generate_replay_bundle};
 use frankenengine_node::{
-    ActionableError,
     config::{self, CliOverrides, Profile},
     ops, runtime,
     security::{

@@ -336,11 +336,12 @@ impl AdmissionGate {
         }
 
         if is_reserved_artifact_id(&artifact.artifact_id) {
+            let reason = AdmissionDenialReason::InvalidContract {
+                detail: format!("artifact_id is reserved: {:?}", artifact.artifact_id),
+            };
             return AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract {
-                    detail: format!("artifact_id is reserved: {:?}", artifact.artifact_id),
-                },
-                event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
+                event_code: reason.code().to_string(),
+                reason,
             };
         }
 
@@ -393,11 +394,12 @@ impl AdmissionGate {
         }
 
         if !is_hex_sha256(&contract.signature) {
+            let reason = AdmissionDenialReason::InvalidContract {
+                detail: "signature must be lowercase hex sha256".to_string(),
+            };
             return AdmissionOutcome::Denied {
-                reason: AdmissionDenialReason::InvalidContract {
-                    detail: "signature must be lowercase hex sha256".to_string(),
-                },
-                event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
+                event_code: reason.code().to_string(),
+                reason,
             };
         }
 
