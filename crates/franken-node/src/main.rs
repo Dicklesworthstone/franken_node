@@ -23472,7 +23472,17 @@ fn main() -> Result<()> {
                             args.project_path.display()
                         )
                     })?;
-                println!("{}", migration::render_rewrite_report(&report));
+                if args.json {
+                    let rendered = serde_json::to_string_pretty(&report).with_context(|| {
+                        format!(
+                            "failed serializing migration rewrite JSON for {}",
+                            args.project_path.display()
+                        )
+                    })?;
+                    println!("{rendered}");
+                } else {
+                    println!("{}", migration::render_rewrite_report(&report));
+                }
 
                 if let Some(out_path) = args.emit_rollback.as_deref() {
                     let rollback_plan = migration::build_rollback_plan(&report);

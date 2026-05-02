@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -89,6 +89,50 @@ fn len_prefixed_digest_update(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
+fn log_phase(test_name: &str, phase: &str, detail: serde_json::Value) {
+    eprintln!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({
+            "suite": "migrate_cli_e2e",
+            "test": test_name,
+            "phase": phase,
+            "detail": detail,
+        }))
+        .expect("structured test log serializes")
+    );
+}
+
+fn parse_json_stdout(output: &Output, label: &str) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
+        panic!(
+            "{label} stdout must be JSON: {err}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
+fn write_basic_rewrite_project(project_path: &Path) {
+    std::fs::create_dir_all(project_path).expect("project dir");
+    std::fs::write(
+        project_path.join("index.js"),
+        "const fs = require(\"fs\");\nconsole.log(fs.existsSync(\"package.json\"));\n",
+    )
+    .expect("write js");
+    std::fs::write(
+        project_path.join("package.json"),
+        r#"{
+  "name": "demo",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "node test.js"
+  }
+}
+"#,
+    )
+    .expect("write package manifest");
+}
+
 #[test]
 fn migrate_runtime_smoke_receipt_hash_helpers_are_framed() {
     let stdout_hash = migration_runtime_smoke_stdout_sha256_hex(b"same output");
@@ -121,25 +165,7 @@ fn migrate_runtime_smoke_receipt_hash_helpers_are_framed() {
 fn migrate_rewrite_apply_emits_rollback_plan_and_updates_manifest() {
     let temp = TempDir::new().expect("temp dir");
     let project_path = temp.path().join("project");
-    std::fs::create_dir_all(&project_path).expect("project dir");
-
-    std::fs::write(
-        project_path.join("index.js"),
-        "const fs = require(\"fs\");\nconsole.log(fs.existsSync(\"package.json\"));\n",
-    )
-    .expect("write js");
-    std::fs::write(
-        project_path.join("package.json"),
-        r#"{
-  "name": "demo",
-  "version": "1.0.0",
-  "scripts": {
-    "test": "node test.js"
-  }
-}
-"#,
-    )
-    .expect("write package manifest");
+    write_basic_rewrite_project(&project_path);
 
     let rollback_path = temp.path().join("rollback/plan.json");
     let project_arg = project_path.to_string_lossy().to_string();
@@ -165,6 +191,11 @@ fn migrate_rewrite_apply_emits_rollback_plan_and_updates_manifest() {
     assert!(stdout.contains("rewrites_planned=2"));
     assert!(stdout.contains("rewrites_applied=2"));
     golden::assert_scrubbed_golden("migrate/rewrite_apply_stdout", &stdout);
+    log_phase(
+        "migrate_rewrite_apply_emits_rollback_plan_and_updates_manifest",
+        "human_output_checked",
+        serde_json::json!({"stdout_len": stdout.len(), "rollback_path": rollback_arg}),
+    );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("migration rollback artifact written:"));
@@ -203,6 +234,153 @@ fn migrate_rewrite_apply_emits_rollback_plan_and_updates_manifest() {
     let source_backup = std::fs::read_to_string(project_path.join(".migrate-backup/index.js"))
         .expect("read source backup");
     assert!(source_backup.contains("const fs = require(\"fs\");"));
+}
+
+#[test]
+fn migrate_rewrite_dry_run_json_emits_machine_report() {
+    let test_name = "migrate_rewrite_dry_run_json_emits_machine_report";
+    let temp = TempDir::new().expect("temp dir");
+    let project_path = temp.path().join("project");
+    write_basic_rewrite_project(&project_path);
+    log_phase(
+        test_name,
+        "project_created",
+        serde_json::json!({"project_path": project_path.display().to_string()}),
+    );
+
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = run_cli(&["migrate", "rewrite", &project_arg, "--json"]);
+    log_phase(
+        test_name,
+        "command_executed",
+        serde_json::json!({"success": output.status.success(), "status": output.status.code()}),
+    );
+    assert!(
+        output.status.success(),
+        "migrate rewrite --json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("franken-node migrate rewrite"),
+        "--json stdout must not include human heading"
+    );
+    let payload = parse_json_stdout(&output, "migrate rewrite --json dry-run");
+    log_phase(
+        test_name,
+        "stdout_json_parsed",
+        serde_json::json!({"keys": payload.as_object().map_or(0, |object| object.len())}),
+    );
+    assert_eq!(payload["schema_version"], "1.0.0");
+    assert_eq!(payload["apply_mode"], false);
+    assert_eq!(payload["package_manifests_scanned"], 1);
+    assert_eq!(payload["rewrites_planned"], 2);
+    assert_eq!(payload["rewrites_applied"], 0);
+    assert_eq!(payload["manual_review_items"], 0);
+    assert_eq!(
+        payload["entries"].as_array().expect("entries array").len(),
+        3
+    );
+    assert_eq!(
+        payload["rollback_entries"]
+            .as_array()
+            .expect("rollback entries array")
+            .len(),
+        2
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).is_empty(),
+        "dry-run JSON should not write rollback stderr without --emit-rollback"
+    );
+
+    let source = std::fs::read_to_string(project_path.join("index.js")).expect("read source");
+    assert!(source.contains("require(\"fs\")"));
+    assert!(
+        !project_path.join(".migrate-backup/index.js").exists(),
+        "dry-run JSON must not create backup artifacts"
+    );
+}
+
+#[test]
+fn migrate_rewrite_apply_json_keeps_rollback_artifact_separate() {
+    let test_name = "migrate_rewrite_apply_json_keeps_rollback_artifact_separate";
+    let temp = TempDir::new().expect("temp dir");
+    let project_path = temp.path().join("project");
+    write_basic_rewrite_project(&project_path);
+    let rollback_path = temp.path().join("rollback/plan.json");
+    log_phase(
+        test_name,
+        "project_created",
+        serde_json::json!({
+            "project_path": project_path.display().to_string(),
+            "rollback_path": rollback_path.display().to_string(),
+        }),
+    );
+
+    let project_arg = project_path.to_string_lossy().to_string();
+    let rollback_arg = rollback_path.to_string_lossy().to_string();
+    let output = run_cli(&[
+        "migrate",
+        "rewrite",
+        &project_arg,
+        "--apply",
+        "--json",
+        "--emit-rollback",
+        &rollback_arg,
+    ]);
+    log_phase(
+        test_name,
+        "command_executed",
+        serde_json::json!({"success": output.status.success(), "status": output.status.code()}),
+    );
+    assert!(
+        output.status.success(),
+        "migrate rewrite --apply --json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload = parse_json_stdout(&output, "migrate rewrite --apply --json");
+    log_phase(
+        test_name,
+        "stdout_json_parsed",
+        serde_json::json!({"rewrites_applied": payload["rewrites_applied"]}),
+    );
+    assert_eq!(payload["schema_version"], "1.0.0");
+    assert_eq!(payload["apply_mode"], true);
+    assert_eq!(payload["rewrites_planned"], 2);
+    assert_eq!(payload["rewrites_applied"], 2);
+    assert_eq!(
+        payload["rollback_entries"]
+            .as_array()
+            .expect("rollback entries array")
+            .len(),
+        2
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("migration rollback artifact written:"));
+    assert!(
+        !stderr.contains("\"schema_version\""),
+        "rollback JSON must not be mixed into stderr"
+    );
+    let rollback_json =
+        std::fs::read_to_string(&rollback_path).expect("rollback artifact should be written");
+    let rollback: serde_json::Value = serde_json::from_str(&rollback_json)
+        .unwrap_or_else(|err| panic!("invalid rollback json: {err}\n{rollback_json}"));
+    assert_eq!(rollback["schema_version"], "1.0.0");
+    assert_eq!(rollback["apply_mode"], true);
+    assert_eq!(rollback["entry_count"].as_u64(), Some(2));
+    log_phase(
+        test_name,
+        "rollback_artifact_checked",
+        serde_json::json!({"entry_count": rollback["entry_count"]}),
+    );
+
+    let rewritten_source =
+        std::fs::read_to_string(project_path.join("index.js")).expect("read rewritten source");
+    assert!(rewritten_source.contains("import fs from \"node:fs\";"));
+    assert!(!rewritten_source.contains("require("));
 }
 
 #[test]
