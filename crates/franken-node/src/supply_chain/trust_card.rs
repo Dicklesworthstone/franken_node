@@ -936,23 +936,6 @@ impl TrustCardRegistry {
         Ok(registry)
     }
 
-    /// Load authoritative trust-card state from disk (backward compatibility).
-    ///
-    /// Defaults to `TrustedFile` source context for existing callers.
-    /// New code should use `load_authoritative_state` with explicit source context.
-    ///
-    /// # Parameters
-    /// - `path`: snapshot file to read and validate.
-    /// - `cache_ttl_secs`: cache TTL to apply to the loaded registry.
-    /// - `loaded_at_secs`: timestamp assigned to cache entries restored from disk.
-    pub fn load_authoritative_state_trusted(
-        path: &Path,
-        cache_ttl_secs: u64,
-        loaded_at_secs: u64,
-    ) -> Result<Self, TrustCardError> {
-        Self::load_authoritative_state(path, cache_ttl_secs, loaded_at_secs, SnapshotSourceContext::TrustedFile)
-    }
-
     /// Load authoritative trust-card state from disk using configuration for signing key.
     ///
     /// # Parameters
@@ -5783,12 +5766,13 @@ mod tests {
         registry.create(sample_input(), 1_000, "trace").expect("create");
         registry.persist_authoritative_state(&path).expect("persist");
 
-        // Test backward compatibility function
-        let restored = TrustCardRegistry::load_authoritative_state_trusted(
+        let restored = TrustCardRegistry::load_authoritative_state(
             &path,
             60,
-            2_000
-        ).expect("load with backward compatibility function");
+            2_000,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect("load authoritative state");
 
         // Should work the same as trusted file context
         let cards = restored
