@@ -7,6 +7,8 @@
 use sha2::Digest;
 use std::fmt;
 
+use crate::push_bounded;
+
 /// Maximum markers before oldest-first eviction.
 const MAX_MARKERS: usize = 4096;
 
@@ -16,20 +18,6 @@ const GENESIS_PREV_HASH: &str = "00000000000000000000000000000000000000000000000
 /// Maximum divergence comparisons to prevent memory exhaustion during binary search.
 /// Limits memory usage when attackers control input to create large shared lengths.
 const MAX_DIVERGENCE_COMPARISONS: usize = 64;
-
-/// Push item to vector with bounded capacity to prevent memory exhaustion.
-/// When capacity is exceeded, removes oldest entries to maintain the limit.
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 fn len_to_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)

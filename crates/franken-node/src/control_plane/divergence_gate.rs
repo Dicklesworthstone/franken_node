@@ -434,6 +434,7 @@ pub struct RecoveryResult {
 // ---------------------------------------------------------------------------
 
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
+use crate::push_bounded;
 /// Maximum blocked mutations before oldest-first eviction.
 const MAX_BLOCKED_MUTATIONS: usize = 4096;
 /// Maximum quarantined partitions before oldest-first eviction.
@@ -1019,18 +1020,6 @@ impl Default for ControlPlaneDivergenceGate {
     }
 }
 
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1038,8 +1027,8 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 #[cfg(test)]
 mod tests {
     use super::{
-        event_codes, ControlPlaneDivergenceGate, DetectionResult, DivergenceGateError, GateState,
-        MutationKind, OperatorAuthorization, StateVector,
+        ControlPlaneDivergenceGate, DetectionResult, DivergenceGateError, GateState, MutationKind,
+        OperatorAuthorization, StateVector, event_codes,
     };
 
     fn make_sv(epoch: u64, state: &str, parent: &str, node: &str) -> StateVector {
@@ -1166,9 +1155,10 @@ mod tests {
         let mut gate = ControlPlaneDivergenceGate::new("test");
         let (local, remote) = forked_pair();
         gate.check_propagation(&local, &remote, 2000, "trace-1");
-        assert!(gate
-            .events()
-            .contains(&event_codes::DG_001_DIVERGENCE_DETECTED.to_string()));
+        assert!(
+            gate.events()
+                .contains(&event_codes::DG_001_DIVERGENCE_DETECTED.to_string())
+        );
     }
 
     #[test]
@@ -1214,9 +1204,10 @@ mod tests {
         let result = gate.respond_halt(2001, "trace-2");
         assert!(result.is_ok());
         assert_eq!(gate.state(), GateState::Diverged);
-        assert!(gate
-            .events()
-            .contains(&event_codes::DG_003_RESPONSE_ACTIVATED.to_string()));
+        assert!(
+            gate.events()
+                .contains(&event_codes::DG_003_RESPONSE_ACTIVATED.to_string())
+        );
     }
 
     #[test]
@@ -1753,9 +1744,10 @@ mod tests {
         let mut gate = ControlPlaneDivergenceGate::new("test");
         let (local, remote) = converged_pair();
         gate.check_propagation(&local, &remote, 2000, "trace-1");
-        assert!(gate
-            .events()
-            .contains(&event_codes::DG_005_FRESHNESS_VERIFIED.to_string()));
+        assert!(
+            gate.events()
+                .contains(&event_codes::DG_005_FRESHNESS_VERIFIED.to_string())
+        );
     }
 
     // --- QuarantinePartition serde ---

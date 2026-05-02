@@ -539,23 +539,12 @@ impl TokenChain {
 // ---------------------------------------------------------------------------
 
 use crate::capacity_defaults::aliases::MAX_EVENTS;
+use crate::push_bounded;
 const MAX_TOKENS: usize = 4096;
 /// Maximum nonces tracked per epoch before oldest-first eviction.
 /// Without this cap, an adversary controlling token creation could exhaust
 /// memory by verifying many unique-nonce tokens over a long epoch.
 const MAX_NONCES: usize = 65_536;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 /// Insert a nonce into a bounded set, evicting the oldest entry when at capacity.
 /// This prevents unbounded memory growth from an adversary replaying many tokens

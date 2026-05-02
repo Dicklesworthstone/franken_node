@@ -12,10 +12,12 @@
 //! - INV-KRS-ROLE-GUARD: Using a key outside its registered role is rejected.
 //! - INV-KRS-ROTATION-ATOMIC: Key rotation atomically revokes old and binds new.
 
-use crate::security::constant_time;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
+
+use crate::push_bounded;
+use crate::security::constant_time;
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -315,18 +317,6 @@ const MAX_REVOKED_ENTRIES: usize = 4096;
 const MAX_ACTIVE_BINDINGS: usize = 4096;
 /// Maximum events before oldest-first eviction.
 const MAX_KEY_ROLE_EVENTS: usize = 4096;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 /// Enforces:
 /// - INV-KRS-ROLE-EXCLUSIVITY: a key_id is bound to at most one role.

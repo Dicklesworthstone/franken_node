@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::control_plane::marker_stream::MarkerStream;
+use crate::push_bounded;
 use crate::security::constant_time;
 
 /// Maximum leaf hashes before oldest-first eviction.
@@ -270,8 +271,7 @@ pub fn mmr_inclusion_proof(
     // Compute both predicates before reducing with `||` so the operator's short-circuit
     // does not reveal whether the size or the root hash mismatched.
     let size_matches = checkpoint_root.tree_size == stream_size;
-    let root_hash_matches =
-        constant_time::ct_eq(&checkpoint_root.root_hash, &current_root_hash);
+    let root_hash_matches = constant_time::ct_eq(&checkpoint_root.root_hash, &current_root_hash);
     if !size_matches || !root_hash_matches {
         return Err(ProofError::CheckpointStale {
             checkpoint_tree_size: checkpoint_root.tree_size,
@@ -496,11 +496,7 @@ fn merkle_audit_path(leaf_hashes: &[Hash], leaf_index: usize) -> Option<Vec<Hash
             level.push(level.last()?.clone());
         }
 
-        let sibling_idx = if idx % 2 == 0 {
-            idx + 1
-        } else {
-            idx - 1
-        };
+        let sibling_idx = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
         path.push(level[sibling_idx].clone());
 
         let mut next = Vec::with_capacity(level.len() / 2);
@@ -550,18 +546,6 @@ fn sha256_hex(input: &[u8]) -> Hash {
     hasher.update(b"mmr_proofs_v1:");
     hasher.update(input);
     hex::encode(hasher.finalize())
-}
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
 }
 
 #[cfg(test)]

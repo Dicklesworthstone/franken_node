@@ -490,23 +490,12 @@ impl fmt::Display for DporError {
 }
 
 use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_RESULTS};
+use crate::push_bounded;
 const MAX_OPERATIONS: usize = 4096;
 const MAX_SAFETY_PROPERTIES: usize = 4096;
 /// Conservative cap on materialized schedules until exploration enforces
 /// `ExplorationBudget` incrementally during traversal.
 const MAX_MATERIALIZED_SCHEDULES: usize = 100;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 fn schedule_pruning_key(schedule: &[Operation]) -> Vec<u8> {
     let mut key = b"dpor_schedule_key_v1:".to_vec();
@@ -1162,7 +1151,7 @@ mod tests {
         }
         model.add_safety_property(SafetyProperty::new(
             "actor_operation_ordering",
-            "operations from same actor maintain sequential consistency"
+            "operations from same actor maintain sequential consistency",
         ));
 
         let schedules = e.generate_linearizations(&model);

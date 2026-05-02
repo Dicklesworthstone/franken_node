@@ -20,6 +20,7 @@ use crate::capacity_defaults::aliases::MAX_CONTROL_EVENTS;
 use crate::{
     capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP},
     config::timeouts,
+    push_bounded,
 };
 
 #[cfg(feature = "control-plane")]
@@ -161,20 +162,6 @@ fn canonicalize_json_value(value: Value, path: &str) -> Result<Value, FleetTrans
         )),
         other => Ok(other),
     }
-}
-
-/// Bounded push helper that maintains capacity by removing oldest entries when limit is exceeded.
-/// When capacity is exceeded, removes oldest entries to maintain the limit.
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

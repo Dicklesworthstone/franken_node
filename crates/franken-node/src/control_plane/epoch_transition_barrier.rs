@@ -36,6 +36,7 @@ pub const DEFAULT_DRAIN_TIMEOUT_MS: u64 =
     crate::config::timeouts::EPOCH_TRANSITION_DRAIN_TIMEOUT_MS;
 
 use crate::capacity_defaults::aliases::MAX_BARRIER_HISTORY;
+use crate::push_bounded;
 
 /// Max number of transcript entries per barrier before oldest-first eviction.
 const MAX_TRANSCRIPT_ENTRIES: usize = 4096;
@@ -75,7 +76,8 @@ pub mod error_codes {
     pub const ERR_BARRIER_EPOCH_MISMATCH: &str = "ERR_BARRIER_EPOCH_MISMATCH";
     pub const ERR_BARRIER_EPOCH_OVERFLOW: &str = "ERR_BARRIER_EPOCH_OVERFLOW";
     pub const ERR_BARRIER_ID_OVERFLOW: &str = "ERR_BARRIER_ID_OVERFLOW";
-    pub const ERR_BARRIER_ABORT_CONFIRMATION_REQUIRED: &str = "ERR_BARRIER_ABORT_CONFIRMATION_REQUIRED";
+    pub const ERR_BARRIER_ABORT_CONFIRMATION_REQUIRED: &str =
+        "ERR_BARRIER_ABORT_CONFIRMATION_REQUIRED";
 }
 
 // ---- Core types ----
@@ -203,7 +205,9 @@ pub enum BarrierError {
     BarrierIdOverflow { current_counter: u64 },
     /// Safety-first mode requires abort confirmations from all participants.
     /// This prevents split-brain but may block if participants are unreachable.
-    AbortConfirmationRequired { missing_participants: Vec<ParticipantId> },
+    AbortConfirmationRequired {
+        missing_participants: Vec<ParticipantId>,
+    },
 }
 
 /// Result of attempting to commit a barrier.
@@ -233,7 +237,9 @@ impl BarrierError {
             Self::EpochOverflow { .. } => error_codes::ERR_BARRIER_EPOCH_OVERFLOW,
             Self::BarrierIdOverflow { .. } => error_codes::ERR_BARRIER_ID_OVERFLOW,
             Self::NotAllAcked { .. } => error_codes::ERR_BARRIER_NOT_ALL_ACKED,
-            Self::AbortConfirmationRequired { .. } => error_codes::ERR_BARRIER_ABORT_CONFIRMATION_REQUIRED,
+            Self::AbortConfirmationRequired { .. } => {
+                error_codes::ERR_BARRIER_ABORT_CONFIRMATION_REQUIRED
+            }
         }
     }
 }
@@ -345,7 +351,9 @@ impl fmt::Display for BarrierError {
                     missing.join(", ")
                 )
             }
-            Self::AbortConfirmationRequired { missing_participants } => {
+            Self::AbortConfirmationRequired {
+                missing_participants,
+            } => {
                 write!(
                     f,
                     "{}: safety-first mode requires abort confirmations from {}",
@@ -405,7 +413,8 @@ impl BarrierConfig {
 
     /// Get the abort warning timestamp threshold.
     pub fn abort_warning_time(&self, start_time: u64) -> u64 {
-        let warning_duration = (self.global_timeout_ms as f64 * self.abort_warning_threshold) as u64;
+        let warning_duration =
+            (self.global_timeout_ms as f64 * self.abort_warning_threshold) as u64;
         start_time.saturating_add(warning_duration)
     }
 
@@ -833,7 +842,11 @@ impl EpochTransitionBarrier {
                     // Note: Real implementation would wait for abort ACKs here
                     // For now, document the safety requirement
                     return Err(BarrierError::AbortConfirmationRequired {
-                        missing_participants: barrier.participants.iter().cloned().collect::<Vec<_>>(),
+                        missing_participants: barrier
+                            .participants
+                            .iter()
+                            .cloned()
+                            .collect::<Vec<_>>(),
                     });
                 } else {
                     // LIVENESS-FIRST: Immediate abort (original behavior)
@@ -843,12 +856,12 @@ impl EpochTransitionBarrier {
                         timestamp_ms,
                         trace_id,
                     );
-                    return self
-                        .abort(reason.clone(), timestamp_ms, trace_id)
-                        .map(|current_epoch| BarrierCommitOutcome::Aborted {
+                    return self.abort(reason.clone(), timestamp_ms, trace_id).map(
+                        |current_epoch| BarrierCommitOutcome::Aborted {
                             current_epoch,
                             reason,
-                        });
+                        },
+                    );
                 }
             }
 
@@ -1085,18 +1098,6 @@ impl Default for EpochTransitionBarrier {
     fn default() -> Self {
         Self::new(BarrierConfig::default())
     }
-}
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
 }
 
 #[cfg(test)]
