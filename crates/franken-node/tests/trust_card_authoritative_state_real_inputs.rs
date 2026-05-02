@@ -4,8 +4,9 @@ use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvid
 use frankenengine_node::supply_chain::trust_card::{
     BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
     DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
-    ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCard, TrustCardInput,
-    TrustCardMutation, TrustCardRegistry, TrustCardRegistrySnapshot, compute_card_hash,
+    ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, SnapshotSourceContext, TrustCard,
+    TrustCardInput, TrustCardMutation, TrustCardRegistry, TrustCardRegistrySnapshot,
+    compute_card_hash,
 };
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
@@ -115,8 +116,13 @@ fn authoritative_registry_round_trips_without_fixture_helper() {
         .persist_authoritative_state(&snapshot_path)
         .expect("persist authoritative state");
 
-    let mut loaded = TrustCardRegistry::load_authoritative_state(&snapshot_path, 60, 1_776_792_610)
-        .expect("load authoritative state");
+    let mut loaded = TrustCardRegistry::load_authoritative_state(
+        &snapshot_path,
+        60,
+        1_776_792_610,
+        SnapshotSourceContext::TrustedFile,
+    )
+    .expect("load authoritative state");
     let reloaded = loaded
         .read(
             "npm:@operator/auth-guard",
@@ -159,8 +165,13 @@ fn authoritative_registry_rejects_tampered_snapshot() {
     );
     std::fs::write(&snapshot_path, raw).expect("tamper snapshot");
 
-    let err = TrustCardRegistry::load_authoritative_state(&snapshot_path, 60, 1_776_792_610)
-        .expect_err("tampered authoritative state must fail closed");
+    let err = TrustCardRegistry::load_authoritative_state(
+        &snapshot_path,
+        60,
+        1_776_792_610,
+        SnapshotSourceContext::TrustedFile,
+    )
+    .expect_err("tampered authoritative state must fail closed");
     assert!(
         err.to_string().contains("signature")
             || err.to_string().contains("hash")
@@ -213,8 +224,13 @@ fn authoritative_registry_rejects_stale_writer_after_high_water_advances() {
         "unexpected error: {err:?}"
     );
 
-    let mut loaded = TrustCardRegistry::load_authoritative_state(&snapshot_path, 60, 1_776_792_700)
-        .expect("load authoritative state");
+    let mut loaded = TrustCardRegistry::load_authoritative_state(
+        &snapshot_path,
+        60,
+        1_776_792_700,
+        SnapshotSourceContext::TrustedFile,
+    )
+    .expect("load authoritative state");
     let card = loaded
         .read(
             "npm:@operator/auth-guard",
