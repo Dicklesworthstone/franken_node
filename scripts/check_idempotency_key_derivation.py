@@ -5,19 +5,21 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import sys
+from pathlib import Path
 from typing import Any
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
 
-IMPL = os.path.join(ROOT, "crates", "franken-node", "src", "remote", "idempotency.rs")
-MOD_RS = os.path.join(ROOT, "crates", "franken-node", "src", "remote", "mod.rs")
-CONF_TEST = os.path.join(ROOT, "tests", "conformance", "idempotency_key_derivation.rs")
-VECTORS = os.path.join(ROOT, "artifacts", "10.14", "idempotency_vectors.json")
-SPEC = os.path.join(ROOT, "docs", "specs", "section_10_14", "bd-12n3_contract.md")
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
+
+IMPL = ROOT / "crates" / "franken-node" / "src" / "remote" / "idempotency.rs"
+MOD_RS = ROOT / "crates" / "franken-node" / "src" / "remote" / "mod.rs"
+CONF_TEST = ROOT / "tests" / "conformance" / "idempotency_key_derivation.rs"
+VECTORS = ROOT / "artifacts" / "10.14" / "idempotency_vectors.json"
+SPEC = ROOT / "docs" / "specs" / "section_10_14" / "bd-12n3_contract.md"
 
 BEAD = "bd-12n3"
 SECTION = "10.14"
@@ -46,9 +48,19 @@ REQUIRED_CONF_MARKERS = [
 ]
 
 
-def _read(path: str) -> str:
-    with open(path, encoding="utf-8") as f:
-        return f.read()
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    payload = json.JSONDecoder().decode(_read_text(path))
+    if not isinstance(payload, dict):
+        raise TypeError("json payload is not an object")
+    return payload
+
+
+def _is_u64(value: Any) -> bool:
+    return isinstance(value, int) and 0 <= value <= 2**64 - 1
 
 
 def _len_prefixed(data: bytes) -> bytes:
@@ -72,15 +84,14 @@ def _check_vectors_document() -> list[dict[str, Any]]:
     def ok(name: str, passed: bool, detail: str) -> None:
         out.append({"check": name, "passed": passed, "detail": detail})
 
-    if not os.path.isfile(VECTORS):
-        ok("vectors_exists", False, VECTORS)
+    if not VECTORS.is_file():
+        ok("vectors_exists", False, str(VECTORS))
         return out
-    ok("vectors_exists", True, VECTORS)
+    ok("vectors_exists", True, str(VECTORS))
 
-    raw = _read(VECTORS)
     try:
-        doc = json.loads(raw)
-    except json.JSONDecodeError as exc:
+        doc = _read_json_object(VECTORS)
+    except (json.JSONDecodeError, OSError, TypeError) as exc:
         ok("vectors_parse_json", False, str(exc))
         return out
     ok("vectors_parse_json", True, "parsed")
@@ -112,7 +123,7 @@ def _check_vectors_document() -> list[dict[str, Any]]:
         row_ok = (
             isinstance(name, str)
             and bool(name)
-            and isinstance(epoch, int)
+            and _is_u64(epoch)
             and isinstance(request_hex, str)
             and bool(HEX_ANY.fullmatch(request_hex))
             and isinstance(expected_hex, str)
@@ -142,16 +153,16 @@ def _checks() -> list[dict[str, Any]]:
     def ok(name: str, passed: bool, detail: str) -> None:
         checks.append({"check": name, "passed": passed, "detail": detail})
 
-    ok("impl_exists", os.path.isfile(IMPL), IMPL)
-    ok("mod_exists", os.path.isfile(MOD_RS), MOD_RS)
-    ok("conformance_test_exists", os.path.isfile(CONF_TEST), CONF_TEST)
-    ok("spec_exists", os.path.isfile(SPEC), SPEC)
-    ok("vectors_exists", os.path.isfile(VECTORS), VECTORS)
+    ok("impl_exists", IMPL.is_file(), str(IMPL))
+    ok("mod_exists", MOD_RS.is_file(), str(MOD_RS))
+    ok("conformance_test_exists", CONF_TEST.is_file(), str(CONF_TEST))
+    ok("spec_exists", SPEC.is_file(), str(SPEC))
+    ok("vectors_exists", VECTORS.is_file(), str(VECTORS))
 
-    src = _read(IMPL) if os.path.isfile(IMPL) else ""
+    src = _read_text(IMPL) if IMPL.is_file() else ""
     production_src = src.partition("#[cfg(test)]")[0]
-    mod_src = _read(MOD_RS) if os.path.isfile(MOD_RS) else ""
-    conf_src = _read(CONF_TEST) if os.path.isfile(CONF_TEST) else ""
+    mod_src = _read_text(MOD_RS) if MOD_RS.is_file() else ""
+    conf_src = _read_text(CONF_TEST) if CONF_TEST.is_file() else ""
 
     ok(
         "module_wiring",
@@ -185,14 +196,19 @@ def _checks() -> list[dict[str, Any]]:
 
 def self_test() -> bool:
     checks = _checks()
-    assert len(checks) >= 20, f"expected >=20 checks, got {len(checks)}"
-    assert all("check" in c and "passed" in c for c in checks)
+    _require(len(checks) >= 20, f"expected >=20 checks, got {len(checks)}")
+    _require(all("check" in c and "passed" in c for c in checks), "malformed check result")
     print(f"self_test: {len(checks)} checks OK", file=sys.stderr)
     return True
 
 
+def _require(condition: bool, message: str) -> None:
+    if not condition:
+        raise RuntimeError(message)
+
+
 def main() -> int:
-    logger = configure_test_logging("check_idempotency_key_derivation")
+    configure_test_logging("check_idempotency_key_derivation")
     if "--self-test" in sys.argv:
         self_test()
         return 0
@@ -208,7 +224,7 @@ def main() -> int:
                 {
                     "bead_id": BEAD,
                     "section": SECTION,
-                    "gate_script": os.path.basename(__file__),
+                    "gate_script": Path(__file__).name,
                     "checks_passed": passed,
                     "checks_total": total,
                     "verdict": verdict,
