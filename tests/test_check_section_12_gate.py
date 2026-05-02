@@ -2,21 +2,16 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
+import tempfile
 from pathlib import Path
 from unittest import TestCase, main
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
 
-spec = importlib.util.spec_from_file_location(
-    "check_section_12_gate",
-    ROOT / "scripts" / "check_section_12_gate.py",
-)
-mod = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = mod
-spec.loader.exec_module(mod)
+import check_section_12_gate as mod
 
 
 class TestGateConstants(TestCase):
@@ -50,6 +45,47 @@ class TestHelpers(TestCase):
         self.assertTrue(mod.evidence_passed({"status": "pass"}))
         self.assertTrue(mod.evidence_passed({"checks_total": 3, "checks_failed": 0}))
         self.assertFalse(mod.evidence_passed({"verdict": "FAIL"}))
+        self.assertFalse(mod.evidence_passed([]))
+
+    def test_parse_script_result_rejects_non_object_json(self) -> None:
+        ok, verdict = mod.parse_script_result("[]", 0)
+        self.assertFalse(ok)
+        self.assertEqual(verdict, "invalid-json")
+
+    def test_load_evidence_rejects_non_object_json(self) -> None:
+        original_root = mod.ROOT
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                mod.ROOT = Path(tmpdir)
+                evidence_dir = mod.ROOT / "artifacts" / "section_12" / "bd-test"
+                evidence_dir.mkdir(parents=True)
+                (evidence_dir / "verification_evidence.json").write_text("[]", encoding="utf-8")
+
+                result = mod.load_evidence(mod.SectionEntry("bd-test", "risk", "script.py", "test.py"))
+
+            self.assertEqual(result["status"], "FAIL")
+            self.assertEqual(result["verdict"], "INVALID_JSON")
+        finally:
+            mod.ROOT = original_root
+
+    def test_scenario_effectiveness_rejects_non_object_report(self) -> None:
+        original_root = mod.ROOT
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                mod.ROOT = Path(tmpdir)
+                report_dir = mod.ROOT / "artifacts" / "section_12" / "bd-test"
+                report_dir.mkdir(parents=True)
+                (report_dir / "check_report.json").write_text("[]", encoding="utf-8")
+
+                result = mod.scenario_effectiveness(
+                    mod.SectionEntry("bd-test", "risk", "script.py", "test.py"),
+                    {"status": "PASS", "passing_checks": 0, "countermeasures": 0},
+                )
+
+            self.assertEqual(result["status"], "FAIL")
+            self.assertEqual(result["error"], "invalid-json")
+        finally:
+            mod.ROOT = original_root
 
     def test_has_self_test(self) -> None:
         entry = mod.SECTION_ENTRIES[0]
@@ -73,7 +109,7 @@ class TestReportAssembly(TestCase):
     def test_report_is_json_serializable(self) -> None:
         report = mod.build_report(execute=False, write_outputs=False)
         blob = json.dumps(report, indent=2)
-        parsed = json.loads(blob)
+        parsed = json.JSONDecoder().decode(blob)
         self.assertEqual(parsed["section"], "12")
 
 

@@ -10,13 +10,14 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 BEAD_ID = "bd-2x1e"
@@ -55,6 +56,21 @@ def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _decode_json_object(text: str) -> dict[str, Any]:
+    payload = json.JSONDecoder().decode(text)
+    if not isinstance(payload, dict):
+        raise TypeError("json payload is not an object")
+    return payload
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    return _decode_json_object(_read_text(path))
+
+
 def parse_unittest_counts(output: str) -> tuple[int, int]:
     ran = 0
     failed = 0
@@ -74,17 +90,19 @@ def parse_unittest_counts(output: str) -> tuple[int, int]:
 def has_self_test(script_path: Path) -> bool:
     if not script_path.exists():
         return False
-    text = script_path.read_text(encoding="utf-8")
+    text = _read_text(script_path)
     return "def self_test(" in text
 
 
 def evidence_passed(payload: dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return False
     verdict = str(payload.get("verdict", "")).upper()
     if verdict == "PASS":
         return True
-    if payload.get("overall_pass") is True:
+    if bool(payload.get("overall_pass", False)):
         return True
-    if payload.get("all_passed") is True:
+    if bool(payload.get("all_passed", False)):
         return True
     status = str(payload.get("status", "")).lower()
     if status == "pass":
@@ -101,8 +119,8 @@ def parse_script_result(stdout: str, return_code: int) -> tuple[bool, str]:
     if return_code != 0:
         return False, "non-zero-exit"
     try:
-        payload = json.loads(stdout) if stdout.strip() else {}
-    except json.JSONDecodeError:
+        payload = _decode_json_object(stdout) if stdout.strip() else {}
+    except (json.JSONDecodeError, TypeError):
         return False, "invalid-json"
     return evidence_passed(payload), str(payload.get("verdict", payload.get("status", "PASS")))
 
@@ -132,6 +150,7 @@ def run_script(entry: SectionEntry, execute: bool = True) -> dict[str, Any]:
     proc = subprocess.run(
         [sys.executable, str(script_path), "--json"],
         capture_output=True,
+        check=False,
         text=True,
         cwd=ROOT,
         timeout=3600,
@@ -166,6 +185,7 @@ def run_unit_test(entry: SectionEntry, execute: bool = True) -> dict[str, Any]:
     proc = subprocess.run(
         [sys.executable, "-m", "unittest", entry.test],
         capture_output=True,
+        check=False,
         text=True,
         cwd=ROOT,
         timeout=3600,
@@ -198,8 +218,8 @@ def load_evidence(entry: SectionEntry) -> dict[str, Any]:
         return result
 
     try:
-        payload = json.loads(evidence_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+        payload = _read_json_object(evidence_path)
+    except (json.JSONDecodeError, OSError, TypeError):
         result["status"] = "FAIL"
         result["verdict"] = "INVALID_JSON"
         return result
@@ -229,7 +249,7 @@ def scenario_effectiveness(entry: SectionEntry, evidence_result: dict[str, Any])
 
     if check_report.exists():
         try:
-            payload = json.loads(check_report.read_text(encoding="utf-8"))
+            payload = _read_json_object(check_report)
             checks = payload.get("checks", [])
             # Count checks that demonstrate risk-mitigation effectiveness.
             # Some beads name these "scenario …", others use domain terms
@@ -253,7 +273,7 @@ def scenario_effectiveness(entry: SectionEntry, evidence_result: dict[str, Any])
                 "scenario_passes": scenario_passes,
                 "source": str(check_report.relative_to(ROOT)),
             }
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, OSError, TypeError):
             return {
                 "bead": entry.bead,
                 "status": "FAIL",
@@ -525,7 +545,7 @@ def self_test() -> tuple[bool, list[dict[str, Any]]]:
 
 
 def main() -> int:
-    logger = configure_test_logging("check_section_12_gate")
+    configure_test_logging("check_section_12_gate")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="Output JSON report")
     parser.add_argument("--self-test", action="store_true", help="Run checker self-test")
