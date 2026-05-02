@@ -234,7 +234,7 @@ fn deterministic_hash(data: &str) -> String {
 
 /// Deterministic SHA-256 hash over multiple fields using length-prefixed encoding.
 /// Prevents hash collision when fields contain delimiters.
-fn deterministic_hash_fields(fields: &[&str]) -> String {
+fn deterministic_hash_iter<'a>(fields: impl IntoIterator<Item = &'a str>) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"verifier_sdk_v1:");
     for field in fields {
@@ -244,12 +244,16 @@ fn deterministic_hash_fields(fields: &[&str]) -> String {
     hex::encode(hasher.finalize())
 }
 
+fn deterministic_hash_fields(fields: &[&str]) -> String {
+    deterministic_hash_iter(fields.iter().copied())
+}
+
 fn artifact_binding_hash(request: &VerificationRequest) -> String {
-    let mut fields = Vec::with_capacity(2 + request.claims.len());
-    fields.push(request.artifact_id.trim());
-    fields.push(request.artifact_hash.as_str());
-    fields.extend(request.claims.iter().map(String::as_str));
-    deterministic_hash_fields(&fields)
+    deterministic_hash_iter(
+        std::iter::once(request.artifact_id.trim())
+            .chain(std::iter::once(request.artifact_hash.as_str()))
+            .chain(request.claims.iter().map(String::as_str)),
+    )
 }
 
 #[allow(dead_code)]
@@ -687,9 +691,8 @@ impl VerifierSdk {
             VerifyVerdict::Fail(failures)
         };
 
-        let chain_binding_refs: Vec<&str> =
-            reports.iter().map(|r| r.binding_hash.as_str()).collect();
-        let chain_binding = deterministic_hash_fields(&chain_binding_refs);
+        let chain_binding =
+            deterministic_hash_iter(reports.iter().map(|r| r.binding_hash.as_str()));
 
         Ok(VerificationReport {
             request_id: format!("vchn-{}", &deterministic_hash(&chain_binding)[..24]),

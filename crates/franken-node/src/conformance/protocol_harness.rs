@@ -4,6 +4,7 @@
 //! enforces a publication gate. Non-conformant connectors are blocked
 //! unless a valid policy override is present.
 
+use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use tracing::{debug, info, instrument, warn};
@@ -143,6 +144,7 @@ fn apply_override(
     current_time: &str,
 ) -> PublicationGateResult {
     let mut errors = Vec::new();
+    let mut parsed_expires_at: Option<DateTime<FixedOffset>> = None;
 
     if policy.override_id.trim().is_empty() {
         errors.push(GateError {
@@ -176,11 +178,31 @@ fn apply_override(
         });
     }
 
-    if policy.expires_at.trim().is_empty() {
+    let expires_at = policy.expires_at.trim();
+    if expires_at.is_empty() {
         errors.push(GateError {
             code: GateErrorCode::OverrideInvalid,
             message: format!("Override '{}' must include an expiry", policy.override_id),
         });
+    } else if expires_at != policy.expires_at {
+        errors.push(GateError {
+            code: GateErrorCode::OverrideInvalid,
+            message: format!(
+                "Override '{}' expiry contains leading or trailing whitespace",
+                policy.override_id
+            ),
+        });
+    } else {
+        match DateTime::parse_from_rfc3339(expires_at) {
+            Ok(timestamp) => parsed_expires_at = Some(timestamp),
+            Err(err) => errors.push(GateError {
+                code: GateErrorCode::OverrideInvalid,
+                message: format!(
+                    "Override '{}' expiry must be RFC3339: {}",
+                    policy.override_id, err
+                ),
+            }),
+        }
     }
 
     for scope in &policy.scope {
@@ -213,20 +235,33 @@ fn apply_override(
         });
     }
 
-    // Check expiry
-    if !policy.expires_at.trim().is_empty() && current_time >= policy.expires_at.as_str() {
-        warn!(
-            override_id = %policy.override_id,
-            expires_at = %policy.expires_at,
-            "override expired"
-        );
-        errors.push(GateError {
-            code: GateErrorCode::OverrideExpired,
-            message: format!(
-                "Override '{}' expired at {}",
-                policy.override_id, policy.expires_at
-            ),
-        });
+    // Check expiry using parsed RFC3339 timestamps. Lexical string ordering is
+    // incorrect when callers use valid offsets other than `Z`.
+    if let Some(expires_at) = parsed_expires_at {
+        match DateTime::parse_from_rfc3339(current_time) {
+            Ok(parsed_current_time) if parsed_current_time >= expires_at => {
+                warn!(
+                    override_id = %policy.override_id,
+                    expires_at = %policy.expires_at,
+                    "override expired"
+                );
+                errors.push(GateError {
+                    code: GateErrorCode::OverrideExpired,
+                    message: format!(
+                        "Override '{}' expired at {}",
+                        policy.override_id, policy.expires_at
+                    ),
+                });
+            }
+            Ok(_) => {}
+            Err(err) => errors.push(GateError {
+                code: GateErrorCode::OverrideInvalid,
+                message: format!(
+                    "Override '{}' current_time must be RFC3339: {}",
+                    policy.override_id, err
+                ),
+            }),
+        }
     }
 
     // Check scope coverage
@@ -454,6 +489,54 @@ mod tests {
                 .errors
                 .iter()
                 .any(|e| e.code == GateErrorCode::OverrideExpired)
+        );
+    }
+
+    #[test]
+    fn override_expiry_uses_rfc3339_instant_ordering() {
+        let policy = PolicyOverride {
+            expires_at: "2026-01-01T05:00:00Z".to_string(),
+            ..valid_override()
+        };
+
+        let result = check_publication(
+            "test-conn",
+            &missing_handshake_declarations(),
+            Some(&policy),
+            "2026-01-01T00:30:00-05:00",
+        );
+
+        assert_eq!(result.gate_decision, "BLOCK");
+        assert!(!result.override_applied);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == GateErrorCode::OverrideExpired)
+        );
+    }
+
+    #[test]
+    fn override_with_invalid_expiry_timestamp_blocks() {
+        let policy = PolicyOverride {
+            expires_at: "not-a-timestamp".to_string(),
+            ..valid_override()
+        };
+
+        let result = check_publication(
+            "test-conn",
+            &missing_handshake_declarations(),
+            Some(&policy),
+            "2026-01-01T00:00:00Z",
+        );
+
+        assert_eq!(result.gate_decision, "BLOCK");
+        assert!(!result.override_applied);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == GateErrorCode::OverrideInvalid)
         );
     }
 
