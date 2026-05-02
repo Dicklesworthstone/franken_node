@@ -78,6 +78,7 @@ mod tests {
         let artifact = ExtensionArtifact {
             artifact_id: "artifact-1".to_string(),
             extension_id: "ext-alpha".to_string(),
+            extension_version: "1.0.0".to_string(),
             capability_contract: None,
             payload_hash: "0".repeat(64),
         };

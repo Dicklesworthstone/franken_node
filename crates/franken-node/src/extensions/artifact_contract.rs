@@ -16,6 +16,7 @@ pub const SCHEMA_VERSION: &str = "capability-artifact-v1.0";
 
 /// Reserved placeholder for unknown artifact identifiers.
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
+const DEFAULT_EXTENSION_VERSION: &str = "1.0.0";
 const MAX_TOKEN_BYTES: usize = crate::capacity_defaults::base::SMALL;
 const MAX_CAPABILITIES_PER_CONTRACT: usize = crate::capacity_defaults::base::STANDARD;
 
@@ -114,6 +115,9 @@ pub struct CapabilityEntry {
 pub struct CapabilityContract {
     pub contract_id: String,
     pub extension_id: String,
+    pub extension_version: String,
+    pub artifact_id: String,
+    pub payload_hash: String,
     pub capabilities: Vec<CapabilityEntry>,
     pub signer_id: String,
     pub signature: String,
@@ -126,6 +130,7 @@ pub struct CapabilityContract {
 pub struct ExtensionArtifact {
     pub artifact_id: String,
     pub extension_id: String,
+    pub extension_version: String,
     pub capability_contract: Option<CapabilityContract>,
     pub payload_hash: String,
 }
@@ -319,6 +324,43 @@ impl AdmissionGate {
             };
         }
 
+        if let Some(detail) =
+            invalid_token_detail("contract extension_version", &contract.extension_version)
+        {
+            return AdmissionOutcome::Denied {
+                reason: AdmissionDenialReason::InvalidContract { detail },
+                event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
+            };
+        }
+
+        if is_reserved_artifact_id(&contract.artifact_id) {
+            return AdmissionOutcome::Denied {
+                reason: AdmissionDenialReason::InvalidContract {
+                    detail: format!(
+                        "contract artifact_id is reserved: {:?}",
+                        contract.artifact_id
+                    ),
+                },
+                event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
+            };
+        }
+
+        if let Some(detail) = invalid_token_detail("contract artifact_id", &contract.artifact_id) {
+            return AdmissionOutcome::Denied {
+                reason: AdmissionDenialReason::InvalidContract { detail },
+                event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
+            };
+        }
+
+        if !is_hex_sha256(&contract.payload_hash) {
+            return AdmissionOutcome::Denied {
+                reason: AdmissionDenialReason::InvalidContract {
+                    detail: "contract payload_hash must be lowercase hex sha256".to_string(),
+                },
+                event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
+            };
+        }
+
         if let Some(detail) = invalid_token_detail("signer_id", &contract.signer_id) {
             return AdmissionOutcome::Denied {
                 reason: AdmissionDenialReason::InvalidContract { detail },
@@ -372,12 +414,45 @@ impl AdmissionGate {
             };
         }
 
+        if let Some(detail) =
+            invalid_token_detail("artifact extension_version", &artifact.extension_version)
+        {
+            return AdmissionOutcome::Denied {
+                reason: AdmissionDenialReason::InvalidContract { detail },
+                event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
+            };
+        }
+
         if contract.extension_id != artifact.extension_id {
             return AdmissionOutcome::Denied {
                 reason: AdmissionDenialReason::InvalidContract {
                     detail: format!(
                         "contract extension_id '{}' does not match artifact extension_id '{}'",
                         contract.extension_id, artifact.extension_id
+                    ),
+                },
+                event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
+            };
+        }
+
+        if contract.extension_version != artifact.extension_version {
+            return AdmissionOutcome::Denied {
+                reason: AdmissionDenialReason::InvalidContract {
+                    detail: format!(
+                        "contract extension_version '{}' does not match artifact extension_version '{}'",
+                        contract.extension_version, artifact.extension_version
+                    ),
+                },
+                event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
+            };
+        }
+
+        if contract.artifact_id != artifact.artifact_id {
+            return AdmissionOutcome::Denied {
+                reason: AdmissionDenialReason::InvalidContract {
+                    detail: format!(
+                        "contract artifact_id '{}' does not match artifact artifact_id '{}'",
+                        contract.artifact_id, artifact.artifact_id
                     ),
                 },
                 event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
@@ -427,6 +502,16 @@ impl AdmissionGate {
             return AdmissionOutcome::Denied {
                 reason: AdmissionDenialReason::InvalidContract {
                     detail: "payload_hash must be lowercase hex sha256".to_string(),
+                },
+                event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
+            };
+        }
+
+        if !crate::security::constant_time::ct_eq(&contract.payload_hash, &artifact.payload_hash) {
+            return AdmissionOutcome::Denied {
+                reason: AdmissionDenialReason::InvalidContract {
+                    detail: "contract payload_hash does not match artifact payload_hash"
+                        .to_string(),
                 },
                 event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
             };
@@ -509,6 +594,29 @@ pub enum DriftCheckResult {
     },
 }
 
+/// Reason an extension capability invocation was denied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvocationDenialReason {
+    CapabilityNotAdmitted,
+    ScopeMismatch { expected: String, actual: String },
+    CallBudgetExceeded { max_calls_per_epoch: u64 },
+}
+
+/// Runtime decision for a single capability invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvocationDecision {
+    Permitted {
+        remaining_calls_in_epoch: u64,
+        event_code: String,
+    },
+    Denied {
+        reason: InvocationDenialReason,
+        event_code: String,
+    },
+}
+
 /// Runtime enforcement engine that verifies active capabilities match
 /// the admitted contract envelope.
 ///
@@ -517,6 +625,7 @@ pub enum DriftCheckResult {
 pub struct EnforcementEngine {
     /// The admitted capability contract.
     admitted_capabilities: BTreeMap<String, CapabilityEntry>,
+    calls_in_epoch: BTreeMap<String, u64>,
     contract_id: String,
 }
 
@@ -532,6 +641,7 @@ impl EnforcementEngine {
         }
         Self {
             admitted_capabilities: admitted,
+            calls_in_epoch: BTreeMap::new(),
             contract_id: contract.contract_id.clone(),
         }
     }
@@ -542,6 +652,55 @@ impl EnforcementEngine {
     /// not in the admitted set.
     pub fn is_permitted(&self, capability_id: &str) -> bool {
         self.admitted_capabilities.contains_key(capability_id)
+    }
+
+    /// Authoritatively decide and record a capability invocation.
+    ///
+    /// This is the runtime invocation guard. It validates the admitted
+    /// capability ID, exact scope, and the per-epoch call budget before
+    /// recording the call.
+    pub fn permit_invocation(&mut self, capability_id: &str, scope: &str) -> InvocationDecision {
+        let Some(capability) = self.admitted_capabilities.get(capability_id) else {
+            return InvocationDecision::Denied {
+                reason: InvocationDenialReason::CapabilityNotAdmitted,
+                event_code: event_codes::ARTIFACT_ENFORCEMENT_CHECK.to_string(),
+            };
+        };
+
+        if capability.scope != scope {
+            return InvocationDecision::Denied {
+                reason: InvocationDenialReason::ScopeMismatch {
+                    expected: capability.scope.clone(),
+                    actual: scope.to_string(),
+                },
+                event_code: event_codes::ARTIFACT_ENFORCEMENT_CHECK.to_string(),
+            };
+        }
+
+        let calls = self
+            .calls_in_epoch
+            .entry(capability.capability_id.clone())
+            .or_insert(0);
+        if *calls >= capability.max_calls_per_epoch {
+            return InvocationDecision::Denied {
+                reason: InvocationDenialReason::CallBudgetExceeded {
+                    max_calls_per_epoch: capability.max_calls_per_epoch,
+                },
+                event_code: event_codes::ARTIFACT_ENFORCEMENT_CHECK.to_string(),
+            };
+        }
+
+        *calls = calls.saturating_add(1);
+        InvocationDecision::Permitted {
+            remaining_calls_in_epoch: capability.max_calls_per_epoch.saturating_sub(*calls),
+            event_code: event_codes::ARTIFACT_ENFORCEMENT_CHECK.to_string(),
+        }
+    }
+
+    /// Reset per-epoch invocation counters after an externally authenticated
+    /// epoch transition.
+    pub fn reset_epoch_call_counts(&mut self) {
+        self.calls_in_epoch.clear();
     }
 
     /// Perform a drift check between the admitted contract and the active capabilities.
@@ -629,6 +788,9 @@ pub fn compute_contract_signature(contract: &CapabilityContract) -> String {
     for field in [
         contract.contract_id.as_str(),
         contract.extension_id.as_str(),
+        contract.extension_version.as_str(),
+        contract.artifact_id.as_str(),
+        contract.payload_hash.as_str(),
         contract.signer_id.as_str(),
         contract.schema_version.as_str(),
     ] {
@@ -659,6 +821,9 @@ pub fn make_contract(
     let mut contract = CapabilityContract {
         contract_id: contract_id.to_string(),
         extension_id: extension_id.to_string(),
+        extension_version: DEFAULT_EXTENSION_VERSION.to_string(),
+        artifact_id: String::new(),
+        payload_hash: String::new(),
         capabilities,
         signer_id: signer_id.to_string(),
         signature: String::new(),
@@ -673,7 +838,7 @@ pub fn make_contract(
 pub fn make_artifact(
     artifact_id: &str,
     extension_id: &str,
-    contract: CapabilityContract,
+    mut contract: CapabilityContract,
 ) -> ExtensionArtifact {
     // Length-prefixed encoding prevents delimiter-collision ambiguity.
     let mut hasher = Sha256::new();
@@ -683,9 +848,17 @@ pub fn make_artifact(
         hasher.update(field.as_bytes());
     }
     let payload_hash = hex::encode(hasher.finalize());
+    let should_resign = verify_contract_signature(&contract);
+    contract.artifact_id = artifact_id.to_string();
+    contract.extension_version = DEFAULT_EXTENSION_VERSION.to_string();
+    contract.payload_hash = payload_hash.clone();
+    if should_resign {
+        contract.signature = compute_contract_signature(&contract);
+    }
     ExtensionArtifact {
         artifact_id: artifact_id.to_string(),
         extension_id: extension_id.to_string(),
+        extension_version: DEFAULT_EXTENSION_VERSION.to_string(),
         capability_contract: Some(contract),
         payload_hash,
     }
@@ -862,6 +1035,7 @@ mod tests {
         let artifact = ExtensionArtifact {
             artifact_id: "a1".to_string(),
             extension_id: "ext-alpha".to_string(),
+            extension_version: DEFAULT_EXTENSION_VERSION.to_string(),
             capability_contract: None,
             payload_hash: "h1".to_string(),
         };
@@ -1363,6 +1537,100 @@ mod tests {
     }
 
     #[test]
+    fn admission_rejects_contract_artifact_id_mismatch() {
+        let gate = test_gate();
+        let contract = test_contract();
+        let mut artifact = make_artifact("a1", "ext-alpha", contract);
+        let contract = artifact
+            .capability_contract
+            .as_mut()
+            .expect("fixture should carry a contract");
+        contract.artifact_id = "a2".to_string();
+        contract.signature = compute_contract_signature(contract);
+
+        let outcome = gate.evaluate(&artifact);
+        let AdmissionOutcome::Denied {
+            reason: AdmissionDenialReason::InvalidContract { detail },
+            ..
+        } = outcome
+        else {
+            assert!(false, "expected artifact binding mismatch to be denied");
+            return;
+        };
+        assert!(detail.contains("contract artifact_id"));
+    }
+
+    #[test]
+    fn admission_rejects_contract_payload_hash_mismatch() {
+        let gate = test_gate();
+        let contract = test_contract();
+        let mut artifact = make_artifact("a1", "ext-alpha", contract);
+        let contract = artifact
+            .capability_contract
+            .as_mut()
+            .expect("fixture should carry a contract");
+        contract.payload_hash = "b".repeat(64);
+        contract.signature = compute_contract_signature(contract);
+
+        let outcome = gate.evaluate(&artifact);
+        let AdmissionOutcome::Denied {
+            reason: AdmissionDenialReason::InvalidContract { detail },
+            ..
+        } = outcome
+        else {
+            assert!(false, "expected payload hash binding mismatch to be denied");
+            return;
+        };
+        assert!(detail.contains("payload_hash"));
+    }
+
+    #[test]
+    fn admission_rejects_extension_version_mismatch() {
+        let gate = test_gate();
+        let contract = test_contract();
+        let mut artifact = make_artifact("a1", "ext-alpha", contract);
+        let contract = artifact
+            .capability_contract
+            .as_mut()
+            .expect("fixture should carry a contract");
+        contract.extension_version = "2.0.0".to_string();
+        contract.signature = compute_contract_signature(contract);
+
+        let outcome = gate.evaluate(&artifact);
+        let AdmissionOutcome::Denied {
+            reason: AdmissionDenialReason::InvalidContract { detail },
+            ..
+        } = outcome
+        else {
+            assert!(false, "expected extension version mismatch to be denied");
+            return;
+        };
+        assert!(detail.contains("extension_version"));
+    }
+
+    #[test]
+    fn admission_rejects_binding_tampering_after_signing() {
+        let gate = test_gate();
+        let contract = test_contract();
+        let mut artifact = make_artifact("a1", "ext-alpha", contract);
+        artifact.payload_hash = "b".repeat(64);
+        let contract = artifact
+            .capability_contract
+            .as_mut()
+            .expect("fixture should carry a contract");
+        contract.payload_hash = artifact.payload_hash.clone();
+
+        let outcome = gate.evaluate(&artifact);
+        assert!(matches!(
+            outcome,
+            AdmissionOutcome::Denied {
+                reason: AdmissionDenialReason::SignatureInvalid,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn admission_rejects_invalid_capability_empty_id() {
         let gate = test_gate();
         let caps = vec![CapabilityEntry {
@@ -1606,6 +1874,98 @@ mod tests {
         let contract = test_contract();
         let engine = EnforcementEngine::from_contract(&contract);
         assert!(!engine.is_permitted("crypto.sign"));
+    }
+
+    #[test]
+    fn invocation_guard_enforces_scope_and_call_budget() {
+        let contract = make_contract(
+            "budgeted-contract",
+            "ext-alpha",
+            vec![CapabilityEntry {
+                capability_id: "fs.read".to_string(),
+                scope: "filesystem:read".to_string(),
+                max_calls_per_epoch: 2,
+            }],
+            "signer-A",
+            SCHEMA_VERSION,
+            10_000,
+        );
+        let mut engine = EnforcementEngine::from_contract(&contract);
+
+        assert!(matches!(
+            engine.permit_invocation("fs.read", "filesystem:write"),
+            InvocationDecision::Denied {
+                reason: InvocationDenialReason::ScopeMismatch { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            engine.permit_invocation("fs.write", "filesystem:read"),
+            InvocationDecision::Denied {
+                reason: InvocationDenialReason::CapabilityNotAdmitted,
+                ..
+            }
+        ));
+
+        assert!(matches!(
+            engine.permit_invocation("fs.read", "filesystem:read"),
+            InvocationDecision::Permitted {
+                remaining_calls_in_epoch: 1,
+                ..
+            }
+        ));
+        assert!(matches!(
+            engine.permit_invocation("fs.read", "filesystem:read"),
+            InvocationDecision::Permitted {
+                remaining_calls_in_epoch: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            engine.permit_invocation("fs.read", "filesystem:read"),
+            InvocationDecision::Denied {
+                reason: InvocationDenialReason::CallBudgetExceeded {
+                    max_calls_per_epoch: 2
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn invocation_guard_can_reset_epoch_call_budget() {
+        let contract = make_contract(
+            "budget-reset-contract",
+            "ext-alpha",
+            vec![CapabilityEntry {
+                capability_id: "fs.read".to_string(),
+                scope: "filesystem:read".to_string(),
+                max_calls_per_epoch: 1,
+            }],
+            "signer-A",
+            SCHEMA_VERSION,
+            10_000,
+        );
+        let mut engine = EnforcementEngine::from_contract(&contract);
+
+        assert!(matches!(
+            engine.permit_invocation("fs.read", "filesystem:read"),
+            InvocationDecision::Permitted { .. }
+        ));
+        assert!(matches!(
+            engine.permit_invocation("fs.read", "filesystem:read"),
+            InvocationDecision::Denied {
+                reason: InvocationDenialReason::CallBudgetExceeded { .. },
+                ..
+            }
+        ));
+
+        engine.reset_epoch_call_counts();
+
+        assert!(matches!(
+            engine.permit_invocation("fs.read", "filesystem:read"),
+            InvocationDecision::Permitted { .. }
+        ));
     }
 
     #[test]
