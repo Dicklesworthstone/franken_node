@@ -47,6 +47,23 @@ class TestSelfTest(unittest.TestCase):
         result = migrate_report.self_test()
         self.assertEqual(result["verdict"], "PASS")
 
+    def test_self_test_checks_live_rust_cli_contract(self):
+        result = migrate_report.self_test()
+        check_ids = {check["id"] for check in result["checks"]}
+        self.assertIn("RUST-CLI-MIGRATE-REPORT-COMMAND", check_ids)
+        self.assertIn("RUST-CLI-MIGRATE-REPORT-DISPATCH", check_ids)
+        self.assertIn("RUST-CLI-MIGRATE-REPORT-RENDERER", check_ids)
+        self.assertIn("RUST-CLI-MIGRATE-REPORT-E2E", check_ids)
+
+    def test_rust_cli_contract_fails_for_missing_checkout_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checks = migrate_report.check_rust_cli_contract(Path(tmpdir))
+        self.assertEqual(
+            {check["status"] for check in checks},
+            {"FAIL"},
+            "contract checks must fail when the Rust CLI sources are absent",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

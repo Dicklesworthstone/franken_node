@@ -19,11 +19,73 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import migration_confidence_report as confidence_mod
-import migration_risk_scorer as scorer_mod
-import project_scanner as scanner_mod
-import rewrite_suggestion_engine as rewrite_mod
-import rollout_planner as planner_mod
+# This script is directly executable, so repo-local helpers need the path shim above.
+import migration_confidence_report as confidence_mod  # noqa: E402
+import migration_risk_scorer as scorer_mod  # noqa: E402
+import project_scanner as scanner_mod  # noqa: E402
+import rewrite_suggestion_engine as rewrite_mod  # noqa: E402
+import rollout_planner as planner_mod  # noqa: E402
+
+
+def _check(check_id: str, passed: bool, details: dict | None = None) -> dict:
+    check = {"id": check_id, "status": "PASS" if passed else "FAIL"}
+    if details is not None:
+        check["details"] = details
+    return check
+
+
+def _read_source(root: Path, relative_path: str) -> tuple[str, str | None]:
+    path = root / relative_path
+    try:
+        return path.read_text(), None
+    except OSError as exc:
+        return "", f"{path}: {exc}"
+
+
+def check_rust_cli_contract(root: Path = ROOT) -> list[dict]:
+    """Verify the shipped Rust CLI surface exists, not just this Python prototype."""
+    cli_rs, cli_err = _read_source(root, "crates/franken-node/src/cli.rs")
+    main_rs, main_err = _read_source(root, "crates/franken-node/src/main.rs")
+    migration_rs, migration_err = _read_source(root, "crates/franken-node/src/migration/mod.rs")
+    e2e_rs, e2e_err = _read_source(root, "crates/franken-node/tests/migrate_cli_e2e.rs")
+
+    checks = [
+        _check(
+            "RUST-CLI-MIGRATE-REPORT-COMMAND",
+            cli_err is None
+            and '#[command(name = "migrate-report")]' in cli_rs
+            and "MigrateReport(MigrateReportArgs)" in cli_rs
+            and "pub struct MigrateReportArgs" in cli_rs
+            and 'alias = "out"' in cli_rs,
+            {"file": "crates/franken-node/src/cli.rs", "error": cli_err},
+        ),
+        _check(
+            "RUST-CLI-MIGRATE-REPORT-DISPATCH",
+            main_err is None
+            and "fn handle_migrate_report" in main_rs
+            and "Command::MigrateReport(args)" in main_rs
+            and "handle_migrate_report(&args)" in main_rs,
+            {"file": "crates/franken-node/src/main.rs", "error": main_err},
+        ),
+        _check(
+            "RUST-CLI-MIGRATE-REPORT-RENDERER",
+            migration_err is None
+            and "pub fn run_one_command_report" in migration_rs
+            and "pub fn render_one_command_report" in migration_rs
+            and "franken-node/migrate-report/v1" in migration_rs
+            and "OneCommandMigrationReportFormat::Html" in migration_rs,
+            {"file": "crates/franken-node/src/migration/mod.rs", "error": migration_err},
+        ),
+        _check(
+            "RUST-CLI-MIGRATE-REPORT-E2E",
+            e2e_err is None
+            and "migrate_report_json_stdout_composes_audit_rewrite_validate_sections" in e2e_rs
+            and "migrate_report_html_output_writes_escaped_report_file" in e2e_rs
+            and '"migrate-report"' in e2e_rs,
+            {"file": "crates/franken-node/tests/migrate_cli_e2e.rs", "error": e2e_err},
+        ),
+    ]
+    return checks
 
 
 def generate_full_report(project_dir: Path) -> dict:
@@ -94,27 +156,30 @@ def self_test() -> dict:
     # Check 1: Has all sections
     sections = ["executive_summary", "scan", "risk_assessment", "rewrite_suggestions", "rollout_plan", "confidence"]
     has_all = all(s in report for s in sections)
-    checks.append({"id": "REPORT-SECTIONS", "status": "PASS" if has_all else "FAIL",
-                    "details": {"sections": [s for s in sections if s in report]}})
+    checks.append(_check(
+        "REPORT-SECTIONS",
+        has_all,
+        {"sections": [s for s in sections if s in report]},
+    ))
 
     # Check 2: Executive summary populated
     exec_summary = report.get("executive_summary", {})
     has_exec = all(k in exec_summary for k in ["go_decision", "confidence_score", "risk_score"])
-    checks.append({"id": "REPORT-EXECUTIVE", "status": "PASS" if has_exec else "FAIL"})
+    checks.append(_check("REPORT-EXECUTIVE", has_exec))
 
     # Check 3: Scan detected APIs
     apis = report.get("scan", {}).get("summary", {}).get("total_apis_detected", 0)
-    checks.append({"id": "REPORT-SCAN", "status": "PASS" if apis > 0 else "FAIL",
-                    "details": {"apis_detected": apis}})
+    checks.append(_check("REPORT-SCAN", apis > 0, {"apis_detected": apis}))
 
     # Check 4: Risk score present
     risk = report.get("risk_assessment", {}).get("risk_score")
-    checks.append({"id": "REPORT-RISK", "status": "PASS" if risk is not None else "FAIL",
-                    "details": {"risk_score": risk}})
+    checks.append(_check("REPORT-RISK", risk is not None, {"risk_score": risk}))
 
     # Check 5: Rollout plan has phases
     phases = report.get("rollout_plan", {}).get("phases", [])
-    checks.append({"id": "REPORT-ROLLOUT", "status": "PASS" if len(phases) == 4 else "FAIL"})
+    checks.append(_check("REPORT-ROLLOUT", len(phases) == 4))
+
+    checks.extend(check_rust_cli_contract())
 
     failing = [c for c in checks if c["status"] == "FAIL"]
     return {
