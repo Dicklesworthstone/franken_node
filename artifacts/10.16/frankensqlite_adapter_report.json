@@ -3,20 +3,20 @@
   "contract_id": "bd-1a1j",
   "gate_verdict": "PASS",
   "summary": {
-    "total_classes": 21,
+    "total_classes": 24,
     "tier1_count": 11,
-    "tier2_count": 9,
+    "tier2_count": 12,
     "tier3_count": 1,
-    "replay_enabled": 20,
-    "total_tables": 47
+    "replay_enabled": 23,
+    "total_tables": 50
   },
   "coverage_summary": {
     "tier_1": {"classes": 11, "passed": 11, "failed": 0},
-    "tier_2": {"classes": 9, "passed": 9, "failed": 0},
+    "tier_2": {"classes": 12, "passed": 12, "failed": 0},
     "tier_3": {"classes": 1, "passed": 1, "failed": 0}
   },
   "schema_migration_status": {
-    "migrations_applied": 21,
+    "migrations_applied": 24,
     "rollback_tested": true,
     "current_version": "1.0.0"
   },
@@ -41,6 +41,9 @@
     {"test_name": "tier2_offline_coverage_flush", "persistence_class": "offline_coverage_metrics", "tier": "tier_2", "status": "pass", "latency_ms": 1.1, "notes": "event stream rollup replay"},
     {"test_name": "tier2_repair_cycle_flush", "persistence_class": "repair_cycle_audit", "tier": "tier_2", "status": "pass", "latency_ms": 0.6, "notes": "cycle budget replay"},
     {"test_name": "tier2_lease_conflict_flush", "persistence_class": "lease_conflict_audit", "tier": "tier_2", "status": "pass", "latency_ms": 0.7, "notes": "tiered conflict resolution replay"},
+    {"test_name": "tier2_incident_bundle_retention_flush", "persistence_class": "incident_bundle_retention", "tier": "tier_2", "status": "pass", "latency_ms": 0.8, "notes": "retention policy replay"},
+    {"test_name": "tier2_migration_artifact_flush", "persistence_class": "migration_artifact", "tier": "tier_2", "status": "pass", "latency_ms": 0.9, "notes": "migration artifact replay"},
+    {"test_name": "tier2_migration_pipeline_flush", "persistence_class": "migration_pipeline", "tier": "tier_2", "status": "pass", "latency_ms": 1.0, "notes": "migration pipeline replay"},
     {"test_name": "tier3_lifecycle_cache", "persistence_class": "lifecycle_transition_cache", "tier": "tier_3", "status": "pass", "latency_ms": 0.2, "notes": "ephemeral cache, no replay"}
   ]
 }

@@ -19,28 +19,16 @@ REPORT = ROOT / "artifacts" / "10.16" / "frankensqlite_adapter_report.json"
 MATRIX = ROOT / "artifacts" / "10.16" / "frankensqlite_persistence_matrix.json"
 SPEC = ROOT / "docs" / "specs" / "section_10_16" / "bd-2tua_contract.md"
 
+def load_persistence_matrix():
+    return json.loads(MATRIX.read_text())
+
+
+def persistence_classes():
+    return load_persistence_matrix().get("persistence_classes", [])
+
+
 PERSISTENCE_DOMAINS = [
-    "fencing_token_state",
-    "lease_service_state",
-    "lease_quorum_coordination",
-    "rollout_state",
-    "health_gate_policy_state",
-    "control_channel_sequence_window",
-    "artifact_journal",
-    "tiered_trust_storage",
-    "canonical_state_roots",
-    "durability_mode_controls",
-    "durable_claim_gate_audit",
-    "snapshot_policy_state",
-    "crdt_merge_state",
-    "schema_migration_registry",
-    "quarantine_store_state",
-    "quarantine_promotion_receipts",
-    "retention_policy_state",
-    "offline_coverage_metrics",
-    "repair_cycle_audit",
-    "lease_conflict_audit",
-    "lifecycle_transition_cache",
+    item["domain"] for item in persistence_classes()
 ]
 
 EVENT_CODES = [
@@ -216,6 +204,15 @@ def check_report():
         "detail": verdict,
     })
 
+    classes = persistence_classes()
+    expected_total = len(classes)
+    expected_tier_counts = {
+        tier: sum(1 for item in classes if item.get("safety_tier") == tier)
+        for tier in ("tier_1", "tier_2", "tier_3")
+    }
+    expected_replay_enabled = sum(1 for item in classes if item.get("replay_support") is True)
+    expected_total_tables = sum(len(item.get("tables", [])) for item in classes)
+
     cr = data.get("conformance_results", [])
     all_pass = all(r.get("status") == "pass" for r in cr)
     results.append({
@@ -225,26 +222,41 @@ def check_report():
     })
 
     results.append({
-        "check": "report: 21 conformance results",
-        "pass": len(cr) == 21,
+        "check": f"report: {expected_total} conformance results",
+        "pass": len(cr) == expected_total,
         "detail": f"{len(cr)} results",
     })
 
     summary = data.get("summary", {})
     results.append({
-        "check": "report: tier1 count = 11",
-        "pass": summary.get("tier1_count") == 11,
+        "check": "report: total class count matches matrix",
+        "pass": summary.get("total_classes") == expected_total,
+        "detail": f"total_classes: {summary.get('total_classes', '?')}",
+    })
+    results.append({
+        "check": f"report: tier1 count = {expected_tier_counts['tier_1']}",
+        "pass": summary.get("tier1_count") == expected_tier_counts["tier_1"],
         "detail": f"tier1_count: {summary.get('tier1_count', '?')}",
     })
     results.append({
-        "check": "report: tier2 count = 9",
-        "pass": summary.get("tier2_count") == 9,
+        "check": f"report: tier2 count = {expected_tier_counts['tier_2']}",
+        "pass": summary.get("tier2_count") == expected_tier_counts["tier_2"],
         "detail": f"tier2_count: {summary.get('tier2_count', '?')}",
     })
     results.append({
-        "check": "report: tier3 count = 1",
-        "pass": summary.get("tier3_count") == 1,
+        "check": f"report: tier3 count = {expected_tier_counts['tier_3']}",
+        "pass": summary.get("tier3_count") == expected_tier_counts["tier_3"],
         "detail": f"tier3_count: {summary.get('tier3_count', '?')}",
+    })
+    results.append({
+        "check": "report: replay-enabled count matches matrix",
+        "pass": summary.get("replay_enabled") == expected_replay_enabled,
+        "detail": f"replay_enabled: {summary.get('replay_enabled', '?')}",
+    })
+    results.append({
+        "check": "report: table count matches matrix",
+        "pass": summary.get("total_tables") == expected_total_tables,
+        "detail": f"total_tables: {summary.get('total_tables', '?')}",
     })
 
     return results
@@ -268,7 +280,7 @@ def check_spec():
 
 
 def check_persistence_domains():
-    """Verify all 21 persistence domains appear in the impl."""
+    """Verify all matrix persistence domains appear in the impl."""
     results = []
     if not IMPL.exists():
         for d in PERSISTENCE_DOMAINS:

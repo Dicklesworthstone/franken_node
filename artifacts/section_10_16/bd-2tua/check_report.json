@@ -4,11 +4,11 @@
   "section": "10.16",
   "overall_pass": true,
   "verdict": "PASS",
-  "test_count": "48",
+  "test_count": "56",
   "summary": {
-    "passing": 127,
+    "passing": 133,
     "failing": 0,
-    "total": 127
+    "total": 133
   },
   "checks": [
     {
@@ -34,7 +34,7 @@
     {
       "check": "conformance test count",
       "pass": true,
-      "detail": "48 tests (minimum 40)"
+      "detail": "56 tests (minimum 40)"
     },
     {
       "check": "Serialize/Deserialize derives",
@@ -577,6 +577,21 @@
       "detail": "found"
     },
     {
+      "check": "domain: incident_bundle_retention",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "domain: migration_artifact",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "domain: migration_pipeline",
+      "pass": true,
+      "detail": "found"
+    },
+    {
       "check": "report: exists",
       "pass": true,
       "detail": "found"
@@ -594,12 +609,17 @@
     {
       "check": "report: all conformance pass",
       "pass": true,
-      "detail": "21 results, all pass"
+      "detail": "24 results, all pass"
     },
     {
-      "check": "report: 21 conformance results",
+      "check": "report: 24 conformance results",
       "pass": true,
-      "detail": "21 results"
+      "detail": "24 results"
+    },
+    {
+      "check": "report: total class count matches matrix",
+      "pass": true,
+      "detail": "total_classes: 24"
     },
     {
       "check": "report: tier1 count = 11",
@@ -607,14 +627,24 @@
       "detail": "tier1_count: 11"
     },
     {
-      "check": "report: tier2 count = 9",
+      "check": "report: tier2 count = 12",
       "pass": true,
-      "detail": "tier2_count: 9"
+      "detail": "tier2_count: 12"
     },
     {
       "check": "report: tier3 count = 1",
       "pass": true,
       "detail": "tier3_count: 1"
+    },
+    {
+      "check": "report: replay-enabled count matches matrix",
+      "pass": true,
+      "detail": "replay_enabled: 23"
+    },
+    {
+      "check": "report: table count matches matrix",
+      "pass": true,
+      "detail": "total_tables: 50"
     },
     {
       "check": "spec doc: exists",

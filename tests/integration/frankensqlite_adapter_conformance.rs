@@ -863,6 +863,33 @@ fn canonical_classes() -> Vec<PersistenceClass> {
             replay_strategy: "tiered_conflict_resolution_replay".into(),
         },
         PersistenceClass {
+            domain: "incident_bundle_retention".into(),
+            owner_module: "crates/franken-node/src/connector/incident_bundle_retention.rs".into(),
+            safety_tier: SafetyTier::Tier2,
+            durability_mode: DurabilityMode::WalNormal,
+            tables: vec!["incident_bundle_retention_state".into()],
+            replay_support: true,
+            replay_strategy: "retention_policy_replay".into(),
+        },
+        PersistenceClass {
+            domain: "migration_artifact".into(),
+            owner_module: "crates/franken-node/src/connector/migration_artifact.rs".into(),
+            safety_tier: SafetyTier::Tier2,
+            durability_mode: DurabilityMode::WalNormal,
+            tables: vec!["migration_artifact_state".into()],
+            replay_support: true,
+            replay_strategy: "migration_artifact_replay".into(),
+        },
+        PersistenceClass {
+            domain: "migration_pipeline".into(),
+            owner_module: "crates/franken-node/src/connector/migration_pipeline.rs".into(),
+            safety_tier: SafetyTier::Tier2,
+            durability_mode: DurabilityMode::WalNormal,
+            tables: vec!["migration_pipeline_state".into()],
+            replay_support: true,
+            replay_strategy: "migration_pipeline_replay".into(),
+        },
+        PersistenceClass {
             domain: "lifecycle_transition_cache".into(),
             owner_module: "crates/franken-node/src/connector/lifecycle.rs".into(),
             safety_tier: SafetyTier::Tier3,
@@ -983,7 +1010,7 @@ mod tests {
 
     #[test]
     fn test_canonical_class_count() {
-        assert_eq!(canonical_classes().len(), 21);
+        assert_eq!(canonical_classes().len(), 24);
     }
 
     #[test]
@@ -1001,7 +1028,7 @@ mod tests {
             .iter()
             .filter(|c| c.safety_tier == SafetyTier::Tier2)
             .count();
-        assert_eq!(count, 9);
+        assert_eq!(count, 12);
     }
 
     #[test]
@@ -1200,11 +1227,11 @@ mod tests {
             adapter.register_class(c);
         }
         let summary = adapter.summary();
-        assert_eq!(summary.total_classes, 21);
+        assert_eq!(summary.total_classes, 24);
         assert_eq!(summary.tier1_count, 11);
-        assert_eq!(summary.tier2_count, 9);
+        assert_eq!(summary.tier2_count, 12);
         assert_eq!(summary.tier3_count, 1);
-        assert_eq!(summary.replay_enabled, 20);
+        assert_eq!(summary.replay_enabled, 23);
     }
 
     #[test]
@@ -1215,8 +1242,8 @@ mod tests {
         }
         let summary = adapter.summary();
         assert!(
-            summary.total_tables >= 40,
-            "Expected at least 40 tables, got {}",
+            summary.total_tables >= 50,
+            "Expected at least 50 tables, got {}",
             summary.total_tables
         );
     }
@@ -1516,7 +1543,7 @@ mod tests {
             .as_array()
             .unwrap()
             .len();
-        assert_eq!(results, 21);
+        assert_eq!(results, 24);
     }
 
     #[test]
@@ -1529,10 +1556,10 @@ mod tests {
         assert_eq!(report.gate_verdict, "PASS");
         assert_eq!(summary.total_classes, canonical_classes().len());
         assert_eq!(summary.tier1_count, 11);
-        assert_eq!(summary.tier2_count, 9);
+        assert_eq!(summary.tier2_count, 12);
         assert_eq!(summary.tier3_count, 1);
-        assert_eq!(summary.replay_enabled, 20);
-        assert!(summary.total_tables >= 40);
+        assert_eq!(summary.replay_enabled, 23);
+        assert!(summary.total_tables >= 50);
         assert_eq!(report.conformance_results.len(), summary.total_classes);
 
         let tier_1 = report

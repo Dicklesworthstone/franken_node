@@ -13,7 +13,7 @@ import check_frankensqlite_adapter as mod
 
 class TestConstants(unittest.TestCase):
     def test_persistence_domains_count(self):
-        self.assertEqual(len(mod.PERSISTENCE_DOMAINS), 21)
+        self.assertEqual(len(mod.PERSISTENCE_DOMAINS), 24)
 
     def test_event_codes_count(self):
         self.assertEqual(len(mod.EVENT_CODES), 6)
@@ -84,9 +84,13 @@ class TestCheckReport(unittest.TestCase):
         verdict_checks = [r for r in results if "gate verdict" in r["check"]]
         self.assertTrue(verdict_checks[0]["pass"])
 
-    def test_report_21_results(self):
+    def test_report_results_match_matrix_count(self):
         results = mod.check_report()
-        count_checks = [r for r in results if "21 conformance" in r["check"]]
+        count_checks = [
+            r
+            for r in results
+            if f"{len(mod.PERSISTENCE_DOMAINS)} conformance" in r["check"]
+        ]
         self.assertTrue(count_checks[0]["pass"])
 
     def test_report_tier_counts(self):
@@ -112,7 +116,7 @@ class TestCheckPersistenceDomains(unittest.TestCase):
 
     def test_domain_count(self):
         results = mod.check_persistence_domains()
-        self.assertEqual(len(results), 21)
+        self.assertEqual(len(results), 24)
 
 
 class TestRunChecks(unittest.TestCase):
