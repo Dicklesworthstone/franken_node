@@ -14,10 +14,11 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 RESULTS: list[dict] = []
@@ -25,6 +26,14 @@ RESULTS: list[dict] = []
 
 def _check(name: str, passed: bool, detail: str) -> None:
     RESULTS.append({"name": name, "passed": passed, "detail": detail})
+
+
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _read_json(path: Path) -> dict:
+    return json.JSONDecoder().decode(_read_text(path))
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +55,7 @@ def check_risk_documented() -> None:
     if not p.is_file():
         _check("risk_documented", False, "Risk policy file missing")
         return
-    text = p.read_text()
+    text = _read_text(p)
     has_description = "Compatibility Illusion" in text
     has_impact = "Impact" in text
     has_likelihood = "Likelihood" in text
@@ -59,7 +68,7 @@ def check_countermeasures() -> None:
     if not p.is_file():
         _check("countermeasures", False, "Risk policy file missing")
         return
-    text = p.read_text()
+    text = _read_text(p)
     has_oracle = "lockstep oracle" in text.lower() or "Lockstep Oracle" in text
     has_receipts = "divergence receipt" in text.lower() or "Divergence Receipt" in text
     has_monitoring = "monitoring" in text.lower() or "Monitoring" in text
@@ -73,9 +82,9 @@ def check_threshold() -> None:
     found_spec = False
     found_policy = False
     if spec.is_file():
-        found_spec = "95%" in spec.read_text()
+        found_spec = "95%" in _read_text(spec)
     if policy.is_file():
-        found_policy = "95%" in policy.read_text()
+        found_policy = "95%" in _read_text(policy)
     ok = found_spec and found_policy
     _check("threshold", ok, "95% threshold present in spec and policy" if ok else "95% threshold missing from spec or policy")
 
@@ -85,7 +94,7 @@ def check_event_codes() -> None:
     if not p.is_file():
         _check("event_codes", False, "Spec file missing")
         return
-    text = p.read_text()
+    text = _read_text(p)
     codes = ["RCR-001", "RCR-002", "RCR-003", "RCR-004"]
     missing = [c for c in codes if c not in text]
     ok = len(missing) == 0
@@ -97,7 +106,7 @@ def check_invariants() -> None:
     if not p.is_file():
         _check("invariants", False, "Spec file missing")
         return
-    text = p.read_text()
+    text = _read_text(p)
     invariants = ["INV-RCR-ORACLE", "INV-RCR-RECEIPTS", "INV-RCR-THRESHOLD", "INV-RCR-MONITOR"]
     missing = [i for i in invariants if i not in text]
     ok = len(missing) == 0
@@ -109,7 +118,7 @@ def check_alert_pipeline() -> None:
     if not p.is_file():
         _check("alert_pipeline", False, "Risk policy file missing")
         return
-    text = p.read_text()
+    text = _read_text(p)
     has_warning = "warning" in text.lower() or "WARNING" in text
     has_critical = "critical" in text.lower() or "CRITICAL" in text
     has_97 = "97%" in text
@@ -123,7 +132,7 @@ def check_spec_keywords() -> None:
     if not p.is_file():
         _check("spec_keywords", False, "Spec file missing")
         return
-    text = p.read_text()
+    text = _read_text(p)
     keywords = ["Compatibility Illusion", "lockstep oracle", "divergence receipt", "bd-s4cu"]
     missing = [k for k in keywords if k.lower() not in text.lower()]
     ok = len(missing) == 0
@@ -135,7 +144,7 @@ def check_escalation() -> None:
     if not p.is_file():
         _check("escalation", False, "Risk policy file missing")
         return
-    text = p.read_text()
+    text = _read_text(p)
     ok = "escalation" in text.lower() or "Escalation" in text
     _check("escalation", ok, "Escalation procedures documented" if ok else "Escalation procedures missing")
 
@@ -145,7 +154,7 @@ def check_evidence_requirements() -> None:
     if not p.is_file():
         _check("evidence_requirements", False, "Risk policy file missing")
         return
-    text = p.read_text()
+    text = _read_text(p)
     ok = "evidence" in text.lower() and "review" in text.lower()
     _check("evidence_requirements", ok, "Evidence requirements for review documented" if ok else "Evidence requirements missing")
 
@@ -156,10 +165,10 @@ def check_verification_evidence() -> None:
         _check("verification_evidence", False, f"Evidence file MISSING: {p}")
         return
     try:
-        data = json.loads(p.read_text())
-        ok = data.get("bead_id") == "bd-s4cu" and data.get("status") == "pass"
+        data = _read_json(p)
+        ok = isinstance(data, dict) and data.get("bead_id") == "bd-s4cu" and data.get("status") == "pass"
         _check("verification_evidence", ok, "Evidence file valid" if ok else "Evidence file has incorrect bead_id or status")
-    except (json.JSONDecodeError, KeyError) as exc:
+    except (json.JSONDecodeError, OSError) as exc:
         _check("verification_evidence", False, f"Evidence file parse error: {exc}")
 
 
@@ -209,22 +218,32 @@ def run_all() -> dict:
 def self_test() -> None:
     """Smoke-test: run all checks and assert the structure is valid."""
     result = run_all()
-    assert isinstance(result, dict)
-    assert result["bead_id"] == "bd-s4cu"
-    assert result["section"] == "12"
-    assert isinstance(result["checks"], list)
-    assert result["total"] == len(ALL_CHECKS)
-    assert result["passed"] <= result["total"]
-    assert isinstance(result["all_passed"], bool)
+    if not isinstance(result, dict):
+        raise RuntimeError("self-test result must be a dict")
+    if result["bead_id"] != "bd-s4cu":
+        raise RuntimeError("self-test bead_id mismatch")
+    if result["section"] != "12":
+        raise RuntimeError("self-test section mismatch")
+    if not isinstance(result["checks"], list):
+        raise RuntimeError("self-test checks must be a list")
+    if result["total"] != len(ALL_CHECKS):
+        raise RuntimeError("self-test total must match ALL_CHECKS")
+    if result["passed"] > result["total"]:
+        raise RuntimeError("self-test passed count cannot exceed total")
+    if not isinstance(result["all_passed"], bool):
+        raise RuntimeError("self-test all_passed must be bool")
     for check in result["checks"]:
-        assert "name" in check
-        assert "passed" in check
-        assert "detail" in check
+        if "name" not in check:
+            raise RuntimeError("self-test check missing name")
+        if "passed" not in check:
+            raise RuntimeError("self-test check missing passed")
+        if "detail" not in check:
+            raise RuntimeError("self-test check missing detail")
     print("self_test passed")
 
 
 def main() -> None:
-    logger = configure_test_logging("check_risk_compatibility")
+    configure_test_logging("check_risk_compatibility")
     if "--self-test" in sys.argv:
         self_test()
         return
