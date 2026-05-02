@@ -1813,9 +1813,7 @@ impl ProofCarryingDecoder {
                     "Signature should still be generated"
                 );
             }
-        }
     }
-}
 
 // ---------------------------------------------------------------------------
 // ProofVerificationApi
