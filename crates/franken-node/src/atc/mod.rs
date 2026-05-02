@@ -7,6 +7,9 @@
 
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+use crate::push_bounded;
+
 pub const ATC_MODULE_SURFACE: &[&str] = &[
     "aggregation",
     "federation",
@@ -20,18 +23,6 @@ pub const ATC_MODULE_SURFACE: &[&str] = &[
 
 pub fn module_surface() -> &'static [&'static str] {
     ATC_MODULE_SURFACE
-}
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
 }
 
 #[cfg(test)]

@@ -21,24 +21,13 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::push_bounded;
+
 /// Maximum number of violations to collect to prevent memory exhaustion attacks.
 const MAX_VIOLATIONS: usize = 10_000;
 
 /// Maximum number of source files to collect to prevent memory exhaustion attacks.
 const MAX_SOURCE_FILES: usize = 50_000;
-
-/// Add item to Vec with bounded capacity. When capacity is exceeded, removes oldest entries.
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 /// Patterns that indicate ambient executor / runtime bootstrap.
 const BANNED_PATTERNS: &[&str] = &[

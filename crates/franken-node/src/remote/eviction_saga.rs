@@ -9,6 +9,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::push_bounded;
+
 /// Explicit capability lookup result - replaces dangerous bool has_remote_cap pattern.
 ///
 /// This enum prevents the security vulnerability where a raw boolean could default to true,
@@ -45,19 +47,6 @@ impl From<bool> for RemoteCapLookup {
     fn from(has_cap: bool) -> Self {
         Self::from_bool(has_cap)
     }
-}
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -853,15 +842,27 @@ impl EvictionSagaManager {
         for (id, saga) in &self.sagas {
             // Orphan: L2 retired but L3 absent
             if !saga.l2_present && !saga.l3_present {
-                push_bounded(&mut orphans, format!("{id}: L2 retired but L3 absent"), DEFAULT_MAX_AUDIT_RECORDS);
+                push_bounded(
+                    &mut orphans,
+                    format!("{id}: L2 retired but L3 absent"),
+                    DEFAULT_MAX_AUDIT_RECORDS,
+                );
             }
             // Orphan: L3 present but not verified and saga complete
             if saga.phase == SagaPhase::Complete && saga.l3_present && !saga.l3_verified {
-                push_bounded(&mut orphans, format!("{id}: L3 present but unverified in Complete state"), DEFAULT_MAX_AUDIT_RECORDS);
+                push_bounded(
+                    &mut orphans,
+                    format!("{id}: L3 present but unverified in Complete state"),
+                    DEFAULT_MAX_AUDIT_RECORDS,
+                );
             }
             // Orphan: stuck in Compensating (crash during compensation)
             if saga.phase == SagaPhase::Compensating {
-                push_bounded(&mut orphans, format!("{id}: stuck in Compensating state"), DEFAULT_MAX_AUDIT_RECORDS);
+                push_bounded(
+                    &mut orphans,
+                    format!("{id}: stuck in Compensating state"),
+                    DEFAULT_MAX_AUDIT_RECORDS,
+                );
             }
         }
 

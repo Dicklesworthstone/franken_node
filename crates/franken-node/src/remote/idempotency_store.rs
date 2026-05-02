@@ -23,25 +23,12 @@ use std::fmt;
 /// sweep.  If still at capacity after sweeping, the insert is rejected.
 const MAX_DEDUPE_ENTRIES: usize = 65_536;
 
-use crate::{config::RemoteConfig, security::constant_time::ct_eq};
+use crate::{config::RemoteConfig, push_bounded, security::constant_time::ct_eq};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::idempotency::IdempotencyKey;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 fn hash_len_prefixed_bytes(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update((u64::try_from(bytes.len()).unwrap_or(u64::MAX)).to_le_bytes());

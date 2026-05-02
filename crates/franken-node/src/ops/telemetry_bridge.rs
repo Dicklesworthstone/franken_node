@@ -1,4 +1,5 @@
 use crate::config::timeouts;
+use crate::push_bounded;
 use crate::storage::frankensqlite_adapter::{
     CallerContext, FrankensqliteAdapter, PersistenceClass,
 };
@@ -75,19 +76,6 @@ fn is_socket_live(socket_path: &Path) -> bool {
             _ => true, // Other errors assume socket might be live (fail closed)
         },
     }
-}
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
 }
 
 /// Lifecycle state for the telemetry bridge runtime.
@@ -1375,7 +1363,9 @@ impl TelemetryBridge {
 
         Self::with_state(state, |metrics| {
             metrics.queue_depth = metrics.queue_depth.saturating_sub(dropped);
-            metrics.dropped_total = metrics.dropped_total.saturating_add(u64::try_from(dropped).unwrap_or(u64::MAX));
+            metrics.dropped_total = metrics
+                .dropped_total
+                .saturating_add(u64::try_from(dropped).unwrap_or(u64::MAX));
             metrics.record_event(
                 event_codes::PERSIST_FAILURE,
                 None,

@@ -287,18 +287,7 @@ const MAX_CONFORMANCE_FIXTURES: usize = 4096;
 const MAX_CONFORMANCE_RESULTS: usize = 4096;
 /// Maximum audit log entries before oldest-first eviction.
 const MAX_CONFORMANCE_AUDIT_LOG: usize = 4096;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
+use crate::push_bounded;
 
 /// The conformance suite runner.
 pub struct ConformanceSuiteRunner {

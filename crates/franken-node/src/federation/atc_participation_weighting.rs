@@ -33,23 +33,12 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
+use crate::push_bounded;
 
 /// Maximum number of sybil clusters that can be detected to prevent memory exhaustion.
 const MAX_SYBIL_CLUSTERS: usize = 1000;
 /// Maximum number of participants per cluster hint to prevent memory exhaustion attacks.
 const MAX_CLUSTER_MEMBERS: usize = 512;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 // ---------------------------------------------------------------------------
 // Event codes
