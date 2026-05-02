@@ -129,7 +129,9 @@ impl Config {
                     freshness_window_secs: None,
                     min_trust_score: None,
                     decay_factor: None,
-                    registry_signing_key: Some("ZnJhbmtlbi1ub2RlLXRydXN0LWNhcmQtcmVnaXN0cnkta2V5LXYx".to_string()),
+                    registry_signing_key: Some(
+                        "ZnJhbmtlbi1ub2RlLXRydXN0LWNhcmQtcmVnaXN0cnkta2V5LXYx".to_string(),
+                    ),
                     reputation_tier_thresholds: None,
                     test_coverage_threshold_pct: None,
                 },
@@ -173,7 +175,9 @@ impl Config {
                 thresholds: ThresholdsConfig::default(),
                 benchmark: BenchmarkConfig::default(),
                 verifier: VerifierConfig {
-                    max_claims_per_request: 1000,
+                    max_claims_per_request: default_max_claims_per_request(),
+                    max_capsule_count: default_max_capsule_count(),
+                    max_chain_depth: default_max_chain_depth(),
                 },
             },
             Profile::Balanced => Self {
@@ -199,7 +203,9 @@ impl Config {
                     freshness_window_secs: None,
                     min_trust_score: None,
                     decay_factor: None,
-                    registry_signing_key: Some("ZnJhbmtlbi1ub2RlLXRydXN0LWNhcmQtcmVnaXN0cnkta2V5LXYx".to_string()),
+                    registry_signing_key: Some(
+                        "ZnJhbmtlbi1ub2RlLXRydXN0LWNhcmQtcmVnaXN0cnkta2V5LXYx".to_string(),
+                    ),
                     reputation_tier_thresholds: None,
                     test_coverage_threshold_pct: None,
                 },
@@ -243,7 +249,9 @@ impl Config {
                 thresholds: ThresholdsConfig::default(),
                 benchmark: BenchmarkConfig::default(),
                 verifier: VerifierConfig {
-                    max_claims_per_request: 1000,
+                    max_claims_per_request: default_max_claims_per_request(),
+                    max_capsule_count: default_max_capsule_count(),
+                    max_chain_depth: default_max_chain_depth(),
                 },
             },
             Profile::LegacyRisky => Self {
@@ -269,7 +277,9 @@ impl Config {
                     freshness_window_secs: None,
                     min_trust_score: None,
                     decay_factor: None,
-                    registry_signing_key: Some("ZnJhbmtlbi1ub2RlLXRydXN0LWNhcmQtcmVnaXN0cnkta2V5LXYx".to_string()),
+                    registry_signing_key: Some(
+                        "ZnJhbmtlbi1ub2RlLXRydXN0LWNhcmQtcmVnaXN0cnkta2V5LXYx".to_string(),
+                    ),
                     reputation_tier_thresholds: None,
                     test_coverage_threshold_pct: None,
                 },
@@ -313,7 +323,9 @@ impl Config {
                 thresholds: ThresholdsConfig::default(),
                 benchmark: BenchmarkConfig::default(),
                 verifier: VerifierConfig {
-                    max_claims_per_request: 1000,
+                    max_claims_per_request: default_max_claims_per_request(),
+                    max_capsule_count: default_max_capsule_count(),
+                    max_chain_depth: default_max_chain_depth(),
                 },
             },
         }
@@ -1169,6 +1181,68 @@ impl Config {
                 );
             }
         }
+
+        if let Some(section) = &overrides.benchmark {
+            if let Some(value) = &section.summary_path {
+                self.benchmark.summary_path = value.clone();
+                push_bounded(
+                    &mut decisions,
+                    MergeDecision::new(stage.clone(), "benchmark.summary_path", value),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
+            if let Some(value) = section.min_aggregate_score {
+                self.benchmark.min_aggregate_score = value;
+                push_bounded(
+                    &mut decisions,
+                    MergeDecision::new(stage.clone(), "benchmark.min_aggregate_score", value),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
+            if let Some(value) = section.max_latency_ms {
+                self.benchmark.max_latency_ms = value;
+                push_bounded(
+                    &mut decisions,
+                    MergeDecision::new(stage.clone(), "benchmark.max_latency_ms", value),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
+            if let Some(value) = section.min_throughput_ops {
+                self.benchmark.min_throughput_ops = value;
+                push_bounded(
+                    &mut decisions,
+                    MergeDecision::new(stage.clone(), "benchmark.min_throughput_ops", value),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
+        }
+
+        if let Some(section) = &overrides.verifier {
+            if let Some(value) = section.max_claims_per_request {
+                self.verifier.max_claims_per_request = value;
+                push_bounded(
+                    &mut decisions,
+                    MergeDecision::new(stage.clone(), "verifier.max_claims_per_request", value),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
+            if let Some(value) = section.max_capsule_count {
+                self.verifier.max_capsule_count = value;
+                push_bounded(
+                    &mut decisions,
+                    MergeDecision::new(stage.clone(), "verifier.max_capsule_count", value),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
+            if let Some(value) = section.max_chain_depth {
+                self.verifier.max_chain_depth = value;
+                push_bounded(
+                    &mut decisions,
+                    MergeDecision::new(stage.clone(), "verifier.max_chain_depth", value),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
+        }
     }
 
     fn apply_env_overrides(
@@ -1645,6 +1719,78 @@ impl Config {
             MAX_MERGE_DECISIONS,
         )?;
 
+        if let Some(value) = env_lookup("FRANKEN_NODE_BENCHMARK_SUMMARY_PATH") {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(ConfigError::EnvParseFailed {
+                    key: "FRANKEN_NODE_BENCHMARK_SUMMARY_PATH".to_string(),
+                    value,
+                    reason: "path must not be empty".to_string(),
+                });
+            }
+            self.benchmark.summary_path = trimmed.to_string();
+            push_bounded(
+                &mut decisions,
+                MergeDecision::new(MergeStage::Env, "benchmark.summary_path", trimmed),
+                MAX_MERGE_DECISIONS,
+            );
+        }
+        if let Some(raw) = env_lookup("FRANKEN_NODE_BENCHMARK_MIN_AGGREGATE_SCORE") {
+            let parsed = parse_env_u32("FRANKEN_NODE_BENCHMARK_MIN_AGGREGATE_SCORE", &raw)?;
+            self.benchmark.min_aggregate_score = parsed;
+            push_bounded(
+                &mut decisions,
+                MergeDecision::new(MergeStage::Env, "benchmark.min_aggregate_score", parsed),
+                MAX_MERGE_DECISIONS,
+            );
+        }
+        if let Some(raw) = env_lookup("FRANKEN_NODE_BENCHMARK_MAX_LATENCY_MS") {
+            let parsed = parse_env_f64("FRANKEN_NODE_BENCHMARK_MAX_LATENCY_MS", &raw)?;
+            self.benchmark.max_latency_ms = parsed;
+            push_bounded(
+                &mut decisions,
+                MergeDecision::new(MergeStage::Env, "benchmark.max_latency_ms", parsed),
+                MAX_MERGE_DECISIONS,
+            );
+        }
+        if let Some(raw) = env_lookup("FRANKEN_NODE_BENCHMARK_MIN_THROUGHPUT_OPS") {
+            let parsed = parse_env_u64("FRANKEN_NODE_BENCHMARK_MIN_THROUGHPUT_OPS", &raw)?;
+            self.benchmark.min_throughput_ops = parsed;
+            push_bounded(
+                &mut decisions,
+                MergeDecision::new(MergeStage::Env, "benchmark.min_throughput_ops", parsed),
+                MAX_MERGE_DECISIONS,
+            );
+        }
+
+        if let Some(raw) = env_lookup("FRANKEN_NODE_VERIFIER_MAX_CLAIMS_PER_REQUEST") {
+            let parsed = parse_env_usize("FRANKEN_NODE_VERIFIER_MAX_CLAIMS_PER_REQUEST", &raw)?;
+            self.verifier.max_claims_per_request = parsed;
+            push_bounded(
+                &mut decisions,
+                MergeDecision::new(MergeStage::Env, "verifier.max_claims_per_request", parsed),
+                MAX_MERGE_DECISIONS,
+            );
+        }
+        if let Some(raw) = env_lookup("FRANKEN_NODE_VERIFIER_MAX_CAPSULE_COUNT") {
+            let parsed = parse_env_usize("FRANKEN_NODE_VERIFIER_MAX_CAPSULE_COUNT", &raw)?;
+            self.verifier.max_capsule_count = parsed;
+            push_bounded(
+                &mut decisions,
+                MergeDecision::new(MergeStage::Env, "verifier.max_capsule_count", parsed),
+                MAX_MERGE_DECISIONS,
+            );
+        }
+        if let Some(raw) = env_lookup("FRANKEN_NODE_VERIFIER_MAX_CHAIN_DEPTH") {
+            let parsed = parse_env_usize("FRANKEN_NODE_VERIFIER_MAX_CHAIN_DEPTH", &raw)?;
+            self.verifier.max_chain_depth = parsed;
+            push_bounded(
+                &mut decisions,
+                MergeDecision::new(MergeStage::Env, "verifier.max_chain_depth", parsed),
+                MAX_MERGE_DECISIONS,
+            );
+        }
+
         Ok(())
     }
 
@@ -1794,6 +1940,8 @@ impl Config {
             "thresholds.min_resilience_score",
             self.thresholds.min_resilience_score,
         )?;
+        validate_benchmark_config(&self.benchmark)?;
+        validate_verifier_config(&self.verifier)?;
         for (lane_name, lane_cfg) in &self.runtime.lanes {
             if lane_cfg.max_concurrent == 0 {
                 return Err(ConfigError::ValidationFailed(format!(
@@ -1890,6 +2038,16 @@ fn parse_env_u8(key: &str, raw: &str) -> Result<u8, ConfigError> {
 fn parse_env_u64(key: &str, raw: &str) -> Result<u64, ConfigError> {
     raw.trim()
         .parse::<u64>()
+        .map_err(|_| ConfigError::EnvParseFailed {
+            key: key.to_string(),
+            value: raw.to_string(),
+            reason: "expected unsigned integer".to_string(),
+        })
+}
+
+fn parse_env_u32(key: &str, raw: &str) -> Result<u32, ConfigError> {
+    raw.trim()
+        .parse::<u32>()
         .map_err(|_| ConfigError::EnvParseFailed {
             key: key.to_string(),
             value: raw.to_string(),
@@ -1997,6 +2155,45 @@ fn validate_reputation_thresholds(thresholds: &ReputationThresholds) -> Result<(
         ));
     }
 
+    Ok(())
+}
+
+fn validate_benchmark_config(config: &BenchmarkConfig) -> Result<(), ConfigError> {
+    let summary_path = config.summary_path.trim();
+    if summary_path.is_empty() || summary_path.contains('\0') {
+        return Err(ConfigError::ValidationFailed(
+            "benchmark.summary_path must be non-empty and must not contain NUL".to_string(),
+        ));
+    }
+    if !config.max_latency_ms.is_finite() || config.max_latency_ms <= 0.0 {
+        return Err(ConfigError::ValidationFailed(
+            "benchmark.max_latency_ms must be a finite positive value".to_string(),
+        ));
+    }
+    if config.min_throughput_ops == 0 {
+        return Err(ConfigError::ValidationFailed(
+            "benchmark.min_throughput_ops must be > 0".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_verifier_config(config: &VerifierConfig) -> Result<(), ConfigError> {
+    if config.max_claims_per_request == 0 {
+        return Err(ConfigError::ValidationFailed(
+            "verifier.max_claims_per_request must be > 0".to_string(),
+        ));
+    }
+    if config.max_capsule_count == 0 {
+        return Err(ConfigError::ValidationFailed(
+            "verifier.max_capsule_count must be > 0".to_string(),
+        ));
+    }
+    if config.max_chain_depth == 0 {
+        return Err(ConfigError::ValidationFailed(
+            "verifier.max_chain_depth must be > 0".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -2129,6 +2326,8 @@ struct ConfigOverrides {
     pub engine: Option<EngineOverrides>,
     pub runtime: Option<RuntimeOverrides>,
     pub thresholds: Option<ThresholdsOverrides>,
+    pub benchmark: Option<BenchmarkOverrides>,
+    pub verifier: Option<VerifierOverrides>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -2247,6 +2446,23 @@ struct ThresholdsOverrides {
     pub max_variance_pct: Option<f64>,
     pub regression_threshold_pct: Option<f64>,
     pub min_resilience_score: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct BenchmarkOverrides {
+    pub summary_path: Option<String>,
+    pub min_aggregate_score: Option<u32>,
+    pub max_latency_ms: Option<f64>,
+    pub min_throughput_ops: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct VerifierOverrides {
+    pub max_claims_per_request: Option<usize>,
+    pub max_capsule_count: Option<usize>,
+    pub max_chain_depth: Option<usize>,
 }
 
 // -- Profile --
@@ -3192,10 +3408,24 @@ pub struct VerifierConfig {
     /// Maximum number of claims per verification request to prevent DoS via unbounded growth.
     #[serde(default = "default_max_claims_per_request")]
     pub max_claims_per_request: usize,
+    /// Maximum replay capsule records/properties accepted by the verifier SDK.
+    #[serde(default = "default_max_capsule_count")]
+    pub max_capsule_count: usize,
+    /// Maximum verification reports accepted in a chain verification request.
+    #[serde(default = "default_max_chain_depth")]
+    pub max_chain_depth: usize,
 }
 
 fn default_max_claims_per_request() -> usize {
     1000
+}
+
+fn default_max_capsule_count() -> usize {
+    1000
+}
+
+fn default_max_chain_depth() -> usize {
+    64
 }
 
 fn default_benchmark_summary_path() -> String {
@@ -3615,6 +3845,141 @@ min_resilience_score = 0.77
         }));
         assert!(resolved.decisions.iter().any(|decision| {
             decision.field == "thresholds.max_failure_rate" && decision.stage == MergeStage::Profile
+        }));
+    }
+
+    #[test]
+    fn resolve_applies_benchmark_file_profile_and_env_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("franken_node.toml");
+        std::fs::write(
+            &path,
+            r#"
+profile = "balanced"
+
+[benchmark]
+summary_path = "artifacts/category_shift/file_summary.json"
+min_aggregate_score = 72
+max_latency_ms = 450.0
+min_throughput_ops = 80000
+
+[profiles.strict.benchmark]
+summary_path = "artifacts/category_shift/profile_summary.json"
+min_aggregate_score = 88
+min_throughput_ops = 120000
+"#,
+        )
+        .unwrap();
+
+        let env = BTreeMap::from([
+            ("FRANKEN_NODE_PROFILE".to_string(), "strict".to_string()),
+            (
+                "FRANKEN_NODE_BENCHMARK_MAX_LATENCY_MS".to_string(),
+                "175.5".to_string(),
+            ),
+        ]);
+
+        let resolved =
+            Config::resolve_with_env(Some(&path), CliOverrides::default(), &map_lookup(env))
+                .unwrap();
+
+        assert_eq!(resolved.config.profile, Profile::Strict);
+        assert_eq!(
+            resolved.config.benchmark.summary_path,
+            "artifacts/category_shift/profile_summary.json"
+        );
+        assert_eq!(resolved.config.benchmark.min_aggregate_score, 88);
+        assert_eq!(resolved.config.benchmark.max_latency_ms, 175.5);
+        assert_eq!(resolved.config.benchmark.min_throughput_ops, 120000);
+        assert!(resolved.decisions.iter().any(|decision| {
+            decision.field == "benchmark.summary_path" && decision.stage == MergeStage::File
+        }));
+        assert!(resolved.decisions.iter().any(|decision| {
+            decision.field == "benchmark.summary_path" && decision.stage == MergeStage::Profile
+        }));
+        assert!(resolved.decisions.iter().any(|decision| {
+            decision.field == "benchmark.max_latency_ms" && decision.stage == MergeStage::Env
+        }));
+    }
+
+    #[test]
+    fn resolve_applies_benchmark_env_overrides() {
+        let env = BTreeMap::from([
+            (
+                "FRANKEN_NODE_BENCHMARK_SUMMARY_PATH".to_string(),
+                "artifacts/category_shift/env_summary.json".to_string(),
+            ),
+            (
+                "FRANKEN_NODE_BENCHMARK_MIN_AGGREGATE_SCORE".to_string(),
+                "91".to_string(),
+            ),
+            (
+                "FRANKEN_NODE_BENCHMARK_MAX_LATENCY_MS".to_string(),
+                "95.25".to_string(),
+            ),
+            (
+                "FRANKEN_NODE_BENCHMARK_MIN_THROUGHPUT_OPS".to_string(),
+                "250000".to_string(),
+            ),
+        ]);
+
+        let resolved =
+            Config::resolve_with_env(None, CliOverrides::default(), &map_lookup(env)).unwrap();
+
+        assert_eq!(
+            resolved.config.benchmark.summary_path,
+            "artifacts/category_shift/env_summary.json"
+        );
+        assert_eq!(resolved.config.benchmark.min_aggregate_score, 91);
+        assert_eq!(resolved.config.benchmark.max_latency_ms, 95.25);
+        assert_eq!(resolved.config.benchmark.min_throughput_ops, 250000);
+        assert!(resolved.decisions.iter().any(|decision| {
+            decision.field == "benchmark.min_throughput_ops" && decision.stage == MergeStage::Env
+        }));
+    }
+
+    #[test]
+    fn resolve_applies_verifier_file_profile_and_env_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("franken_node.toml");
+        std::fs::write(
+            &path,
+            r#"
+profile = "balanced"
+
+[verifier]
+max_claims_per_request = 101
+max_capsule_count = 202
+max_chain_depth = 33
+
+[profiles.strict.verifier]
+max_capsule_count = 303
+max_chain_depth = 44
+"#,
+        )
+        .unwrap();
+
+        let env = BTreeMap::from([
+            ("FRANKEN_NODE_PROFILE".to_string(), "strict".to_string()),
+            (
+                "FRANKEN_NODE_VERIFIER_MAX_CLAIMS_PER_REQUEST".to_string(),
+                "404".to_string(),
+            ),
+        ]);
+
+        let resolved =
+            Config::resolve_with_env(Some(&path), CliOverrides::default(), &map_lookup(env))
+                .unwrap();
+
+        assert_eq!(resolved.config.profile, Profile::Strict);
+        assert_eq!(resolved.config.verifier.max_claims_per_request, 404);
+        assert_eq!(resolved.config.verifier.max_capsule_count, 303);
+        assert_eq!(resolved.config.verifier.max_chain_depth, 44);
+        assert!(resolved.decisions.iter().any(|decision| {
+            decision.field == "verifier.max_capsule_count" && decision.stage == MergeStage::Profile
+        }));
+        assert!(resolved.decisions.iter().any(|decision| {
+            decision.field == "verifier.max_claims_per_request" && decision.stage == MergeStage::Env
         }));
     }
 
@@ -4293,6 +4658,92 @@ state_dir = ""
     }
 
     #[test]
+    fn validation_rejects_invalid_benchmark_config() {
+        let mut empty_path = Config::for_profile(Profile::Balanced);
+        empty_path.benchmark.summary_path = "   ".to_string();
+        assert!(
+            empty_path
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("benchmark.summary_path")
+        );
+
+        let mut nul_path = Config::for_profile(Profile::Balanced);
+        nul_path.benchmark.summary_path = "artifacts/category_shift\0summary.json".to_string();
+        assert!(
+            nul_path
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("benchmark.summary_path")
+        );
+
+        let mut non_finite_latency = Config::for_profile(Profile::Balanced);
+        non_finite_latency.benchmark.max_latency_ms = f64::NAN;
+        assert!(
+            non_finite_latency
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("benchmark.max_latency_ms")
+        );
+
+        let mut zero_latency = Config::for_profile(Profile::Balanced);
+        zero_latency.benchmark.max_latency_ms = 0.0;
+        assert!(
+            zero_latency
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("benchmark.max_latency_ms")
+        );
+
+        let mut zero_throughput = Config::for_profile(Profile::Balanced);
+        zero_throughput.benchmark.min_throughput_ops = 0;
+        assert!(
+            zero_throughput
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("benchmark.min_throughput_ops")
+        );
+    }
+
+    #[test]
+    fn validation_rejects_invalid_verifier_config() {
+        let mut zero_claims = Config::for_profile(Profile::Balanced);
+        zero_claims.verifier.max_claims_per_request = 0;
+        assert!(
+            zero_claims
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("verifier.max_claims_per_request")
+        );
+
+        let mut zero_capsules = Config::for_profile(Profile::Balanced);
+        zero_capsules.verifier.max_capsule_count = 0;
+        assert!(
+            zero_capsules
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("verifier.max_capsule_count")
+        );
+
+        let mut zero_chain = Config::for_profile(Profile::Balanced);
+        zero_chain.verifier.max_chain_depth = 0;
+        assert!(
+            zero_chain
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("verifier.max_chain_depth")
+        );
+    }
+
+    #[test]
     fn validate_score_and_percentage_reject_out_of_range_values() {
         assert!(validate_opt_score("trust.min_trust_score", Some(-0.01)).is_err());
         assert!(validate_opt_score("trust.min_trust_score", Some(1.01)).is_err());
@@ -4355,13 +4806,9 @@ state_dir = ""
     fn validation_rejects_missing_registry_signing_key() {
         let mut config = Config::for_profile(Profile::Balanced);
         config.trust.registry_signing_key = None;
-        assert!(
-            config
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("trust.registry_signing_key must be configured (fail-closed security boundary)")
-        );
+        assert!(config.validate().unwrap_err().to_string().contains(
+            "trust.registry_signing_key must be configured (fail-closed security boundary)"
+        ));
     }
 
     #[test]

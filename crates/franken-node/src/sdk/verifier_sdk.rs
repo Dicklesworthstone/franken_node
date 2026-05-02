@@ -178,6 +178,8 @@ impl VerifierConfig {
     pub fn from_node_config(config: &crate::config::VerifierConfig) -> Self {
         Self {
             max_claims_per_request: config.max_claims_per_request,
+            max_capsule_count: config.max_capsule_count,
+            max_chain_depth: config.max_chain_depth,
             ..Self::default()
         }
     }
@@ -957,10 +959,28 @@ mod tests {
             verifier_identity: "verifier://alice".to_string(),
             require_hash_match: false,
             strict_claims: false,
+            max_claims_per_request: DEFAULT_MAX_CLAIMS_PER_REQUEST,
+            max_capsule_count: DEFAULT_MAX_CAPSULE_COUNT,
+            max_chain_depth: DEFAULT_MAX_CHAIN_DEPTH,
             extensions: BTreeMap::new(),
         };
         let sdk = VerifierSdk::new(config.clone());
         assert_eq!(sdk.config(), &config);
+    }
+
+    #[test]
+    fn verifier_sdk_config_maps_all_node_capacity_caps() {
+        let node_config = crate::config::VerifierConfig {
+            max_claims_per_request: 11,
+            max_capsule_count: 22,
+            max_chain_depth: 33,
+        };
+
+        let sdk_config = VerifierConfig::from_node_config(&node_config);
+
+        assert_eq!(sdk_config.max_claims_per_request, 11);
+        assert_eq!(sdk_config.max_capsule_count, 22);
+        assert_eq!(sdk_config.max_chain_depth, 33);
     }
 
     #[test]
