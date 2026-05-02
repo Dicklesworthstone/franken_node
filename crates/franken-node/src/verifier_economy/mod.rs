@@ -4278,6 +4278,7 @@ mod tests {
             bundle_version: "v1".to_string(),
             max_replay_capsule_freshness_secs: 30,
             capsule_freshness_secs: None,
+            max_submissions_per_window: None,
         };
         let mut reg = VerifierEconomyRegistry::from_replay_config(&config);
         let (verifier, attestation) = register_and_submit(&mut reg);
