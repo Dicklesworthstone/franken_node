@@ -124,6 +124,10 @@ pub enum Command {
     #[command(subcommand)]
     Migrate(MigrateCommand),
 
+    /// Export one-command migration assessment report.
+    #[command(name = "migrate-report")]
+    MigrateReport(MigrateReportArgs),
+
     /// Compatibility verification across runtimes.
     #[command(subcommand)]
     Verify(VerifyCommand),
@@ -509,6 +513,20 @@ pub struct MigrateValidateArgs {
     /// Output format: json or text.
     #[arg(long, default_value = "text")]
     pub format: String,
+}
+
+#[derive(Debug, Parser)]
+pub struct MigrateReportArgs {
+    /// Path to the project to assess.
+    pub project_path: PathBuf,
+
+    /// Output format: json or html.
+    #[arg(long, default_value = "json", value_parser = ["json", "html"])]
+    pub format: String,
+
+    /// Output file path. When omitted, the report is written to stdout.
+    #[arg(long, alias = "out")]
+    pub output: Option<PathBuf>,
 }
 
 // -- verify --

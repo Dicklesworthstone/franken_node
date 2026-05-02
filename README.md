@@ -171,6 +171,7 @@ franken-node incident list --severity high
 | `franken-node migrate audit` | Inventory migration risk and emit findings | `franken-node migrate audit ./my-app --format json` |
 | `franken-node migrate rewrite` | Apply migration transforms with rollback artifacts | `franken-node migrate rewrite ./my-app --apply` |
 | `franken-node migrate validate` | Validate transformed project with conformance checks | `franken-node migrate validate ./my-app` |
+| `franken-node migrate-report` | Export one-command migration assessment for enterprise review | `franken-node migrate-report ./my-app --format json --output report.json` |
 | `franken-node verify lockstep` | Compare behavior across runtimes | `franken-node verify lockstep ./my-app --runtimes node,bun,franken-node` |
 | `franken-node trust card` | Show trust profile for one extension | `franken-node trust card npm:@example/plugin` |
 | `franken-node trust list` | List extensions by risk/status filters | `franken-node trust list --risk high --revoked false` |

