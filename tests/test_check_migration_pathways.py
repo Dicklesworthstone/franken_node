@@ -3,20 +3,28 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
+import runpy
 import unittest
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Import the verification script as a module
-# ---------------------------------------------------------------------------
-SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
-spec = importlib.util.spec_from_file_location(
-    "check_migration_pathways", SCRIPTS_DIR / "check_migration_pathways.py"
-)
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
+ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / "scripts" / "check_migration_pathways.py"
+
+
+class ScriptNamespace:
+    def __init__(self, script_globals: dict[str, object]) -> None:
+        object.__setattr__(self, "_script_globals", script_globals)
+
+    def __getattr__(self, name: str) -> object:
+        return self._script_globals[name]
+
+
+mod = ScriptNamespace(runpy.run_path(str(SCRIPT)))
+
+
+def _json_decode(text: str) -> dict:
+    return json.JSONDecoder().decode(text)
 
 
 class TestSelfTest(unittest.TestCase):
@@ -269,7 +277,7 @@ class TestJsonOutput(unittest.TestCase):
     def test_json_serializable(self) -> None:
         result = mod.run_all()
         text = json.dumps(result, indent=2)
-        parsed = json.loads(text)
+        parsed = _json_decode(text)
         self.assertEqual(parsed["bead_id"], "bd-2f43")
         self.assertIsInstance(parsed["checks"], list)
 

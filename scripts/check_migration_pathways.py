@@ -17,10 +17,10 @@ import json
 import re
 import sys
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 BEAD_ID = "bd-2f43"
 
@@ -29,6 +29,11 @@ RESULTS: list[dict] = []
 
 def _check(name: str, passed: bool, detail: str) -> None:
     RESULTS.append({"name": name, "passed": passed, "detail": detail})
+
+
+def _expect(condition: bool, message: str) -> None:
+    if not condition:
+        raise RuntimeError(message)
 
 
 # ---------------------------------------------------------------------------
@@ -263,21 +268,24 @@ def self_test() -> None:
     RESULTS.clear()
     _check("self_test_true", True, "always passes")
     _check("self_test_false", False, "always fails")
-    assert len(RESULTS) == 2
-    assert RESULTS[0]["passed"] is True
-    assert RESULTS[1]["passed"] is False
+    _expect(len(RESULTS) == 2, "self_test expected two synthetic checks")
+    _expect(bool(RESULTS[0]["passed"]), "self_test true check did not pass")
+    _expect(not bool(RESULTS[1]["passed"]), "self_test false check did not fail")
     RESULTS.clear()
 
     result = run_all()
-    assert result["bead_id"] == BEAD_ID
-    assert result["total_checks"] == len(ALL_CHECKS)
-    assert result["passed"] + result["failed"] == result["total_checks"]
-    assert isinstance(result["overall_passed"], bool)
-    assert isinstance(result["checks"], list)
+    _expect(result["bead_id"] == BEAD_ID, "self_test bead id mismatch")
+    _expect(result["total_checks"] == len(ALL_CHECKS), "self_test check count mismatch")
+    _expect(
+        result["passed"] + result["failed"] == result["total_checks"],
+        "self_test summary counts do not add up",
+    )
+    _expect(isinstance(result["overall_passed"], bool), "self_test overall_passed is not bool")
+    _expect(isinstance(result["checks"], list), "self_test checks is not a list")
     for check in result["checks"]:
-        assert "name" in check
-        assert "passed" in check
-        assert "detail" in check
+        _expect("name" in check, f"self_test check missing name: {check!r}")
+        _expect("passed" in check, f"self_test check missing passed: {check!r}")
+        _expect("detail" in check, f"self_test check missing detail: {check!r}")
     print("self_test: ALL PASSED")
 
 
@@ -286,7 +294,7 @@ def self_test() -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    logger = configure_test_logging("check_migration_pathways")
+    configure_test_logging("check_migration_pathways")
     if len(sys.argv) > 1 and sys.argv[1] == "--self-test":
         self_test()
         return
