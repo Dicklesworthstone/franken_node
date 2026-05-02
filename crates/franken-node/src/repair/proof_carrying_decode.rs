@@ -15,6 +15,7 @@
 //! - INV-REPAIR-PROOF-BINDING: Proof binds input fragments to output via signed attestation.
 //! - INV-REPAIR-PROOF-DETERMINISTIC: Same inputs produce identical proof structure.
 
+use crate::push_bounded;
 use crate::security::constant_time;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -29,18 +30,6 @@ pub const REPAIR_PROOF_MISSING: &str = "REPAIR_PROOF_MISSING";
 pub const REPAIR_PROOF_INVALID: &str = "REPAIR_PROOF_INVALID";
 pub const DEFAULT_MAX_AUDIT_LOG_ENTRIES: usize = 4_096;
 const MAX_REGISTERED_ALGORITHMS: usize = 4096;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 #[cfg(test)]
 fn test_push_bounded() {
