@@ -254,24 +254,13 @@ impl fmt::Display for PerfBudgetError {
 // ---------------------------------------------------------------------------
 
 use crate::capacity_defaults::aliases::MAX_EVENTS;
+use crate::push_bounded;
 
 /// Maximum timing samples retained per hot path before oldest-first eviction.
 const MAX_TIMING_SAMPLES: usize = 8192;
 
 /// Maximum path results retained per gate evaluation to prevent memory exhaustion.
 const MAX_PATH_RESULTS: usize = 512;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 /// Guard that enforces performance budgets on control-plane hot paths.
 pub struct PerformanceBudgetGuard {

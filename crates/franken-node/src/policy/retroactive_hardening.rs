@@ -19,22 +19,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::hardening_state_machine::HardeningLevel;
+use crate::push_bounded;
 use crate::security::constant_time;
 
 /// Maximum number of progress records to prevent memory exhaustion attacks.
 const MAX_HARDENING_PROGRESS_RECORDS: usize = 4096;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -351,10 +340,10 @@ impl RetroactiveHardeningPipeline {
             push_bounded(
                 &mut progress,
                 HardeningProgressRecord {
-                object_id: object.object_id.clone(),
-                artifacts_created,
-                repairability_before: repairability_before.score,
-                repairability_after: repairability_after.score,
+                    object_id: object.object_id.clone(),
+                    artifacts_created,
+                    repairability_before: repairability_before.score,
+                    repairability_after: repairability_after.score,
                 },
                 MAX_HARDENING_PROGRESS_RECORDS,
             );
@@ -382,7 +371,9 @@ impl RetroactiveHardeningPipeline {
                 let mut hasher = Sha256::new();
                 hasher.update(b"retroactive_hardening_hash_v1:");
                 hasher.update(b"RETROHARDEN-CHECKSUM\x00");
-                hasher.update((u64::try_from(object.content.len()).unwrap_or(u64::MAX)).to_le_bytes());
+                hasher.update(
+                    (u64::try_from(object.content.len()).unwrap_or(u64::MAX)).to_le_bytes(),
+                );
                 hasher.update(&object.content);
                 hasher.update(self.epoch_id.to_le_bytes());
                 hasher.finalize().to_vec()
