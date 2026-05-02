@@ -21,6 +21,7 @@
 //! - INV-NVO-DETERMINISTIC: Oracle results are deterministic for the same
 //!   inputs; BTreeMap used for ordered output.
 
+use crate::push_bounded;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -29,18 +30,6 @@ use std::fmt;
 const MAX_EVENT_LOG_ENTRIES: usize = 4096;
 const L1_LINKAGE_HASH_DOMAIN: &[u8] = b"l1_linkage_v1:";
 const SHA256_HEX_LEN: usize = 64;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -545,7 +534,8 @@ impl RuntimeOracle {
 
         self.active_checks.insert(check_id.to_string(), true);
 
-        let quorum_required = quorum_required_for(self.runtimes.len(), self.quorum_threshold_percent)?;
+        let quorum_required =
+            quorum_required_for(self.runtimes.len(), self.quorum_threshold_percent)?;
         if runtime_outputs.len() < quorum_required {
             self.active_checks.remove(check_id);
             return Err(OracleError {

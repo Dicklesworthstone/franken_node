@@ -3,6 +3,19 @@
 
 pub use frankenengine_node::{ActionableError, lock_utils};
 
+#[cfg(any(test, feature = "admin-tools"))]
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
+    }
+    items.push(item);
+}
+
 // The api and policy modules are included via #[path] so the bin target
 // can use a subset of functions from these files. The lib target uses
 // them fully; the bin only needs selected items, so dead_code is expected.

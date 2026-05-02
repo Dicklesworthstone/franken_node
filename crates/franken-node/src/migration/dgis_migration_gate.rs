@@ -3,6 +3,7 @@
 //! This gate connects migration autopilot decisions to dependency-topology
 //! health deltas, with deterministic rejection reasons and replan suggestions.
 
+use crate::push_bounded;
 use serde::{Deserialize, Serialize};
 
 /// Stable event codes for gate telemetry.
@@ -126,19 +127,6 @@ pub struct MigrationHealthReport {
 
 /// Maximum rejection reasons to prevent memory exhaustion attacks.
 const MAX_REJECTION_REASONS: usize = 10;
-
-/// Push item to vector with capacity bounds checking to prevent memory exhaustion.
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 fn evaluate_policy(
     delta: HealthDelta,

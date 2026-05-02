@@ -13,6 +13,7 @@
 //! - INV-LANE-TELEMETRY-ACCURATE: counters match actual task lifecycle events
 //! - INV-LANE-HOT-RELOAD: policy changes take effect without restart
 
+use crate::push_bounded;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
@@ -26,18 +27,6 @@ pub const DEFAULT_STARVATION_WINDOW_MS: u64 = 5_000;
 pub const DEFAULT_MAX_AUDIT_LOG_ENTRIES: usize = 4_096;
 /// Default maximum number of pending task identities retained per lane.
 pub const DEFAULT_MAX_QUEUED_TASKS_PER_LANE: usize = 4_096;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 // ---- Event codes ----
 

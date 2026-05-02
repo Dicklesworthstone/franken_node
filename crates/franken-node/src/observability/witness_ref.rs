@@ -14,22 +14,11 @@
 use std::fmt;
 
 use super::evidence_ledger::{DecisionKind, EvidenceEntry};
+use crate::push_bounded;
 use crate::security::constant_time;
 
 const MAX_REFS: usize = 4096;
 const MAX_REPLAY_BUNDLE_LOCATOR_LEN: usize = 512;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 fn strict_replay_bundle_locator_is_safe(locator: &str) -> bool {
     if locator.trim() != locator || locator.is_empty() {
@@ -2034,7 +2023,10 @@ mod tests {
             let audit = WitnessValidator::coverage_audit(&entries_with_witnesses);
 
             // Verify arithmetic correctness
-            assert_eq!(audit.total_entries, u64::try_from(entries_with_witnesses.len()).unwrap_or(u64::MAX));
+            assert_eq!(
+                audit.total_entries,
+                u64::try_from(entries_with_witnesses.len()).unwrap_or(u64::MAX)
+            );
 
             let expected_high_impact = entries_with_witnesses
                 .iter()

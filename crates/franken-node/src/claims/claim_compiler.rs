@@ -10,18 +10,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 use crate::capacity_defaults::aliases::MAX_BLOCKED_SOURCES;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
+use crate::push_bounded;
 
 /// Report schema version.
 pub const SCHEMA_VERSION: &str = "claim-compiler-v1.0";
@@ -1269,9 +1258,10 @@ mod tests {
             compiled_contract("rate-limit-snap-1", 10_000),
             compiled_contract("rate-limit-snap-2", 10_000),
         ];
-        assert!(sb
-            .build_snapshot("snap-rate-limit-blocked", &contracts)
-            .is_none());
+        assert!(
+            sb.build_snapshot("snap-rate-limit-blocked", &contracts)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1589,9 +1579,10 @@ mod tests {
                     ..
                 }
             ));
-            assert!(sb
-                .build_snapshot("snap-zero-rate-limit", &contracts)
-                .is_none());
+            assert!(
+                sb.build_snapshot("snap-zero-rate-limit", &contracts)
+                    .is_none()
+            );
         }
 
         #[test]
@@ -1736,9 +1727,10 @@ mod tests {
             contract.signature =
                 sign_contract(&contract.contract_digest, &contract.signer_id, "wrong-key");
 
-            assert!(sb
-                .build_snapshot("snap-wrong-key-signature", &[contract])
-                .is_none());
+            assert!(
+                sb.build_snapshot("snap-wrong-key-signature", &[contract])
+                    .is_none()
+            );
         }
 
         #[test]
@@ -1747,9 +1739,10 @@ mod tests {
             let mut contract = compiled_contract("empty-signature-snapshot-1", 10_000);
             contract.signature.clear();
 
-            assert!(sb
-                .build_snapshot("snap-empty-signature", &[contract])
-                .is_none());
+            assert!(
+                sb.build_snapshot("snap-empty-signature", &[contract])
+                    .is_none()
+            );
         }
 
         #[test]
@@ -1760,9 +1753,10 @@ mod tests {
             contract.signature =
                 sign_contract(&contract.contract_digest, &contract.signer_id, "key-secret");
 
-            assert!(sb
-                .build_snapshot("snap-tampered-evidence", &[contract])
-                .is_none());
+            assert!(
+                sb.build_snapshot("snap-tampered-evidence", &[contract])
+                    .is_none()
+            );
         }
 
         #[test]
@@ -1782,9 +1776,10 @@ mod tests {
                     ..
                 }
             ));
-            assert!(sb
-                .build_snapshot("snap-mixed-freshness", &contracts)
-                .is_none());
+            assert!(
+                sb.build_snapshot("snap-mixed-freshness", &contracts)
+                    .is_none()
+            );
         }
 
         #[test]

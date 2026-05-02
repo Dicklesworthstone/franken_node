@@ -6,7 +6,7 @@ extern crate self as frankenengine_node;
 const MAX_HELP_URLS: usize = 32;
 
 /// Add item to Vec with bounded capacity. When capacity is exceeded, removes oldest entries.
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+pub(crate) fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
         items.clear();
         return;
@@ -64,9 +64,13 @@ pub mod lock_utils {
     pub fn safe_lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<T>, ActionableError> {
         mutex.lock().map_err(|poison_err| {
             ActionableError::new(
-                format!("Mutex poisoned due to panic in another thread: {}", poison_err),
+                format!(
+                    "Mutex poisoned due to panic in another thread: {}",
+                    poison_err
+                ),
                 "Check for panics in concurrent code and fix root cause",
-            ).with_help_url("https://doc.rust-lang.org/std/sync/struct.Mutex.html#poisoning")
+            )
+            .with_help_url("https://doc.rust-lang.org/std/sync/struct.Mutex.html#poisoning")
         })
     }
 
@@ -81,7 +85,7 @@ pub mod lock_utils {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActionableError, MAX_HELP_URLS, push_bounded, lock_utils};
+    use super::{ActionableError, MAX_HELP_URLS, lock_utils, push_bounded};
     use std::sync::{Arc, Mutex};
     use std::thread;
 
@@ -303,10 +307,11 @@ mod tests {
                 .count(),
             2
         );
-        assert!(!err
-            .help_urls
-            .iter()
-            .any(|url| url.as_str() == "https://example.invalid/unique-0"));
+        assert!(
+            !err.help_urls
+                .iter()
+                .any(|url| url.as_str() == "https://example.invalid/unique-0")
+        );
     }
 
     #[test]
@@ -319,10 +324,11 @@ mod tests {
 
         assert_eq!(err.help_urls.len(), MAX_HELP_URLS);
         assert_eq!(err.help_urls.last().map(String::as_str), Some(""));
-        assert!(!err
-            .help_urls
-            .iter()
-            .any(|url| url.as_str() == "https://example.invalid/nonblank-0"));
+        assert!(
+            !err.help_urls
+                .iter()
+                .any(|url| url.as_str() == "https://example.invalid/nonblank-0")
+        );
     }
 
     #[test]
@@ -457,16 +463,26 @@ mod tests {
             let rendered = err.to_string();
 
             // Verify Unicode injection doesn't corrupt output format
-            assert!(rendered.contains("fix_command=fix-command"),
-                   "Format should remain valid despite Unicode injection: {}", description);
+            assert!(
+                rendered.contains("fix_command=fix-command"),
+                "Format should remain valid despite Unicode injection: {}",
+                description
+            );
 
             // Verify message is preserved (not truncated or corrupted)
-            assert!(rendered.starts_with(malicious_message),
-                   "Message should be preserved for: {}", description);
+            assert!(
+                rendered.starts_with(malicious_message),
+                "Message should be preserved for: {}",
+                description
+            );
 
             // Verify the error can be safely cloned and compared
             let cloned = err.clone();
-            assert_eq!(cloned, err, "Clone should work correctly for: {}", description);
+            assert_eq!(
+                cloned, err,
+                "Clone should work correctly for: {}",
+                description
+            );
         }
     }
 
@@ -487,18 +503,27 @@ mod tests {
             let rendered = err.to_string();
 
             // Verify null bytes don't cause string truncation
-            assert!(rendered.contains(&format!("fix_command={}", malicious_fix)),
-                   "Fix command should be preserved despite null bytes: {}", description);
+            assert!(
+                rendered.contains(&format!("fix_command={}", malicious_fix)),
+                "Fix command should be preserved despite null bytes: {}",
+                description
+            );
 
             // Verify format structure remains intact
-            assert!(rendered.starts_with("test error\n"),
-                   "Error format should remain valid for: {}", description);
+            assert!(
+                rendered.starts_with("test error\n"),
+                "Error format should remain valid for: {}",
+                description
+            );
 
             // Test with help URLs to ensure no cross-field contamination
             let err_with_help = err.clone().with_help_url("https://example.com/help");
             let help_rendered = err_with_help.to_string();
-            assert!(help_rendered.contains("help_url=https://example.com/help"),
-                   "Help URL should be preserved despite null byte injection: {}", description);
+            assert!(
+                help_rendered.contains("help_url=https://example.com/help"),
+                "Help URL should be preserved despite null byte injection: {}",
+                description
+            );
         }
     }
 
@@ -522,16 +547,23 @@ mod tests {
         );
         assert_eq!(
             err.help_urls.first().map(String::as_str),
-            Some("https://example.com/help-9968-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+            Some(
+                "https://example.com/help-9968-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            )
         );
         assert_eq!(
             err.help_urls.last().map(String::as_str),
-            Some("https://example.com/help-9999-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+            Some(
+                "https://example.com/help-9999-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            )
         );
 
         // Rendering should complete despite large size
         let rendered = err.to_string();
-        assert!(rendered.contains("fix_command=fix-command"), "Should render correctly despite size");
+        assert!(
+            rendered.contains("fix_command=fix-command"),
+            "Should render correctly despite size"
+        );
         assert_eq!(
             rendered.matches("help_url=").count(),
             MAX_HELP_URLS,
@@ -552,39 +584,66 @@ mod tests {
         // Test serialization format injection attacks
         // Malformed JSON/XML/YAML-like content could bypass parsing or logging
         let injection_cases = [
-            ("error\"],\"malicious\":\"payload", "JSON injection in message"),
-            ("error</message><script>alert(1)</script>", "XML injection in message"),
+            (
+                "error\"],\"malicious\":\"payload",
+                "JSON injection in message",
+            ),
+            (
+                "error</message><script>alert(1)</script>",
+                "XML injection in message",
+            ),
             ("error\n  malicious: payload", "YAML injection in message"),
             ("error{{.Values.Secret}}", "Template injection in message"),
             ("fix\"],\"cmd\":\"rm -rf /", "JSON injection in fix command"),
-            ("fix</fix><script>alert(1)</script>", "XML injection in fix command"),
-            ("https://evil.com\"];window.location=\"https://malicious.com", "URL injection in help"),
+            (
+                "fix</fix><script>alert(1)</script>",
+                "XML injection in fix command",
+            ),
+            (
+                "https://evil.com\"];window.location=\"https://malicious.com",
+                "URL injection in help",
+            ),
         ];
 
         for (injection_payload, description) in &injection_cases {
             // Test injection in different fields
             let err_msg = ActionableError::new(injection_payload, "safe-fix");
             let err_fix = ActionableError::new("safe error", injection_payload);
-            let err_help = ActionableError::new("safe error", "safe-fix")
-                .with_help_url(injection_payload);
+            let err_help =
+                ActionableError::new("safe error", "safe-fix").with_help_url(injection_payload);
 
             let rendered_msg = err_msg.to_string();
             let rendered_fix = err_fix.to_string();
             let rendered_help = err_help.to_string();
 
             // Verify injection doesn't break output format
-            assert!(rendered_msg.contains("fix_command=safe-fix"),
-                   "Message injection should not break format: {}", description);
-            assert!(rendered_fix.contains(&format!("fix_command={}", injection_payload)),
-                   "Fix command injection should be contained: {}", description);
-            assert!(rendered_help.contains(&format!("help_url={}", injection_payload)),
-                   "Help URL injection should be contained: {}", description);
+            assert!(
+                rendered_msg.contains("fix_command=safe-fix"),
+                "Message injection should not break format: {}",
+                description
+            );
+            assert!(
+                rendered_fix.contains(&format!("fix_command={}", injection_payload)),
+                "Fix command injection should be contained: {}",
+                description
+            );
+            assert!(
+                rendered_help.contains(&format!("help_url={}", injection_payload)),
+                "Help URL injection should be contained: {}",
+                description
+            );
 
             // Verify no script execution or template processing
-            assert!(!rendered_msg.contains("malicious"),
-                   "Should not execute malicious content in message: {}", description);
-            assert!(!rendered_fix.contains("<script>") || rendered_fix.contains("fix_command="),
-                   "Should not process script tags in fix command: {}", description);
+            assert!(
+                !rendered_msg.contains("malicious"),
+                "Should not execute malicious content in message: {}",
+                description
+            );
+            assert!(
+                !rendered_fix.contains("<script>") || rendered_fix.contains("fix_command="),
+                "Should not process script tags in fix command: {}",
+                description
+            );
         }
     }
 
@@ -594,38 +653,55 @@ mod tests {
         // Edge cases with special float values in error contexts
         let float_edge_cases = [
             (f64::INFINITY.to_string(), "Infinity in error field"),
-            (f64::NEG_INFINITY.to_string(), "Negative infinity in error field"),
+            (
+                f64::NEG_INFINITY.to_string(),
+                "Negative infinity in error field",
+            ),
             (f64::NAN.to_string(), "NaN in error field"),
             (f64::MIN.to_string(), "Minimum f64 in error field"),
             (f64::MAX.to_string(), "Maximum f64 in error field"),
             (f64::EPSILON.to_string(), "Machine epsilon in error field"),
-            ((1.0/3.0).to_string(), "Repeating decimal in error field"),
+            ((1.0 / 3.0).to_string(), "Repeating decimal in error field"),
         ];
 
         for (float_string, description) in &float_edge_cases {
             let err = ActionableError::new(
                 format!("Float error: {}", float_string),
-                format!("Fix float: {}", float_string)
-            ).with_help_url(format!("https://example.com/help?value={}", float_string));
+                format!("Fix float: {}", float_string),
+            )
+            .with_help_url(format!("https://example.com/help?value={}", float_string));
 
             let rendered = err.to_string();
 
             // Verify float values don't cause formatting issues
-            assert!(rendered.contains("fix_command="),
-                   "Should maintain format structure with: {}", description);
-            assert!(rendered.contains("help_url="),
-                   "Should include help URL with: {}", description);
+            assert!(
+                rendered.contains("fix_command="),
+                "Should maintain format structure with: {}",
+                description
+            );
+            assert!(
+                rendered.contains("help_url="),
+                "Should include help URL with: {}",
+                description
+            );
 
             // Verify float values are properly escaped/contained
             if float_string == "inf" || float_string == "-inf" || float_string == "NaN" {
-                assert!(rendered.contains(float_string),
-                       "Special float values should be preserved: {}", description);
+                assert!(
+                    rendered.contains(float_string),
+                    "Special float values should be preserved: {}",
+                    description
+                );
             }
 
             // Verify error can still be used normally
             let cloned = err.clone();
-            assert_eq!(cloned.to_string(), rendered,
-                      "Clone should be identical with: {}", description);
+            assert_eq!(
+                cloned.to_string(),
+                rendered,
+                "Clone should be identical with: {}",
+                description
+            );
         }
     }
 
@@ -635,11 +711,23 @@ mod tests {
         // Similar errors should not collide or cause security bypasses
         let collision_test_cases = [
             ("error-123", "error-132", "Transposed characters in message"),
-            ("test_error", "test-error", "Underscore vs hyphen difference"),
+            (
+                "test_error",
+                "test-error",
+                "Underscore vs hyphen difference",
+            ),
             ("Error", "error", "Case sensitivity in message"),
             ("fix_cmd", "fix-cmd", "Separator differences in fix command"),
-            ("https://site.com/help", "https://site.com/help/", "Trailing slash in help URL"),
-            ("command --flag", "command  --flag", "Extra space in fix command"),
+            (
+                "https://site.com/help",
+                "https://site.com/help/",
+                "Trailing slash in help URL",
+            ),
+            (
+                "command --flag",
+                "command  --flag",
+                "Extra space in fix command",
+            ),
         ];
 
         for (variant1, variant2, description) in &collision_test_cases {
@@ -648,14 +736,22 @@ mod tests {
 
             // Verify different errors are not equal (no collision)
             if variant1 != variant2 {
-                assert_ne!(err1, err2, "Different errors should not be equal: {}", description);
+                assert_ne!(
+                    err1, err2,
+                    "Different errors should not be equal: {}",
+                    description
+                );
             }
 
             // Verify no collision in string representation
             let rendered1 = err1.to_string();
             let rendered2 = err2.to_string();
             if variant1 != variant2 {
-                assert_ne!(rendered1, rendered2, "String representations should differ: {}", description);
+                assert_ne!(
+                    rendered1, rendered2,
+                    "String representations should differ: {}",
+                    description
+                );
             }
         }
     }
@@ -680,13 +776,17 @@ mod tests {
         let clone_duration = start_time.elapsed();
 
         // Cloning should complete in reasonable time
-        assert!(clone_duration.as_millis() < 1000,
-               "Deep cloning should not take excessive time");
+        assert!(
+            clone_duration.as_millis() < 1000,
+            "Deep cloning should not take excessive time"
+        );
 
         // Verify cloned error is still functional
         let rendered = current.to_string();
-        assert!(rendered.contains("fix_command=base fix"),
-               "Deeply cloned error should render correctly");
+        assert!(
+            rendered.contains("fix_command=base fix"),
+            "Deeply cloned error should render correctly"
+        );
         assert_eq!(
             current.help_urls.len(),
             MAX_HELP_URLS,
@@ -695,8 +795,10 @@ mod tests {
 
         // Verify memory usage is reasonable (no exponential growth)
         let final_rendered = current.to_string();
-        assert!(final_rendered.len() < 1_000_000,
-               "Rendered output should not be excessively large");
+        assert!(
+            final_rendered.len() < 1_000_000,
+            "Rendered output should not be excessively large"
+        );
     }
 
     #[test]
@@ -710,31 +812,34 @@ mod tests {
         let results = Arc::new(Mutex::new(Vec::new()));
 
         // Spawn multiple threads to stress test concurrent operations
-        let handles: Vec<_> = (0..8).map(|thread_id| {
-            let err_clone = Arc::clone(&base_err);
-            let results_clone = Arc::clone(&results);
+        let handles: Vec<_> = (0..8)
+            .map(|thread_id| {
+                let err_clone = Arc::clone(&base_err);
+                let results_clone = Arc::clone(&results);
 
-            thread::spawn(move || {
-                // Perform various operations concurrently
-                for iteration in 0..100 {
-                    let mut local_err = (*err_clone).clone();
-                    local_err = local_err.with_help_url(format!("thread-{}-iter-{}", thread_id, iteration));
+                thread::spawn(move || {
+                    // Perform various operations concurrently
+                    for iteration in 0..100 {
+                        let mut local_err = (*err_clone).clone();
+                        local_err = local_err
+                            .with_help_url(format!("thread-{}-iter-{}", thread_id, iteration));
 
-                    let rendered = local_err.to_string();
-                    let cloned = local_err.clone();
+                        let rendered = local_err.to_string();
+                        let cloned = local_err.clone();
 
-                    // Verify concurrent operations produce valid results
-                    assert!(rendered.contains("fix_command=fix concurrency"));
-                    assert_eq!(cloned, local_err);
+                        // Verify concurrent operations produce valid results
+                        assert!(rendered.contains("fix_command=fix concurrency"));
+                        assert_eq!(cloned, local_err);
 
-                    // Record result for verification
-                    {
-                        let mut results_lock = results_clone.lock().unwrap();
-                        results_lock.push((thread_id, iteration, rendered.len()));
+                        // Record result for verification
+                        {
+                            let mut results_lock = results_clone.lock().unwrap();
+                            results_lock.push((thread_id, iteration, rendered.len()));
+                        }
                     }
-                }
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all threads to complete
         for handle in handles {
@@ -743,12 +848,26 @@ mod tests {
 
         // Verify all concurrent operations completed successfully
         let final_results = results.lock().unwrap();
-        assert_eq!(final_results.len(), 8 * 100, "All concurrent operations should complete");
+        assert_eq!(
+            final_results.len(),
+            8 * 100,
+            "All concurrent operations should complete"
+        );
 
         // Verify results are reasonable (no corruption)
         for (thread_id, iteration, rendered_len) in final_results.iter() {
-            assert!(*rendered_len > 0, "Rendered length should be positive for thread {} iteration {}", thread_id, iteration);
-            assert!(*rendered_len < 10000, "Rendered length should be reasonable for thread {} iteration {}", thread_id, iteration);
+            assert!(
+                *rendered_len > 0,
+                "Rendered length should be positive for thread {} iteration {}",
+                thread_id,
+                iteration
+            );
+            assert!(
+                *rendered_len < 10000,
+                "Rendered length should be reasonable for thread {} iteration {}",
+                thread_id,
+                iteration
+            );
         }
     }
 
@@ -762,7 +881,10 @@ mod tests {
             ("x".repeat(1000000), "extremely long message"),
             ("fix", "minimal fix command"),
             ("fix ".repeat(1000), "repeated fix command"),
-            ("https://".repeat(100) + "example.com", "malformed repeated URL"),
+            (
+                "https://".repeat(100) + "example.com",
+                "malformed repeated URL",
+            ),
         ];
 
         for (boundary_value, description) in &boundary_test_cases {
@@ -775,32 +897,52 @@ mod tests {
             let rendered_fix = err_fix.to_string();
 
             // Verify format structure is maintained despite extreme values
-            assert!(rendered_msg.contains("fix_command=normal-fix"),
-                   "Message boundary should not break format: {}", description);
-            assert!(rendered_fix.contains(&format!("fix_command={}", boundary_value)),
-                   "Fix command boundary should be contained: {}", description);
+            assert!(
+                rendered_msg.contains("fix_command=normal-fix"),
+                "Message boundary should not break format: {}",
+                description
+            );
+            assert!(
+                rendered_fix.contains(&format!("fix_command={}", boundary_value)),
+                "Fix command boundary should be contained: {}",
+                description
+            );
 
             // Verify operations remain functional
             let cloned_msg = err_msg.clone();
             let cloned_fix = err_fix.clone();
-            assert_eq!(cloned_msg, err_msg, "Clone should work with boundary message: {}", description);
-            assert_eq!(cloned_fix, err_fix, "Clone should work with boundary fix: {}", description);
+            assert_eq!(
+                cloned_msg, err_msg,
+                "Clone should work with boundary message: {}",
+                description
+            );
+            assert_eq!(
+                cloned_fix, err_fix,
+                "Clone should work with boundary fix: {}",
+                description
+            );
 
             // Test with help URLs containing boundary values
-            if boundary_value.len() < 100000 { // Avoid excessive memory usage in tests
+            if boundary_value.len() < 100000 {
+                // Avoid excessive memory usage in tests
                 let err_help = ActionableError::new("normal error", "normal fix")
                     .with_help_url(boundary_value);
                 let rendered_help = err_help.to_string();
-                assert!(rendered_help.contains(&format!("help_url={}", boundary_value)),
-                       "Help URL boundary should be preserved: {}", description);
+                assert!(
+                    rendered_help.contains(&format!("help_url={}", boundary_value)),
+                    "Help URL boundary should be preserved: {}",
+                    description
+                );
             }
         }
 
         // Verify original functionality remains intact after boundary testing
         let normal_err = ActionableError::new("normal error", "normal fix");
         let normal_rendered = normal_err.to_string();
-        assert_eq!(normal_rendered, "normal error\nfix_command=normal fix",
-                  "Normal functionality should remain intact after boundary testing");
+        assert_eq!(
+            normal_rendered, "normal error\nfix_command=normal fix",
+            "Normal functionality should remain intact after boundary testing"
+        );
     }
 
     #[test]
@@ -825,8 +967,13 @@ mod tests {
         // Verify all URLs in final list are consecutive from the end
         for (idx, url) in err.help_urls.iter().enumerate() {
             let expected_index = 5 + idx; // Starting from URL 5 after dropping first 5
-            assert!(url.contains(&expected_index.to_string()),
-                   "URL at position {} should contain index {}, got: {}", idx, expected_index, url);
+            assert!(
+                url.contains(&expected_index.to_string()),
+                "URL at position {} should contain index {}, got: {}",
+                idx,
+                expected_index,
+                url
+            );
         }
     }
 
@@ -868,7 +1015,11 @@ mod tests {
 
     #[test]
     fn negative_push_bounded_over_capacity_discards_oldest_entries() {
-        let mut urls = vec!["old-a".to_string(), "old-b".to_string(), "old-c".to_string()];
+        let mut urls = vec![
+            "old-a".to_string(),
+            "old-b".to_string(),
+            "old-c".to_string(),
+        ];
 
         push_bounded(&mut urls, "new".to_string(), 2);
 
@@ -888,7 +1039,10 @@ mod tests {
         }
 
         assert_eq!(cloned.help_urls.len(), MAX_HELP_URLS);
-        assert_eq!(cloned.to_string().matches("\nhelp_url=").count(), MAX_HELP_URLS);
+        assert_eq!(
+            cloned.to_string().matches("\nhelp_url=").count(),
+            MAX_HELP_URLS
+        );
     }
 
     #[test]
@@ -917,9 +1071,7 @@ mod tests {
         assert_eq!(err.help_urls.len(), MAX_HELP_URLS);
         assert!(!rendered.contains("https://example.invalid/one-past-0"));
         assert!(rendered.contains("https://example.invalid/one-past-1"));
-        assert!(rendered.contains(&format!(
-            "https://example.invalid/one-past-{MAX_HELP_URLS}"
-        )));
+        assert!(rendered.contains(&format!("https://example.invalid/one-past-{MAX_HELP_URLS}")));
     }
 
     #[test]
@@ -931,7 +1083,10 @@ mod tests {
 
         assert_eq!(err.help_urls.len(), MAX_HELP_URLS);
         assert!(err.help_urls.iter().all(|url| url.len() > 512));
-        assert_eq!(err.to_string().matches("\nhelp_url=").count(), MAX_HELP_URLS);
+        assert_eq!(
+            err.to_string().matches("\nhelp_url=").count(),
+            MAX_HELP_URLS
+        );
     }
 
     #[test]
@@ -947,10 +1102,11 @@ mod tests {
         }
 
         assert_eq!(err.help_urls.len(), MAX_HELP_URLS);
-        assert!(!err
-            .help_urls
-            .iter()
-            .any(|url| url.as_str() == "https://example.invalid/mixed-1"));
+        assert!(
+            !err.help_urls
+                .iter()
+                .any(|url| url.as_str() == "https://example.invalid/mixed-1")
+        );
         assert!(err.help_urls.iter().any(String::is_empty));
     }
 
@@ -1003,7 +1159,10 @@ mod tests {
 
                 // Simulate work while holding both locks
                 let value = format!("{}-{}", *guard_a, *guard_b);
-                results_clone.lock().unwrap().push(format!("thread-{}: {}", i, value));
+                results_clone
+                    .lock()
+                    .unwrap()
+                    .push(format!("thread-{}: {}", i, value));
 
                 // Locks released in reverse order automatically
             });
@@ -1013,13 +1172,18 @@ mod tests {
         // All threads should complete within reasonable time (no deadlock)
         let start = std::time::Instant::now();
         for handle in handles {
-            handle.join().expect("Thread should complete without deadlock");
+            handle
+                .join()
+                .expect("Thread should complete without deadlock");
         }
         let elapsed = start.elapsed();
 
         // Verify no deadlock occurred (should complete much faster than 10s)
-        assert!(elapsed < Duration::from_secs(10),
-            "Multi-lock test took too long: {:?}. Possible deadlock!", elapsed);
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "Multi-lock test took too long: {:?}. Possible deadlock!",
+            elapsed
+        );
 
         // Verify all threads completed successfully
         let final_results = results.lock().unwrap();

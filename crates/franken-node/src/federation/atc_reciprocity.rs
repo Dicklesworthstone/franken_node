@@ -34,21 +34,10 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
+use crate::push_bounded;
 
 /// Maximum number of reciprocity matrix entries to prevent memory exhaustion.
 const MAX_RECIPROCITY_ENTRIES: usize = 10_000;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 fn parse_rfc3339(value: &str) -> Option<DateTime<FixedOffset>> {
     DateTime::parse_from_rfc3339(value).ok()
@@ -472,16 +461,20 @@ impl ReciprocityEngine {
                 exceptions_active = exceptions_active.saturating_add(1);
             }
 
-            push_bounded(&mut entries, ReciprocityMatrixEntry {
-                participant_id: metrics.participant_id.clone(),
-                tier: decision.tier,
-                contribution_ratio: decision.contribution_ratio,
-                quality_adjusted_ratio: decision.quality_adjusted_ratio,
-                contributions_made: metrics.contributions_made,
-                intelligence_consumed: metrics.intelligence_consumed,
-                exception_active: decision.exception_applied,
-                grace_period_active: decision.grace_period_active,
-            }, MAX_RECIPROCITY_ENTRIES);
+            push_bounded(
+                &mut entries,
+                ReciprocityMatrixEntry {
+                    participant_id: metrics.participant_id.clone(),
+                    tier: decision.tier,
+                    contribution_ratio: decision.contribution_ratio,
+                    quality_adjusted_ratio: decision.quality_adjusted_ratio,
+                    contributions_made: metrics.contributions_made,
+                    intelligence_consumed: metrics.intelligence_consumed,
+                    exception_active: decision.exception_applied,
+                    grace_period_active: decision.grace_period_active,
+                },
+                MAX_RECIPROCITY_ENTRIES,
+            );
         }
 
         let content_hash = {
@@ -514,7 +507,11 @@ impl ReciprocityEngine {
     pub fn export_audit_jsonl(&self) -> Result<String, serde_json::Error> {
         let mut lines = Vec::with_capacity(self.audit_log.len().min(MAX_AUDIT_LOG_ENTRIES));
         for entry in &self.audit_log {
-            push_bounded(&mut lines, serde_json::to_string(entry)?, MAX_AUDIT_LOG_ENTRIES);
+            push_bounded(
+                &mut lines,
+                serde_json::to_string(entry)?,
+                MAX_AUDIT_LOG_ENTRIES,
+            );
         }
         Ok(lines.join("\n"))
     }
@@ -2405,9 +2402,19 @@ mod atc_reciprocity_negative_path_tests {
         let decision = engine.evaluate_access(&expired_metrics, "2026-04-17T00:00:00Z");
 
         // Expired exception should NOT grant access
-        assert!(!decision.exception_applied, "Expired exception should not be applied");
-        assert_eq!(decision.tier, AccessTier::Blocked, "Expired exception should result in blocked access");
-        assert!(!decision.granted, "Expired exception should not grant access");
+        assert!(
+            !decision.exception_applied,
+            "Expired exception should not be applied"
+        );
+        assert_eq!(
+            decision.tier,
+            AccessTier::Blocked,
+            "Expired exception should result in blocked access"
+        );
+        assert!(
+            !decision.granted,
+            "Expired exception should not grant access"
+        );
 
         // Test valid (unexpired) exception
         let valid_metrics = ContributionMetrics {
@@ -2424,8 +2431,15 @@ mod atc_reciprocity_negative_path_tests {
         let decision = engine.evaluate_access(&valid_metrics, "2026-04-17T00:00:00Z");
 
         // Valid exception should grant access
-        assert!(decision.exception_applied, "Valid exception should be applied");
-        assert_eq!(decision.tier, AccessTier::Standard, "Valid exception should grant standard access");
+        assert!(
+            decision.exception_applied,
+            "Valid exception should be applied"
+        );
+        assert_eq!(
+            decision.tier,
+            AccessTier::Standard,
+            "Valid exception should grant standard access"
+        );
         assert!(decision.granted, "Valid exception should grant access");
 
         // Test malformed expiration timestamp
@@ -2443,8 +2457,18 @@ mod atc_reciprocity_negative_path_tests {
         let decision = engine.evaluate_access(&malformed_metrics, "2026-04-17T00:00:00Z");
 
         // Malformed expiration should fail closed and not grant access
-        assert!(!decision.exception_applied, "Malformed expiry should not grant access");
-        assert_eq!(decision.tier, AccessTier::Blocked, "Malformed expiry should result in blocked access");
-        assert!(!decision.granted, "Malformed expiry should not grant access");
+        assert!(
+            !decision.exception_applied,
+            "Malformed expiry should not grant access"
+        );
+        assert_eq!(
+            decision.tier,
+            AccessTier::Blocked,
+            "Malformed expiry should result in blocked access"
+        );
+        assert!(
+            !decision.granted,
+            "Malformed expiry should not grant access"
+        );
     }
 }

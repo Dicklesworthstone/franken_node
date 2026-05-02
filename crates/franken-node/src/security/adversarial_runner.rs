@@ -18,21 +18,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::capacity_defaults::aliases::{MAX_EVENTS, MAX_RESULTS};
+use crate::push_bounded;
 
 const MAX_RUNNER_EVENTS: usize = MAX_EVENTS;
 const MAX_BREACHED_CAMPAIGN_IDS: usize = MAX_RESULTS;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 // ---------------------------------------------------------------------------
 // Event codes

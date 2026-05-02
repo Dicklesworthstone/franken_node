@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+use crate::push_bounded;
 use crate::runtime::clock;
 
 const MAX_INTERACTIONS: usize = 4096;
@@ -848,18 +849,6 @@ impl UpdateCopilot {
     fn log_interaction(&mut self, interaction: CopilotInteraction) {
         push_bounded(&mut self.interactions, interaction, MAX_INTERACTIONS);
     }
-}
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
 }
 
 // ---------------------------------------------------------------------------

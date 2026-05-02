@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 use super::certification::{DerivationMetadata, VerifiedEvidenceRef};
+use crate::push_bounded;
 use crate::security::constant_time;
 
 /// Source context for trust card registry snapshot validation.
@@ -49,19 +50,6 @@ const MAX_EXTENSION_ID_LEN: usize = 256;
 
 /// Maximum JSON payload size for untrusted sources to prevent DoS attacks.
 const MAX_UNTRUSTED_JSON_SIZE: usize = 1_000_000; // 1MB
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 fn next_trust_card_version(
     previous_version: u64,
@@ -235,9 +223,9 @@ fn validate_comprehensive(
         .sum();
 
     if total_cards > 10_000 {
-        return Err(TrustCardError::InvalidSnapshot(
-            format!("too many trust cards: {total_cards} exceeds limit 10,000"),
-        ));
+        return Err(TrustCardError::InvalidSnapshot(format!(
+            "too many trust cards: {total_cards} exceeds limit 10,000"
+        )));
     }
 
     // Validate each card's structure more strictly
@@ -273,9 +261,8 @@ fn verify_signature_before_parsing(
     }
 
     // Minimal parsing to extract only signature-relevant fields
-    let partial: serde_json::Value = serde_json::from_str(raw_json).map_err(|err| {
-        TrustCardError::InvalidSnapshot(format!("malformed JSON: {}", err))
-    })?;
+    let partial: serde_json::Value = serde_json::from_str(raw_json)
+        .map_err(|err| TrustCardError::InvalidSnapshot(format!("malformed JSON: {}", err)))?;
 
     let snapshot_hash = partial
         .get("snapshot_hash")
@@ -314,9 +301,9 @@ fn sanitize_error_for_untrusted(err: TrustCardError) -> TrustCardError {
             path,
             detail: "parsing failed".to_string(),
         },
-        TrustCardError::InvalidSnapshot(_) => TrustCardError::InvalidSnapshot(
-            "snapshot validation failed".to_string(),
-        ),
+        TrustCardError::InvalidSnapshot(_) => {
+            TrustCardError::InvalidSnapshot("snapshot validation failed".to_string())
+        }
         // Pass through other errors unchanged
         other => other,
     }
@@ -894,33 +881,36 @@ impl TrustCardRegistry {
         })?;
 
         // Contextual validation strategy based on source trust level
-        let snapshot = match source_context {
-            SnapshotSourceContext::TrustedFile => {
-                // Lazy validation: parse first, then basic checks
-                let snapshot = serde_json::from_str::<TrustCardRegistrySnapshot>(&raw)
-                    .map_err(|err| TrustCardError::SnapshotParse {
-                        path: path.to_path_buf(),
-                        detail: err.to_string(),
-                    })?;
-                validate_basic_bounds(&snapshot)?;
-                snapshot
-            }
-            SnapshotSourceContext::UntrustedNetwork => {
-                // Eager validation: verify signature first, comprehensive checks
-                verify_signature_before_parsing(&raw, DEFAULT_REGISTRY_KEY)
-                    .map_err(|err| sanitize_error_for_untrusted(err))?;
+        let snapshot =
+            match source_context {
+                SnapshotSourceContext::TrustedFile => {
+                    // Lazy validation: parse first, then basic checks
+                    let snapshot = serde_json::from_str::<TrustCardRegistrySnapshot>(&raw)
+                        .map_err(|err| TrustCardError::SnapshotParse {
+                            path: path.to_path_buf(),
+                            detail: err.to_string(),
+                        })?;
+                    validate_basic_bounds(&snapshot)?;
+                    snapshot
+                }
+                SnapshotSourceContext::UntrustedNetwork => {
+                    // Eager validation: verify signature first, comprehensive checks
+                    verify_signature_before_parsing(&raw, DEFAULT_REGISTRY_KEY)
+                        .map_err(|err| sanitize_error_for_untrusted(err))?;
 
-                let snapshot = serde_json::from_str::<TrustCardRegistrySnapshot>(&raw)
-                    .map_err(|err| sanitize_error_for_untrusted(TrustCardError::SnapshotParse {
-                        path: path.to_path_buf(),
-                        detail: err.to_string(),
-                    }))?;
+                    let snapshot = serde_json::from_str::<TrustCardRegistrySnapshot>(&raw)
+                        .map_err(|err| {
+                            sanitize_error_for_untrusted(TrustCardError::SnapshotParse {
+                                path: path.to_path_buf(),
+                                detail: err.to_string(),
+                            })
+                        })?;
 
-                validate_comprehensive(&snapshot, DEFAULT_REGISTRY_KEY)
-                    .map_err(|err| sanitize_error_for_untrusted(err))?;
-                snapshot
-            }
-        };
+                    validate_comprehensive(&snapshot, DEFAULT_REGISTRY_KEY)
+                        .map_err(|err| sanitize_error_for_untrusted(err))?;
+                    snapshot
+                }
+            };
 
         let high_water = read_snapshot_high_water(path, DEFAULT_REGISTRY_KEY)?;
         validate_snapshot_high_water(path, &snapshot, high_water.as_ref())?;
@@ -961,33 +951,36 @@ impl TrustCardRegistry {
         })?;
 
         // Contextual validation strategy based on source trust level
-        let snapshot = match source_context {
-            SnapshotSourceContext::TrustedFile => {
-                // Lazy validation: parse first, then basic checks
-                let snapshot = serde_json::from_str::<TrustCardRegistrySnapshot>(&raw)
-                    .map_err(|err| TrustCardError::SnapshotParse {
-                        path: path.to_path_buf(),
-                        detail: err.to_string(),
-                    })?;
-                validate_basic_bounds(&snapshot)?;
-                snapshot
-            }
-            SnapshotSourceContext::UntrustedNetwork => {
-                // Eager validation: verify signature first, comprehensive checks
-                verify_signature_before_parsing(&raw, &registry_key)
-                    .map_err(|err| sanitize_error_for_untrusted(err))?;
+        let snapshot =
+            match source_context {
+                SnapshotSourceContext::TrustedFile => {
+                    // Lazy validation: parse first, then basic checks
+                    let snapshot = serde_json::from_str::<TrustCardRegistrySnapshot>(&raw)
+                        .map_err(|err| TrustCardError::SnapshotParse {
+                            path: path.to_path_buf(),
+                            detail: err.to_string(),
+                        })?;
+                    validate_basic_bounds(&snapshot)?;
+                    snapshot
+                }
+                SnapshotSourceContext::UntrustedNetwork => {
+                    // Eager validation: verify signature first, comprehensive checks
+                    verify_signature_before_parsing(&raw, &registry_key)
+                        .map_err(|err| sanitize_error_for_untrusted(err))?;
 
-                let snapshot = serde_json::from_str::<TrustCardRegistrySnapshot>(&raw)
-                    .map_err(|err| sanitize_error_for_untrusted(TrustCardError::SnapshotParse {
-                        path: path.to_path_buf(),
-                        detail: err.to_string(),
-                    }))?;
+                    let snapshot = serde_json::from_str::<TrustCardRegistrySnapshot>(&raw)
+                        .map_err(|err| {
+                            sanitize_error_for_untrusted(TrustCardError::SnapshotParse {
+                                path: path.to_path_buf(),
+                                detail: err.to_string(),
+                            })
+                        })?;
 
-                validate_comprehensive(&snapshot, &registry_key)
-                    .map_err(|err| sanitize_error_for_untrusted(err))?;
-                snapshot
-            }
-        };
+                    validate_comprehensive(&snapshot, &registry_key)
+                        .map_err(|err| sanitize_error_for_untrusted(err))?;
+                    snapshot
+                }
+            };
 
         let high_water = read_snapshot_high_water(path, &registry_key)?;
         validate_snapshot_high_water(path, &snapshot, high_water.as_ref())?;
@@ -3902,8 +3895,13 @@ mod tests {
             .persist_authoritative_state(&path)
             .expect("persist authoritative state");
 
-        let mut restored =
-            TrustCardRegistry::load_authoritative_state(&path, 60, 2_000, SnapshotSourceContext::TrustedFile).expect("load");
+        let mut restored = TrustCardRegistry::load_authoritative_state(
+            &path,
+            60,
+            2_000,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect("load");
 
         let cards = restored
             .list(&TrustCardListFilter::empty(), "trace-roundtrip", 2_000)
@@ -3963,8 +3961,13 @@ mod tests {
         )
         .expect("install older snapshot");
 
-        let err = TrustCardRegistry::load_authoritative_state(&path, 60, 2_000, SnapshotSourceContext::TrustedFile)
-            .expect_err("older signed snapshot must be rejected after high-water advances");
+        let err = TrustCardRegistry::load_authoritative_state(
+            &path,
+            60,
+            2_000,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect_err("older signed snapshot must be rejected after high-water advances");
 
         assert!(
             matches!(err, TrustCardError::InvalidSnapshot(ref detail) if detail.contains("rollback rejected")),
@@ -4083,8 +4086,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("missing-trust-card-state.json");
 
-        let err = TrustCardRegistry::load_authoritative_state(&path, 60, 2_000, SnapshotSourceContext::TrustedFile)
-            .expect_err("missing state file must fail");
+        let err = TrustCardRegistry::load_authoritative_state(
+            &path,
+            60,
+            2_000,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect_err("missing state file must fail");
 
         assert!(matches!(err, TrustCardError::SnapshotRead { .. }));
     }
@@ -4095,8 +4103,13 @@ mod tests {
         let path = dir.path().join("malformed-trust-card-state.json");
         std::fs::write(&path, "{not-json").expect("write malformed state");
 
-        let err = TrustCardRegistry::load_authoritative_state(&path, 60, 2_000, SnapshotSourceContext::TrustedFile)
-            .expect_err("malformed state file must fail");
+        let err = TrustCardRegistry::load_authoritative_state(
+            &path,
+            60,
+            2_000,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect_err("malformed state file must fail");
 
         assert!(matches!(err, TrustCardError::SnapshotParse { .. }));
     }
@@ -5441,16 +5454,21 @@ mod tests {
 
         // Create a valid registry
         let mut registry = TrustCardRegistry::default();
-        let card = registry.create(sample_input(), 1_000, "trace").expect("create");
-        registry.persist_authoritative_state(&path).expect("persist");
+        let card = registry
+            .create(sample_input(), 1_000, "trace")
+            .expect("create");
+        registry
+            .persist_authoritative_state(&path)
+            .expect("persist");
 
         // Load using trusted file context - should use lazy validation
         let restored = TrustCardRegistry::load_authoritative_state(
             &path,
             60,
             2_000,
-            SnapshotSourceContext::TrustedFile
-        ).expect("load with trusted file context");
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect("load with trusted file context");
 
         // Verify the registry was loaded correctly
         let loaded_card = restored
@@ -5467,16 +5485,21 @@ mod tests {
 
         // Create a valid registry with proper signature
         let mut registry = TrustCardRegistry::default();
-        registry.create(sample_input(), 1_000, "trace").expect("create");
-        registry.persist_authoritative_state(&path).expect("persist");
+        registry
+            .create(sample_input(), 1_000, "trace")
+            .expect("create");
+        registry
+            .persist_authoritative_state(&path)
+            .expect("persist");
 
         // Load using untrusted network context - should use eager validation
         let restored = TrustCardRegistry::load_authoritative_state(
             &path,
             60,
             2_000,
-            SnapshotSourceContext::UntrustedNetwork
-        ).expect("load with untrusted network context");
+            SnapshotSourceContext::UntrustedNetwork,
+        )
+        .expect("load with untrusted network context");
 
         // Verify the registry was loaded correctly
         let cards = restored
@@ -5502,8 +5525,9 @@ mod tests {
             &path,
             60,
             2_000,
-            SnapshotSourceContext::UntrustedNetwork
-        ).expect_err("oversized JSON should be rejected for untrusted sources");
+            SnapshotSourceContext::UntrustedNetwork,
+        )
+        .expect_err("oversized JSON should be rejected for untrusted sources");
 
         assert!(matches!(err, TrustCardError::InvalidSnapshot(ref detail)
             if detail.contains("exceeds maximum")));
@@ -5532,8 +5556,9 @@ mod tests {
             &path,
             60,
             2_000,
-            SnapshotSourceContext::UntrustedNetwork
-        ).expect_err("invalid signature should be rejected for untrusted sources");
+            SnapshotSourceContext::UntrustedNetwork,
+        )
+        .expect_err("invalid signature should be rejected for untrusted sources");
 
         assert!(matches!(err, TrustCardError::InvalidSnapshot(ref detail)
             if detail.contains("signature verification failed")));
@@ -5546,8 +5571,12 @@ mod tests {
 
         // Create a valid registry first
         let mut registry = TrustCardRegistry::default();
-        registry.create(sample_input(), 1_000, "trace").expect("create");
-        registry.persist_authoritative_state(&path).expect("persist");
+        registry
+            .create(sample_input(), 1_000, "trace")
+            .expect("create");
+        registry
+            .persist_authoritative_state(&path)
+            .expect("persist");
 
         // Tamper with the signature in the file
         let original_json = std::fs::read_to_string(&path).expect("read");
@@ -5563,8 +5592,9 @@ mod tests {
             &path,
             60,
             2_000,
-            SnapshotSourceContext::TrustedFile
-        ).expect_err("tampered signature should eventually fail");
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect_err("tampered signature should eventually fail");
 
         // Error should come from later signature validation, not pre-parsing
         assert!(matches!(err, TrustCardError::InvalidSnapshot(ref detail)
@@ -5582,8 +5612,9 @@ mod tests {
             &path,
             60,
             2_000,
-            SnapshotSourceContext::UntrustedNetwork
-        ).expect_err("malformed JSON should fail");
+            SnapshotSourceContext::UntrustedNetwork,
+        )
+        .expect_err("malformed JSON should fail");
 
         // Error detail should be sanitized for untrusted sources
         match err {
@@ -5605,8 +5636,9 @@ mod tests {
             &path,
             60,
             2_000,
-            SnapshotSourceContext::TrustedFile
-        ).expect_err("malformed JSON should fail");
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect_err("malformed JSON should fail");
 
         // Error should contain specific parsing details
         match err {
@@ -5625,13 +5657,15 @@ mod tests {
 
         // Create snapshot with too many cards (exceeding limits for untrusted sources)
         let mut cards_map = BTreeMap::new();
-        let sample_cards: Vec<TrustCard> = (0..600).map(|i| {
-            let mut card = sample_input().try_into().expect("convert");
-            let card_ref: &mut TrustCard = &mut card;
-            card_ref.extension.extension_id = format!("npm:@test/card-{i}");
-            card_ref.trust_card_version = 1;
-            card
-        }).collect();
+        let sample_cards: Vec<TrustCard> = (0..600)
+            .map(|i| {
+                let mut card = sample_input().try_into().expect("convert");
+                let card_ref: &mut TrustCard = &mut card;
+                card_ref.extension.extension_id = format!("npm:@test/card-{i}");
+                card_ref.trust_card_version = 1;
+                card
+            })
+            .collect();
         cards_map.insert("npm:@test/excessive".to_string(), sample_cards);
 
         let snapshot = TrustCardRegistrySnapshot {
@@ -5654,11 +5688,15 @@ mod tests {
             &path,
             60,
             2_000,
-            SnapshotSourceContext::UntrustedNetwork
-        ).expect_err("excessive cards should be rejected for untrusted sources");
+            SnapshotSourceContext::UntrustedNetwork,
+        )
+        .expect_err("excessive cards should be rejected for untrusted sources");
 
         // Should fail during validation (either signature or bounds)
-        assert!(matches!(err, TrustCardError::InvalidSnapshot(_) | TrustCardError::InvalidInput { .. }));
+        assert!(matches!(
+            err,
+            TrustCardError::InvalidSnapshot(_) | TrustCardError::InvalidInput { .. }
+        ));
     }
 
     #[test]
@@ -5763,8 +5801,12 @@ mod tests {
 
         // Create a valid registry
         let mut registry = TrustCardRegistry::default();
-        registry.create(sample_input(), 1_000, "trace").expect("create");
-        registry.persist_authoritative_state(&path).expect("persist");
+        registry
+            .create(sample_input(), 1_000, "trace")
+            .expect("create");
+        registry
+            .persist_authoritative_state(&path)
+            .expect("persist");
 
         let restored = TrustCardRegistry::load_authoritative_state(
             &path,

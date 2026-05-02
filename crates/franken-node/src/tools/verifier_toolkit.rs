@@ -58,6 +58,7 @@ pub mod invariants {
 pub const TOOLKIT_VERSION: &str = "vtk-v1.0";
 
 use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_REPORTS};
+use crate::push_bounded;
 /// Compute the Unix epoch timestamp for January 1 of the current year.
 fn current_year_base() -> i64 {
     let now = chrono::Utc::now();
@@ -69,19 +70,6 @@ fn current_year_base() -> i64 {
 }
 
 const DETERMINISTIC_TIME_WINDOW_SECONDS: u64 = 365 * 24 * 60 * 60;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 fn deterministic_digest(domain: &[u8], fields: &[&str]) -> [u8; 32] {
     let mut hasher = Sha256::new();

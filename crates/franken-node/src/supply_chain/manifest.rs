@@ -19,22 +19,10 @@ use frankenengine_extension_host::{
 use serde::{Deserialize, Serialize};
 
 use crate::capacity_defaults::aliases::MAX_CHAIN_ENTRIES;
+use crate::push_bounded;
 
 /// Maximum capabilities per manifest to prevent memory exhaustion.
 const MAX_CAPABILITIES: usize = 1024;
-
-/// Add item to Vec with bounded capacity. When capacity is exceeded, removes oldest entries.
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 pub const MANIFEST_SCHEMA_VERSION: &str = "1.0";
 

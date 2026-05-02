@@ -57,18 +57,7 @@ pub mod invariants {
 }
 
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
+use crate::push_bounded;
 
 fn revision_validation_error(revision: &StandardRevision) -> Option<&'static str> {
     if revision.title.trim().is_empty() {
