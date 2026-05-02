@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """bd-2wsm: Epoch transition barrier protocol — verification gate."""
 import json
-import os
 import re
 import sys
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-IMPL = os.path.join(ROOT, "crates", "franken-node", "src", "control_plane", "epoch_transition_barrier.rs")
-MOD_RS = os.path.join(ROOT, "crates", "franken-node", "src", "control_plane", "mod.rs")
-SPEC = os.path.join(ROOT, "docs", "specs", "section_10_14", "bd-2wsm_contract.md")
+
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
+
+IMPL = ROOT / "crates" / "franken-node" / "src" / "control_plane" / "epoch_transition_barrier.rs"
+MOD_RS = ROOT / "crates" / "franken-node" / "src" / "control_plane" / "mod.rs"
+SPEC = ROOT / "docs" / "specs" / "section_10_14" / "bd-2wsm_contract.md"
 BEAD, SECTION = "bd-2wsm", "10.14"
 
 EVENT_CODES = [
@@ -30,15 +34,20 @@ INVS = [
     "INV-BARRIER-TRANSCRIPT", "INV-BARRIER-TIMEOUT",
 ]
 
-def _read(p):
-    with open(p) as f: return f.read()
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
 
-def _checks():
-    r = []
-    def ok(n, p, d=""): r.append({"check": n, "passed": p, "detail": d})
-    src = _read(IMPL)
-    ok("source_exists", os.path.isfile(IMPL), IMPL)
-    ok("module_wiring", "pub mod epoch_transition_barrier;" in _read(MOD_RS))
+
+def _checks() -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+
+    def ok(name: str, passed: bool, detail: str = "") -> None:
+        results.append({"check": name, "passed": passed, "detail": detail})
+
+    src = _read_text(IMPL) if IMPL.is_file() else ""
+    mod_src = _read_text(MOD_RS) if MOD_RS.is_file() else ""
+    ok("source_exists", IMPL.is_file(), str(IMPL))
+    ok("module_wiring", "pub mod epoch_transition_barrier;" in mod_src)
 
     # Barrier phases
     phases = ["Proposed", "Draining", "Committed", "Aborted"]
@@ -65,7 +74,14 @@ def _checks():
     ok("missing_acks", "fn missing_acks" in src, "Missing ACK tracking")
     ok("is_terminal", "fn is_terminal" in src, "Terminal state check")
     ok("serialized_barrier", "is_barrier_active" in src and "ConcurrentBarrier" in src, "INV-BARRIER-SERIALIZED")
-    ok("epoch_mismatch", "EpochMismatch" in src and "target_epoch != current_epoch + 1" in src, "Epoch validation")
+    ok(
+        "epoch_mismatch",
+        "EpochMismatch" in src
+        and "expected_epoch" in src
+        and ".checked_add(1)" in src
+        and "target_epoch != expected_epoch" in src,
+        "Epoch validation",
+    )
 
     # Event and error codes
     ok("event_codes", sum(1 for c in EVENT_CODES if c in src) >= 10, f"{sum(1 for c in EVENT_CODES if c in src)}/10")
@@ -79,30 +95,57 @@ def _checks():
     ok("participant_timeout_override", "participant_timeouts" in src and "drain_timeout_for" in src, "Per-participant timeouts")
 
     # Spec and tests
-    ok("spec_alignment", os.path.isfile(SPEC), SPEC)
+    ok("spec_alignment", SPEC.is_file(), str(SPEC))
     test_count = len(re.findall(r"#\[test\]", src))
     ok("test_coverage", test_count >= 30, f"{test_count} tests")
 
-    return r
+    return results
 
-def self_test():
-    r = _checks()
-    assert len(r) >= 25
-    for x in r:
-        assert "check" in x and "passed" in x
-    print(f"self_test: {len(r)} checks OK", file=sys.stderr)
+
+def _require(condition: bool, message: str) -> None:
+    if not condition:
+        raise RuntimeError(message)
+
+
+def self_test() -> bool:
+    results = _checks()
+    _require(len(results) >= 25, "too few checks")
+    for check in results:
+        _require("check" in check and "passed" in check, "malformed check result")
+    print(f"self_test: {len(results)} checks OK", file=sys.stderr)
     return True
 
-def main():
-    logger = configure_test_logging("check_epoch_barrier")
-    as_json = "--json" in sys.argv
-    if "--self-test" in sys.argv: self_test(); return
-    results = _checks(); p = sum(1 for x in results if x["passed"]); t = len(results); v = "PASS" if p == t else "FAIL"
-    if as_json:
-        print(json.dumps({"bead_id": BEAD, "section": SECTION, "gate_script": os.path.basename(__file__), "checks_passed": p, "checks_total": t, "verdict": v, "checks": results}, indent=2))
-    else:
-        for x in results: print(f"  [{'PASS' if x['passed'] else 'FAIL'}] {x['check']}: {x['detail']}")
-        print(f"\n{BEAD}: {p}/{t} checks — {v}")
-    sys.exit(0 if v == "PASS" else 1)
 
-if __name__ == "__main__": main()
+def main() -> int:
+    configure_test_logging("check_epoch_barrier")
+    as_json = "--json" in sys.argv
+    if "--self-test" in sys.argv:
+        self_test()
+        return 0
+    results = _checks()
+    p = sum(1 for x in results if x["passed"])
+    t = len(results)
+    v = "PASS" if p == t else "FAIL"
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "bead_id": BEAD,
+                    "section": SECTION,
+                    "gate_script": Path(__file__).name,
+                    "checks_passed": p,
+                    "checks_total": t,
+                    "verdict": v,
+                    "checks": results,
+                },
+                indent=2,
+            )
+        )
+    else:
+        for x in results:
+            print(f"  [{'PASS' if x['passed'] else 'FAIL'}] {x['check']}: {x['detail']}")
+        print(f"\n{BEAD}: {p}/{t} checks — {v}")
+    return 0 if v == "PASS" else 1
+
+if __name__ == "__main__":
+    sys.exit(main())

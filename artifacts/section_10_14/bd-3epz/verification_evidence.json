@@ -2,13 +2,13 @@
   "bead_id": "bd-3epz",
   "section": "10.14",
   "title": "Section-wide verification gate: FrankenSQLite Deep-Mined Expansion",
-  "generated_at": "2026-02-26T00:20:32.913956+00:00",
+  "generated_at": "2026-05-02T17:47:31.665405+00:00",
   "verdict": "PASS",
   "gate_pass": true,
   "total_beads": 52,
-  "passing_beads": 52,
-  "failing_beads": 0,
-  "coverage_pct": 100.0,
+  "passing_beads": 51,
+  "failing_beads": 1,
+  "coverage_pct": 98.08,
   "coverage_threshold_pct": 90.0,
   "evidence_exists_count": 52,
   "spec_contract_count": 43,
@@ -35,11 +35,11 @@
     {
       "bead_id": "bd-12n3",
       "title": "Idempotency key derivation from request bytes with epoch binding",
-      "evidence_pass": true,
-      "evidence_verdict": "COMPLETED_WITH_BASELINE_WORKSPACE_FAILURES",
+      "evidence_pass": false,
+      "evidence_verdict": "CONTRACT_GATES_PASS_WITH_PARTIAL_REMOTE_VERIFICATION",
       "has_spec_contract": true,
       "has_verification_summary": true,
-      "overall_pass": true
+      "overall_pass": false
     },
     {
       "bead_id": "bd-15u3",
@@ -497,12 +497,12 @@
     {
       "id": "GATE-10.14-COVERAGE-THRESHOLD",
       "status": "PASS",
-      "detail": "100.0% passing (threshold 90.0%)"
+      "detail": "98.08% passing (threshold 90.0%)"
     },
     {
       "id": "GATE-10.14-ALL-BEADS",
-      "status": "PASS",
-      "detail": "52/52 beads passing"
+      "status": "FAIL",
+      "detail": "51/52 beads passing"
     },
     {
       "id": "GATE-10.14-SPEC-CONTRACTS",
@@ -515,7 +515,15 @@
       "detail": "52/52 verification summaries found"
     }
   ],
-  "gaps": [],
+  "gaps": [
+    {
+      "bead": "bd-12n3",
+      "title": "Idempotency key derivation from request bytes with epoch binding",
+      "verdict": "CONTRACT_GATES_PASS_WITH_PARTIAL_REMOTE_VERIFICATION",
+      "detail": "Evidence verdict: CONTRACT_GATES_PASS_WITH_PARTIAL_REMOTE_VERIFICATION",
+      "remediation": "Fix verification checks and regenerate evidence artifacts."
+    }
+  ],
   "events": [
     {
       "event_code": "GATE_10_14_EVALUATION_STARTED",
@@ -534,7 +542,7 @@
     {
       "event_code": "GATE_10_14_BEAD_CHECKED",
       "bead": "bd-12n3",
-      "overall_pass": true
+      "overall_pass": false
     },
     {
       "event_code": "GATE_10_14_BEAD_CHECKED",
@@ -785,10 +793,10 @@
       "event_code": "GATE_10_14_VERDICT_EMITTED",
       "verdict": "PASS",
       "total_beads": 52,
-      "passing_beads": 52,
-      "failing_beads": 0,
-      "coverage_pct": 100.0
+      "passing_beads": 51,
+      "failing_beads": 1,
+      "coverage_pct": 98.08
     }
   ],
-  "content_hash": "15c1b9de656f0da525410499b540f91256b6e83bb226e285f8c9573412bc28e6"
+  "content_hash": "777efb0270f7b7fef9bb85388e8aca90d795358104069d2bf386b9a432bc3732"
 }

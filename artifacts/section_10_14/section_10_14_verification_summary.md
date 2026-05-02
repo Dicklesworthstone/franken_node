@@ -3,8 +3,8 @@
 - Gate bead: `bd-3epz`
 - Verdict: `PASS`
 - Total beads: `52`
-- Passing: `52/52`
-- Coverage: `100.0%` (threshold: `90.0%`)
+- Passing: `51/52`
+- Coverage: `98.08%` (threshold: `90.0%`)
 - Spec contracts: `43/52`
 - Verification summaries: `52/52`
 
@@ -14,7 +14,7 @@
 |------|-------|----------|------|---------|---------|
 | bd-126h | Append-only marker stream for high-impact control  | PASS | YES | YES | PASS |
 | bd-129f | O(1) marker lookup by sequence and O(log N) timest | PASS | YES | YES | PASS |
-| bd-12n3 | Idempotency key derivation from request bytes with | PASS | YES | YES | PASS |
+| bd-12n3 | Idempotency key derivation from request bytes with | FAIL | YES | YES | FAIL |
 | bd-15u3 | Guardrail precedence enforcement (decision engine) | PASS | YES | YES | PASS |
 | bd-18ud | Durability modes (local and quorum) | PASS | YES | YES | PASS |
 | bd-1ayu | Overhead/rate clamp policy for hardening escalatio | PASS | YES | YES | PASS |
@@ -71,10 +71,10 @@
 |------|--------|--------|
 | GATE-10.14-BEAD-COUNT | PASS | 52 beads found (minimum 49) |
 | GATE-10.14-EVIDENCE-EXISTS | PASS | 52/52 evidence files found |
-| GATE-10.14-COVERAGE-THRESHOLD | PASS | 100.0% passing (threshold 90.0%) |
-| GATE-10.14-ALL-BEADS | PASS | 52/52 beads passing |
+| GATE-10.14-COVERAGE-THRESHOLD | PASS | 98.08% passing (threshold 90.0%) |
+| GATE-10.14-ALL-BEADS | FAIL | 51/52 beads passing |
 | GATE-10.14-SPEC-CONTRACTS | FAIL | 43/52 spec contracts found |
 | GATE-10.14-SUMMARIES | PASS | 52/52 verification summaries found |
 
 ## Gap Analysis
-No open gaps. All section 10.14 beads verified and passing.
+1. `bd-12n3` - Idempotency key derivation from request bytes with epoch binding | Evidence verdict: CONTRACT_GATES_PASS_WITH_PARTIAL_REMOTE_VERIFICATION | remediation: Fix verification checks and regenerate evidence artifacts.

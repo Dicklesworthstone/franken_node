@@ -4,8 +4,8 @@
 - Title: Section-wide verification gate: FrankenSQLite Deep-Mined Expansion
 - Verdict: `PASS`
 - Total beads: `52`
-- Passing: `52/52`
-- Coverage: `100.0%`
+- Passing: `51/52`
+- Coverage: `98.08%`
 
 ## Artifacts
 
