@@ -2,6 +2,7 @@
 
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -45,6 +46,22 @@ class TestReportLoad(unittest.TestCase):
         data, checks = mod.load_report()
         self.assertIsInstance(data, dict)
         self.assertTrue(all(c["pass"] for c in checks))
+
+    def test_load_report_invalid_json_fails_closed(self):
+        original_report = mod.REPORT
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                mod.REPORT = Path(tmpdir) / "federated_privacy_leakage_report.json"
+                mod.REPORT.write_text("{bad-json", encoding="utf-8")
+
+                data, checks = mod.load_report()
+        finally:
+            mod.REPORT = original_report
+
+        self.assertIsNone(data)
+        valid_json_check = next(c for c in checks if c["check"] == "report: valid json")
+        self.assertFalse(valid_json_check["pass"])
+        self.assertIn("invalid", valid_json_check["detail"])
 
 
 class TestBudgetLogic(unittest.TestCase):
@@ -135,8 +152,13 @@ class TestJsonRoundTrip(unittest.TestCase):
     def test_json_serializable(self):
         result = mod.run_checks()
         blob = json.dumps(result, indent=2)
-        parsed = json.loads(blob)
+        parsed = json.JSONDecoder().decode(blob)
         self.assertEqual(parsed["bead_id"], "bd-1nab")
+
+    def test_adversarial_copy_avoids_json_round_trip(self):
+        source = (ROOT / "scripts" / "check_federated_privacy_leakage.py").read_text(encoding="utf-8")
+        self.assertIn("deepcopy(data)", source)
+        self.assertNotIn("json.loads(json.dumps(data))", source)
 
 
 if __name__ == "__main__":

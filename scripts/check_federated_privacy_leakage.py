@@ -9,11 +9,13 @@ Usage:
 
 import json
 import sys
+from copy import deepcopy
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 BEAD_ID = "bd-1nab"
@@ -35,6 +37,10 @@ REQUIRED_CONTRACT_TERMS = [
     "Scenario C",
     "Scenario D",
 ]
+
+
+def read_json_file(path: Path) -> dict:
+    return json.JSONDecoder().decode(path.read_text(encoding="utf-8"))
 
 
 def check_file(path: Path, label: str) -> dict:
@@ -75,9 +81,9 @@ def load_report() -> tuple[dict | None, list[dict]]:
     checks.append({"check": "report: exists", "pass": True, "detail": "found"})
 
     try:
-        data = json.loads(REPORT.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        checks.append({"check": "report: valid json", "pass": False, "detail": "invalid"})
+        data = read_json_file(REPORT)
+    except (json.JSONDecodeError, OSError) as exc:
+        checks.append({"check": "report: valid json", "pass": False, "detail": f"invalid: {exc}"})
         return None, checks
 
     checks.append({"check": "report: valid json", "pass": True, "detail": "valid"})
@@ -285,7 +291,7 @@ def check_report(data: dict | None) -> list[dict]:
         "detail": "stable" if deterministic else "unstable channel aggregation",
     })
 
-    adversarial = json.loads(json.dumps(data))
+    adversarial = deepcopy(data)
     if adversarial.get("channels"):
         adversarial["channels"][0]["n_plus_one_blocked"] = False
     adversarial_sensitive = not channel_exhaustion_blocking_ok(adversarial.get("channels", []))
@@ -344,7 +350,7 @@ def self_test() -> tuple[bool, list[dict]]:
 
 
 def main() -> int:
-    logger = configure_test_logging("check_federated_privacy_leakage")
+    configure_test_logging("check_federated_privacy_leakage")
     as_json = "--json" in sys.argv
     run_self_test = "--self-test" in sys.argv
 
