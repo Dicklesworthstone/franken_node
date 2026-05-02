@@ -13,21 +13,10 @@ use serde::{Deserialize, Serialize};
 use crate::config::SecurityConfig;
 
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
+use crate::push_bounded;
 const MAX_TRIGGER_CONDITIONS: usize = 4096;
 const MAX_MANDATORY_AUDIT_EVENTS: usize = 4096;
 const MAX_AUTO_RECOVERY_CRITERIA: usize = 4096;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 pub const DEGRADED_MODE_ENTERED: &str = "DEGRADED_MODE_ENTERED";
 pub const DEGRADED_MODE_EXITED: &str = "DEGRADED_MODE_EXITED";

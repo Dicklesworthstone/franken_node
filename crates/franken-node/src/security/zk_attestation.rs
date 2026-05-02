@@ -25,6 +25,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::push_bounded;
+
 /// Schema version for all ZK attestation payloads.
 pub const SCHEMA_VERSION: &str = "zka-v1.0";
 
@@ -39,18 +41,6 @@ const MAX_TIMING_SAMPLES: usize = 10_000;
 const MAX_AUDIT_TRAIL_ENTRIES: usize = 100_000;
 const MAX_ATTESTATIONS_LIST: usize = 10_000;
 const MAX_THREAD_HANDLES: usize = 1_000;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 // ── Invariant constants ─────────────────────────────────────────────────────
 

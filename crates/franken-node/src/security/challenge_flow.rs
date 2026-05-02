@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
+use crate::push_bounded;
 
 /// Maximum challenge records retained.  When exceeded, the oldest
 /// terminal-state (Denied / Promoted) challenges are evicted first.
@@ -27,18 +28,6 @@ const MAX_RECEIVED_PROOFS_PER_CHALLENGE: usize = 64;
 
 /// Maximum timeout operations per batch to bound memory usage.
 const MAX_TIMEOUT_BATCH_SIZE: usize = 1024;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 /// Safe conversion of field length to u64 with overflow protection.
 fn safe_field_len_as_u64(len: usize, field_name: &str) -> Result<u64, ChallengeError> {
@@ -2983,9 +2972,11 @@ mod tests {
             .submit_proof(&regression_cid, regression_proof, "regression_actor", 5_000)
             .unwrap_err();
         assert_eq!(regression_err.code, ERR_PROOF_INVALID);
-        assert!(regression_err
-            .message
-            .contains("predate challenge creation"));
+        assert!(
+            regression_err
+                .message
+                .contains("predate challenge creation")
+        );
 
         // Test timeout calculation with overflow protection
         let overflow_challenge = Challenge {

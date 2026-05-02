@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 #[allow(unused_imports)]
 use sha2::{Digest, Sha256};
 
+use crate::push_bounded;
 use crate::security::adversary_graph::AdversaryPosterior;
 use crate::security::constant_time;
 
@@ -21,19 +22,6 @@ pub const DEFAULT_QUARANTINE_SCOPE: &str = "global";
 
 /// Maximum control decisions to prevent memory exhaustion attacks.
 const MAX_DECISIONS: usize = 1024;
-
-/// Add item to Vec with bounded capacity. When capacity is exceeded, removes oldest entries.
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 fn decision_priority_cmp(left: &ControlDecision, right: &ControlDecision) -> Ordering {
     right
@@ -347,7 +335,7 @@ impl QuarantineController {
         is_valid &= constant_time::ct_eq(&entry.event_code, EVD_QUAR_CTRL_001);
         is_valid &= constant_time::ct_eq(&entry.policy_version, QUARANTINE_POLICY_VERSION);
         is_valid &= constant_time::ct_eq(&entry.policy_hash, &self.policy_hash());
-        
+
         is_valid &= entry.posterior.is_finite();
         is_valid &= entry.threshold.is_finite();
 
@@ -385,8 +373,7 @@ impl QuarantineController {
             &decision.evidence_hash,
             &decision.signed_evidence.evidence_hash,
         );
-        let scope_matches =
-            constant_time::ct_eq(&decision.scope, &decision.signed_evidence.scope);
+        let scope_matches = constant_time::ct_eq(&decision.scope, &decision.signed_evidence.scope);
         let action_matches = decision.action == decision.signed_evidence.action;
         let posterior_matches =
             decision.posterior.to_bits() == decision.signed_evidence.posterior.to_bits();
