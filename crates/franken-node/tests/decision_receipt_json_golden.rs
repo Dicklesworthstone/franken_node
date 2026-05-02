@@ -5,9 +5,9 @@
 //! change would break signature validation and compliance tooling.
 
 use frankenengine_node::security::decision_receipt::{
-    DECISION_RECEIPT_SIGNATURE_VERSION, Decision, Receipt,
+    Decision, Receipt, DECISION_RECEIPT_SIGNATURE_VERSION,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{fs, path::Path};
 
 /// Create a deterministic decision receipt for golden testing
@@ -26,6 +26,7 @@ fn create_deterministic_receipt() -> Receipt {
     let mut receipt = Receipt::new(
         "quarantine_extension",
         "security-admin@franken-node.prod",
+        "franken-node-control-plane",
         &input_data,
         &output_data,
         Decision::Approved,
@@ -48,6 +49,7 @@ fn create_deterministic_receipt() -> Receipt {
     // Override non-deterministic fields for golden test stability
     receipt.receipt_id = "01234567-89ab-cdef-0123-456789abcdef".to_string();
     receipt.timestamp = "2026-01-01T00:00:00Z".to_string();
+    receipt.nonce = "abcdef0123456789abcdef0123456789".to_string();
     receipt.previous_receipt_hash = Some("previous-receipt-hash-abc123def456".to_string());
 
     receipt
@@ -105,35 +107,47 @@ fn decision_receipt_json_schema_stability() {
         serde_json::to_value(&receipt).expect("Receipt should convert to JSON value");
 
     // Verify critical schema elements are present and correctly typed
-    assert!(json_value.get("receipt_id").unwrap().is_string());
-    assert!(json_value.get("action_name").unwrap().is_string());
-    assert!(json_value.get("actor_identity").unwrap().is_string());
-    assert!(json_value.get("timestamp").unwrap().is_string());
-    assert!(json_value.get("signature_version").unwrap().is_string());
-    assert!(json_value.get("input_hash").unwrap().is_string());
-    assert!(json_value.get("output_hash").unwrap().is_string());
-    assert!(json_value.get("decision").unwrap().is_string());
-    assert!(json_value.get("rationale").unwrap().is_string());
-    assert!(json_value.get("evidence_refs").unwrap().is_array());
-    assert!(json_value.get("policy_rule_chain").unwrap().is_array());
-    assert!(json_value.get("confidence").unwrap().is_number());
-    assert!(json_value.get("rollback_command").unwrap().is_string());
-    assert!(json_value.get("previous_receipt_hash").unwrap().is_string());
+    assert!(json_value.get("receipt_id").is_some_and(Value::is_string));
+    assert!(json_value.get("action_name").is_some_and(Value::is_string));
+    assert!(json_value
+        .get("actor_identity")
+        .is_some_and(Value::is_string));
+    assert!(json_value.get("timestamp").is_some_and(Value::is_string));
+    assert!(json_value
+        .get("signature_version")
+        .is_some_and(Value::is_string));
+    assert!(json_value.get("nonce").is_some_and(Value::is_string));
+    assert!(json_value.get("audience").is_some_and(Value::is_string));
+    assert!(json_value.get("input_hash").is_some_and(Value::is_string));
+    assert!(json_value.get("output_hash").is_some_and(Value::is_string));
+    assert!(json_value.get("decision").is_some_and(Value::is_string));
+    assert!(json_value.get("rationale").is_some_and(Value::is_string));
+    assert!(json_value.get("evidence_refs").is_some_and(Value::is_array));
+    assert!(json_value
+        .get("policy_rule_chain")
+        .is_some_and(Value::is_array));
+    assert!(json_value.get("confidence").is_some_and(Value::is_number));
+    assert!(json_value
+        .get("rollback_command")
+        .is_some_and(Value::is_string));
+    assert!(json_value
+        .get("previous_receipt_hash")
+        .is_some_and(Value::is_string));
 
     // Verify decision enum serializes correctly
     assert_eq!(
-        json_value.get("decision").unwrap().as_str().unwrap(),
-        "approved"
+        json_value.get("decision").and_then(Value::as_str),
+        Some("approved")
     );
     assert_eq!(
-        json_value
-            .get("signature_version")
-            .unwrap()
-            .as_str()
-            .unwrap(),
-        DECISION_RECEIPT_SIGNATURE_VERSION
+        json_value.get("signature_version").and_then(Value::as_str),
+        Some(DECISION_RECEIPT_SIGNATURE_VERSION)
+    );
+    assert_eq!(
+        json_value.get("audience").and_then(Value::as_str),
+        Some("franken-node-control-plane")
     );
 
     // Verify confidence is serialized as integer (canonical_f64 serialization)
-    assert!(json_value.get("confidence").unwrap().is_u64());
+    assert!(json_value.get("confidence").is_some_and(Value::is_u64));
 }

@@ -17,7 +17,7 @@ struct CoverageRow {
     vectors: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 struct PolicyLogExpectation {
     check_code: String,
     event_code: String,
