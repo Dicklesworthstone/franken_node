@@ -10,11 +10,10 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from typing import Any
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
-from typing import Any
 
 BEAD_ID = "bd-2owx"
 SECTION = "10.16"
@@ -72,8 +71,8 @@ def _load_json(path: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+        payload = json.JSONDecoder().decode(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
         return None
     return payload if isinstance(payload, dict) else None
 
@@ -252,10 +251,16 @@ def parse_policy_contract_block(markdown: str) -> dict[str, Any] | None:
     if not payload:
         return None
     try:
-        parsed = json.loads(payload)
+        parsed = json.JSONDecoder().decode(payload)
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _configure_logging() -> None:
+    from scripts.lib.test_logger import configure_test_logging
+
+    configure_test_logging("check_adjacent_substrate_policy")
 
 
 def compare_contract_to_manifest(
@@ -570,13 +575,17 @@ def self_test() -> bool:
             "policy_hash": "sha256:test",
         },
     }
-    assert not validate_manifest_schema(sample_manifest)
+    schema_errors = validate_manifest_schema(sample_manifest)
+    if schema_errors:
+        raise RuntimeError(f"expected valid sample manifest, got errors: {schema_errors}")
 
     bad_manifest = copy.deepcopy(sample_manifest)
     bad_manifest["substrates"][0]["name"] = "unknown"
-    assert any(
+    has_unknown_substrate_error = any(
         "unknown substrate name" in error for error in validate_manifest_schema(bad_manifest)
     )
+    if not has_unknown_substrate_error:
+        raise RuntimeError("expected unknown substrate validation error")
 
     markdown = (
         "prefix\n"
@@ -585,18 +594,23 @@ def self_test() -> bool:
         f"{CONTRACT_END}\n"
     )
     parsed = parse_policy_contract_block(markdown)
-    assert parsed is not None
-    assert parsed.get("policy_id") == "sample"
+    if parsed is None:
+        raise RuntimeError("expected embedded policy contract JSON to parse")
+    if parsed.get("policy_id") != "sample":
+        raise RuntimeError(f"unexpected policy_id in parsed contract: {parsed!r}")
 
     result = run_all()
-    assert result["bead_id"] == BEAD_ID
-    assert result["section"] == SECTION
-    assert "checks" in result and isinstance(result["checks"], list)
+    if result["bead_id"] != BEAD_ID:
+        raise RuntimeError(f"bead_id mismatch: {result['bead_id']}")
+    if result["section"] != SECTION:
+        raise RuntimeError(f"section mismatch: {result['section']}")
+    if "checks" not in result or not isinstance(result["checks"], list):
+        raise RuntimeError(f"malformed run_all result: {result!r}")
     return True
 
 
 def main() -> None:
-    logger = configure_test_logging("check_adjacent_substrate_policy")
+    _configure_logging()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="Emit JSON report")
     parser.add_argument("--self-test", action="store_true", help="Run internal self test")
