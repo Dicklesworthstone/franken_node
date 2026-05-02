@@ -133,6 +133,7 @@ impl Config {
                     bundle_version: "v1".to_string(),
                     max_replay_capsule_freshness_secs: timeouts::REPLAY_CAPSULE_FRESHNESS_SECS,
                     capsule_freshness_secs: None,
+                    max_submissions_per_window: None,
                 },
                 registry: RegistryConfig {
                     require_signatures: true,
@@ -199,6 +200,7 @@ impl Config {
                     bundle_version: "v1".to_string(),
                     max_replay_capsule_freshness_secs: timeouts::REPLAY_CAPSULE_FRESHNESS_SECS,
                     capsule_freshness_secs: None,
+                    max_submissions_per_window: None,
                 },
                 registry: RegistryConfig {
                     require_signatures: true,
@@ -265,6 +267,7 @@ impl Config {
                     bundle_version: "v1".to_string(),
                     max_replay_capsule_freshness_secs: timeouts::REPLAY_CAPSULE_FRESHNESS_SECS,
                     capsule_freshness_secs: None,
+                    max_submissions_per_window: None,
                 },
                 registry: RegistryConfig {
                     require_signatures: false,
@@ -2418,6 +2421,10 @@ pub struct ReplayConfig {
     /// When `None`, consumers use `timeouts::REPLAY_CAPSULE_FRESHNESS_SECS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capsule_freshness_secs: Option<u64>,
+    /// Maximum submissions per verifier per window for anti-gaming rate limiting.
+    /// When `None`, consumers use the default of 100 submissions per window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_submissions_per_window: Option<u32>,
 }
 
 // -- Registry --

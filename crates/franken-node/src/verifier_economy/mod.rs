@@ -709,6 +709,23 @@ impl VerifierEconomyRegistry {
     /// assert_eq!(registry.replay_capsule_freshness_secs(), 120);
     /// ```
     pub fn with_replay_capsule_freshness_secs(replay_capsule_freshness_secs: u64) -> Self {
+        Self::with_replay_capsule_freshness_and_submissions(replay_capsule_freshness_secs, 100)
+    }
+
+    /// Create a registry with custom replay-capsule freshness and submission limits.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::verifier_economy::VerifierEconomyRegistry;
+    ///
+    /// let registry = VerifierEconomyRegistry::with_replay_capsule_freshness_and_submissions(120, 50);
+    /// assert_eq!(registry.replay_capsule_freshness_secs(), 120);
+    /// ```
+    pub fn with_replay_capsule_freshness_and_submissions(
+        replay_capsule_freshness_secs: u64,
+        max_submissions_per_window: u32,
+    ) -> Self {
         let replay_capsule_freshness_secs =
             i64::try_from(replay_capsule_freshness_secs.max(1)).unwrap_or(i64::MAX);
         Self {
@@ -727,7 +744,7 @@ impl VerifierEconomyRegistry {
             attestation_id_exhausted: false,
             dispute_id_exhausted: false,
             submission_counts: BTreeMap::new(),
-            max_submissions_per_window: 100,
+            max_submissions_per_window,
             replay_capsule_freshness_secs,
         }
     }
@@ -745,7 +762,10 @@ impl VerifierEconomyRegistry {
     /// assert_eq!(registry.replay_capsule_freshness_secs(), 90);
     /// ```
     pub fn from_replay_config(config: &crate::config::ReplayConfig) -> Self {
-        Self::with_replay_capsule_freshness_secs(config.max_replay_capsule_freshness_secs)
+        Self::with_replay_capsule_freshness_and_submissions(
+            config.max_replay_capsule_freshness_secs,
+            config.max_submissions_per_window.unwrap_or(100),
+        )
     }
 
     /// Return the configured replay-capsule freshness limit in seconds.
