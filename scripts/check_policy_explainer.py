@@ -206,7 +206,7 @@ def check_examples_artifact():
             "detail": f"MISSING: {rel}",
         }
     try:
-        data = json.loads(EXAMPLES_ARTIFACT.read_text())
+        data = json.JSONDecoder().decode(EXAMPLES_ARTIFACT.read_text())
         # Support both "scenarios" and "examples" key names
         scenarios = data.get("scenarios", data.get("examples", []))
         count = len(scenarios)

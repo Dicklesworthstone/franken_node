@@ -1,22 +1,18 @@
 """Tests for scripts/check_policy_explainer.py (bd-mwvn)."""
 
-import importlib.util
 import json
 import os
+import runpy
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import TestCase, main
 
 ROOT = Path(__file__).resolve().parent.parent
 
-spec = importlib.util.spec_from_file_location(
-    "check_policy_explainer",
-    ROOT / "scripts" / "check_policy_explainer.py",
-)
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
+mod = SimpleNamespace(**runpy.run_path(str(ROOT / "scripts" / "check_policy_explainer.py")))
 
 
 class TestCheckFileHelper(TestCase):
@@ -138,16 +134,16 @@ class TestJsonOutput(TestCase):
     def test_json_serializable(self):
         result = mod.run_checks()
         serialized = json.dumps(result)
-        parsed = json.loads(serialized)
+        parsed = json.JSONDecoder().decode(serialized)
         self.assertEqual(parsed["bead_id"], "bd-mwvn")
 
     def test_cli_json(self):
         result = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "check_policy_explainer.py"), "--json"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, check=False,
         )
         self.assertEqual(result.returncode, 0)
-        data = json.loads(result.stdout)
+        data = json.JSONDecoder().decode(result.stdout)
         self.assertEqual(data["verdict"], "PASS")
 
 
