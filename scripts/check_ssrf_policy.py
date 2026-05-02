@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-from pathlib import Path
 """Verification script for bd-1nk5: SSRF-deny default policy template."""
 
 import json
@@ -7,9 +6,11 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
+
 CHECKS = []
 
 
@@ -25,8 +26,15 @@ def check(check_id, description, passed, details=None):
     return passed
 
 
+def _configure_logging() -> None:
+    from scripts.lib.test_logger import configure_test_logging
+
+    configure_test_logging("check_ssrf_policy")
+
+
 def main():
-    logger = configure_test_logging("check_ssrf_policy")
+    _configure_logging()
+    CHECKS.clear()
     print("bd-1nk5: SSRF-Deny Default Policy Template — Verification\n")
     all_pass = True
 
@@ -34,7 +42,7 @@ def main():
     impl_path = os.path.join(ROOT, "crates/franken-node/src/security/ssrf_policy.rs")
     impl_exists = os.path.isfile(impl_path)
     if impl_exists:
-        content = Path(impl_path).read_text()
+        content = Path(impl_path).read_text(encoding="utf-8")
         has_template = "struct SsrfPolicyTemplate" in content
         has_cidr = "struct CidrRange" in content
         has_receipt = "struct PolicyReceipt" in content
@@ -47,7 +55,7 @@ def main():
 
     # SSRF-CIDRS: All 7 standard CIDR ranges
     if impl_exists:
-        content = Path(impl_path).read_text()
+        content = Path(impl_path).read_text(encoding="utf-8")
         cidrs = ["127, 0, 0, 0", "10, 0, 0, 0", "172, 16, 0, 0",
                  "192, 168, 0, 0", "169, 254, 0, 0", "100, 64, 0, 0", "0, 0, 0, 0"]
         found = sum(1 for c in cidrs if c in content)
@@ -58,7 +66,7 @@ def main():
 
     # SSRF-ERRORS: All 4 error codes
     if impl_exists:
-        content = Path(impl_path).read_text()
+        content = Path(impl_path).read_text(encoding="utf-8")
         errors = ["SSRF_DENIED", "SSRF_INVALID_IP", "SSRF_RECEIPT_MISSING", "SSRF_TEMPLATE_INVALID"]
         found = [e for e in errors if e in content]
         all_pass &= check("SSRF-ERRORS", "All 4 error codes present",
@@ -70,7 +78,7 @@ def main():
     toml_path = os.path.join(ROOT, "config/policies/network_guard_default.toml")
     toml_exists = os.path.isfile(toml_path)
     if toml_exists:
-        content = Path(toml_path).read_text()
+        content = Path(toml_path).read_text(encoding="utf-8")
         has_cidrs = "blocked_cidrs" in content
         has_template = "ssrf_deny_default" in content
     else:
@@ -83,7 +91,7 @@ def main():
     fixture_valid = False
     if os.path.isfile(fixture_path):
         try:
-            data = json.loads(Path(fixture_path).read_text())
+            data = json.JSONDecoder().decode(Path(fixture_path).read_text(encoding="utf-8"))
             fixture_valid = "cases" in data and len(data["cases"]) >= 8
         except json.JSONDecodeError:
             pass
@@ -95,7 +103,7 @@ def main():
     report_valid = False
     if os.path.isfile(report_path):
         try:
-            data = json.loads(Path(report_path).read_text())
+            data = json.JSONDecoder().decode(Path(report_path).read_text(encoding="utf-8"))
             report_valid = "ssrf_patterns_tested" in data and data.get("verdict") == "PASS"
         except json.JSONDecodeError:
             pass
@@ -105,7 +113,7 @@ def main():
     sec_path = os.path.join(ROOT, "tests/security/ssrf_default_deny.rs")
     sec_exists = os.path.isfile(sec_path)
     if sec_exists:
-        content = Path(sec_path).read_text()
+        content = Path(sec_path).read_text(encoding="utf-8")
         has_deny = "denies_" in content
         has_allow = "allows_" in content
         has_allowlist = "allowlist" in content
@@ -120,7 +128,7 @@ def main():
         result = subprocess.run(
             ["rch", "exec", "--", "cargo", "test", "-p", "frankenengine-node", "--", "security::ssrf_policy"],
             capture_output=True, text=True, timeout=3600,
-            cwd=os.path.join(ROOT, "crates/franken-node")
+            cwd=os.path.join(ROOT, "crates/franken-node"), check=False,
         )
         test_output = result.stdout + result.stderr
         matches = re.findall(r"test result: ok\. (\d+) passed", test_output)
@@ -135,7 +143,7 @@ def main():
     spec_path = os.path.join(ROOT, "docs/specs/section_10_13/bd-1nk5_contract.md")
     spec_exists = os.path.isfile(spec_path)
     if spec_exists:
-        content = Path(spec_path).read_text()
+        content = Path(spec_path).read_text(encoding="utf-8")
         has_invariants = "INV-SSRF" in content
         has_receipt = "PolicyReceipt" in content
     else:
@@ -159,9 +167,8 @@ def main():
 
     evidence_dir = os.path.join(ROOT, "artifacts/section_10_13/bd-1nk5")
     os.makedirs(evidence_dir, exist_ok=True)
-    with open(os.path.join(evidence_dir, "verification_evidence.json"), "w") as f:
-        json.dump(evidence, f, indent=2)
-        f.write("\n")
+    evidence_path = Path(evidence_dir) / "verification_evidence.json"
+    evidence_path.write_text(f"{json.dumps(evidence, indent=2)}\n", encoding="utf-8")
 
     return 0 if all_pass else 1
 

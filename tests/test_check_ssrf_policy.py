@@ -3,6 +3,7 @@
 import json
 import os
 import unittest
+from pathlib import Path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -15,23 +16,20 @@ class TestSsrfPolicyFixtures(unittest.TestCase):
 
     def test_deny_fixture_has_cases(self):
         path = os.path.join(ROOT, "fixtures/ssrf_policy/ssrf_deny_scenarios.json")
-        with open(path) as f:
-            data = json.load(f)
+        data = json.JSONDecoder().decode(Path(path).read_text(encoding="utf-8"))
         self.assertIn("cases", data)
         self.assertGreaterEqual(len(data["cases"]), 8)
 
     def test_deny_fixture_has_deny_and_allow(self):
         path = os.path.join(ROOT, "fixtures/ssrf_policy/ssrf_deny_scenarios.json")
-        with open(path) as f:
-            data = json.load(f)
+        data = json.JSONDecoder().decode(Path(path).read_text(encoding="utf-8"))
         actions = [c["expected_action"] for c in data["cases"]]
         self.assertIn("allow", actions)
         self.assertIn("deny", actions)
 
     def test_deny_fixture_cases_have_fields(self):
         path = os.path.join(ROOT, "fixtures/ssrf_policy/ssrf_deny_scenarios.json")
-        with open(path) as f:
-            data = json.load(f)
+        data = json.JSONDecoder().decode(Path(path).read_text(encoding="utf-8"))
         for case in data["cases"]:
             self.assertIn("host", case)
             self.assertIn("port", case)
@@ -40,8 +38,7 @@ class TestSsrfPolicyFixtures(unittest.TestCase):
 
     def test_deny_fixture_covers_all_categories(self):
         path = os.path.join(ROOT, "fixtures/ssrf_policy/ssrf_deny_scenarios.json")
-        with open(path) as f:
-            data = json.load(f)
+        data = json.JSONDecoder().decode(Path(path).read_text(encoding="utf-8"))
         categories = {c["category"] for c in data["cases"]}
         for cat in ["loopback", "private", "metadata", "tailnet", "public"]:
             self.assertIn(cat, categories, f"Missing category {cat}")
@@ -52,8 +49,7 @@ class TestSsrfPolicyFixtures(unittest.TestCase):
 
     def test_allowlist_fixture_has_cases(self):
         path = os.path.join(ROOT, "fixtures/ssrf_policy/allowlist_scenarios.json")
-        with open(path) as f:
-            data = json.load(f)
+        data = json.JSONDecoder().decode(Path(path).read_text(encoding="utf-8"))
         self.assertIn("cases", data)
         self.assertGreaterEqual(len(data["cases"]), 2)
 
@@ -66,15 +62,13 @@ class TestSsrfPolicyTestReport(unittest.TestCase):
 
     def test_report_valid_json(self):
         path = os.path.join(ROOT, "artifacts/section_10_13/bd-1nk5/ssrf_policy_test_report.json")
-        with open(path) as f:
-            data = json.load(f)
+        data = json.JSONDecoder().decode(Path(path).read_text(encoding="utf-8"))
         self.assertIn("ssrf_patterns_tested", data)
         self.assertEqual(data["verdict"], "PASS")
 
     def test_report_covers_all_patterns(self):
         path = os.path.join(ROOT, "artifacts/section_10_13/bd-1nk5/ssrf_policy_test_report.json")
-        with open(path) as f:
-            data = json.load(f)
+        data = json.JSONDecoder().decode(Path(path).read_text(encoding="utf-8"))
         patterns = [p["pattern"] for p in data["ssrf_patterns_tested"]]
         for pat in ["ipv4_loopback", "rfc1918_class_a", "rfc1918_class_b",
                     "rfc1918_class_c", "cloud_metadata", "cgnat_tailnet",
@@ -83,8 +77,7 @@ class TestSsrfPolicyTestReport(unittest.TestCase):
 
     def test_report_has_allowlist_tests(self):
         path = os.path.join(ROOT, "artifacts/section_10_13/bd-1nk5/ssrf_policy_test_report.json")
-        with open(path) as f:
-            data = json.load(f)
+        data = json.JSONDecoder().decode(Path(path).read_text(encoding="utf-8"))
         self.assertIn("allowlist_tests", data)
         self.assertGreaterEqual(len(data["allowlist_tests"]), 2)
 
@@ -94,8 +87,7 @@ class TestSsrfPolicyImplementation(unittest.TestCase):
     def setUp(self):
         self.impl_path = os.path.join(ROOT, "crates/franken-node/src/security/ssrf_policy.rs")
         self.assertTrue(os.path.isfile(self.impl_path))
-        with open(self.impl_path) as f:
-            self.content = f.read()
+        self.content = Path(self.impl_path).read_text(encoding="utf-8")
 
     def test_has_ssrf_policy_template(self):
         self.assertIn("struct SsrfPolicyTemplate", self.content)
@@ -139,8 +131,7 @@ class TestSsrfPolicyToml(unittest.TestCase):
     def setUp(self):
         self.toml_path = os.path.join(ROOT, "config/policies/network_guard_default.toml")
         self.assertTrue(os.path.isfile(self.toml_path))
-        with open(self.toml_path) as f:
-            self.content = f.read()
+        self.content = Path(self.toml_path).read_text(encoding="utf-8")
 
     def test_has_template_name(self):
         self.assertIn("ssrf_deny_default", self.content)
@@ -162,8 +153,7 @@ class TestSsrfPolicySpec(unittest.TestCase):
     def setUp(self):
         self.spec_path = os.path.join(ROOT, "docs/specs/section_10_13/bd-1nk5_contract.md")
         self.assertTrue(os.path.isfile(self.spec_path))
-        with open(self.spec_path) as f:
-            self.content = f.read()
+        self.content = Path(self.spec_path).read_text(encoding="utf-8")
 
     def test_has_invariants(self):
         for inv in ["INV-SSRF-DEFAULT-DENY", "INV-SSRF-RECEIPT",
@@ -177,6 +167,21 @@ class TestSsrfPolicySpec(unittest.TestCase):
     def test_has_policy_receipt_schema(self):
         self.assertIn("PolicyReceipt", self.content)
         self.assertIn("trace_id", self.content)
+
+
+class TestSsrfChecker(unittest.TestCase):
+
+    def setUp(self):
+        self.check_path = os.path.join(ROOT, "scripts/check_ssrf_policy.py")
+        self.assertTrue(os.path.isfile(self.check_path))
+        self.content = Path(self.check_path).read_text(encoding="utf-8")
+
+    def test_checker_clears_accumulated_checks(self):
+        self.assertIn("CHECKS.clear()", self.content)
+
+    def test_checker_uses_rch_exec_not_local_cargo(self):
+        self.assertIn('"rch", "exec", "--", "cargo"', self.content)
+        self.assertIn("check=False", self.content)
 
 
 if __name__ == "__main__":
