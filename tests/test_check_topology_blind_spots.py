@@ -2,21 +2,17 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-_spec = importlib.util.spec_from_file_location(
-    "check_topology_blind_spots",
-    ROOT / "scripts" / "check_topology_blind_spots.py",
-)
-mod = importlib.util.module_from_spec(_spec)
-sys.modules[_spec.name] = mod
-_spec.loader.exec_module(mod)
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import check_topology_blind_spots as mod
 
 
 class TestSelfTest(unittest.TestCase):
@@ -194,7 +190,7 @@ class TestMissingFileDetection(unittest.TestCase):
 
     def _run_with_missing(self, fn, attr_name):
         """Run a check with a path patched to a non-existent file."""
-        fake = Path("/tmp/nonexistent_bd1n1t_test_file.md")
+        fake = ROOT.parent / "nonexistent_bd1n1t_test_file.md"
         original = getattr(mod, attr_name)
         try:
             setattr(mod, attr_name, fake)
@@ -299,7 +295,7 @@ class TestJsonOutput(unittest.TestCase):
     def test_json_roundtrip(self) -> None:
         result = mod.run_all()
         output = json.dumps(result, indent=2)
-        parsed = json.loads(output)
+        parsed = json.JSONDecoder().decode(output)
         self.assertEqual(parsed["bead_id"], "bd-1n1t")
 
     def test_json_subprocess(self) -> None:
@@ -310,10 +306,11 @@ class TestJsonOutput(unittest.TestCase):
                 "--json",
             ],
             capture_output=True,
+            check=False,
             text=True,
         )
         self.assertEqual(proc.returncode, 0)
-        parsed = json.loads(proc.stdout)
+        parsed = json.JSONDecoder().decode(proc.stdout)
         self.assertEqual(parsed["bead_id"], "bd-1n1t")
         self.assertEqual(parsed["verdict"], "PASS")
 
@@ -328,7 +325,7 @@ class TestSafeRel(unittest.TestCase):
         self.assertIn("docs", result)
 
     def test_non_root_path(self) -> None:
-        p = Path("/tmp/fake/test.md")
+        p = ROOT.parent / "fake" / "test.md"
         result = mod._safe_rel(p)
         self.assertEqual(result, str(p))
 
@@ -475,6 +472,38 @@ class TestCheckHelper(unittest.TestCase):
         mod._check("test_fail", False, "it failed")
         self.assertEqual(len(mod.RESULTS), 1)
         self.assertFalse(mod.RESULTS[0]["passed"])
+
+
+class TestVerificationEvidenceFailures(unittest.TestCase):
+    def setUp(self) -> None:
+        mod.RESULTS.clear()
+        self.original_evidence = mod.EVIDENCE
+
+    def tearDown(self) -> None:
+        mod.EVIDENCE = self.original_evidence
+        mod.RESULTS.clear()
+
+    def test_malformed_verification_evidence_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mod.EVIDENCE = Path(tmpdir) / "verification_evidence.json"
+            mod.EVIDENCE.write_text("{bad-json", encoding="utf-8")
+
+            mod.check_verification_evidence()
+
+        self.assertEqual(mod.RESULTS[0]["name"], "verification_evidence")
+        self.assertFalse(mod.RESULTS[0]["passed"])
+        self.assertIn("parse error", mod.RESULTS[0]["detail"].lower())
+
+    def test_non_object_verification_evidence_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mod.EVIDENCE = Path(tmpdir) / "verification_evidence.json"
+            mod.EVIDENCE.write_text("[]", encoding="utf-8")
+
+            mod.check_verification_evidence()
+
+        self.assertEqual(mod.RESULTS[0]["name"], "verification_evidence")
+        self.assertFalse(mod.RESULTS[0]["passed"])
+        self.assertIn("incorrect bead_id or status", mod.RESULTS[0]["detail"])
 
 
 if __name__ == "__main__":

@@ -15,11 +15,12 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
-from typing import Any
+
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 SPEC = ROOT / "docs" / "specs" / "section_12" / "bd-1n1t_contract.md"
@@ -65,6 +66,14 @@ RESULTS: list[dict[str, Any]] = []
 
 def _check(name: str, passed: bool, detail: str) -> None:
     RESULTS.append({"name": name, "passed": bool(passed), "detail": detail})
+
+
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    return json.JSONDecoder().decode(_read_text(path))
 
 
 def _safe_rel(path: Path) -> str:
@@ -134,7 +143,7 @@ def check_spec_event_codes() -> None:
     if not SPEC.is_file():
         _check("spec_event_codes", False, "Spec file missing")
         return
-    text = SPEC.read_text()
+    text = _read_text(SPEC)
     missing = [c for c in SPEC_EVENT_CODES if c not in text]
     ok = len(missing) == 0
     _check(
@@ -148,7 +157,7 @@ def check_spec_invariants() -> None:
     if not SPEC.is_file():
         _check("spec_invariants", False, "Spec file missing")
         return
-    text = SPEC.read_text()
+    text = _read_text(SPEC)
     missing = [i for i in SPEC_INVARIANTS if i not in text]
     ok = len(missing) == 0
     _check(
@@ -162,7 +171,7 @@ def check_spec_countermeasures() -> None:
     if not SPEC.is_file():
         _check("spec_countermeasures", False, "Spec file missing")
         return
-    text = SPEC.read_text()
+    text = _read_text(SPEC)
     # Spec uses different countermeasure names: Graph Ingestion, Metric Baselines,
     # Choke-Point Alerts, Cycle Handling
     spec_cms = ["Graph Ingestion", "Metric Baselines", "Choke-Point"]
@@ -179,7 +188,7 @@ def check_spec_threshold_drift() -> None:
     if not SPEC.is_file():
         _check("spec_threshold_drift", False, "Spec file missing")
         return
-    text = SPEC.read_text()
+    text = _read_text(SPEC)
     ok = "20%" in text
     _check(
         "spec_threshold_drift",
@@ -192,7 +201,7 @@ def check_spec_threshold_chokepoint() -> None:
     if not SPEC.is_file():
         _check("spec_threshold_chokepoint", False, "Spec file missing")
         return
-    text = SPEC.read_text()
+    text = _read_text(SPEC)
     ok = "50%" in text
     _check(
         "spec_threshold_chokepoint",
@@ -205,7 +214,7 @@ def check_spec_keywords() -> None:
     if not SPEC.is_file():
         _check("spec_keywords", False, "Spec file missing")
         return
-    text = SPEC.read_text().lower()
+    text = _read_text(SPEC).lower()
     keywords = ["topology", "blind spot", "transitive", "depth", "remediation"]
     missing = [k for k in keywords if k not in text]
     ok = len(missing) == 0
@@ -220,7 +229,7 @@ def check_spec_scenarios() -> None:
     if not SPEC.is_file():
         _check("spec_scenarios", False, "Spec file missing")
         return
-    text = SPEC.read_text()
+    text = _read_text(SPEC)
     scenarios = ["Scenario A", "Scenario B", "Scenario C", "Scenario D"]
     missing = [s for s in scenarios if s not in text]
     ok = len(missing) == 0
@@ -235,7 +244,7 @@ def check_policy_event_codes() -> None:
     if not POLICY.is_file():
         _check("policy_event_codes", False, "Policy file missing")
         return
-    text = POLICY.read_text()
+    text = _read_text(POLICY)
     missing = [c for c in POLICY_EVENT_CODES if c not in text]
     ok = len(missing) == 0
     _check(
@@ -249,7 +258,7 @@ def check_policy_invariants() -> None:
     if not POLICY.is_file():
         _check("policy_invariants", False, "Policy file missing")
         return
-    text = POLICY.read_text()
+    text = _read_text(POLICY)
     missing = [i for i in POLICY_INVARIANTS if i not in text]
     ok = len(missing) == 0
     _check(
@@ -263,7 +272,7 @@ def check_policy_sections() -> None:
     if not POLICY.is_file():
         _check("policy_sections", False, "Policy file missing")
         return
-    text = POLICY.read_text()
+    text = _read_text(POLICY)
     sections = [
         "Escalation Procedures",
         "Evidence Requirements",
@@ -284,7 +293,7 @@ def check_policy_allowlist() -> None:
     if not POLICY.is_file():
         _check("policy_allowlist", False, "Policy file missing")
         return
-    text = POLICY.read_text().lower()
+    text = _read_text(POLICY).lower()
     ok = "allowlist" in text
     _check(
         "policy_allowlist",
@@ -297,7 +306,7 @@ def check_policy_remediation_register() -> None:
     if not POLICY.is_file():
         _check("policy_remediation_register", False, "Policy file missing")
         return
-    text = POLICY.read_text().lower()
+    text = _read_text(POLICY).lower()
     ok = "remediation register" in text
     _check(
         "policy_remediation_register",
@@ -310,7 +319,7 @@ def check_policy_risk_description() -> None:
     if not POLICY.is_file():
         _check("policy_risk_description", False, "Policy file missing")
         return
-    text = POLICY.read_text()
+    text = _read_text(POLICY)
     ok = "Topology Blind Spots" in text and "Risk Description" in text
     _check(
         "policy_risk_description",
@@ -323,8 +332,9 @@ def check_policy_dead_zone_detection() -> None:
     if not POLICY.is_file():
         _check("policy_dead_zone_detection", False, "Policy file missing")
         return
-    text = POLICY.read_text().lower()
-    ok = "dead zone" in text and "24" in POLICY.read_text()
+    policy_text = _read_text(POLICY)
+    text = policy_text.lower()
+    ok = "dead zone" in text and "24" in policy_text
     _check(
         "policy_dead_zone_detection",
         ok,
@@ -338,8 +348,9 @@ def check_policy_escalation() -> None:
     if not POLICY.is_file():
         _check("policy_escalation", False, "Policy file missing")
         return
-    text = POLICY.read_text().lower()
-    ok = "escalation" in text and "72" in POLICY.read_text()
+    policy_text = _read_text(POLICY)
+    text = policy_text.lower()
+    ok = "escalation" in text and "72" in policy_text
     _check(
         "policy_escalation",
         ok,
@@ -353,7 +364,7 @@ def check_policy_countermeasures() -> None:
     if not POLICY.is_file():
         _check("policy_countermeasures", False, "Policy file missing")
         return
-    text = POLICY.read_text()
+    text = _read_text(POLICY)
     cm_keywords = [
         "Trust Graph Coverage Audit",
         "Observability Contract",
@@ -380,14 +391,14 @@ def check_verification_evidence() -> None:
         )
         return
     try:
-        data = json.loads(EVIDENCE.read_text())
-        ok = data.get("bead_id") == "bd-1n1t" and data.get("status") == "pass"
+        data = _read_json(EVIDENCE)
+        ok = isinstance(data, dict) and data.get("bead_id") == "bd-1n1t" and data.get("status") == "pass"
         _check(
             "verification_evidence",
             ok,
             "Evidence file valid" if ok else "Evidence has incorrect bead_id or status",
         )
-    except (json.JSONDecodeError, KeyError) as exc:
+    except (json.JSONDecodeError, OSError) as exc:
         _check("verification_evidence", False, f"Evidence parse error: {exc}")
 
 
@@ -447,26 +458,31 @@ def run_all() -> dict[str, Any]:
     }
 
 
+def _require(condition: bool, message: str) -> None:
+    if not condition:
+        raise RuntimeError(message)
+
+
 def self_test() -> None:
     """Smoke-test: run all checks and assert the structure is valid."""
     result = run_all()
-    assert isinstance(result, dict)
-    assert result["bead_id"] == "bd-1n1t"
-    assert result["section"] == "12"
-    assert isinstance(result["checks"], list)
-    assert result["total"] == len(ALL_CHECKS)
-    assert result["passed"] <= result["total"]
-    assert result["failed"] == result["total"] - result["passed"]
-    assert result["verdict"] in ("PASS", "FAIL")
+    _require(isinstance(result, dict), "result must be a dict")
+    _require(result["bead_id"] == "bd-1n1t", "unexpected bead_id")
+    _require(result["section"] == "12", "unexpected section")
+    _require(isinstance(result["checks"], list), "checks must be a list")
+    _require(result["total"] == len(ALL_CHECKS), "total must match ALL_CHECKS")
+    _require(result["passed"] <= result["total"], "passed cannot exceed total")
+    _require(result["failed"] == result["total"] - result["passed"], "failed count inconsistent")
+    _require(result["verdict"] in ("PASS", "FAIL"), "unexpected verdict")
     for check in result["checks"]:
-        assert "name" in check
-        assert "passed" in check
-        assert "detail" in check
+        _require("name" in check, "check missing name")
+        _require("passed" in check, "check missing passed")
+        _require("detail" in check, "check missing detail")
     print("self_test passed")
 
 
 def main() -> None:
-    logger = configure_test_logging("check_topology_blind_spots")
+    configure_test_logging("check_topology_blind_spots")
     if "--self-test" in sys.argv:
         self_test()
         return
