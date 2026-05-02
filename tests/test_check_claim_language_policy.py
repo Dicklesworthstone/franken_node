@@ -1,14 +1,28 @@
 """Unit tests for scripts/check_claim_language_policy.py."""
 
 import json
-import sys
+import runpy
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "scripts"))
+SCRIPT = ROOT / "scripts" / "check_claim_language_policy.py"
 
-import check_claim_language_policy as mod
+
+class ScriptNamespace:
+    def __init__(self, script_globals: dict[str, object]) -> None:
+        object.__setattr__(self, "_script_globals", script_globals)
+
+    def __getattr__(self, name: str) -> object:
+        return self._script_globals[name]
+
+
+script_globals = runpy.run_path(str(SCRIPT))
+mod = ScriptNamespace(script_globals["run_checks"].__globals__)
+
+
+def load_json(text: str) -> dict[str, object]:
+    return json.JSONDecoder().decode(text)
 
 
 class TestConstants(unittest.TestCase):
@@ -252,7 +266,7 @@ class TestJsonOutput(unittest.TestCase):
     def test_json_serializable(self):
         result = mod.run_checks()
         output = json.dumps(result, indent=2)
-        parsed = json.loads(output)
+        parsed = load_json(output)
         self.assertEqual(parsed["bead_id"], "bd-33kj")
 
     def test_json_has_all_fields(self):

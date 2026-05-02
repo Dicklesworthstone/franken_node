@@ -17,10 +17,9 @@ import json
 import re
 import sys
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
 
 
 BEAD_ID = "bd-33kj"
@@ -81,6 +80,12 @@ def _read(path: Path) -> str:
 def _count_claim_mappings(text: str) -> int:
     """Count CLM-*-NN entries in the mapping table."""
     return len(re.findall(r"\bCLM-[A-Z]+-\d+\b", text))
+
+
+def _configure_logging() -> None:
+    from scripts.lib.test_logger import configure_test_logging
+
+    configure_test_logging("check_claim_language_policy")
 
 
 def run_checks() -> dict:
@@ -192,7 +197,7 @@ def run_checks() -> dict:
     evidence_verdict = None
     if EVIDENCE_PATH.is_file():
         try:
-            evidence_data = json.loads(EVIDENCE_PATH.read_text())
+            evidence_data = json.JSONDecoder().decode(EVIDENCE_PATH.read_text(encoding="utf-8"))
             evidence_verdict = evidence_data.get("verdict")
         except (json.JSONDecodeError, OSError):
             pass
@@ -246,23 +251,27 @@ def self_test() -> tuple[bool, list]:
     """Internal validation: ensure check structure is well-formed."""
     result = run_checks()
 
-    assert result["bead_id"] == BEAD_ID, f"bead_id mismatch: {result['bead_id']}"
-    assert result["section"] == SECTION, f"section mismatch: {result['section']}"
-    assert result["summary"]["total"] >= 25, (
-        f"expected >= 25 checks, got {result['summary']['total']}"
-    )
+    if result["bead_id"] != BEAD_ID:
+        raise RuntimeError(f"bead_id mismatch: {result['bead_id']}")
+    if result["section"] != SECTION:
+        raise RuntimeError(f"section mismatch: {result['section']}")
+    if result["summary"]["total"] < 25:
+        raise RuntimeError(f"expected >= 25 checks, got {result['summary']['total']}")
 
     for check in result["checks"]:
-        assert "name" in check, f"check missing 'name': {check}"
-        assert "passed" in check, f"check missing 'passed': {check}"
-        assert "detail" in check, f"check missing 'detail': {check}"
+        if "name" not in check:
+            raise RuntimeError(f"check missing 'name': {check}")
+        if "passed" not in check:
+            raise RuntimeError(f"check missing 'passed': {check}")
+        if "detail" not in check:
+            raise RuntimeError(f"check missing 'detail': {check}")
 
     all_pass = result["summary"]["failing"] == 0
     return all_pass, result["checks"]
 
 
 def main() -> None:
-    logger = configure_test_logging("check_claim_language_policy")
+    _configure_logging()
     if "--self-test" in sys.argv:
         ok, checks = self_test()
         status = "PASS" if ok else "FAIL"
