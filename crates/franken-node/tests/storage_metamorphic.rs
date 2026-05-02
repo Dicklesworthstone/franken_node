@@ -1,6 +1,5 @@
 use frankenengine_node::storage::frankensqlite_adapter::{
-    AdapterSummary, CallerContext, FrankensqliteAdapter, FrankensqliteLegacySystemReadExt,
-    PersistenceClass, ReadResult,
+    AdapterError, AdapterSummary, CallerContext, FrankensqliteAdapter, PersistenceClass, ReadResult,
 };
 use frankenengine_node::storage::retrievability_gate::{
     ArtifactId, RG_EVICTION_BLOCKED, RetrievabilityConfig, RetrievabilityGate, SegmentId,
@@ -75,8 +74,9 @@ fn direct_read(
 
 #[test]
 #[allow(deprecated)]
-fn explicit_and_legacy_calls_preserve_same_persistence_state() {
+fn explicit_and_legacy_calls_preserve_same_persistence_state() -> Result<(), AdapterError> {
     let caller = CallerContext::system("storage::metamorphic", "trace-explicit-legacy");
+    let legacy_caller = CallerContext::system("legacy::adapter", "legacy-read");
     let mut explicit = explicit_seeded_adapter("trace-explicit");
     let mut legacy = legacy_seeded_adapter();
 
@@ -101,9 +101,9 @@ fn explicit_and_legacy_calls_preserve_same_persistence_state() {
         ),
     ];
     let legacy_reads = [
-        legacy.read_legacy(PersistenceClass::AuditLog, "audit-1"),
-        legacy.read_legacy(PersistenceClass::ControlState, "control-1"),
-        legacy.read_legacy(PersistenceClass::Snapshot, "snapshot-1"),
+        legacy.read_legacy(&legacy_caller, PersistenceClass::AuditLog, "audit-1")?,
+        legacy.read_legacy(&legacy_caller, PersistenceClass::ControlState, "control-1")?,
+        legacy.read_legacy(&legacy_caller, PersistenceClass::Snapshot, "snapshot-1")?,
     ];
 
     for (explicit_read, legacy_read) in explicit_reads.iter().zip(legacy_reads.iter()) {
@@ -120,6 +120,8 @@ fn explicit_and_legacy_calls_preserve_same_persistence_state() {
         "summary should remain invariant under explicit vs legacy call surfaces"
     );
     assert_eq!(explicit.to_report(), legacy.to_report());
+
+    Ok(())
 }
 
 #[test]

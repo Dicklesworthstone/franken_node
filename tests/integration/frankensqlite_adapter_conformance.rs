@@ -1734,23 +1734,17 @@ mod tests {
     /// testing against the actual bd-1a1j persistence contract. This prevents
     /// divergence between hardcoded test data and real contract requirements.
     #[test]
-    fn bd1a1j_full_conformance_test() {
+    fn bd1a1j_full_conformance_test() -> Result<(), Box<dyn std::error::Error>> {
         use std::collections::{BTreeMap, BTreeSet};
         use std::fs;
         use std::path::Path;
 
         // Load golden catalog to verify against contract
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
-        let catalog_path = Path::new(&manifest_dir).join("tests/goldens/frankensqlite/persistence_class_catalog.json");
-        let catalog_content = fs::read_to_string(catalog_path).unwrap_or_else(|e| {
-            panic!(
-                "Failed to load golden catalog from {}: {}",
-                catalog_path.display(),
-                e
-            )
-        });
-        let catalog: serde_json::Value = serde_json::from_str(&catalog_content)
-            .unwrap_or_else(|e| panic!("Failed to parse golden catalog: {}", e));
+        let catalog_path = Path::new(&manifest_dir)
+            .join("tests/goldens/frankensqlite/persistence_class_catalog.json");
+        let catalog_content = fs::read_to_string(&catalog_path)?;
+        let catalog: serde_json::Value = serde_json::from_str(&catalog_content)?;
 
         // Load actual implementation data
         let actual_classes = canonical_classes();
@@ -1937,5 +1931,7 @@ mod tests {
             "{} out of {} BD-1A1J conformance requirements failed (compliance: {:.1}%)",
             failed_tests, total_tests, compliance_score
         );
+
+        Ok(())
     }
 }
