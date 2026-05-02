@@ -11,9 +11,11 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
+
 SRC = os.path.join(ROOT, "crates", "franken-node", "src", "control_plane", "control_lane_policy.rs")
 MOD = os.path.join(ROOT, "crates", "franken-node", "src", "control_plane", "mod.rs")
 SPEC = os.path.join(ROOT, "docs", "specs", "section_10_15", "bd-cuut_contract.md")
@@ -28,13 +30,19 @@ def check(name: str, passed: bool, detail: str = "") -> bool:
 
 def read(path: str) -> str:
     try:
-        with open(path, "r") as f:
-            return f.read()
+        return Path(path).read_text(encoding="utf-8")
     except FileNotFoundError:
         return ""
 
 
+def _configure_logging() -> None:
+    from scripts.lib.test_logger import configure_test_logging
+
+    configure_test_logging("check_control_lane_policy")
+
+
 def run_checks() -> bool:
+    results.clear()
     src = read(SRC)
     mod_src = read(MOD)
     spec = read(SPEC)
@@ -48,8 +56,8 @@ def run_checks() -> bool:
 
     # --- Three lane classes ---
     lanes = ["Cancel", "Timed", "Ready"]
-    for l in lanes:
-        check(f"lane_{l.lower()}", l in src, f"ControlLane::{l}")
+    for lane in lanes:
+        check(f"lane_{lane.lower()}", lane in src, f"ControlLane::{lane}")
 
     # --- Lane enum has exactly 3 variants ---
     lane_enum = src.count("ControlLane::Cancel") > 0 and src.count("ControlLane::Timed") > 0 and src.count("ControlLane::Ready") > 0
@@ -185,7 +193,7 @@ def self_test():
 
 
 def main():
-    logger = configure_test_logging("check_control_lane_policy")
+    _configure_logging()
     ok = run_checks()
     passed = sum(1 for r in results if r["passed"])
     total = len(results)

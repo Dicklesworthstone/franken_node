@@ -2,69 +2,83 @@
 """Unit tests for scripts/check_control_lane_policy.py (bd-cuut)."""
 from __future__ import annotations
 
-import importlib.util
 import json
-import os
+import runpy
 import subprocess
 import sys
 import unittest
+from pathlib import Path
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCRIPT = os.path.join(ROOT, "scripts", "check_control_lane_policy.py")
+ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / "scripts" / "check_control_lane_policy.py"
 
 
-def load_module():
-    spec = importlib.util.spec_from_file_location("check_control_lane_policy", SCRIPT)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+class ScriptNamespace:
+    def __init__(self, script_globals: dict[str, object]) -> None:
+        object.__setattr__(self, "_script_globals", script_globals)
+
+    def __getattr__(self, name: str) -> object:
+        return self._script_globals[name]
+
+
+script_globals = runpy.run_path(str(SCRIPT))
+mod = ScriptNamespace(script_globals["run_checks"].__globals__)
+
+
+def run_script(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *args],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=30,
+    )
+
+
+def load_json(text: str) -> dict[str, object]:
+    return json.JSONDecoder().decode(text)
 
 
 class TestSelfTest(unittest.TestCase):
     def test_self_test_passes(self):
-        mod = load_module()
         self.assertTrue(mod.self_test())
 
 
 class TestJsonOutput(unittest.TestCase):
     def test_json_flag_produces_valid_json(self):
-        out = subprocess.check_output(
-            [sys.executable, SCRIPT, "--json"], text=True
-        )
-        data = json.loads(out)
+        proc = run_script("--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = load_json(proc.stdout)
         self.assertIn("bead_id", data)
         self.assertEqual(data["bead_id"], "bd-cuut")
 
     def test_json_has_checks_array(self):
-        out = subprocess.check_output(
-            [sys.executable, SCRIPT, "--json"], text=True
-        )
-        data = json.loads(out)
+        proc = run_script("--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = load_json(proc.stdout)
         self.assertIsInstance(data["checks"], list)
         self.assertGreater(len(data["checks"]), 0)
 
     def test_json_ok_is_true(self):
-        out = subprocess.check_output(
-            [sys.executable, SCRIPT, "--json"], text=True
-        )
-        data = json.loads(out)
+        proc = run_script("--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = load_json(proc.stdout)
         self.assertTrue(data["ok"])
 
     def test_json_section(self):
-        out = subprocess.check_output(
-            [sys.executable, SCRIPT, "--json"], text=True
-        )
-        data = json.loads(out)
+        proc = run_script("--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = load_json(proc.stdout)
         self.assertEqual(data["section"], "10.15")
 
 
 class TestIndividualChecks(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        out = subprocess.check_output(
-            [sys.executable, SCRIPT, "--json"], text=True
-        )
-        data = json.loads(out)
+        proc = run_script("--json")
+        if proc.returncode != 0:
+            raise AssertionError(proc.stderr)
+        data = load_json(proc.stdout)
         cls.checks = {c["name"]: c for c in data["checks"]}
 
     def _assert_pass(self, name):
@@ -178,23 +192,24 @@ class TestIndividualChecks(unittest.TestCase):
 
 
 class TestOverall(unittest.TestCase):
+    def test_run_checks_does_not_accumulate_results(self):
+        mod.run_checks()
+        first_count = len(mod.results)
+        mod.run_checks()
+        self.assertEqual(len(mod.results), first_count)
+
     def test_exit_code_zero(self):
-        result = subprocess.run(
-            [sys.executable, SCRIPT], capture_output=True, text=True
-        )
+        result = run_script()
         self.assertEqual(result.returncode, 0)
 
     def test_human_output_contains_pass(self):
-        result = subprocess.run(
-            [sys.executable, SCRIPT], capture_output=True, text=True
-        )
+        result = run_script()
         self.assertIn("PASS", result.stdout)
 
     def test_all_checks_pass(self):
-        out = subprocess.check_output(
-            [sys.executable, SCRIPT, "--json"], text=True
-        )
-        data = json.loads(out)
+        proc = run_script("--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = load_json(proc.stdout)
         self.assertEqual(data["passed"], data["total"])
 
 
