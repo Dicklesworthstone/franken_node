@@ -13,21 +13,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::control_plane::mmr_proofs::{self, Hash, InclusionProof, MmrRoot};
 
 use crate::capacity_defaults::aliases::MAX_EVENTS;
+use crate::push_bounded;
 
 /// Maximum record IDs to prevent memory exhaustion attacks.
 const MAX_RECORD_IDS: usize = 8192;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 const RECORD_DIGEST_DOMAIN: &[u8] = b"anti_entropy_record_v1:";
 const ROOT_DIGEST_DOMAIN: &[u8] = b"anti_entropy_root_v1:";
@@ -928,7 +917,12 @@ impl AntiEntropyReconciler {
                 continue;
             }
 
-            push_accepted_bounded(&mut accepted, record.clone(), replaced, self.config.max_delta_batch)?;
+            push_accepted_bounded(
+                &mut accepted,
+                record.clone(),
+                replaced,
+                self.config.max_delta_batch,
+            )?;
         }
 
         // Phase 2: apply all validated records atomically.

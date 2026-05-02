@@ -20,6 +20,7 @@ use crate::control_plane::transition_abort::{
 };
 
 use crate::capacity_defaults::aliases::MAX_EVENTS;
+use crate::push_bounded;
 const MAX_HISTORY_ENTRIES: usize = 4096;
 
 pub const EPOCH_PROPOSED: &str = "EPOCH_PROPOSED";
@@ -636,18 +637,6 @@ fn manifest_hash_for_transition(
     }
     hasher.update(target_epoch.to_le_bytes());
     hex::encode(hasher.finalize())
-}
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::capacity_defaults::aliases::MAX_EVENTS;
+use crate::push_bounded;
 
 use crate::runtime::checkpoint::{
     CHECKPOINT_CONTRACT_VIOLATION, CHECKPOINT_MISSING, CHECKPOINT_SAVE, CHECKPOINT_WARNING,
@@ -232,18 +233,6 @@ fn duration_ms(duration: Duration) -> u64 {
 
 fn elapsed_ms(started: Instant) -> u64 {
     duration_ms(started.elapsed())
-}
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
 }
 
 #[cfg(test)]

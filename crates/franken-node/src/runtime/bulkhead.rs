@@ -8,21 +8,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::capacity_defaults::aliases::MAX_EVENTS;
+use crate::push_bounded;
 
 const MAX_OPERATION_ID_LEN: usize = 256;
 const MAX_PERMIT_ID_LEN: usize = 64;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 fn validate_identifier(field: &str, value: &str, max_len: usize) -> Result<(), BulkheadError> {
     if value.trim().is_empty() {

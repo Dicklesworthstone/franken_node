@@ -35,6 +35,7 @@ pub const SCHEMA_VERSION: &str = "hwp-v1.0";
 pub const MAX_RISK_LEVEL: u32 = 100;
 
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
+use crate::push_bounded;
 const MAX_DECISIONS: usize = 4096;
 const MAX_DISPATCHES: usize = 4096;
 
@@ -1236,18 +1237,6 @@ impl Default for HardwarePlanner {
         approved.insert("asupersync".to_string());
         Self::new(approved)
     }
-}
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
 }
 
 // ===========================================================================

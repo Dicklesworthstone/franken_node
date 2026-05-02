@@ -18,6 +18,8 @@ use std::sync::{
 };
 use std::thread;
 use std::time::{Duration, Instant};
+
+use crate::push_bounded;
 use fs2::FileExt;
 
 // Security: bounds for push_bounded to prevent memory exhaustion
@@ -38,18 +40,6 @@ struct LockstepCorpusManifest {
 struct LockstepCorpusCase {
     id: String,
     file: String,
-}
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
 }
 
 fn extend_bounded(items: &mut Vec<u8>, new_data: &[u8], max_total_bytes: usize) {
