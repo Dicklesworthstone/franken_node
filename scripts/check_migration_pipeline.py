@@ -9,12 +9,12 @@ Usage:
 
 import json
 import sys
-from pathlib import Path
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
 from datetime import datetime, timezone
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 # -- File paths ----------------------------------------------------------------
@@ -151,7 +151,7 @@ def _checks() -> list:
     evidence_pass = False
     if EVIDENCE_FILE.exists():
         try:
-            ev = json.loads(EVIDENCE_FILE.read_text(encoding="utf-8"))
+            ev = json.JSONDecoder().decode(EVIDENCE_FILE.read_text(encoding="utf-8"))
             evidence_pass = ev.get("verdict") == "PASS"
         except (json.JSONDecodeError, OSError):
             pass
@@ -366,7 +366,7 @@ def run_all() -> dict:
 
 
 def main():
-    logger = configure_test_logging("check_migration_pipeline")
+    configure_test_logging("check_migration_pipeline")
     if "--self-test" in sys.argv:
         result = self_test()
         for c in result["checks"]:
