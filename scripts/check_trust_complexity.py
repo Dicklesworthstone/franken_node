@@ -15,10 +15,11 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 SPEC = ROOT / "docs" / "specs" / "section_12" / "bd-kiqr_contract.md"
@@ -34,6 +35,14 @@ RESULTS: list[dict] = []
 
 def _check(name: str, passed: bool, detail: str) -> None:
     RESULTS.append({"name": name, "passed": passed, "detail": detail})
+
+
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _read_json(path: Path) -> dict:
+    return json.JSONDecoder().decode(_read_text(path))
 
 
 def _safe_rel(path: Path) -> str:
@@ -61,7 +70,7 @@ def check_risk_documented() -> None:
     if not POLICY.is_file():
         _check("risk_documented", False, "Risk policy file missing")
         return
-    text = POLICY.read_text()
+    text = _read_text(POLICY)
     ok = all(k in text for k in ["Trust-System Complexity", "Impact", "Likelihood"])
     _check("risk_documented", ok,
            "Risk description, impact, and likelihood documented" if ok else "Missing sections")
@@ -71,7 +80,7 @@ def check_replay_mechanism() -> None:
     if not POLICY.is_file():
         _check("replay_mechanism", False, "Risk policy file missing")
         return
-    text = POLICY.read_text().lower()
+    text = _read_text(POLICY).lower()
     ok = "replay" in text and "deterministic" in text
     _check("replay_mechanism", ok,
            "Deterministic replay mechanism documented" if ok else "Replay mechanism missing")
@@ -81,7 +90,7 @@ def check_degraded_mode() -> None:
     if not POLICY.is_file():
         _check("degraded_mode", False, "Risk policy file missing")
         return
-    text = POLICY.read_text()
+    text = _read_text(POLICY)
     text_lower = text.lower()
     ok = "degraded" in text_lower and "300s" in text and "safe-mode" in text_lower
     _check("degraded_mode", ok,
@@ -92,7 +101,7 @@ def check_complexity_budget() -> None:
     if not POLICY.is_file():
         _check("complexity_budget", False, "Risk policy file missing")
         return
-    text = POLICY.read_text().lower()
+    text = _read_text(POLICY).lower()
     ok = "complexity budget" in text and "depth" in text
     _check("complexity_budget", ok,
            "Complexity budget with depth limits documented" if ok else "Missing budget")
@@ -102,7 +111,7 @@ def check_countermeasures() -> None:
     if not POLICY.is_file():
         _check("countermeasures", False, "Risk policy file missing")
         return
-    text = POLICY.read_text().lower()
+    text = _read_text(POLICY).lower()
     ok = all(k in text for k in ["replay", "degraded", "budget", "dashboard"])
     _check("countermeasures", ok,
            "All countermeasures documented" if ok else "Missing countermeasures")
@@ -112,7 +121,7 @@ def check_event_codes() -> None:
     if not SPEC.is_file():
         _check("event_codes", False, "Spec file missing")
         return
-    text = SPEC.read_text()
+    text = _read_text(SPEC)
     missing = [c for c in EVENT_CODES if c not in text]
     ok = len(missing) == 0
     _check("event_codes", ok,
@@ -123,7 +132,7 @@ def check_invariants() -> None:
     if not SPEC.is_file():
         _check("invariants", False, "Spec file missing")
         return
-    text = SPEC.read_text()
+    text = _read_text(SPEC)
     missing = [i for i in INVARIANTS if i not in text]
     ok = len(missing) == 0
     _check("invariants", ok,
@@ -134,7 +143,7 @@ def check_spec_keywords() -> None:
     if not SPEC.is_file():
         _check("spec_keywords", False, "Spec file missing")
         return
-    text = SPEC.read_text().lower()
+    text = _read_text(SPEC).lower()
     keywords = ["complexity", "trust", "budget", "audit", "threshold"]
     missing = [k for k in keywords if k not in text]
     ok = len(missing) == 0
@@ -146,7 +155,7 @@ def check_threshold() -> None:
     if not SPEC.is_file():
         _check("threshold", False, "Spec file missing")
         return
-    text = SPEC.read_text()
+    text = _read_text(SPEC)
     ok = "replay divergence" in text.lower() and "0" in text
     _check("threshold", ok,
            "Zero-divergence threshold present" if ok else "Missing threshold")
@@ -156,7 +165,7 @@ def check_alert_pipeline() -> None:
     if not SPEC.is_file():
         _check("alert_pipeline", False, "Spec file missing")
         return
-    text = SPEC.read_text().lower()
+    text = _read_text(SPEC).lower()
     ok = "alert" in text and ("pipeline" in text or "escalation" in text)
     _check("alert_pipeline", ok,
            "Alert pipeline documented" if ok else "Alert pipeline missing")
@@ -166,7 +175,7 @@ def check_escalation() -> None:
     if not POLICY.is_file():
         _check("escalation", False, "Risk policy file missing")
         return
-    text = POLICY.read_text().lower()
+    text = _read_text(POLICY).lower()
     ok = "escalation" in text
     _check("escalation", ok,
            "Escalation procedures documented" if ok else "Missing escalation")
@@ -176,7 +185,7 @@ def check_evidence_requirements() -> None:
     if not POLICY.is_file():
         _check("evidence_requirements", False, "Risk policy file missing")
         return
-    text = POLICY.read_text().lower()
+    text = _read_text(POLICY).lower()
     ok = "evidence" in text and "review" in text
     _check("evidence_requirements", ok,
            "Evidence requirements for review documented" if ok else "Missing evidence reqs")
@@ -186,7 +195,7 @@ def check_monitoring() -> None:
     if not POLICY.is_file():
         _check("monitoring", False, "Risk policy file missing")
         return
-    text = POLICY.read_text().lower()
+    text = _read_text(POLICY).lower()
     ok = "dashboard" in text and "velocity" in text
     _check("monitoring", ok,
            "Monitoring with dashboards and velocity metrics documented" if ok else "Incomplete")
@@ -198,11 +207,11 @@ def check_verification_evidence() -> None:
                f"Evidence file MISSING: {_safe_rel(EVIDENCE)}")
         return
     try:
-        data = json.loads(EVIDENCE.read_text())
-        ok = data.get("bead_id") == "bd-kiqr" and data.get("status") == "pass"
+        data = _read_json(EVIDENCE)
+        ok = isinstance(data, dict) and data.get("bead_id") == "bd-kiqr" and data.get("status") == "pass"
         _check("verification_evidence", ok,
                "Evidence file valid" if ok else "Evidence has incorrect bead_id or status")
-    except (json.JSONDecodeError, KeyError) as exc:
+    except (json.JSONDecodeError, OSError) as exc:
         _check("verification_evidence", False, f"Evidence parse error: {exc}")
 
 
@@ -259,23 +268,34 @@ def run_all() -> dict:
 def self_test() -> None:
     """Smoke-test: run all checks and assert the structure is valid."""
     result = run_all()
-    assert isinstance(result, dict)
-    assert result["bead_id"] == "bd-kiqr"
-    assert result["section"] == "12"
-    assert isinstance(result["checks"], list)
-    assert result["total"] == len(ALL_CHECKS)
-    assert result["passed"] <= result["total"]
-    assert result["failed"] == result["total"] - result["passed"]
-    assert result["verdict"] in ("PASS", "FAIL")
+    if not isinstance(result, dict):
+        raise RuntimeError("self-test result must be a dict")
+    if result["bead_id"] != "bd-kiqr":
+        raise RuntimeError("self-test bead_id mismatch")
+    if result["section"] != "12":
+        raise RuntimeError("self-test section mismatch")
+    if not isinstance(result["checks"], list):
+        raise RuntimeError("self-test checks must be a list")
+    if result["total"] != len(ALL_CHECKS):
+        raise RuntimeError("self-test total must match ALL_CHECKS")
+    if result["passed"] > result["total"]:
+        raise RuntimeError("self-test passed count cannot exceed total")
+    if result["failed"] != result["total"] - result["passed"]:
+        raise RuntimeError("self-test failed count mismatch")
+    if result["verdict"] not in ("PASS", "FAIL"):
+        raise RuntimeError("self-test verdict must be PASS or FAIL")
     for check in result["checks"]:
-        assert "name" in check
-        assert "passed" in check
-        assert "detail" in check
+        if "name" not in check:
+            raise RuntimeError("self-test check missing name")
+        if "passed" not in check:
+            raise RuntimeError("self-test check missing passed")
+        if "detail" not in check:
+            raise RuntimeError("self-test check missing detail")
     print("self_test passed")
 
 
 def main() -> None:
-    logger = configure_test_logging("check_trust_complexity")
+    configure_test_logging("check_trust_complexity")
     if "--self-test" in sys.argv:
         self_test()
         return

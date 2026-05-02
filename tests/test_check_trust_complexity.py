@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -180,17 +181,18 @@ class TestJsonOutput(unittest.TestCase):
     def test_json_output(self) -> None:
         result = mod.run_all()
         output = json.dumps(result, indent=2)
-        parsed = json.loads(output)
+        parsed = json.JSONDecoder().decode(output)
         self.assertEqual(parsed["bead_id"], "bd-kiqr")
 
     def test_json_subprocess(self) -> None:
         proc = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "check_trust_complexity.py"), "--json"],
             capture_output=True,
+            check=False,
             text=True,
         )
         self.assertEqual(proc.returncode, 0)
-        parsed = json.loads(proc.stdout)
+        parsed = json.JSONDecoder().decode(proc.stdout)
         self.assertEqual(parsed["bead_id"], "bd-kiqr")
         self.assertEqual(parsed["verdict"], "PASS")
 
@@ -229,6 +231,38 @@ class TestSafeRel(unittest.TestCase):
         p = Path("/tmp/fake/test.md")
         result = mod._safe_rel(p)
         self.assertEqual(result, str(p))
+
+
+class TestVerificationEvidenceFailures(unittest.TestCase):
+    def setUp(self) -> None:
+        self.original_evidence = mod.EVIDENCE
+        mod.RESULTS.clear()
+
+    def tearDown(self) -> None:
+        mod.EVIDENCE = self.original_evidence
+        mod.RESULTS.clear()
+
+    def test_malformed_verification_evidence_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mod.EVIDENCE = Path(tmpdir) / "verification_evidence.json"
+            mod.EVIDENCE.write_text("{bad-json", encoding="utf-8")
+
+            mod.check_verification_evidence()
+
+        self.assertEqual(mod.RESULTS[0]["name"], "verification_evidence")
+        self.assertFalse(mod.RESULTS[0]["passed"])
+        self.assertIn("Evidence parse error", mod.RESULTS[0]["detail"])
+
+    def test_non_object_verification_evidence_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mod.EVIDENCE = Path(tmpdir) / "verification_evidence.json"
+            mod.EVIDENCE.write_text("[]", encoding="utf-8")
+
+            mod.check_verification_evidence()
+
+        self.assertEqual(mod.RESULTS[0]["name"], "verification_evidence")
+        self.assertFalse(mod.RESULTS[0]["passed"])
+        self.assertIn("incorrect bead_id or status", mod.RESULTS[0]["detail"])
 
 
 if __name__ == "__main__":
