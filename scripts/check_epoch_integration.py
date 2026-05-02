@@ -9,8 +9,7 @@ import sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 BEAD_ID = "bd-2gr"
@@ -109,7 +108,7 @@ def _check(name: str, passed: bool, detail: str) -> dict:
 def _read(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    except OSError:
         return ""
 
 
@@ -419,18 +418,20 @@ def run_all() -> dict:
 
 def self_test() -> bool:
     result = run_all()
-    assert result["bead_id"] == BEAD_ID
-    assert result["section"] == SECTION
-    assert result["total"] >= 40
+    if result["bead_id"] != BEAD_ID:
+        raise RuntimeError("unexpected bead_id")
+    if result["section"] != SECTION:
+        raise RuntimeError("unexpected section")
+    if result["total"] < 40:
+        raise RuntimeError("expected at least 40 checks")
     for check in result["checks"]:
-        assert "name" in check
-        assert "passed" in check
-        assert "detail" in check
+        if "name" not in check or "passed" not in check or "detail" not in check:
+            raise RuntimeError(f"malformed check: {check!r}")
     return True
 
 
 def main() -> None:
-    logger = configure_test_logging("check_epoch_integration")
+    configure_test_logging("check_epoch_integration")
     as_json = "--json" in sys.argv
 
     if "--self-test" in sys.argv:
