@@ -16,10 +16,9 @@ import json
 import re
 import sys
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
 
 
 CORPUS = ROOT / "fixtures" / "conformance" / "corpus_manifest.json"
@@ -51,7 +50,27 @@ def _rel(path: Path) -> str:
         return str(path)
 
 
-def _checks():
+def _load_json_object(path: Path) -> tuple[dict[str, object] | None, str]:
+    try:
+        data = json.JSONDecoder().decode(_read(path))
+    except json.JSONDecodeError as exc:
+        return None, f"invalid JSON: {exc}"
+    except OSError as exc:
+        return None, f"read failed: {exc}"
+
+    if not isinstance(data, dict):
+        return None, f"expected JSON object, got {type(data).__name__}"
+
+    return data, f"{path.name} parses as JSON"
+
+
+def _configure_logging() -> None:
+    from scripts.lib.test_logger import configure_test_logging
+
+    configure_test_logging("check_compatibility_corpus")
+
+
+def _checks() -> list[dict[str, object]]:
     results = []
 
     def ok(name, passed, detail=""):
@@ -64,12 +83,11 @@ def _checks():
     schema_valid = False
     schema_data = None
     if SCHEMA.is_file():
-        try:
-            schema_data = json.loads(_read(SCHEMA))
-            schema_valid = True
-        except (json.JSONDecodeError, OSError):
-            pass
-    ok("schema_valid_json", schema_valid, "fixture_metadata_schema.json parses as JSON")
+        schema_data, schema_detail = _load_json_object(SCHEMA)
+        schema_valid = schema_data is not None
+    else:
+        schema_detail = "fixture_metadata_schema.json missing"
+    ok("schema_valid_json", schema_valid, schema_detail)
 
     # 3. Schema has $schema field (Draft 2020-12)
     has_draft = False
@@ -92,12 +110,11 @@ def _checks():
     corpus_valid = False
     corpus_data = None
     if CORPUS.is_file():
-        try:
-            corpus_data = json.loads(_read(CORPUS))
-            corpus_valid = True
-        except (json.JSONDecodeError, OSError):
-            pass
-    ok("corpus_valid_json", corpus_valid, "corpus_manifest.json parses as JSON")
+        corpus_data, corpus_detail = _load_json_object(CORPUS)
+        corpus_valid = corpus_data is not None
+    else:
+        corpus_detail = "corpus_manifest.json missing"
+    ok("corpus_valid_json", corpus_valid, corpus_detail)
 
     # 7. Corpus has schema_version
     has_version = False
@@ -185,15 +202,17 @@ def _checks():
 def self_test():
     """Smoke-test that all checks produce output."""
     results = _checks()
-    assert len(results) >= 15, f"Expected >=15 checks, got {len(results)}"
+    if len(results) < 15:
+        raise RuntimeError(f"Expected >=15 checks, got {len(results)}")
     for r in results:
-        assert "check" in r and "passed" in r
+        if "check" not in r or "passed" not in r:
+            raise RuntimeError(f"Malformed check result: {r!r}")
     print(f"self_test: {len(results)} checks OK", file=sys.stderr)
     return True
 
 
 def main():
-    logger = configure_test_logging("check_compatibility_corpus")
+    _configure_logging()
     as_json = "--json" in sys.argv
 
     if "--self-test" in sys.argv:
