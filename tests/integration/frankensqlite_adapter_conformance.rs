@@ -1740,7 +1740,8 @@ mod tests {
         use std::path::Path;
 
         // Load golden catalog to verify against contract
-        let catalog_path = Path::new("tests/goldens/frankensqlite/persistence_class_catalog.json");
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+        let catalog_path = Path::new(&manifest_dir).join("tests/goldens/frankensqlite/persistence_class_catalog.json");
         let catalog_content = fs::read_to_string(catalog_path).unwrap_or_else(|e| {
             panic!(
                 "Failed to load golden catalog from {}: {}",
