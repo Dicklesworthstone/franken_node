@@ -1,14 +1,23 @@
 """Unit tests for scripts/check_migration_friction_persistence.py."""
 
 import json
-import sys
+import runpy
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "scripts"))
+SCRIPT = ROOT / "scripts" / "check_migration_friction_persistence.py"
 
-import check_migration_friction_persistence as mod
+
+class ScriptNamespace:
+    def __init__(self, script_globals: dict[str, object]) -> None:
+        object.__setattr__(self, "_script_globals", script_globals)
+
+    def __getattr__(self, name: str) -> object:
+        return self._script_globals[name]
+
+
+mod = ScriptNamespace(runpy.run_path(str(SCRIPT)))
 
 
 class TestConstants(unittest.TestCase):
@@ -116,7 +125,7 @@ class TestJsonRoundTrip(unittest.TestCase):
     def test_json_serializable(self):
         result = mod.run_checks()
         blob = json.dumps(result, indent=2)
-        parsed = json.loads(blob)
+        parsed = json.JSONDecoder().decode(blob)
         self.assertEqual(parsed["bead_id"], "bd-3jc1")
 
 

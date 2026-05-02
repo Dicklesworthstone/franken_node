@@ -31,6 +31,10 @@ REQUIRED_CONTRACT_TERMS = [
 ]
 
 
+def _json_decode(text: str) -> dict:
+    return json.JSONDecoder().decode(text)
+
+
 def check_file(path: Path, label: str) -> dict:
     ok = path.exists()
     return {
@@ -49,7 +53,7 @@ def load_report() -> tuple[dict | None, list[dict]]:
     checks.append({"check": "report: exists", "pass": True, "detail": "found"})
 
     try:
-        data = json.loads(REPORT.read_text(encoding="utf-8"))
+        data = _json_decode(REPORT.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         checks.append({"check": "report: valid json", "pass": False, "detail": "invalid"})
         return None, checks
