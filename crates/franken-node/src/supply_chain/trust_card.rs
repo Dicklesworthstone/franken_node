@@ -151,7 +151,7 @@ const DEFAULT_REGISTRY_KEY: &[u8] = b"franken-node-trust-card-registry-key-v1";
 const MIN_CONFIGURED_REGISTRY_KEY_BYTES: usize = 32;
 pub const TRUST_CARD_REGISTRY_SNAPSHOT_SCHEMA: &str = "franken-node/trust-card-registry-state/v1";
 
-/// Get registry signing key from config or default if not specified.
+/// Get registry signing key from config (fail-closed if not specified).
 fn get_registry_key(config: &crate::config::TrustConfig) -> Result<Vec<u8>, TrustCardError> {
     match &config.registry_signing_key {
         Some(key_base64) => {
@@ -768,7 +768,7 @@ impl TrustCardRegistry {
     /// - `config`: Trust configuration containing optional registry signing key.
     ///
     /// # Returns
-    /// A new empty `TrustCardRegistry` with signing key from config or default.
+    /// A new empty `TrustCardRegistry` with signing key from config (fail-closed if not configured).
     pub fn from_config(config: &crate::config::TrustConfig) -> Result<Self, TrustCardError> {
         let cache_ttl_secs = config.card_cache_ttl_secs.unwrap_or(DEFAULT_CACHE_TTL_SECS);
         let registry_key = get_registry_key(config)?;
