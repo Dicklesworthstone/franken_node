@@ -1,19 +1,28 @@
 """Unit tests for scripts/check_policy_checkpoint.py (bd-174)."""
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
+import runpy
+import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-spec = importlib.util.spec_from_file_location(
-    "check_policy_checkpoint", ROOT / "scripts" / "check_policy_checkpoint.py"
-)
-mod = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = mod
-spec.loader.exec_module(mod)
+
+
+class ScriptNamespace:
+    def __init__(self, values: dict[str, object]) -> None:
+        object.__setattr__(self, "_values", values)
+
+    def __getattr__(self, name: str) -> object:
+        return self._values[name]
+
+    def __setattr__(self, name: str, value: object) -> None:
+        self._values[name] = value
+
+
+script_globals = runpy.run_path(str(ROOT / "scripts" / "check_policy_checkpoint.py"))
+mod = ScriptNamespace(script_globals["run_all"].__globals__)
 
 
 class TestRunAllStructure(unittest.TestCase):
@@ -432,7 +441,7 @@ class TestJsonOutput(unittest.TestCase):
     def test_json_serializable(self) -> None:
         result = mod.run_all()
         output = json.dumps(result, indent=2)
-        parsed = json.loads(output)
+        parsed = json.JSONDecoder().decode(output)
         self.assertEqual(parsed["bead_id"], "bd-174")
         self.assertEqual(parsed["section"], "10.10")
         self.assertIn("checks", parsed)
@@ -441,7 +450,7 @@ class TestJsonOutput(unittest.TestCase):
     def test_json_check_format(self) -> None:
         result = mod.run_all()
         output = json.dumps(result, indent=2)
-        parsed = json.loads(output)
+        parsed = json.JSONDecoder().decode(output)
         for c in parsed["checks"]:
             self.assertIn("check", c)
             self.assertIn("pass", c)
@@ -457,9 +466,9 @@ class TestSafeRel(unittest.TestCase):
         self.assertEqual(result, "docs/specs/test.md")
 
     def test_path_outside_root(self) -> None:
-        p = Path("/tmp/some/other/path.md")
+        p = Path(tempfile.gettempdir()) / "some" / "other" / "path.md"
         result = mod._safe_rel(p)
-        self.assertEqual(result, "/tmp/some/other/path.md")
+        self.assertEqual(result, str(p))
 
     def test_root_itself(self) -> None:
         result = mod._safe_rel(mod.ROOT)

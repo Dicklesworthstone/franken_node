@@ -16,11 +16,12 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
-from typing import Any
+
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 SPEC = ROOT / "docs" / "specs" / "section_10_10" / "bd-174_contract.md"
@@ -381,7 +382,7 @@ def check_verification_evidence() -> None:
         _check("verification_evidence", False, f"MISSING: {_safe_rel(p)}")
         return
     try:
-        data = json.loads(p.read_text())
+        data = json.JSONDecoder().decode(p.read_text())
         ok = data.get("bead_id") == "bd-174" and data.get("status") == "pass"
         _check(
             "verification_evidence",
@@ -398,7 +399,7 @@ def check_evidence_chain_metrics() -> None:
         _check("evidence_chain_metrics", False, "evidence file missing")
         return
     try:
-        data = json.loads(EVIDENCE.read_text())
+        data = json.JSONDecoder().decode(EVIDENCE.read_text())
         metrics = data.get("metrics", {})
         has_length = "chain_length" in metrics
         has_channels = "channels_covered" in metrics
@@ -496,7 +497,7 @@ def self_test() -> bool:
 
 
 def main() -> None:
-    logger = configure_test_logging("check_policy_checkpoint")
+    configure_test_logging("check_policy_checkpoint")
     parser = argparse.ArgumentParser(
         description="Verify bd-174: policy checkpoint chain"
     )
