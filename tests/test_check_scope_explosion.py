@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -171,8 +172,44 @@ class TestJsonOutput(unittest.TestCase):
     def test_json_output(self) -> None:
         result = mod.run_all()
         output = json.dumps(result, indent=2)
-        parsed = json.loads(output)
+        parsed = json.JSONDecoder().decode(output)
         self.assertEqual(parsed["bead_id"], "bd-38ri")
+
+
+class TestVerificationEvidenceFailures(unittest.TestCase):
+    def setUp(self) -> None:
+        self.original_root = mod.ROOT
+        mod.RESULTS.clear()
+
+    def tearDown(self) -> None:
+        mod.ROOT = self.original_root
+        mod.RESULTS.clear()
+
+    def test_malformed_verification_evidence_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mod.ROOT = Path(tmpdir)
+            evidence_path = mod.ROOT / "artifacts" / "section_12" / "bd-38ri" / "verification_evidence.json"
+            evidence_path.parent.mkdir(parents=True)
+            evidence_path.write_text("{bad-json", encoding="utf-8")
+
+            mod.check_verification_evidence()
+
+        self.assertEqual(mod.RESULTS[0]["name"], "verification_evidence")
+        self.assertFalse(mod.RESULTS[0]["passed"])
+        self.assertIn("Evidence file parse error", mod.RESULTS[0]["detail"])
+
+    def test_non_object_verification_evidence_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mod.ROOT = Path(tmpdir)
+            evidence_path = mod.ROOT / "artifacts" / "section_12" / "bd-38ri" / "verification_evidence.json"
+            evidence_path.parent.mkdir(parents=True)
+            evidence_path.write_text("[]", encoding="utf-8")
+
+            mod.check_verification_evidence()
+
+        self.assertEqual(mod.RESULTS[0]["name"], "verification_evidence")
+        self.assertFalse(mod.RESULTS[0]["passed"])
+        self.assertIn("incorrect bead_id or status", mod.RESULTS[0]["detail"])
 
 
 if __name__ == "__main__":

@@ -14,10 +14,11 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 RESULTS: list[dict] = []
@@ -25,6 +26,14 @@ RESULTS: list[dict] = []
 
 def _check(name: str, passed: bool, detail: str) -> None:
     RESULTS.append({"name": name, "passed": passed, "detail": detail})
+
+
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _read_json(path: Path) -> dict:
+    return json.JSONDecoder().decode(_read_text(path))
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +55,7 @@ def check_risk_documented() -> None:
     if not p.is_file():
         _check("risk_documented", False, "Risk policy file missing")
         return
-    text = p.read_text()
+    text = _read_text(p)
     has_description = "Scope Explosion" in text
     has_impact = "Impact" in text
     has_likelihood = "Likelihood" in text
@@ -59,7 +68,7 @@ def check_capability_gates() -> None:
     if not p.is_file():
         _check("capability_gates", False, "Risk policy file missing")
         return
-    text = p.read_text()
+    text = _read_text(p)
     has_cap_gates = "capability gate" in text.lower() or "Capability Gate" in text
     has_max = "maximum capability count" in text.lower() or "max" in text.lower()
     has_approval = "approval" in text.lower()
@@ -72,7 +81,7 @@ def check_artifact_gates() -> None:
     if not p.is_file():
         _check("artifact_gates", False, "Risk policy file missing")
         return
-    text = p.read_text()
+    text = _read_text(p)
     has_artifact = "artifact-gated" in text.lower() or "Artifact-Gated" in text
     has_chain = "artifact chain" in text.lower()
     has_six = "verification_evidence" in text and "verification_summary" in text
@@ -85,7 +94,7 @@ def check_scope_budgets() -> None:
     if not p.is_file():
         _check("scope_budgets", False, "Risk policy file missing")
         return
-    text = p.read_text()
+    text = _read_text(p)
     has_budget = "scope budget" in text.lower() or "bead count limit" in text.lower() or "per-track" in text.lower()
     has_80 = "80%" in text
     has_95 = "95%" in text
@@ -98,7 +107,7 @@ def check_countermeasures() -> None:
     if not p.is_file():
         _check("countermeasures", False, "Risk policy file missing")
         return
-    text = p.read_text()
+    text = _read_text(p)
     has_cap = "capability gate" in text.lower()
     has_artifact = "artifact-gated" in text.lower()
     has_budget = "scope budget" in text.lower() or "bead count" in text.lower()
@@ -112,7 +121,7 @@ def check_event_codes() -> None:
     if not p.is_file():
         _check("event_codes", False, "Spec file missing")
         return
-    text = p.read_text()
+    text = _read_text(p)
     codes = ["RSE-001", "RSE-002", "RSE-003", "RSE-004"]
     missing = [c for c in codes if c not in text]
     ok = len(missing) == 0
@@ -124,7 +133,7 @@ def check_invariants() -> None:
     if not p.is_file():
         _check("invariants", False, "Spec file missing")
         return
-    text = p.read_text()
+    text = _read_text(p)
     invariants = ["INV-RSE-GATE", "INV-RSE-BUDGET", "INV-RSE-ARTIFACT", "INV-RSE-TRACK"]
     missing = [i for i in invariants if i not in text]
     ok = len(missing) == 0
@@ -136,7 +145,7 @@ def check_spec_keywords() -> None:
     if not p.is_file():
         _check("spec_keywords", False, "Spec file missing")
         return
-    text = p.read_text()
+    text = _read_text(p)
     keywords = ["Scope Explosion", "capability gate", "artifact-gated", "scope budget", "bd-38ri"]
     missing = [k for k in keywords if k.lower() not in text.lower()]
     ok = len(missing) == 0
@@ -148,7 +157,7 @@ def check_escalation() -> None:
     if not p.is_file():
         _check("escalation", False, "Risk policy file missing")
         return
-    text = p.read_text()
+    text = _read_text(p)
     ok = "escalation" in text.lower() or "Escalation" in text
     _check("escalation", ok, "Escalation procedures documented" if ok else "Escalation procedures missing")
 
@@ -158,7 +167,7 @@ def check_evidence_requirements() -> None:
     if not p.is_file():
         _check("evidence_requirements", False, "Risk policy file missing")
         return
-    text = p.read_text()
+    text = _read_text(p)
     ok = "evidence" in text.lower() and "review" in text.lower()
     _check("evidence_requirements", ok, "Evidence requirements for review documented" if ok else "Evidence requirements missing")
 
@@ -168,7 +177,7 @@ def check_monitoring() -> None:
     if not p.is_file():
         _check("monitoring", False, "Risk policy file missing")
         return
-    text = p.read_text()
+    text = _read_text(p)
     has_dashboard = "dashboard" in text.lower()
     has_velocity = "velocity" in text.lower()
     ok = has_dashboard and has_velocity
@@ -181,10 +190,10 @@ def check_verification_evidence() -> None:
         _check("verification_evidence", False, f"Evidence file MISSING: {p}")
         return
     try:
-        data = json.loads(p.read_text())
-        ok = data.get("bead_id") == "bd-38ri" and data.get("status") == "pass"
+        data = _read_json(p)
+        ok = isinstance(data, dict) and data.get("bead_id") == "bd-38ri" and data.get("status") == "pass"
         _check("verification_evidence", ok, "Evidence file valid" if ok else "Evidence file has incorrect bead_id or status")
-    except (json.JSONDecodeError, KeyError) as exc:
+    except (json.JSONDecodeError, OSError) as exc:
         _check("verification_evidence", False, f"Evidence file parse error: {exc}")
 
 
@@ -236,22 +245,32 @@ def run_all() -> dict:
 def self_test() -> None:
     """Smoke-test: run all checks and assert the structure is valid."""
     result = run_all()
-    assert isinstance(result, dict)
-    assert result["bead_id"] == "bd-38ri"
-    assert result["section"] == "12"
-    assert isinstance(result["checks"], list)
-    assert result["total"] == len(ALL_CHECKS)
-    assert result["passed"] <= result["total"]
-    assert isinstance(result["all_passed"], bool)
+    if not isinstance(result, dict):
+        raise RuntimeError("self-test result must be a dict")
+    if result["bead_id"] != "bd-38ri":
+        raise RuntimeError("self-test bead_id mismatch")
+    if result["section"] != "12":
+        raise RuntimeError("self-test section mismatch")
+    if not isinstance(result["checks"], list):
+        raise RuntimeError("self-test checks must be a list")
+    if result["total"] != len(ALL_CHECKS):
+        raise RuntimeError("self-test total must match ALL_CHECKS")
+    if result["passed"] > result["total"]:
+        raise RuntimeError("self-test passed count cannot exceed total")
+    if not isinstance(result["all_passed"], bool):
+        raise RuntimeError("self-test all_passed must be bool")
     for check in result["checks"]:
-        assert "name" in check
-        assert "passed" in check
-        assert "detail" in check
+        if "name" not in check:
+            raise RuntimeError("self-test check missing name")
+        if "passed" not in check:
+            raise RuntimeError("self-test check missing passed")
+        if "detail" not in check:
+            raise RuntimeError("self-test check missing detail")
     print("self_test passed")
 
 
 def main() -> None:
-    logger = configure_test_logging("check_scope_explosion")
+    configure_test_logging("check_scope_explosion")
     if "--self-test" in sys.argv:
         self_test()
         return
