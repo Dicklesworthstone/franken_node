@@ -23,20 +23,9 @@ pub const SCHEMA_VERSION: &str = "lab-v1.0";
 // ---------------------------------------------------------------------------
 
 use crate::capacity_defaults::aliases::MAX_EVENTS;
+use crate::push_bounded;
 const MAX_REORDER_BUFFERS: usize = 4096;
 const MAX_VIRTUAL_LINKS: usize = 4096;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 /// Lab runtime initialized with seed and config.
 pub const EVT_LAB_INITIALIZED: &str = "FN-LB-001";
@@ -7890,8 +7879,13 @@ mod tests {
                 4 => {
                     // Runtime statistics
                     let stats = runtime.get_runtime_stats();
-                    assert!(stats.total_links_created >= u64::try_from(links.len()).unwrap_or(u64::MAX));
-                    assert!(stats.total_timers_created >= u64::try_from(timers.len()).unwrap_or(u64::MAX));
+                    assert!(
+                        stats.total_links_created >= u64::try_from(links.len()).unwrap_or(u64::MAX)
+                    );
+                    assert!(
+                        stats.total_timers_created
+                            >= u64::try_from(timers.len()).unwrap_or(u64::MAX)
+                    );
                 }
                 5 => {
                     // DPOR statistics
@@ -7905,7 +7899,9 @@ mod tests {
         // Final consistency check after simulated concurrent operations
         let final_stats = runtime.get_runtime_stats();
         assert!(final_stats.total_links_created >= u64::try_from(links.len()).unwrap_or(u64::MAX));
-        assert!(final_stats.total_timers_created >= u64::try_from(timers.len()).unwrap_or(u64::MAX));
+        assert!(
+            final_stats.total_timers_created >= u64::try_from(timers.len()).unwrap_or(u64::MAX)
+        );
         assert!(final_stats.total_messages_sent < u64::MAX);
         assert!(final_stats.current_tick < u64::MAX);
 

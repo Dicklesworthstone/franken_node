@@ -678,21 +678,9 @@ impl std::fmt::Display for SessionError {
 /// # INV-SCC-TERMINATED
 /// Once terminated, a session rejects all further messages.
 use crate::capacity_defaults::aliases::{MAX_SESSION_EVENTS, MAX_WINDOWS_SEEN};
+use crate::push_bounded;
 
 const MAX_REPLAY_WINDOW_ENTRIES: usize = MAX_WINDOWS_SEEN;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        let drain_until = overflow.min(items.len());
-        items.drain(0..drain_until);
-    }
-    items.extend(std::iter::once(item));
-}
 
 // ---------------------------------------------------------------------------
 // Transcript HMAC helpers

@@ -32,6 +32,8 @@ use std::time::Instant;
 #[cfg(any(test, feature = "control-plane"))]
 use super::error::ApiError;
 #[cfg(any(test, feature = "control-plane"))]
+use crate::push_bounded;
+#[cfg(any(test, feature = "control-plane"))]
 const MAX_SAMPLES: usize = 4096;
 #[cfg(any(test, feature = "control-plane"))]
 const MAX_AUTH_FAILURE_SOURCES: usize = 1024;
@@ -39,20 +41,6 @@ const MAX_AUTH_FAILURE_SOURCES: usize = 1024;
 const TOP_AUTH_FAILURE_SOURCES: usize = 10;
 #[cfg(any(test, feature = "control-plane"))]
 const TRACEPARENT_HEADER_LEN: usize = 55;
-
-#[cfg(any(test, feature = "control-plane"))]
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        let drain_until = overflow.min(items.len());
-        items.drain(0..drain_until);
-    }
-    items.extend(std::iter::once(item));
-}
 
 #[cfg(any(test, feature = "control-plane"))]
 fn push_hex_byte(output: &mut String, byte: u8) {

@@ -90,41 +90,7 @@ pub const MAX_NODES: usize = 10;
 /// Memory-safety capacity for the nodes Vec (must be > MAX_NODES to allow
 /// the `build()` validation to detect over-limit and return TooManyNodes).
 use crate::capacity_defaults::aliases::{MAX_ASSERTIONS, MAX_LINKS, MAX_NODES_CAP};
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-
-    // Inline negative-path tests
-    #[cfg(test)]
-    {
-        // Test: zero capacity clears vec before adding
-        let mut test_vec = vec![1, 2, 3];
-        push_bounded(&mut test_vec, 4, 0);
-        assert!(test_vec.is_empty(), "zero cap should clear existing items");
-
-        // Test: saturating arithmetic on overflow calculation
-        let mut items_at_max = vec![0; usize::MAX];
-        let large_cap = usize::MAX.saturating_sub(10);
-        items_at_max.truncate(large_cap + 5); // Simulate near-overflow
-        push_bounded(&mut items_at_max, 999, large_cap);
-        // Should not panic due to saturating_sub/saturating_add
-        assert!(items_at_max.len() <= large_cap.saturating_add(1));
-
-        // Test: drain range bounds checking at capacity edge
-        let mut edge_vec = vec![1, 2, 3, 4, 5];
-        push_bounded(&mut edge_vec, 6, 3);
-        assert_eq!(edge_vec.len(), 3, "should evict oldest when at capacity");
-        assert_eq!(edge_vec[edge_vec.len() - 1], 6, "new item should be last");
-    }
-}
+use crate::push_bounded;
 
 // ---------------------------------------------------------------------------
 // NodeRole
