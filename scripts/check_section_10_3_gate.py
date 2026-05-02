@@ -14,13 +14,14 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 GATE_BEAD = "bd-3enl"
@@ -69,9 +70,9 @@ def _check(name: str, passed: bool, detail: str = "") -> dict[str, Any]:
 def _evidence_pass(data: dict[str, Any]) -> bool:
     if data.get("verdict") == "PASS":
         return True
-    if data.get("overall_pass") is True:
+    if bool(data.get("overall_pass")):
         return True
-    if data.get("all_passed") is True:
+    if bool(data.get("all_passed")):
         return True
     raw_status = str(data.get("status", "")).lower()
     if raw_status == "pass":
@@ -111,7 +112,8 @@ def _find_evidence(bead_id: str) -> Path | None:
 
 def _load_evidence(path: Path) -> dict[str, Any] | None:
     try:
-        return json.loads(path.read_text())
+        raw = path.read_text()
+        return json.JSONDecoder().decode(raw)
     except (json.JSONDecodeError, OSError):
         return None
 
@@ -311,7 +313,7 @@ def self_test() -> dict[str, Any]:
 
 
 def main() -> None:
-    logger = configure_test_logging("check_section_10_3_gate")
+    configure_test_logging("check_section_10_3_gate")
     parser = argparse.ArgumentParser(description=f"Section {SECTION} verification gate")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--self-test", action="store_true")
