@@ -2,22 +2,23 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
+import runpy
+import subprocess
 import sys
+import types
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase, main
 
 ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / "scripts" / "check_frankensqlite_contract.py"
 
-spec = importlib.util.spec_from_file_location(
-    "check_frankensqlite_contract",
-    ROOT / "scripts" / "check_frankensqlite_contract.py",
-)
-mod = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = mod
-spec.loader.exec_module(mod)
+mod = types.SimpleNamespace(**runpy.run_path(str(SCRIPT)))
+
+
+def load_matrix() -> dict:
+    return mod._load_json_object(mod.MATRIX_PATH)
 
 
 class TestFixturePaths(TestCase):
@@ -47,13 +48,26 @@ class TestVerification(TestCase):
         self.assertEqual(report["bead_id"], "bd-1a1j")
         self.assertFalse(report["errors"])
 
+    def test_json_cli_reports_pass(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.JSONDecoder().decode(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["bead_id"], "bd-1a1j")
+
     def test_self_test_passes(self) -> None:
         ok, payload = mod.self_test()
         self.assertTrue(ok)
         self.assertEqual(payload["self_test"], "passed")
 
     def test_duplicate_table_ownership_is_rejected(self) -> None:
-        matrix = json.loads(mod.MATRIX_PATH.read_text(encoding="utf-8"))
+        matrix = load_matrix()
         matrix["persistence_classes"][1]["tables"].append(
             matrix["persistence_classes"][0]["tables"][0]
         )
@@ -73,7 +87,7 @@ class TestVerification(TestCase):
         self.assertTrue(any("table ownership conflict" in err for err in report["errors"]))
 
     def test_invalid_tier_mode_pair_is_rejected(self) -> None:
-        matrix = json.loads(mod.MATRIX_PATH.read_text(encoding="utf-8"))
+        matrix = load_matrix()
         matrix["durability_modes"]["tier_1"]["journal_mode"] = "DELETE"
 
         with TemporaryDirectory(prefix="frankensqlite-test-") as tmp:
@@ -90,8 +104,26 @@ class TestVerification(TestCase):
         self.assertFalse(ok)
         self.assertTrue(any("invalid pair" in err for err in report["errors"]))
 
+    def test_replay_support_requires_strict_boolean_true(self) -> None:
+        matrix = load_matrix()
+        matrix["persistence_classes"][0]["replay_support"] = "true"
+
+        with TemporaryDirectory(prefix="frankensqlite-test-") as tmp:
+            tmp_path = Path(tmp)
+            matrix_path = tmp_path / "matrix.json"
+            matrix_path.write_text(json.dumps(matrix, indent=2), encoding="utf-8")
+
+            ok, report = mod.run_checks(
+                matrix_path=matrix_path,
+                contract_path=mod.CONTRACT_PATH,
+                module_root=mod.MODULE_ROOT,
+            )
+
+        self.assertFalse(ok)
+        self.assertTrue(any("replay semantics required" in err for err in report["errors"]))
+
     def test_unclassified_new_stateful_module_is_detected(self) -> None:
-        matrix = json.loads(mod.MATRIX_PATH.read_text(encoding="utf-8"))
+        matrix = load_matrix()
 
         with TemporaryDirectory(prefix="frankensqlite-test-") as tmp:
             tmp_path = Path(tmp)
@@ -141,6 +173,28 @@ class TestVerification(TestCase):
 
         self.assertFalse(ok)
         self.assertTrue(any("missing persistence class mapping" in err for err in report["errors"]))
+
+    def test_malformed_matrix_fails_closed(self) -> None:
+        with TemporaryDirectory(prefix="frankensqlite-test-") as tmp:
+            matrix_path = Path(tmp) / "matrix.json"
+            matrix_path.write_text("{not-json", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
+                mod.run_checks(
+                    matrix_path=matrix_path,
+                    contract_path=mod.CONTRACT_PATH,
+                    module_root=mod.MODULE_ROOT,
+                )
+
+    def test_non_object_matrix_fails_closed(self) -> None:
+        with TemporaryDirectory(prefix="frankensqlite-test-") as tmp:
+            matrix_path = Path(tmp) / "matrix.json"
+            matrix_path.write_text("[]", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "must contain an object"):
+                mod.run_checks(
+                    matrix_path=matrix_path,
+                    contract_path=mod.CONTRACT_PATH,
+                    module_root=mod.MODULE_ROOT,
+                )
 
 
 if __name__ == "__main__":

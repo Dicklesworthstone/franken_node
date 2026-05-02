@@ -7,15 +7,14 @@ import argparse
 import hashlib
 import json
 import re
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
-import sys
-from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 CONTRACT_PATH = ROOT / "docs" / "specs" / "frankensqlite_persistence_contract.md"
 MATRIX_PATH = ROOT / "artifacts" / "10.16" / "frankensqlite_persistence_matrix.json"
@@ -101,6 +100,22 @@ def discover_stateful_modules(
 def _trace_id(payload: dict[str, Any]) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _load_json_object(path: Path) -> dict[str, Any]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"unable to read JSON artifact `{_rel(path)}`: {exc}") from exc
+
+    try:
+        payload = json.JSONDecoder().decode(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid JSON in `{_rel(path)}`: {exc.msg}") from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"JSON artifact `{_rel(path)}` must contain an object")
+    return payload
 
 
 def _validate_durability_modes(
@@ -298,8 +313,11 @@ def evaluate_contract(
                     table_owners[table] = owner_module
 
         if tier in {"tier_1", "tier_2"}:
-            replay_ok = replay_support is True and isinstance(replay_strategy, str) and bool(
-                replay_strategy.strip()
+            replay_ok = (
+                isinstance(replay_support, bool)
+                and replay_support
+                and isinstance(replay_strategy, str)
+                and bool(replay_strategy.strip())
             )
             if not replay_ok:
                 message = (
@@ -359,7 +377,7 @@ def run_checks(
     if not contract_path.is_file():
         raise FileNotFoundError(f"missing contract doc: {contract_path}")
 
-    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    matrix = _load_json_object(matrix_path)
     contract_text = contract_path.read_text(encoding="utf-8")
     stateful_modules = discover_stateful_modules(module_root, ROOT)
 
@@ -440,7 +458,8 @@ def self_test() -> tuple[bool, dict[str, Any]]:
 
         modules = discover_stateful_modules(module_root, root)
         ok, report = evaluate_contract(matrix, contract.read_text(encoding="utf-8"), modules)
-        assert ok, f"self_test expected pass but got errors: {report['errors']}"
+        if not ok:
+            raise RuntimeError(f"self_test expected pass but got errors: {report['errors']}")
 
         # Integration check: adding a new stateful module must fail if unmapped.
         (module_root / "lease_service.rs").write_text("pub struct LeaseService;\n", encoding="utf-8")
@@ -450,14 +469,16 @@ def self_test() -> tuple[bool, dict[str, Any]]:
             contract.read_text(encoding="utf-8"),
             modules_with_extra,
         )
-        assert not ok_missing
-        assert any("missing persistence class mapping" in e for e in report_missing["errors"])
+        if ok_missing:
+            raise RuntimeError("self_test expected unmapped module failure")
+        if not any("missing persistence class mapping" in e for e in report_missing["errors"]):
+            raise RuntimeError("self_test expected missing persistence class mapping error")
 
     return True, {"ok": True, "self_test": "passed"}
 
 
 def main() -> int:
-    logger = configure_test_logging("check_frankensqlite_contract")
+    configure_test_logging("check_frankensqlite_contract")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON output")
     parser.add_argument("--self-test", action="store_true", help="run internal self-test")
