@@ -4853,9 +4853,10 @@ state_dir = ""
 
         let err = config.validate().unwrap_err();
 
-        assert!(err
-            .to_string()
-            .contains("verifier.max_claims_per_request must be > 0"));
+        assert!(
+            err.to_string()
+                .contains("verifier.max_claims_per_request must be > 0")
+        );
     }
 
     #[test]
