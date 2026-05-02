@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 pub mod timeouts;
@@ -12,6 +13,7 @@ pub mod timeouts;
 /// Default number of configuration merge decisions to track.
 /// Prevents memory exhaustion from adversarial config override patterns.
 pub const DEFAULT_MAX_MERGE_DECISIONS: usize = 100;
+const MIN_REGISTRY_SIGNING_KEY_BYTES: usize = 32;
 
 const fn default_max_merge_decisions() -> usize {
     DEFAULT_MAX_MERGE_DECISIONS
@@ -1742,6 +1744,16 @@ impl Config {
         )?;
         validate_opt_score("trust.min_trust_score", self.trust.min_trust_score)?;
         validate_opt_score("trust.decay_factor", self.trust.decay_factor)?;
+        validate_opt_pct(
+            "trust.test_coverage_threshold_pct",
+            self.trust.test_coverage_threshold_pct,
+        )?;
+        if let Some(thresholds) = &self.trust.reputation_tier_thresholds {
+            validate_reputation_thresholds(thresholds)?;
+        }
+        if let Some(registry_signing_key) = &self.trust.registry_signing_key {
+            validate_registry_signing_key(registry_signing_key)?;
+        }
         validate_opt_score(
             "thresholds.max_failure_rate",
             self.thresholds.max_failure_rate,
@@ -1935,6 +1947,61 @@ fn validate_opt_pct(field: &str, value: Option<f64>) -> Result<(), ConfigError> 
             "{field} must be a finite value within [0.0, 100.0], got {v}"
         )));
     }
+    Ok(())
+}
+
+fn validate_reputation_thresholds(thresholds: &ReputationThresholds) -> Result<(), ConfigError> {
+    for (field, value) in [
+        (
+            "trust.reputation_tier_thresholds.provisional",
+            thresholds.provisional,
+        ),
+        (
+            "trust.reputation_tier_thresholds.established",
+            thresholds.established,
+        ),
+        (
+            "trust.reputation_tier_thresholds.trusted",
+            thresholds.trusted,
+        ),
+    ] {
+        validate_opt_pct(field, Some(value))?;
+    }
+
+    if !(thresholds.provisional < thresholds.established
+        && thresholds.established < thresholds.trusted)
+    {
+        return Err(ConfigError::ValidationFailed(
+            "trust.reputation_tier_thresholds must satisfy provisional < established < trusted"
+                .to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_registry_signing_key(encoded: &str) -> Result<(), ConfigError> {
+    if encoded.trim() != encoded || encoded.is_empty() {
+        return Err(ConfigError::ValidationFailed(
+            "trust.registry_signing_key must be non-empty base64 without surrounding whitespace"
+                .to_string(),
+        ));
+    }
+
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|err| {
+            ConfigError::ValidationFailed(format!(
+                "trust.registry_signing_key must be valid base64: {err}"
+            ))
+        })?;
+
+    if decoded.len() < MIN_REGISTRY_SIGNING_KEY_BYTES {
+        return Err(ConfigError::ValidationFailed(format!(
+            "trust.registry_signing_key must decode to at least {MIN_REGISTRY_SIGNING_KEY_BYTES} bytes"
+        )));
+    }
+
     Ok(())
 }
 
@@ -3206,6 +3273,8 @@ pub enum ConfigError {
 mod tests {
     use std::collections::BTreeMap;
 
+    use base64::Engine as _;
+
     use super::*;
 
     fn map_lookup(map: BTreeMap<String, String>) -> impl Fn(&str) -> Option<String> {
@@ -4196,6 +4265,72 @@ state_dir = ""
         assert!(validate_opt_score("trust.min_trust_score", Some(1.01)).is_err());
         assert!(validate_opt_pct("thresholds.max_variance_pct", Some(-0.01)).is_err());
         assert!(validate_opt_pct("thresholds.max_variance_pct", Some(100.01)).is_err());
+    }
+
+    #[test]
+    fn validation_rejects_invalid_trust_threshold_overrides() {
+        let mut config = Config::for_profile(Profile::Balanced);
+        config.trust.test_coverage_threshold_pct = Some(f64::NAN);
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("trust.test_coverage_threshold_pct")
+        );
+
+        let mut config = Config::for_profile(Profile::Balanced);
+        config.trust.reputation_tier_thresholds = Some(ReputationThresholds {
+            trusted: 50.0,
+            established: 80.0,
+            provisional: 20.0,
+        });
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("trust.reputation_tier_thresholds")
+        );
+    }
+
+    #[test]
+    fn validation_rejects_invalid_registry_signing_key() {
+        let mut config = Config::for_profile(Profile::Balanced);
+        config.trust.registry_signing_key = Some("not-base64".to_string());
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("trust.registry_signing_key")
+        );
+
+        let mut config = Config::for_profile(Profile::Balanced);
+        config.trust.registry_signing_key =
+            Some(base64::engine::general_purpose::STANDARD.encode([0_u8; 16]));
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("trust.registry_signing_key")
+        );
+    }
+
+    #[test]
+    fn validation_accepts_valid_trust_threshold_and_key_overrides() {
+        let mut config = Config::for_profile(Profile::Balanced);
+        config.trust.test_coverage_threshold_pct = Some(85.0);
+        config.trust.reputation_tier_thresholds = Some(ReputationThresholds {
+            trusted: 90.0,
+            established: 60.0,
+            provisional: 30.0,
+        });
+        config.trust.registry_signing_key =
+            Some(base64::engine::general_purpose::STANDARD.encode([7_u8; 32]));
+
+        config.validate().expect("valid trust overrides");
     }
 
     #[test]

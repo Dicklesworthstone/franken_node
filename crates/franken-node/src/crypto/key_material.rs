@@ -94,7 +94,10 @@ pub struct Ed25519KeyMaterial {
 
 impl Ed25519KeyMaterial {
     /// Create new key material with specified expiration.
-    pub fn new(key_id: String, expires_at: std::time::SystemTime) -> Result<Self, KeyMaterialError> {
+    pub fn new(
+        key_id: String,
+        expires_at: std::time::SystemTime,
+    ) -> Result<Self, KeyMaterialError> {
         let mut rng = rand::thread_rng();
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rng);
         let verifying_key = signing_key.verifying_key();
@@ -134,7 +137,7 @@ impl Ed25519KeyMaterial {
 }
 
 // Simple in-memory key storage for testing/development
-const MAX_TEST_KEYS: usize = 1000; // Bound test key storage growth
+const MAX_TEST_KEYS: usize = crate::capacity_defaults::base::TRACE;
 
 lazy_static::lazy_static! {
     static ref KEY_STORAGE: Arc<Mutex<HashMap<String, Ed25519KeyMaterial>>> =
@@ -224,12 +227,16 @@ impl Ed25519KeyMaterial {
 
         // Reject key_id if it would exceed length bound (prevent memory exhaustion)
         if self.key_id.len() > 256 {
-            return Err(KeyMaterialError::StorageFailed("Key ID too long".to_string()));
+            return Err(KeyMaterialError::StorageFailed(
+                "Key ID too long".to_string(),
+            ));
         }
 
         // Prevent unbounded storage growth in test scenarios
         if !storage.contains_key(&self.key_id) && storage.len() >= MAX_TEST_KEYS {
-            return Err(KeyMaterialError::StorageFailed("Test key storage capacity exceeded".to_string()));
+            return Err(KeyMaterialError::StorageFailed(
+                "Test key storage capacity exceeded".to_string(),
+            ));
         }
 
         storage.insert(self.key_id.clone(), self.clone());
@@ -284,7 +291,8 @@ mod tests {
     #[test]
     fn test_ed25519_key_material_fingerprint() {
         let expires_at = std::time::SystemTime::now() + Duration::from_secs(3600);
-        let key_material = Ed25519KeyMaterial::new("fingerprint_test".to_string(), expires_at).unwrap();
+        let key_material =
+            Ed25519KeyMaterial::new("fingerprint_test".to_string(), expires_at).unwrap();
 
         let fingerprint = key_material.fingerprint();
         assert!(fingerprint.starts_with("ed25519:"));
@@ -316,7 +324,8 @@ mod tests {
     #[test]
     fn test_ed25519_key_material_rotation() {
         let expires_at = std::time::SystemTime::now() + Duration::from_secs(3600);
-        let mut key_material = Ed25519KeyMaterial::new("rotation_test".to_string(), expires_at).unwrap();
+        let mut key_material =
+            Ed25519KeyMaterial::new("rotation_test".to_string(), expires_at).unwrap();
 
         let old_public_key = *key_material.public_key();
         let old_fingerprint = key_material.fingerprint();
@@ -339,7 +348,8 @@ mod tests {
     #[test]
     fn test_ed25519_key_material_load_expired() {
         let expires_at = std::time::SystemTime::now() - Duration::from_secs(1);
-        let key_material = Ed25519KeyMaterial::new("expired_storage_test".to_string(), expires_at).unwrap();
+        let key_material =
+            Ed25519KeyMaterial::new("expired_storage_test".to_string(), expires_at).unwrap();
         let key_id = key_material.key_id().to_string();
 
         // Store the expired key

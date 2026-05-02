@@ -17,7 +17,7 @@ use std::{
     time::Duration,
 };
 
-use base64;
+use base64::Engine as _;
 use fs2::FileExt;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
@@ -148,16 +148,34 @@ pub const TRUST_CARD_DIFF_COMPUTED: &str = "TRUST_CARD_DIFF_COMPUTED";
 
 const DEFAULT_CACHE_TTL_SECS: u64 = crate::config::timeouts::TRUST_CARD_CACHE_TTL_SECS;
 const DEFAULT_REGISTRY_KEY: &[u8] = b"franken-node-trust-card-registry-key-v1";
+const MIN_CONFIGURED_REGISTRY_KEY_BYTES: usize = 32;
 pub const TRUST_CARD_REGISTRY_SNAPSHOT_SCHEMA: &str = "franken-node/trust-card-registry-state/v1";
 
 /// Get registry signing key from config or default if not specified.
-fn get_registry_key(config: &crate::config::TrustConfig) -> Vec<u8> {
+fn get_registry_key(config: &crate::config::TrustConfig) -> Result<Vec<u8>, TrustCardError> {
     match &config.registry_signing_key {
         Some(key_base64) => {
-            // Attempt to decode from base64, fallback to default on error
-            base64::decode(key_base64).unwrap_or_else(|_| DEFAULT_REGISTRY_KEY.to_vec())
+            if key_base64.trim() != key_base64 || key_base64.is_empty() {
+                return Err(TrustCardError::InvalidInput {
+                    reason: "registry_signing_key must be non-empty base64 without surrounding whitespace"
+                        .to_string(),
+                });
+            }
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(key_base64)
+                .map_err(|err| TrustCardError::InvalidInput {
+                    reason: format!("registry_signing_key must be valid base64: {err}"),
+                })?;
+            if decoded.len() < MIN_CONFIGURED_REGISTRY_KEY_BYTES {
+                return Err(TrustCardError::InvalidInput {
+                    reason: format!(
+                        "registry_signing_key must decode to at least {MIN_CONFIGURED_REGISTRY_KEY_BYTES} bytes"
+                    ),
+                });
+            }
+            Ok(decoded)
         }
-        None => DEFAULT_REGISTRY_KEY.to_vec(),
+        None => Ok(DEFAULT_REGISTRY_KEY.to_vec()),
     }
 }
 
@@ -748,11 +766,10 @@ impl TrustCardRegistry {
     ///
     /// # Returns
     /// A new empty `TrustCardRegistry` with signing key from config or default.
-    #[must_use]
-    pub fn from_config(config: &crate::config::TrustConfig) -> Self {
+    pub fn from_config(config: &crate::config::TrustConfig) -> Result<Self, TrustCardError> {
         let cache_ttl_secs = config.card_cache_ttl_secs.unwrap_or(DEFAULT_CACHE_TTL_SECS);
-        let registry_key = get_registry_key(config);
-        Self::new(cache_ttl_secs, &registry_key)
+        let registry_key = get_registry_key(config)?;
+        Ok(Self::new(cache_ttl_secs, &registry_key))
     }
 
     /// Materialize the registry's current authoritative state as a signed snapshot.
@@ -945,7 +962,7 @@ impl TrustCardRegistry {
         source_context: SnapshotSourceContext,
     ) -> Result<Self, TrustCardError> {
         let cache_ttl_secs = config.card_cache_ttl_secs.unwrap_or(DEFAULT_CACHE_TTL_SECS);
-        let registry_key = get_registry_key(config);
+        let registry_key = get_registry_key(config)?;
 
         let raw = std::fs::read_to_string(path).map_err(|err| TrustCardError::SnapshotRead {
             path: path.to_path_buf(),
@@ -2773,6 +2790,7 @@ mod tests {
         TrustCardMutation, TrustCardRegistry, VerifiedEvidenceRef, canonicalize_value,
         update_card_hash, validate_trust_card_structure,
     };
+    use base64::Engine as _;
 
     fn test_evidence_refs() -> Vec<VerifiedEvidenceRef> {
         use super::super::certification::EvidenceType;
@@ -5680,6 +5698,28 @@ mod tests {
 
         let err = validate_basic_bounds(&snapshot).expect_err("oversized extension ID should fail");
         assert!(matches!(err, TrustCardError::InvalidInput { .. }));
+    }
+
+    #[test]
+    fn registry_from_config_rejects_invalid_configured_key() {
+        let mut config = crate::config::Config::for_profile(crate::config::Profile::Balanced).trust;
+        config.registry_signing_key = Some("not-base64".to_string());
+
+        let err = match TrustCardRegistry::from_config(&config) {
+            Ok(_) => panic!("invalid key should fail closed"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err, TrustCardError::InvalidInput { .. }));
+    }
+
+    #[test]
+    fn registry_from_config_accepts_valid_configured_key() {
+        let mut config = crate::config::Config::for_profile(crate::config::Profile::Balanced).trust;
+        config.registry_signing_key =
+            Some(base64::engine::general_purpose::STANDARD.encode([9_u8; 32]));
+
+        TrustCardRegistry::from_config(&config).expect("valid key should configure registry");
     }
 
     #[test]
