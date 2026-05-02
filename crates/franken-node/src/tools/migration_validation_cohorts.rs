@@ -57,18 +57,7 @@ pub mod invariants {
 pub const SCHEMA_VERSION: &str = "mvc-v1.0";
 pub const MIN_DETERMINISM_RATE: f64 = 0.99;
 use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_PROJECTS_PER_COHORT, MAX_RUNS};
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
+use crate::push_bounded;
 
 /// Cohort category for project grouping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

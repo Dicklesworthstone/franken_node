@@ -64,18 +64,7 @@ pub mod invariants {
 pub const MODEL_VERSION: &str = "ted-v1.0";
 
 use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_REPORTS};
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
+use crate::push_bounded;
 
 // ---------------------------------------------------------------------------
 // Attack categories
@@ -490,7 +479,9 @@ impl TrustEconomicsDashboard {
         let content_hash = {
             let mut h = Sha256::new();
             h.update(b"trust_economics_hash_v1:");
-            h.update((u64::try_from(self.config.model_version.len()).unwrap_or(u64::MAX)).to_le_bytes());
+            h.update(
+                (u64::try_from(self.config.model_version.len()).unwrap_or(u64::MAX)).to_le_bytes(),
+            );
             h.update(self.config.model_version.as_bytes());
             h.update((u64::try_from(amplification.len()).unwrap_or(u64::MAX)).to_le_bytes());
             for a in &amplification {

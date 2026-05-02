@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::push_bounded;
+
 use super::replay_bundle::{
     EventType, ReplayBundle, ReplayBundleError, TimelineEvent, validate_bundle_integrity,
 };
@@ -25,18 +27,6 @@ const MAX_POLICY_OVERRIDE_DIFFS: usize = 32;
 const MAX_REPLAY_OUTCOMES: usize = 1_000_000;
 const MAX_SWEEP_RESULTS: usize = MAX_SWEEP_VALUES;
 const MAX_DIVERGENCE_POINTS: usize = 100_000;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 pub const COUNTERFACTUAL_REPLAY_STARTED: &str = "COUNTERFACTUAL_REPLAY_STARTED";
 pub const COUNTERFACTUAL_REPLAY_COMPLETED: &str = "COUNTERFACTUAL_REPLAY_COMPLETED";

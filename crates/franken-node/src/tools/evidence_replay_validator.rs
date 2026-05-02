@@ -15,22 +15,10 @@
 use std::fmt;
 
 use crate::observability::evidence_ledger::{DecisionKind, EvidenceEntry};
+use crate::push_bounded;
 use crate::security::constant_time;
 
 use crate::capacity_defaults::aliases::{MAX_FIELDS, MAX_RESULTS};
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 /// Stable event codes for structured logging.
 pub mod event_codes {

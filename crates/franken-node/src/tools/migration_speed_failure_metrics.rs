@@ -55,20 +55,8 @@ pub mod invariants {
 pub const METRIC_VERSION: &str = "msf-v1.0";
 pub const MAX_FAILURE_RATE: f64 = 0.05;
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
+use crate::push_bounded;
 const MAX_RECORDS: usize = 4096;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 fn hash_f64(hasher: &mut Sha256, value: f64) {
     if value.is_finite() {

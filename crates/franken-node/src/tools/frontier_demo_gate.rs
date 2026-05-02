@@ -28,20 +28,9 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 use crate::capacity_defaults::aliases::{MAX_EVENTS, MAX_RESULTS};
+use crate::push_bounded;
 const MAX_REGISTERED_PROGRAMS: usize = 4096;
 const FRONTIER_DEMO_HASH_DOMAIN: &[u8] = b"frontier_demo_hash_v1:";
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 fn frontier_demo_hash(data: &[u8]) -> String {
     let mut hasher = Sha256::new();

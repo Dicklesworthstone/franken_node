@@ -54,21 +54,9 @@ pub mod invariants {
 pub const SCHEMA_VERSION: &str = "vbr-v1.0";
 pub const MIN_QUALITY_SCORE: f64 = 0.8;
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
+use crate::push_bounded;
 const MAX_DOWNLOADS: usize = 4096;
 const MAX_ARTIFACTS_PER_RELEASE: usize = 256;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 /// Release type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

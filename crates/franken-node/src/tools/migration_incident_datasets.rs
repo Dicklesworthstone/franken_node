@@ -29,19 +29,8 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
+use crate::push_bounded;
 const MAX_BUNDLES: usize = 4096;
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if cap == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() >= cap {
-        let overflow = items.len().saturating_sub(cap).saturating_add(1);
-        items.drain(0..overflow.min(items.len()));
-    }
-    items.push(item);
-}
 
 fn len_to_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
