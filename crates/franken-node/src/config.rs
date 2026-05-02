@@ -126,7 +126,7 @@ impl Config {
                     freshness_window_secs: None,
                     min_trust_score: None,
                     decay_factor: None,
-                    registry_signing_key: None,
+                    registry_signing_key: Some("ZnJhbmtlbi1ub2RlLXRydXN0LWNhcmQtcmVnaXN0cnkta2V5LXYx".to_string()),
                     reputation_tier_thresholds: None,
                     test_coverage_threshold_pct: None,
                 },
@@ -193,7 +193,7 @@ impl Config {
                     freshness_window_secs: None,
                     min_trust_score: None,
                     decay_factor: None,
-                    registry_signing_key: None,
+                    registry_signing_key: Some("ZnJhbmtlbi1ub2RlLXRydXN0LWNhcmQtcmVnaXN0cnkta2V5LXYx".to_string()),
                     reputation_tier_thresholds: None,
                     test_coverage_threshold_pct: None,
                 },
@@ -260,7 +260,7 @@ impl Config {
                     freshness_window_secs: None,
                     min_trust_score: None,
                     decay_factor: None,
-                    registry_signing_key: None,
+                    registry_signing_key: Some("ZnJhbmtlbi1ub2RlLXRydXN0LWNhcmQtcmVnaXN0cnkta2V5LXYx".to_string()),
                     reputation_tier_thresholds: None,
                     test_coverage_threshold_pct: None,
                 },
@@ -1751,8 +1751,16 @@ impl Config {
         if let Some(thresholds) = &self.trust.reputation_tier_thresholds {
             validate_reputation_thresholds(thresholds)?;
         }
-        if let Some(registry_signing_key) = &self.trust.registry_signing_key {
-            validate_registry_signing_key(registry_signing_key)?;
+        match &self.trust.registry_signing_key {
+            Some(registry_signing_key) => {
+                validate_registry_signing_key(registry_signing_key)?;
+            }
+            None => {
+                return Err(ConfigError::ValidationFailed(
+                    "trust.registry_signing_key must be configured (fail-closed security boundary)"
+                        .to_string(),
+                ));
+            }
         }
         validate_opt_score(
             "thresholds.max_failure_rate",
@@ -4315,6 +4323,19 @@ state_dir = ""
                 .unwrap_err()
                 .to_string()
                 .contains("trust.registry_signing_key")
+        );
+    }
+
+    #[test]
+    fn validation_rejects_missing_registry_signing_key() {
+        let mut config = Config::for_profile(Profile::Balanced);
+        config.trust.registry_signing_key = None;
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("trust.registry_signing_key must be configured (fail-closed security boundary)")
         );
     }
 

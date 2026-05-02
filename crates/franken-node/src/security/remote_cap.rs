@@ -16,9 +16,9 @@ use std::time::Duration;
 // bd-1vjbv: Modernized Ed25519 signature verification imports
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hmac::{Hmac, KeyInit, Mac};
+use rand; // For jitter in lock timeout backoff
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use rand; // For jitter in lock timeout backoff
 #[cfg(feature = "http-client")]
 use url::Url;
 
@@ -1599,7 +1599,7 @@ impl CapabilityProvider {
                 Err(TryLockError::Poisoned(poisoned)) => {
                     // Poisoned mutex recovery - this ensures audit integrity even if
                     // other threads panic while holding the lock
-                    return Ok(poisoned.into_inner())
+                    return Ok(poisoned.into_inner());
                 }
                 Err(TryLockError::WouldBlock) => {
                     let elapsed = start.elapsed();
@@ -1612,7 +1612,7 @@ impl CapabilityProvider {
 
                     // Use exponential backoff with jitter to reduce contention
                     let jitter = Duration::from_nanos(
-                        (rand::random::<u32>() % 1000) as u64 * 1000 // 0-1ms jitter
+                        (rand::random::<u32>() % 1000) as u64 * 1000, // 0-1ms jitter
                     );
                     let sleep_duration = std::cmp::min(backoff.saturating_add(jitter), max_backoff);
                     std::thread::sleep(sleep_duration);
@@ -1642,7 +1642,14 @@ impl fmt::Debug for CapabilityGate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CapabilityGate")
             .field("verification_secret", &"<redacted>")
-            .field("verifying_key", &if self.verifying_key.is_some() { "<present>" } else { "<none>" })
+            .field(
+                "verifying_key",
+                &if self.verifying_key.is_some() {
+                    "<present>"
+                } else {
+                    "<none>"
+                },
+            )
             .field("connectivity_mode", &self.connectivity_mode)
             .field("consumed_token_count", &self.consumed_tokens.len())
             .field("revoked_token_count", &self.revoked_tokens.len())
@@ -2413,11 +2420,10 @@ impl CapabilityGate {
         verifying_key: &VerifyingKey,
     ) -> Result<bool, RemoteCapError> {
         // Decode hex signature
-        let signature_bytes = hex::decode(signature_hex).map_err(|_| {
-            RemoteCapError::CryptoEngineUnavailable {
+        let signature_bytes =
+            hex::decode(signature_hex).map_err(|_| RemoteCapError::CryptoEngineUnavailable {
                 detail: "invalid hex signature format".to_string(),
-            }
-        })?;
+            })?;
 
         if signature_bytes.len() != 64 {
             return Ok(false); // Invalid signature length
@@ -2617,7 +2623,11 @@ fn estimated_secret_entropy_bits(secret: &str) -> f64 {
 
     // Ensure final result is finite
     let result = entropy * total;
-    if result.is_finite() { result } else { 0.0 }
+    if result.is_finite() {
+        result
+    } else {
+        0.0
+    }
 }
 
 fn replay_store_error(action: &str, path: &Path, source: std::io::Error) -> RemoteCapError {
@@ -3446,11 +3456,10 @@ mod tests {
             )
             .expect_err("second real use must fail");
         assert_eq!(err.code(), "REMOTECAP_REPLAY");
-        assert!(
-            gate.audit_log()
-                .iter()
-                .any(|event| event.event_code == "REMOTECAP_RECHECK_PASSED")
-        );
+        assert!(gate
+            .audit_log()
+            .iter()
+            .any(|event| event.event_code == "REMOTECAP_RECHECK_PASSED"));
     }
 
     #[test]
@@ -5288,12 +5297,10 @@ mod remote_cap_comprehensive_negative_tests {
 
         // Normalization should deduplicate and clean up endpoints
         assert!(unnormalized_scope.endpoint_prefixes.len() <= 2); // At most 2 unique endpoints after normalization
-        assert!(
-            !unnormalized_scope
-                .endpoint_prefixes
-                .iter()
-                .any(|e| e.trim().is_empty())
-        ); // No empty entries
+        assert!(!unnormalized_scope
+            .endpoint_prefixes
+            .iter()
+            .any(|e| e.trim().is_empty())); // No empty entries
     }
 
     /// Negative test: Advanced cryptographic attack scenarios
@@ -5577,10 +5584,9 @@ mod remote_cap_comprehensive_negative_tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.code(), "REMOTECAP_CRYPTO_UNAVAILABLE");
-        assert!(
-            err.to_string()
-                .contains("verification material is unavailable")
-        );
+        assert!(err
+            .to_string()
+            .contains("verification material is unavailable"));
     }
 
     #[test]
@@ -5589,10 +5595,9 @@ mod remote_cap_comprehensive_negative_tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.code(), "REMOTECAP_CRYPTO_UNAVAILABLE");
-        assert!(
-            err.to_string()
-                .contains("verification material is unavailable")
-        );
+        assert!(err
+            .to_string()
+            .contains("verification material is unavailable"));
     }
 
     #[test]

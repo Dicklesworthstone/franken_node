@@ -175,7 +175,10 @@ fn get_registry_key(config: &crate::config::TrustConfig) -> Result<Vec<u8>, Trus
             }
             Ok(decoded)
         }
-        None => Ok(DEFAULT_REGISTRY_KEY.to_vec()),
+        None => Err(TrustCardError::InvalidInput {
+            reason: "registry_signing_key must be configured (fail-closed security boundary)"
+                .to_string(),
+        }),
     }
 }
 

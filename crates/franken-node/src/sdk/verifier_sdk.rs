@@ -49,6 +49,9 @@ pub const SCHEMA_TAG: &str = "vsk-v1.0";
 
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 
+const DEFAULT_MAX_CLAIMS_PER_REQUEST: usize = 1000;
+const DEFAULT_MAX_CAPSULE_COUNT: usize = 1000;
+const DEFAULT_MAX_CHAIN_DEPTH: usize = 64;
 
 /// Security posture marker for this cryptographic verifier SDK surface.
 ///
@@ -148,6 +151,10 @@ pub struct VerifierConfig {
     pub strict_claims: bool,
     /// Maximum number of claims per verification request to prevent DoS via unbounded growth.
     pub max_claims_per_request: usize,
+    /// Maximum capsule records/properties accepted before replay or canonical serialization.
+    pub max_capsule_count: usize,
+    /// Maximum verification reports accepted in a single chain verification request.
+    pub max_chain_depth: usize,
     /// Additional properties carried forward for extensibility.
     pub extensions: BTreeMap<String, String>,
 }
@@ -158,7 +165,9 @@ impl Default for VerifierConfig {
             verifier_identity: "verifier://default".to_string(),
             require_hash_match: true,
             strict_claims: true,
-            max_claims_per_request: 1000,
+            max_claims_per_request: DEFAULT_MAX_CLAIMS_PER_REQUEST,
+            max_capsule_count: DEFAULT_MAX_CAPSULE_COUNT,
+            max_chain_depth: DEFAULT_MAX_CHAIN_DEPTH,
             extensions: BTreeMap::new(),
         }
     }
@@ -255,6 +264,28 @@ fn artifact_binding_hash(request: &VerificationRequest) -> String {
             .chain(std::iter::once(request.artifact_hash.as_str()))
             .chain(request.claims.iter().map(String::as_str)),
     )
+}
+
+fn validate_capacity_limit(name: &str, limit: usize) -> Result<usize, SdkError> {
+    if limit == 0 {
+        return Err(SdkError::ConfigError(format!(
+            "{name} must be greater than zero"
+        )));
+    }
+    Ok(limit)
+}
+
+fn capsule_component_count(capsule: &super::replay_capsule::ReplayCapsule) -> usize {
+    let input_metadata_count = capsule.inputs.iter().fold(0usize, |count, input| {
+        count.saturating_add(input.metadata.len())
+    });
+
+    capsule
+        .inputs
+        .len()
+        .saturating_add(capsule.expected_outputs.len())
+        .saturating_add(capsule.environment.properties.len())
+        .saturating_add(input_metadata_count)
 }
 
 #[allow(dead_code)]
@@ -458,6 +489,9 @@ impl VerifierSdk {
         &self,
         capsule: &super::replay_capsule::ReplayCapsule,
     ) -> Result<VerificationReport, SdkError> {
+        let max_capsule_count =
+            validate_capacity_limit("max_capsule_count", self.config.max_capsule_count)?;
+
         if capsule.capsule_id.is_empty() {
             return Err(SdkError::MalformedCapsule(
                 "capsule_id is empty".to_string(),
@@ -511,6 +545,49 @@ impl VerifierSdk {
                 !capsule.environment.config_hash.is_empty()
             ),
         });
+
+        let capsule_count = capsule_component_count(capsule);
+        let capsule_within_capacity = capsule_count <= max_capsule_count;
+        evidence.push(EvidenceEntry {
+            check_name: "capsule_capacity_check".to_string(),
+            passed: capsule_within_capacity,
+            detail: if capsule_within_capacity {
+                format!("{capsule_count} capsule components within limit of {max_capsule_count}")
+            } else {
+                format!("{capsule_count} capsule components exceeds limit of {max_capsule_count}")
+            },
+        });
+
+        if !capsule_within_capacity {
+            evidence.push(EvidenceEntry {
+                check_name: "capsule_replay_skipped_due_to_capacity".to_string(),
+                passed: false,
+                detail: "Replay and canonical serialization skipped due to excessive capsule size"
+                    .to_string(),
+            });
+            let failures: Vec<String> = evidence
+                .iter()
+                .filter(|e| !e.passed)
+                .map(|e| e.check_name.clone())
+                .collect();
+            let binding_hash = deterministic_hash_fields(&[
+                "capsule_capacity_exceeded",
+                &capsule.capsule_id,
+                &capsule_count.to_string(),
+                &max_capsule_count.to_string(),
+            ]);
+
+            return Ok(VerificationReport {
+                request_id: format!("vcap-{}", &deterministic_hash(&capsule.capsule_id)[..24]),
+                verdict: VerifyVerdict::Fail(failures),
+                evidence,
+                trace_id: format!("vtrc-{}", &binding_hash[..24]),
+                schema_tag: SCHEMA_TAG.to_string(),
+                api_version: API_VERSION.to_string(),
+                verifier_identity: self.config.verifier_identity.clone(),
+                binding_hash,
+            });
+        }
 
         // Sequence monotonicity check on inputs
         let monotonic = capsule
@@ -585,6 +662,9 @@ impl VerifierSdk {
         &self,
         reports: &[VerificationReport],
     ) -> Result<VerificationReport, SdkError> {
+        let max_chain_depth =
+            validate_capacity_limit("max_chain_depth", self.config.max_chain_depth)?;
+
         if reports.is_empty() {
             return Err(SdkError::BrokenChain("chain is empty".to_string()));
         }
@@ -597,6 +677,57 @@ impl VerifierSdk {
             passed: true,
             detail: format!("{} reports in chain", reports.len()),
         });
+
+        let chain_within_capacity = reports.len() <= max_chain_depth;
+        evidence.push(EvidenceEntry {
+            check_name: "chain_depth_check".to_string(),
+            passed: chain_within_capacity,
+            detail: if chain_within_capacity {
+                format!(
+                    "{} reports within chain depth limit of {}",
+                    reports.len(),
+                    max_chain_depth
+                )
+            } else {
+                format!(
+                    "{} reports exceeds chain depth limit of {}",
+                    reports.len(),
+                    max_chain_depth
+                )
+            },
+        });
+
+        if !chain_within_capacity {
+            evidence.push(EvidenceEntry {
+                check_name: "chain_verification_skipped_due_to_depth".to_string(),
+                passed: false,
+                detail: "Chain-wide schema, uniqueness, and verdict checks skipped due to depth"
+                    .to_string(),
+            });
+            let failures: Vec<String> = evidence
+                .iter()
+                .filter(|e| !e.passed)
+                .map(|e| e.check_name.clone())
+                .collect();
+            let report_count = reports.len().to_string();
+            let chain_depth = max_chain_depth.to_string();
+            let chain_binding =
+                deterministic_hash_fields(&["chain_depth_exceeded", &report_count, &chain_depth]);
+
+            return Ok(VerificationReport {
+                request_id: format!("vchn-{}", &deterministic_hash(&chain_binding)[..24]),
+                verdict: VerifyVerdict::Fail(failures),
+                evidence,
+                trace_id: format!(
+                    "vtrc-{}",
+                    &deterministic_hash(&format!("chain:{chain_binding}"))[..24]
+                ),
+                schema_tag: SCHEMA_TAG.to_string(),
+                api_version: API_VERSION.to_string(),
+                verifier_identity: self.config.verifier_identity.clone(),
+                binding_hash: chain_binding,
+            });
+        }
 
         // All reports have same schema_tag
         let same_schema = reports.iter().all(|r| r.schema_tag == SCHEMA_TAG);

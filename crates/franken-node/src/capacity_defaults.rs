@@ -382,6 +382,7 @@ pub mod support {
     use super::base;
 
     pub const SCHEMA_VERSIONS: usize = base::TRACE;
+    pub const TEST_KEYS: usize = base::TRACE;
     pub const ASSERTIONS: usize = base::STANDARD;
     pub const LINKS: usize = base::STANDARD;
     pub const NODES_CAP: usize = base::STANDARD;
@@ -688,6 +689,7 @@ pub mod aliases {
     pub const MAX_WINDOWS_SEEN: usize = verifier::WINDOWS_SEEN;
 
     pub const MAX_SCHEMA_VERSIONS: usize = support::SCHEMA_VERSIONS;
+    pub const MAX_TEST_KEYS: usize = support::TEST_KEYS;
     pub const MAX_ASSERTIONS: usize = support::ASSERTIONS;
     pub const MAX_LINKS: usize = support::LINKS;
     pub const MAX_NODES_CAP: usize = support::NODES_CAP;
@@ -716,6 +718,7 @@ mod tests {
         assert_eq!(aliases::MAX_SESSION_EVENTS, runtime::SESSION_EVENTS);
         assert_eq!(aliases::MAX_VERIFIERS, verifier::VERIFIERS);
         assert_eq!(aliases::MAX_SCHEMA_VERSIONS, support::SCHEMA_VERSIONS);
+        assert_eq!(aliases::MAX_TEST_KEYS, support::TEST_KEYS);
     }
 
     #[test]
@@ -786,8 +789,10 @@ mod tests {
     #[test]
     fn support_schema_versions_do_not_use_large_runtime_bucket() {
         assert_eq!(aliases::MAX_SCHEMA_VERSIONS, base::TRACE);
+        assert_eq!(aliases::MAX_TEST_KEYS, base::TRACE);
         assert_ne!(aliases::MAX_SCHEMA_VERSIONS, aliases::MAX_TRACE_STEPS);
         assert_ne!(aliases::MAX_SCHEMA_VERSIONS, aliases::MAX_TOTAL_ARTIFACTS);
+        assert_ne!(aliases::MAX_TEST_KEYS, aliases::MAX_TRACE_STEPS);
     }
 
     #[test]

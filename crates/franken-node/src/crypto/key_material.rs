@@ -137,7 +137,7 @@ impl Ed25519KeyMaterial {
 }
 
 // Simple in-memory key storage for testing/development
-const MAX_TEST_KEYS: usize = crate::capacity_defaults::base::TRACE;
+const MAX_TEST_KEYS: usize = crate::capacity_defaults::aliases::MAX_TEST_KEYS;
 
 lazy_static::lazy_static! {
     static ref KEY_STORAGE: Arc<Mutex<HashMap<String, Ed25519KeyMaterial>>> =
