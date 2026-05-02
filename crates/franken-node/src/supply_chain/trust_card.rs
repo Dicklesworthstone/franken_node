@@ -927,7 +927,12 @@ impl TrustCardRegistry {
         let trusted_snapshot = snapshot.clone();
         let mut registry = Self::from_snapshot(snapshot, DEFAULT_REGISTRY_KEY, loaded_at_secs)?;
         registry.cache_ttl_secs = cache_ttl_secs.max(1);
-        persist_snapshot_high_water_if_newer(path, &trusted_snapshot, high_water.as_ref())?;
+        persist_snapshot_high_water_if_newer(
+            path,
+            &trusted_snapshot,
+            high_water.as_ref(),
+            DEFAULT_REGISTRY_KEY,
+        )?;
         Ok(registry)
     }
 
@@ -1007,7 +1012,12 @@ impl TrustCardRegistry {
         let mut registry = Self::from_snapshot(snapshot, &registry_key, loaded_at_secs)?;
         registry.cache_ttl_secs = cache_ttl_secs.max(1);
 
-        persist_snapshot_high_water_if_newer(path, &trusted_snapshot, high_water.as_ref())?;
+        persist_snapshot_high_water_if_newer(
+            path,
+            &trusted_snapshot,
+            high_water.as_ref(),
+            &registry_key,
+        )?;
         Ok(registry)
     }
 
@@ -2725,6 +2735,7 @@ fn persist_snapshot_high_water_if_newer(
     path: &Path,
     snapshot: &TrustCardRegistrySnapshot,
     high_water: Option<&TrustCardRegistrySnapshotHighWater>,
+    registry_key: &[u8],
 ) -> Result<(), TrustCardError> {
     let should_write = match high_water {
         None => true,
@@ -2737,7 +2748,7 @@ fn persist_snapshot_high_water_if_newer(
     if !should_write {
         return Ok(());
     }
-    let next = signed_snapshot_high_water(snapshot, DEFAULT_REGISTRY_KEY)?;
+    let next = signed_snapshot_high_water(snapshot, registry_key)?;
     write_snapshot_high_water(path, &next)
 }
 
@@ -2789,9 +2800,9 @@ mod tests {
     use super::{
         AuditRecord, BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
         DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
-        ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCard, TrustCardError,
-        TrustCardMutation, TrustCardRegistry, VerifiedEvidenceRef, canonicalize_value,
-        update_card_hash, validate_trust_card_structure,
+        ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, SnapshotSourceContext,
+        TrustCard, TrustCardError, TrustCardMutation, TrustCardRegistry, VerifiedEvidenceRef,
+        canonicalize_value, to_canonical_json, update_card_hash, validate_trust_card_structure,
     };
     use base64::Engine as _;
 
@@ -5723,6 +5734,43 @@ mod tests {
             Some(base64::engine::general_purpose::STANDARD.encode([9_u8; 32]));
 
         TrustCardRegistry::from_config(&config).expect("valid key should configure registry");
+    }
+
+    #[test]
+    fn configured_load_writes_high_water_with_configured_key() {
+        let mut config = crate::config::Config::for_profile(crate::config::Profile::Balanced).trust;
+        config.registry_signing_key =
+            Some(base64::engine::general_purpose::STANDARD.encode([7_u8; 32]));
+        let mut registry = TrustCardRegistry::from_config(&config)
+            .expect("custom registry key should configure registry");
+        registry
+            .create(sample_input(), 1_000, "trace")
+            .expect("create");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("custom-key-trust-card-state.json");
+        let snapshot = registry.snapshot().expect("snapshot");
+        std::fs::write(
+            &path,
+            to_canonical_json(&snapshot).expect("snapshot should serialize"),
+        )
+        .expect("write snapshot without high-water");
+
+        TrustCardRegistry::load_authoritative_state_from_config(
+            &path,
+            &config,
+            2_000,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect("first configured load should write high-water");
+
+        TrustCardRegistry::load_authoritative_state_from_config(
+            &path,
+            &config,
+            3_000,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect("second configured load should verify high-water with configured key");
     }
 
     #[test]
