@@ -1,85 +1,116 @@
 """Tests for scripts/check_compatibility_corpus.py (bd-2ja)."""
 
-import importlib.util
 import json
+import runpy
 import subprocess
 import sys
+import tempfile
+import unittest
 from pathlib import Path
-from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_compatibility_corpus.py"
 
-spec = importlib.util.spec_from_file_location("check_corpus", SCRIPT)
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
+
+class ScriptNamespace:
+    def __init__(self, script_globals: dict[str, object]) -> None:
+        object.__setattr__(self, "_script_globals", script_globals)
+
+    def __getattr__(self, name: str) -> object:
+        return self._script_globals[name]
+
+    def __setattr__(self, name: str, value: object) -> None:
+        self._script_globals[name] = value
 
 
-class TestSelfTest:
+script_globals = runpy.run_path(str(SCRIPT))
+mod = ScriptNamespace(script_globals["_checks"].__globals__)
+
+
+def run_script(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *args],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=30,
+    )
+
+
+def load_json(text: str) -> dict[str, object]:
+    return json.JSONDecoder().decode(text)
+
+
+def checks_with_corpus(path: Path) -> list[dict[str, object]]:
+    original = mod.CORPUS
+    mod.CORPUS = path
+    try:
+        return mod._checks()
+    finally:
+        mod.CORPUS = original
+
+
+class TestSelfTest(unittest.TestCase):
     def test_self_test(self):
-        assert mod.self_test() is True
+        self.assertTrue(mod.self_test())
 
 
-class TestValidCorpusPasses:
+class TestValidCorpusPasses(unittest.TestCase):
     def test_valid_corpus_passes(self):
         results = mod._checks()
-        failed = [r for r in results if not r["passed"]]
-        assert len(failed) == 0, f"Failed: {[r['check'] for r in failed]}"
+        failed = [result for result in results if not result["passed"]]
+        self.assertEqual(failed, [], f"Failed: {[result['check'] for result in failed]}")
 
     def test_json_output_verdict_pass(self):
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT), "--json"],
-            capture_output=True, text=True,
-        )
-        data = json.loads(result.stdout)
-        assert data["bead_id"] == "bd-2ja"
-        assert data["section"] == "10.7"
-        assert data["verdict"] == "PASS"
-        assert data["checks_passed"] == data["checks_total"]
+        result = run_script("--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = load_json(result.stdout)
+        self.assertEqual(data["bead_id"], "bd-2ja")
+        self.assertEqual(data["section"], "10.7")
+        self.assertEqual(data["verdict"], "PASS")
+        self.assertEqual(data["checks_passed"], data["checks_total"])
 
     def test_human_output(self):
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT)],
-            capture_output=True, text=True,
-        )
-        assert "bd-2ja" in result.stdout
-        assert "PASS" in result.stdout
+        result = run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("bd-2ja", result.stdout)
+        self.assertIn("PASS", result.stdout)
 
 
-class TestMissingFixtureFieldFails:
-    def test_missing_fixture_field_fails(self, tmp_path):
+class TestMissingFixtureFieldFails(unittest.TestCase):
+    def test_missing_fixture_field_fails(self):
         """Removing a required field from a fixture causes check failure."""
-        corpus_data = json.loads(mod._read(mod.CORPUS))
-        # Remove 'api_surface' from first fixture
+        corpus_data = load_json(mod._read(mod.CORPUS))
         del corpus_data["fixtures"][0]["api_surface"]
 
-        bad_corpus = tmp_path / "corpus_manifest.json"
-        bad_corpus.write_text(json.dumps(corpus_data), encoding="utf-8")
+        with tempfile.TemporaryDirectory(prefix="compat-corpus-") as temp_dir:
+            bad_corpus = Path(temp_dir) / "corpus_manifest.json"
+            bad_corpus.write_text(json.dumps(corpus_data), encoding="utf-8")
 
-        with mock.patch.object(mod, "CORPUS", bad_corpus):
-            results = mod._checks()
+            results = checks_with_corpus(bad_corpus)
             required_check = next(
-                r for r in results if r["check"] == "fixtures_required_fields"
+                result for result in results if result["check"] == "fixtures_required_fields"
             )
-            assert not required_check["passed"], \
-                "Should fail when a required field is missing"
+            self.assertFalse(required_check["passed"], "Should fail when a required field is missing")
 
 
-class TestInvalidBandFails:
-    def test_invalid_band_fails(self, tmp_path):
+class TestInvalidBandFails(unittest.TestCase):
+    def test_invalid_band_fails(self):
         """Using an invalid band value causes check failure."""
-        corpus_data = json.loads(mod._read(mod.CORPUS))
-        # Set an invalid band
+        corpus_data = load_json(mod._read(mod.CORPUS))
         corpus_data["fixtures"][0]["band"] = "nonexistent_band"
 
-        bad_corpus = tmp_path / "corpus_manifest.json"
-        bad_corpus.write_text(json.dumps(corpus_data), encoding="utf-8")
+        with tempfile.TemporaryDirectory(prefix="compat-corpus-") as temp_dir:
+            bad_corpus = Path(temp_dir) / "corpus_manifest.json"
+            bad_corpus.write_text(json.dumps(corpus_data), encoding="utf-8")
 
-        with mock.patch.object(mod, "CORPUS", bad_corpus):
-            results = mod._checks()
+            results = checks_with_corpus(bad_corpus)
             band_check = next(
-                r for r in results if r["check"] == "valid_bands"
+                result for result in results if result["check"] == "valid_bands"
             )
-            assert not band_check["passed"], \
-                "Should fail when band is not in valid set"
+            self.assertFalse(band_check["passed"], "Should fail when band is not in valid set")
+
+
+if __name__ == "__main__":
+    unittest.main()
