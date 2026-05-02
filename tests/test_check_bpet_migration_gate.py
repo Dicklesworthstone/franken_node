@@ -127,7 +127,7 @@ class TestReportValidation(unittest.TestCase):
             root = Path(tmp)
             _write_pass_fixture(root)
             report = root / "artifacts/10.21/bpet_migration_gate_results.json"
-            data = json.loads(report.read_text(encoding="utf-8"))
+            data = json.JSONDecoder().decode(report.read_text(encoding="utf-8"))
             data["admission"]["verdict"] = "bad"
             report.write_text(json.dumps(data), encoding="utf-8")
             checks = checker.check_report(root)
