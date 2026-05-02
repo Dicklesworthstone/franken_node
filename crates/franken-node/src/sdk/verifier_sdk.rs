@@ -173,6 +173,16 @@ impl Default for VerifierConfig {
     }
 }
 
+impl VerifierConfig {
+    /// Create VerifierConfig from top-level node configuration.
+    pub fn from_node_config(config: &crate::config::VerifierConfig) -> Self {
+        Self {
+            max_claims_per_request: config.max_claims_per_request,
+            ..Self::default()
+        }
+    }
+}
+
 /// The universal Verifier SDK entry point.
 ///
 /// INV-VSK-STABLE-API: All public methods are stable within a major version.

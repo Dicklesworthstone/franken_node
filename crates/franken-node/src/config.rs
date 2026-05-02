@@ -80,6 +80,9 @@ pub struct Config {
 
     /// Category shift benchmark gate configuration.
     pub benchmark: BenchmarkConfig,
+
+    /// Verifier SDK behavior settings.
+    pub verifier: VerifierConfig,
 }
 
 impl Default for Config {
@@ -169,6 +172,9 @@ impl Config {
                 runtime: RuntimeConfig::strict_defaults(),
                 thresholds: ThresholdsConfig::default(),
                 benchmark: BenchmarkConfig::default(),
+                verifier: VerifierConfig {
+                    max_claims_per_request: 1000,
+                },
             },
             Profile::Balanced => Self {
                 profile,
@@ -236,6 +242,9 @@ impl Config {
                 runtime: RuntimeConfig::balanced_defaults(),
                 thresholds: ThresholdsConfig::default(),
                 benchmark: BenchmarkConfig::default(),
+                verifier: VerifierConfig {
+                    max_claims_per_request: 1000,
+                },
             },
             Profile::LegacyRisky => Self {
                 profile,
@@ -303,6 +312,9 @@ impl Config {
                 runtime: RuntimeConfig::legacy_defaults(),
                 thresholds: ThresholdsConfig::default(),
                 benchmark: BenchmarkConfig::default(),
+                verifier: VerifierConfig {
+                    max_claims_per_request: 1000,
+                },
             },
         }
     }
@@ -3171,6 +3183,19 @@ pub struct BenchmarkConfig {
     /// **Default:** 50000
     #[serde(default = "default_min_throughput_ops")]
     pub min_throughput_ops: u64,
+}
+
+// -- Verifier --
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerifierConfig {
+    /// Maximum number of claims per verification request to prevent DoS via unbounded growth.
+    #[serde(default = "default_max_claims_per_request")]
+    pub max_claims_per_request: usize,
+}
+
+fn default_max_claims_per_request() -> usize {
+    1000
 }
 
 fn default_benchmark_summary_path() -> String {
