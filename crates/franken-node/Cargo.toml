@@ -301,6 +301,15 @@ path = "tests/migration_report_conformance.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "migration_e2e_gate_artifacts"
+path = "tests/migration_e2e_gate_artifacts.rs"
+
+[[test]]
+name = "policy_e2e_evidence_matrix"
+path = "tests/policy_e2e_evidence_matrix.rs"
+required-features = ["policy-engine"]
+
+[[test]]
 name = "runtime_cli_e2e"
 path = "tests/runtime_cli_e2e.rs"
 
