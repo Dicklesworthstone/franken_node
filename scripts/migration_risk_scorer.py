@@ -105,6 +105,16 @@ def score_report(scan_report: dict) -> dict:
     }
 
 
+def load_scan_report(report_path: Path) -> dict:
+    """Load a scan report, failing closed on unreadable or malformed input."""
+    try:
+        return json.JSONDecoder().decode(report_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"invalid scan report JSON: {report_path}: {exc}") from exc
+    except OSError as exc:
+        raise SystemExit(f"failed to read scan report: {report_path}: {exc}") from exc
+
+
 def self_test() -> dict:
     """Run self-test with synthetic scan reports."""
     checks = []
@@ -187,7 +197,7 @@ def main():
         sys.exit(2)
 
     report_path = Path(args[0])
-    scan_report = json.loads(report_path.read_text())
+    scan_report = load_scan_report(report_path)
     result = score_report(scan_report)
 
     if json_output:

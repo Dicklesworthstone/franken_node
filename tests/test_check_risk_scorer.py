@@ -2,6 +2,7 @@
 """Unit tests for migration_risk_scorer.py."""
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -104,6 +105,36 @@ class TestScoreReport(unittest.TestCase):
         self.assertIn("features", result)
         self.assertIn("explanations", result)
         self.assertIn("weights_used", result)
+
+
+class TestLoadScanReport(unittest.TestCase):
+    def test_load_scan_report_valid_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "scan.json"
+            report_path.write_text('{"project": "loaded-project"}', encoding="utf-8")
+
+            result = scorer.load_scan_report(report_path)
+
+        self.assertEqual(result["project"], "loaded-project")
+
+    def test_load_scan_report_invalid_json_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "scan.json"
+            report_path.write_text("{bad-json", encoding="utf-8")
+
+            with self.assertRaises(SystemExit) as raised:
+                scorer.load_scan_report(report_path)
+
+        self.assertIn("invalid scan report JSON", str(raised.exception))
+
+    def test_load_scan_report_missing_file_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "missing.json"
+
+            with self.assertRaises(SystemExit) as raised:
+                scorer.load_scan_report(report_path)
+
+        self.assertIn("failed to read scan report", str(raised.exception))
 
 
 class TestSelfTest(unittest.TestCase):
