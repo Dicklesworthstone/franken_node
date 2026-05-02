@@ -141,7 +141,7 @@ def check_content(path, patterns, category):
         for p in patterns:
             results.append({"check": f"{category}: {p}", "pass": False, "detail": "file missing"})
         return results
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     for p in patterns:
         found = p in text
         results.append({
@@ -155,7 +155,7 @@ def check_content(path, patterns, category):
 def check_impl_test_count():
     if not IMPL.exists():
         return {"check": "integration test count", "pass": False, "detail": "impl missing"}
-    text = IMPL.read_text()
+    text = IMPL.read_text(encoding="utf-8")
     count = len(re.findall(r"#\[test\]", text))
     ok = count >= 35
     return {
@@ -168,7 +168,7 @@ def check_impl_test_count():
 def check_serde_derives():
     if not IMPL.exists():
         return {"check": "Serialize/Deserialize derives", "pass": False, "detail": "impl missing"}
-    text = IMPL.read_text()
+    text = IMPL.read_text(encoding="utf-8")
     has_ser = "Serialize" in text and "Deserialize" in text
     return {
         "check": "Serialize/Deserialize derives",
@@ -184,7 +184,7 @@ def check_inventory_csv():
         return results
     results.append({"check": "inventory CSV: exists", "pass": True, "detail": "found"})
 
-    with open(INVENTORY_CSV) as f:
+    with INVENTORY_CSV.open(encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
 
@@ -243,7 +243,7 @@ def check_spec():
         results.append({"check": "spec doc: exists", "pass": False, "detail": "MISSING"})
         return results
     results.append({"check": "spec doc: exists", "pass": True, "detail": "found"})
-    text = SPEC.read_text()
+    text = SPEC.read_text(encoding="utf-8")
 
     for section in ["Types", "Methods", "Event Codes", "Invariants", "Acceptance Criteria"]:
         found = section in text

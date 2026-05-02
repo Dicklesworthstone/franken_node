@@ -177,7 +177,7 @@ class TestJsonOutput(unittest.TestCase):
     def test_json_serializable(self):
         result = mod.run_checks()
         output = json.dumps(result, indent=2)
-        parsed = json.loads(output)
+        parsed = json.JSONDecoder().decode(output)
         self.assertEqual(parsed["bead_id"], "bd-1xtf")
 
     def test_json_has_all_fields(self):
