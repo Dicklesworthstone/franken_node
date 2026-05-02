@@ -4,16 +4,16 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 SRC = os.path.join(ROOT, "crates", "franken-node", "src", "remote", "remote_bulkhead.rs")
 
 
 def _read(path):
     try:
-        with open(path, encoding="utf-8") as f:
-            return f.read()
+        return Path(path).read_text(encoding="utf-8")
     except OSError:
         return None
 
