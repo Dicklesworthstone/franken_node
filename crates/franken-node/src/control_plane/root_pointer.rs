@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use fs2::FileExt;
 use hmac::{Hmac, KeyInit, Mac};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -121,13 +121,77 @@ impl fmt::Display for ControlEpoch {
 }
 
 /// Canonical root pointer payload.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RootPointer {
     pub epoch: ControlEpoch,
     pub marker_stream_head_seq: u64,
     pub marker_stream_head_hash: String,
     pub publication_timestamp: String,
     pub publisher_id: String,
+}
+
+impl<'de> Deserialize<'de> for RootPointer {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let object = value.as_object().ok_or_else(|| {
+            <D::Error as serde::de::Error>::custom("root pointer must be a JSON object")
+        })?;
+
+        let epoch = object
+            .get("epoch")
+            .ok_or_else(|| <D::Error as serde::de::Error>::custom("missing field `epoch`"))?
+            .as_u64()
+            .ok_or_else(|| {
+                <D::Error as serde::de::Error>::custom("field `epoch` must be an unsigned integer")
+            })?;
+        let marker_stream_head_seq = object
+            .get("marker_stream_head_seq")
+            .ok_or_else(|| {
+                <D::Error as serde::de::Error>::custom("missing field `marker_stream_head_seq`")
+            })?
+            .as_u64()
+            .ok_or_else(|| {
+                <D::Error as serde::de::Error>::custom(
+                    "field `marker_stream_head_seq` must be an unsigned integer",
+                )
+            })?;
+        let marker_stream_head_hash = object
+            .get("marker_stream_head_hash")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                <D::Error as serde::de::Error>::custom(
+                    "field `marker_stream_head_hash` must be a string",
+                )
+            })?
+            .to_string();
+        let publication_timestamp = object
+            .get("publication_timestamp")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                <D::Error as serde::de::Error>::custom(
+                    "field `publication_timestamp` must be a string",
+                )
+            })?
+            .to_string();
+        let publisher_id = object
+            .get("publisher_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                <D::Error as serde::de::Error>::custom("field `publisher_id` must be a string")
+            })?
+            .to_string();
+
+        Ok(Self {
+            epoch: ControlEpoch(epoch),
+            marker_stream_head_seq,
+            marker_stream_head_hash,
+            publication_timestamp,
+            publisher_id,
+        })
+    }
 }
 
 /// Detached root authentication record written alongside the root pointer.
