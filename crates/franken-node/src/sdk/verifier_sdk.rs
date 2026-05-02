@@ -49,8 +49,6 @@ pub const SCHEMA_TAG: &str = "vsk-v1.0";
 
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 
-/// Maximum number of claims per verification request to prevent DoS via unbounded growth
-const MAX_CLAIMS_PER_REQUEST: usize = 1000;
 
 /// Security posture marker for this cryptographic verifier SDK surface.
 ///
@@ -148,6 +146,8 @@ pub struct VerifierConfig {
     pub require_hash_match: bool,
     /// Whether to require all claims to be non-empty.
     pub strict_claims: bool,
+    /// Maximum number of claims per verification request to prevent DoS via unbounded growth.
+    pub max_claims_per_request: usize,
     /// Additional properties carried forward for extensibility.
     pub extensions: BTreeMap<String, String>,
 }
@@ -158,6 +158,7 @@ impl Default for VerifierConfig {
             verifier_identity: "verifier://default".to_string(),
             require_hash_match: true,
             strict_claims: true,
+            max_claims_per_request: 1000,
             extensions: BTreeMap::new(),
         }
     }
@@ -358,7 +359,7 @@ impl VerifierSdk {
         });
 
         // Claims capacity check to prevent unbounded growth DoS
-        let claims_within_capacity = request.claims.len() <= MAX_CLAIMS_PER_REQUEST;
+        let claims_within_capacity = request.claims.len() <= self.config.max_claims_per_request;
         evidence.push(EvidenceEntry {
             check_name: "claims_capacity_check".to_string(),
             passed: claims_within_capacity,
@@ -366,13 +367,13 @@ impl VerifierSdk {
                 format!(
                     "{} claims within limit of {}",
                     request.claims.len(),
-                    MAX_CLAIMS_PER_REQUEST
+                    self.config.max_claims_per_request
                 )
             } else {
                 format!(
                     "{} claims exceeds limit of {}",
                     request.claims.len(),
-                    MAX_CLAIMS_PER_REQUEST
+                    self.config.max_claims_per_request
                 )
             },
         });

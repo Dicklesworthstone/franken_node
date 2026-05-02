@@ -188,6 +188,10 @@ name = "connector_lifecycle_public_api_e2e"
 path = "tests/connector_lifecycle_public_api_e2e.rs"
 
 [[test]]
+name = "connector_method_contract_artifact_conformance"
+path = "tests/connector_method_contract_artifact_conformance.rs"
+
+[[test]]
 name = "atc_verifier_api_routes"
 path = "tests/atc_verifier_api_routes.rs"
 required-features = ["control-plane"]
@@ -381,6 +385,20 @@ path = "tests/canonical_serializer_real_inputs.rs"
 [[test]]
 name = "canonical_serializer_conformance"
 path = "tests/canonical_serializer_conformance.rs"
+
+[[test]]
+name = "encoding_proptest"
+path = "tests/encoding_proptest.rs"
+
+[[test]]
+name = "claims_proptest"
+path = "tests/claims_proptest.rs"
+required-features = ["advanced-features"]
+
+[[test]]
+name = "conformance_proptest"
+path = "tests/conformance_proptest.rs"
+required-features = ["advanced-features"]
 
 [[test]]
 name = "category_shift_real_inputs"

@@ -5171,7 +5171,7 @@ fn registry_publish_signing_key_required_error(package_path: &Path) -> Actionabl
             package_path.display()
         ),
         format!(
-            "mkdir -p .franken-node/keys && openssl rand -hex 32 > .franken-node/keys/publisher.ed25519 && franken-node registry publish {} --signing-key .franken-node/keys/publisher.ed25519",
+            "mkdir -p .franken-node/keys && openssl rand -hex 32 > .franken-node/keys/publisher.ed25519 && franken-node registry publish {} --version 1.0.0 --signing-key .franken-node/keys/publisher.ed25519",
             package_path.display()
         ),
     )
@@ -10733,6 +10733,7 @@ mod registry_command_tests {
         let request = build_registry_publish_request_with_context(
             &package,
             &hash,
+            "2.3.4",
             &signing_material,
             registry_publish_context(
                 "builder.example.internal",
@@ -10747,6 +10748,7 @@ mod registry_command_tests {
             ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_'
         }));
         assert_eq!(request.initial_version.content_hash, hash);
+        assert_eq!(request.initial_version.version, "2.3.4");
         assert_eq!(request.signature.signature_bytes.len(), 64);
         assert_eq!(
             request.provenance.builder_identity,
@@ -10800,11 +10802,13 @@ mod registry_command_tests {
         let request = build_registry_publish_request_with_context(
             &package,
             "abc123",
+            "0.1.2",
             &signing_material,
             registry_publish_context("builder-host", None, None, None),
         )
         .expect("publish request");
         assert_eq!(request.initial_version.content_hash, "abc123");
+        assert_eq!(request.initial_version.version, "0.1.2");
         assert!(request.provenance.source_repository_url.is_empty());
         assert!(request.provenance.vcs_commit_sha.is_empty());
         assert_eq!(request.provenance.slsa_level_claim, 0);
@@ -10812,6 +10816,32 @@ mod registry_command_tests {
         assert_eq!(
             request.provenance.links[0].role,
             supply_chain::provenance::ChainLinkRole::Publisher
+        );
+    }
+
+    #[test]
+    fn build_registry_publish_request_rejects_non_numeric_version() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let package = temp.path().join("demo.tar.gz");
+        std::fs::write(&package, "artifact").expect("write package");
+        let signing_material = Ed25519SigningMaterial {
+            path: temp.path().join("publisher.ed25519"),
+            source: "test",
+            signing_key: ed25519_dalek::SigningKey::from_bytes(&[10_u8; 32]),
+        };
+
+        let err = build_registry_publish_request_with_context(
+            &package,
+            "abc123",
+            "1.0.0-alpha",
+            &signing_material,
+            registry_publish_context("builder-host", None, None, None),
+        )
+        .expect_err("pre-release versions are not accepted by registry monotonic rules");
+
+        assert!(
+            err.to_string().contains("numeric semver"),
+            "unexpected error: {err:#}"
         );
     }
 
@@ -10831,6 +10861,7 @@ mod registry_command_tests {
         let request = build_registry_publish_request_with_context(
             &package_path,
             &content_hash,
+            "1.2.3",
             &signing_material,
             registry_publish_context(
                 "builder.example.internal",
@@ -11023,6 +11054,25 @@ mod registry_command_tests {
         assert!(
             leftovers.is_empty(),
             "temp registry directories should be cleaned up: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn registry_publish_capacity_rejects_full_active_lineage() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let lineage_root = registry_artifact_lineage_root(temp.path(), "publisher", "plugin");
+        std::fs::create_dir_all(lineage_root.join("entry-a")).expect("entry a");
+        std::fs::create_dir_all(lineage_root.join("entry-b")).expect("entry b");
+        std::fs::create_dir_all(lineage_root.join(".entry-c.tmp-ignored")).expect("temp entry");
+
+        ensure_local_registry_artifact_capacity(temp.path(), "publisher", "plugin", 3)
+            .expect("below cap");
+        let err = ensure_local_registry_artifact_capacity(temp.path(), "publisher", "plugin", 2)
+            .expect_err("at cap should reject publish");
+
+        assert!(
+            err.to_string().contains("active artifact cap exceeded"),
+            "unexpected error: {err:#}"
         );
     }
 
@@ -14937,6 +14987,12 @@ fn registry_active_artifacts_root(project_root: &Path) -> PathBuf {
     registry_storage_root(project_root).join("artifacts")
 }
 
+fn registry_artifact_lineage_root(project_root: &Path, publisher_id: &str, name: &str) -> PathBuf {
+    registry_active_artifacts_root(project_root)
+        .join(normalize_registry_name(publisher_id))
+        .join(normalize_registry_name(name))
+}
+
 fn registry_archive_root(project_root: &Path) -> PathBuf {
     registry_storage_root(project_root).join("archive")
 }
@@ -15010,6 +15066,46 @@ fn registry_artifact_file_name_is_safe(file_name: &str) -> bool {
     }
 }
 
+fn count_active_registry_artifacts_in_lineage(lineage_root: &Path) -> Result<usize> {
+    if !lineage_root.is_dir() {
+        return Ok(0);
+    }
+
+    let mut active = 0_usize;
+    for entry in std::fs::read_dir(lineage_root)
+        .with_context(|| format!("failed listing {}", lineage_root.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed reading {}", lineage_root.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed reading file type for {}", path.display()))?;
+        if file_type.is_dir() && !registry_should_skip_dir(&path) {
+            active = active.saturating_add(1);
+        }
+    }
+    Ok(active)
+}
+
+fn ensure_local_registry_artifact_capacity(
+    project_root: &Path,
+    publisher_id: &str,
+    name: &str,
+    max_active_artifacts: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        max_active_artifacts > 0,
+        "registry publish --max-active-artifacts must be at least 1"
+    );
+    let lineage_root = registry_artifact_lineage_root(project_root, publisher_id, name);
+    let active = count_active_registry_artifacts_in_lineage(&lineage_root)?;
+    anyhow::ensure!(
+        active < max_active_artifacts,
+        "registry publish active artifact cap exceeded for {publisher_id}/{name}: {active} active artifacts (max {max_active_artifacts}); run `franken-node registry gc --keep {max_active_artifacts}` or increase --max-active-artifacts"
+    );
+    Ok(())
+}
+
 fn sync_directory(path: &Path) -> Result<()> {
     std::fs::File::open(path)
         .and_then(|directory| directory.sync_all())
@@ -15081,9 +15177,8 @@ fn persist_local_registry_artifact(
         request.initial_version.content_hash
     );
 
-    let lineage_root = registry_active_artifacts_root(project_root)
-        .join(normalize_registry_name(&published.publisher_id))
-        .join(normalize_registry_name(&published.name));
+    let lineage_root =
+        registry_artifact_lineage_root(project_root, &published.publisher_id, &published.name);
     std::fs::create_dir_all(&lineage_root)
         .with_context(|| format!("failed creating {}", lineage_root.display()))?;
     let lineage_parent =
@@ -15843,23 +15938,55 @@ fn registry_publish_provenance_signature_payload(
 fn build_registry_publish_request(
     package_path: &Path,
     content_hash: &str,
+    version: &str,
     signing_material: &Ed25519SigningMaterial,
 ) -> Result<RegistrationRequest> {
     let provenance_context = collect_registry_publish_provenance_context(package_path);
     build_registry_publish_request_with_context(
         package_path,
         content_hash,
+        version,
         signing_material,
         provenance_context,
     )
 }
 
+fn validate_registry_publish_version(version: &str) -> Result<&str> {
+    let trimmed = version.trim();
+    anyhow::ensure!(
+        trimmed == version,
+        "registry publish --version must not contain leading or trailing whitespace"
+    );
+    validate_version_string(version)
+        .with_context(|| format!("invalid registry publish --version `{version}`"))?;
+    let mut components = version.split('.');
+    let Some(major) = components.next() else {
+        anyhow::bail!("registry publish --version must be numeric semver: MAJOR.MINOR.PATCH");
+    };
+    let Some(minor) = components.next() else {
+        anyhow::bail!("registry publish --version must be numeric semver: MAJOR.MINOR.PATCH");
+    };
+    let Some(patch) = components.next() else {
+        anyhow::bail!("registry publish --version must be numeric semver: MAJOR.MINOR.PATCH");
+    };
+    anyhow::ensure!(
+        components.next().is_none()
+            && [major, minor, patch]
+                .iter()
+                .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())),
+        "registry publish --version must be numeric semver: MAJOR.MINOR.PATCH"
+    );
+    Ok(version)
+}
+
 fn build_registry_publish_request_with_context(
     package_path: &Path,
     content_hash: &str,
+    version: &str,
     signing_material: &Ed25519SigningMaterial,
     provenance_context: RegistryPublishProvenanceContext,
 ) -> Result<RegistrationRequest> {
+    let version = validate_registry_publish_version(version)?;
     let inferred_name = package_path
         .file_stem()
         .and_then(std::ffi::OsStr::to_str)
@@ -15884,7 +16011,7 @@ fn build_registry_publish_request_with_context(
     } = provenance_context;
     let publisher_id = builder_identity.clone();
     let initial_version = VersionEntry {
-        version: "1.0.0".to_string(),
+        version: version.to_string(),
         parent_version: None,
         content_hash: content_hash.to_string(),
         registered_at: chrono::Utc::now().to_rfc3339(),
@@ -16125,8 +16252,18 @@ fn handle_registry_publish(args: &cli::RegistryPublishArgs) -> Result<()> {
         .as_deref()
         .ok_or_else(|| registry_publish_signing_key_required_error(&args.package_path))?;
     let signing_material = load_registry_publish_signing_material(signing_key_path)?;
-    let request =
-        build_registry_publish_request(&args.package_path, &content_hash, &signing_material)?;
+    let request = build_registry_publish_request(
+        &args.package_path,
+        &content_hash,
+        &args.version,
+        &signing_material,
+    )?;
+    ensure_local_registry_artifact_capacity(
+        &project_root,
+        &request.publisher_id,
+        &request.name,
+        args.max_active_artifacts,
+    )?;
     let request_for_storage = request.clone();
     let publisher_key_id = request.signature.key_id.clone();
     let signing_key_source = signing_material.source;

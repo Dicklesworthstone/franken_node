@@ -67,7 +67,7 @@ pub struct MethodSpec {
 }
 
 /// A connector's declaration of a method it implements.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MethodDeclaration {
     pub name: String,
     pub version: String,
@@ -97,7 +97,7 @@ impl fmt::Display for MethodErrorCode {
 }
 
 /// Validation result for a single method.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MethodValidationResult {
     pub method: String,
     pub required: bool,
@@ -108,14 +108,14 @@ pub struct MethodValidationResult {
 }
 
 /// A single validation error for a method.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MethodValidationError {
     pub code: MethodErrorCode,
     pub message: String,
 }
 
 /// The complete validation report for a connector.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContractReport {
     pub connector_id: String,
     pub schema_version: String,
@@ -125,7 +125,7 @@ pub struct ContractReport {
 }
 
 /// Summary counts for the validation report.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReportSummary {
     pub total_methods: usize,
     pub required_methods: usize,
@@ -387,12 +387,10 @@ mod tests {
             .iter()
             .find(|m| m.method == "handshake")
             .unwrap();
-        assert!(
-            handshake
-                .errors
-                .iter()
-                .any(|e| e.code == MethodErrorCode::VersionIncompatible)
-        );
+        assert!(handshake
+            .errors
+            .iter()
+            .any(|e| e.code == MethodErrorCode::VersionIncompatible));
     }
 
     #[test]
@@ -498,12 +496,10 @@ mod tests {
 
         assert_eq!(report.verdict, "FAIL");
         assert_eq!(describe.status, "FAIL");
-        assert!(
-            describe
-                .errors
-                .iter()
-                .any(|error| error.code == MethodErrorCode::VersionIncompatible)
-        );
+        assert!(describe
+            .errors
+            .iter()
+            .any(|error| error.code == MethodErrorCode::VersionIncompatible));
     }
 
     #[test]
@@ -523,12 +519,10 @@ mod tests {
             .expect("capabilities result");
 
         assert_eq!(report.verdict, "FAIL");
-        assert!(
-            capabilities
-                .errors
-                .iter()
-                .any(|error| error.code == MethodErrorCode::VersionIncompatible)
-        );
+        assert!(capabilities
+            .errors
+            .iter()
+            .any(|error| error.code == MethodErrorCode::VersionIncompatible));
     }
 
     #[test]
@@ -551,12 +545,10 @@ mod tests {
         assert_eq!(report.verdict, "FAIL");
         assert_eq!(simulate.required, false);
         assert_eq!(simulate.status, "FAIL");
-        assert!(
-            simulate
-                .errors
-                .iter()
-                .any(|error| error.code == MethodErrorCode::SchemaMismatch)
-        );
+        assert!(simulate
+            .errors
+            .iter()
+            .any(|error| error.code == MethodErrorCode::SchemaMismatch));
     }
 
     #[test]
@@ -578,12 +570,10 @@ mod tests {
 
         assert_eq!(report.verdict, "FAIL");
         assert_eq!(health.version_found.as_deref(), Some("2.0.0"));
-        assert!(
-            health
-                .errors
-                .iter()
-                .any(|error| error.code == MethodErrorCode::VersionIncompatible)
-        );
+        assert!(health
+            .errors
+            .iter()
+            .any(|error| error.code == MethodErrorCode::VersionIncompatible));
     }
 
     #[test]
@@ -600,12 +590,10 @@ mod tests {
         assert_eq!(report.verdict, "FAIL");
         assert_eq!(report.summary.failing, 8);
         assert_eq!(report.summary.skipped, 1);
-        assert!(
-            report
-                .methods
-                .iter()
-                .all(|method| method.method != "custom_extension")
-        );
+        assert!(report
+            .methods
+            .iter()
+            .all(|method| method.method != "custom_extension"));
     }
 
     #[test]
@@ -627,18 +615,14 @@ mod tests {
 
         assert_eq!(report.verdict, "FAIL");
         assert_eq!(configure.errors.len(), 2);
-        assert!(
-            configure
-                .errors
-                .iter()
-                .any(|error| error.code == MethodErrorCode::VersionIncompatible)
-        );
-        assert!(
-            configure
-                .errors
-                .iter()
-                .any(|error| error.code == MethodErrorCode::SchemaMismatch)
-        );
+        assert!(configure
+            .errors
+            .iter()
+            .any(|error| error.code == MethodErrorCode::VersionIncompatible));
+        assert!(configure
+            .errors
+            .iter()
+            .any(|error| error.code == MethodErrorCode::SchemaMismatch));
     }
 
     #[test]
@@ -658,12 +642,10 @@ mod tests {
             .expect("health result");
 
         assert_eq!(report.verdict, "FAIL");
-        assert!(
-            health
-                .errors
-                .iter()
-                .any(|error| error.code == MethodErrorCode::VersionIncompatible)
-        );
+        assert!(health
+            .errors
+            .iter()
+            .any(|error| error.code == MethodErrorCode::VersionIncompatible));
     }
 
     #[test]
@@ -683,12 +665,10 @@ mod tests {
             .expect("shutdown result");
 
         assert_eq!(report.verdict, "FAIL");
-        assert!(
-            shutdown
-                .errors
-                .iter()
-                .any(|error| error.code == MethodErrorCode::VersionIncompatible)
-        );
+        assert!(shutdown
+            .errors
+            .iter()
+            .any(|error| error.code == MethodErrorCode::VersionIncompatible));
     }
 
     #[test]
@@ -708,12 +688,10 @@ mod tests {
             .expect("introspect result");
 
         assert_eq!(report.verdict, "FAIL");
-        assert!(
-            introspect
-                .errors
-                .iter()
-                .any(|error| error.code == MethodErrorCode::VersionIncompatible)
-        );
+        assert!(introspect
+            .errors
+            .iter()
+            .any(|error| error.code == MethodErrorCode::VersionIncompatible));
     }
 
     #[test]
@@ -736,12 +714,10 @@ mod tests {
         assert_eq!(report.verdict, "FAIL");
         assert_eq!(simulate.required, false);
         assert_eq!(simulate.status, "FAIL");
-        assert!(
-            simulate
-                .errors
-                .iter()
-                .any(|error| error.code == MethodErrorCode::VersionIncompatible)
-        );
+        assert!(simulate
+            .errors
+            .iter()
+            .any(|error| error.code == MethodErrorCode::VersionIncompatible));
     }
 
     #[test]

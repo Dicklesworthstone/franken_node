@@ -219,7 +219,7 @@ impl DeterministicSeed {
 // ---------------------------------------------------------------------------
 
 /// Emitted when a config change would alter the derived seed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionBumpRecord {
     pub domain: DomainTag,
     pub content_hash_hex: String,
@@ -2017,12 +2017,12 @@ mod additional_negative_path_tests {
         let test_hash = content_hash();
         assert_eq!(test_hash.0.len(), 32, "Test hash should be 32 bytes");
 
-        // Verify incrementing pattern in test hash
+        // Verify the helper's fixed fixture pattern.
         for i in 0..32 {
-            let expected_byte = u8::try_from(i).expect("Index should fit in u8");
+            let expected_byte = 0x2a;
             assert_eq!(
                 test_hash.0[i], expected_byte,
-                "Test hash should have incrementing pattern"
+                "Test hash should preserve the fixed fixture pattern"
             );
         }
     }
@@ -2065,7 +2065,7 @@ mod additional_negative_path_tests {
         // Verify deriver still functions after clear
         let tracked_before = deriver.tracked_domains();
         let test_config = ScheduleConfig::new(99).with_param("post_clear", "test");
-        let (seed, bump) = deriver.derive_seed(&DomainTag::Repair, &content_hash, &test_config);
+        let (seed, bump) = deriver.derive_seed(&DomainTag::Encoding, &content_hash, &test_config);
 
         assert_eq!(
             seed.bytes.len(),

@@ -6,6 +6,9 @@
 pub mod optimization_governor;
 
 #[cfg(test)]
+mod metamorphic_tests;
+
+#[cfg(test)]
 mod tests {
     use super::optimization_governor::{
         GOV_010_KNOB_DISPATCHED, GovernorDecision, GovernorGate, OptimizationGovernor,

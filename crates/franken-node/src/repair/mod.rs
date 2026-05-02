@@ -1,6 +1,9 @@
 pub mod proof_carrying_decode;
 
 #[cfg(test)]
+mod metamorphic_tests;
+
+#[cfg(test)]
 mod tests {
     use super::proof_carrying_decode::{
         AlgorithmId, DecodeResult, Fragment, ProofAuditEvent, ProofCarryingDecodeError,

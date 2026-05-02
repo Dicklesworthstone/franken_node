@@ -152,6 +152,22 @@ fn gate_event(code: &str, level: &str, trace_id: &str, message: String) -> GateE
     }
 }
 
+/// Maximum evidence requirements to prevent memory exhaustion attacks.
+const MAX_EVIDENCE_REQUIREMENTS: usize = 20;
+
+/// Push item to vector with capacity bounds checking to prevent memory exhaustion.
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
+    }
+    items.push(item);
+}
+
 fn derive_evidence_requirements(
     baseline: TrajectorySnapshot,
     projected: TrajectorySnapshot,
@@ -165,22 +181,42 @@ fn derive_evidence_requirements(
     if !instability_delta.is_finite()
         || instability_delta >= thresholds.max_instability_delta_for_direct_admit
     {
-        requirements.push("bpet.calibration_report".to_string());
-        requirements.push("bpet.drift_explainer".to_string());
+        push_bounded(
+            &mut requirements,
+            "bpet.calibration_report".to_string(),
+            MAX_EVIDENCE_REQUIREMENTS,
+        );
+        push_bounded(
+            &mut requirements,
+            "bpet.drift_explainer".to_string(),
+            MAX_EVIDENCE_REQUIREMENTS,
+        );
     }
     if !projected.drift_score.is_finite()
         || !drift_delta.is_finite()
         || projected.drift_score >= thresholds.max_drift_score_for_direct_admit
     {
-        requirements.push("bpet.longitudinal_drift_trace".to_string());
+        push_bounded(
+            &mut requirements,
+            "bpet.longitudinal_drift_trace".to_string(),
+            MAX_EVIDENCE_REQUIREMENTS,
+        );
     }
     if !projected.regime_shift_probability.is_finite()
         || !regime_shift_delta.is_finite()
         || projected.regime_shift_probability
             >= thresholds.max_regime_shift_probability_for_direct_admit
     {
-        requirements.push("bpet.regime_shift_counterfactuals".to_string());
-        requirements.push("ops.signoff.two_person_rule".to_string());
+        push_bounded(
+            &mut requirements,
+            "bpet.regime_shift_counterfactuals".to_string(),
+            MAX_EVIDENCE_REQUIREMENTS,
+        );
+        push_bounded(
+            &mut requirements,
+            "ops.signoff.two_person_rule".to_string(),
+            MAX_EVIDENCE_REQUIREMENTS,
+        );
     }
 
     requirements.sort();

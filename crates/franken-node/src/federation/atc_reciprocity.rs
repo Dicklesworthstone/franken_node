@@ -35,6 +35,9 @@ use std::collections::BTreeMap;
 
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 
+/// Maximum number of reciprocity matrix entries to prevent memory exhaustion.
+const MAX_RECIPROCITY_ENTRIES: usize = 10_000;
+
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
         items.clear();
@@ -469,7 +472,7 @@ impl ReciprocityEngine {
                 exceptions_active = exceptions_active.saturating_add(1);
             }
 
-            entries.push(ReciprocityMatrixEntry {
+            push_bounded(&mut entries, ReciprocityMatrixEntry {
                 participant_id: metrics.participant_id.clone(),
                 tier: decision.tier,
                 contribution_ratio: decision.contribution_ratio,
@@ -478,7 +481,7 @@ impl ReciprocityEngine {
                 intelligence_consumed: metrics.intelligence_consumed,
                 exception_active: decision.exception_applied,
                 grace_period_active: decision.grace_period_active,
-            });
+            }, MAX_RECIPROCITY_ENTRIES);
         }
 
         let content_hash = {
@@ -509,9 +512,9 @@ impl ReciprocityEngine {
 
     /// Export audit log as JSONL.
     pub fn export_audit_jsonl(&self) -> Result<String, serde_json::Error> {
-        let mut lines = Vec::with_capacity(self.audit_log.len());
+        let mut lines = Vec::with_capacity(self.audit_log.len().min(MAX_AUDIT_LOG_ENTRIES));
         for entry in &self.audit_log {
-            lines.push(serde_json::to_string(entry)?);
+            push_bounded(&mut lines, serde_json::to_string(entry)?, MAX_AUDIT_LOG_ENTRIES);
         }
         Ok(lines.join("\n"))
     }

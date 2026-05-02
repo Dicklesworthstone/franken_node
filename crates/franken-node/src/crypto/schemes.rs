@@ -1,9 +1,15 @@
 //! Signature scheme trait abstractions and concrete implementations.
 
 use crate::crypto::error::Ed25519Error;
-use ed25519_dalek::{SigningKey, VerifyingKey, Signature, Signer, Verifier};
-use serde::{Serialize, Deserialize};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
+
+const ED25519_SIGNATURE_PREIMAGE_DOMAIN: &[u8] = b"ed25519_signature_v1:";
+
+fn len_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
 
 /// Unified signature scheme abstraction with domain separation support.
 ///
@@ -104,10 +110,10 @@ impl SignatureScheme for Ed25519Scheme {
         #[cfg(feature = "blake3")]
         let digest = {
             let mut hasher = blake3::Hasher::new();
-            hasher.update(b"ed25519_sign_v1:");
-            hasher.update(&(domain.len() as u64).to_le_bytes());
+            hasher.update(ED25519_SIGNATURE_PREIMAGE_DOMAIN);
+            hasher.update(&len_to_u64(domain.len()).to_le_bytes());
             hasher.update(domain);
-            hasher.update(&(message.len() as u64).to_le_bytes());
+            hasher.update(&len_to_u64(message.len()).to_le_bytes());
             hasher.update(message);
             hasher.finalize()
         };
@@ -116,10 +122,10 @@ impl SignatureScheme for Ed25519Scheme {
         let digest = {
             use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
-            hasher.update(b"ed25519_sign_v1:");
-            hasher.update(&(domain.len() as u64).to_le_bytes());
+            hasher.update(ED25519_SIGNATURE_PREIMAGE_DOMAIN);
+            hasher.update(len_to_u64(domain.len()).to_le_bytes());
             hasher.update(domain);
-            hasher.update(&(message.len() as u64).to_le_bytes());
+            hasher.update(len_to_u64(message.len()).to_le_bytes());
             hasher.update(message);
             hasher.finalize()
         };
@@ -149,10 +155,10 @@ impl SignatureScheme for Ed25519Scheme {
         #[cfg(feature = "blake3")]
         let digest = {
             let mut hasher = blake3::Hasher::new();
-            hasher.update(b"ed25519_verify_v1:");
-            hasher.update(&(domain.len() as u64).to_le_bytes());
+            hasher.update(ED25519_SIGNATURE_PREIMAGE_DOMAIN);
+            hasher.update(&len_to_u64(domain.len()).to_le_bytes());
             hasher.update(domain);
-            hasher.update(&(message.len() as u64).to_le_bytes());
+            hasher.update(&len_to_u64(message.len()).to_le_bytes());
             hasher.update(message);
             hasher.finalize()
         };
@@ -161,10 +167,10 @@ impl SignatureScheme for Ed25519Scheme {
         let digest = {
             use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
-            hasher.update(b"ed25519_verify_v1:");
-            hasher.update(&(domain.len() as u64).to_le_bytes());
+            hasher.update(ED25519_SIGNATURE_PREIMAGE_DOMAIN);
+            hasher.update(len_to_u64(domain.len()).to_le_bytes());
             hasher.update(domain);
-            hasher.update(&(message.len() as u64).to_le_bytes());
+            hasher.update(len_to_u64(message.len()).to_le_bytes());
             hasher.update(message);
             hasher.finalize()
         };
@@ -193,7 +199,7 @@ impl SignatureScheme for Ed25519Scheme {
         if bytes.len() != 32 {
             return Err(Ed25519Error::InvalidKeyLength {
                 expected: 32,
-                actual: bytes.len()
+                actual: bytes.len(),
             });
         }
 
@@ -211,7 +217,7 @@ impl SignatureScheme for Ed25519Scheme {
         if bytes.len() != 64 {
             return Err(Ed25519Error::InvalidSignatureLength {
                 expected: 64,
-                actual: bytes.len()
+                actual: bytes.len(),
             });
         }
 
@@ -220,7 +226,7 @@ impl SignatureScheme for Ed25519Scheme {
 
         // Validate the signature by attempting to parse it
         match Signature::try_from(&sig_array[..]) {
-            Ok(_) => {}, // Valid signature format
+            Ok(_) => {} // Valid signature format
             Err(e) => return Err(Ed25519Error::MalformedSignature(e.to_string())),
         };
 
@@ -239,7 +245,9 @@ mod tests {
         let domain = b"test_domain";
 
         let signature = Ed25519Scheme::sign_with_domain(&sk, domain, message).unwrap();
-        assert!(Ed25519Scheme::verify_with_domain(&pk, domain, message, &signature));
+        assert!(Ed25519Scheme::verify_with_domain(
+            &pk, domain, message, &signature
+        ));
     }
 
     #[test]
@@ -254,8 +262,12 @@ mod tests {
         assert_ne!(sig1, sig2);
 
         // Cross-domain verification should fail
-        assert!(!Ed25519Scheme::verify_with_domain(&pk, b"domain1", message, &sig2));
-        assert!(!Ed25519Scheme::verify_with_domain(&pk, b"domain2", message, &sig1));
+        assert!(!Ed25519Scheme::verify_with_domain(
+            &pk, b"domain1", message, &sig2
+        ));
+        assert!(!Ed25519Scheme::verify_with_domain(
+            &pk, b"domain2", message, &sig1
+        ));
     }
 
     #[test]
@@ -286,7 +298,13 @@ mod tests {
         // Test invalid key length
         let short_key = [0u8; 16];
         let result = Ed25519Scheme::public_key_from_bytes(&short_key);
-        assert!(matches!(result, Err(Ed25519Error::InvalidKeyLength { expected: 32, actual: 16 })));
+        assert!(matches!(
+            result,
+            Err(Ed25519Error::InvalidKeyLength {
+                expected: 32,
+                actual: 16
+            })
+        ));
     }
 
     #[test]
@@ -303,7 +321,13 @@ mod tests {
         // Test invalid signature length
         let short_sig = [0u8; 32];
         let result = Ed25519Scheme::signature_from_bytes(&short_sig);
-        assert!(matches!(result, Err(Ed25519Error::InvalidSignatureLength { expected: 64, actual: 32 })));
+        assert!(matches!(
+            result,
+            Err(Ed25519Error::InvalidSignatureLength {
+                expected: 64,
+                actual: 32
+            })
+        ));
     }
 
     #[test]

@@ -124,6 +124,22 @@ pub struct MigrationHealthReport {
     pub evaluation: GateEvaluation,
 }
 
+/// Maximum rejection reasons to prevent memory exhaustion attacks.
+const MAX_REJECTION_REASONS: usize = 10;
+
+/// Push item to vector with capacity bounds checking to prevent memory exhaustion.
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
+    }
+    items.push(item);
+}
+
 fn evaluate_policy(
     delta: HealthDelta,
     thresholds: MigrationGateThresholds,
@@ -150,30 +166,42 @@ fn evaluate_policy(
                 delta.cascade_risk_delta, thresholds.max_cascade_risk_delta
             )
         };
-        reasons.push(RejectionReason {
-            code: "DGIS-MIGRATE-RISK-DELTA".to_string(),
-            detail,
-        });
+        push_bounded(
+            &mut reasons,
+            RejectionReason {
+                code: "DGIS-MIGRATE-RISK-DELTA".to_string(),
+                detail,
+            },
+            MAX_REJECTION_REASONS,
+        );
     }
 
     if delta.new_fragility_findings >= i64::from(thresholds.max_new_fragility_findings) {
-        reasons.push(RejectionReason {
-            code: "DGIS-MIGRATE-FRAGILITY-DELTA".to_string(),
-            detail: format!(
-                "new fragility findings {} meet or exceed max {}",
-                delta.new_fragility_findings, thresholds.max_new_fragility_findings
-            ),
-        });
+        push_bounded(
+            &mut reasons,
+            RejectionReason {
+                code: "DGIS-MIGRATE-FRAGILITY-DELTA".to_string(),
+                detail: format!(
+                    "new fragility findings {} meet or exceed max {}",
+                    delta.new_fragility_findings, thresholds.max_new_fragility_findings
+                ),
+            },
+            MAX_REJECTION_REASONS,
+        );
     }
 
     if delta.new_articulation_points >= i64::from(thresholds.max_new_articulation_points) {
-        reasons.push(RejectionReason {
-            code: "DGIS-MIGRATE-ARTICULATION-DELTA".to_string(),
-            detail: format!(
-                "new articulation points {} meet or exceed max {}",
-                delta.new_articulation_points, thresholds.max_new_articulation_points
-            ),
-        });
+        push_bounded(
+            &mut reasons,
+            RejectionReason {
+                code: "DGIS-MIGRATE-ARTICULATION-DELTA".to_string(),
+                detail: format!(
+                    "new articulation points {} meet or exceed max {}",
+                    delta.new_articulation_points, thresholds.max_new_articulation_points
+                ),
+            },
+            MAX_REJECTION_REASONS,
+        );
     }
 
     reasons

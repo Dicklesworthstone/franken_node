@@ -136,7 +136,7 @@ pub enum CompilationResult {
 }
 
 /// Configuration for the claim compiler.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompilerConfig {
     pub signer_id: String,
     pub signing_key: String,
@@ -380,7 +380,7 @@ pub struct ScoreboardEntry {
 }
 
 /// A scoreboard snapshot is an atomic collection of entries.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScoreboardSnapshot {
     pub schema_version: String,
     pub snapshot_id: String,
@@ -405,7 +405,7 @@ pub enum ScoreboardUpdateResult {
 }
 
 /// Configuration for the scoreboard pipeline.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScoreboardConfig {
     pub signer_id: String,
     pub signing_key: String,
@@ -1269,10 +1269,9 @@ mod tests {
             compiled_contract("rate-limit-snap-1", 10_000),
             compiled_contract("rate-limit-snap-2", 10_000),
         ];
-        assert!(
-            sb.build_snapshot("snap-rate-limit-blocked", &contracts)
-                .is_none()
-        );
+        assert!(sb
+            .build_snapshot("snap-rate-limit-blocked", &contracts)
+            .is_none());
     }
 
     #[test]
@@ -1590,10 +1589,9 @@ mod tests {
                     ..
                 }
             ));
-            assert!(
-                sb.build_snapshot("snap-zero-rate-limit", &contracts)
-                    .is_none()
-            );
+            assert!(sb
+                .build_snapshot("snap-zero-rate-limit", &contracts)
+                .is_none());
         }
 
         #[test]
@@ -1738,10 +1736,9 @@ mod tests {
             contract.signature =
                 sign_contract(&contract.contract_digest, &contract.signer_id, "wrong-key");
 
-            assert!(
-                sb.build_snapshot("snap-wrong-key-signature", &[contract])
-                    .is_none()
-            );
+            assert!(sb
+                .build_snapshot("snap-wrong-key-signature", &[contract])
+                .is_none());
         }
 
         #[test]
@@ -1750,10 +1747,9 @@ mod tests {
             let mut contract = compiled_contract("empty-signature-snapshot-1", 10_000);
             contract.signature.clear();
 
-            assert!(
-                sb.build_snapshot("snap-empty-signature", &[contract])
-                    .is_none()
-            );
+            assert!(sb
+                .build_snapshot("snap-empty-signature", &[contract])
+                .is_none());
         }
 
         #[test]
@@ -1764,10 +1760,9 @@ mod tests {
             contract.signature =
                 sign_contract(&contract.contract_digest, &contract.signer_id, "key-secret");
 
-            assert!(
-                sb.build_snapshot("snap-tampered-evidence", &[contract])
-                    .is_none()
-            );
+            assert!(sb
+                .build_snapshot("snap-tampered-evidence", &[contract])
+                .is_none());
         }
 
         #[test]
@@ -1787,10 +1782,9 @@ mod tests {
                     ..
                 }
             ));
-            assert!(
-                sb.build_snapshot("snap-mixed-freshness", &contracts)
-                    .is_none()
-            );
+            assert!(sb
+                .build_snapshot("snap-mixed-freshness", &contracts)
+                .is_none());
         }
 
         #[test]

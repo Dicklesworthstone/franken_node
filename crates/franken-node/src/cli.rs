@@ -6,6 +6,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_REGISTRY_MAX_ACTIVE_ARTIFACTS_PER_LINEAGE: usize = 5;
+
 /// Validate user content path arguments against path traversal attacks.
 /// Strict validation for user-controlled content paths.
 ///
@@ -1247,9 +1249,17 @@ pub struct RegistryPublishArgs {
     /// Path to extension package to publish.
     pub package_path: PathBuf,
 
+    /// Authoritative extension version for this package.
+    #[arg(long)]
+    pub version: String,
+
     /// Path to the operator-managed Ed25519 signing key file.
     #[arg(long)]
     pub signing_key: Option<PathBuf>,
+
+    /// Maximum active artifacts retained per publisher/name lineage before publish requires GC.
+    #[arg(long, default_value_t = DEFAULT_REGISTRY_MAX_ACTIVE_ARTIFACTS_PER_LINEAGE)]
+    pub max_active_artifacts: usize,
 }
 
 #[derive(Debug, Parser)]

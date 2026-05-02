@@ -4,6 +4,9 @@
 //! they deliberately exercise an out-of-distribution input class that these
 //! canonical generators do not model.
 
+#[cfg(test)]
+mod metamorphic_tests;
+
 use crate::observability::evidence_ledger::{DecisionKind, EvidenceEntry, test_entry};
 use crate::security::impossible_default::{CapabilityToken, ImpossibleCapability};
 use crate::supply_chain::certification::{DerivationMetadata, EvidenceType, VerifiedEvidenceRef};
