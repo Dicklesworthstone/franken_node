@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -13,10 +13,24 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_vef_policy_constraints.py"
 
-spec = importlib.util.spec_from_file_location("check_vef_policy_constraints", SCRIPT)
-mod = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = mod
-spec.loader.exec_module(mod)
+
+class ScriptNamespace:
+    def __init__(self, script_globals: dict[str, object]) -> None:
+        object.__setattr__(self, "_script_globals", script_globals)
+
+    def __getattr__(self, name: str) -> object:
+        return self._script_globals[name]
+
+    def __setattr__(self, name: str, value: object) -> None:
+        self._script_globals[name] = value
+
+
+script_globals = runpy.run_path(str(SCRIPT))
+mod = ScriptNamespace(script_globals["run_all"].__globals__)
+
+
+def load_json(text: str) -> dict[str, object]:
+    return json.JSONDecoder().decode(text)
 
 
 class TestRunAllShape(unittest.TestCase):
@@ -73,7 +87,7 @@ class TestCli(unittest.TestCase):
             check=False,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        parsed = json.loads(proc.stdout)
+        parsed = load_json(proc.stdout)
         self.assertEqual(parsed["bead_id"], "bd-16fq")
         self.assertIn("checks", parsed)
 
