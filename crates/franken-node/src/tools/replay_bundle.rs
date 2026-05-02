@@ -739,9 +739,11 @@ fn prepared_event_sort_key(
 
 fn compute_same_timestamp_causal_depths(prepared: &[PreparedEvent]) -> Vec<u64> {
     let mut depths = vec![None; prepared.len()];
+    let mut visiting_epoch = vec![0_usize; prepared.len()];
     for index in 0..prepared.len() {
-        let mut visiting = vec![false; prepared.len()];
-        let _ = same_timestamp_causal_depth(index, prepared, &mut depths, &mut visiting);
+        let epoch = index.saturating_add(1);
+        let _ =
+            same_timestamp_causal_depth(index, prepared, &mut depths, &mut visiting_epoch, epoch);
     }
     depths.into_iter().map(|depth| depth.unwrap_or(0)).collect()
 }
@@ -750,16 +752,17 @@ fn same_timestamp_causal_depth(
     index: usize,
     prepared: &[PreparedEvent],
     depths: &mut [Option<u64>],
-    visiting: &mut [bool],
+    visiting_epoch: &mut [usize],
+    epoch: usize,
 ) -> u64 {
     if let Some(depth) = depths[index] {
         return depth;
     }
-    if visiting[index] {
+    if visiting_epoch[index] == epoch {
         depths[index] = Some(0);
         return 0;
     }
-    visiting[index] = true;
+    visiting_epoch[index] = epoch;
     let depth = prepared[index]
         .causal_parent
         .and_then(|parent| {
@@ -771,12 +774,12 @@ fn same_timestamp_causal_depth(
                 return None;
             }
             Some(
-                same_timestamp_causal_depth(parent_index, prepared, depths, visiting)
+                same_timestamp_causal_depth(parent_index, prepared, depths, visiting_epoch, epoch)
                     .saturating_add(1),
             )
         })
         .unwrap_or(0);
-    visiting[index] = false;
+    visiting_epoch[index] = 0;
     depths[index] = Some(depth);
     depth
 }
@@ -2479,6 +2482,41 @@ mod tests {
             )
             .with_causal_parent(2),
         ]
+    }
+
+    fn same_timestamp_prepared_event(index: usize, causal_parent: Option<u64>) -> PreparedEvent {
+        PreparedEvent {
+            normalized_timestamp: "2026-02-20T10:00:00.000100Z".to_string(),
+            timestamp_micros: 1_771_584_000_000_100,
+            event_type: EventType::PolicyEval,
+            payload: serde_json::json!({ "index": index }),
+            causal_parent,
+            state_snapshot: None,
+            policy_version: None,
+            sort_key: Vec::new(),
+            causal_depth: 0,
+            original_index: index,
+        }
+    }
+
+    #[test]
+    fn same_timestamp_causal_depths_handle_large_parent_chain() {
+        let prepared: Vec<PreparedEvent> = (0_usize..4_096)
+            .map(|index| {
+                let causal_parent = if index == 0 {
+                    None
+                } else {
+                    Some(u64::try_from(index).expect("index fits in u64"))
+                };
+                same_timestamp_prepared_event(index, causal_parent)
+            })
+            .collect();
+
+        let depths = compute_same_timestamp_causal_depths(&prepared);
+
+        assert_eq!(depths.first(), Some(&0));
+        assert_eq!(depths.get(1), Some(&1));
+        assert_eq!(depths.get(4_095), Some(&4_095));
     }
 
     fn fixture_signing_key() -> ed25519_dalek::SigningKey {
