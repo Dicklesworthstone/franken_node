@@ -568,17 +568,20 @@ impl DurableReplayStore {
             .write_all(durable_replay_record(cap, replay_key).as_bytes())
             .map_err(|source| replay_store_error("write marker", &path, source))?;
 
-        let should_flush = {
+        // Replay protection contract: when consume() returns Ok(true), the
+        // marker must be durable. Without flushing the file's fsync and the
+        // directory entry, a crash before the next batched flush would lose
+        // the marker — on restart the replay key would appear unconsumed and
+        // the cap could be replayed (bd-12qg2). Queue this marker into the
+        // pending batch and always flush before returning so concurrent
+        // callers still amortize sync_directory through the shared lock.
+        {
             let mut pending = self.inner.pending_syncs.lock().map_err(|_| {
                 replay_store_poisoned_lock_error("queue marker sync", &self.inner.consumed_dir)
             })?;
             pending.markers.push(marker);
-            pending.markers.len() >= self.inner.sync_batch_size
-        };
-
-        if should_flush {
-            self.inner.flush_pending_markers()?;
         }
+        self.inner.flush_pending_markers()?;
         Ok(true)
     }
 
@@ -3153,7 +3156,14 @@ mod tests {
     }
 
     #[test]
-    fn durable_replay_store_batches_marker_syncs_until_threshold() {
+    fn durable_replay_store_consume_flushes_marker_before_returning() {
+        // bd-12qg2: consume() must guarantee per-call durability — the replay
+        // protection contract is that Ok(true) means this replay_key is
+        // durably consumed. The pending-markers batch is an internal
+        // amortization optimization for concurrent consumers (they coalesce
+        // sync_directory through the shared lock); each consume() must still
+        // flush before returning so a crash cannot lose markers and reopen
+        // the replay window.
         let provider = CapabilityProvider::new("secret-a").expect("valid provider");
         let (first_cap, _) = provider
             .issue(
@@ -3190,12 +3200,12 @@ mod tests {
             .expect("first consume writes marker"));
         assert_eq!(
             store.pending_marker_sync_count(),
-            1,
-            "first marker should be queued for batched fsync"
+            0,
+            "consume() must flush pending markers before returning Ok(true)"
         );
         assert!(store
             .contains_consumed(&first_replay_key)
-            .expect("queued marker remains visible"));
+            .expect("flushed marker remains visible"));
 
         let second_replay_key = replay_store_key(&second_cap);
         assert!(store
@@ -3204,7 +3214,7 @@ mod tests {
         assert_eq!(
             store.pending_marker_sync_count(),
             0,
-            "batch threshold should flush queued marker fsyncs together"
+            "second consume() must also leave pending markers fully flushed"
         );
         assert!(
             !store
