@@ -7,6 +7,9 @@ use std::sync::{Arc, Mutex, Once};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use frankenengine_node::config::{Config, Profile};
 use frankenengine_node::control_plane::fleet_transport::{
     FileFleetTransport, FleetAction, FleetTargetKind, FleetTransport, NodeHealth, NodeStatus,
 };
@@ -1660,6 +1663,62 @@ fn trust_scan_is_idempotent() {
     let stdout = String::from_utf8_lossy(&second.stdout);
     assert!(stdout.contains("created=0"));
     assert!(stdout.contains("skipped_existing=3"));
+}
+
+#[test]
+fn trust_scan_uses_project_configured_registry_signing_key() {
+    let workspace = scannable_trust_workspace();
+    let mut custom_config = Config::for_profile(Profile::Balanced);
+    custom_config.trust.registry_signing_key = Some(BASE64_STANDARD.encode([0xA5_u8; 32]));
+    fs::write(
+        workspace.path().join("franken_node.toml"),
+        custom_config.to_toml().expect("serialize config"),
+    )
+    .expect("write config");
+
+    let first = run_cli_in_workspace(workspace.path(), &["trust", "scan", "."]);
+    ensure_command_success(
+        "trust scan with custom registry signing key",
+        workspace.path(),
+        &["trust", "scan", "."],
+        &first,
+    );
+    let first_stdout = String::from_utf8_lossy(&first.stdout);
+    assert!(first_stdout.contains("created=3"));
+
+    let registry_path = workspace
+        .path()
+        .join(".franken-node/state/trust-card-registry.v1.json");
+    TrustCardRegistry::load_authoritative_state_from_config(
+        &registry_path,
+        &custom_config.trust,
+        2_000,
+        SnapshotSourceContext::TrustedFile,
+    )
+    .expect("custom-key trust registry should load");
+
+    let default_config = Config::for_profile(Profile::Balanced);
+    let default_key_load = TrustCardRegistry::load_authoritative_state_from_config(
+        &registry_path,
+        &default_config.trust,
+        2_000,
+        SnapshotSourceContext::TrustedFile,
+    );
+    assert!(
+        default_key_load.is_err(),
+        "custom-key registry should reject default-key validation"
+    );
+
+    let second = run_cli_in_workspace(workspace.path(), &["trust", "scan", "."]);
+    ensure_command_success(
+        "second trust scan with custom registry signing key",
+        workspace.path(),
+        &["trust", "scan", "."],
+        &second,
+    );
+    let second_stdout = String::from_utf8_lossy(&second.stdout);
+    assert!(second_stdout.contains("created=0"));
+    assert!(second_stdout.contains("skipped_existing=3"));
 }
 
 #[test]
