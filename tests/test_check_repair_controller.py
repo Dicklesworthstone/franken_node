@@ -1,31 +1,41 @@
 """Unit tests for check_repair_controller.py verification logic."""
 
-import os
+import json
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / "scripts/check_repair_controller.py"
+CSV_PATH = ROOT / "artifacts/section_10_13/bd-91gg/repair_cycle_telemetry.csv"
+EVIDENCE_PATH = ROOT / "artifacts/section_10_13/bd-91gg/verification_evidence.json"
+JSON_DECODER = json.JSONDecoder()
+
+
+def decode_json_object(raw: str) -> dict[str, object]:
+    parsed = JSON_DECODER.decode(raw)
+    if not isinstance(parsed, dict):
+        raise AssertionError("expected JSON object")
+    return parsed
 
 
 class TestRepairTelemetry(unittest.TestCase):
 
     def test_csv_exists(self):
-        path = os.path.join(ROOT, "artifacts/section_10_13/bd-91gg/repair_cycle_telemetry.csv")
-        self.assertTrue(os.path.isfile(path))
+        self.assertTrue(CSV_PATH.is_file())
 
     def test_csv_has_data(self):
-        path = os.path.join(ROOT, "artifacts/section_10_13/bd-91gg/repair_cycle_telemetry.csv")
-        with open(path) as f:
-            lines = [l for l in f if l.strip()]
+        lines = [line for line in CSV_PATH.read_text(encoding="utf-8").splitlines() if line.strip()]
         self.assertGreaterEqual(len(lines), 4)
 
 
 class TestRepairControllerImpl(unittest.TestCase):
 
     def setUp(self):
-        self.impl_path = os.path.join(ROOT, "crates/franken-node/src/connector/repair_controller.rs")
-        self.assertTrue(os.path.isfile(self.impl_path))
-        with open(self.impl_path) as f:
-            self.content = f.read()
+        self.impl_path = ROOT / "crates/franken-node/src/connector/repair_controller.rs"
+        self.assertTrue(self.impl_path.is_file())
+        self.content = self.impl_path.read_text(encoding="utf-8")
 
     def test_has_repair_config(self):
         self.assertIn("struct RepairConfig", self.content)
@@ -51,10 +61,9 @@ class TestRepairControllerImpl(unittest.TestCase):
 class TestRepairControllerSpec(unittest.TestCase):
 
     def setUp(self):
-        self.spec_path = os.path.join(ROOT, "docs/specs/section_10_13/bd-91gg_contract.md")
-        self.assertTrue(os.path.isfile(self.spec_path))
-        with open(self.spec_path) as f:
-            self.content = f.read()
+        self.spec_path = ROOT / "docs/specs/section_10_13/bd-91gg_contract.md"
+        self.assertTrue(self.spec_path.is_file())
+        self.content = self.spec_path.read_text(encoding="utf-8")
 
     def test_has_invariants(self):
         for inv in ["INV-BRC-BOUNDED", "INV-BRC-FAIRNESS",
@@ -70,10 +79,9 @@ class TestRepairControllerSpec(unittest.TestCase):
 class TestRepairIntegration(unittest.TestCase):
 
     def setUp(self):
-        self.integ_path = os.path.join(ROOT, "tests/integration/repair_fairness.rs")
-        self.assertTrue(os.path.isfile(self.integ_path))
-        with open(self.integ_path) as f:
-            self.content = f.read()
+        self.integ_path = ROOT / "tests/integration/repair_fairness.rs"
+        self.assertTrue(self.integ_path.is_file())
+        self.content = self.integ_path.read_text(encoding="utf-8")
 
     def test_covers_bounded(self):
         self.assertIn("inv_brc_bounded", self.content)
@@ -86,6 +94,40 @@ class TestRepairIntegration(unittest.TestCase):
 
     def test_covers_deterministic(self):
         self.assertIn("inv_brc_deterministic", self.content)
+
+
+class TestRepairControllerCli(unittest.TestCase):
+
+    def test_json_mode_is_structural_and_machine_readable(self):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--json"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        evidence = decode_json_object(result.stdout)
+        statuses = {check["id"]: check["status"] for check in evidence["checks"]}
+
+        self.assertEqual(evidence["gate"], "repair_controller_verification")
+        self.assertEqual(evidence["mode"], "structural")
+        self.assertEqual(statuses["BRC-TESTS"], "SKIP")
+        self.assertEqual(evidence["summary"]["skipped_checks"], 1)
+        self.assertNotIn("bd-91gg:", result.stdout)
+
+    def test_json_mode_does_not_rewrite_evidence_artifact(self):
+        before = EVIDENCE_PATH.read_text(encoding="utf-8")
+        subprocess.run(
+            [sys.executable, str(SCRIPT), "--json"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        after = EVIDENCE_PATH.read_text(encoding="utf-8")
+        self.assertEqual(before, after)
 
 
 if __name__ == "__main__":
