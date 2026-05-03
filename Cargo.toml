@@ -26,3 +26,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 frankentui = { package = "ftui", path = "../../../dp/frankentui/crates/ftui", default-features = false }
+
+[patch.crates-io]
+fsqlite = { path = "/dp/frankensqlite/crates/fsqlite" }
+fsqlite-core = { path = "/dp/frankensqlite/crates/fsqlite-core" }
+fsqlite-types = { path = "/dp/frankensqlite/crates/fsqlite-types" }
+fsqlite-error = { path = "/dp/frankensqlite/crates/fsqlite-error" }
