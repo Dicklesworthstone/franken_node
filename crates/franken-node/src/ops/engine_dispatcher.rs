@@ -35,18 +35,25 @@ fn validate_runtime_path(runtime_path: &Path) -> Result<()> {
     let path_str = runtime_path.to_string_lossy();
 
     // Reject paths with shell metacharacters that could be used for injection
-    if path_str.contains(';') || path_str.contains('&') || path_str.contains('|')
-        || path_str.contains('`') || path_str.contains('$') || path_str.contains('\n')
-        || path_str.contains('\r') {
+    if path_str.contains(';')
+        || path_str.contains('&')
+        || path_str.contains('|')
+        || path_str.contains('`')
+        || path_str.contains('$')
+        || path_str.contains('\n')
+        || path_str.contains('\r')
+    {
         return Err(anyhow::anyhow!(
-            "Runtime path contains shell metacharacters: {}", path_str
+            "Runtime path contains shell metacharacters: {}",
+            path_str
         ));
     }
 
     // Require absolute paths to prevent relative path manipulation
     if !runtime_path.is_absolute() {
         return Err(anyhow::anyhow!(
-            "Runtime path must be absolute: {}", path_str
+            "Runtime path must be absolute: {}",
+            path_str
         ));
     }
 
@@ -58,11 +65,17 @@ fn validate_target_path(target_path: &Path) -> Result<()> {
     let path_str = target_path.to_string_lossy();
 
     // Reject paths with shell metacharacters
-    if path_str.contains(';') || path_str.contains('&') || path_str.contains('|')
-        || path_str.contains('`') || path_str.contains('$') || path_str.contains('\n')
-        || path_str.contains('\r') {
+    if path_str.contains(';')
+        || path_str.contains('&')
+        || path_str.contains('|')
+        || path_str.contains('`')
+        || path_str.contains('$')
+        || path_str.contains('\n')
+        || path_str.contains('\r')
+    {
         return Err(anyhow::anyhow!(
-            "Target path contains shell metacharacters: {}", path_str
+            "Target path contains shell metacharacters: {}",
+            path_str
         ));
     }
 
@@ -1513,10 +1526,10 @@ impl EngineDispatcher {
     #[cfg(feature = "engine")]
     fn validate_capabilities(capabilities: &[String]) -> Result<(), ActionableError> {
         use crate::security::constant_time::ct_eq;
-        use frankenengine_engine::capability::{CapabilityProfile, RuntimeCapability};
+        use frankenengine_engine::capability::CapabilityProfile;
 
         // Get all supported capabilities dynamically from franken-engine
-        let all_capabilities = CapabilityProfile::full().capabilities;
+        let all_capabilities = CapabilityProfile::full().capabilities().clone();
 
         // Create vector of valid capability strings from franken-engine API
         let mut valid_capabilities = Vec::new();
@@ -1760,7 +1773,11 @@ impl EngineDispatcher {
         hasher.update(b"engine_dispatcher_policy_id_v1:");
 
         let profile_str = format!("{:?}", profile);
-        hasher.update(u64::try_from(profile_str.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(profile_str.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(profile_str.as_bytes());
 
         if let Some(mode) = policy_mode {
