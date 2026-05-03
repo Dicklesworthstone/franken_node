@@ -119,6 +119,23 @@ fn sv(node: &str, epoch: u64, payload: &str, parent_hash: &str) -> StateVector {
 
 const SIGNING_KEY: &[u8] = b"e2e-divergence-gate-hmac-key-v1";
 
+fn recovery_auth(
+    gate: &ControlPlaneDivergenceGate,
+    operator_id: &str,
+    checkpoint_epoch: u64,
+    timestamp: u64,
+    reason: &str,
+) -> OperatorAuthorization {
+    OperatorAuthorization::new_for_active_divergence(
+        operator_id,
+        gate.active_divergence().expect("active divergence"),
+        checkpoint_epoch,
+        timestamp,
+        reason,
+        SIGNING_KEY,
+    )
+}
+
 #[test]
 fn e2e_divergence_gate_normal_path_allows_mutations() -> Result<(), String> {
     let h = Harness::new("e2e_divergence_gate_normal_path_allows_mutations");
@@ -313,12 +330,12 @@ fn e2e_divergence_gate_recover_with_authorized_operator() {
     h.log_phase("diverged", true, json!({}));
 
     // Build a real signed authorization.
-    let auth = OperatorAuthorization::new(
+    let auth = recovery_auth(
+        &gate,
         "operator-prod-1",
         12, // resync_checkpoint_epoch
         1_745_750_100,
         "operator-approved-recovery",
-        SIGNING_KEY,
     );
     assert!(
         auth.verify(SIGNING_KEY),
@@ -357,13 +374,7 @@ fn e2e_divergence_gate_recover_rejects_tampered_authorization() -> Result<(), St
     gate.check_propagation(&local, &remote, 1_745_750_007, "trace-fork");
     assert_eq!(gate.state(), GateState::Diverged);
 
-    let mut auth = OperatorAuthorization::new(
-        "operator-rogue",
-        12,
-        1_745_750_100,
-        "rogue-recovery",
-        SIGNING_KEY,
-    );
+    let mut auth = recovery_auth(&gate, "operator-rogue", 12, 1_745_750_100, "rogue-recovery");
     // Tamper a hex char in the authorization_hash.
     let mut chars: Vec<char> = auth.authorization_hash.chars().collect();
     chars[0] = if chars[0] == '0' { '1' } else { '0' };

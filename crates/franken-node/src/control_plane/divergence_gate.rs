@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
+use uuid::Uuid;
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
     crate::security::constant_time::ct_eq(a, b)
@@ -50,6 +51,8 @@ pub mod event_codes {
 const MAX_EVENT_CODES: usize = 10_000;
 const MAX_TIMING_SAMPLES: usize = 10_000;
 const MAX_ATTACK_STEPS: usize = 1_000;
+const MAX_CONSUMED_AUTHORIZATION_NONCES: usize = 4_096;
+const AUTHORIZATION_MAX_AGE_MS: u64 = 300_000;
 
 // ---------------------------------------------------------------------------
 // Invariant identifiers
@@ -248,6 +251,8 @@ pub struct OperatorAuthorization {
     pub signature: String,
     pub resync_checkpoint_epoch: u64,
     pub timestamp: u64,
+    pub nonce: String,
+    pub divergence_fingerprint: String,
     pub reason: String,
 }
 
@@ -271,6 +276,10 @@ fn invalid_authorization_text(field: &str, value: &str) -> Option<String> {
 
 impl OperatorAuthorization {
     /// Create a new authorization with a computed hash and signature.
+    ///
+    /// This is suitable for standalone signature verification. Recovery through
+    /// `ControlPlaneDivergenceGate::respond_recover` requires an authorization
+    /// created with `new_for_active_divergence`.
     pub fn new(
         operator_id: impl Into<String>,
         resync_checkpoint_epoch: u64,
@@ -278,21 +287,56 @@ impl OperatorAuthorization {
         reason: impl Into<String>,
         signing_key: &[u8],
     ) -> Self {
-        let operator_id = operator_id.into();
-        let reason = reason.into();
-        let mut hasher = Sha256::new();
-        hasher.update(b"divergence_gate_auth_v1:");
-        let canonical = format!(
-            "{}:{}|{}|{}|{}:{}",
-            operator_id.len(),
+        Self::new_with_divergence_fingerprint(
             operator_id,
             resync_checkpoint_epoch,
             timestamp,
-            reason.len(),
-            reason
+            Uuid::now_v7().simple().to_string(),
+            "unbound-divergence".to_string(),
+            reason,
+            signing_key,
+        )
+    }
+
+    /// Create a recovery authorization bound to the currently active divergence.
+    pub fn new_for_active_divergence(
+        operator_id: impl Into<String>,
+        active_divergence: &ActiveDivergence,
+        resync_checkpoint_epoch: u64,
+        timestamp: u64,
+        reason: impl Into<String>,
+        signing_key: &[u8],
+    ) -> Self {
+        Self::new_with_divergence_fingerprint(
+            operator_id,
+            resync_checkpoint_epoch,
+            timestamp,
+            Uuid::now_v7().simple().to_string(),
+            active_divergence.authorization_fingerprint(),
+            reason,
+            signing_key,
+        )
+    }
+
+    fn new_with_divergence_fingerprint(
+        operator_id: impl Into<String>,
+        resync_checkpoint_epoch: u64,
+        timestamp: u64,
+        nonce: String,
+        divergence_fingerprint: String,
+        reason: impl Into<String>,
+        signing_key: &[u8],
+    ) -> Self {
+        let operator_id = operator_id.into();
+        let reason = reason.into();
+        let authorization_hash = Self::authorization_hash(
+            &operator_id,
+            resync_checkpoint_epoch,
+            timestamp,
+            &nonce,
+            &divergence_fingerprint,
+            &reason,
         );
-        hasher.update(canonical.as_bytes());
-        let authorization_hash = hex::encode(hasher.finalize());
 
         use hmac::{Hmac, KeyInit, Mac};
         let signature = match Hmac::<Sha256>::new_from_slice(signing_key) {
@@ -310,31 +354,58 @@ impl OperatorAuthorization {
             signature,
             resync_checkpoint_epoch,
             timestamp,
+            nonce,
+            divergence_fingerprint,
             reason,
         }
+    }
+
+    fn authorization_hash(
+        operator_id: &str,
+        resync_checkpoint_epoch: u64,
+        timestamp: u64,
+        nonce: &str,
+        divergence_fingerprint: &str,
+        reason: &str,
+    ) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"divergence_gate_auth_v2:");
+        let canonical = format!(
+            "{}:{}|{}|{}|{}:{}|{}:{}|{}:{}",
+            operator_id.len(),
+            operator_id,
+            resync_checkpoint_epoch,
+            timestamp,
+            nonce.len(),
+            nonce,
+            divergence_fingerprint.len(),
+            divergence_fingerprint,
+            reason.len(),
+            reason
+        );
+        hasher.update(canonical.as_bytes());
+        hex::encode(hasher.finalize())
     }
 
     /// Verify the authorization hash and signature are consistent.
     pub fn verify(&self, verification_key: &[u8]) -> bool {
         if invalid_authorization_text("operator_id", &self.operator_id).is_some()
+            || invalid_authorization_text("nonce", &self.nonce).is_some()
+            || invalid_authorization_text("divergence_fingerprint", &self.divergence_fingerprint)
+                .is_some()
             || invalid_authorization_text("reason", &self.reason).is_some()
         {
             return false;
         }
 
-        let mut hasher = Sha256::new();
-        hasher.update(b"divergence_gate_auth_v1:");
-        let canonical = format!(
-            "{}:{}|{}|{}|{}:{}",
-            self.operator_id.len(),
-            self.operator_id,
+        let expected = Self::authorization_hash(
+            &self.operator_id,
             self.resync_checkpoint_epoch,
             self.timestamp,
-            self.reason.len(),
-            self.reason
+            &self.nonce,
+            &self.divergence_fingerprint,
+            &self.reason,
         );
-        hasher.update(canonical.as_bytes());
-        let expected = hex::encode(hasher.finalize());
         if !constant_time_eq(&self.authorization_hash, &expected) {
             return false;
         }
@@ -455,6 +526,7 @@ pub struct ControlPlaneDivergenceGate {
     alerts: Vec<OperatorAlert>,
     blocked_mutations: Vec<MutationCheckResult>,
     active_divergence: Option<ActiveDivergence>,
+    consumed_authorization_nonces: Vec<String>,
     node_id: String,
     alert_counter: u64,
 }
@@ -471,6 +543,27 @@ pub struct ActiveDivergence {
     pub response_mode: Option<String>,
 }
 
+impl ActiveDivergence {
+    /// Stable fingerprint used to bind operator authorization to one divergence.
+    pub fn authorization_fingerprint(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"divergence_gate_active_v1:");
+        let canonical = format!(
+            "{}:{}|{}|{}:{}|{}:{}|{}",
+            self.detection_result.len(),
+            self.detection_result,
+            self.fork_epoch,
+            self.local_hash.len(),
+            self.local_hash,
+            self.remote_hash.len(),
+            self.remote_hash,
+            self.detected_at
+        );
+        hasher.update(canonical.as_bytes());
+        hex::encode(hasher.finalize())
+    }
+}
+
 impl ControlPlaneDivergenceGate {
     /// Create a new gate in Normal state.
     pub fn new(node_id: impl Into<String>) -> Self {
@@ -483,6 +576,7 @@ impl ControlPlaneDivergenceGate {
             alerts: Vec::new(),
             blocked_mutations: Vec::new(),
             active_divergence: None,
+            consumed_authorization_nonces: Vec::new(),
             node_id: node_id.into(),
             alert_counter: 0,
         }
@@ -938,6 +1032,17 @@ impl ControlPlaneDivergenceGate {
             return Err(DivergenceGateError::UnauthorizedRecovery { reason });
         }
 
+        if let Some(reason) = invalid_authorization_text("nonce", &authorization.nonce) {
+            return Err(DivergenceGateError::UnauthorizedRecovery { reason });
+        }
+
+        if let Some(reason) = invalid_authorization_text(
+            "divergence_fingerprint",
+            &authorization.divergence_fingerprint,
+        ) {
+            return Err(DivergenceGateError::UnauthorizedRecovery { reason });
+        }
+
         // Verify authorization
         if !authorization.verify(verification_key) {
             return Err(DivergenceGateError::UnauthorizedRecovery {
@@ -945,8 +1050,47 @@ impl ControlPlaneDivergenceGate {
             });
         }
 
+        if authorization.timestamp > timestamp {
+            return Err(DivergenceGateError::UnauthorizedRecovery {
+                reason: "authorization timestamp is in the future".to_string(),
+            });
+        }
+
+        if timestamp.saturating_sub(authorization.timestamp) > AUTHORIZATION_MAX_AGE_MS {
+            return Err(DivergenceGateError::UnauthorizedRecovery {
+                reason: "authorization expired".to_string(),
+            });
+        }
+
+        let active_divergence = self.active_divergence.as_ref().ok_or_else(|| {
+            DivergenceGateError::UnauthorizedRecovery {
+                reason: "authorization has no active divergence to recover".to_string(),
+            }
+        })?;
+        let expected_fingerprint = active_divergence.authorization_fingerprint();
+        if !constant_time_eq(&authorization.divergence_fingerprint, &expected_fingerprint) {
+            return Err(DivergenceGateError::UnauthorizedRecovery {
+                reason: "authorization not bound to active divergence".to_string(),
+            });
+        }
+
+        if self
+            .consumed_authorization_nonces
+            .iter()
+            .any(|nonce| constant_time_eq(nonce, &authorization.nonce))
+        {
+            return Err(DivergenceGateError::UnauthorizedRecovery {
+                reason: "authorization nonce already consumed".to_string(),
+            });
+        }
+
         // Transition to Recovering (observable intermediate state)
         self.state = GateState::Recovering;
+        push_bounded(
+            &mut self.consumed_authorization_nonces,
+            authorization.nonce.clone(),
+            MAX_CONSUMED_AUTHORIZATION_NONCES,
+        );
         self.emit_audit(
             timestamp,
             event_codes::DG_004_RECOVERY_COMPLETED,
@@ -1121,6 +1265,24 @@ mod tests {
         let (local, remote) = forked_pair();
         gate.check_propagation(&local, &remote, 2000, "trace-1");
         gate
+    }
+
+    fn recovery_auth(
+        gate: &ControlPlaneDivergenceGate,
+        operator_id: &str,
+        resync_checkpoint_epoch: u64,
+        timestamp: u64,
+        reason: &str,
+        signing_key: &[u8],
+    ) -> OperatorAuthorization {
+        OperatorAuthorization::new_for_active_divergence(
+            operator_id,
+            gate.active_divergence().expect("active divergence"),
+            resync_checkpoint_epoch,
+            timestamp,
+            reason,
+            signing_key,
+        )
     }
 
     // --- Construction ---
@@ -1416,7 +1578,7 @@ mod tests {
         let mut gate = ControlPlaneDivergenceGate::new("test");
         let (local, remote) = forked_pair();
         gate.check_propagation(&local, &remote, 2000, "trace-1");
-        let auth = OperatorAuthorization::new("operator-1", 9, 2001, "fix fork", b"test-key");
+        let auth = recovery_auth(&gate, "operator-1", 9, 2001, "fix fork", b"test-key");
         let result = gate.respond_recover(&auth, b"test-key", 10, 2001, "trace-2");
         assert!(result.is_ok());
         let recovery = result.unwrap();
@@ -1432,10 +1594,57 @@ mod tests {
         let (local, remote) = forked_pair();
         gate.check_propagation(&local, &remote, 2000, "trace-1");
         gate.respond_alert(2001, "trace-2").unwrap();
-        let auth = OperatorAuthorization::new("operator-1", 9, 2002, "fix fork", b"test-key");
+        let auth = recovery_auth(&gate, "operator-1", 9, 2002, "fix fork", b"test-key");
         let result = gate.respond_recover(&auth, b"test-key", 10, 2002, "trace-3");
         assert!(result.is_ok());
         assert_eq!(gate.state(), GateState::Normal);
+    }
+
+    #[test]
+    fn test_recover_rejects_expired_authorization() {
+        let mut gate = diverged_gate();
+        let auth = recovery_auth(&gate, "operator-1", 9, 2001, "fix fork", b"test-key");
+
+        let result = gate.respond_recover(
+            &auth,
+            b"test-key",
+            10,
+            2001 + AUTHORIZATION_MAX_AGE_MS + 1,
+            "trace-expired",
+        );
+
+        assert!(matches!(
+            result.unwrap_err(),
+            DivergenceGateError::UnauthorizedRecovery { .. }
+        ));
+        assert_eq!(gate.state(), GateState::Diverged);
+        assert!(gate.active_divergence().is_some());
+    }
+
+    #[test]
+    fn test_recover_rejects_wrong_divergence_binding() {
+        let original_gate = diverged_gate();
+        let auth = recovery_auth(
+            &original_gate,
+            "operator-1",
+            9,
+            2001,
+            "fix original fork",
+            b"test-key",
+        );
+
+        let mut other_gate = ControlPlaneDivergenceGate::new("other");
+        let (local, remote) = gapped_pair();
+        other_gate.check_propagation(&local, &remote, 2001, "trace-other");
+
+        let result = other_gate.respond_recover(&auth, b"test-key", 10, 2002, "trace-wrong");
+
+        assert!(matches!(
+            result.unwrap_err(),
+            DivergenceGateError::UnauthorizedRecovery { .. }
+        ));
+        assert_eq!(other_gate.state(), GateState::Diverged);
+        assert!(original_gate.active_divergence().is_some());
     }
 
     #[test]
@@ -1779,7 +1988,7 @@ mod tests {
         let mut gate = ControlPlaneDivergenceGate::new("test");
         let (local, remote) = forked_pair();
         gate.check_propagation(&local, &remote, 2000, "trace-1");
-        let auth = OperatorAuthorization::new("op-1", 9, 2001, "fix", b"test-key");
+        let auth = recovery_auth(&gate, "op-1", 9, 2001, "fix", b"test-key");
         gate.respond_recover(&auth, b"test-key", 10, 2001, "trace-2")
             .unwrap();
         let last = gate.audit_log().last().unwrap();
@@ -1811,7 +2020,7 @@ mod tests {
         assert!(blocked.is_err());
 
         // Recover
-        let auth = OperatorAuthorization::new("admin", 9, 2004, "approved fix", b"test-key");
+        let auth = recovery_auth(&gate, "admin", 9, 2004, "approved fix", b"test-key");
         gate.respond_recover(&auth, b"test-key", 10, 2004, "trace-5")
             .unwrap();
         assert_eq!(gate.state(), GateState::Normal);
@@ -2086,7 +2295,8 @@ mod tests {
                         }
                     }
                     "recover_start" => {
-                        let auth = OperatorAuthorization::new(
+                        let auth = recovery_auth(
+                            &test_gate,
                             "test-operator",
                             2,
                             3000 + step_idx as u64,
@@ -2201,7 +2411,8 @@ mod tests {
         ];
 
         for (attack_name, attack_fn) in signature_bypass_attacks {
-            let valid_auth = OperatorAuthorization::new(
+            let valid_auth = recovery_auth(
+                &gate,
                 "test-operator",
                 3,
                 4001,
@@ -2270,7 +2481,8 @@ mod tests {
         ];
 
         for (attack_name, malicious_key) in key_substitution_attacks {
-            let valid_auth = OperatorAuthorization::new(
+            let valid_auth = recovery_auth(
+                &gate,
                 "test-operator",
                 3,
                 4002,
@@ -2371,8 +2583,14 @@ mod tests {
         );
 
         // Test 4: Authorization replay and reuse attacks
-        let valid_auth =
-            OperatorAuthorization::new("replay-test", 3, 4004, "replay attack test", b"test-key");
+        let valid_auth = recovery_auth(
+            &gate,
+            "replay-test",
+            3,
+            4004,
+            "replay attack test",
+            b"test-key",
+        );
 
         // First use should succeed
         let first_result = gate.respond_recover(&valid_auth, b"test-key", 40, 4004, "first-use");
@@ -2390,27 +2608,23 @@ mod tests {
         let (local, remote) = forked_pair();
         gate.check_propagation(&local, &remote, 4005, "new-divergence");
 
-        // Replay attempt should work (same auth can be reused with proper verification)
+        // Replay attempt must fail: the nonce was consumed and the token is
+        // bound to the previous active divergence.
         let replay_result =
             gate.respond_recover(&valid_auth, b"test-key", 45, 4005, "replay-attempt");
 
-        // The implementation doesn't prevent auth reuse, but verify it still works correctly
-        if replay_result.is_ok() {
-            assert_eq!(
-                gate.state(),
-                GateState::Normal,
-                "Replay should work if authorization is valid"
-            );
-        } else {
-            // If replay is rejected, it should be for a clear reason
-            assert!(
-                matches!(
-                    replay_result.unwrap_err(),
-                    DivergenceGateError::UnauthorizedRecovery { .. }
-                ),
-                "Replay rejection should be UnauthorizedRecovery"
-            );
-        }
+        assert!(
+            matches!(
+                replay_result.unwrap_err(),
+                DivergenceGateError::UnauthorizedRecovery { .. }
+            ),
+            "Replay rejection should be UnauthorizedRecovery"
+        );
+        assert_eq!(
+            gate.state(),
+            GateState::Diverged,
+            "Replay must not recover a later divergence"
+        );
     }
 
     #[test]
@@ -2505,14 +2719,17 @@ mod tests {
             }
 
             // Reset gate for next test
-            let auth = OperatorAuthorization::new(
-                "reset-operator",
-                4,
-                5003,
-                "reset for next test",
-                b"reset-key",
-            );
-            let _ = gate.respond_recover(&auth, b"reset-key", 50, 5003, "reset-trace");
+            if gate.active_divergence().is_some() {
+                let auth = recovery_auth(
+                    &gate,
+                    "reset-operator",
+                    4,
+                    5003,
+                    "reset for next test",
+                    b"reset-key",
+                );
+                let _ = gate.respond_recover(&auth, b"reset-key", 50, 5003, "reset-trace");
+            }
         }
 
         // Test 2: Mutation kind bypass and enum manipulation attacks
@@ -2667,14 +2884,17 @@ mod tests {
         ];
 
         // Reset to normal for state vector tests
-        let reset_auth = OperatorAuthorization::new(
-            "reset-op",
-            5,
-            8000,
-            "reset for state vector tests",
-            b"reset-key",
-        );
-        let _ = gate.respond_recover(&reset_auth, b"reset-key", 60, 8000, "reset-trace");
+        if gate.active_divergence().is_some() {
+            let reset_auth = recovery_auth(
+                &gate,
+                "reset-op",
+                5,
+                8000,
+                "reset for state vector tests",
+                b"reset-key",
+            );
+            let _ = gate.respond_recover(&reset_auth, b"reset-key", 60, 8000, "reset-trace");
+        }
 
         for (attack_local, attack_remote) in state_vector_attacks {
             let (result, proof, log_event) =
@@ -2704,7 +2924,8 @@ mod tests {
 
             // Reset for next iteration if needed
             if gate.state() != GateState::Normal {
-                let recover_auth = OperatorAuthorization::new(
+                let recover_auth = recovery_auth(
+                    &gate,
                     "recover-op",
                     6,
                     8002,
