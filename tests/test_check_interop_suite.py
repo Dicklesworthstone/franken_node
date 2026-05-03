@@ -1,37 +1,46 @@
 """Unit tests for check_interop_suite.py verification logic."""
 
 import json
-import os
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / "scripts/check_interop_suite.py"
+FIXTURE_PATH = ROOT / "fixtures/interop/interop_test_vectors.json"
+MATRIX_PATH = ROOT / "artifacts/section_10_13/bd-35by/interop_results_matrix.csv"
+EVIDENCE_PATH = ROOT / "artifacts/section_10_13/bd-35by/verification_evidence.json"
+JSON_DECODER = json.JSONDecoder()
+
+
+def decode_json_object(raw: str) -> dict[str, object]:
+    parsed = JSON_DECODER.decode(raw)
+    if not isinstance(parsed, dict):
+        raise AssertionError("expected JSON object")
+    return parsed
 
 
 class TestInteropFixtures(unittest.TestCase):
 
     def test_fixtures_exist(self):
-        path = os.path.join(ROOT, "fixtures/interop/interop_test_vectors.json")
-        self.assertTrue(os.path.isfile(path))
+        self.assertTrue(FIXTURE_PATH.is_file())
 
     def test_fixtures_valid_json(self):
-        path = os.path.join(ROOT, "fixtures/interop/interop_test_vectors.json")
-        with open(path) as f:
-            data = json.load(f)
+        data = decode_json_object(FIXTURE_PATH.read_text(encoding="utf-8"))
         self.assertIn("test_vectors", data)
         self.assertGreaterEqual(len(data["test_vectors"]), 5)
 
     def test_results_matrix_exists(self):
-        path = os.path.join(ROOT, "artifacts/section_10_13/bd-35by/interop_results_matrix.csv")
-        self.assertTrue(os.path.isfile(path))
+        self.assertTrue(MATRIX_PATH.is_file())
 
 
 class TestInteropImpl(unittest.TestCase):
 
     def setUp(self):
-        self.impl_path = os.path.join(ROOT, "crates/franken-node/src/connector/interop_suite.rs")
-        self.assertTrue(os.path.isfile(self.impl_path))
-        with open(self.impl_path) as f:
-            self.content = f.read()
+        self.impl_path = ROOT / "crates/franken-node/src/connector/interop_suite.rs"
+        self.assertTrue(self.impl_path.is_file())
+        self.content = self.impl_path.read_text(encoding="utf-8")
 
     def test_has_interop_class(self):
         self.assertIn("enum InteropClass", self.content)
@@ -52,10 +61,9 @@ class TestInteropImpl(unittest.TestCase):
 class TestInteropSpec(unittest.TestCase):
 
     def setUp(self):
-        self.spec_path = os.path.join(ROOT, "docs/specs/section_10_13/bd-35by_contract.md")
-        self.assertTrue(os.path.isfile(self.spec_path))
-        with open(self.spec_path) as f:
-            self.content = f.read()
+        self.spec_path = ROOT / "docs/specs/section_10_13/bd-35by_contract.md"
+        self.assertTrue(self.spec_path.is_file())
+        self.content = self.spec_path.read_text(encoding="utf-8")
 
     def test_has_invariants(self):
         for inv in ["INV-IOP-SERIALIZATION", "INV-IOP-OBJECT-ID",
@@ -67,10 +75,9 @@ class TestInteropSpec(unittest.TestCase):
 class TestInteropIntegration(unittest.TestCase):
 
     def setUp(self):
-        self.integ_path = os.path.join(ROOT, "tests/integration/interop_mandatory_suites.rs")
-        self.assertTrue(os.path.isfile(self.integ_path))
-        with open(self.integ_path) as f:
-            self.content = f.read()
+        self.integ_path = ROOT / "tests/integration/interop_mandatory_suites.rs"
+        self.assertTrue(self.integ_path.is_file())
+        self.content = self.integ_path.read_text(encoding="utf-8")
 
     def test_covers_serialization(self):
         self.assertIn("inv_iop_serialization", self.content)
@@ -86,6 +93,41 @@ class TestInteropIntegration(unittest.TestCase):
 
     def test_covers_source_diversity(self):
         self.assertIn("inv_iop_source_diversity", self.content)
+
+
+class TestInteropCheckerCli(unittest.TestCase):
+
+    def test_json_mode_is_structural_and_machine_readable(self):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--json"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        evidence = decode_json_object(result.stdout)
+        statuses = {check["id"]: check["status"] for check in evidence["checks"]}
+
+        self.assertEqual(evidence["gate"], "interop_suite_verification")
+        self.assertEqual(evidence["mode"], "structural")
+        self.assertEqual(statuses["IOP-TESTS"], "SKIP")
+        self.assertEqual(statuses["IOP-MATRIX"], "PASS")
+        self.assertEqual(evidence["summary"]["skipped_checks"], 1)
+        self.assertNotIn("bd-35by:", result.stdout)
+
+    def test_json_mode_does_not_rewrite_evidence_artifact(self):
+        before = EVIDENCE_PATH.read_text(encoding="utf-8")
+        subprocess.run(
+            [sys.executable, str(SCRIPT), "--json"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        after = EVIDENCE_PATH.read_text(encoding="utf-8")
+        self.assertEqual(before, after)
 
 
 if __name__ == "__main__":
