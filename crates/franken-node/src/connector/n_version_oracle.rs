@@ -338,7 +338,7 @@ pub fn run_harness(
                         sample.boundary_name, rt.runtime_id
                     ),
                 };
-                
+
                 let div = BoundaryDivergence {
                     divergence_id: format!("div-{div_counter:04}"),
                     boundary_name: sample.boundary_name.clone(),
@@ -402,11 +402,7 @@ pub fn run_harness(
                     }
                 }
 
-                push_bounded(
-                    &mut divergences,
-                    div,
-                    MAX_DIVERGENCES,
-                );
+                push_bounded(&mut divergences, div, MAX_DIVERGENCES);
             }
         }
     }

@@ -1084,7 +1084,13 @@ impl std::fmt::Display for ProofCarryingDecodeError {
                 write!(f, "{}: object {object_id}: {reason}", self.code())
             }
             Self::CapacityExceeded { resource, capacity } => {
-                write!(f, "{}: resource {} exceeded capacity {}", self.code(), resource, capacity)
+                write!(
+                    f,
+                    "{}: resource {} exceeded capacity {}",
+                    self.code(),
+                    resource,
+                    capacity
+                )
             }
         }
     }
@@ -1145,105 +1151,104 @@ impl ProofCarryingDecoder {
             audit_log: Vec::new(),
             max_audit_log_entries: max_audit_log_entries.max(1),
         };
+    }
 
-        // Inline negative-path tests
-        #[cfg(test)]
-        #[allow(unreachable_code)]
-        {
-            // Test: zero capacity should clamp to 1
-            let decoder = Self::with_audit_log_capacity(ProofMode::Mandatory, "test", "secret", 0);
-            assert_eq!(
-                decoder.audit_log_capacity(),
-                1,
-                "zero capacity should clamp to 1"
-            );
+    // Inline negative-path tests
+    #[cfg(test)]
+    #[allow(dead_code)]
+    fn with_audit_log_capacity_negative_path_regressions() {
+        // Test: zero capacity should clamp to 1
+        let decoder = Self::with_audit_log_capacity(ProofMode::Mandatory, "test", "secret", 0);
+        assert_eq!(
+            decoder.audit_log_capacity(),
+            1,
+            "zero capacity should clamp to 1"
+        );
 
-            // Test: very large capacity should be accepted
-            let large_cap = usize::MAX;
-            let decoder =
-                Self::with_audit_log_capacity(ProofMode::Advisory, "test", "secret", large_cap);
-            assert_eq!(
-                decoder.audit_log_capacity(),
-                large_cap,
-                "large capacity should be preserved"
-            );
+        // Test: very large capacity should be accepted
+        let large_cap = usize::MAX;
+        let decoder =
+            Self::with_audit_log_capacity(ProofMode::Advisory, "test", "secret", large_cap);
+        assert_eq!(
+            decoder.audit_log_capacity(),
+            large_cap,
+            "large capacity should be preserved"
+        );
 
-            // Test: empty signer ID should be allowed
-            let decoder = Self::with_audit_log_capacity(ProofMode::Mandatory, "", "secret", 100);
-            assert_eq!(decoder.signer_id, "", "empty signer ID should be preserved");
+        // Test: empty signer ID should be allowed
+        let decoder = Self::with_audit_log_capacity(ProofMode::Mandatory, "", "secret", 100);
+        assert_eq!(decoder.signer_id, "", "empty signer ID should be preserved");
 
-            // Test: empty signing secret should be allowed
-            let decoder = Self::with_audit_log_capacity(ProofMode::Advisory, "test", "", 100);
-            assert_eq!(
-                decoder.signing_secret, "",
-                "empty signing secret should be preserved"
-            );
+        // Test: empty signing secret should be allowed
+        let decoder = Self::with_audit_log_capacity(ProofMode::Advisory, "test", "", 100);
+        assert_eq!(
+            decoder.signing_secret, "",
+            "empty signing secret should be preserved"
+        );
 
-            // Test: very long signer ID should be handled
-            let long_signer = "x".repeat(10000);
-            let decoder =
-                Self::with_audit_log_capacity(ProofMode::Mandatory, &long_signer, "secret", 100);
-            assert_eq!(
-                decoder.signer_id.len(),
-                10000,
-                "long signer ID should be preserved"
-            );
+        // Test: very long signer ID should be handled
+        let long_signer = "x".repeat(10000);
+        let decoder =
+            Self::with_audit_log_capacity(ProofMode::Mandatory, &long_signer, "secret", 100);
+        assert_eq!(
+            decoder.signer_id.len(),
+            10000,
+            "long signer ID should be preserved"
+        );
 
-            // Test: Unicode in signer ID should be supported
-            let unicode_signer = "签名者_υπογράφων";
-            let decoder =
-                Self::with_audit_log_capacity(ProofMode::Advisory, unicode_signer, "secret", 100);
-            assert_eq!(
-                decoder.signer_id, unicode_signer,
-                "Unicode signer ID should be preserved"
-            );
+        // Test: Unicode in signer ID should be supported
+        let unicode_signer = "签名者_υπογράφων";
+        let decoder =
+            Self::with_audit_log_capacity(ProofMode::Advisory, unicode_signer, "secret", 100);
+        assert_eq!(
+            decoder.signer_id, unicode_signer,
+            "Unicode signer ID should be preserved"
+        );
 
-            // Test: special characters in signing secret
-            let special_secret = "secret!@#$%^&*()";
-            let decoder =
-                Self::with_audit_log_capacity(ProofMode::Mandatory, "test", special_secret, 100);
-            assert_eq!(
-                decoder.signing_secret, special_secret,
-                "special characters in secret should be preserved"
-            );
+        // Test: special characters in signing secret
+        let special_secret = "secret!@#$%^&*()";
+        let decoder =
+            Self::with_audit_log_capacity(ProofMode::Mandatory, "test", special_secret, 100);
+        assert_eq!(
+            decoder.signing_secret, special_secret,
+            "special characters in secret should be preserved"
+        );
 
-            // Test: default algorithms should always be registered
-            let decoder = Self::with_audit_log_capacity(ProofMode::Advisory, "test", "secret", 50);
-            assert_eq!(
-                decoder.registered_algorithms().len(),
-                3,
-                "should have 3 default algorithms"
-            );
-            assert!(
-                decoder
-                    .registered_algorithms()
-                    .iter()
-                    .any(|alg| alg.as_str() == "reed_solomon_8_4"),
-                "should include reed_solomon_8_4"
-            );
-            assert!(
-                decoder
-                    .registered_algorithms()
-                    .iter()
-                    .any(|alg| alg.as_str() == "xor_parity_2"),
-                "should include xor_parity_2"
-            );
-            assert!(
-                decoder
-                    .registered_algorithms()
-                    .iter()
-                    .any(|alg| alg.as_str() == "simple_concat"),
-                "should include simple_concat"
-            );
+        // Test: default algorithms should always be registered
+        let decoder = Self::with_audit_log_capacity(ProofMode::Advisory, "test", "secret", 50);
+        assert_eq!(
+            decoder.registered_algorithms().len(),
+            3,
+            "should have 3 default algorithms"
+        );
+        assert!(
+            decoder
+                .registered_algorithms()
+                .iter()
+                .any(|alg| alg.as_str() == "reed_solomon_8_4"),
+            "should include reed_solomon_8_4"
+        );
+        assert!(
+            decoder
+                .registered_algorithms()
+                .iter()
+                .any(|alg| alg.as_str() == "xor_parity_2"),
+            "should include xor_parity_2"
+        );
+        assert!(
+            decoder
+                .registered_algorithms()
+                .iter()
+                .any(|alg| alg.as_str() == "simple_concat"),
+            "should include simple_concat"
+        );
 
-            // Test: audit log should start empty
-            let decoder =
-                Self::with_audit_log_capacity(ProofMode::Mandatory, "test", "secret", 1000);
-            assert!(
-                decoder.audit_log().is_empty(),
-                "audit log should start empty"
-            );
-        }
+        // Test: audit log should start empty
+        let decoder = Self::with_audit_log_capacity(ProofMode::Mandatory, "test", "secret", 1000);
+        assert!(
+            decoder.audit_log().is_empty(),
+            "audit log should start empty"
+        );
     }
 
     pub fn mode(&self) -> ProofMode {
@@ -1258,7 +1263,10 @@ impl ProofCarryingDecoder {
         &self.registered_algorithms
     }
 
-    pub fn register_algorithm(&mut self, algorithm_id: AlgorithmId) -> Result<(), ProofCarryingDecodeError> {
+    pub fn register_algorithm(
+        &mut self,
+        algorithm_id: AlgorithmId,
+    ) -> Result<(), ProofCarryingDecodeError> {
         if !self.registered_algorithms.contains(&algorithm_id) {
             if self.registered_algorithms.len() >= MAX_REGISTERED_ALGORITHMS {
                 return Err(ProofCarryingDecodeError::CapacityExceeded {
@@ -1271,83 +1279,96 @@ impl ProofCarryingDecoder {
         Ok(())
     }
 
-        // Inline negative-path tests
-        #[cfg(test)]
-        #[allow(unreachable_code)]
-        {
-            // Test: registering duplicate algorithm should be idempotent
-            let mut decoder = ProofCarryingDecoder::new(ProofMode::Mandatory, "test", "secret");
-            let initial_count = decoder.registered_algorithms().len();
-            decoder.register_algorithm(AlgorithmId::new("reed_solomon_8_4")).unwrap(); // Already exists
-            assert_eq!(
-                decoder.registered_algorithms().len(),
-                initial_count,
-                "duplicate registration should be ignored"
-            );
+    // Inline negative-path tests
+    #[cfg(test)]
+    #[allow(dead_code)]
+    fn register_algorithm_negative_path_regressions() {
+        // Test: registering duplicate algorithm should be idempotent
+        let mut decoder = ProofCarryingDecoder::new(ProofMode::Mandatory, "test", "secret");
+        let initial_count = decoder.registered_algorithms().len();
+        decoder
+            .register_algorithm(AlgorithmId::new("reed_solomon_8_4"))
+            .unwrap(); // Already exists
+        assert_eq!(
+            decoder.registered_algorithms().len(),
+            initial_count,
+            "duplicate registration should be ignored"
+        );
 
-            // Test: registering empty algorithm ID should be allowed
-            let mut decoder = ProofCarryingDecoder::new(ProofMode::Mandatory, "test", "secret");
-            let initial_count = decoder.registered_algorithms().len();
-            decoder.register_algorithm(AlgorithmId::new("")).unwrap();
-            assert_eq!(
-                decoder.registered_algorithms().len(),
-                initial_count + 1,
-                "empty algorithm ID should be registerable"
-            );
+        // Test: registering empty algorithm ID should be allowed
+        let mut decoder = ProofCarryingDecoder::new(ProofMode::Mandatory, "test", "secret");
+        let initial_count = decoder.registered_algorithms().len();
+        decoder.register_algorithm(AlgorithmId::new("")).unwrap();
+        assert_eq!(
+            decoder.registered_algorithms().len(),
+            initial_count + 1,
+            "empty algorithm ID should be registerable"
+        );
 
-            // Test: registering many algorithms should respect capacity
-            let mut decoder = ProofCarryingDecoder::new(ProofMode::Mandatory, "test", "secret");
-            let initial_count = decoder.registered_algorithms().len();
-            // Try to register up to the capacity
-            for i in 0..(MAX_REGISTERED_ALGORITHMS - initial_count) {
-                decoder.register_algorithm(AlgorithmId::new(format!("algo_{}", i))).unwrap();
-            }
-            // Next one should fail
-            let err = decoder.register_algorithm(AlgorithmId::new("algo_overflow")).unwrap_err();
-            assert!(
-                matches!(err, ProofCarryingDecodeError::CapacityExceeded { .. }),
-                "should return CapacityExceeded when full"
-            );
-            assert!(
-                decoder.registered_algorithms().len() <= MAX_REGISTERED_ALGORITHMS,
-                "should respect maximum capacity"
-            );
-
-            // Test: case sensitivity in algorithm registration
-            let mut decoder = ProofCarryingDecoder::new(ProofMode::Mandatory, "test", "secret");
-            decoder.register_algorithm(AlgorithmId::new("CaseSensitive")).unwrap();
-            decoder.register_algorithm(AlgorithmId::new("casesensitive")).unwrap();
-            let case_sensitive_count = decoder
-                .registered_algorithms()
-                .iter()
-                .filter(|alg| alg.as_str().to_lowercase() == "casesensitive")
-                .count();
-            assert_eq!(
-                case_sensitive_count, 2,
-                "case sensitivity should be preserved"
-            );
-
-            // Test: Unicode algorithm IDs should be supported
-            let mut decoder = ProofCarryingDecoder::new(ProofMode::Mandatory, "test", "secret");
-            let initial_count = decoder.registered_algorithms().len();
-            decoder.register_algorithm(AlgorithmId::new("算法_αλγόριθμος")).unwrap();
-            assert_eq!(
-                decoder.registered_algorithms().len(),
-                initial_count + 1,
-                "Unicode algorithm IDs should work"
-            );
-
-            // Test: very long algorithm ID should be handled
-            let mut decoder = ProofCarryingDecoder::new(ProofMode::Mandatory, "test", "secret");
-            let initial_count = decoder.registered_algorithms().len();
-            let long_id = "x".repeat(10000);
-            decoder.register_algorithm(AlgorithmId::new(&long_id)).unwrap();
-            assert_eq!(
-                decoder.registered_algorithms().len(),
-                initial_count + 1,
-                "very long algorithm IDs should work"
-            );
+        // Test: registering many algorithms should respect capacity
+        let mut decoder = ProofCarryingDecoder::new(ProofMode::Mandatory, "test", "secret");
+        let initial_count = decoder.registered_algorithms().len();
+        // Try to register up to the capacity
+        for i in 0..(MAX_REGISTERED_ALGORITHMS - initial_count) {
+            decoder
+                .register_algorithm(AlgorithmId::new(format!("algo_{}", i)))
+                .unwrap();
         }
+        // Next one should fail
+        let err = decoder
+            .register_algorithm(AlgorithmId::new("algo_overflow"))
+            .unwrap_err();
+        assert!(
+            matches!(err, ProofCarryingDecodeError::CapacityExceeded { .. }),
+            "should return CapacityExceeded when full"
+        );
+        assert!(
+            decoder.registered_algorithms().len() <= MAX_REGISTERED_ALGORITHMS,
+            "should respect maximum capacity"
+        );
+
+        // Test: case sensitivity in algorithm registration
+        let mut decoder = ProofCarryingDecoder::new(ProofMode::Mandatory, "test", "secret");
+        decoder
+            .register_algorithm(AlgorithmId::new("CaseSensitive"))
+            .unwrap();
+        decoder
+            .register_algorithm(AlgorithmId::new("casesensitive"))
+            .unwrap();
+        let case_sensitive_count = decoder
+            .registered_algorithms()
+            .iter()
+            .filter(|alg| alg.as_str().to_lowercase() == "casesensitive")
+            .count();
+        assert_eq!(
+            case_sensitive_count, 2,
+            "case sensitivity should be preserved"
+        );
+
+        // Test: Unicode algorithm IDs should be supported
+        let mut decoder = ProofCarryingDecoder::new(ProofMode::Mandatory, "test", "secret");
+        let initial_count = decoder.registered_algorithms().len();
+        decoder
+            .register_algorithm(AlgorithmId::new("算法_αλγόριθμος"))
+            .unwrap();
+        assert_eq!(
+            decoder.registered_algorithms().len(),
+            initial_count + 1,
+            "Unicode algorithm IDs should work"
+        );
+
+        // Test: very long algorithm ID should be handled
+        let mut decoder = ProofCarryingDecoder::new(ProofMode::Mandatory, "test", "secret");
+        let initial_count = decoder.registered_algorithms().len();
+        let long_id = "x".repeat(10000);
+        decoder
+            .register_algorithm(AlgorithmId::new(&long_id))
+            .unwrap();
+        assert_eq!(
+            decoder.registered_algorithms().len(),
+            initial_count + 1,
+            "very long algorithm IDs should work"
+        );
     }
 
     pub fn audit_log(&self) -> &[ProofAuditEvent] {
@@ -1444,365 +1465,367 @@ impl ProofCarryingDecoder {
             trace_id: trace_id.to_string(),
         });
 
-        return Ok(DecodeResult {
+        Ok(DecodeResult {
             object_id: object_id.to_string(),
             output_data,
             proof: Some(proof),
-        });
+        })
+    }
 
-        // Inline negative-path tests for decode method
-        #[cfg(test)]
-        #[allow(unreachable_code)]
-        {
-            // Test: Unicode injection in object_id
-            let mut decoder =
-                ProofCarryingDecoder::new(ProofMode::Mandatory, "test_signer", "test_secret");
-            let fragments = vec![Fragment::new("frag1", b"data1".to_vec())];
-            let algorithm_id = AlgorithmId::new("reed_solomon_8_4");
-            let malicious_object_id = "legit\u{202E}tnemalf\u{202D}.txt"; // BIDI override attack
-            let result = decoder.decode(
-                &malicious_object_id,
-                &fragments,
-                &algorithm_id,
-                1000000000,
-                "trace1",
+    // Inline negative-path tests for decode method
+    #[cfg(test)]
+    #[allow(dead_code)]
+    fn decode_negative_path_regressions() {
+        // Test: Unicode injection in object_id
+        let mut decoder =
+            ProofCarryingDecoder::new(ProofMode::Mandatory, "test_signer", "test_secret");
+        let fragments = vec![Fragment::new("frag1", b"data1".to_vec())];
+        let algorithm_id = AlgorithmId::new("reed_solomon_8_4");
+        let malicious_object_id = "legit\u{202E}tnemalf\u{202D}.txt"; // BIDI override attack
+        let result = decoder.decode(
+            &malicious_object_id,
+            &fragments,
+            &algorithm_id,
+            1000000000,
+            "trace1",
+        );
+        assert!(
+            result.is_ok(),
+            "Unicode injection in object_id should be preserved but not break functionality"
+        );
+        if let Ok(decode_result) = result {
+            assert_eq!(
+                decode_result.object_id, malicious_object_id,
+                "Malicious object_id should be preserved"
             );
-            assert!(
-                result.is_ok(),
-                "Unicode injection in object_id should be preserved but not break functionality"
-            );
-            if let Ok(decode_result) = result {
-                assert_eq!(
-                    decode_result.object_id, malicious_object_id,
-                    "Malicious object_id should be preserved"
-                );
-            }
+        }
 
-            // Test: Arithmetic overflow protection in timestamp_epoch_secs
-            let mut decoder =
-                ProofCarryingDecoder::new(ProofMode::Mandatory, "test_signer", "test_secret");
-            let fragments = vec![Fragment::new("frag1", b"test_data".to_vec())];
-            let algorithm_id = AlgorithmId::new("reed_solomon_8_4");
-            let max_timestamp = u64::MAX;
-            let result = decoder.decode(
-                "obj1",
-                &fragments,
-                &algorithm_id,
+        // Test: Arithmetic overflow protection in timestamp_epoch_secs
+        let mut decoder =
+            ProofCarryingDecoder::new(ProofMode::Mandatory, "test_signer", "test_secret");
+        let fragments = vec![Fragment::new("frag1", b"test_data".to_vec())];
+        let algorithm_id = AlgorithmId::new("reed_solomon_8_4");
+        let max_timestamp = u64::MAX;
+        let result = decoder.decode(
+            "obj1",
+            &fragments,
+            &algorithm_id,
+            max_timestamp,
+            "trace_overflow",
+        );
+        assert!(
+            result.is_ok(),
+            "Maximum timestamp should be handled without overflow"
+        );
+        if let Ok(decode_result) = result {
+            assert_eq!(
+                decode_result.proof.as_ref().unwrap().timestamp_epoch_secs,
                 max_timestamp,
-                "trace_overflow",
+                "Timestamp should be preserved"
             );
-            assert!(
-                result.is_ok(),
-                "Maximum timestamp should be handled without overflow"
-            );
-            if let Ok(decode_result) = result {
-                assert_eq!(
-                    decode_result.proof.as_ref().unwrap().timestamp_epoch_secs,
-                    max_timestamp,
-                    "Timestamp should be preserved"
-                );
-            }
+        }
 
-            // Test: Memory exhaustion through massive fragment concatenation
-            let mut decoder =
-                ProofCarryingDecoder::new(ProofMode::Mandatory, "test_signer", "test_secret");
-            let massive_data = vec![0u8; 1_000_000]; // 1MB per fragment
-            let fragments: Vec<Fragment> = (0..10) // 10MB total
+        // Test: Memory exhaustion through massive fragment concatenation
+        let mut decoder =
+            ProofCarryingDecoder::new(ProofMode::Mandatory, "test_signer", "test_secret");
+        let massive_data = vec![0u8; 1_000_000]; // 1MB per fragment
+        let fragments: Vec<Fragment> = (0..10) // 10MB total
                 .map(|i| Fragment::new(&format!("massive_frag_{}", i), massive_data.clone()))
                 .collect();
-            let algorithm_id = AlgorithmId::new("simple_concat");
-            let result = decoder.decode(
-                "massive_obj",
-                &fragments,
-                &algorithm_id,
-                1000000001,
-                "trace_massive",
+        let algorithm_id = AlgorithmId::new("simple_concat");
+        let result = decoder.decode(
+            "massive_obj",
+            &fragments,
+            &algorithm_id,
+            1000000001,
+            "trace_massive",
+        );
+        assert!(
+            result.is_ok(),
+            "Massive fragment concatenation should complete without memory issues"
+        );
+        if let Ok(decode_result) = result {
+            assert_eq!(
+                decode_result.output_data.len(),
+                10_000_000,
+                "Output should be 10MB"
             );
-            assert!(
-                result.is_ok(),
-                "Massive fragment concatenation should complete without memory issues"
-            );
-            if let Ok(decode_result) = result {
-                assert_eq!(
-                    decode_result.output_data.len(),
-                    10_000_000,
-                    "Output should be 10MB"
+        }
+
+        // Test: Concurrent operation simulation (rapid sequential decodes)
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+        let shared_decoder = Arc::new(Mutex::new(ProofCarryingDecoder::new(
+            ProofMode::Advisory,
+            "concurrent_signer",
+            "concurrent_secret",
+        )));
+        let mut handles = vec![];
+        for i in 0..5 {
+            let decoder_clone = Arc::clone(&shared_decoder);
+            let handle = thread::spawn(move || {
+                let fragment = Fragment::new(
+                    &format!("concurrent_frag_{}", i),
+                    format!("data_{}", i).into_bytes(),
                 );
-            }
-
-            // Test: Concurrent operation simulation (rapid sequential decodes)
-            use std::sync::{Arc, Mutex};
-            use std::thread;
-            let shared_decoder = Arc::new(Mutex::new(ProofCarryingDecoder::new(
-                ProofMode::Advisory,
-                "concurrent_signer",
-                "concurrent_secret",
-            )));
-            let mut handles = vec![];
-            for i in 0..5 {
-                let decoder_clone = Arc::clone(&shared_decoder);
-                let handle = thread::spawn(move || {
-                    let fragment = Fragment::new(
-                        &format!("concurrent_frag_{}", i),
-                        format!("data_{}", i).into_bytes(),
-                    );
-                    let algorithm_id = AlgorithmId::new("simple_concat");
-                    let mut decoder = decoder_clone.lock().unwrap();
-                    decoder.decode(
-                        &format!("concurrent_obj_{}", i),
-                        &[fragment],
-                        &algorithm_id,
-                        1000000002 + i as u64,
-                        &format!("trace_concurrent_{}", i),
-                    )
-                });
-                handles.push(handle);
-            }
-            for handle in handles {
-                let result = handle.join().unwrap();
-                assert!(result.is_ok(), "Concurrent decodes should all succeed");
-            }
-
-            // Test: Unregistered algorithm attack vector
-            let mut decoder =
-                ProofCarryingDecoder::new(ProofMode::Mandatory, "test_signer", "test_secret");
-            let fragments = vec![Fragment::new("frag1", b"data1".to_vec())];
-            let malicious_algorithm = AlgorithmId::new("malicious_algorithm\x00\x01\x02"); // With control characters
-            let result = decoder.decode(
-                "obj1",
-                &fragments,
-                &malicious_algorithm,
-                1000000003,
-                "trace_unregistered",
-            );
-            assert!(result.is_err(), "Unregistered algorithm should be rejected");
-            if let Err(ProofCarryingDecodeError::ReconstructionFailed { reason, .. }) = result {
-                assert!(
-                    reason.contains("unregistered algorithm"),
-                    "Error should indicate unregistered algorithm"
-                );
-            }
-
-            // Test: Empty fragments collection edge case
-            let mut decoder =
-                ProofCarryingDecoder::new(ProofMode::Mandatory, "test_signer", "test_secret");
-            let empty_fragments: Vec<Fragment> = vec![];
-            let algorithm_id = AlgorithmId::new("reed_solomon_8_4");
-            let result = decoder.decode(
-                "empty_obj",
-                &empty_fragments,
-                &algorithm_id,
-                1000000004,
-                "trace_empty",
-            );
-            assert!(result.is_err(), "Empty fragments should be rejected");
-            if let Err(ProofCarryingDecodeError::ReconstructionFailed { reason, .. }) = result {
-                assert!(
-                    reason.contains("no fragments"),
-                    "Error should indicate no fragments provided"
-                );
-            }
-
-            // Test: Audit log capacity boundary attacks
-            let mut decoder = ProofCarryingDecoder::with_audit_log_capacity(
-                ProofMode::Advisory,
-                "audit_signer",
-                "audit_secret",
-                3,
-            );
-            let fragment = Fragment::new("audit_frag", b"audit_data".to_vec());
-            let algorithm_id = AlgorithmId::new("simple_concat");
-            // Generate more audit events than capacity
-            for i in 0..10 {
-                let _ = decoder.decode(
-                    &format!("audit_obj_{}", i),
-                    &[fragment.clone()],
+                let algorithm_id = AlgorithmId::new("simple_concat");
+                let mut decoder = decoder_clone.lock().unwrap();
+                decoder.decode(
+                    &format!("concurrent_obj_{}", i),
+                    &[fragment],
                     &algorithm_id,
-                    1000000005 + i as u64,
-                    &format!("trace_audit_{}", i),
-                );
-            }
+                    1000000002 + i as u64,
+                    &format!("trace_concurrent_{}", i),
+                )
+            });
+            handles.push(handle);
+        }
+        for handle in handles {
+            let result = handle.join().unwrap();
+            assert!(result.is_ok(), "Concurrent decodes should all succeed");
+        }
+
+        // Test: Unregistered algorithm attack vector
+        let mut decoder =
+            ProofCarryingDecoder::new(ProofMode::Mandatory, "test_signer", "test_secret");
+        let fragments = vec![Fragment::new("frag1", b"data1".to_vec())];
+        let malicious_algorithm = AlgorithmId::new("malicious_algorithm\x00\x01\x02"); // With control characters
+        let result = decoder.decode(
+            "obj1",
+            &fragments,
+            &malicious_algorithm,
+            1000000003,
+            "trace_unregistered",
+        );
+        assert!(result.is_err(), "Unregistered algorithm should be rejected");
+        if let Err(ProofCarryingDecodeError::ReconstructionFailed { reason, .. }) = result {
             assert!(
-                decoder.audit_log().len() <= 3,
-                "Audit log should be bounded by capacity"
+                reason.contains("unregistered algorithm"),
+                "Error should indicate unregistered algorithm"
             );
-            // Should keep only the most recent entries
+        }
+
+        // Test: Empty fragments collection edge case
+        let mut decoder =
+            ProofCarryingDecoder::new(ProofMode::Mandatory, "test_signer", "test_secret");
+        let empty_fragments: Vec<Fragment> = vec![];
+        let algorithm_id = AlgorithmId::new("reed_solomon_8_4");
+        let result = decoder.decode(
+            "empty_obj",
+            &empty_fragments,
+            &algorithm_id,
+            1000000004,
+            "trace_empty",
+        );
+        assert!(result.is_err(), "Empty fragments should be rejected");
+        if let Err(ProofCarryingDecodeError::ReconstructionFailed { reason, .. }) = result {
             assert!(
-                decoder
-                    .audit_log()
-                    .iter()
-                    .all(|event| event.trace_id.contains("audit_")),
-                "Audit log should contain recent events"
+                reason.contains("no fragments"),
+                "Error should indicate no fragments provided"
             );
+        }
 
-            // Test: Hash collision resistance in fragment and output processing
-            let mut decoder =
-                ProofCarryingDecoder::new(ProofMode::Mandatory, "hash_signer", "hash_secret");
-            // Create fragments with similar but distinct data that might collide
-            let fragment1 = Fragment::new("collision1", b"similar_data_variant_a".to_vec());
-            let fragment2 = Fragment::new("collision2", b"similar_data_variant_b".to_vec());
-            let algorithm_id = AlgorithmId::new("simple_concat");
-
-            let result1 = decoder.decode(
-                "hash_obj1",
-                &[fragment1],
+        // Test: Audit log capacity boundary attacks
+        let mut decoder = ProofCarryingDecoder::with_audit_log_capacity(
+            ProofMode::Advisory,
+            "audit_signer",
+            "audit_secret",
+            3,
+        );
+        let fragment = Fragment::new("audit_frag", b"audit_data".to_vec());
+        let algorithm_id = AlgorithmId::new("simple_concat");
+        // Generate more audit events than capacity
+        for i in 0..10 {
+            let _ = decoder.decode(
+                &format!("audit_obj_{}", i),
+                &[fragment.clone()],
                 &algorithm_id,
-                1000000006,
-                "trace_hash1",
+                1000000005 + i as u64,
+                &format!("trace_audit_{}", i),
             );
-            let result2 = decoder.decode(
-                "hash_obj2",
-                &[fragment2],
-                &algorithm_id,
-                1000000007,
-                "trace_hash2",
-            );
+        }
+        assert!(
+            decoder.audit_log().len() <= 3,
+            "Audit log should be bounded by capacity"
+        );
+        // Should keep only the most recent entries
+        assert!(
+            decoder
+                .audit_log()
+                .iter()
+                .all(|event| event.trace_id.contains("audit_")),
+            "Audit log should contain recent events"
+        );
 
+        // Test: Hash collision resistance in fragment and output processing
+        let mut decoder =
+            ProofCarryingDecoder::new(ProofMode::Mandatory, "hash_signer", "hash_secret");
+        // Create fragments with similar but distinct data that might collide
+        let fragment1 = Fragment::new("collision1", b"similar_data_variant_a".to_vec());
+        let fragment2 = Fragment::new("collision2", b"similar_data_variant_b".to_vec());
+        let algorithm_id = AlgorithmId::new("simple_concat");
+
+        let result1 = decoder.decode(
+            "hash_obj1",
+            &[fragment1],
+            &algorithm_id,
+            1000000006,
+            "trace_hash1",
+        );
+        let result2 = decoder.decode(
+            "hash_obj2",
+            &[fragment2],
+            &algorithm_id,
+            1000000007,
+            "trace_hash2",
+        );
+
+        assert!(
+            result1.is_ok() && result2.is_ok(),
+            "Both hash operations should succeed"
+        );
+        if let (Ok(decode1), Ok(decode2)) = (result1, result2) {
+            assert_ne!(
+                decode1.proof.as_ref().unwrap().output_hash,
+                decode2.proof.as_ref().unwrap().output_hash,
+                "Different inputs should produce different output hashes"
+            );
+            assert_ne!(
+                decode1.proof.as_ref().unwrap().proof_id,
+                decode2.proof.as_ref().unwrap().proof_id,
+                "Different outputs should have different proof IDs"
+            );
+        }
+
+        // Test: Resource exhaustion through trace_id flooding
+        let mut decoder =
+            ProofCarryingDecoder::new(ProofMode::Advisory, "trace_signer", "trace_secret");
+        let fragment = Fragment::new("trace_frag", b"trace_data".to_vec());
+        let algorithm_id = AlgorithmId::new("simple_concat");
+        let massive_trace_id = "x".repeat(100_000); // 100KB trace ID
+        let result = decoder.decode(
+            "trace_obj",
+            &[fragment],
+            &algorithm_id,
+            1000000008,
+            &massive_trace_id,
+        );
+        assert!(
+            result.is_ok(),
+            "Massive trace_id should be handled gracefully"
+        );
+        if let Ok(decode_result) = result {
+            assert_eq!(
+                decode_result.proof.as_ref().unwrap().trace_id,
+                massive_trace_id,
+                "Massive trace_id should be preserved"
+            );
+        }
+
+        // Test: Serialization format injection resistance in proof generation
+        let mut decoder =
+            ProofCarryingDecoder::new(ProofMode::Mandatory, "serial_signer", "serial_secret");
+        let malicious_fragment = Fragment::new(
+            "injection_frag",
+            br#"{"malicious":"json","command":"rm -rf /"}"#.to_vec(),
+        );
+        let algorithm_id = AlgorithmId::new("simple_concat");
+        let malicious_object_id = r#"</proof><script>alert('xss')</script><proof>"#;
+        let malicious_trace_id = r#"'; DROP TABLE proofs; --"#;
+
+        let result = decoder.decode(
+            malicious_object_id,
+            &[malicious_fragment],
+            &algorithm_id,
+            1000000009,
+            malicious_trace_id,
+        );
+        assert!(
+            result.is_ok(),
+            "Serialization injection should be handled safely"
+        );
+        if let Ok(decode_result) = result {
+            // Proof should contain the malicious strings as-is but not execute them
+            assert_eq!(
+                decode_result.proof.as_ref().unwrap().object_id,
+                malicious_object_id
+            );
+            assert_eq!(
+                decode_result.proof.as_ref().unwrap().trace_id,
+                malicious_trace_id
+            );
+            // Data should be preserved exactly without interpretation
+            assert_eq!(
+                decode_result.output_data,
+                br#"{"malicious":"json","command":"rm -rf /"}"#
+            );
+        }
+
+        // Test: Fragment count arithmetic boundary validation
+        let mut decoder =
+            ProofCarryingDecoder::new(ProofMode::Mandatory, "count_signer", "count_secret");
+        let single_fragment = Fragment::new("count_frag", b"count_data".to_vec());
+        let algorithm_id = AlgorithmId::new("simple_concat");
+        let result = decoder.decode(
+            "count_obj",
+            &[single_fragment],
+            &algorithm_id,
+            1000000010,
+            "trace_count",
+        );
+        assert!(
+            result.is_ok(),
+            "Single fragment should be processed correctly"
+        );
+        if let Ok(decode_result) = result {
+            assert_eq!(
+                decode_result.proof.as_ref().unwrap().fragment_count,
+                1,
+                "Fragment count should be accurate"
+            );
+            // Verify that fragment_count is used consistently in hash computation
             assert!(
-                result1.is_ok() && result2.is_ok(),
-                "Both hash operations should succeed"
+                decode_result
+                    .proof
+                    .as_ref()
+                    .unwrap()
+                    .attestation
+                    .payload_hash
+                    .len()
+                    > 0,
+                "Payload hash should be computed"
             );
-            if let (Ok(decode1), Ok(decode2)) = (result1, result2) {
-                assert_ne!(
-                    decode1.proof.as_ref().unwrap().output_hash,
-                    decode2.proof.as_ref().unwrap().output_hash,
-                    "Different inputs should produce different output hashes"
-                );
-                assert_ne!(
-                    decode1.proof.as_ref().unwrap().proof_id,
-                    decode2.proof.as_ref().unwrap().proof_id,
-                    "Different outputs should have different proof IDs"
-                );
-            }
+        }
 
-            // Test: Resource exhaustion through trace_id flooding
-            let mut decoder =
-                ProofCarryingDecoder::new(ProofMode::Advisory, "trace_signer", "trace_secret");
-            let fragment = Fragment::new("trace_frag", b"trace_data".to_vec());
-            let algorithm_id = AlgorithmId::new("simple_concat");
-            let massive_trace_id = "x".repeat(100_000); // 100KB trace ID
-            let result = decoder.decode(
-                "trace_obj",
-                &[fragment],
-                &algorithm_id,
-                1000000008,
-                &massive_trace_id,
-            );
+        // Test: Signing secret boundary conditions
+        let empty_secret_decoder =
+            ProofCarryingDecoder::new(ProofMode::Advisory, "empty_secret_signer", "");
+        let mut decoder = empty_secret_decoder;
+        let fragment = Fragment::new("secret_frag", b"secret_data".to_vec());
+        let algorithm_id = AlgorithmId::new("simple_concat");
+        let result = decoder.decode(
+            "secret_obj",
+            &[fragment],
+            &algorithm_id,
+            1000000011,
+            "trace_secret",
+        );
+        assert!(result.is_ok(), "Empty signing secret should be allowed");
+        if let Ok(decode_result) = result {
             assert!(
-                result.is_ok(),
-                "Massive trace_id should be handled gracefully"
+                decode_result
+                    .proof
+                    .as_ref()
+                    .unwrap()
+                    .attestation
+                    .signature
+                    .len()
+                    > 0,
+                "Signature should still be generated"
             );
-            if let Ok(decode_result) = result {
-                assert_eq!(
-                    decode_result.proof.as_ref().unwrap().trace_id,
-                    massive_trace_id,
-                    "Massive trace_id should be preserved"
-                );
-            }
-
-            // Test: Serialization format injection resistance in proof generation
-            let mut decoder =
-                ProofCarryingDecoder::new(ProofMode::Mandatory, "serial_signer", "serial_secret");
-            let malicious_fragment = Fragment::new(
-                "injection_frag",
-                br#"{"malicious":"json","command":"rm -rf /"}"#.to_vec(),
-            );
-            let algorithm_id = AlgorithmId::new("simple_concat");
-            let malicious_object_id = r#"</proof><script>alert('xss')</script><proof>"#;
-            let malicious_trace_id = r#"'; DROP TABLE proofs; --"#;
-
-            let result = decoder.decode(
-                malicious_object_id,
-                &[malicious_fragment],
-                &algorithm_id,
-                1000000009,
-                malicious_trace_id,
-            );
-            assert!(
-                result.is_ok(),
-                "Serialization injection should be handled safely"
-            );
-            if let Ok(decode_result) = result {
-                // Proof should contain the malicious strings as-is but not execute them
-                assert_eq!(
-                    decode_result.proof.as_ref().unwrap().object_id,
-                    malicious_object_id
-                );
-                assert_eq!(
-                    decode_result.proof.as_ref().unwrap().trace_id,
-                    malicious_trace_id
-                );
-                // Data should be preserved exactly without interpretation
-                assert_eq!(
-                    decode_result.output_data,
-                    br#"{"malicious":"json","command":"rm -rf /"}"#
-                );
-            }
-
-            // Test: Fragment count arithmetic boundary validation
-            let mut decoder =
-                ProofCarryingDecoder::new(ProofMode::Mandatory, "count_signer", "count_secret");
-            let single_fragment = Fragment::new("count_frag", b"count_data".to_vec());
-            let algorithm_id = AlgorithmId::new("simple_concat");
-            let result = decoder.decode(
-                "count_obj",
-                &[single_fragment],
-                &algorithm_id,
-                1000000010,
-                "trace_count",
-            );
-            assert!(
-                result.is_ok(),
-                "Single fragment should be processed correctly"
-            );
-            if let Ok(decode_result) = result {
-                assert_eq!(
-                    decode_result.proof.as_ref().unwrap().fragment_count,
-                    1,
-                    "Fragment count should be accurate"
-                );
-                // Verify that fragment_count is used consistently in hash computation
-                assert!(
-                    decode_result
-                        .proof
-                        .as_ref()
-                        .unwrap()
-                        .attestation
-                        .payload_hash
-                        .len()
-                        > 0,
-                    "Payload hash should be computed"
-                );
-            }
-
-            // Test: Signing secret boundary conditions
-            let empty_secret_decoder =
-                ProofCarryingDecoder::new(ProofMode::Advisory, "empty_secret_signer", "");
-            let mut decoder = empty_secret_decoder;
-            let fragment = Fragment::new("secret_frag", b"secret_data".to_vec());
-            let algorithm_id = AlgorithmId::new("simple_concat");
-            let result = decoder.decode(
-                "secret_obj",
-                &[fragment],
-                &algorithm_id,
-                1000000011,
-                "trace_secret",
-            );
-            assert!(result.is_ok(), "Empty signing secret should be allowed");
-            if let Ok(decode_result) = result {
-                assert!(
-                    decode_result
-                        .proof
-                        .as_ref()
-                        .unwrap()
-                        .attestation
-                        .signature
-                        .len()
-                        > 0,
-                    "Signature should still be generated"
-                );
-            }
+        }
     }
+}
 
 // ---------------------------------------------------------------------------
 // ProofVerificationApi

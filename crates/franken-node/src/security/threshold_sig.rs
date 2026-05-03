@@ -1200,9 +1200,11 @@ mod tests {
         assert_eq!(parsed_signature.to_bytes(), legacy_signature_bytes);
 
         let message = build_signing_message(TEST_ARTIFACT_ID, TEST_CONNECTOR_ID, "hash-abc");
-        assert!(parsed_key
-            .verify_strict(&message, &parsed_signature)
-            .is_ok());
+        assert!(
+            parsed_key
+                .verify_strict(&message, &parsed_signature)
+                .is_ok()
+        );
     }
 
     #[test]

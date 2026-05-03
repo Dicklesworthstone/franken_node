@@ -14,10 +14,11 @@ mod tests {
         (
             "[a-z0-9-]{1,20}",
             prop::collection::vec(any::<u8>(), 1..100),
-        ).prop_map(|(id, data)| Fragment {
-            fragment_id: id,
-            data,
-        })
+        )
+            .prop_map(|(id, data)| Fragment {
+                fragment_id: id,
+                data,
+            })
     }
 
     fn arb_fragment_list() -> impl Strategy<Value = Vec<Fragment>> {
@@ -29,10 +30,7 @@ mod tests {
     }
 
     fn arb_proof_mode() -> impl Strategy<Value = ProofMode> {
-        prop_oneof![
-            Just(ProofMode::Mandatory),
-            Just(ProofMode::Optional),
-        ]
+        prop_oneof![Just(ProofMode::Mandatory), Just(ProofMode::Optional),]
     }
 
     impl Arbitrary for Fragment {

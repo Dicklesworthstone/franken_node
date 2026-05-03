@@ -1476,7 +1476,8 @@ mod tests {
             record
                 .evidence
                 .as_ref()
-                .map_or(true, |evidence| !evidence.contains('\0') && !evidence.contains('\r'))
+                .map_or(true, |evidence| !evidence.contains('\0')
+                    && !evidence.contains('\r'))
         );
     }
 

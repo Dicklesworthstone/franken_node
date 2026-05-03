@@ -26,8 +26,8 @@
 
 use ed25519_dalek::SigningKey;
 use frankenengine_node::security::threshold_sig::{
-    sign, verify_threshold, FailureReason, PartialSignature, PublicationArtifact, SignerKey,
-    ThresholdConfig,
+    FailureReason, PartialSignature, PublicationArtifact, SignerKey, ThresholdConfig, sign,
+    verify_threshold,
 };
 use proptest::prelude::*;
 use sha2::{Digest, Sha256};

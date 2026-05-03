@@ -635,7 +635,8 @@ impl EcosystemRegistry {
                     .entry_hash
                     .clone(),
             );
-            self.audit_trail.drain(0..overflow.min(self.audit_trail.len()));
+            self.audit_trail
+                .drain(0..overflow.min(self.audit_trail.len()));
         }
         self.audit_trail.push(entry);
     }

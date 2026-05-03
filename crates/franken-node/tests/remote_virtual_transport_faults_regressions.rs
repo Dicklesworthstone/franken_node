@@ -1,6 +1,6 @@
 use frankenengine_node::remote::virtual_transport_faults::{
-    chaos, FaultClass, FaultConfig, FaultSchedule, ScheduledFault, VirtualTransportFaultHarness,
-    MAX_CAMPAIGN_MESSAGES, MAX_SCHEDULED_FAULTS,
+    FaultClass, FaultConfig, FaultSchedule, MAX_CAMPAIGN_MESSAGES, MAX_SCHEDULED_FAULTS,
+    ScheduledFault, VirtualTransportFaultHarness, chaos,
 };
 
 #[test]

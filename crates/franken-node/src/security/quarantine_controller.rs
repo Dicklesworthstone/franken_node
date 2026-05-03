@@ -609,10 +609,12 @@ mod tests {
         let controller = QuarantineController::new(QuarantineThresholdPolicy::default(), "salt")
             .expect("controller");
 
-        assert!(controller
-            .decide_for_posterior("ext:quiet", 0.20, "trace-quiet")
-            .expect("subthreshold posterior has no evidence requirement")
-            .is_none());
+        assert!(
+            controller
+                .decide_for_posterior("ext:quiet", 0.20, "trace-quiet")
+                .expect("subthreshold posterior has no evidence requirement")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1009,9 +1011,11 @@ mod tests {
         assert!(decisions.iter().any(|decision| {
             decision.principal_id == "ext:revoke-keeper" && decision.action == ControlAction::Revoke
         }));
-        assert!(!decisions
-            .iter()
-            .any(|decision| decision.principal_id == "ext:throttle-1023"));
+        assert!(
+            !decisions
+                .iter()
+                .any(|decision| decision.principal_id == "ext:throttle-1023")
+        );
     }
 }
 

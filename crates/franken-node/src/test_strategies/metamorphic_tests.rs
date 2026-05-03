@@ -159,7 +159,9 @@ mod tests {
 
             // Test multiple timestamp generations
             for seed in 0..30u64 {
-                let mut rng = proptest::test_runner::TestRng::deterministic_rng(proptest::test_runner::RngAlgorithm::ChaCha);
+                let mut rng = proptest::test_runner::TestRng::deterministic_rng(
+                    proptest::test_runner::RngAlgorithm::ChaCha,
+                );
                 rng.set_seed(seed);
 
                 if let Ok(tree) = strategy.new_tree(&mut rng) {
@@ -181,8 +183,13 @@ mod tests {
                     );
 
                     // Check basic format components
-                    let parts: Vec<&str> = timestamp.split(&['T', '-', ':', '.', 'Z'][..]).collect();
-                    prop_assert!(parts.len() >= 6, "Timestamp should have all components: '{}'", timestamp);
+                    let parts: Vec<&str> =
+                        timestamp.split(&['T', '-', ':', '.', 'Z'][..]).collect();
+                    prop_assert!(
+                        parts.len() >= 6,
+                        "Timestamp should have all components: '{}'",
+                        timestamp
+                    );
                 }
             }
         });
@@ -195,7 +202,9 @@ mod tests {
             let strategy = sha256_hash();
 
             for seed in 0..20u64 {
-                let mut rng = proptest::test_runner::TestRng::deterministic_rng(proptest::test_runner::RngAlgorithm::ChaCha);
+                let mut rng = proptest::test_runner::TestRng::deterministic_rng(
+                    proptest::test_runner::RngAlgorithm::ChaCha,
+                );
                 rng.set_seed(seed);
 
                 if let Ok(tree) = strategy.new_tree(&mut rng) {

@@ -1,5 +1,5 @@
 use frankenengine_node::conformance::connector_method_validator::{
-    validate_contract, ContractReport, MethodDeclaration,
+    ContractReport, MethodDeclaration, validate_contract,
 };
 use proptest::{collection::vec, prelude::*};
 

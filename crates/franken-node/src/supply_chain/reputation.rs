@@ -111,7 +111,10 @@ impl ReputationTier {
 
     /// Derive tier from a numeric score using configuration (0..=100).
     #[must_use]
-    pub fn from_score_with_config(score: f64, config: &crate::config::ReputationThresholds) -> Self {
+    pub fn from_score_with_config(
+        score: f64,
+        config: &crate::config::ReputationThresholds,
+    ) -> Self {
         if !score.is_finite() {
             return Self::Untrusted;
         }

@@ -1575,7 +1575,9 @@ impl SafeModeController {
         let computed_digest = {
             let mut hasher = Sha256::new();
             hasher.update(b"safe_mode_evidence_digest_v1:");
-            hasher.update((u64::try_from(input.evidence_entries.len()).unwrap_or(u64::MAX)).to_le_bytes());
+            hasher.update(
+                (u64::try_from(input.evidence_entries.len()).unwrap_or(u64::MAX)).to_le_bytes(),
+            );
             for (i, entry) in input.evidence_entries.iter().enumerate() {
                 hasher.update((i as u64).to_le_bytes());
                 hasher.update((u64::try_from(entry.len()).unwrap_or(u64::MAX)).to_le_bytes());

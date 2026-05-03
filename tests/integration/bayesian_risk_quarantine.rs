@@ -3,8 +3,8 @@
 
 use frankenengine_node::security::adversary_graph::AdversaryPosterior;
 use frankenengine_node::security::quarantine_controller::{
-    ControlAction, QuarantineController, QuarantineControllerError, QuarantineThresholdPolicy,
-    DEFAULT_QUARANTINE_SCOPE,
+    ControlAction, DEFAULT_QUARANTINE_SCOPE, QuarantineController, QuarantineControllerError,
+    QuarantineThresholdPolicy,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};

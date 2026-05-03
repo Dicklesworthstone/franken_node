@@ -57,7 +57,8 @@ const CLOCK_DRIFT_TOLERANCE_NS: u64 = 1_000_000_000;
 /// control characters, newlines, and other characters that could be used
 /// for log injection attacks.
 fn sanitize_log_identifier(identifier: &str) -> String {
-    identifier.chars()
+    identifier
+        .chars()
         .map(|c| match c {
             '\n' => "\\n".to_string(),
             '\r' => "\\r".to_string(),
@@ -759,7 +760,10 @@ impl TraceBuilder {
             AuditEntry::new(
                 event_codes::TTR_001,
                 trace_id,
-                &format!("Capture started for workflow '{}'", sanitize_log_identifier(workflow_name)),
+                &format!(
+                    "Capture started for workflow '{}'",
+                    sanitize_log_identifier(workflow_name)
+                ),
                 now,
             ),
             MAX_AUDIT_LOG_ENTRIES,
@@ -1140,15 +1144,25 @@ impl ReplayEngine {
             let mut clock_drift_divergence: Option<Divergence> = None;
 
             // Extract timestamp from side effects if present
-            if let Some(original_clock_effect) = step.side_effects.iter().find(|e| e.kind == "clock_read") {
-                if let Some(replayed_clock_effect) = replayed_effects.iter().find(|e| e.kind == "clock_read") {
+            if let Some(original_clock_effect) =
+                step.side_effects.iter().find(|e| e.kind == "clock_read")
+            {
+                if let Some(replayed_clock_effect) =
+                    replayed_effects.iter().find(|e| e.kind == "clock_read")
+                {
                     // Verify exact payload length for timestamp safety
-                    if original_clock_effect.payload.len() == 8 && replayed_clock_effect.payload.len() == 8 {
+                    if original_clock_effect.payload.len() == 8
+                        && replayed_clock_effect.payload.len() == 8
+                    {
                         let original_timestamp = u64::from_le_bytes(
-                            original_clock_effect.payload[0..8].try_into().unwrap_or([0; 8])
+                            original_clock_effect.payload[0..8]
+                                .try_into()
+                                .unwrap_or([0; 8]),
                         );
                         let replayed_timestamp = u64::from_le_bytes(
-                            replayed_clock_effect.payload[0..8].try_into().unwrap_or([0; 8])
+                            replayed_clock_effect.payload[0..8]
+                                .try_into()
+                                .unwrap_or([0; 8]),
                         );
 
                         // Handle wraparound-aware drift calculation
@@ -4925,7 +4939,8 @@ mod tests {
         let mut engine = ReplayEngine::new();
 
         // Create trace with timestamp near u64::MAX
-        let mut builder = TraceBuilder::new("wraparound-test".to_string(), "test-workflow".to_string());
+        let mut builder =
+            TraceBuilder::new("wraparound-test".to_string(), "test-workflow".to_string());
 
         let near_max_timestamp = u64::MAX - 100; // 100ns before wraparound
         let wrapped_timestamp = 50; // Wrapped around to small value
@@ -4935,7 +4950,10 @@ mod tests {
             0,
             b"input".to_vec(),
             b"output".to_vec(),
-            vec![SideEffect::new("clock_read", near_max_timestamp.to_le_bytes().to_vec())],
+            vec![SideEffect::new(
+                "clock_read",
+                near_max_timestamp.to_le_bytes().to_vec(),
+            )],
             near_max_timestamp,
         );
         builder.add_step(original_step);
@@ -4961,18 +4979,27 @@ mod tests {
             (step.output.clone(), effects)
         };
 
-        let result = engine.replay("wraparound-test", wraparound_replay_fn).unwrap();
+        let result = engine
+            .replay("wraparound-test", wraparound_replay_fn)
+            .unwrap();
 
         // Verify correct wraparound handling
         match result.verdict {
             ReplayVerdict::Diverged(_) => {
                 // Check if clock drift was detected
-                let clock_drift = result.divergences.iter().find(|d|
-                    matches!(d.kind, DivergenceKind::ClockDrift { .. })
-                );
+                let clock_drift = result
+                    .divergences
+                    .iter()
+                    .find(|d| matches!(d.kind, DivergenceKind::ClockDrift { .. }));
 
                 if let Some(divergence) = clock_drift {
-                    if let DivergenceKind::ClockDrift { expected_ns, actual_ns, drift_ns, tolerance_ns } = &divergence.kind {
+                    if let DivergenceKind::ClockDrift {
+                        expected_ns,
+                        actual_ns,
+                        drift_ns,
+                        tolerance_ns,
+                    } = &divergence.kind
+                    {
                         // The actual drift should be small (150ns), not massive
                         // Real drift = min(|near_max - wrapped|, |wrapped - near_max|)
                         // forward_diff = wrapped_timestamp - near_max_timestamp (would underflow)
@@ -4983,7 +5010,11 @@ mod tests {
                         assert_eq!(*tolerance_ns, CLOCK_DRIFT_TOLERANCE_NS);
 
                         // Drift should be reasonable (not massive false positive)
-                        assert!(*drift_ns < 1000, "Drift calculation should handle wraparound correctly, got {}ns", drift_ns);
+                        assert!(
+                            *drift_ns < 1000,
+                            "Drift calculation should handle wraparound correctly, got {}ns",
+                            drift_ns
+                        );
 
                         eprintln!("Wraparound drift correctly calculated: {}ns", drift_ns);
                     }

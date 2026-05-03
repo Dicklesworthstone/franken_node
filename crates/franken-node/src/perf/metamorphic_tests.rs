@@ -18,17 +18,18 @@ mod tests {
             arb_predicted_metrics(),
             "[a-z]{1,20}",
             "[a-z]{1,15}",
-        ).prop_map(|(id, knob, old_val, new_val, metrics, rationale, trace_id)| {
-            OptimizationProposal {
-                proposal_id: id,
-                knob,
-                old_value: old_val,
-                new_value: new_val,
-                predicted: metrics,
-                rationale,
-                trace_id,
-            }
-        })
+        )
+            .prop_map(
+                |(id, knob, old_val, new_val, metrics, rationale, trace_id)| OptimizationProposal {
+                    proposal_id: id,
+                    knob,
+                    old_value: old_val,
+                    new_value: new_val,
+                    predicted: metrics,
+                    rationale,
+                    trace_id,
+                },
+            )
     }
 
     fn arb_predicted_metrics() -> impl Strategy<Value = PredictedMetrics> {
@@ -37,14 +38,13 @@ mod tests {
             1u32..10000,  // throughput_rps
             0.0f64..5.0,  // error_rate_pct
             100u32..8192, // memory_mb
-        ).prop_map(|(lat, thr, err, mem)| {
-            PredictedMetrics {
+        )
+            .prop_map(|(lat, thr, err, mem)| PredictedMetrics {
                 latency_ms: lat,
                 throughput_rps: thr,
                 error_rate_pct: err,
                 memory_mb: mem,
-            }
-        })
+            })
     }
 
     fn arb_runtime_knob() -> impl Strategy<Value = RuntimeKnob> {

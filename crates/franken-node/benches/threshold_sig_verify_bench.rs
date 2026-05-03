@@ -1,7 +1,7 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use frankenengine_node::security::threshold_sig::{
-    sign, verify_threshold, PartialSignature, PublicationArtifact, SignerKey, ThresholdConfig,
+    PartialSignature, PublicationArtifact, SignerKey, ThresholdConfig, sign, verify_threshold,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};

@@ -553,7 +553,10 @@ impl ControlLanePolicy {
         timestamp_ms: u64,
     ) -> Result<ControlLane, String> {
         if let Some(reason) = invalid_task_id_reason(task_id) {
-            return Err(format!("{}: {reason}", error_codes::ERR_CLP_INVALID_TASK_ID));
+            return Err(format!(
+                "{}: {reason}",
+                error_codes::ERR_CLP_INVALID_TASK_ID
+            ));
         }
         let assignment = &self.assignments[tc.as_index()];
         let lane = assignment.lane;
@@ -586,7 +589,10 @@ impl ControlLanePolicy {
         trace_id: &str,
     ) -> Result<QueuedControlTask, String> {
         if let Some(reason) = invalid_task_id_reason(task_id) {
-            return Err(format!("{}: {reason}", error_codes::ERR_CLP_INVALID_TASK_ID));
+            return Err(format!(
+                "{}: {reason}",
+                error_codes::ERR_CLP_INVALID_TASK_ID
+            ));
         }
         if self.deadline_queue.len() >= self.max_deadline_queue_entries {
             return Err(format!(
@@ -845,7 +851,10 @@ impl ControlLanePolicy {
         trace_id: &str,
     ) -> Result<PreemptionEvent, String> {
         if let Some(reason) = invalid_task_id_reason(task_id) {
-            return Err(format!("{}: {reason}", error_codes::ERR_CLP_INVALID_TASK_ID));
+            return Err(format!(
+                "{}: {reason}",
+                error_codes::ERR_CLP_INVALID_TASK_ID
+            ));
         }
         let event = PreemptionEvent {
             task_id: task_id.to_string(),
@@ -1614,9 +1623,8 @@ mod tests {
     #[test]
     fn test_class_counts_reflect_reassigned_lane() {
         let mut policy = ControlLanePolicy::new();
-        policy
-            .assignments[ControlTaskClass::StaleEntryCleanup.as_index()]
-            .lane = ControlLane::Timed;
+        policy.assignments[ControlTaskClass::StaleEntryCleanup.as_index()].lane =
+            ControlLane::Timed;
 
         let counts = policy.class_counts_per_lane();
 

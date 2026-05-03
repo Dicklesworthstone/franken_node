@@ -5,6 +5,7 @@
 //! displayed via CLI.
 
 #[cfg(test)]
+#[path = "trust_card_fuzz_test.rs"]
 mod fuzz_smoke_tests;
 
 use std::{

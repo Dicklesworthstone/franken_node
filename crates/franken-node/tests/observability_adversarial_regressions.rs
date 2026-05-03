@@ -7,8 +7,8 @@ use frankenengine_node::observability::witness_ref::{
     WitnessKind, WitnessValidationError, WitnessValidator,
 };
 use frankenengine_node::security::quarantine_controller::{
-    ControlAction, ControlDecision, QuarantineController, QuarantineThresholdPolicy,
-    DEFAULT_QUARANTINE_SCOPE,
+    ControlAction, ControlDecision, DEFAULT_QUARANTINE_SCOPE, QuarantineController,
+    QuarantineThresholdPolicy,
 };
 
 const VALID_EVIDENCE_HASH: &str =

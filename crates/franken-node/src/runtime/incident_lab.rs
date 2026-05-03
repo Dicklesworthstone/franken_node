@@ -344,7 +344,8 @@ impl IncidentLab {
         if integrity_hash.is_empty() {
             tracing::warn!(
                 "Incident integrity_hash is empty: {} (trace_id={})",
-                trace.integrity_hash, trace.trace_id
+                trace.integrity_hash,
+                trace.trace_id
             );
             return Err(LabError {
                 code: error_codes::ERR_ILAB_TRACE_INVALID.to_string(),
@@ -484,13 +485,16 @@ impl IncidentLab {
         if trace.events.len() > MAX_EVENTS {
             tracing::warn!(
                 "Incident trace exceeds max events: {} > {} (trace_id={})",
-                trace.events.len(), MAX_EVENTS, trace.trace_id
+                trace.events.len(),
+                MAX_EVENTS,
+                trace.trace_id
             );
             return Err(LabError {
                 code: error_codes::ERR_ILAB_TRACE_TOO_LARGE.to_string(),
                 message: format!(
                     "Incident trace exceeds max events: {} > {}",
-                    trace.events.len(), MAX_EVENTS
+                    trace.events.len(),
+                    MAX_EVENTS
                 ),
             });
         }
@@ -715,7 +719,8 @@ impl IncidentLab {
         if !(0.0..=1.0).contains(&plan.expected_loss_reduction) {
             tracing::warn!(
                 "expected_loss_reduction must be in [0.0, 1.0], got {} (plan_id={})",
-                plan.expected_loss_reduction, plan.plan_id
+                plan.expected_loss_reduction,
+                plan.plan_id
             );
             return Err(LabError {
                 code: error_codes::ERR_ILAB_MITIGATION_INVALID.to_string(),
@@ -734,7 +739,8 @@ impl IncidentLab {
         {
             tracing::warn!(
                 "Signer '{}' not in accepted signers (plan_id={})",
-                plan.signer_id, plan.plan_id
+                plan.signer_id,
+                plan.plan_id
             );
             return Err(LabError {
                 code: error_codes::ERR_ILAB_MITIGATION_INVALID.to_string(),
@@ -886,7 +892,9 @@ impl IncidentLab {
         if self.config.rollback_window_secs < MIN_ROLLBACK_WINDOW_SECS {
             tracing::warn!(
                 "Rollback window too short: {} < {} seconds (plan_id={})",
-                self.config.rollback_window_secs, MIN_ROLLBACK_WINDOW_SECS, plan.plan_id
+                self.config.rollback_window_secs,
+                MIN_ROLLBACK_WINDOW_SECS,
+                plan.plan_id
             );
             return Err(LabError {
                 code: error_codes::ERR_ILAB_ROLLBACK_INVALID.to_string(),

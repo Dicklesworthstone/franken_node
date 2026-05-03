@@ -1051,8 +1051,8 @@ fn parse_signing_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::SigningKey> 
                                     return (Some(signing_key), local_candidates);
                                 }
                                 for extra in extras {
-                            push_bounded(&mut local_candidates, extra, 64);
-                        }
+                                    push_bounded(&mut local_candidates, extra, 64);
+                                }
                             }
                             _ => {}
                         }
@@ -1107,8 +1107,8 @@ fn parse_signing_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::SigningKey> 
                                     return (Some(signing_key), local_candidates);
                                 }
                                 for extra in extras {
-                            push_bounded(&mut local_candidates, extra, 64);
-                        }
+                                    push_bounded(&mut local_candidates, extra, 64);
+                                }
                             }
                             _ => {}
                         }
@@ -1163,8 +1163,8 @@ fn parse_signing_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::SigningKey> 
                                     return (Some(signing_key), local_candidates);
                                 }
                                 for extra in extras {
-                            push_bounded(&mut local_candidates, extra, 64);
-                        }
+                                    push_bounded(&mut local_candidates, extra, 64);
+                                }
                             }
                             _ => {}
                         }
@@ -1206,7 +1206,9 @@ fn parse_signing_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::SigningKey> 
                 }
                 for entry in values {
                     match entry {
-                        serde_json::Value::String(value) => push_bounded(&mut candidates, value, 64),
+                        serde_json::Value::String(value) => {
+                            push_bounded(&mut candidates, value, 64)
+                        }
                         serde_json::Value::Array(values) => {
                             if let Some(bytes) = parse_byte_array(&values)
                                 && let Some(signing_key) = signing_key_from_bytes(&bytes)
@@ -18982,8 +18984,8 @@ fn decode_signature_blob(raw: &[u8]) -> Vec<u8> {
                                     return (Some(bytes), local_candidates);
                                 }
                                 for extra in extras {
-                            push_bounded(&mut local_candidates, extra, 64);
-                        }
+                                    push_bounded(&mut local_candidates, extra, 64);
+                                }
                             }
                             _ => {}
                         }
@@ -19034,8 +19036,8 @@ fn decode_signature_blob(raw: &[u8]) -> Vec<u8> {
                                     return (Some(bytes), local_candidates);
                                 }
                                 for extra in extras {
-                            push_bounded(&mut local_candidates, extra, 64);
-                        }
+                                    push_bounded(&mut local_candidates, extra, 64);
+                                }
                             }
                             _ => {}
                         }
@@ -19086,8 +19088,8 @@ fn decode_signature_blob(raw: &[u8]) -> Vec<u8> {
                                     return (Some(bytes), local_candidates);
                                 }
                                 for extra in extras {
-                            push_bounded(&mut local_candidates, extra, 64);
-                        }
+                                    push_bounded(&mut local_candidates, extra, 64);
+                                }
                             }
                             _ => {}
                         }
@@ -19127,7 +19129,9 @@ fn decode_signature_blob(raw: &[u8]) -> Vec<u8> {
                 }
                 for entry in values {
                     match entry {
-                        serde_json::Value::String(value) => push_bounded(&mut candidates, value, 64),
+                        serde_json::Value::String(value) => {
+                            push_bounded(&mut candidates, value, 64)
+                        }
                         serde_json::Value::Array(values) => {
                             if let Some(bytes) = parse_signature_byte_array(&values) {
                                 return bytes;
@@ -19562,8 +19566,8 @@ fn parse_verifying_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::VerifyingK
                                     return (Some(key), local_candidates);
                                 }
                                 for extra in extras {
-                            push_bounded(&mut local_candidates, extra, 64);
-                        }
+                                    push_bounded(&mut local_candidates, extra, 64);
+                                }
                             }
                             _ => {}
                         }
@@ -19618,8 +19622,8 @@ fn parse_verifying_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::VerifyingK
                                     return (Some(key), local_candidates);
                                 }
                                 for extra in extras {
-                            push_bounded(&mut local_candidates, extra, 64);
-                        }
+                                    push_bounded(&mut local_candidates, extra, 64);
+                                }
                             }
                             _ => {}
                         }
@@ -19674,8 +19678,8 @@ fn parse_verifying_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::VerifyingK
                                     return (Some(key), local_candidates);
                                 }
                                 for extra in extras {
-                            push_bounded(&mut local_candidates, extra, 64);
-                        }
+                                    push_bounded(&mut local_candidates, extra, 64);
+                                }
                             }
                             _ => {}
                         }
@@ -19717,7 +19721,9 @@ fn parse_verifying_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::VerifyingK
                 }
                 for entry in values {
                     match entry {
-                        serde_json::Value::String(value) => push_bounded(&mut candidates, value, 64),
+                        serde_json::Value::String(value) => {
+                            push_bounded(&mut candidates, value, 64)
+                        }
                         serde_json::Value::Array(values) => {
                             if let Some(bytes) = parse_byte_array(&values)
                                 && let Some(key) = verifying_key_from_bytes(&bytes)

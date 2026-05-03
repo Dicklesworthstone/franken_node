@@ -27,7 +27,11 @@ mod tests {
         let mut error_count = 0;
 
         for (i, test_data) in test_cases.iter().enumerate() {
-            println!("Testing case {}: {:?}", i, std::str::from_utf8(test_data).unwrap_or("<binary>"));
+            println!(
+                "Testing case {}: {:?}",
+                i,
+                std::str::from_utf8(test_data).unwrap_or("<binary>")
+            );
 
             // Test UTF-8 conversion
             let utf8_result = std::str::from_utf8(test_data);
@@ -58,10 +62,16 @@ mod tests {
             println!();
         }
 
-        println!("Summary: {} parsed successfully, {} errors", parsed_count, error_count);
+        println!(
+            "Summary: {} parsed successfully, {} errors",
+            parsed_count, error_count
+        );
 
         // We expect mostly errors since most test cases are malformed
-        assert!(error_count > 0, "Should have parsing errors for malformed inputs");
+        assert!(
+            error_count > 0,
+            "Should have parsing errors for malformed inputs"
+        );
 
         // Verify that no panics occurred (test itself would have failed)
         println!("✅ No panics occurred during fuzzing logic test");

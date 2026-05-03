@@ -187,7 +187,11 @@ impl TrustObjectId {
         let mut hasher = Sha256::new();
         hasher.update(b"trust_object_hash_v1:");
         let domain_bytes = domain.prefix().as_bytes();
-        hasher.update(u64::try_from(domain_bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(domain_bytes.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(domain_bytes);
         hasher.update(u64::try_from(data.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(data);
@@ -216,7 +220,11 @@ impl TrustObjectId {
         let mut hasher = Sha256::new();
         hasher.update(b"trust_object_derive_v1:");
         let domain_bytes = domain.prefix().as_bytes();
-        hasher.update(u64::try_from(domain_bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(domain_bytes.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(domain_bytes);
         hasher.update(epoch.to_be_bytes());
         hasher.update(sequence.to_be_bytes());

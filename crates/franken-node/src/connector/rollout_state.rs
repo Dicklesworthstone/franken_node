@@ -5,6 +5,7 @@
 //! Supports versioned writes for conflict detection and deterministic
 //! recovery replay.
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -13,7 +14,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread;
 use std::time::Duration;
-use fs2::FileExt;
 
 use crate::control_plane::control_epoch::{
     ControlEpoch, EpochArtifactEvent, EpochRejection, EpochRejectionReason, ValidityWindowPolicy,

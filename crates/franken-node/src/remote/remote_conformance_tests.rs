@@ -403,9 +403,10 @@ mod tests {
 
         // Test valid artifact ID with Unicode
         let valid_id = "测试-artifact-🚀";
-        assert!(mgr
-            .start_saga(valid_id, RemoteCapLookup::Granted, "test")
-            .is_ok());
+        assert!(
+            mgr.start_saga(valid_id, RemoteCapLookup::Granted, "test")
+                .is_ok()
+        );
     }
 
     // ── Idempotency Store Edge Cases ────────────────────────────────────────────

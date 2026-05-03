@@ -5,9 +5,9 @@
 //! change would break signature validation and compliance tooling.
 
 use frankenengine_node::security::decision_receipt::{
-    Decision, Receipt, DECISION_RECEIPT_SIGNATURE_VERSION,
+    DECISION_RECEIPT_SIGNATURE_VERSION, Decision, Receipt,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{fs, path::Path};
 
 /// Create a deterministic decision receipt for golden testing
@@ -109,13 +109,17 @@ fn decision_receipt_json_schema_stability() {
     // Verify critical schema elements are present and correctly typed
     assert!(json_value.get("receipt_id").is_some_and(Value::is_string));
     assert!(json_value.get("action_name").is_some_and(Value::is_string));
-    assert!(json_value
-        .get("actor_identity")
-        .is_some_and(Value::is_string));
+    assert!(
+        json_value
+            .get("actor_identity")
+            .is_some_and(Value::is_string)
+    );
     assert!(json_value.get("timestamp").is_some_and(Value::is_string));
-    assert!(json_value
-        .get("signature_version")
-        .is_some_and(Value::is_string));
+    assert!(
+        json_value
+            .get("signature_version")
+            .is_some_and(Value::is_string)
+    );
     assert!(json_value.get("nonce").is_some_and(Value::is_string));
     assert!(json_value.get("audience").is_some_and(Value::is_string));
     assert!(json_value.get("input_hash").is_some_and(Value::is_string));
@@ -123,16 +127,22 @@ fn decision_receipt_json_schema_stability() {
     assert!(json_value.get("decision").is_some_and(Value::is_string));
     assert!(json_value.get("rationale").is_some_and(Value::is_string));
     assert!(json_value.get("evidence_refs").is_some_and(Value::is_array));
-    assert!(json_value
-        .get("policy_rule_chain")
-        .is_some_and(Value::is_array));
+    assert!(
+        json_value
+            .get("policy_rule_chain")
+            .is_some_and(Value::is_array)
+    );
     assert!(json_value.get("confidence").is_some_and(Value::is_number));
-    assert!(json_value
-        .get("rollback_command")
-        .is_some_and(Value::is_string));
-    assert!(json_value
-        .get("previous_receipt_hash")
-        .is_some_and(Value::is_string));
+    assert!(
+        json_value
+            .get("rollback_command")
+            .is_some_and(Value::is_string)
+    );
+    assert!(
+        json_value
+            .get("previous_receipt_hash")
+            .is_some_and(Value::is_string)
+    );
 
     // Verify decision enum serializes correctly
     assert_eq!(

@@ -793,8 +793,7 @@ impl RemoteBulkhead {
             .collect::<Vec<_>>();
         values.sort_unstable();
         let len = values.len();
-        let rank = (99usize.saturating_mul(len))
-            .saturating_add(99) / 100;
+        let rank = (99usize.saturating_mul(len)).saturating_add(99) / 100;
         let rank = rank.max(1).saturating_sub(1);
         Some(values[rank])
     }
