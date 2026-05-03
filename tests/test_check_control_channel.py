@@ -10,6 +10,14 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts/check_control_channel.py"
 VECTORS_PATH = ROOT / "artifacts/section_10_13/bd-v97o/control_channel_replay_vectors.json"
 EVIDENCE_PATH = ROOT / "artifacts/section_10_13/bd-v97o/verification_evidence.json"
+JSON_DECODER = json.JSONDecoder()
+
+
+def decode_json_object(raw: str) -> dict[str, object]:
+    parsed = JSON_DECODER.decode(raw)
+    if not isinstance(parsed, dict):
+        raise AssertionError("expected JSON object")
+    return parsed
 
 
 class TestControlChannelVectors(unittest.TestCase):
@@ -18,7 +26,7 @@ class TestControlChannelVectors(unittest.TestCase):
         self.assertTrue(VECTORS_PATH.is_file())
 
     def test_vectors_valid_json(self):
-        data = json.loads(VECTORS_PATH.read_text(encoding="utf-8"))
+        data = decode_json_object(VECTORS_PATH.read_text(encoding="utf-8"))
         self.assertIn("vectors", data)
         self.assertGreaterEqual(len(data["vectors"]), 3)
 
@@ -92,7 +100,7 @@ class TestControlChannelCli(unittest.TestCase):
             timeout=30,
             check=True,
         )
-        evidence = json.loads(result.stdout)
+        evidence = decode_json_object(result.stdout)
         statuses = {check["id"]: check["status"] for check in evidence["checks"]}
 
         self.assertEqual(evidence["gate"], "control_channel_verification")

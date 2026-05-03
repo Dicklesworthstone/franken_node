@@ -9,7 +9,6 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -21,6 +20,7 @@ VECTORS_PATH = ROOT / "artifacts/section_10_13/bd-v97o/control_channel_replay_ve
 INTEG_PATH = ROOT / "tests/integration/control_channel_replay.rs"
 SPEC_PATH = ROOT / "docs/specs/section_10_13/bd-v97o_contract.md"
 EVIDENCE_PATH = ROOT / "artifacts/section_10_13/bd-v97o/verification_evidence.json"
+JSON_DECODER = json.JSONDecoder()
 
 
 def read_utf8(path: Path) -> str | None:
@@ -31,11 +31,11 @@ def read_utf8(path: Path) -> str | None:
         return None
 
 
-def load_json_object(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+def load_json_object(path: Path) -> tuple[dict[str, object] | None, str | None]:
     """Load a JSON object and return an explanatory error for invalid evidence."""
     try:
         raw = path.read_text(encoding="utf-8")
-        parsed = json.loads(raw)
+        parsed = JSON_DECODER.decode(raw)
     except OSError as exc:
         return None, f"unable to read {path}: {exc}"
     except json.JSONDecodeError as exc:
@@ -105,7 +105,7 @@ def run_rust_tests() -> tuple[bool, str]:
     return tests_pass, f"{rust_tests} tests passed"
 
 
-def build_evidence(checks: list[dict[str, str]], mode: str) -> dict[str, Any]:
+def build_evidence(checks: list[dict[str, str]], mode: str) -> dict[str, object]:
     passing = sum(1 for check_entry in checks if check_entry["status"] == "PASS")
     failing = sum(1 for check_entry in checks if check_entry["status"] == "FAIL")
     skipped = sum(1 for check_entry in checks if check_entry["status"] == "SKIP")
@@ -150,7 +150,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
-def run_checks(*, run_tests: bool, emit_human: bool) -> dict[str, Any]:
+def run_checks(*, run_tests: bool, emit_human: bool) -> dict[str, object]:
     checks: list[dict[str, str]] = []
     if emit_human:
         print("bd-v97o: Authenticated Control Channel - Verification\n")
@@ -269,7 +269,7 @@ def run_checks(*, run_tests: bool, emit_human: bool) -> dict[str, Any]:
     return evidence
 
 
-def write_evidence(path: Path, evidence: dict[str, Any]) -> None:
+def write_evidence(path: Path, evidence: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
 
