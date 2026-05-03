@@ -1,19 +1,30 @@
 """Unit tests for check_sandbox_profiles.py verification logic."""
 
 import json
-import os
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / "scripts/check_sandbox_profiles.py"
+EVIDENCE_PATH = ROOT / "artifacts/section_10_13/bd-3ua7/verification_evidence.json"
+JSON_DECODER = json.JSONDecoder()
+
+
+def decode_json_object(raw: str) -> dict[str, object]:
+    parsed = JSON_DECODER.decode(raw)
+    if not isinstance(parsed, dict):
+        raise AssertionError("expected JSON object")
+    return parsed
 
 
 class TestSandboxFixtures(unittest.TestCase):
 
     def _load_fixture(self, name):
-        path = os.path.join(ROOT, "fixtures/sandbox_profiles", name)
-        self.assertTrue(os.path.isfile(path), f"Fixture {name} must exist")
-        with open(path) as f:
-            return json.load(f)
+        path = ROOT / "fixtures/sandbox_profiles" / name
+        self.assertTrue(path.is_file(), f"Fixture {name} must exist")
+        return decode_json_object(path.read_text(encoding="utf-8"))
 
     def test_profile_capabilities_exist(self):
         data = self._load_fixture("profile_capabilities.json")
@@ -60,19 +71,17 @@ class TestSandboxFixtures(unittest.TestCase):
 class TestSandboxCompilerOutput(unittest.TestCase):
 
     def test_compiler_output_exists(self):
-        path = os.path.join(ROOT, "artifacts/section_10_13/bd-3ua7/sandbox_profile_compiler_output.json")
-        self.assertTrue(os.path.isfile(path))
+        path = ROOT / "artifacts/section_10_13/bd-3ua7/sandbox_profile_compiler_output.json"
+        self.assertTrue(path.is_file())
 
     def test_compiler_output_has_4_policies(self):
-        path = os.path.join(ROOT, "artifacts/section_10_13/bd-3ua7/sandbox_profile_compiler_output.json")
-        with open(path) as f:
-            data = json.load(f)
+        path = ROOT / "artifacts/section_10_13/bd-3ua7/sandbox_profile_compiler_output.json"
+        data = decode_json_object(path.read_text(encoding="utf-8"))
         self.assertEqual(len(data["compiled_policies"]), 4)
 
     def test_each_policy_has_6_grants(self):
-        path = os.path.join(ROOT, "artifacts/section_10_13/bd-3ua7/sandbox_profile_compiler_output.json")
-        with open(path) as f:
-            data = json.load(f)
+        path = ROOT / "artifacts/section_10_13/bd-3ua7/sandbox_profile_compiler_output.json"
+        data = decode_json_object(path.read_text(encoding="utf-8"))
         for p in data["compiled_policies"]:
             self.assertEqual(len(p["grants"]), 6, f"Policy {p['profile']} should have 6 grants")
 
@@ -80,10 +89,9 @@ class TestSandboxCompilerOutput(unittest.TestCase):
 class TestSandboxImplementation(unittest.TestCase):
 
     def setUp(self):
-        self.impl_path = os.path.join(ROOT, "crates/franken-node/src/security/sandbox_policy_compiler.rs")
-        self.assertTrue(os.path.isfile(self.impl_path))
-        with open(self.impl_path) as f:
-            self.content = f.read()
+        self.impl_path = ROOT / "crates/franken-node/src/security/sandbox_policy_compiler.rs"
+        self.assertTrue(self.impl_path.is_file())
+        self.content = self.impl_path.read_text(encoding="utf-8")
 
     def test_has_sandbox_profile_enum(self):
         self.assertIn("enum SandboxProfile", self.content)
@@ -110,10 +118,9 @@ class TestSandboxImplementation(unittest.TestCase):
 class TestSandboxSpec(unittest.TestCase):
 
     def setUp(self):
-        self.spec_path = os.path.join(ROOT, "docs/specs/section_10_13/bd-3ua7_contract.md")
-        self.assertTrue(os.path.isfile(self.spec_path))
-        with open(self.spec_path) as f:
-            self.content = f.read()
+        self.spec_path = ROOT / "docs/specs/section_10_13/bd-3ua7_contract.md"
+        self.assertTrue(self.spec_path.is_file())
+        self.content = self.spec_path.read_text(encoding="utf-8")
 
     def test_has_invariants(self):
         for inv in ["INV-SANDBOX-TIERED", "INV-SANDBOX-NO-DOWNGRADE",
@@ -128,6 +135,40 @@ class TestSandboxSpec(unittest.TestCase):
     def test_has_all_profiles(self):
         for p in ["strict", "strict_plus", "moderate", "permissive"]:
             self.assertIn(p, self.content, f"Missing profile {p}")
+
+
+class TestSandboxCli(unittest.TestCase):
+
+    def test_json_mode_is_structural_and_machine_readable(self):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--json"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        evidence = decode_json_object(result.stdout)
+        statuses = {check["id"]: check["status"] for check in evidence["checks"]}
+
+        self.assertEqual(evidence["gate"], "sandbox_profile_verification")
+        self.assertEqual(evidence["mode"], "structural")
+        self.assertEqual(statuses["SANDBOX-TESTS"], "SKIP")
+        self.assertEqual(evidence["summary"]["skipped_checks"], 1)
+        self.assertNotIn("bd-3ua7:", result.stdout)
+
+    def test_json_mode_does_not_rewrite_evidence_artifact(self):
+        before = EVIDENCE_PATH.read_text(encoding="utf-8")
+        subprocess.run(
+            [sys.executable, str(SCRIPT), "--json"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        after = EVIDENCE_PATH.read_text(encoding="utf-8")
+        self.assertEqual(before, after)
 
 
 if __name__ == "__main__":
