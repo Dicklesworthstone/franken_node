@@ -1,22 +1,32 @@
 """Unit tests for check_frame_parser.py verification logic."""
 
 import json
-import os
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / "scripts/check_frame_parser.py"
+RESULTS_PATH = ROOT / "artifacts/section_10_13/bd-3tzl/frame_decode_guardrail_results.json"
+EVIDENCE_PATH = ROOT / "artifacts/section_10_13/bd-3tzl/verification_evidence.json"
+JSON_DECODER = json.JSONDecoder()
+
+
+def decode_json_object(raw: str) -> dict[str, object]:
+    parsed = JSON_DECODER.decode(raw)
+    if not isinstance(parsed, dict):
+        raise AssertionError("expected JSON object")
+    return parsed
 
 
 class TestFrameDecodeResults(unittest.TestCase):
 
     def test_results_exist(self):
-        path = os.path.join(ROOT, "artifacts/section_10_13/bd-3tzl/frame_decode_guardrail_results.json")
-        self.assertTrue(os.path.isfile(path))
+        self.assertTrue(RESULTS_PATH.is_file())
 
     def test_results_valid_json(self):
-        path = os.path.join(ROOT, "artifacts/section_10_13/bd-3tzl/frame_decode_guardrail_results.json")
-        with open(path) as f:
-            data = json.load(f)
+        data = decode_json_object(RESULTS_PATH.read_text(encoding="utf-8"))
         self.assertIn("test_frames", data)
         self.assertGreaterEqual(len(data["test_frames"]), 3)
 
@@ -24,10 +34,9 @@ class TestFrameDecodeResults(unittest.TestCase):
 class TestFrameParserImpl(unittest.TestCase):
 
     def setUp(self):
-        self.impl_path = os.path.join(ROOT, "crates/franken-node/src/connector/frame_parser.rs")
-        self.assertTrue(os.path.isfile(self.impl_path))
-        with open(self.impl_path) as f:
-            self.content = f.read()
+        self.impl_path = ROOT / "crates/franken-node/src/connector/frame_parser.rs"
+        self.assertTrue(self.impl_path.is_file())
+        self.content = self.impl_path.read_text(encoding="utf-8")
 
     def test_has_parser_config(self):
         self.assertIn("struct ParserConfig", self.content)
@@ -50,10 +59,9 @@ class TestFrameParserImpl(unittest.TestCase):
 class TestFrameParserSpec(unittest.TestCase):
 
     def setUp(self):
-        self.spec_path = os.path.join(ROOT, "docs/specs/section_10_13/bd-3tzl_contract.md")
-        self.assertTrue(os.path.isfile(self.spec_path))
-        with open(self.spec_path) as f:
-            self.content = f.read()
+        self.spec_path = ROOT / "docs/specs/section_10_13/bd-3tzl_contract.md"
+        self.assertTrue(self.spec_path.is_file())
+        self.content = self.spec_path.read_text(encoding="utf-8")
 
     def test_has_invariants(self):
         for inv in ["INV-BPG-SIZE-BOUNDED", "INV-BPG-DEPTH-BOUNDED",
@@ -64,10 +72,9 @@ class TestFrameParserSpec(unittest.TestCase):
 class TestFrameParserIntegration(unittest.TestCase):
 
     def setUp(self):
-        self.integ_path = os.path.join(ROOT, "tests/integration/frame_decode_guardrails.rs")
-        self.assertTrue(os.path.isfile(self.integ_path))
-        with open(self.integ_path) as f:
-            self.content = f.read()
+        self.integ_path = ROOT / "tests/integration/frame_decode_guardrails.rs"
+        self.assertTrue(self.integ_path.is_file())
+        self.content = self.integ_path.read_text(encoding="utf-8")
 
     def test_covers_size(self):
         self.assertIn("inv_bpg_size_bounded", self.content)
@@ -80,6 +87,40 @@ class TestFrameParserIntegration(unittest.TestCase):
 
     def test_covers_auditable(self):
         self.assertIn("inv_bpg_auditable", self.content)
+
+
+class TestFrameParserCheckerCli(unittest.TestCase):
+
+    def test_json_mode_is_structural_and_machine_readable(self):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--json"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        evidence = decode_json_object(result.stdout)
+        statuses = {check["id"]: check["status"] for check in evidence["checks"]}
+
+        self.assertEqual(evidence["gate"], "frame_parser_verification")
+        self.assertEqual(evidence["mode"], "structural")
+        self.assertEqual(statuses["BPG-TESTS"], "SKIP")
+        self.assertEqual(evidence["summary"]["skipped_checks"], 1)
+        self.assertNotIn("bd-3tzl:", result.stdout)
+
+    def test_json_mode_does_not_rewrite_evidence_artifact(self):
+        before = EVIDENCE_PATH.read_text(encoding="utf-8")
+        subprocess.run(
+            [sys.executable, str(SCRIPT), "--json"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        after = EVIDENCE_PATH.read_text(encoding="utf-8")
+        self.assertEqual(before, after)
 
 
 if __name__ == "__main__":
