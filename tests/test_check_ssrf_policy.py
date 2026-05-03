@@ -1,35 +1,45 @@
 """Unit tests for check_ssrf_policy.py verification logic."""
 
 import json
-import os
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / "scripts/check_ssrf_policy.py"
+DENY_FIXTURE_PATH = ROOT / "fixtures/ssrf_policy/ssrf_deny_scenarios.json"
+ALLOWLIST_FIXTURE_PATH = ROOT / "fixtures/ssrf_policy/allowlist_scenarios.json"
+REPORT_PATH = ROOT / "artifacts/section_10_13/bd-1nk5/ssrf_policy_test_report.json"
+EVIDENCE_PATH = ROOT / "artifacts/section_10_13/bd-1nk5/verification_evidence.json"
+JSON_DECODER = json.JSONDecoder()
+
+
+def decode_json_object(raw: str) -> dict[str, object]:
+    parsed = JSON_DECODER.decode(raw)
+    if not isinstance(parsed, dict):
+        raise AssertionError("expected JSON object")
+    return parsed
 
 
 class TestSsrfPolicyFixtures(unittest.TestCase):
 
     def test_deny_fixture_exists(self):
-        path = os.path.join(ROOT, "fixtures/ssrf_policy/ssrf_deny_scenarios.json")
-        self.assertTrue(os.path.isfile(path))
+        self.assertTrue(DENY_FIXTURE_PATH.is_file())
 
     def test_deny_fixture_has_cases(self):
-        path = os.path.join(ROOT, "fixtures/ssrf_policy/ssrf_deny_scenarios.json")
-        data = json.JSONDecoder().decode(Path(path).read_text(encoding="utf-8"))
+        data = decode_json_object(DENY_FIXTURE_PATH.read_text(encoding="utf-8"))
         self.assertIn("cases", data)
         self.assertGreaterEqual(len(data["cases"]), 8)
 
     def test_deny_fixture_has_deny_and_allow(self):
-        path = os.path.join(ROOT, "fixtures/ssrf_policy/ssrf_deny_scenarios.json")
-        data = json.JSONDecoder().decode(Path(path).read_text(encoding="utf-8"))
+        data = decode_json_object(DENY_FIXTURE_PATH.read_text(encoding="utf-8"))
         actions = [c["expected_action"] for c in data["cases"]]
         self.assertIn("allow", actions)
         self.assertIn("deny", actions)
 
     def test_deny_fixture_cases_have_fields(self):
-        path = os.path.join(ROOT, "fixtures/ssrf_policy/ssrf_deny_scenarios.json")
-        data = json.JSONDecoder().decode(Path(path).read_text(encoding="utf-8"))
+        data = decode_json_object(DENY_FIXTURE_PATH.read_text(encoding="utf-8"))
         for case in data["cases"]:
             self.assertIn("host", case)
             self.assertIn("port", case)
@@ -37,19 +47,16 @@ class TestSsrfPolicyFixtures(unittest.TestCase):
             self.assertIn("category", case)
 
     def test_deny_fixture_covers_all_categories(self):
-        path = os.path.join(ROOT, "fixtures/ssrf_policy/ssrf_deny_scenarios.json")
-        data = json.JSONDecoder().decode(Path(path).read_text(encoding="utf-8"))
+        data = decode_json_object(DENY_FIXTURE_PATH.read_text(encoding="utf-8"))
         categories = {c["category"] for c in data["cases"]}
         for cat in ["loopback", "private", "metadata", "tailnet", "public"]:
             self.assertIn(cat, categories, f"Missing category {cat}")
 
     def test_allowlist_fixture_exists(self):
-        path = os.path.join(ROOT, "fixtures/ssrf_policy/allowlist_scenarios.json")
-        self.assertTrue(os.path.isfile(path))
+        self.assertTrue(ALLOWLIST_FIXTURE_PATH.is_file())
 
     def test_allowlist_fixture_has_cases(self):
-        path = os.path.join(ROOT, "fixtures/ssrf_policy/allowlist_scenarios.json")
-        data = json.JSONDecoder().decode(Path(path).read_text(encoding="utf-8"))
+        data = decode_json_object(ALLOWLIST_FIXTURE_PATH.read_text(encoding="utf-8"))
         self.assertIn("cases", data)
         self.assertGreaterEqual(len(data["cases"]), 2)
 
@@ -57,18 +64,15 @@ class TestSsrfPolicyFixtures(unittest.TestCase):
 class TestSsrfPolicyTestReport(unittest.TestCase):
 
     def test_report_exists(self):
-        path = os.path.join(ROOT, "artifacts/section_10_13/bd-1nk5/ssrf_policy_test_report.json")
-        self.assertTrue(os.path.isfile(path))
+        self.assertTrue(REPORT_PATH.is_file())
 
     def test_report_valid_json(self):
-        path = os.path.join(ROOT, "artifacts/section_10_13/bd-1nk5/ssrf_policy_test_report.json")
-        data = json.JSONDecoder().decode(Path(path).read_text(encoding="utf-8"))
+        data = decode_json_object(REPORT_PATH.read_text(encoding="utf-8"))
         self.assertIn("ssrf_patterns_tested", data)
         self.assertEqual(data["verdict"], "PASS")
 
     def test_report_covers_all_patterns(self):
-        path = os.path.join(ROOT, "artifacts/section_10_13/bd-1nk5/ssrf_policy_test_report.json")
-        data = json.JSONDecoder().decode(Path(path).read_text(encoding="utf-8"))
+        data = decode_json_object(REPORT_PATH.read_text(encoding="utf-8"))
         patterns = [p["pattern"] for p in data["ssrf_patterns_tested"]]
         for pat in ["ipv4_loopback", "rfc1918_class_a", "rfc1918_class_b",
                     "rfc1918_class_c", "cloud_metadata", "cgnat_tailnet",
@@ -76,8 +80,7 @@ class TestSsrfPolicyTestReport(unittest.TestCase):
             self.assertIn(pat, patterns, f"Missing pattern {pat}")
 
     def test_report_has_allowlist_tests(self):
-        path = os.path.join(ROOT, "artifacts/section_10_13/bd-1nk5/ssrf_policy_test_report.json")
-        data = json.JSONDecoder().decode(Path(path).read_text(encoding="utf-8"))
+        data = decode_json_object(REPORT_PATH.read_text(encoding="utf-8"))
         self.assertIn("allowlist_tests", data)
         self.assertGreaterEqual(len(data["allowlist_tests"]), 2)
 
@@ -85,9 +88,9 @@ class TestSsrfPolicyTestReport(unittest.TestCase):
 class TestSsrfPolicyImplementation(unittest.TestCase):
 
     def setUp(self):
-        self.impl_path = os.path.join(ROOT, "crates/franken-node/src/security/ssrf_policy.rs")
-        self.assertTrue(os.path.isfile(self.impl_path))
-        self.content = Path(self.impl_path).read_text(encoding="utf-8")
+        self.impl_path = ROOT / "crates/franken-node/src/security/ssrf_policy.rs"
+        self.assertTrue(self.impl_path.is_file())
+        self.content = self.impl_path.read_text(encoding="utf-8")
 
     def test_has_ssrf_policy_template(self):
         self.assertIn("struct SsrfPolicyTemplate", self.content)
@@ -129,9 +132,9 @@ class TestSsrfPolicyImplementation(unittest.TestCase):
 class TestSsrfPolicyToml(unittest.TestCase):
 
     def setUp(self):
-        self.toml_path = os.path.join(ROOT, "config/policies/network_guard_default.toml")
-        self.assertTrue(os.path.isfile(self.toml_path))
-        self.content = Path(self.toml_path).read_text(encoding="utf-8")
+        self.toml_path = ROOT / "config/policies/network_guard_default.toml"
+        self.assertTrue(self.toml_path.is_file())
+        self.content = self.toml_path.read_text(encoding="utf-8")
 
     def test_has_template_name(self):
         self.assertIn("ssrf_deny_default", self.content)
@@ -151,9 +154,9 @@ class TestSsrfPolicyToml(unittest.TestCase):
 class TestSsrfPolicySpec(unittest.TestCase):
 
     def setUp(self):
-        self.spec_path = os.path.join(ROOT, "docs/specs/section_10_13/bd-1nk5_contract.md")
-        self.assertTrue(os.path.isfile(self.spec_path))
-        self.content = Path(self.spec_path).read_text(encoding="utf-8")
+        self.spec_path = ROOT / "docs/specs/section_10_13/bd-1nk5_contract.md"
+        self.assertTrue(self.spec_path.is_file())
+        self.content = self.spec_path.read_text(encoding="utf-8")
 
     def test_has_invariants(self):
         for inv in ["INV-SSRF-DEFAULT-DENY", "INV-SSRF-RECEIPT",
@@ -172,16 +175,51 @@ class TestSsrfPolicySpec(unittest.TestCase):
 class TestSsrfChecker(unittest.TestCase):
 
     def setUp(self):
-        self.check_path = os.path.join(ROOT, "scripts/check_ssrf_policy.py")
-        self.assertTrue(os.path.isfile(self.check_path))
-        self.content = Path(self.check_path).read_text(encoding="utf-8")
+        self.assertTrue(SCRIPT.is_file())
+        self.content = SCRIPT.read_text(encoding="utf-8")
 
-    def test_checker_clears_accumulated_checks(self):
-        self.assertIn("CHECKS.clear()", self.content)
+    def test_checker_uses_local_check_state(self):
+        self.assertIn("checks: list[dict[str, str]] = []", self.content)
+        self.assertNotIn("CHECKS = []", self.content)
 
     def test_checker_uses_rch_exec_not_local_cargo(self):
-        self.assertIn('"rch", "exec", "--", "cargo"', self.content)
+        for token in ['"rch"', '"exec"', '"--"', '"cargo"', '"test"']:
+            self.assertIn(token, self.content)
         self.assertIn("check=False", self.content)
+
+
+class TestSsrfPolicyCli(unittest.TestCase):
+
+    def test_json_mode_is_structural_and_machine_readable(self):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--json"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        evidence = decode_json_object(result.stdout)
+        statuses = {check["id"]: check["status"] for check in evidence["checks"]}
+
+        self.assertEqual(evidence["gate"], "ssrf_policy_verification")
+        self.assertEqual(evidence["mode"], "structural")
+        self.assertEqual(statuses["SSRF-TESTS"], "SKIP")
+        self.assertEqual(evidence["summary"]["skipped_checks"], 1)
+        self.assertNotIn("bd-1nk5:", result.stdout)
+
+    def test_json_mode_does_not_rewrite_evidence_artifact(self):
+        before = EVIDENCE_PATH.read_text(encoding="utf-8")
+        subprocess.run(
+            [sys.executable, str(SCRIPT), "--json"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        after = EVIDENCE_PATH.read_text(encoding="utf-8")
+        self.assertEqual(before, after)
 
 
 if __name__ == "__main__":
