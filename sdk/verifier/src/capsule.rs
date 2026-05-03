@@ -22,7 +22,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::DateTime;
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hex;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -208,6 +208,7 @@ pub fn deterministic_hash(data: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+#[cfg(test)]
 fn push_length_prefixed(hasher: &mut Sha256, value: &str) {
     hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(value.as_bytes());
@@ -253,6 +254,7 @@ fn compute_replay_hash(payload: &str, inputs: &BTreeMap<String, String>) -> Stri
 /// across manifest fields, payload, and inputs.
 ///
 /// INV-CAPSULE-VERDICT-REPRODUCIBLE: deterministic for same capsule contents.
+#[cfg(test)]
 fn compute_signing_payload(capsule: &ReplayCapsule) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"verifier_sdk_capsule_signing_v1:");

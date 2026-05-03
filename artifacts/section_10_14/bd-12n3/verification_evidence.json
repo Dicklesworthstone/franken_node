@@ -2,8 +2,8 @@
   "bead_id": "bd-12n3",
   "section": "10.14",
   "title": "Idempotency key derivation from request bytes with epoch binding",
-  "generated_at": "2026-03-29T05:24:00Z",
-  "status": "contract_gates_pass_with_partial_remote_verification",
+  "generated_at": "2026-05-03T02:04:11Z",
+  "status": "contract_gates_pass_with_remote_dependency_compile_blocked",
   "checks": [
     {
       "name": "implementation_surface_present",
@@ -35,42 +35,53 @@
       "command": "python3 -m pytest -q tests/test_check_idempotency_key_derivation.py",
       "exit_code": 0,
       "status": "PASS",
-      "output_path": "artifacts/section_10_14/bd-12n3/pytest_check_idempotency_key_derivation.log"
+      "output_path": "artifacts/section_10_14/bd-12n3/pytest_check_idempotency_key_derivation.log",
+      "summary": {
+        "tests_passed": 7
+      }
     },
     {
-      "name": "rustfmt_touched_files",
-      "command": "rustfmt --edition 2024 --check crates/franken-node/src/remote/idempotency.rs tests/conformance/idempotency_key_derivation.rs",
+      "name": "sdk_verifier_clippy_blocker_removed",
+      "command": "rustfmt --edition 2024 sdk/verifier/src/bundle.rs sdk/verifier/src/capsule.rs sdk/verifier/src/lib.rs && git diff --check -- sdk/verifier/src/bundle.rs sdk/verifier/src/capsule.rs sdk/verifier/src/lib.rs",
       "exit_code": 0,
-      "status": "PASS"
-    },
-    {
-      "name": "git_diff_check_touched_files",
-      "command": "git diff --check -- crates/franken-node/src/remote/idempotency.rs tests/conformance/idempotency_key_derivation.rs docs/specs/section_10_14/bd-12n3_contract.md docs/integration/control_idempotency_adoption.md scripts/check_idempotency_key_derivation.py tests/test_check_idempotency_key_derivation.py artifacts/10.14/idempotency_vectors.json artifacts/section_10_14/bd-12n3/check_report_idempotency_key_derivation.json",
-      "exit_code": 0,
-      "status": "PASS"
+      "status": "PASS",
+      "note": "Removed verifier SDK -D warnings blockers that prevented the bd-12n3 clippy proof from reaching dependency compilation."
     },
     {
       "name": "cargo_check_all_targets_via_rch",
-      "command": "rch exec -- env CARGO_TARGET_DIR=target/bd-3vmoo-check2 cargo check -p frankenengine-node --all-targets",
+      "command": "RCH_VISIBILITY=verbose rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_franken_node_pane11 cargo check -p frankenengine-node --all-targets",
       "exit_code": 101,
-      "status": "FAIL_INFRA",
+      "status": "FAIL_DEPENDENCY",
       "output_path": "artifacts/section_10_14/bd-12n3/rch_cargo_check_all_targets.log",
-      "note": "Remote worker failed creating a temp dir under target/bd-3vmoo-check2 while compiling sibling frankenengine-engine."
+      "note": "Remote cargo check reached dependency compilation and failed in sibling sqlmodel-frankensqlite at /dp/sqlmodel_rust/crates/sqlmodel-frankensqlite/src/connection.rs:79:41 because fsqlite::Connection::open_with_page_size is not available in fsqlite-core 0.1.2."
     },
     {
       "name": "cargo_clippy_all_targets_via_rch",
-      "command": "rch exec -- env CARGO_TARGET_DIR=target/bd-3vmoo-clippy cargo clippy -p frankenengine-node --all-targets -- -D warnings",
-      "exit_code": null,
-      "status": "PENDING",
+      "command": "RCH_VISIBILITY=verbose rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_franken_node_pane11 cargo clippy -p frankenengine-node --all-targets -- -D warnings",
+      "exit_code": 101,
+      "status": "FAIL_DEPENDENCY",
       "output_path": "artifacts/section_10_14/bd-12n3/rch_cargo_clippy_all_targets.log",
-      "note": "Remote clippy run did not return a final verdict before this evidence file was updated."
+      "note": "After verifier SDK clippy cleanup, remote clippy reached dependency compilation and failed on the same sibling sqlmodel-frankensqlite open_with_page_size API mismatch."
     },
     {
-      "name": "focused_collision_regression_via_rch",
-      "command": "rch exec -- env CARGO_TARGET_DIR=target/bd-3vmoo-filter2 cargo test -p frankenengine-node separator_collision_inputs_do_not_alias_after_derivation_fix -- --nocapture",
-      "exit_code": null,
-      "status": "PENDING",
-      "note": "Focused remote test stayed active/quiet on the worker when this evidence file was updated."
+      "name": "focused_idempotency_tests_via_rch",
+      "command": "RCH_VISIBILITY=verbose rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_franken_node_pane11 cargo test -p frankenengine-node idempotency -- --nocapture",
+      "exit_code": 101,
+      "status": "FAIL_DEPENDENCY",
+      "output_path": "artifacts/section_10_14/bd-12n3/rch_cargo_test_idempotency_key_derivation.log",
+      "note": "Focused idempotency/collision cargo test proof could not reach test execution because sibling sqlmodel-frankensqlite failed to compile with the same open_with_page_size API mismatch."
+    },
+    {
+      "name": "section_10_14_gate",
+      "command": "python3 scripts/check_section_10_14_gate.py --json",
+      "exit_code": 0,
+      "status": "PASS",
+      "output_path": "artifacts/section_10_14/bd-12n3/check_section_10_14_gate.json",
+      "summary": {
+        "verdict": "PASS",
+        "coverage_pct": 98.08,
+        "failing_beads": 1
+      }
     }
   ],
   "contract_surface": {
@@ -81,5 +92,11 @@
     "gate_tests": "tests/test_check_idempotency_key_derivation.py",
     "vectors": "artifacts/10.14/idempotency_vectors.json",
     "spec": "docs/specs/section_10_14/bd-12n3_contract.md"
+  },
+  "remaining_blocker": {
+    "kind": "remote_dependency_compile_failure",
+    "path": "/dp/sqlmodel_rust/crates/sqlmodel-frankensqlite/src/connection.rs",
+    "line": 79,
+    "message": "no associated function or constant named open_with_page_size found for struct fsqlite::Connection"
   }
 }

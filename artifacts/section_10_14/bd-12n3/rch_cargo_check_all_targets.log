@@ -1,0 +1,1189 @@
+[RCH] CARGO_TARGET_DIR forwarding detected from delegated command tokens
+[RCH] Cargo target sync active; forcing worker CARGO_TARGET_DIR to an isolated remote target and syncing back to /tmp/rch_target_franken_node_pane11
+[RCH] removed local Cargo target-dir setting before remote execution; worker-scoped target dir will be injected
+  [2m2026-05-03T01:48:20.594862Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1149989 at ubuntu@212.90.121.76 (6 slots, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:380 [2;3mon[0m ThreadId(1)
+
+[RCH] project path normalized: received_input=/data/projects/franken_node
+[RCH] project path normalized: verified_absolute_input=/data/projects/franken_node
+[RCH] project path normalized: canonical_root_resolved=/data/projects
+[RCH] project path normalized: canonical_input_resolved=/data/projects/franken_node
+[RCH] project path normalized: verified_within_root=/data/projects/franken_node root=/data/projects
+[RCH] dependency root /data/projects/fastapi_rust/crates/fastapi-types (TransitivePathDependency)
+[RCH] dependency root /data/projects/fastapi_rust/crates/fastapi-router (TransitivePathDependency)
+[RCH] dependency root /data/projects/fastapi_rust/crates/fastapi-openapi (TransitivePathDependency)
+[RCH] dependency root /data/projects/fastapi_rust/crates/fastapi-core (TransitivePathDependency)
+[RCH] dependency root /data/projects/franken_engine/crates/franken-extension-host (TransitivePathDependency)
+[RCH] dependency root /data/projects/franken_node/crates/franken-security-macros (WorkspaceMember)
+[RCH] dependency root /data/projects/franken_node/sdk/verifier (WorkspaceMember)
+[RCH] dependency root /data/projects/frankentui/crates/ftui-core (TransitivePathDependency)
+[RCH] dependency root /data/projects/frankentui/crates/ftui-a11y (TransitivePathDependency)
+[RCH] dependency root /data/projects/frankentui/crates/ftui-i18n (TransitivePathDependency)
+[RCH] dependency root /data/projects/frankentui/crates/ftui-layout (TransitivePathDependency)
+[RCH] dependency root /data/projects/frankentui/crates/ftui-render (TransitivePathDependency)
+[RCH] dependency root /data/projects/frankentui/crates/ftui-backend (TransitivePathDependency)
+[RCH] dependency root /data/projects/frankentui/crates/ftui-style (TransitivePathDependency)
+[RCH] dependency root /data/projects/frankentui/crates/ftui-text (TransitivePathDependency)
+[RCH] dependency root /data/projects/frankentui/crates/ftui-runtime (TransitivePathDependency)
+[RCH] dependency root /data/projects/frankentui/crates/ftui-widgets (TransitivePathDependency)
+[RCH] dependency root /data/projects/frankentui/crates/ftui (TransitivePathDependency)
+[RCH] dependency root /data/projects/sqlmodel_rust/crates/sqlmodel-core (TransitivePathDependency)
+[RCH] dependency root /data/projects/sqlmodel_rust/crates/sqlmodel-frankensqlite (TransitivePathDependency)
+[RCH] dependency root /data/projects/sqlmodel_rust/crates/sqlmodel-macros (TransitivePathDependency)
+[RCH] dependency root /data/projects/sqlmodel_rust/crates/sqlmodel-pool (TransitivePathDependency)
+[RCH] dependency root /data/projects/sqlmodel_rust/crates/sqlmodel-query (TransitivePathDependency)
+[RCH] dependency root /data/projects/sqlmodel_rust/crates/sqlmodel-schema (TransitivePathDependency)
+[RCH] dependency root /data/projects/sqlmodel_rust/crates/sqlmodel-session (TransitivePathDependency)
+[RCH] dependency root /data/projects/sqlmodel_rust/crates/sqlmodel (TransitivePathDependency)
+[RCH] dependency root /data/projects/franken_engine/crates/franken-engine (TransitivePathDependency)
+[RCH] dependency root /data/projects/franken_node/crates/franken-node (WorkspaceMember)
+  [2m2026-05-03T01:48:21.013981Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for franken_node (hash: 30865fd0a0e8ade8)[0m
+    [2;3mat[0m rch/src/hook.rs:5060 [2;3mon[0m ThreadId(1)
+
+[RCH] dependency sync roots planned: 33
+[RCH] dependency sync root 1/33: /data/projects/fastapi_rust
+[RCH] dependency sync root 2/33: /data/projects/fastapi_rust/crates/fastapi-core
+[RCH] dependency sync root 3/33: /data/projects/fastapi_rust/crates/fastapi-openapi
+[RCH] dependency sync root 4/33: /data/projects/fastapi_rust/crates/fastapi-router
+[RCH] dependency sync root 5/33: /data/projects/fastapi_rust/crates/fastapi-types
+[RCH] dependency sync root 6/33: /data/projects/franken_engine
+[RCH] dependency sync root 7/33: /data/projects/franken_engine/crates/franken-engine
+[RCH] dependency sync root 8/33: /data/projects/franken_engine/crates/franken-extension-host
+[RCH] dependency sync root 9/33: /data/projects/franken_node
+[RCH] dependency sync root 10/33: /data/projects/franken_node/crates/franken-node
+[RCH] dependency sync root 11/33: /data/projects/franken_node/crates/franken-security-macros
+[RCH] dependency sync root 12/33: /data/projects/franken_node/sdk/verifier
+[RCH] dependency sync root 13/33: /data/projects/frankentui
+[RCH] dependency sync root 14/33: /data/projects/frankentui/crates/ftui
+[RCH] dependency sync root 15/33: /data/projects/frankentui/crates/ftui-a11y
+[RCH] dependency sync root 16/33: /data/projects/frankentui/crates/ftui-backend
+[RCH] dependency sync root 17/33: /data/projects/frankentui/crates/ftui-core
+[RCH] dependency sync root 18/33: /data/projects/frankentui/crates/ftui-i18n
+[RCH] dependency sync root 19/33: /data/projects/frankentui/crates/ftui-layout
+[RCH] dependency sync root 20/33: /data/projects/frankentui/crates/ftui-render
+[RCH] dependency sync root 21/33: /data/projects/frankentui/crates/ftui-runtime
+[RCH] dependency sync root 22/33: /data/projects/frankentui/crates/ftui-style
+[RCH] dependency sync root 23/33: /data/projects/frankentui/crates/ftui-text
+[RCH] dependency sync root 24/33: /data/projects/frankentui/crates/ftui-widgets
+[RCH] dependency sync root 25/33: /data/projects/sqlmodel_rust
+[RCH] dependency sync root 26/33: /data/projects/sqlmodel_rust/crates/sqlmodel
+[RCH] dependency sync root 27/33: /data/projects/sqlmodel_rust/crates/sqlmodel-core
+[RCH] dependency sync root 28/33: /data/projects/sqlmodel_rust/crates/sqlmodel-frankensqlite
+[RCH] dependency sync root 29/33: /data/projects/sqlmodel_rust/crates/sqlmodel-macros
+[RCH] dependency sync root 30/33: /data/projects/sqlmodel_rust/crates/sqlmodel-pool
+[RCH] dependency sync root 31/33: /data/projects/sqlmodel_rust/crates/sqlmodel-query
+[RCH] dependency sync root 32/33: /data/projects/sqlmodel_rust/crates/sqlmodel-schema
+[RCH] dependency sync root 33/33: /data/projects/sqlmodel_rust/crates/sqlmodel-session
+[RCH] dependency sync manifest: {"schema_version":"rch.sync_closure_manifest.v2","generated_at_unix_ms":1777772900971,"project_root":"/data/projects/franken_node","entries":[{"order":1,"local_root":"/data/projects/fastapi_rust","remote_root":"/data/projects/fastapi_rust","project_id":"fastapi_rust","root_hash":"ad5927320d9e4e5b","is_primary":false,"mode":"workspace_metadata"},{"order":2,"local_root":"/data/projects/fastapi_rust/crates/fastapi-core","remote_root":"/data/projects/fastapi_rust/crates/fastapi-core","project_id":"fastapi-core","root_hash":"7389d062b9550d9c","is_primary":false,"mode":"full"},{"order":3,"local_root":"/data/projects/fastapi_rust/crates/fastapi-openapi","remote_root":"/data/projects/fastapi_rust/crates/fastapi-openapi","project_id":"fastapi-openapi","root_hash":"156cfc9be14f6500","is_primary":false,"mode":"full"},{"order":4,"local_root":"/data/projects/fastapi_rust/crates/fastapi-router","remote_root":"/data/projects/fastapi_rust/crates/fastapi-router","project_id":"fastapi-router","root_hash":"0934b28626baea5c","is_primary":false,"mode":"full"},{"order":5,"local_root":"/data/projects/fastapi_rust/crates/fastapi-types","remote_root":"/data/projects/fastapi_rust/crates/fastapi-types","project_id":"fastapi-types","root_hash":"44f2fd52b58f2481","is_primary":false,"mode":"full"},{"order":6,"local_root":"/data/projects/franken_engine","remote_root":"/data/projects/franken_engine","project_id":"franken_engine","root_hash":"d4b64b5104d365e1","is_primary":false,"mode":"workspace_metadata"},{"order":7,"local_root":"/data/projects/franken_engine/crates/franken-engine","remote_root":"/data/projects/franken_engine/crates/franken-engine","project_id":"franken-engine","root_hash":"980326a48ce3795b","is_primary":false,"mode":"full"},{"order":8,"local_root":"/data/projects/franken_engine/crates/franken-extension-host","remote_root":"/data/projects/franken_engine/crates/franken-extension-host","project_id":"franken-extension-host","root_hash":"28616e505d50ac30","is_primary":false,"mode":"full"},{"order":9,"local_root":"/data/projects/franken_node","remote_root":"/data/projects/franken_node","project_id":"franken_node","root_hash":"30865fd0a0e8ade8","is_primary":true,"mode":"full"},{"order":10,"local_root":"/data/projects/franken_node/crates/franken-node","remote_root":"/data/projects/franken_node/crates/franken-node","project_id":"franken-node","root_hash":"cd0639693982e757","is_primary":false,"mode":"full"},{"order":11,"local_root":"/data/projects/franken_node/crates/franken-security-macros","remote_root":"/data/projects/franken_node/crates/franken-security-macros","project_id":"franken-security-macros","root_hash":"27de9ce6ec24464b","is_primary":false,"mode":"full"},{"order":12,"local_root":"/data/projects/franken_node/sdk/verifier","remote_root":"/data/projects/franken_node/sdk/verifier","project_id":"verifier","root_hash":"54c5cda5a0b6cd25","is_primary":false,"mode":"full"},{"order":13,"local_root":"/data/projects/frankentui","remote_root":"/data/projects/frankentui","project_id":"frankentui","root_hash":"050acb3e209bbebb","is_primary":false,"mode":"workspace_metadata"},{"order":14,"local_root":"/data/projects/frankentui/crates/ftui","remote_root":"/data/projects/frankentui/crates/ftui","project_id":"ftui","root_hash":"b1d53ccabdb2dae0","is_primary":false,"mode":"full"},{"order":15,"local_root":"/data/projects/frankentui/crates/ftui-a11y","remote_root":"/data/projects/frankentui/crates/ftui-a11y","project_id":"ftui-a11y","root_hash":"522820e288809ed1","is_primary":false,"mode":"full"},{"order":16,"local_root":"/data/projects/frankentui/crates/ftui-backend","remote_root":"/data/projects/frankentui/crates/ftui-backend","project_id":"ftui-backend","root_hash":"83dbc4daa67e729a","is_primary":false,"mode":"full"},{"order":17,"local_root":"/data/projects/frankentui/crates/ftui-core","remote_root":"/data/projects/frankentui/crates/ftui-core","project_id":"ftui-core","root_hash":"a3a2c5e1ccec8e85","is_primary":false,"mode":"full"},{"order":18,"local_root":"/data/projects/frankentui/crates/ftui-i18n","remote_root":"/data/projects/frankentui/crates/ftui-i18n","project_id":"ftui-i18n","root_hash":"88be3ba78f020b12","is_primary":false,"mode":"full"},{"order":19,"local_root":"/data/projects/frankentui/crates/ftui-layout","remote_root":"/data/projects/frankentui/crates/ftui-layout","project_id":"ftui-layout","root_hash":"8df04bac953495af","is_primary":false,"mode":"full"},{"order":20,"local_root":"/data/projects/frankentui/crates/ftui-render","remote_root":"/data/projects/frankentui/crates/ftui-render","project_id":"ftui-render","root_hash":"5ccc92e3d9180590","is_primary":false,"mode":"full"},{"order":21,"local_root":"/data/projects/frankentui/crates/ftui-runtime","remote_root":"/data/projects/frankentui/crates/ftui-runtime","project_id":"ftui-runtime","root_hash":"e57dd8085a7a5cca","is_primary":false,"mode":"full"},{"order":22,"local_root":"/data/projects/frankentui/crates/ftui-style","remote_root":"/data/projects/frankentui/crates/ftui-style","project_id":"ftui-style","root_hash":"54495551cd47c3a9","is_primary":false,"mode":"full"},{"order":23,"local_root":"/data/projects/frankentui/crates/ftui-text","remote_root":"/data/projects/frankentui/crates/ftui-text","project_id":"ftui-text","root_hash":"c2a7e73ba7f0a693","is_primary":false,"mode":"full"},{"order":24,"local_root":"/data/projects/frankentui/crates/ftui-widgets","remote_root":"/data/projects/frankentui/crates/ftui-widgets","project_id":"ftui-widgets","root_hash":"9d378b11b9b97c44","is_primary":false,"mode":"full"},{"order":25,"local_root":"/data/projects/sqlmodel_rust","remote_root":"/data/projects/sqlmodel_rust","project_id":"sqlmodel_rust","root_hash":"76a71365bcd91777","is_primary":false,"mode":"workspace_metadata"},{"order":26,"local_root":"/data/projects/sqlmodel_rust/crates/sqlmodel","remote_root":"/data/projects/sqlmodel_rust/crates/sqlmodel","project_id":"sqlmodel","root_hash":"e79d5059c446c97c","is_primary":false,"mode":"full"},{"order":27,"local_root":"/data/projects/sqlmodel_rust/crates/sqlmodel-core","remote_root":"/data/projects/sqlmodel_rust/crates/sqlmodel-core","project_id":"sqlmodel-core","root_hash":"b74065a68c3793df","is_primary":false,"mode":"full"},{"order":28,"local_root":"/data/projects/sqlmodel_rust/crates/sqlmodel-frankensqlite","remote_root":"/data/projects/sqlmodel_rust/crates/sqlmodel-frankensqlite","project_id":"sqlmodel-frankensqlite","root_hash":"ac5550eaf517a5a3","is_primary":false,"mode":"full"},{"order":29,"local_root":"/data/projects/sqlmodel_rust/crates/sqlmodel-macros","remote_root":"/data/projects/sqlmodel_rust/crates/sqlmodel-macros","project_id":"sqlmodel-macros","root_hash":"fcbf9ed46cecc3f7","is_primary":false,"mode":"full"},{"order":30,"local_root":"/data/projects/sqlmodel_rust/crates/sqlmodel-pool","remote_root":"/data/projects/sqlmodel_rust/crates/sqlmodel-pool","project_id":"sqlmodel-pool","root_hash":"4a87a682a04d8197","is_primary":false,"mode":"full"},{"order":31,"local_root":"/data/projects/sqlmodel_rust/crates/sqlmodel-query","remote_root":"/data/projects/sqlmodel_rust/crates/sqlmodel-query","project_id":"sqlmodel-query","root_hash":"51603ef38f1f7b7f","is_primary":false,"mode":"full"},{"order":32,"local_root":"/data/projects/sqlmodel_rust/crates/sqlmodel-schema","remote_root":"/data/projects/sqlmodel_rust/crates/sqlmodel-schema","project_id":"sqlmodel-schema","root_hash":"48e52cf6827bb9d3","is_primary":false,"mode":"full"},{"order":33,"local_root":"/data/projects/sqlmodel_rust/crates/sqlmodel-session","remote_root":"/data/projects/sqlmodel_rust/crates/sqlmodel-session","project_id":"sqlmodel-session","root_hash":"68d11cc62ae81e1e","is_primary":false,"mode":"full"}]}
+  [2m2026-05-03T01:48:21.014183Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 33 roots[0m
+    [2;3mat[0m rch/src/hook.rs:5082 [2;3mon[0m ThreadId(1)
+
+[RCH] sync start (project franken_node on vmi1149989)
+[RCH] topology preflight ok on vmi1149989 (/dp -> /data/projects enforced)
+[RCH] repo_updater pre-sync skipped (dirty local sync roots: /data/projects/franken_engine, /data/projects/franken_engine/crates/franken-engine, /data/projects/franken_engine/crates/franken-extension-host, /data/projects/franken_node, /data/projects/franken_node/crates/franken-node, /data/projects/franken_node/crates/franken-security-macros, /data/projects/franken_node/sdk/verifier)
+  [2m2026-05-03T01:48:23.207817Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker vmi1149989...[0m
+    [2;3mat[0m rch/src/hook.rs:5112 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/fastapi_rust
+[RCH] syncing dependency root /data/projects/fastapi_rust to remote /data/projects/fastapi_rust
+  [2m2026-05-03T01:48:23.207870Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/fastapi_rust -> /data/projects/fastapi_rust on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:48:25.300237Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2092ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/fastapi_rust/crates/fastapi-core
+[RCH] syncing dependency root /data/projects/fastapi_rust/crates/fastapi-core to remote /data/projects/fastapi_rust/crates/fastapi-core
+  [2m2026-05-03T01:48:25.300363Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/fastapi_rust/crates/fastapi-core -> /data/projects/fastapi_rust/crates/fastapi-core on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:48:27.479377Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2178ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/fastapi_rust/crates/fastapi-openapi
+[RCH] syncing dependency root /data/projects/fastapi_rust/crates/fastapi-openapi to remote /data/projects/fastapi_rust/crates/fastapi-openapi
+  [2m2026-05-03T01:48:27.479492Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/fastapi_rust/crates/fastapi-openapi -> /data/projects/fastapi_rust/crates/fastapi-openapi on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:48:29.932663Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2453ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/fastapi_rust/crates/fastapi-router
+[RCH] syncing dependency root /data/projects/fastapi_rust/crates/fastapi-router to remote /data/projects/fastapi_rust/crates/fastapi-router
+  [2m2026-05-03T01:48:29.932765Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/fastapi_rust/crates/fastapi-router -> /data/projects/fastapi_rust/crates/fastapi-router on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:48:32.063196Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2130ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/fastapi_rust/crates/fastapi-types
+[RCH] syncing dependency root /data/projects/fastapi_rust/crates/fastapi-types to remote /data/projects/fastapi_rust/crates/fastapi-types
+  [2m2026-05-03T01:48:32.063284Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/fastapi_rust/crates/fastapi-types -> /data/projects/fastapi_rust/crates/fastapi-types on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:48:34.188602Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2125ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/franken_engine
+[RCH] syncing dependency root /data/projects/franken_engine to remote /data/projects/franken_engine
+  [2m2026-05-03T01:48:34.188712Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 8 pattern(s) from .rchignore (total: 53)[0m
+    [2;3mat[0m rch/src/transfer.rs:621 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:48:34.188721Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_engine -> /data/projects/franken_engine on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:48:36.399031Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2210ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/franken_engine/crates/franken-engine
+[RCH] syncing dependency root /data/projects/franken_engine/crates/franken-engine to remote /data/projects/franken_engine/crates/franken-engine
+  [2m2026-05-03T01:48:36.399119Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_engine/crates/franken-engine -> /data/projects/franken_engine/crates/franken-engine on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:48:39.647378Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 3248ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/franken_engine/crates/franken-extension-host
+[RCH] syncing dependency root /data/projects/franken_engine/crates/franken-extension-host to remote /data/projects/franken_engine/crates/franken-extension-host
+  [2m2026-05-03T01:48:39.647461Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_engine/crates/franken-extension-host -> /data/projects/franken_engine/crates/franken-extension-host on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:48:41.702105Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2054ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/franken_node
+[RCH] syncing dependency root /data/projects/franken_node to remote /data/projects/franken_node
+  [2m2026-05-03T01:48:41.702201Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 26 pattern(s) from .rchignore (total: 71)[0m
+    [2;3mat[0m rch/src/transfer.rs:621 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:48:41.702210Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_node -> /data/projects/franken_node on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:48:45.570611Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 3868ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/franken_node/crates/franken-node
+[RCH] syncing dependency root /data/projects/franken_node/crates/franken-node to remote /data/projects/franken_node/crates/franken-node
+  [2m2026-05-03T01:48:45.570722Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_node/crates/franken-node -> /data/projects/franken_node/crates/franken-node on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:48:48.014538Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2443ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/franken_node/crates/franken-security-macros
+[RCH] syncing dependency root /data/projects/franken_node/crates/franken-security-macros to remote /data/projects/franken_node/crates/franken-security-macros
+  [2m2026-05-03T01:48:48.014644Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_node/crates/franken-security-macros -> /data/projects/franken_node/crates/franken-security-macros on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:48:50.140475Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2125ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/franken_node/sdk/verifier
+[RCH] syncing dependency root /data/projects/franken_node/sdk/verifier to remote /data/projects/franken_node/sdk/verifier
+  [2m2026-05-03T01:48:50.140591Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_node/sdk/verifier -> /data/projects/franken_node/sdk/verifier on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:48:52.237206Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2096ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/frankentui
+[RCH] syncing dependency root /data/projects/frankentui to remote /data/projects/frankentui
+  [2m2026-05-03T01:48:52.237343Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankentui -> /data/projects/frankentui on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:48:54.463173Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2225ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/frankentui/crates/ftui
+[RCH] syncing dependency root /data/projects/frankentui/crates/ftui to remote /data/projects/frankentui/crates/ftui
+  [2m2026-05-03T01:48:54.463270Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankentui/crates/ftui -> /data/projects/frankentui/crates/ftui on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:48:56.883270Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2419ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/frankentui/crates/ftui-a11y
+[RCH] syncing dependency root /data/projects/frankentui/crates/ftui-a11y to remote /data/projects/frankentui/crates/ftui-a11y
+  [2m2026-05-03T01:48:56.883397Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankentui/crates/ftui-a11y -> /data/projects/frankentui/crates/ftui-a11y on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:48:58.946629Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2063ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/frankentui/crates/ftui-backend
+[RCH] syncing dependency root /data/projects/frankentui/crates/ftui-backend to remote /data/projects/frankentui/crates/ftui-backend
+  [2m2026-05-03T01:48:58.946724Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankentui/crates/ftui-backend -> /data/projects/frankentui/crates/ftui-backend on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:49:01.463632Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2516ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/frankentui/crates/ftui-core
+[RCH] syncing dependency root /data/projects/frankentui/crates/ftui-core to remote /data/projects/frankentui/crates/ftui-core
+  [2m2026-05-03T01:49:01.463742Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankentui/crates/ftui-core -> /data/projects/frankentui/crates/ftui-core on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:49:03.955663Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2491ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/frankentui/crates/ftui-i18n
+[RCH] syncing dependency root /data/projects/frankentui/crates/ftui-i18n to remote /data/projects/frankentui/crates/ftui-i18n
+  [2m2026-05-03T01:49:03.955761Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankentui/crates/ftui-i18n -> /data/projects/frankentui/crates/ftui-i18n on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:49:06.223832Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2268ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/frankentui/crates/ftui-layout
+[RCH] syncing dependency root /data/projects/frankentui/crates/ftui-layout to remote /data/projects/frankentui/crates/ftui-layout
+  [2m2026-05-03T01:49:06.223943Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankentui/crates/ftui-layout -> /data/projects/frankentui/crates/ftui-layout on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:49:08.380009Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2156ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/frankentui/crates/ftui-render
+[RCH] syncing dependency root /data/projects/frankentui/crates/ftui-render to remote /data/projects/frankentui/crates/ftui-render
+  [2m2026-05-03T01:49:08.380090Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankentui/crates/ftui-render -> /data/projects/frankentui/crates/ftui-render on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:49:10.507081Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2126ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/frankentui/crates/ftui-runtime
+[RCH] syncing dependency root /data/projects/frankentui/crates/ftui-runtime to remote /data/projects/frankentui/crates/ftui-runtime
+  [2m2026-05-03T01:49:10.507170Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankentui/crates/ftui-runtime -> /data/projects/frankentui/crates/ftui-runtime on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:49:12.629375Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2122ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/frankentui/crates/ftui-style
+[RCH] syncing dependency root /data/projects/frankentui/crates/ftui-style to remote /data/projects/frankentui/crates/ftui-style
+  [2m2026-05-03T01:49:12.629471Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankentui/crates/ftui-style -> /data/projects/frankentui/crates/ftui-style on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:49:14.775151Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2145ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/frankentui/crates/ftui-text
+[RCH] syncing dependency root /data/projects/frankentui/crates/ftui-text to remote /data/projects/frankentui/crates/ftui-text
+  [2m2026-05-03T01:49:14.775238Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankentui/crates/ftui-text -> /data/projects/frankentui/crates/ftui-text on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:49:16.859099Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2083ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/frankentui/crates/ftui-widgets
+[RCH] syncing dependency root /data/projects/frankentui/crates/ftui-widgets to remote /data/projects/frankentui/crates/ftui-widgets
+  [2m2026-05-03T01:49:16.859186Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankentui/crates/ftui-widgets -> /data/projects/frankentui/crates/ftui-widgets on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:49:18.920714Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2061ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/sqlmodel_rust
+[RCH] syncing dependency root /data/projects/sqlmodel_rust to remote /data/projects/sqlmodel_rust
+  [2m2026-05-03T01:49:18.920801Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/sqlmodel_rust -> /data/projects/sqlmodel_rust on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:49:20.936271Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2015ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/sqlmodel_rust/crates/sqlmodel
+[RCH] syncing dependency root /data/projects/sqlmodel_rust/crates/sqlmodel to remote /data/projects/sqlmodel_rust/crates/sqlmodel
+  [2m2026-05-03T01:49:20.936388Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/sqlmodel_rust/crates/sqlmodel -> /data/projects/sqlmodel_rust/crates/sqlmodel on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:49:23.235997Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2299ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/sqlmodel_rust/crates/sqlmodel-core
+[RCH] syncing dependency root /data/projects/sqlmodel_rust/crates/sqlmodel-core to remote /data/projects/sqlmodel_rust/crates/sqlmodel-core
+  [2m2026-05-03T01:49:23.236074Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/sqlmodel_rust/crates/sqlmodel-core -> /data/projects/sqlmodel_rust/crates/sqlmodel-core on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:49:25.396165Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2160ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/sqlmodel_rust/crates/sqlmodel-frankensqlite
+[RCH] syncing dependency root /data/projects/sqlmodel_rust/crates/sqlmodel-frankensqlite to remote /data/projects/sqlmodel_rust/crates/sqlmodel-frankensqlite
+  [2m2026-05-03T01:49:25.396273Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/sqlmodel_rust/crates/sqlmodel-frankensqlite -> /data/projects/sqlmodel_rust/crates/sqlmodel-frankensqlite on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:49:27.568999Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2172ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/sqlmodel_rust/crates/sqlmodel-macros
+[RCH] syncing dependency root /data/projects/sqlmodel_rust/crates/sqlmodel-macros to remote /data/projects/sqlmodel_rust/crates/sqlmodel-macros
+  [2m2026-05-03T01:49:27.569117Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/sqlmodel_rust/crates/sqlmodel-macros -> /data/projects/sqlmodel_rust/crates/sqlmodel-macros on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:49:29.748086Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2178ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/sqlmodel_rust/crates/sqlmodel-pool
+[RCH] syncing dependency root /data/projects/sqlmodel_rust/crates/sqlmodel-pool to remote /data/projects/sqlmodel_rust/crates/sqlmodel-pool
+  [2m2026-05-03T01:49:29.748192Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/sqlmodel_rust/crates/sqlmodel-pool -> /data/projects/sqlmodel_rust/crates/sqlmodel-pool on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:49:31.919225Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2171ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/sqlmodel_rust/crates/sqlmodel-query
+[RCH] syncing dependency root /data/projects/sqlmodel_rust/crates/sqlmodel-query to remote /data/projects/sqlmodel_rust/crates/sqlmodel-query
+  [2m2026-05-03T01:49:31.919314Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/sqlmodel_rust/crates/sqlmodel-query -> /data/projects/sqlmodel_rust/crates/sqlmodel-query on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:49:33.944171Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2024ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/sqlmodel_rust/crates/sqlmodel-schema
+[RCH] syncing dependency root /data/projects/sqlmodel_rust/crates/sqlmodel-schema to remote /data/projects/sqlmodel_rust/crates/sqlmodel-schema
+  [2m2026-05-03T01:49:33.944254Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/sqlmodel_rust/crates/sqlmodel-schema -> /data/projects/sqlmodel_rust/crates/sqlmodel-schema on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:49:36.039065Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2094ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+[RCH] exact dependency closure sync required; bypassing transfer estimator for /data/projects/sqlmodel_rust/crates/sqlmodel-session
+[RCH] syncing dependency root /data/projects/sqlmodel_rust/crates/sqlmodel-session to remote /data/projects/sqlmodel_rust/crates/sqlmodel-session
+  [2m2026-05-03T01:49:36.039144Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/sqlmodel_rust/crates/sqlmodel-session -> /data/projects/sqlmodel_rust/crates/sqlmodel-session on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1083 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:49:38.095410Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2056ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1152 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:49:38.095475Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 15757 files, 671234 bytes in 74866ms[0m
+    [2;3mat[0m rch/src/hook.rs:5275 [2;3mon[0m ThreadId(1)
+
+[RCH] sync done: 15757 files, 671234 bytes in 74866ms
+[RCH] dependency preflight report: {"schema_version":"rch.dependency_preflight.v1","worker":"vmi1149989","verified":true,"reason_code":null,"remediation":null,"evidence":[{"root":"/data/projects/fastapi_rust","manifest":"/data/projects/fastapi_rust/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/fastapi_rust/crates/fastapi-core","manifest":"/data/projects/fastapi_rust/crates/fastapi-core/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/fastapi_rust/crates/fastapi-openapi","manifest":"/data/projects/fastapi_rust/crates/fastapi-openapi/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/fastapi_rust/crates/fastapi-router","manifest":"/data/projects/fastapi_rust/crates/fastapi-router/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/fastapi_rust/crates/fastapi-types","manifest":"/data/projects/fastapi_rust/crates/fastapi-types/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/franken_engine","manifest":"/data/projects/franken_engine/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/franken_engine/crates/franken-engine","manifest":"/data/projects/franken_engine/crates/franken-engine/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/franken_engine/crates/franken-extension-host","manifest":"/data/projects/franken_engine/crates/franken-extension-host/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/franken_node","manifest":"/data/projects/franken_node/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":true},{"root":"/data/projects/franken_node/crates/franken-node","manifest":"/data/projects/franken_node/crates/franken-node/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/franken_node/crates/franken-security-macros","manifest":"/data/projects/franken_node/crates/franken-security-macros/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/franken_node/sdk/verifier","manifest":"/data/projects/franken_node/sdk/verifier/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/frankentui","manifest":"/data/projects/frankentui/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/frankentui/crates/ftui","manifest":"/data/projects/frankentui/crates/ftui/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/frankentui/crates/ftui-a11y","manifest":"/data/projects/frankentui/crates/ftui-a11y/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/frankentui/crates/ftui-backend","manifest":"/data/projects/frankentui/crates/ftui-backend/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/frankentui/crates/ftui-core","manifest":"/data/projects/frankentui/crates/ftui-core/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/frankentui/crates/ftui-i18n","manifest":"/data/projects/frankentui/crates/ftui-i18n/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/frankentui/crates/ftui-layout","manifest":"/data/projects/frankentui/crates/ftui-layout/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/frankentui/crates/ftui-render","manifest":"/data/projects/frankentui/crates/ftui-render/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/frankentui/crates/ftui-runtime","manifest":"/data/projects/frankentui/crates/ftui-runtime/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/frankentui/crates/ftui-style","manifest":"/data/projects/frankentui/crates/ftui-style/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/frankentui/crates/ftui-text","manifest":"/data/projects/frankentui/crates/ftui-text/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/frankentui/crates/ftui-widgets","manifest":"/data/projects/frankentui/crates/ftui-widgets/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/sqlmodel_rust","manifest":"/data/projects/sqlmodel_rust/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/sqlmodel_rust/crates/sqlmodel","manifest":"/data/projects/sqlmodel_rust/crates/sqlmodel/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/sqlmodel_rust/crates/sqlmodel-core","manifest":"/data/projects/sqlmodel_rust/crates/sqlmodel-core/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/sqlmodel_rust/crates/sqlmodel-frankensqlite","manifest":"/data/projects/sqlmodel_rust/crates/sqlmodel-frankensqlite/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/sqlmodel_rust/crates/sqlmodel-macros","manifest":"/data/projects/sqlmodel_rust/crates/sqlmodel-macros/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/sqlmodel_rust/crates/sqlmodel-pool","manifest":"/data/projects/sqlmodel_rust/crates/sqlmodel-pool/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/sqlmodel_rust/crates/sqlmodel-query","manifest":"/data/projects/sqlmodel_rust/crates/sqlmodel-query/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/sqlmodel_rust/crates/sqlmodel-schema","manifest":"/data/projects/sqlmodel_rust/crates/sqlmodel-schema/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false},{"root":"/data/projects/sqlmodel_rust/crates/sqlmodel-session","manifest":"/data/projects/sqlmodel_rust/crates/sqlmodel-session/Cargo.toml","status":"present","reason_code":"RCH-I324","detail":"manifest present and refreshed in current sync","is_primary":false}]}
+[RCH] remote dependency preflight verified 33 roots on vmi1149989
+  [2m2026-05-03T01:49:39.599954Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: env cargo check -p frankenengine-node --all-targets[0m
+    [2;3mat[0m rch/src/hook.rs:5302 [2;3mon[0m ThreadId(1)
+
+[RCH] exec start: env cargo check -p frankenengine-node --all-targets
+  [2m2026-05-03T01:49:39.599986Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting TMPDIR for remote execution (worker-scoped path): /data/tmp -> /data/projects/franken_node/.rch-tmp[0m
+    [2;3mat[0m rch/src/transfer.rs:546 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:49:39.599996Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /tmp/rch_target_franken_node_pane11 -> /data/projects/franken_node/.rch-target-vmi1149989-job-29825454286307341-1777772903207810518-0[0m
+    [2;3mat[0m rch/src/transfer.rs:546 [2;3mon[0m ThreadId(1)
+
+  [2m2026-05-03T01:49:39.600007Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mWrapping command with external timeout protection, [1;32mkind[0m[32m: cargo check, [1;32mtimeout_secs[0m[32m: 1800[0m
+    [2;3mat[0m rch/src/transfer.rs:833 [2;3mon[0m ThreadId(1)
+
+[1m[92m    Updating[0m crates.io index
+[1m[92m     Locking[0m 1 package to latest compatible version
+[1m[33m Downgrading[0m fastapi-rust v0.3.0 (/dp/fastapi_rust/crates/fastapi) -> v0.2.1
+[1m[92m Downloading[0m crates ...
+[1m[92m  Downloaded[0m half v2.7.1
+[1m[92m  Downloaded[0m adler2 v2.0.1
+[1m[92m  Downloaded[0m hmac v0.12.1
+[1m[92m  Downloaded[0m hashbrown v0.17.0
+[1m[92m  Downloaded[0m is_terminal_polyfill v1.70.2
+[1m[92m  Downloaded[0m quick-error v1.2.3
+[1m[92m  Downloaded[0m heck v0.5.0
+[1m[92m  Downloaded[0m hex v0.4.3
+[1m[92m  Downloaded[0m json5 v0.4.1
+[1m[92m  Downloaded[0m idna_adapter v1.2.1
+[1m[92m  Downloaded[0m lazy_static v1.5.0
+[1m[92m  Downloaded[0m plotters-backend v0.3.7
+[1m[92m  Downloaded[0m itoa v1.0.18
+[1m[92m  Downloaded[0m parking v2.2.1
+[1m[92m  Downloaded[0m opaque-debug v0.3.1
+[1m[92m  Downloaded[0m rand_chacha v0.3.1
+[1m[92m  Downloaded[0m predicates-tree v1.0.13
+[1m[92m  Downloaded[0m rand_xorshift v0.4.0
+[1m[92m  Downloaded[0m is-terminal v0.4.17
+[1m[92m  Downloaded[0m predicates-core v1.0.10
+[1m[92m  Downloaded[0m inout v0.1.4
+[1m[92m  Downloaded[0m lru v0.12.5
+[1m[92m  Downloaded[0m matchers v0.2.0
+[1m[92m  Downloaded[0m percent-encoding v2.3.2
+[1m[92m  Downloaded[0m plotters-svg v0.3.7
+[1m[92m  Downloaded[0m pollster v0.4.0
+[1m[92m  Downloaded[0m memoffset v0.9.1
+[1m[92m  Downloaded[0m rustc_version v0.4.1
+[1m[92m  Downloaded[0m rustc-hash v2.1.2
+[1m[92m  Downloaded[0m same-file v1.0.6
+[1m[92m  Downloaded[0m scoped-tls v1.0.1
+[1m[92m  Downloaded[0m nu-ansi-term v0.50.3
+[1m[92m  Downloaded[0m pkcs8 v0.10.2
+[1m[92m  Downloaded[0m potential_utf v0.1.5
+[1m[92m  Downloaded[0m prost-derive v0.13.5
+[1m[92m  Downloaded[0m lock_api v0.4.14
+[1m[92m  Downloaded[0m ppv-lite86 v0.2.21
+[1m[92m  Downloaded[0m oorandom v11.1.5
+[1m[92m  Downloaded[0m scopeguard v1.2.0
+[1m[92m  Downloaded[0m httparse v1.10.1
+[1m[92m  Downloaded[0m once_cell v1.21.4
+[1m[92m  Downloaded[0m lru v0.18.0
+[1m[92m  Downloaded[0m prost v0.13.5
+[1m[92m  Downloaded[0m lru v0.16.4
+[1m[92m  Downloaded[0m iana-time-zone v0.1.65
+[1m[92m  Downloaded[0m hmac v0.13.0
+[1m[92m  Downloaded[0m serde_bytes v0.11.19
+[1m[92m  Downloaded[0m predicates v3.1.4
+[1m[92m  Downloaded[0m serde_spanned v0.6.9
+[1m[92m  Downloaded[0m serde_spanned v1.1.1
+[1m[92m  Downloaded[0m rand_chacha v0.9.0
+[1m[92m  Downloaded[0m rand_core v0.6.4
+[1m[92m  Downloaded[0m pin-project-lite v0.2.17
+[1m[92m  Downloaded[0m poly1305 v0.8.0
+[1m[92m  Downloaded[0m pin-project-internal v1.1.11
+[1m[92m  Downloaded[0m quote v1.0.45
+[1m[92m  Downloaded[0m rusty-fork v0.3.1
+[1m[92m  Downloaded[0m sha1 v0.10.6
+[1m[92m  Downloaded[0m sha1 v0.11.0
+[1m[92m  Downloaded[0m hybrid-array v0.4.10
+[1m[92m  Downloaded[0m pest_generator v2.8.6
+[1m[92m  Downloaded[0m litemap v0.8.2
+[1m[92m  Downloaded[0m password-hash v0.5.0
+[1m[92m  Downloaded[0m parking_lot_core v0.9.12
+[1m[92m  Downloaded[0m rmp-serde v1.3.1
+[1m[92m  Downloaded[0m icu_provider v2.2.0
+[1m[92m  Downloaded[0m signature v2.2.0
+[1m[92m  Downloaded[0m strsim v0.11.1
+[1m[92m  Downloaded[0m subtle v2.6.1
+[1m[92m  Downloaded[0m rand_core v0.9.5
+[1m[92m  Downloaded[0m pest_derive v2.8.6
+[1m[92m  Downloaded[0m rmp v0.8.15
+[1m[92m  Downloaded[0m rustls-pki-types v1.14.0
+[1m[92m  Downloaded[0m rustversion v1.0.22
+[1m[92m  Downloaded[0m sha2 v0.10.9
+[1m[92m  Downloaded[0m stable_deref_trait v1.2.1
+[1m[92m  Downloaded[0m terminal_size v0.4.4
+[1m[92m  Downloaded[0m termtree v0.5.1
+[1m[92m  Downloaded[0m num-traits v0.2.19
+[1m[92m  Downloaded[0m shlex v1.3.0
+[1m[92m  Downloaded[0m signal-hook-registry v1.4.8
+[1m[92m  Downloaded[0m tinyvec_macros v0.1.1
+[1m[92m  Downloaded[0m tokio-macros v2.7.0
+[1m[92m  Downloaded[0m semver v1.0.28
+[1m[92m  Downloaded[0m simd-adler32 v0.3.9
+[1m[92m  Downloaded[0m slab v0.4.12
+[1m[92m  Downloaded[0m toml_datetime v0.6.11
+[1m[92m  Downloaded[0m log v0.4.29
+[1m[92m  Downloaded[0m pin-project v1.1.11
+[1m[92m  Downloaded[0m polling v3.11.0
+[1m[92m  Downloaded[0m parking_lot v0.12.5
+[1m[92m  Downloaded[0m str_indices v0.4.4
+[1m[92m  Downloaded[0m streaming-iterator v0.1.9
+[1m[92m  Downloaded[0m synstructure v0.13.2
+[1m[92m  Downloaded[0m toml_write v0.1.2
+[1m[92m  Downloaded[0m thiserror v2.0.18
+[1m[92m  Downloaded[0m sha2 v0.11.0
+[1m[92m  Downloaded[0m proc-macro2 v1.0.106
+[1m[92m  Downloaded[0m thread_local v1.1.9
+[1m[92m  Downloaded[0m tinystr v0.8.3
+[1m[92m  Downloaded[0m signal-hook v0.4.4
+[1m[92m  Downloaded[0m icu_normalizer v2.2.0
+[1m[92m  Downloaded[0m spki v0.7.3
+[1m[92m  Downloaded[0m toml_datetime v1.1.1+spec-1.1.0
+[1m[92m  Downloaded[0m toml_writer v1.1.1+spec-1.1.0
+[1m[92m  Downloaded[0m tree-sitter-language v0.1.7
+[1m[92m  Downloaded[0m unarray v0.1.4
+[1m[92m  Downloaded[0m unicode-display-width v0.3.0
+[1m[92m  Downloaded[0m loom v0.7.2
+[1m[92m  Downloaded[0m miniz_oxide v0.8.9
+[1m[92m  Downloaded[0m pest_meta v2.8.6
+[1m[92m  Downloaded[0m smallvec v1.15.1
+[1m[92m  Downloaded[0m icu_properties v2.2.0
+[1m[92m  Downloaded[0m rand v0.8.6
+[1m[92m  Downloaded[0m thiserror-impl v2.0.18
+[1m[92m  Downloaded[0m icu_locale_core v2.2.0
+[1m[92m  Downloaded[0m rayon-core v1.13.0
+[1m[92m  Downloaded[0m sharded-slab v0.1.7
+[1m[92m  Downloaded[0m signal-hook v0.3.18
+[1m[92m  Downloaded[0m tracing-log v0.2.0
+[1m[92m  Downloaded[0m universal-hash v0.5.1
+[1m[92m  Downloaded[0m untrusted v0.9.0
+[1m[92m  Downloaded[0m unty-next v0.1.1
+[1m[92m  Downloaded[0m http v1.4.0
+[1m[92m  Downloaded[0m serde_core v1.0.228
+[1m[92m  Downloaded[0m serde_derive v1.0.228
+[1m[92m  Downloaded[0m similar v2.7.0
+[1m[92m  Downloaded[0m socket2 v0.6.3
+[1m[92m  Downloaded[0m toml v0.8.23
+[1m[92m  Downloaded[0m toml_parser v1.1.2+spec-1.1.0
+[1m[92m  Downloaded[0m utf8-zero v0.8.1
+[1m[92m  Downloaded[0m utf8_iter v1.0.4
+[1m[92m  Downloaded[0m utf8parse v0.2.2
+[1m[92m  Downloaded[0m version_check v0.9.5
+[1m[92m  Downloaded[0m icu_collections v2.2.0
+[1m[92m  Downloaded[0m icu_normalizer_data v2.2.0
+[1m[92m  Downloaded[0m rustls-webpki v0.103.13
+[1m[92m  Downloaded[0m tempfile v3.27.0
+[1m[92m  Downloaded[0m tracing-attributes v0.1.31
+[1m[92m  Downloaded[0m visibility v0.1.1
+[1m[92m  Downloaded[0m indexmap v2.14.0
+[1m[92m  Downloaded[0m memchr v2.8.0
+[1m[92m  Downloaded[0m tinytemplate v1.2.1
+[1m[92m  Downloaded[0m wait4 v0.1.3
+[1m[92m  Downloaded[0m serde v1.0.228
+[1m[92m  Downloaded[0m insta v1.47.2
+[1m[92m  Downloaded[0m io-uring v0.7.12
+[1m[92m  Downloaded[0m toml v1.1.2+spec-1.1.0
+[1m[92m  Downloaded[0m rand v0.9.4
+[1m[92m  Downloaded[0m tinyvec v1.11.0
+[1m[92m  Downloaded[0m tracing-core v0.1.36
+[1m[92m  Downloaded[0m web-time v1.1.0
+[1m[92m  Downloaded[0m wait-timeout v0.2.1
+[1m[92m  Downloaded[0m walkdir v2.5.0
+[1m[92m  Downloaded[0m writeable v0.6.3
+[1m[92m  Downloaded[0m zerofrom v0.1.7
+[1m[92m  Downloaded[0m yoke-derive v0.8.2
+[1m[92m  Downloaded[0m aead v0.5.2
+[1m[92m  Downloaded[0m zerofrom-derive v0.1.7
+[1m[92m  Downloaded[0m zeroize_derive v1.4.3
+[1m[92m  Downloaded[0m hashbrown v0.16.1
+[1m[92m  Downloaded[0m which v8.0.2
+[1m[92m  Downloaded[0m toml_edit v0.22.27
+[1m[92m  Downloaded[0m xxhash-rust v0.8.15
+[1m[92m  Downloaded[0m ucd-trie v0.1.7
+[1m[92m  Downloaded[0m unicode-ident v1.0.24
+[1m[92m  Downloaded[0m ureq-proto v0.6.0
+[1m[92m  Downloaded[0m zeroize v1.8.2
+[1m[92m  Downloaded[0m zerovec-derive v0.11.3
+[1m[92m  Downloaded[0m zmij v1.0.21
+[1m[92m  Downloaded[0m anstyle-query v1.1.5
+[1m[92m  Downloaded[0m arrayref v0.3.9
+[1m[92m  Downloaded[0m hashbrown v0.14.5
+[1m[92m  Downloaded[0m hashbrown v0.15.5
+[1m[92m  Downloaded[0m virtue-next v0.1.3
+[1m[92m  Downloaded[0m idna v1.1.0
+[1m[92m  Downloaded[0m plotters v0.3.7
+[1m[92m  Downloaded[0m pest v2.8.6
+[1m[92m  Downloaded[0m assert2-macros v0.4.0
+[1m[92m  Downloaded[0m bincode_derive-next v2.1.0
+[1m[92m  Downloaded[0m anstyle-parse v1.0.0
+[1m[92m  Downloaded[0m anstream v1.0.0
+[1m[92m  Downloaded[0m anstyle v1.0.14
+[1m[92m  Downloaded[0m arrayvec v0.7.6
+[1m[92m  Downloaded[0m bit-set v0.8.0
+[1m[92m  Downloaded[0m block-buffer v0.10.4
+[1m[92m  Downloaded[0m itertools v0.14.0
+[1m[92m  Downloaded[0m regex v1.12.3
+[1m[92m  Downloaded[0m uuid v1.23.1
+[1m[92m  Downloaded[0m block-buffer v0.12.0
+[1m[92m  Downloaded[0m cast v0.3.0
+[1m[92m  Downloaded[0m cfg_aliases v0.2.1
+[1m[92m  Downloaded[0m ciborium-ll v0.2.2
+[1m[92m  Downloaded[0m yoke v0.8.2
+[1m[92m  Downloaded[0m argon2 v0.5.3
+[1m[92m  Downloaded[0m assert2 v0.4.0
+[1m[92m  Downloaded[0m asupersync-macros v0.3.1
+[1m[92m  Downloaded[0m autocfg v1.5.0
+[1m[92m  Downloaded[0m ciborium-io v0.2.2
+[1m[92m  Downloaded[0m hkdf v0.13.0
+[1m[92m  Downloaded[0m bit-vec v0.8.0
+[1m[92m  Downloaded[0m ahash v0.8.12
+[1m[92m  Downloaded[0m assert_cmd v2.2.1
+[1m[92m  Downloaded[0m itertools v0.10.5
+[1m[92m  Downloaded[0m anes v0.1.6
+[1m[92m  Downloaded[0m base64ct v1.8.3
+[1m[92m  Downloaded[0m cfg-if v1.0.4
+[1m[92m  Downloaded[0m chacha20 v0.9.1
+[1m[92m  Downloaded[0m cipher v0.4.4
+[1m[92m  Downloaded[0m serde_json v1.0.149
+[1m[92m  Downloaded[0m url v2.5.8
+[1m[92m  Downloaded[0m bitflags v2.11.1
+[1m[92m  Downloaded[0m typenum v1.20.0
+[1m[92m  Downloaded[0m arbitrary v1.4.2
+[1m[92m  Downloaded[0m yansi v1.0.1
+[1m[92m  Downloaded[0m rayon v1.12.0
+[1m[92m  Downloaded[0m unicode-segmentation v1.13.2
+[1m[92m  Downloaded[0m crc32c v0.6.8
+[1m[92m  Downloaded[0m colorchoice v1.0.5
+[1m[92m  Downloaded[0m ciborium v0.2.2
+[1m[92m  Downloaded[0m cpufeatures v0.3.0
+[1m[92m  Downloaded[0m clap_lex v1.1.0
+[1m[92m  Downloaded[0m clap_derive v4.6.1
+[1m[92m  Downloaded[0m zerocopy-derive v0.8.48
+[1m[92m  Downloaded[0m zerotrie v0.2.4
+[1m[92m  Downloaded[0m anyhow v1.0.102
+[1m[92m  Downloaded[0m crossbeam-queue v0.3.12
+[1m[92m  Downloaded[0m crypto-common v0.1.7
+[1m[92m  Downloaded[0m blake2 v0.10.6
+[1m[92m  Downloaded[0m allocator-api2 v0.2.21
+[1m[92m  Downloaded[0m base64 v0.22.1
+[1m[92m  Downloaded[0m ctrlc v3.5.2
+[1m[92m  Downloaded[0m crypto-common v0.2.1
+[1m[92m  Downloaded[0m difflib v0.4.0
+[1m[92m  Downloaded[0m equivalent v1.0.2
+[1m[92m  Downloaded[0m icu_properties_data v2.2.0
+[1m[92m  Downloaded[0m fs2 v0.4.3
+[1m[92m  Downloaded[0m curve25519-dalek-derive v0.1.1
+[1m[92m  Downloaded[0m derive_arbitrary v1.4.2
+[1m[92m  Downloaded[0m errno v0.3.14
+[1m[92m  Downloaded[0m proptest v1.11.0
+[1m[92m  Downloaded[0m cpufeatures v0.2.17
+[1m[92m  Downloaded[0m cmov v0.5.3
+[1m[92m  Downloaded[0m constant_time_eq v0.4.2
+[1m[92m  Downloaded[0m bincode-next v2.1.0
+[1m[92m  Downloaded[0m criterion-plot v0.5.0
+[1m[92m  Downloaded[0m crossbeam-deque v0.8.6
+[1m[92m  Downloaded[0m tree-sitter-javascript v0.25.0
+[1m[92m  Downloaded[0m ed25519 v2.2.3
+[1m[92m  Downloaded[0m ropey v1.6.1
+[1m[92m  Downloaded[0m ctutils v0.4.2
+[1m[92m  Downloaded[0m digest v0.10.7
+[1m[92m  Downloaded[0m fastrand v2.4.1
+[1m[92m  Downloaded[0m digest v0.11.2
+[1m[92m  Downloaded[0m displaydoc v0.2.5
+[1m[92m  Downloaded[0m either v1.15.0
+[1m[92m  Downloaded[0m const-oid v0.9.6
+[1m[92m  Downloaded[0m console v0.16.3
+[1m[92m  Downloaded[0m crc32fast v1.5.0
+[1m[92m  Downloaded[0m unicode-normalization v0.1.25
+[1m[92m  Downloaded[0m form_urlencoded v1.2.2
+[1m[92m  Downloaded[0m chacha20poly1305 v0.10.1
+[1m[92m  Downloaded[0m clap v4.6.1
+[1m[92m  Downloaded[0m fnv v1.0.7
+[1m[92m  Downloaded[0m ureq v3.3.0
+[1m[92m  Downloaded[0m crossbeam-utils v0.8.21
+[1m[92m  Downloaded[0m fsqlite-error v0.1.2
+[1m[92m  Downloaded[0m franken-evidence v0.3.1
+[1m[92m  Downloaded[0m arc-swap v1.9.1
+[1m[92m  Downloaded[0m find-msvc-tools v0.1.9
+[1m[92m  Downloaded[0m crossbeam-epoch v0.9.18
+[1m[92m  Downloaded[0m franken-kernel v0.2.9
+[1m[92m  Downloaded[0m fsqlite-ast v0.1.2
+[1m[92m  Downloaded[0m franken-evidence v0.2.9
+[1m[92m  Downloaded[0m futures-core v0.3.32
+[1m[92m  Downloaded[0m futures-task v0.3.32
+[1m[92m  Downloaded[0m bumpalo v3.20.2
+[1m[92m  Downloaded[0m bytes v1.11.1
+[1m[92m  Downloaded[0m dashmap v6.1.0
+[1m[92m  Downloaded[0m foldhash v0.1.5
+[1m[92m  Downloaded[0m foldhash v0.2.0
+[1m[92m  Downloaded[0m franken-decision v0.2.9
+[1m[92m  Downloaded[0m franken-decision v0.3.1
+[1m[92m  Downloaded[0m fsqlite-ext-icu v0.1.2
+[1m[92m  Downloaded[0m generic-array v0.14.7
+[1m[92m  Downloaded[0m diff v0.1.13
+[1m[92m  Downloaded[0m futures-io v0.3.32
+[1m[92m  Downloaded[0m cc v1.2.60
+[1m[92m  Downloaded[0m const-oid v0.10.2
+[1m[92m  Downloaded[0m fsqlite-ext-misc v0.1.2
+[1m[92m  Downloaded[0m fsqlite-ext-fts5 v0.1.2
+[1m[92m  Downloaded[0m fsqlite-ext-json v0.1.2
+[1m[92m  Downloaded[0m fsqlite-ext-rtree v0.1.2
+[1m[92m  Downloaded[0m futures-executor v0.3.32
+[1m[92m  Downloaded[0m fsqlite-observability v0.1.2
+[1m[92m  Downloaded[0m zerovec v0.11.6
+[1m[92m  Downloaded[0m tree-sitter v0.26.8
+[1m[92m  Downloaded[0m der v0.7.10
+[1m[92m  Downloaded[0m getrandom v0.2.17
+[1m[92m  Downloaded[0m generator v0.8.8
+[1m[92m  Downloaded[0m tracing-subscriber v0.3.23
+[1m[92m  Downloaded[0m winnow v0.7.15
+[1m[92m  Downloaded[0m ed25519-dalek v2.2.0
+[1m[92m  Downloaded[0m flate2 v1.1.9
+[1m[92m  Downloaded[0m futures-lite v2.6.1
+[1m[92m  Downloaded[0m getrandom v0.3.4
+[1m[92m  Downloaded[0m getrandom v0.4.2
+[1m[92m  Downloaded[0m winnow v1.0.2
+[1m[92m  Downloaded[0m criterion v0.5.1
+[1m[92m  Downloaded[0m franken-kernel v0.3.1
+[1m[92m  Downloaded[0m fsqlite v0.1.2
+[1m[92m  Downloaded[0m fsqlite-vfs v0.1.3
+[1m[92m  Downloaded[0m fsqlite-func v0.1.2
+[1m[92m  Downloaded[0m fsqlite-parser v0.1.2
+[1m[92m  Downloaded[0m fsqlite-planner v0.1.2
+[1m[92m  Downloaded[0m fsqlite-btree v0.1.2
+[1m[92m  Downloaded[0m webpki-roots v1.0.7
+[1m[92m  Downloaded[0m fsqlite-types v0.1.2
+[1m[92m  Downloaded[0m futures-util v0.3.32
+[1m[92m  Downloaded[0m fsqlite-pager v0.1.2
+[1m[92m  Downloaded[0m fsqlite-wal v0.1.2
+[1m[92m  Downloaded[0m fsqlite-vdbe v0.1.2
+[1m[92m  Downloaded[0m nix v0.29.0
+[1m[92m  Downloaded[0m clap_builder v4.6.0
+[1m[92m  Downloaded[0m fsqlite-mvcc v0.1.2
+[1m[92m  Downloaded[0m syn v2.0.117
+[1m[92m  Downloaded[0m aho-corasick v1.1.4
+[1m[92m  Downloaded[0m fsqlite-core v0.1.2
+[1m[92m  Downloaded[0m unicode-width v0.2.2
+[1m[92m  Downloaded[0m blake3 v1.8.4
+[1m[92m  Downloaded[0m nix v0.31.2
+[1m[92m  Downloaded[0m regex-syntax v0.8.10
+[1m[92m  Downloaded[0m rustls v0.23.38
+[1m[92m  Downloaded[0m zerocopy v0.8.48
+[1m[92m  Downloaded[0m chrono v0.4.44
+[1m[92m  Downloaded[0m rustix v1.1.4
+[1m[92m  Downloaded[0m curve25519-dalek v4.1.3
+[1m[92m  Downloaded[0m bstr v1.12.1
+[1m[92m  Downloaded[0m tracing v0.1.44
+[1m[92m  Downloaded[0m regex-automata v0.4.14
+[1m[92m  Downloaded[0m libc v0.2.185
+[1m[92m  Downloaded[0m tokio v1.52.1
+[1m[92m  Downloaded[0m ring v0.17.14
+[1m[92m  Downloaded[0m linux-raw-sys v0.12.1
+[1m[92m  Downloaded[0m asupersync v0.2.9
+[1m[92m  Downloaded[0m asupersync v0.3.1
+[1m[92m   Compiling[0m proc-macro2 v1.0.106
+[1m[92m   Compiling[0m quote v1.0.45
+[1m[92m   Compiling[0m unicode-ident v1.0.24
+[1m[92m   Compiling[0m libc v0.2.185
+[1m[92m    Checking[0m cfg-if v1.0.4
+[1m[92m   Compiling[0m serde_core v1.0.228
+[1m[92m    Checking[0m memchr v2.8.0
+[1m[92m   Compiling[0m serde v1.0.228
+[1m[92m    Checking[0m typenum v1.20.0
+[1m[92m    Checking[0m allocator-api2 v0.2.21
+[1m[92m   Compiling[0m version_check v0.9.5
+[1m[92m   Compiling[0m zmij v1.0.21
+[1m[92m    Checking[0m once_cell v1.21.4
+[1m[92m    Checking[0m equivalent v1.0.2
+[1m[92m    Checking[0m foldhash v0.2.0
+[1m[92m   Compiling[0m serde_json v1.0.149
+[1m[92m    Checking[0m itoa v1.0.18
+[1m[92m    Checking[0m smallvec v1.15.1
+[1m[92m   Compiling[0m autocfg v1.5.0
+[1m[92m    Checking[0m hashbrown v0.17.0
+[1m[92m    Checking[0m pin-project-lite v0.2.17
+[1m[92m   Compiling[0m generic-array v0.14.7
+[1m[92m   Compiling[0m find-msvc-tools v0.1.9
+[1m[92m    Checking[0m regex-syntax v0.8.10
+[1m[92m   Compiling[0m shlex v1.3.0
+[1m[92m   Compiling[0m cc v1.2.60
+[1m[92m    Checking[0m aho-corasick v1.1.4
+[1m[92m   Compiling[0m num-traits v0.2.19
+[1m[92m   Compiling[0m syn v2.0.117
+[1m[92m    Checking[0m tracing-core v0.1.36
+[1m[92m   Compiling[0m rustix v1.1.4
+[1m[92m    Checking[0m indexmap v2.14.0
+[1m[92m   Compiling[0m crossbeam-utils v0.8.21
+[1m[92m    Checking[0m linux-raw-sys v0.12.1
+[1m[92m    Checking[0m getrandom v0.2.17
+[1m[92m    Checking[0m errno v0.3.14
+[1m[92m    Checking[0m log v0.4.29
+[1m[92m    Checking[0m rand_core v0.6.4
+[1m[92m    Checking[0m signal-hook-registry v1.4.8
+[1m[92m   Compiling[0m cfg_aliases v0.2.1
+[1m[92m   Compiling[0m getrandom v0.4.2
+[1m[92m    Checking[0m crypto-common v0.1.7
+[1m[92m    Checking[0m subtle v2.6.1
+[1m[92m   Compiling[0m memoffset v0.9.1
+[1m[92m    Checking[0m fastrand v2.4.1
+[1m[92m    Checking[0m crossbeam-epoch v0.9.18
+[1m[92m   Compiling[0m parking_lot_core v0.9.12
+[1m[92m   Compiling[0m thiserror v2.0.18
+[1m[92m   Compiling[0m nix v0.31.2
+[1m[92m    Checking[0m regex-automata v0.4.14
+[1m[92m    Checking[0m scopeguard v1.2.0
+[1m[92m    Checking[0m futures-core v0.3.32
+[1m[92m    Checking[0m cpufeatures v0.3.0
+[1m[92m    Checking[0m lazy_static v1.5.0
+[1m[92m    Checking[0m lock_api v0.4.14
+[1m[92m    Checking[0m bitflags v2.11.1
+[1m[92m    Checking[0m crossbeam-deque v0.8.6
+[1m[92m    Checking[0m sharded-slab v0.1.7
+[1m[92m    Checking[0m tracing-log v0.2.0
+[1m[92m    Checking[0m thread_local v1.1.9
+[1m[92m    Checking[0m nu-ansi-term v0.50.3
+[1m[92m    Checking[0m base64 v0.22.1
+[1m[92m    Checking[0m slab v0.4.12
+[1m[92m   Compiling[0m virtue-next v0.1.3
+[1m[92m    Checking[0m rmp v0.8.15
+[1m[92m    Checking[0m unty-next v0.1.1
+[1m[92m    Checking[0m parking v2.2.1
+[1m[92m    Checking[0m futures-io v0.3.32
+[1m[92m    Checking[0m parking_lot v0.12.5
+[1m[92m    Checking[0m crossbeam-queue v0.3.12
+[1m[92m    Checking[0m socket2 v0.6.3
+[1m[92m    Checking[0m futures-lite v2.6.1
+[1m[92m    Checking[0m block-buffer v0.10.4
+[1m[92m    Checking[0m cpufeatures v0.2.17
+[1m[92m    Checking[0m foldhash v0.1.5
+[1m[92m    Checking[0m digest v0.10.7
+[1m[92m   Compiling[0m signal-hook v0.3.18
+[1m[92m   Compiling[0m io-uring v0.7.12
+[1m[92m   Compiling[0m bincode_derive-next v2.1.0
+[1m[92m    Checking[0m hashbrown v0.15.5
+[1m[92m   Compiling[0m blake3 v1.8.4
+[1m[92m    Checking[0m sha2 v0.10.9
+[1m[92m    Checking[0m sha1 v0.10.6
+[1m[92m    Checking[0m hmac v0.12.1
+[1m[92m    Checking[0m arrayref v0.3.9
+[1m[92m    Checking[0m constant_time_eq v0.4.2
+[1m[92m    Checking[0m arrayvec v0.7.6
+[1m[92m    Checking[0m xxhash-rust v0.8.15
+[1m[92m   Compiling[0m zerocopy v0.8.48
+[1m[92m   Compiling[0m getrandom v0.3.4
+[1m[92m   Compiling[0m semver v1.0.28
+[1m[92m   Compiling[0m ahash v0.8.12
+[1m[92m   Compiling[0m rustc_version v0.4.1
+[1m[92m   Compiling[0m signal-hook v0.4.4
+[1m[92m   Compiling[0m nix v0.29.0
+[1m[92m    Checking[0m hybrid-array v0.4.10
+[1m[92m    Checking[0m cmov v0.5.3
+[1m[92m    Checking[0m pollster v0.4.0
+[1m[92m   Compiling[0m crc32c v0.6.8
+[1m[92m    Checking[0m matchers v0.2.0
+[1m[92m    Checking[0m const-oid v0.10.2
+[1m[92m    Checking[0m ctutils v0.4.2
+[1m[92m    Checking[0m inout v0.1.4
+[1m[92m   Compiling[0m anyhow v1.0.102
+[1m[92m   Compiling[0m rustversion v1.0.22
+[1m[92m   Compiling[0m synstructure v0.13.2
+[1m[92m    Checking[0m universal-hash v0.5.1
+[1m[92m    Checking[0m crypto-common v0.2.1
+[1m[92m    Checking[0m block-buffer v0.12.0
+[1m[92m    Checking[0m opaque-debug v0.3.1
+[1m[92m    Checking[0m base64ct v1.8.3
+[1m[92m   Compiling[0m crc32fast v1.5.0
+[1m[92m    Checking[0m bytes v1.11.1
+[1m[92m    Checking[0m poly1305 v0.8.0
+[1m[92m    Checking[0m tempfile v3.27.0
+[1m[92m    Checking[0m polling v3.11.0
+[1m[92m    Checking[0m password-hash v0.5.0
+[1m[92m    Checking[0m regex v1.12.3
+[1m[92m    Checking[0m blake2 v0.10.6
+[1m[92m    Checking[0m aead v0.5.2
+[1m[92m    Checking[0m digest v0.11.2
+[1m[92m   Compiling[0m either v1.15.0
+[1m[92m    Checking[0m iana-time-zone v0.1.65
+[1m[92m    Checking[0m sha2 v0.11.0
+[1m[92m    Checking[0m argon2 v0.5.3
+[1m[92m    Checking[0m hmac v0.13.0
+[1m[92m   Compiling[0m ucd-trie v0.1.7
+[1m[92m   Compiling[0m itertools v0.14.0
+[1m[92m    Checking[0m stable_deref_trait v1.2.1
+[1m[92m    Checking[0m sha1 v0.11.0
+[1m[92m    Checking[0m unicode-width v0.2.2
+[1m[92m    Checking[0m unicode-segmentation v1.13.2
+[1m[92m   Compiling[0m pest v2.8.6
+[1m[92m    Checking[0m arc-swap v1.9.1
+[1m[92m    Checking[0m web-time v1.1.0
+[1m[92m   Compiling[0m serde_derive v1.0.228
+[1m[92m   Compiling[0m tracing-attributes v0.1.31
+[1m[92m   Compiling[0m thiserror-impl v2.0.18
+[1m[92m   Compiling[0m pin-project-internal v1.1.11
+[1m[92m   Compiling[0m visibility v0.1.1
+[1m[92m   Compiling[0m zerocopy-derive v0.8.48
+[1m[92m   Compiling[0m zeroize_derive v1.4.3
+[1m[92m   Compiling[0m zerofrom-derive v0.1.7
+[1m[92m    Checking[0m pin-project v1.1.11
+[1m[92m    Checking[0m zeroize v1.8.2
+[1m[92m   Compiling[0m yoke-derive v0.8.2
+[1m[92m    Checking[0m cipher v0.4.4
+[1m[92m   Compiling[0m asupersync-macros v0.3.1
+[1m[92m   Compiling[0m prost-derive v0.13.5
+[1m[92m    Checking[0m tracing v0.1.44
+[1m[92m    Checking[0m chacha20 v0.9.1
+[1m[92m    Checking[0m fsqlite-error v0.1.2
+[1m[92m    Checking[0m tracing-subscriber v0.3.23
+[1m[92m    Checking[0m fsqlite-error v0.1.2 (/dp/frankensqlite/crates/fsqlite-error)
+[1m[92m    Checking[0m chacha20poly1305 v0.10.1
+[1m[92m   Compiling[0m pest_meta v2.8.6
+[1m[92m   Compiling[0m zerovec-derive v0.11.3
+[1m[92m    Checking[0m unicode-display-width v0.3.0
+[1m[92m   Compiling[0m displaydoc v0.2.5
+[1m[92m    Checking[0m zerofrom v0.1.7
+[1m[92m    Checking[0m yoke v0.8.2
+[1m[92m   Compiling[0m pest_generator v2.8.6
+[1m[92m    Checking[0m prost v0.13.5
+[1m[92m    Checking[0m anstyle v1.0.14
+[1m[92m    Checking[0m zerovec v0.11.6
+[1m[92m    Checking[0m writeable v0.6.3
+[1m[92m    Checking[0m bumpalo v3.20.2
+[1m[92m    Checking[0m litemap v0.8.2
+[1m[92m   Compiling[0m tree-sitter-language v0.1.7
+[1m[92m    Checking[0m zerotrie v0.2.4
+[1m[92m   Compiling[0m curve25519-dalek v4.1.3
+[1m[92m   Compiling[0m ring v0.17.14
+[1m[92m   Compiling[0m pest_derive v2.8.6
+[1m[92m    Checking[0m tinystr v0.8.3
+[1m[92m    Checking[0m potential_utf v0.1.5
+[1m[92m   Compiling[0m icu_properties_data v2.2.0
+[1m[92m   Compiling[0m icu_normalizer_data v2.2.0
+[1m[92m    Checking[0m futures-task v0.3.32
+[1m[92m    Checking[0m icu_locale_core v2.2.0
+[1m[92m    Checking[0m utf8_iter v1.0.4
+[1m[92m    Checking[0m fastapi-types v0.3.0 (/dp/fastapi_rust/crates/fastapi-types)
+[1m[92m    Checking[0m utf8parse v0.2.2
+[1m[92m    Checking[0m rmp-serde v1.3.1
+[1m[92m    Checking[0m bincode-next v2.1.0
+[1m[92m    Checking[0m franken-evidence v0.2.9
+[1m[92m    Checking[0m franken-kernel v0.2.9
+[1m[92m    Checking[0m franken-kernel v0.3.1
+[1m[92m    Checking[0m chrono v0.4.44
+[1m[92m    Checking[0m franken-evidence v0.3.1
+[1m[92m    Checking[0m json5 v0.4.1
+[1m[92m    Checking[0m franken-decision v0.2.9
+[1m[92m    Checking[0m icu_provider v2.2.0
+[1m[92m    Checking[0m franken-decision v0.3.1
+[1m[92m    Checking[0m anstyle-parse v1.0.0
+[1m[92m    Checking[0m fastapi-router v0.3.0 (/dp/fastapi_rust/crates/fastapi-router)
+[1m[92m    Checking[0m asupersync v0.2.9
+[1m[92m    Checking[0m icu_collections v2.2.0
+[1m[92m    Checking[0m asupersync v0.3.1
+[1m[92m    Checking[0m futures-util v0.3.32
+[1m[92m   Compiling[0m curve25519-dalek-derive v0.1.1
+[1m[92m    Checking[0m anstyle-query v1.1.5
+[1m[92m    Checking[0m str_indices v0.4.4
+[1m[92m    Checking[0m rustc-hash v2.1.2
+[1m[92m    Checking[0m signature v2.2.0
+[1m[92m    Checking[0m ppv-lite86 v0.2.21
+[1m[92m    Checking[0m colorchoice v1.0.5
+[1m[92m    Checking[0m is_terminal_polyfill v1.70.2
+[1m[92m    Checking[0m hashbrown v0.14.5
+[1m[92m    Checking[0m ftui-core v0.4.0 (/dp/frankentui/crates/ftui-core)
+[1m[92m    Checking[0m anstream v1.0.0
+[1m[92m    Checking[0m rand_chacha v0.3.1
+[1m[92m    Checking[0m rand v0.8.6
+[1m[92m    Checking[0m dashmap v6.1.0
+[1m[92m    Checking[0m futures-executor v0.3.32
+[1m[92m    Checking[0m ed25519 v2.2.3
+[1m[92m    Checking[0m ropey v1.6.1
+[1m[92m    Checking[0m fastapi-openapi v0.3.0 (/dp/fastapi_rust/crates/fastapi-openapi)
+[1m[92m    Checking[0m rustls-pki-types v1.14.0
+[1m[92m    Checking[0m rand_core v0.9.5
+[1m[92m    Checking[0m ftui-render v0.4.0 (/dp/frankentui/crates/ftui-render)
+[1m[92m    Checking[0m ftui-layout v0.4.0 (/dp/frankentui/crates/ftui-layout)
+[1m[92m    Checking[0m lru v0.12.5
+[1m[92m    Checking[0m wait-timeout v0.2.1
+[1m[92m    Checking[0m lru v0.18.0
+[1m[92m    Checking[0m untrusted v0.9.0
+[1m[92m   Compiling[0m heck v0.5.0
+[1m[92m    Checking[0m strsim v0.11.1
+[1m[92m   Compiling[0m httparse v1.10.1
+[1m[92m    Checking[0m clap_lex v1.1.0
+[1m[92m   Compiling[0m clap_derive v4.6.1
+[1m[92m   Compiling[0m sqlmodel-macros v0.2.2 (/dp/sqlmodel_rust/crates/sqlmodel-macros)
+[1m[92m    Checking[0m clap_builder v4.6.0
+[1m[92m    Checking[0m ed25519-dalek v2.2.0
+[1m[92m    Checking[0m icu_normalizer v2.2.0
+[1m[92m    Checking[0m icu_properties v2.2.0
+[1m[92m   Compiling[0m tree-sitter v0.26.8
+[1m[92m    Checking[0m serde_spanned v0.6.9
+[1m[92m    Checking[0m toml_datetime v0.6.11
+[1m[92m    Checking[0m tinyvec_macros v0.1.1
+[1m[92m    Checking[0m ftui-style v0.4.0 (/dp/frankentui/crates/ftui-style)
+[1m[92m    Checking[0m ftui-backend v0.4.0 (/dp/frankentui/crates/ftui-backend)
+[1m[92m    Checking[0m simd-adler32 v0.3.9
+[1m[92m    Checking[0m ftui-i18n v0.4.0 (/dp/frankentui/crates/ftui-i18n)
+[1m[92m    Checking[0m percent-encoding v2.3.2
+[1m[92m    Checking[0m adler2 v2.0.1
+[1m[92m   Compiling[0m rustls v0.23.38
+[1m[92m    Checking[0m winnow v0.7.15
+[1m[92m    Checking[0m toml_write v0.1.2
+[1m[92m    Checking[0m miniz_oxide v0.8.9
+[1m[92m    Checking[0m clap v4.6.1
+[1m[92m    Checking[0m idna_adapter v1.2.1
+[1m[92m    Checking[0m tinyvec v1.11.0
+[1m[92m    Checking[0m rustls-webpki v0.103.13
+[1m[92m    Checking[0m ftui-a11y v0.4.0 (/dp/frankentui/crates/ftui-a11y)
+[1m[92m    Checking[0m http v1.4.0
+[1m[92m    Checking[0m serde_bytes v0.11.19
+[1m[92m   Compiling[0m tree-sitter-javascript v0.25.0
+[1m[92m    Checking[0m hashbrown v0.16.1
+[1m[92m   Compiling[0m rayon-core v1.13.0
+[1m[92m    Checking[0m winnow v1.0.2
+[1m[92m    Checking[0m bit-vec v0.8.0
+[1m[92m    Checking[0m fnv v1.0.7
+[1m[92m    Checking[0m quick-error v1.2.3
+[1m[92m    Checking[0m hex v0.4.3
+[1m[92m    Checking[0m ureq-proto v0.6.0
+[1m[92m    Checking[0m rusty-fork v0.3.1
+[1m[92m    Checking[0m bit-set v0.8.0
+[1m[92m    Checking[0m toml_parser v1.1.2+spec-1.1.0
+[1m[92m    Checking[0m toml_edit v0.22.27
+[1m[92m    Checking[0m ftui-text v0.4.0 (/dp/frankentui/crates/ftui-text)
+[1m[92m    Checking[0m lru v0.16.4
+[1m[92m    Checking[0m frankenengine-extension-host v0.1.0 (/data/projects/franken_engine/crates/franken-extension-host)
+[1m[92m    Checking[0m flate2 v1.1.9
+[1m[92m    Checking[0m unicode-normalization v0.1.25
+[1m[92m    Checking[0m idna v1.1.0
+[1m[92m    Checking[0m form_urlencoded v1.2.2
+[1m[92m    Checking[0m webpki-roots v1.0.7
+[1m[92m    Checking[0m rand_xorshift v0.4.0
+[1m[92m    Checking[0m rand_chacha v0.9.0
+[1m[92m    Checking[0m rand v0.9.4
+[1m[92m    Checking[0m half v2.7.1
+[1m[92m   Compiling[0m derive_arbitrary v1.4.2
+[1m[92m    Checking[0m ftui-runtime v0.4.0 (/dp/frankentui/crates/ftui-runtime)
+[1m[92m   Compiling[0m generator v0.8.8
+[1m[92m   Compiling[0m assert2-macros v0.4.0
+[1m[92m    Checking[0m uuid v1.23.1
+[1m[92m    Checking[0m serde_spanned v1.1.1
+[1m[92m    Checking[0m toml_datetime v1.1.1+spec-1.1.0
+[1m[92m    Checking[0m toml v0.8.23
+[1m[92m    Checking[0m wait4 v0.1.3
+[1m[92m    Checking[0m predicates-core v1.0.10
+[1m[92m    Checking[0m utf8-zero v0.8.1
+[1m[92m    Checking[0m ciborium-io v0.2.2
+[1m[92m    Checking[0m streaming-iterator v0.1.9
+[1m[92m    Checking[0m unarray v0.1.4
+[1m[92m   Compiling[0m frankenengine-node v0.1.0 (/data/projects/franken_node/crates/franken-node)
+[1m[92m    Checking[0m plotters-backend v0.3.7
+[1m[92m    Checking[0m toml_writer v1.1.1+spec-1.1.0
+[1m[92m    Checking[0m proptest v1.11.0
+[1m[92m    Checking[0m plotters-svg v0.3.7
+[1m[92m    Checking[0m ciborium-ll v0.2.2
+[1m[92m    Checking[0m toml v1.1.2+spec-1.1.0
+[1m[92m    Checking[0m arbitrary v1.4.2
+[1m[92m    Checking[0m url v2.5.8
+[1m[92m    Checking[0m ureq v3.3.0
+[1m[92m    Checking[0m itertools v0.10.5
+[1m[92m   Compiling[0m franken-security-macros v0.1.0 (/data/projects/franken_node/crates/franken-security-macros)
+[1m[92m    Checking[0m hkdf v0.13.0
+[1m[92m    Checking[0m ctrlc v3.5.2
+[1m[92m    Checking[0m fs2 v0.4.3
+[1m[92m    Checking[0m which v8.0.2
+[1m[92m    Checking[0m difflib v0.4.0
+[1m[92m    Checking[0m termtree v0.5.1
+[1m[92m   Compiling[0m assert_cmd v2.2.1
+[1m[92m    Checking[0m same-file v1.0.6
+[1m[92m    Checking[0m cast v0.3.0
+[1m[92m    Checking[0m predicates v3.1.4
+[1m[92m    Checking[0m predicates-tree v1.0.13
+[1m[92m    Checking[0m walkdir v2.5.0
+[1m[92m    Checking[0m rayon v1.12.0
+[1m[92m    Checking[0m ciborium v0.2.2
+[1m[92m    Checking[0m plotters v0.3.7
+[1m[92m   Compiling[0m fastapi-macros v0.3.0 (/dp/fastapi_rust/crates/fastapi-macros)
+[1m[92m    Checking[0m criterion-plot v0.5.0
+[1m[92m    Checking[0m tinytemplate v1.2.1
+[1m[92m   Compiling[0m tokio-macros v2.7.0
+[1m[92m    Checking[0m terminal_size v0.4.4
+[1m[92m    Checking[0m bstr v1.12.1
+[1m[92m    Checking[0m is-terminal v0.4.17
+[1m[92m    Checking[0m console v0.16.3
+[1m[92m    Checking[0m similar v2.7.0
+[1m[92m    Checking[0m oorandom v11.1.5
+[1m[92m    Checking[0m anes v0.1.6
+[1m[92m    Checking[0m diff v0.1.13
+[1m[92m    Checking[0m yansi v1.0.1
+[1m[92m    Checking[0m scoped-tls v1.0.1
+[1m[92m    Checking[0m insta v1.47.2
+[1m[92m    Checking[0m tokio v1.52.1
+[1m[92m    Checking[0m loom v0.7.2
+[1m[92m    Checking[0m frankenengine-verifier-sdk v0.1.0 (/data/projects/franken_node/sdk/verifier)
+[1m[92m    Checking[0m assert2 v0.4.0
+[1m[92m    Checking[0m criterion v0.5.1
+[1m[33mwarning[0m[1m: unused import: `Verifier`[0m
+  [1m[94m--> [0msdk/verifier/src/bundle.rs:11:52
+   [1m[94m|[0m
+[1m[94m11[0m [1m[94m|[0m use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+   [1m[94m|[0m                                                    [1m[33m^^^^^^^^[0m
+   [1m[94m|[0m
+   [1m[94m= [0m[1mnote[0m: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+[1m[33mwarning[0m[1m: unused import: `Verifier`[0m
+  [1m[94m--> [0msdk/verifier/src/capsule.rs:25:52
+   [1m[94m|[0m
+[1m[94m25[0m [1m[94m|[0m use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+   [1m[94m|[0m                                                    [1m[33m^^^^^^^^[0m
+
+[1m[92m    Checking[0m ftui-widgets v0.4.0 (/dp/frankentui/crates/ftui-widgets)
+[1m[33mwarning[0m[1m: unused import: `Verifier`[0m
+  [1m[94m--> [0msdk/verifier/src/lib.rs:53:41
+   [1m[94m|[0m
+[1m[94m53[0m [1m[94m|[0m use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+   [1m[94m|[0m                                         [1m[33m^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `push_length_prefixed` is never used[0m
+   [1m[94m--> [0msdk/verifier/src/capsule.rs:211:4
+    [1m[94m|[0m
+[1m[94m211[0m [1m[94m|[0m fn push_length_prefixed(hasher: &mut Sha256, value: &str) {
+    [1m[94m|[0m    [1m[33m^^^^^^^^^^^^^^^^^^^^[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+[1m[33mwarning[0m[1m: function `compute_signing_payload` is never used[0m
+   [1m[94m--> [0msdk/verifier/src/capsule.rs:256:4
+    [1m[94m|[0m
+[1m[94m256[0m [1m[94m|[0m fn compute_signing_payload(capsule: &ReplayCapsule) -> String {
+    [1m[94m|[0m    [1m[33m^^^^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m: `frankenengine-verifier-sdk` (lib) generated 5 warnings (run `cargo fix --lib -p frankenengine-verifier-sdk` to apply 2 suggestions)
+[1m[92m    Checking[0m ftui v0.4.0 (/dp/frankentui/crates/ftui)
+[1m[92m    Checking[0m fsqlite-types v0.1.2
+[1m[92m    Checking[0m fsqlite-types v0.1.2 (/dp/frankensqlite/crates/fsqlite-types)
+[1m[92m    Checking[0m fsqlite-func v0.1.2
+[1m[92m    Checking[0m fsqlite-observability v0.1.2
+[1m[92m    Checking[0m fsqlite-ast v0.1.2
+[1m[92m    Checking[0m fsqlite-vfs v0.1.3
+[1m[92m    Checking[0m fsqlite-parser v0.1.2
+[1m[92m    Checking[0m fsqlite-ext-misc v0.1.2
+[1m[92m    Checking[0m fsqlite-ext-json v0.1.2
+[1m[92m    Checking[0m fsqlite-ext-fts5 v0.1.2
+[1m[92m    Checking[0m fsqlite-ext-rtree v0.1.2
+[1m[92m    Checking[0m fsqlite-ext-icu v0.1.2
+[1m[92m    Checking[0m fsqlite-func v0.1.2 (/dp/frankensqlite/crates/fsqlite-func)
+[1m[92m    Checking[0m fsqlite-observability v0.1.2 (/dp/frankensqlite/crates/fsqlite-observability)
+[1m[92m    Checking[0m fsqlite-ast v0.1.2 (/dp/frankensqlite/crates/fsqlite-ast)
+[1m[92m    Checking[0m fsqlite-wal v0.1.2
+[1m[92m    Checking[0m fsqlite-planner v0.1.2
+[1m[92m    Checking[0m fsqlite-vfs v0.1.3 (/dp/frankensqlite/crates/fsqlite-vfs)
+[1m[92m    Checking[0m fsqlite-parser v0.1.2 (/dp/frankensqlite/crates/fsqlite-parser)
+[1m[92m    Checking[0m fsqlite-ext-icu v0.1.2 (/dp/frankensqlite/crates/fsqlite-ext-icu)
+[1m[92m    Checking[0m fsqlite-ext-rtree v0.1.2 (/dp/frankensqlite/crates/fsqlite-ext-rtree)
+[1m[92m    Checking[0m fsqlite-ext-misc v0.1.2 (/dp/frankensqlite/crates/fsqlite-ext-misc)
+[1m[92m    Checking[0m fsqlite-ext-fts5 v0.1.2 (/dp/frankensqlite/crates/fsqlite-ext-fts5)
+[1m[92m    Checking[0m fsqlite-ext-json v0.1.2 (/dp/frankensqlite/crates/fsqlite-ext-json)
+[1m[92m    Checking[0m fsqlite-wal v0.1.2 (/dp/frankensqlite/crates/fsqlite-wal)
+[1m[92m    Checking[0m fsqlite-planner v0.1.2 (/dp/frankensqlite/crates/fsqlite-planner)
+[1m[92m    Checking[0m fsqlite-pager v0.1.2
+[1m[92m    Checking[0m fsqlite-btree v0.1.2
+[1m[92m    Checking[0m sqlmodel-core v0.2.2 (/dp/sqlmodel_rust/crates/sqlmodel-core)
+[1m[92m    Checking[0m fastapi-core v0.3.0 (/dp/fastapi_rust/crates/fastapi-core)
+[1m[92m    Checking[0m fsqlite-mvcc v0.1.2
+[1m[92m    Checking[0m fsqlite-pager v0.1.2 (/dp/frankensqlite/crates/fsqlite-pager)
+[1m[92m    Checking[0m sqlmodel-query v0.2.2 (/dp/sqlmodel_rust/crates/sqlmodel-query)
+[1m[92m    Checking[0m sqlmodel-pool v0.2.2 (/dp/sqlmodel_rust/crates/sqlmodel-pool)
+[1m[92m    Checking[0m sqlmodel-schema v0.2.2 (/dp/sqlmodel_rust/crates/sqlmodel-schema)
+[1m[92m    Checking[0m sqlmodel-session v0.2.2 (/dp/sqlmodel_rust/crates/sqlmodel-session)
+[1m[92m    Checking[0m fsqlite-btree v0.1.2 (/dp/frankensqlite/crates/fsqlite-btree)
+[1m[92m    Checking[0m fastapi-http v0.3.0 (/dp/fastapi_rust/crates/fastapi-http)
+[1m[92m    Checking[0m sqlmodel v0.2.2 (/dp/sqlmodel_rust/crates/sqlmodel)
+[1m[92m    Checking[0m fsqlite-mvcc v0.1.2 (/dp/frankensqlite/crates/fsqlite-mvcc)
+[1m[92m    Checking[0m fsqlite-vdbe v0.1.2
+[1m[92m    Checking[0m fastapi-rust v0.2.1 (/dp/fastapi_rust/crates/fastapi)
+[1m[92m    Checking[0m fsqlite-core v0.1.2
+[1m[92m    Checking[0m fsqlite-vdbe v0.1.2 (/dp/frankensqlite/crates/fsqlite-vdbe)
+[1m[92m    Checking[0m fsqlite-core v0.1.2 (/dp/frankensqlite/crates/fsqlite-core)
+[1m[92m    Checking[0m fsqlite v0.1.2
+[1m[92m    Checking[0m sqlmodel-frankensqlite v0.2.2 (/dp/sqlmodel_rust/crates/sqlmodel-frankensqlite)
+[1m[91merror[E0599][0m[1m: no associated function or constant named `open_with_page_size` found for struct `fsqlite::Connection` in the current scope[0m
+    [1m[94m--> [0m/dp/sqlmodel_rust/crates/sqlmodel-frankensqlite/src/connection.rs:79:41
+     [1m[94m|[0m
+[1m[94m  79[0m [1m[94m|[0m         let conn = fsqlite::Connection::open_with_page_size(&path, page_size_bytes)
+     [1m[94m|[0m                                         [1m[91m^^^^^^^^^^^^^^^^^^^[0m [1m[91massociated function or constant not found in `fsqlite::Connection`[0m
+     [1m[94m|[0m
+[1m[92mnote[0m: if you're trying to build a new `fsqlite::Connection` consider using one of the following associated functions:
+      fsqlite::Connection::open
+      fsqlite::Connection::open_schema_only
+      fsqlite::Connection::open_schema_only_with_env
+      fsqlite::Connection::open_with_env
+    [1m[94m--> [0m/tmp/rch-cargo-home-vmi1149989-3107744-1777772979599972410/registry/src/index.crates.io-1949cf8c6b5b557f/fsqlite-core-0.1.2/src/connection.rs:3198:5
+     [1m[94m|[0m
+[1m[94m3198[0m [1m[94m|[0m     pub fn open(path: impl Into<String>) -> Result<Self> {
+     [1m[94m|[0m     [1m[92m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m3220[0m [1m[94m|[0m     pub fn open_schema_only(path: impl Into<String>) -> Result<Self> {
+     [1m[94m|[0m     [1m[92m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m3228[0m [1m[94m|[0m     pub fn open_schema_only_with_env(path: impl Into<String>, env: ConnectionEnv) -> Result<Self> {
+     [1m[94m|[0m     [1m[92m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m3353[0m [1m[94m|[0m     pub fn open_with_env(path: impl Into<String>, env: ConnectionEnv) -> Result<Self> {
+     [1m[94m|[0m     [1m[92m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+[1m[96mhelp[0m: there is an associated function `open_with_env` with a similar name
+     [1m[94m|[0m
+[1m[94m  79[0m [91m- [0m        let conn = fsqlite::Connection::[91mopen_with_page_size[0m(&path, page_size_bytes)
+[1m[94m  79[0m [92m+ [0m        let conn = fsqlite::Connection::[92mopen_with_env[0m(&path, page_size_bytes)
+     [1m[94m|[0m
+
+[1mFor more information about this error, try `rustc --explain E0599`.[0m
+[1m[91merror[0m: could not compile `sqlmodel-frankensqlite` (lib) due to 1 previous error
+[1m[33mwarning[0m: build failed, waiting for other jobs to finish...
+  [2m2026-05-03T01:51:21.402593Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=101 in 101802ms[0m
+    [2;3mat[0m rch/src/hook.rs:5426 [2;3mon[0m ThreadId(1)
+
+[RCH] exec done: exit=101 in 101802ms
+[RCH] remote vmi1149989 failed (exit 101)

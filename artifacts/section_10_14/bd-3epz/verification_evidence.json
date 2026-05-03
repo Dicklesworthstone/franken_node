@@ -2,7 +2,7 @@
   "bead_id": "bd-3epz",
   "section": "10.14",
   "title": "Section-wide verification gate: FrankenSQLite Deep-Mined Expansion",
-  "generated_at": "2026-05-02T17:47:31.665405+00:00",
+  "generated_at": "2026-05-03T02:05:13.107418+00:00",
   "verdict": "PASS",
   "gate_pass": true,
   "total_beads": 52,
@@ -36,7 +36,7 @@
       "bead_id": "bd-12n3",
       "title": "Idempotency key derivation from request bytes with epoch binding",
       "evidence_pass": false,
-      "evidence_verdict": "CONTRACT_GATES_PASS_WITH_PARTIAL_REMOTE_VERIFICATION",
+      "evidence_verdict": "CONTRACT_GATES_PASS_WITH_REMOTE_DEPENDENCY_COMPILE_BLOCKED",
       "has_spec_contract": true,
       "has_verification_summary": true,
       "overall_pass": false
@@ -519,8 +519,8 @@
     {
       "bead": "bd-12n3",
       "title": "Idempotency key derivation from request bytes with epoch binding",
-      "verdict": "CONTRACT_GATES_PASS_WITH_PARTIAL_REMOTE_VERIFICATION",
-      "detail": "Evidence verdict: CONTRACT_GATES_PASS_WITH_PARTIAL_REMOTE_VERIFICATION",
+      "verdict": "CONTRACT_GATES_PASS_WITH_REMOTE_DEPENDENCY_COMPILE_BLOCKED",
+      "detail": "Evidence verdict: CONTRACT_GATES_PASS_WITH_REMOTE_DEPENDENCY_COMPILE_BLOCKED",
       "remediation": "Fix verification checks and regenerate evidence artifacts."
     }
   ],
@@ -798,5 +798,5 @@
       "coverage_pct": 98.08
     }
   ],
-  "content_hash": "777efb0270f7b7fef9bb85388e8aca90d795358104069d2bf386b9a432bc3732"
+  "content_hash": "4ec4cca48c92fd342489c06014fd37c40fa987bb042fd17d3a21d68bc191eca6"
 }

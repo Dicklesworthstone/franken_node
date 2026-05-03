@@ -77,4 +77,4 @@
 | GATE-10.14-SUMMARIES | PASS | 52/52 verification summaries found |
 
 ## Gap Analysis
-1. `bd-12n3` - Idempotency key derivation from request bytes with epoch binding | Evidence verdict: CONTRACT_GATES_PASS_WITH_PARTIAL_REMOTE_VERIFICATION | remediation: Fix verification checks and regenerate evidence artifacts.
+1. `bd-12n3` - Idempotency key derivation from request bytes with epoch binding | Evidence verdict: CONTRACT_GATES_PASS_WITH_REMOTE_DEPENDENCY_COMPILE_BLOCKED | remediation: Fix verification checks and regenerate evidence artifacts.

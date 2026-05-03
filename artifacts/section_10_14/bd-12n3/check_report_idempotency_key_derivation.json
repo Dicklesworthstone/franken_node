@@ -119,7 +119,7 @@
     {
       "check": "impl_test_count",
       "passed": true,
-      "detail": "13 tests (>=12)"
+      "detail": "44 tests (>=12)"
     },
     {
       "check": "vectors_exists",

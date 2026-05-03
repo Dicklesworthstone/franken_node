@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use chrono::{DateTime, FixedOffset};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};

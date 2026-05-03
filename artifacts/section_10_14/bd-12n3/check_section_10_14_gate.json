@@ -1,0 +1,802 @@
+{
+  "bead_id": "bd-3epz",
+  "section": "10.14",
+  "title": "Section-wide verification gate: FrankenSQLite Deep-Mined Expansion",
+  "generated_at": "2026-05-03T02:05:13.107418+00:00",
+  "verdict": "PASS",
+  "gate_pass": true,
+  "total_beads": 52,
+  "passing_beads": 51,
+  "failing_beads": 1,
+  "coverage_pct": 98.08,
+  "coverage_threshold_pct": 90.0,
+  "evidence_exists_count": 52,
+  "spec_contract_count": 43,
+  "summary_count": 52,
+  "per_bead_results": [
+    {
+      "bead_id": "bd-126h",
+      "title": "Append-only marker stream for high-impact control events",
+      "evidence_pass": true,
+      "evidence_verdict": "UNKNOWN",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-129f",
+      "title": "O(1) marker lookup by sequence and O(log N) timestamp-to-sequence search",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-12n3",
+      "title": "Idempotency key derivation from request bytes with epoch binding",
+      "evidence_pass": false,
+      "evidence_verdict": "CONTRACT_GATES_PASS_WITH_REMOTE_DEPENDENCY_COMPILE_BLOCKED",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": false
+    },
+    {
+      "bead_id": "bd-15u3",
+      "title": "Guardrail precedence enforcement (decision engine)",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-18ud",
+      "title": "Durability modes (local and quorum)",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-1ayu",
+      "title": "Overhead/rate clamp policy for hardening escalations",
+      "evidence_pass": true,
+      "evidence_verdict": "UNKNOWN",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-1dar",
+      "title": "Optional MMR checkpoints and inclusion/prefix proof APIs for external verifiers",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS_WITH_EXTERNAL_BLOCKERS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-1daz",
+      "title": "Retroactive hardening pipeline (union-only protection artifacts)",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-1fck",
+      "title": "Retrievability-before-eviction proofs",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-1fp4",
+      "title": "Integrity sweep escalation/de-escalation policy",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-1iyx",
+      "title": "Determinism conformance tests",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-1l62",
+      "title": "Durable claim gate on verifiable marker/proof availability",
+      "evidence_pass": true,
+      "evidence_verdict": "UNKNOWN",
+      "has_spec_contract": false,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-1nfu",
+      "title": "Require RemoteCap for network-bound trust/control operations",
+      "evidence_pass": true,
+      "evidence_verdict": "COMPLETED_WITH_BASELINE_WORKSPACE_FAILURES",
+      "has_spec_contract": false,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-1oof",
+      "title": "Trace-witness references for high-impact ledger entries",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-1ru2",
+      "title": "Cancel-Safe Eviction Saga",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-1vsr",
+      "title": "Transition abort semantics on timeout/cancellation with force policy",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-1zym",
+      "title": "Automatic hardening trigger on guardrail rejection evidence",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-206h",
+      "title": "Idempotency dedupe store with at-most-once execution guarantee",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-20uo",
+      "title": "Proof-carrying repair artifacts for decode/reconstruction paths",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-22yy",
+      "title": "DPOR-style schedule exploration gates for control/epoch/remote protocols",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-2573",
+      "title": "",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": false,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-25nl",
+      "title": "",
+      "evidence_pass": true,
+      "evidence_verdict": "IMPLEMENTED_WITH_BLOCKED_FULL_VALIDATION",
+      "has_spec_contract": false,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-27o2",
+      "title": "Profile tuning harness with signed policy updates",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-2808",
+      "title": "Deterministic repro bundle export for control-plane failures",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-29r6",
+      "title": "Deterministic seed derivation",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-29yx",
+      "title": "Suspicious-artifact challenge flow",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-2e73",
+      "title": "Bounded evidence ledger ring buffer",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-2igi",
+      "title": "Bayesian posterior diagnostics for explainable policy ranking",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-2ona",
+      "title": "Evidence-ledger replay validator",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-2qqu",
+      "title": "Virtual Transport Fault Harness",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-2wsm",
+      "title": "Epoch transition barrier protocol across core services with drain requirements",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-2xv8",
+      "title": "",
+      "evidence_pass": true,
+      "evidence_verdict": "COMPLETED_WITH_KNOWN_REPO_GATE_FAILURES",
+      "has_spec_contract": false,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-3a3q",
+      "title": "Anytime-valid guardrail monitor set",
+      "evidence_pass": true,
+      "evidence_verdict": "UNKNOWN",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-3cs3",
+      "title": "Epoch-scoped key derivation for trust artifact authentication",
+      "evidence_pass": true,
+      "evidence_verdict": "UNKNOWN",
+      "has_spec_contract": false,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-3hdv",
+      "title": "Monotonic control epoch in canonical manifest state",
+      "evidence_pass": true,
+      "evidence_verdict": "UNKNOWN",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-3i6c",
+      "title": "FrankenSQLite-inspired conformance suite",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-3ort",
+      "title": "Proof-presence requirement for quarantine promotion",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-3rya",
+      "title": "Monotonic hardening state machine verification",
+      "evidence_pass": true,
+      "evidence_verdict": "UNKNOWN",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-876n",
+      "title": "Cancellation injection at all await points for critical control workflows",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-8tvs",
+      "title": "Per-class object tuning policy",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-ac83",
+      "title": "Remote Computation Registry",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-b9b6",
+      "title": "Durability contract violation diagnostic bundles",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-bq4p",
+      "title": "Controller boundary checks rejecting correctness-semantic mutations",
+      "evidence_pass": true,
+      "evidence_verdict": "UNKNOWN",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-mwvn",
+      "title": "Policy action explainer (diagnostic vs guarantee confidence)",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-nupr",
+      "title": "",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": false,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-nwhn",
+      "title": "Root pointer atomic publication protocol",
+      "evidence_pass": true,
+      "evidence_verdict": "UNKNOWN",
+      "has_spec_contract": false,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-okqy",
+      "title": "L1/L2/L3 tiered trust artifact storage",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-oolt",
+      "title": "Mandatory evidence emission for policy-driven actions",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-qlc6",
+      "title": "Lane-aware scheduler classes with priority policies",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-sddz",
+      "title": "Immutable correctness envelope verification",
+      "evidence_pass": true,
+      "evidence_verdict": "UNKNOWN",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-v4l0",
+      "title": "Remote Bulkhead",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS",
+      "has_spec_contract": true,
+      "has_verification_summary": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-xwk5",
+      "title": "[10.14] Implement fork/divergence detection via marker-id prefix comparison and binary search",
+      "evidence_pass": true,
+      "evidence_verdict": "PASS_WITH_ENV_BLOCKERS",
+      "has_spec_contract": false,
+      "has_verification_summary": true,
+      "overall_pass": true
+    }
+  ],
+  "gate_checks": [
+    {
+      "id": "GATE-10.14-BEAD-COUNT",
+      "status": "PASS",
+      "detail": "52 beads found (minimum 49)"
+    },
+    {
+      "id": "GATE-10.14-EVIDENCE-EXISTS",
+      "status": "PASS",
+      "detail": "52/52 evidence files found"
+    },
+    {
+      "id": "GATE-10.14-COVERAGE-THRESHOLD",
+      "status": "PASS",
+      "detail": "98.08% passing (threshold 90.0%)"
+    },
+    {
+      "id": "GATE-10.14-ALL-BEADS",
+      "status": "FAIL",
+      "detail": "51/52 beads passing"
+    },
+    {
+      "id": "GATE-10.14-SPEC-CONTRACTS",
+      "status": "FAIL",
+      "detail": "43/52 spec contracts found"
+    },
+    {
+      "id": "GATE-10.14-SUMMARIES",
+      "status": "PASS",
+      "detail": "52/52 verification summaries found"
+    }
+  ],
+  "gaps": [
+    {
+      "bead": "bd-12n3",
+      "title": "Idempotency key derivation from request bytes with epoch binding",
+      "verdict": "CONTRACT_GATES_PASS_WITH_REMOTE_DEPENDENCY_COMPILE_BLOCKED",
+      "detail": "Evidence verdict: CONTRACT_GATES_PASS_WITH_REMOTE_DEPENDENCY_COMPILE_BLOCKED",
+      "remediation": "Fix verification checks and regenerate evidence artifacts."
+    }
+  ],
+  "events": [
+    {
+      "event_code": "GATE_10_14_EVALUATION_STARTED",
+      "message": "Section 10.14 gate evaluation started"
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-126h",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-129f",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-12n3",
+      "overall_pass": false
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-15u3",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-18ud",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-1ayu",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-1dar",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-1daz",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-1fck",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-1fp4",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-1iyx",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-1l62",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-1nfu",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-1oof",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-1ru2",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-1vsr",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-1zym",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-206h",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-20uo",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-22yy",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-2573",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-25nl",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-27o2",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-2808",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-29r6",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-29yx",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-2e73",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-2igi",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-2ona",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-2qqu",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-2wsm",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-2xv8",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-3a3q",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-3cs3",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-3hdv",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-3i6c",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-3ort",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-3rya",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-876n",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-8tvs",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-ac83",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-b9b6",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-bq4p",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-mwvn",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-nupr",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-nwhn",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-okqy",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-oolt",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-qlc6",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-sddz",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-v4l0",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_BEAD_CHECKED",
+      "bead": "bd-xwk5",
+      "overall_pass": true
+    },
+    {
+      "event_code": "GATE_10_14_VERDICT_EMITTED",
+      "verdict": "PASS",
+      "total_beads": 52,
+      "passing_beads": 51,
+      "failing_beads": 1,
+      "coverage_pct": 98.08
+    }
+  ],
+  "content_hash": "4ec4cca48c92fd342489c06014fd37c40fa987bb042fd17d3a21d68bc191eca6"
+}
