@@ -23434,7 +23434,7 @@ fn handle_debug_explain(args: &DebugExplainArgs) -> Result<()> {
         };
 
         let expected_key_id = signing_key_id(&public_key);
-        if signed.signer_key_id == expected_key_id {
+        if security::constant_time::ct_eq(&signed.signer_key_id, &expected_key_id) {
             steps.push(ExplainStep::ok(
                 "signer_key",
                 format!("signer_key_id matches public key fingerprint {expected_key_id}"),
