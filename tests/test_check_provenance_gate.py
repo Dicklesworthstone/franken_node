@@ -1,34 +1,43 @@
 """Unit tests for check_provenance_gate.py verification logic."""
 
 import json
-import os
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from scripts import check_provenance_gate
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / "scripts/check_provenance_gate.py"
+FIXTURE_PATH = ROOT / "fixtures/provenance/gate_scenarios.json"
+DECISIONS_PATH = ROOT / "artifacts/section_10_13/bd-3i9o/provenance_gate_decisions.json"
+EVIDENCE_PATH = ROOT / "artifacts/section_10_13/bd-3i9o/verification_evidence.json"
+JSON_DECODER = json.JSONDecoder()
+
+
+def decode_json_object(raw: str) -> dict[str, object]:
+    parsed = JSON_DECODER.decode(raw)
+    if not isinstance(parsed, dict):
+        raise AssertionError("expected JSON object")
+    return parsed
 
 
 class TestProvenanceFixtures(unittest.TestCase):
 
     def test_fixture_exists(self):
-        path = os.path.join(ROOT, "fixtures/provenance/gate_scenarios.json")
-        self.assertTrue(os.path.isfile(path))
+        self.assertTrue(FIXTURE_PATH.is_file())
 
     def test_fixture_has_cases(self):
-        path = os.path.join(ROOT, "fixtures/provenance/gate_scenarios.json")
-        with open(path) as f:
-            data = json.load(f)
+        data = decode_json_object(FIXTURE_PATH.read_text(encoding="utf-8"))
         self.assertIn("cases", data)
         self.assertGreaterEqual(len(data["cases"]), 4)
 
     def test_fixture_has_pass_and_fail(self):
-        path = os.path.join(ROOT, "fixtures/provenance/gate_scenarios.json")
-        with open(path) as f:
-            data = json.load(f)
-        passed = [c for c in data["cases"] if c.get("expected_passed") is True]
-        failed = [c for c in data["cases"] if c.get("expected_passed") is False]
+        data = decode_json_object(FIXTURE_PATH.read_text(encoding="utf-8"))
+        passed = [case for case in data["cases"] if case.get("expected_passed") in {True}]
+        failed = [case for case in data["cases"] if case.get("expected_passed") in {False}]
         self.assertGreater(len(passed), 0)
         self.assertGreater(len(failed), 0)
 
@@ -36,20 +45,15 @@ class TestProvenanceFixtures(unittest.TestCase):
 class TestProvenanceDecisions(unittest.TestCase):
 
     def test_decisions_exist(self):
-        path = os.path.join(ROOT, "artifacts/section_10_13/bd-3i9o/provenance_gate_decisions.json")
-        self.assertTrue(os.path.isfile(path))
+        self.assertTrue(DECISIONS_PATH.is_file())
 
     def test_decisions_valid(self):
-        path = os.path.join(ROOT, "artifacts/section_10_13/bd-3i9o/provenance_gate_decisions.json")
-        with open(path) as f:
-            data = json.load(f)
+        data = decode_json_object(DECISIONS_PATH.read_text(encoding="utf-8"))
         self.assertIn("decisions", data)
         self.assertGreaterEqual(len(data["decisions"]), 2)
 
     def test_decisions_have_both_outcomes(self):
-        path = os.path.join(ROOT, "artifacts/section_10_13/bd-3i9o/provenance_gate_decisions.json")
-        with open(path) as f:
-            data = json.load(f)
+        data = decode_json_object(DECISIONS_PATH.read_text(encoding="utf-8"))
         passed = [d for d in data["decisions"] if d["passed"]]
         failed = [d for d in data["decisions"] if not d["passed"]]
         self.assertGreater(len(passed), 0)
@@ -59,10 +63,9 @@ class TestProvenanceDecisions(unittest.TestCase):
 class TestProvenanceImplementation(unittest.TestCase):
 
     def setUp(self):
-        self.impl_path = os.path.join(ROOT, "crates/franken-node/src/supply_chain/provenance_gate.rs")
-        self.assertTrue(os.path.isfile(self.impl_path))
-        with open(self.impl_path) as f:
-            self.content = f.read()
+        self.impl_path = ROOT / "crates/franken-node/src/supply_chain/provenance_gate.rs"
+        self.assertTrue(self.impl_path.is_file())
+        self.content = self.impl_path.read_text(encoding="utf-8")
 
     def test_has_provenance_policy(self):
         self.assertIn("struct ProvenancePolicy", self.content)
@@ -93,10 +96,9 @@ class TestProvenanceImplementation(unittest.TestCase):
 class TestProvenanceCheckerLogic(unittest.TestCase):
 
     def test_cargo_harness_wires_security_test(self):
-        harness_path = os.path.join(ROOT, "crates/franken-node/tests/attestation_gate.rs")
-        self.assertTrue(os.path.isfile(harness_path))
-        with open(harness_path) as f:
-            content = f.read()
+        harness_path = ROOT / "crates/franken-node/tests/attestation_gate.rs"
+        self.assertTrue(harness_path.is_file())
+        content = harness_path.read_text(encoding="utf-8")
         self.assertIn("../../../tests/security/attestation_gate.rs", content)
 
     def test_parse_rust_test_summary_handles_singular_and_plural(self):
@@ -177,6 +179,7 @@ test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
             text=True,
             timeout=3600,
             cwd=check_provenance_gate.ROOT,
+            check=False,
         )
         self.assertEqual(summary["returncode"], 0)
         self.assertEqual(summary["passed"], 2)
@@ -207,6 +210,7 @@ test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
             text=True,
             timeout=3600,
             cwd=check_provenance_gate.ROOT,
+            check=False,
         )
         self.assertEqual(summary["returncode"], 0)
         self.assertEqual(summary["passed"], 1)
@@ -215,10 +219,9 @@ test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
 class TestProvenanceSpec(unittest.TestCase):
 
     def setUp(self):
-        self.spec_path = os.path.join(ROOT, "docs/specs/section_10_13/bd-3i9o_contract.md")
-        self.assertTrue(os.path.isfile(self.spec_path))
-        with open(self.spec_path) as f:
-            self.content = f.read()
+        self.spec_path = ROOT / "docs/specs/section_10_13/bd-3i9o_contract.md"
+        self.assertTrue(self.spec_path.is_file())
+        self.content = self.spec_path.read_text(encoding="utf-8")
 
     def test_has_invariants(self):
         for inv in ["INV-PROV-REQUIRED-ATTEST", "INV-PROV-BUILD-ASSURANCE",
@@ -229,6 +232,40 @@ class TestProvenanceSpec(unittest.TestCase):
         for code in ["PROV_ATTEST_MISSING", "PROV_ASSURANCE_LOW",
                      "PROV_BUILDER_UNTRUSTED", "PROV_POLICY_INVALID"]:
             self.assertIn(code, self.content, f"Missing error code {code}")
+
+
+class TestProvenanceCli(unittest.TestCase):
+
+    def test_json_mode_is_structural_and_machine_readable(self):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--json"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        evidence = decode_json_object(result.stdout)
+        statuses = {check["id"]: check["status"] for check in evidence["checks"]}
+
+        self.assertEqual(evidence["gate"], "provenance_gate_verification")
+        self.assertEqual(evidence["mode"], "structural")
+        self.assertEqual(statuses["PG-TESTS"], "SKIP")
+        self.assertEqual(evidence["summary"]["skipped_checks"], 1)
+        self.assertNotIn("bd-3i9o:", result.stdout)
+
+    def test_json_mode_does_not_rewrite_evidence_artifact(self):
+        before = EVIDENCE_PATH.read_text(encoding="utf-8")
+        subprocess.run(
+            [sys.executable, str(SCRIPT), "--json"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        after = EVIDENCE_PATH.read_text(encoding="utf-8")
+        self.assertEqual(before, after)
 
 
 if __name__ == "__main__":
