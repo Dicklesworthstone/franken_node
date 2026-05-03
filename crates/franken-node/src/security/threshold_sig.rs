@@ -28,10 +28,16 @@ const ED25519_SIGNATURE_HEX_LEN: usize = 128;
 const MAX_THRESHOLD_IDENTIFIER_BYTES: usize = 4096;
 const MAX_SEEN_KEY_PREALLOC: usize = 64;
 const SIGNING_MESSAGE_DOMAIN_LEN: usize = 24;
-const SIGNING_MESSAGE_DOMAIN: &[u8; SIGNING_MESSAGE_DOMAIN_LEN] = b"threshold_sig_verify_v1:";
+const SIGNING_MESSAGE_DOMAIN: &[u8; SIGNING_MESSAGE_DOMAIN_LEN] = b"threshold_sig_verify_v2:";
+const INLINE_SIGNING_MESSAGE_IDENTIFIER_BYTES: usize = 128;
 const INLINE_SIGNING_MESSAGE_CONTENT_HASH_BYTES: usize = 64;
-const INLINE_SIGNING_MESSAGE_BYTES: usize =
-    SIGNING_MESSAGE_DOMAIN_LEN + 8 + INLINE_SIGNING_MESSAGE_CONTENT_HASH_BYTES;
+const INLINE_SIGNING_MESSAGE_BYTES: usize = SIGNING_MESSAGE_DOMAIN_LEN
+    + 8
+    + INLINE_SIGNING_MESSAGE_IDENTIFIER_BYTES
+    + 8
+    + INLINE_SIGNING_MESSAGE_IDENTIFIER_BYTES
+    + 8
+    + INLINE_SIGNING_MESSAGE_CONTENT_HASH_BYTES;
 
 /// Threshold configuration: k-of-n quorum.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -401,13 +407,25 @@ fn digest_prefix_u64(digest: &[u8]) -> u64 {
     u64::from_le_bytes(prefix)
 }
 
+fn extend_len_prefixed_field(msg: &mut Vec<u8>, value: &str) {
+    let value_len = u64::try_from(value.len()).unwrap_or(u64::MAX);
+    msg.extend_from_slice(&value_len.to_le_bytes());
+    msg.extend_from_slice(value.as_bytes());
+}
+
 /// Build the domain-separated message for signing/verification.
-fn build_signing_message(content_hash: &str) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(SIGNING_MESSAGE_DOMAIN.len() + 8 + content_hash.len());
+fn build_signing_message(artifact_id: &str, connector_id: &str, content_hash: &str) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(
+        SIGNING_MESSAGE_DOMAIN.len()
+            + 24
+            + artifact_id.len()
+            + connector_id.len()
+            + content_hash.len(),
+    );
     msg.extend_from_slice(SIGNING_MESSAGE_DOMAIN);
-    let content_hash_len = u64::try_from(content_hash.len()).unwrap_or(u64::MAX);
-    msg.extend_from_slice(&content_hash_len.to_le_bytes());
-    msg.extend_from_slice(content_hash.as_bytes());
+    extend_len_prefixed_field(&mut msg, artifact_id);
+    extend_len_prefixed_field(&mut msg, connector_id);
+    extend_len_prefixed_field(&mut msg, content_hash);
     msg
 }
 
@@ -420,15 +438,34 @@ enum SigningMessage {
 }
 
 impl SigningMessage {
-    fn new(content_hash: &str) -> Self {
-        if content_hash.len() > INLINE_SIGNING_MESSAGE_CONTENT_HASH_BYTES {
-            return Self::Heap(build_signing_message(content_hash));
+    fn new(artifact_id: &str, connector_id: &str, content_hash: &str) -> Self {
+        if artifact_id.len() > INLINE_SIGNING_MESSAGE_IDENTIFIER_BYTES
+            || connector_id.len() > INLINE_SIGNING_MESSAGE_IDENTIFIER_BYTES
+            || content_hash.len() > INLINE_SIGNING_MESSAGE_CONTENT_HASH_BYTES
+        {
+            return Self::Heap(build_signing_message(
+                artifact_id,
+                connector_id,
+                content_hash,
+            ));
         }
 
         let mut bytes = [0_u8; INLINE_SIGNING_MESSAGE_BYTES];
         let mut len = 0;
         bytes[len..len + SIGNING_MESSAGE_DOMAIN_LEN].copy_from_slice(SIGNING_MESSAGE_DOMAIN);
         len += SIGNING_MESSAGE_DOMAIN_LEN;
+
+        let artifact_id_len = u64::try_from(artifact_id.len()).unwrap_or(u64::MAX);
+        bytes[len..len + 8].copy_from_slice(&artifact_id_len.to_le_bytes());
+        len += 8;
+        bytes[len..len + artifact_id.len()].copy_from_slice(artifact_id.as_bytes());
+        len += artifact_id.len();
+
+        let connector_id_len = u64::try_from(connector_id.len()).unwrap_or(u64::MAX);
+        bytes[len..len + 8].copy_from_slice(&connector_id_len.to_le_bytes());
+        len += 8;
+        bytes[len..len + connector_id.len()].copy_from_slice(connector_id.as_bytes());
+        len += connector_id.len();
 
         let content_hash_len = u64::try_from(content_hash.len()).unwrap_or(u64::MAX);
         bytes[len..len + 8].copy_from_slice(&content_hash_len.to_le_bytes());
@@ -565,8 +602,14 @@ fn parse_signature(signature_hex: &str) -> Option<Signature> {
 }
 
 /// Verify a partial signature using Ed25519.
-fn verify_signature(key: &SignerKey, content_hash: &str, sig: &PartialSignature) -> bool {
-    let message = build_signing_message(content_hash);
+fn verify_signature(
+    key: &SignerKey,
+    artifact_id: &str,
+    connector_id: &str,
+    content_hash: &str,
+    sig: &PartialSignature,
+) -> bool {
+    let message = build_signing_message(artifact_id, connector_id, content_hash);
     verify_signature_with_message(key, &message, sig)
 }
 
@@ -658,12 +701,18 @@ impl PendingFailure<'_> {
     }
 }
 
-/// Create an Ed25519 signature for a content hash.
+/// Create an Ed25519 signature for a concrete publication context.
 ///
 /// Requires the private signing key. The corresponding public key must be
 /// registered in the threshold config for the signature to verify.
-pub fn sign(signing_key: &SigningKey, key_id: &str, content_hash: &str) -> PartialSignature {
-    let message = SigningMessage::new(content_hash);
+pub fn sign(
+    signing_key: &SigningKey,
+    key_id: &str,
+    artifact_id: &str,
+    connector_id: &str,
+    content_hash: &str,
+) -> PartialSignature {
+    let message = SigningMessage::new(artifact_id, connector_id, content_hash);
     let signature = signing_key.sign(message.as_slice());
     PartialSignature {
         signer_id: key_id.to_string(),
@@ -820,8 +869,13 @@ fn verify_threshold_with_validated_artifact(
             continue;
         };
 
-        let message_bytes =
-            message_bytes.get_or_insert_with(|| SigningMessage::new(&artifact.content_hash));
+        let message_bytes = message_bytes.get_or_insert_with(|| {
+            SigningMessage::new(
+                &artifact.artifact_id,
+                &artifact.connector_id,
+                &artifact.content_hash,
+            )
+        });
         if !verify_parsed_signature_with_key(verifying_key, message_bytes.as_slice(), &signature) {
             if first_failure.is_none() {
                 first_failure = Some(PendingFailure::InvalidSignature(&sig.signer_id));
@@ -908,6 +962,19 @@ mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
 
+    const TEST_ARTIFACT_ID: &str = "art-1";
+    const TEST_CONNECTOR_ID: &str = "conn-1";
+
+    fn test_sign(signing_key: &SigningKey, key_id: &str, content_hash: &str) -> PartialSignature {
+        sign(
+            signing_key,
+            key_id,
+            TEST_ARTIFACT_ID,
+            TEST_CONNECTOR_ID,
+            content_hash,
+        )
+    }
+
     /// Deterministically generate an Ed25519 signing key from an index.
     fn test_signing_key(i: u32) -> SigningKey {
         let mut h = Sha256::new();
@@ -957,11 +1024,11 @@ mod tests {
             .iter()
             .zip(config.signer_keys.iter())
             .take(count)
-            .map(|(sk, key)| sign(sk, &key.key_id, hash))
+            .map(|(sk, key)| test_sign(sk, &key.key_id, hash))
             .collect();
         PublicationArtifact {
-            artifact_id: "art-1".into(),
-            connector_id: "conn-1".into(),
+            artifact_id: TEST_ARTIFACT_ID.into(),
+            connector_id: TEST_CONNECTOR_ID.into(),
             content_hash: hash.to_string(),
             signatures: sigs,
         }
@@ -1116,7 +1183,7 @@ mod tests {
             signing_key.verifying_key().to_bytes()
         );
 
-        let signature = sign(&signing_key, "signer-7", "hash-abc");
+        let signature = test_sign(&signing_key, "signer-7", "hash-abc");
         let Some(parsed_signature) = parse_signature(&signature.signature_hex) else {
             assert!(false, "signature should parse");
             return;
@@ -1132,12 +1199,10 @@ mod tests {
 
         assert_eq!(parsed_signature.to_bytes(), legacy_signature_bytes);
 
-        let message = build_signing_message("hash-abc");
-        assert!(
-            parsed_key
-                .verify_strict(&message, &parsed_signature)
-                .is_ok()
-        );
+        let message = build_signing_message(TEST_ARTIFACT_ID, TEST_CONNECTOR_ID, "hash-abc");
+        assert!(parsed_key
+            .verify_strict(&message, &parsed_signature)
+            .is_ok());
     }
 
     #[test]
@@ -1251,8 +1316,8 @@ mod tests {
             connector_id: "conn-1".into(),
             content_hash: "hash-abc".into(),
             signatures: vec![
-                sign(&sks[0], &config.signer_keys[0].key_id, "hash-abc"),
-                sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc"),
+                test_sign(&sks[0], &config.signer_keys[0].key_id, "hash-abc"),
+                test_sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc"),
             ],
         };
 
@@ -1337,7 +1402,7 @@ mod tests {
         // Add same signer again
         push_bounded(
             &mut artifact.signatures,
-            sign(&sks[0], &config.signer_keys[0].key_id, "hash-abc"),
+            test_sign(&sks[0], &config.signer_keys[0].key_id, "hash-abc"),
             MAX_SIGNATURES,
         );
         let result = verify_threshold(&config, &artifact, "t7", "ts");
@@ -1356,7 +1421,7 @@ mod tests {
         let (sks, config) = test_config(2, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
 
-        let mut replay = sign(&sks[0], &config.signer_keys[0].key_id, "hash-abc");
+        let mut replay = test_sign(&sks[0], &config.signer_keys[0].key_id, "hash-abc");
         replay.signer_id = "signer-0-alias".to_string();
         push_bounded(&mut artifact.signatures, replay, MAX_SIGNATURES);
 
@@ -1374,7 +1439,7 @@ mod tests {
         let (sks, config) = test_config(2, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
 
-        let mut replay = sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
+        let mut replay = test_sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
         replay.signer_id = "signer-0".to_string();
         push_bounded(&mut artifact.signatures, replay, MAX_SIGNATURES);
 
@@ -1403,9 +1468,13 @@ mod tests {
 
     #[test]
     fn signing_message_layout_is_domain_separated_and_length_prefixed() {
-        let message = build_signing_message("hash");
+        let message = build_signing_message("art", "conn", "hash");
         let mut expected = Vec::new();
         expected.extend_from_slice(SIGNING_MESSAGE_DOMAIN);
+        expected.extend_from_slice(&3_u64.to_le_bytes());
+        expected.extend_from_slice(b"art");
+        expected.extend_from_slice(&4_u64.to_le_bytes());
+        expected.extend_from_slice(b"conn");
         expected.extend_from_slice(&4_u64.to_le_bytes());
         expected.extend_from_slice(b"hash");
 
@@ -1415,24 +1484,19 @@ mod tests {
     #[test]
     fn inline_signing_message_matches_vec_layout_for_digest_sized_hashes() {
         let content_hash = "a".repeat(INLINE_SIGNING_MESSAGE_CONTENT_HASH_BYTES);
-        let inline_message = SigningMessage::new(&content_hash);
-        let expected = build_signing_message(&content_hash);
+        let inline_message =
+            SigningMessage::new(TEST_ARTIFACT_ID, TEST_CONNECTOR_ID, &content_hash);
+        let expected = build_signing_message(TEST_ARTIFACT_ID, TEST_CONNECTOR_ID, &content_hash);
 
-        assert!(matches!(
-            inline_message,
-            SigningMessage::Inline {
-                len: INLINE_SIGNING_MESSAGE_BYTES,
-                ..
-            }
-        ));
+        assert!(matches!(inline_message, SigningMessage::Inline { .. }));
         assert_eq!(inline_message.as_slice(), expected.as_slice());
     }
 
     #[test]
     fn oversized_signing_message_uses_heap_layout_without_changing_bytes() {
         let content_hash = "a".repeat(INLINE_SIGNING_MESSAGE_CONTENT_HASH_BYTES + 1);
-        let heap_message = SigningMessage::new(&content_hash);
-        let expected = build_signing_message(&content_hash);
+        let heap_message = SigningMessage::new(TEST_ARTIFACT_ID, TEST_CONNECTOR_ID, &content_hash);
+        let expected = build_signing_message(TEST_ARTIFACT_ID, TEST_CONNECTOR_ID, &content_hash);
 
         assert!(matches!(heap_message, SigningMessage::Heap(_)));
         assert_eq!(heap_message.as_slice(), expected.as_slice());
@@ -1441,28 +1505,45 @@ mod tests {
     #[test]
     fn sign_deterministic() {
         let sk = test_signing_key(0);
-        let s1 = sign(&sk, "signer-0", "hash");
-        let s2 = sign(&sk, "signer-0", "hash");
+        let s1 = test_sign(&sk, "signer-0", "hash");
+        let s2 = test_sign(&sk, "signer-0", "hash");
         assert_eq!(s1.signature_hex, s2.signature_hex);
     }
 
     #[test]
     fn sign_different_for_different_hashes() {
         let sk = test_signing_key(0);
-        let s1 = sign(&sk, "signer-0", "hash-a");
-        let s2 = sign(&sk, "signer-0", "hash-b");
+        let s1 = test_sign(&sk, "signer-0", "hash-a");
+        let s2 = test_sign(&sk, "signer-0", "hash-b");
         assert_ne!(s1.signature_hex, s2.signature_hex);
+    }
+
+    #[test]
+    fn sign_different_for_different_publication_contexts() {
+        let sk = test_signing_key(0);
+        let by_artifact = sign(&sk, "signer-0", "art-a", TEST_CONNECTOR_ID, "hash");
+        let other_artifact = sign(&sk, "signer-0", "art-b", TEST_CONNECTOR_ID, "hash");
+        let other_connector = sign(&sk, "signer-0", "art-a", "conn-b", "hash");
+
+        assert_ne!(by_artifact.signature_hex, other_artifact.signature_hex);
+        assert_ne!(by_artifact.signature_hex, other_connector.signature_hex);
     }
 
     #[test]
     fn signature_verification_helpers_agree_on_valid_and_invalid_signatures() {
         let (sks, config) = test_config(1, 1);
         let key = &config.signer_keys[0];
-        let valid_signature = sign(&sks[0], &key.key_id, "hash-abc");
-        let message = build_signing_message("hash-abc");
+        let valid_signature = test_sign(&sks[0], &key.key_id, "hash-abc");
+        let message = build_signing_message(TEST_ARTIFACT_ID, TEST_CONNECTOR_ID, "hash-abc");
         let parsed_key = parse_verifying_key(&key.public_key_hex).unwrap();
 
-        assert!(verify_signature(key, "hash-abc", &valid_signature));
+        assert!(verify_signature(
+            key,
+            TEST_ARTIFACT_ID,
+            TEST_CONNECTOR_ID,
+            "hash-abc",
+            &valid_signature
+        ));
         assert!(verify_signature_with_message(
             key,
             &message,
@@ -1480,7 +1561,13 @@ mod tests {
             signature_hex: "deadbeef".to_string(),
         };
 
-        assert!(!verify_signature(key, "hash-abc", &invalid_signature));
+        assert!(!verify_signature(
+            key,
+            TEST_ARTIFACT_ID,
+            TEST_CONNECTOR_ID,
+            "hash-abc",
+            &invalid_signature
+        ));
         assert!(!verify_signature_with_message(
             key,
             &message,
@@ -1640,7 +1727,7 @@ mod tests {
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
         push_bounded(
             &mut artifact.signatures,
-            sign(&sks[1], &config.signer_keys[1].key_id, "hash-other"),
+            test_sign(&sks[1], &config.signer_keys[1].key_id, "hash-other"),
             MAX_SIGNATURES,
         );
 
@@ -1671,7 +1758,7 @@ mod tests {
         );
         push_bounded(
             &mut artifact.signatures,
-            sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc"),
+            test_sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc"),
             MAX_SIGNATURES,
         );
 
@@ -1688,7 +1775,7 @@ mod tests {
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 2);
         push_bounded(
             &mut artifact.signatures,
-            sign(&sks[0], &config.signer_keys[0].key_id, "hash-abc"),
+            test_sign(&sks[0], &config.signer_keys[0].key_id, "hash-abc"),
             MAX_SIGNATURES,
         );
 
@@ -1787,7 +1874,7 @@ mod tests {
     fn signer_id_case_mismatch_rejected_even_with_valid_key_signature() {
         let (sks, config) = test_config(2, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
-        let mut replay = sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
+        let mut replay = test_sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
         replay.signer_id = "Signer-1".to_string();
         push_bounded(&mut artifact.signatures, replay, MAX_SIGNATURES);
 
@@ -1869,7 +1956,7 @@ mod tests {
     fn empty_signer_id_for_known_key_is_rejected() {
         let (sks, config) = test_config(2, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
-        let mut detached_identity = sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
+        let mut detached_identity = test_sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
         detached_identity.signer_id.clear();
         push_bounded(&mut artifact.signatures, detached_identity, MAX_SIGNATURES);
 
@@ -1889,7 +1976,7 @@ mod tests {
     fn whitespace_key_id_is_unknown_even_when_signature_bytes_are_valid() {
         let (sks, config) = test_config(2, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
-        let mut shifted_key = sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
+        let mut shifted_key = test_sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
         shifted_key.signer_id = "signer-1 ".to_string();
         shifted_key.key_id = "signer-1 ".to_string();
         push_bounded(&mut artifact.signatures, shifted_key, MAX_SIGNATURES);
@@ -2074,7 +2161,7 @@ mod tests {
     fn known_signer_label_with_unknown_key_id_is_unknown() {
         let (sks, config) = test_config(2, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
-        let mut detached = sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
+        let mut detached = test_sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
         detached.key_id = "signer-missing".to_string();
         push_bounded(&mut artifact.signatures, detached, MAX_SIGNATURES);
 
@@ -2094,7 +2181,7 @@ mod tests {
     fn signature_replayed_under_different_known_key_is_rejected() {
         let (sks, config) = test_config(2, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
-        let mut replay = sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
+        let mut replay = test_sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
         replay.signer_id = "signer-2".to_string();
         replay.key_id = "signer-2".to_string();
         push_bounded(&mut artifact.signatures, replay, MAX_SIGNATURES);
@@ -2179,7 +2266,7 @@ mod tests {
         assert_eq!(result.valid_signatures, 1);
 
         // Cross-message signature replay attack
-        let valid_sig_hash_a = sign(&sks[1], &config.signer_keys[1].key_id, "hash-a");
+        let valid_sig_hash_a = test_sign(&sks[1], &config.signer_keys[1].key_id, "hash-a");
         let mut replay_artifact = signed_artifact(&sks, &config, "hash-b", 1);
         push_bounded(
             &mut replay_artifact.signatures,
@@ -2196,7 +2283,7 @@ mod tests {
         assert_eq!(result.valid_signatures, 1);
 
         // Signature malleability attack (flipping bits to try different valid points)
-        let valid_sig = sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
+        let valid_sig = test_sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
         let mut malleable_bytes = hex::decode(&valid_sig.signature_hex).unwrap();
         malleable_bytes[0] ^= 0x01; // Flip a bit
         push_bounded(
@@ -2215,7 +2302,11 @@ mod tests {
 
         // Public key substitution attack (valid signature for wrong key)
         let (other_sks, _) = test_keys(1);
-        let wrong_key_sig = other_sks[0].sign(&build_signing_message("hash-abc"));
+        let wrong_key_sig = other_sks[0].sign(&build_signing_message(
+            TEST_ARTIFACT_ID,
+            TEST_CONNECTOR_ID,
+            "hash-abc",
+        ));
         push_bounded(
             &mut artifact.signatures,
             PartialSignature {
@@ -2236,7 +2327,7 @@ mod tests {
         let (sks, config) = test_config(3, 5);
 
         // Attempt to bypass threshold by using duplicate keys with different signer IDs
-        let valid_sig = sign(&sks[0], &config.signer_keys[0].key_id, "hash-abc");
+        let valid_sig = test_sign(&sks[0], &config.signer_keys[0].key_id, "hash-abc");
         let mut duplicate_votes = Vec::new();
 
         // Try to use same key signature with different signer aliases
@@ -2267,8 +2358,8 @@ mod tests {
         let mut replay_artifact = signed_artifact(&sks, &config, "hash-abc", 2);
 
         // Add replayed signatures under bogus identities
-        let sig1 = sign(&sks[0], &config.signer_keys[0].key_id, "hash-abc");
-        let sig2 = sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
+        let sig1 = test_sign(&sks[0], &config.signer_keys[0].key_id, "hash-abc");
+        let sig2 = test_sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
 
         replay_artifact.signatures.extend([
             PartialSignature {
@@ -2797,7 +2888,8 @@ mod tests {
         assert_eq!(result.valid_signatures, 0);
 
         // Attempt length extension attack
-        let mut extended_message = build_signing_message(raw_content);
+        let mut extended_message =
+            build_signing_message(TEST_ARTIFACT_ID, TEST_CONNECTOR_ID, raw_content);
         extended_message.extend_from_slice(b"evil_extension");
 
         let extended_signature = sks[2].sign(&extended_message);
@@ -2815,16 +2907,30 @@ mod tests {
         assert!(!result.verified);
         assert_eq!(result.valid_signatures, 0);
 
-        // Test that proper domain-separated signatures work
-        let proper_signature = sign(&sks[0], &config.signer_keys[0].key_id, raw_content);
         let mut valid_artifact = PublicationArtifact {
             artifact_id: "valid-test".to_string(),
             connector_id: "conn-1".to_string(),
             content_hash: raw_content.to_string(),
-            signatures: vec![proper_signature],
+            signatures: vec![],
         };
 
-        let valid_sig_2 = sign(&sks[1], &config.signer_keys[1].key_id, raw_content);
+        // Test that proper domain-separated signatures work.
+        let proper_signature = sign(
+            &sks[0],
+            &config.signer_keys[0].key_id,
+            &valid_artifact.artifact_id,
+            &valid_artifact.connector_id,
+            raw_content,
+        );
+        valid_artifact.signatures.push(proper_signature);
+
+        let valid_sig_2 = sign(
+            &sks[1],
+            &config.signer_keys[1].key_id,
+            &valid_artifact.artifact_id,
+            &valid_artifact.connector_id,
+            raw_content,
+        );
         push_bounded(&mut valid_artifact.signatures, valid_sig_2, MAX_SIGNATURES);
 
         let result = verify_threshold(&config, &valid_artifact, "t-valid", "ts");
@@ -3172,6 +3278,8 @@ mod tests {
         let valid_sig_hex = sign(
             &signing_keys[0],
             &config.signer_keys[0].key_id,
+            "duplicate-same",
+            "test-connector",
             &content_hash,
         )
         .signature_hex;
@@ -3446,7 +3554,13 @@ mod tests {
 
         for content_hash in test_hashes {
             // MR: Sign then verify must succeed
-            let signature = sign(&signing_key, key_id, &content_hash);
+            let signature = sign(
+                &signing_key,
+                key_id,
+                "test-artifact",
+                "test-connector",
+                &content_hash,
+            );
 
             let artifact = PublicationArtifact {
                 artifact_id: "test-artifact".to_string(),
@@ -3497,7 +3611,15 @@ mod tests {
         // Create signatures from all 3 signers
         let mut signatures: Vec<PartialSignature> = signers
             .iter()
-            .map(|(signing_key, key_id)| sign(signing_key, key_id, content_hash))
+            .map(|(signing_key, key_id)| {
+                sign(
+                    signing_key,
+                    key_id,
+                    "permutation-test",
+                    "test-connector",
+                    content_hash,
+                )
+            })
             .collect();
 
         // Test original order
@@ -3576,7 +3698,13 @@ mod tests {
         };
 
         let original_content = "original-content-hash";
-        let signature = sign(&signing_key, key_id, original_content);
+        let signature = sign(
+            &signing_key,
+            key_id,
+            "message-preservation-test",
+            "test-connector",
+            original_content,
+        );
 
         // Test various message modifications
         let tampered_messages = vec![

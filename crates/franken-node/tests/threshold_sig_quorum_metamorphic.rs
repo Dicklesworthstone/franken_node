@@ -17,22 +17,32 @@
 //! 6. **Signer-id mismatch rejection** — a partial signature whose `signer_id`
 //!    does not match its configured `key_id` does not count toward quorum
 //!    (prevents label replay).
+//! 7. **Publication-context binding** — partial signatures produced for one
+//!    artifact or connector do not count toward quorum for another artifact or
+//!    connector carrying the same content hash.
 //!
 //! These are the load-bearing safety properties: if any break, the threshold gate
 //! either lets unauthorised publications through or rejects valid quorums.
 
 use ed25519_dalek::SigningKey;
 use frankenengine_node::security::threshold_sig::{
-    FailureReason, PartialSignature, PublicationArtifact, SignerKey, ThresholdConfig, sign,
-    verify_threshold,
+    sign, verify_threshold, FailureReason, PartialSignature, PublicationArtifact, SignerKey,
+    ThresholdConfig,
 };
 use proptest::prelude::*;
 use sha2::{Digest, Sha256};
 
+const PROP_ARTIFACT_ID: &str = "art-prop";
+const PROP_CONNECTOR_ID: &str = "conn-prop";
+
 fn signing_key_from_seed(domain: &[u8], idx: u32) -> SigningKey {
     let mut hasher = Sha256::new();
     hasher.update(b"threshold_sig_quorum_metamorphic_v1:");
-    hasher.update(u64::try_from(domain.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(
+        u64::try_from(domain.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     hasher.update(domain);
     hasher.update(idx.to_le_bytes());
     let seed: [u8; 32] = hasher.finalize().into();
@@ -66,41 +76,79 @@ fn build_quorum(domain: &[u8], k: u32, n: u32) -> Quorum {
     }
 }
 
-fn sign_with_indices(quorum: &Quorum, content_hash: &str, indices: &[usize]) -> Vec<PartialSignature> {
+fn sign_with_indices_for_context(
+    quorum: &Quorum,
+    artifact_id: &str,
+    connector_id: &str,
+    content_hash: &str,
+    indices: &[usize],
+) -> Vec<PartialSignature> {
     indices
         .iter()
         .map(|&i| {
             let key_id = &quorum.config.signer_keys[i].key_id;
-            sign(&quorum.signing_keys[i], key_id, content_hash)
+            sign(
+                &quorum.signing_keys[i],
+                key_id,
+                artifact_id,
+                connector_id,
+                content_hash,
+            )
         })
         .collect()
 }
 
-fn make_artifact(content_hash: &str, signatures: Vec<PartialSignature>) -> PublicationArtifact {
+fn sign_with_indices(
+    quorum: &Quorum,
+    content_hash: &str,
+    indices: &[usize],
+) -> Vec<PartialSignature> {
+    sign_with_indices_for_context(
+        quorum,
+        PROP_ARTIFACT_ID,
+        PROP_CONNECTOR_ID,
+        content_hash,
+        indices,
+    )
+}
+
+fn make_artifact_with_context(
+    artifact_id: &str,
+    connector_id: &str,
+    content_hash: &str,
+    signatures: Vec<PartialSignature>,
+) -> PublicationArtifact {
     PublicationArtifact {
-        artifact_id: "art-prop".to_string(),
-        connector_id: "conn-prop".to_string(),
+        artifact_id: artifact_id.to_string(),
+        connector_id: connector_id.to_string(),
         content_hash: content_hash.to_string(),
         signatures,
     }
+}
+
+fn make_artifact(content_hash: &str, signatures: Vec<PartialSignature>) -> PublicationArtifact {
+    make_artifact_with_context(
+        PROP_ARTIFACT_ID,
+        PROP_CONNECTOR_ID,
+        content_hash,
+        signatures,
+    )
 }
 
 /// Strategy generating (k, n) with `1 <= k <= n <= 8`, plus an arbitrary subset
 /// size `m` in `0..=n` and an ordering of `n` signer indices used to pick which
 /// `m` signers contribute partial signatures.
 fn quorum_strategy() -> impl Strategy<Value = (u32, u32, u32, Vec<usize>)> {
-    (1_u32..=8_u32)
-        .prop_flat_map(|n| {
-            (Just(n), 1_u32..=n).prop_flat_map(|(n, k)| {
-                (
-                    Just(k),
-                    Just(n),
-                    0_u32..=n,
-                    Just((0..n as usize).collect::<Vec<_>>())
-                        .prop_shuffle(),
-                )
-            })
+    (1_u32..=8_u32).prop_flat_map(|n| {
+        (Just(n), 1_u32..=n).prop_flat_map(|(n, k)| {
+            (
+                Just(k),
+                Just(n),
+                0_u32..=n,
+                Just((0..n as usize).collect::<Vec<_>>()).prop_shuffle(),
+            )
         })
+    })
 }
 
 proptest! {
@@ -251,6 +299,8 @@ proptest! {
         let cross = sign(
             &quorum.signing_keys[0],
             &quorum.config.signer_keys[0].key_id,
+            PROP_ARTIFACT_ID,
+            PROP_CONNECTOR_ID,
             &hash_b,
         );
         signatures[0] = cross;
@@ -303,6 +353,60 @@ proptest! {
         prop_assert!(
             result.valid_signatures < k,
             "mismatched signer_id must not contribute to valid_signatures"
+        );
+    }
+
+    /// Property 7: publication-context binding. Signatures made for one artifact
+    /// or connector cannot be replayed onto another artifact or connector with the
+    /// same content hash.
+    #[test]
+    fn cross_publication_context_signatures_do_not_count(
+        n in 1_u32..=6_u32,
+        content_seed in any::<u64>(),
+    ) {
+        let k = n;
+        let quorum = build_quorum(b"context-binding", k, n);
+        let content_hash = format!("ctx-{content_seed:016x}");
+        let indices = (0..n as usize).collect::<Vec<_>>();
+
+        let signatures = sign_with_indices_for_context(
+            &quorum,
+            "art-a",
+            "conn-a",
+            &content_hash,
+            &indices,
+        );
+
+        let artifact_replay = verify_threshold(
+            &quorum.config,
+            &make_artifact_with_context("art-b", "conn-a", &content_hash, signatures.clone()),
+            "t-artifact-replay",
+            "ts",
+        );
+        prop_assert!(
+            !artifact_replay.verified,
+            "cross-artifact signature replay must not satisfy quorum"
+        );
+        prop_assert_eq!(
+            artifact_replay.valid_signatures,
+            0,
+            "every cross-artifact signature must be rejected"
+        );
+
+        let connector_replay = verify_threshold(
+            &quorum.config,
+            &make_artifact_with_context("art-a", "conn-b", &content_hash, signatures),
+            "t-connector-replay",
+            "ts",
+        );
+        prop_assert!(
+            !connector_replay.verified,
+            "cross-connector signature replay must not satisfy quorum"
+        );
+        prop_assert_eq!(
+            connector_replay.valid_signatures,
+            0,
+            "every cross-connector signature must be rejected"
         );
     }
 }

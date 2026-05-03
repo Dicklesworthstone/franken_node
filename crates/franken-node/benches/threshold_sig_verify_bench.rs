@@ -1,18 +1,24 @@
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use frankenengine_node::security::threshold_sig::{
-    PartialSignature, PublicationArtifact, SignerKey, ThresholdConfig, sign, verify_threshold,
+    sign, verify_threshold, PartialSignature, PublicationArtifact, SignerKey, ThresholdConfig,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-fn build_signing_message(content_hash: &str) -> Vec<u8> {
+fn extend_len_prefixed_field(msg: &mut Vec<u8>, value: &str) {
+    let value_len = u64::try_from(value.len()).unwrap_or(u64::MAX);
+    msg.extend_from_slice(&value_len.to_le_bytes());
+    msg.extend_from_slice(value.as_bytes());
+}
+
+fn build_signing_message(artifact_id: &str, connector_id: &str, content_hash: &str) -> Vec<u8> {
     let mut msg = Vec::new();
-    msg.extend_from_slice(b"threshold_sig_verify_v1:");
-    let content_hash_len = u64::try_from(content_hash.len()).unwrap_or(u64::MAX);
-    msg.extend_from_slice(&content_hash_len.to_le_bytes());
-    msg.extend_from_slice(content_hash.as_bytes());
+    msg.extend_from_slice(b"threshold_sig_verify_v2:");
+    extend_len_prefixed_field(&mut msg, artifact_id);
+    extend_len_prefixed_field(&mut msg, connector_id);
+    extend_len_prefixed_field(&mut msg, content_hash);
     msg
 }
 
@@ -50,15 +56,27 @@ fn build_case(
         signer_keys: signer_keys.clone(),
     };
 
+    let artifact_id = format!("artifact-{count}");
+    let connector_id = "connector-bench";
+    let content_hash = "content-hash-bench";
+
     let signatures: Vec<PartialSignature> = signing_keys
         .iter()
-        .map(|(key_id, signing_key)| sign(signing_key, key_id, "content-hash-bench"))
+        .map(|(key_id, signing_key)| {
+            sign(
+                signing_key,
+                key_id,
+                &artifact_id,
+                connector_id,
+                content_hash,
+            )
+        })
         .collect();
 
     let artifact = PublicationArtifact {
-        artifact_id: format!("artifact-{count}"),
-        connector_id: "connector-bench".to_string(),
-        content_hash: "content-hash-bench".to_string(),
+        artifact_id,
+        connector_id: connector_id.to_string(),
+        content_hash: content_hash.to_string(),
         signatures,
     };
 
@@ -93,7 +111,11 @@ fn verify_threshold_preparsed(
     config: &PreparsedThresholdConfig,
     artifact: &PublicationArtifact,
 ) -> bool {
-    let message = build_signing_message(&artifact.content_hash);
+    let message = build_signing_message(
+        &artifact.artifact_id,
+        &artifact.connector_id,
+        &artifact.content_hash,
+    );
     let mut valid_count = 0u32;
     let mut seen_signers: BTreeSet<&str> = BTreeSet::new();
     let mut seen_key_ids: BTreeSet<&str> = BTreeSet::new();

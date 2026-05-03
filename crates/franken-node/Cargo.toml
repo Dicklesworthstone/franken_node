@@ -747,6 +747,10 @@ path = "tests/e2e_epoch_transition_barrier_lifecycle.rs"
 name = "e2e_provenance_gate_evaluation"
 path = "tests/e2e_provenance_gate_evaluation.rs"
 
+[[test]]
+name = "threshold_sig_quorum_metamorphic"
+path = "tests/threshold_sig_quorum_metamorphic.rs"
+
 [[bench]]
 name = "cuckoo_revocation_bench"
 harness = false
