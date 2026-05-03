@@ -1,31 +1,47 @@
 """Unit tests for check_threshold_sig.py verification logic."""
 
 import json
-import os
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / "scripts/check_threshold_sig.py"
+EVIDENCE_PATH = ROOT / "artifacts/section_10_13/bd-35q1/verification_evidence.json"
+JSON_DECODER = json.JSONDecoder()
+
+
+def decode_json_object(raw: str) -> dict[str, object]:
+    parsed = JSON_DECODER.decode(raw)
+    if not isinstance(parsed, dict):
+        raise AssertionError("expected JSON object")
+    return parsed
 
 
 class TestThresholdSigFixtures(unittest.TestCase):
 
     def test_fixture_exists(self):
-        path = os.path.join(ROOT, "fixtures/threshold_sig/verification_scenarios.json")
-        self.assertTrue(os.path.isfile(path))
+        path = ROOT / "fixtures/threshold_sig/verification_scenarios.json"
+        self.assertTrue(path.is_file())
 
     def test_fixture_has_cases(self):
-        path = os.path.join(ROOT, "fixtures/threshold_sig/verification_scenarios.json")
-        with open(path) as f:
-            data = json.load(f)
+        path = ROOT / "fixtures/threshold_sig/verification_scenarios.json"
+        data = decode_json_object(path.read_text(encoding="utf-8"))
         self.assertIn("cases", data)
         self.assertGreaterEqual(len(data["cases"]), 4)
 
     def test_fixture_has_pass_and_fail(self):
-        path = os.path.join(ROOT, "fixtures/threshold_sig/verification_scenarios.json")
-        with open(path) as f:
-            data = json.load(f)
-        verified = [c for c in data["cases"] if c.get("expected_verified") is True]
-        rejected = [c for c in data["cases"] if c.get("expected_verified") is False]
+        path = ROOT / "fixtures/threshold_sig/verification_scenarios.json"
+        data = decode_json_object(path.read_text(encoding="utf-8"))
+        verified = [
+            c for c in data["cases"]
+            if isinstance(c.get("expected_verified"), bool) and c["expected_verified"]
+        ]
+        rejected = [
+            c for c in data["cases"]
+            if isinstance(c.get("expected_verified"), bool) and not c["expected_verified"]
+        ]
         self.assertGreater(len(verified), 0)
         self.assertGreater(len(rejected), 0)
 
@@ -33,20 +49,18 @@ class TestThresholdSigFixtures(unittest.TestCase):
 class TestThresholdSigVectors(unittest.TestCase):
 
     def test_vectors_exist(self):
-        path = os.path.join(ROOT, "artifacts/section_10_13/bd-35q1/threshold_signature_vectors.json")
-        self.assertTrue(os.path.isfile(path))
+        path = ROOT / "artifacts/section_10_13/bd-35q1/threshold_signature_vectors.json"
+        self.assertTrue(path.is_file())
 
     def test_vectors_valid(self):
-        path = os.path.join(ROOT, "artifacts/section_10_13/bd-35q1/threshold_signature_vectors.json")
-        with open(path) as f:
-            data = json.load(f)
+        path = ROOT / "artifacts/section_10_13/bd-35q1/threshold_signature_vectors.json"
+        data = decode_json_object(path.read_text(encoding="utf-8"))
         self.assertIn("vectors", data)
         self.assertGreaterEqual(len(data["vectors"]), 2)
 
     def test_vectors_have_both_results(self):
-        path = os.path.join(ROOT, "artifacts/section_10_13/bd-35q1/threshold_signature_vectors.json")
-        with open(path) as f:
-            data = json.load(f)
+        path = ROOT / "artifacts/section_10_13/bd-35q1/threshold_signature_vectors.json"
+        data = decode_json_object(path.read_text(encoding="utf-8"))
         results = [v["result"] for v in data["vectors"]]
         self.assertIn("verified", results)
         self.assertIn("rejected", results)
@@ -55,10 +69,9 @@ class TestThresholdSigVectors(unittest.TestCase):
 class TestThresholdSigImplementation(unittest.TestCase):
 
     def setUp(self):
-        self.impl_path = os.path.join(ROOT, "crates/franken-node/src/security/threshold_sig.rs")
-        self.assertTrue(os.path.isfile(self.impl_path))
-        with open(self.impl_path) as f:
-            self.content = f.read()
+        self.impl_path = ROOT / "crates/franken-node/src/security/threshold_sig.rs"
+        self.assertTrue(self.impl_path.is_file())
+        self.content = self.impl_path.read_text(encoding="utf-8")
 
     def test_has_threshold_config(self):
         self.assertIn("struct ThresholdConfig", self.content)
@@ -94,10 +107,9 @@ class TestThresholdSigImplementation(unittest.TestCase):
 class TestThresholdSigSpec(unittest.TestCase):
 
     def setUp(self):
-        self.spec_path = os.path.join(ROOT, "docs/specs/section_10_13/bd-35q1_contract.md")
-        self.assertTrue(os.path.isfile(self.spec_path))
-        with open(self.spec_path) as f:
-            self.content = f.read()
+        self.spec_path = ROOT / "docs/specs/section_10_13/bd-35q1_contract.md"
+        self.assertTrue(self.spec_path.is_file())
+        self.content = self.spec_path.read_text(encoding="utf-8")
 
     def test_has_invariants(self):
         for inv in ["INV-THRESH-QUORUM", "INV-THRESH-PARTIAL-REJECT",
@@ -111,6 +123,40 @@ class TestThresholdSigSpec(unittest.TestCase):
 
     def test_has_failure_reason_type(self):
         self.assertIn("FailureReason", self.content)
+
+
+class TestThresholdSigCli(unittest.TestCase):
+
+    def test_json_mode_is_structural_and_machine_readable(self):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--json"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        evidence = decode_json_object(result.stdout)
+        statuses = {check["id"]: check["status"] for check in evidence["checks"]}
+
+        self.assertEqual(evidence["gate"], "threshold_sig_verification")
+        self.assertEqual(evidence["mode"], "structural")
+        self.assertEqual(statuses["TS-TESTS"], "SKIP")
+        self.assertEqual(evidence["summary"]["skipped_checks"], 1)
+        self.assertNotIn("bd-35q1:", result.stdout)
+
+    def test_json_mode_does_not_rewrite_evidence_artifact(self):
+        before = EVIDENCE_PATH.read_text(encoding="utf-8")
+        subprocess.run(
+            [sys.executable, str(SCRIPT), "--json"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        after = EVIDENCE_PATH.read_text(encoding="utf-8")
+        self.assertEqual(before, after)
 
 
 if __name__ == "__main__":
