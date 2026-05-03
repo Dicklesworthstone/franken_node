@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import TestCase, main
 
 
@@ -40,6 +41,15 @@ class TestSpecInvariants(TestCase):
     def test_all_invariants_present(self):
         result = checker.check_content("spec", checker.SPEC_PATH, checker.REQUIRED_INVARIANTS)
         self.assertTrue(result["pass"], f"Missing: {result['missing']}")
+
+    def test_existing_unreadable_input_fails_closed(self):
+        with TemporaryDirectory() as temp_dir:
+            result = checker.check_content("spec", Path(temp_dir), ["INV-POL-MULTI-PARTY"])
+
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["found"], [])
+        self.assertEqual(result["missing"], ["INV-POL-MULTI-PARTY"])
+        self.assertIn("unable to read", result["reason"])
 
     def test_eight_invariants(self):
         result = checker.check_content("spec", checker.SPEC_PATH, checker.REQUIRED_INVARIANTS)

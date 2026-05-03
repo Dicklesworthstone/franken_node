@@ -114,35 +114,62 @@ REQUIRED_STATES = [
 
 
 def check_file_exists(path: Path) -> dict[str, Any]:
+    display_path = render_path(path)
     exists = path.exists()
+    if exists:
+        try:
+            size_bytes = path.stat().st_size
+        except OSError as exc:
+            return {
+                "path": display_path,
+                "exists": False,
+                "size_bytes": 0,
+                "reason": f"unable to stat file: {exc}",
+            }
     return {
-        "path": str(path.relative_to(ROOT)),
+        "path": display_path,
         "exists": exists,
-        "size_bytes": path.stat().st_size if exists else 0,
+        "size_bytes": size_bytes if exists else 0,
     }
 
 
-def check_content(name: str, path: Path, required: list[str]) -> dict[str, Any]:
+def render_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def read_required_text(path: Path, missing_reason: str) -> tuple[str | None, str | None]:
     if not path.exists():
-        return {"pass": False, "reason": f"{name} file not found", "found": [], "missing": required}
-    content = path.read_text()
+        return None, missing_reason
+    try:
+        return path.read_text(encoding="utf-8"), None
+    except OSError as exc:
+        return None, f"unable to read {render_path(path)}: {exc}"
+
+
+def check_content(name: str, path: Path, required: list[str]) -> dict[str, Any]:
+    content, error = read_required_text(path, f"{name} file not found")
+    if error is not None:
+        return {"pass": False, "reason": error, "found": [], "missing": required}
     found = [item for item in required if item in content]
     missing = [item for item in required if item not in content]
     return {"pass": len(missing) == 0, "found": found, "missing": missing}
 
 
 def check_mod_registration() -> dict[str, Any]:
-    if not MOD_PATH.exists():
-        return {"pass": False, "reason": "mod.rs not found"}
-    content = MOD_PATH.read_text()
+    content, error = read_required_text(MOD_PATH, "mod.rs not found")
+    if error is not None:
+        return {"pass": False, "reason": error}
     has_module = "pub mod approval_workflow;" in content
     return {"pass": has_module, "registered": has_module}
 
 
 def check_hash_chain() -> dict[str, Any]:
-    if not RUST_IMPL_PATH.exists():
-        return {"pass": False, "reason": "rust impl not found"}
-    content = RUST_IMPL_PATH.read_text()
+    content, error = read_required_text(RUST_IMPL_PATH, "rust impl not found")
+    if error is not None:
+        return {"pass": False, "reason": error}
     has_prev_hash = "prev_hash" in content
     has_entry_hash = "entry_hash" in content
     has_sha256 = "Sha256" in content
@@ -156,9 +183,9 @@ def check_hash_chain() -> dict[str, Any]:
 
 
 def check_role_separation() -> dict[str, Any]:
-    if not RUST_IMPL_PATH.exists():
-        return {"pass": False, "reason": "rust impl not found"}
-    content = RUST_IMPL_PATH.read_text()
+    content, error = read_required_text(RUST_IMPL_PATH, "rust impl not found")
+    if error is not None:
+        return {"pass": False, "reason": error}
     has_sole_check = "ERR_SOLE_APPROVER" in content
     has_proposer_check = "proposed_by" in content
     has_non_proposer = "non_proposer_approvals" in content
@@ -171,9 +198,9 @@ def check_role_separation() -> dict[str, Any]:
 
 
 def check_rollback_mechanism() -> dict[str, Any]:
-    if not RUST_IMPL_PATH.exists():
-        return {"pass": False, "reason": "rust impl not found"}
-    content = RUST_IMPL_PATH.read_text()
+    content, error = read_required_text(RUST_IMPL_PATH, "rust impl not found")
+    if error is not None:
+        return {"pass": False, "reason": error}
     has_rollback_fn = "pub fn rollback(" in content
     has_inverse_diff = "inverse_diff" in content
     has_rollback_of = "rollback_of" in content
@@ -244,7 +271,7 @@ def run_all_checks() -> dict[str, Any]:
 
 def write_evidence(evidence: dict[str, Any]) -> None:
     EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
-    EVIDENCE_PATH.write_text(json.dumps(evidence, indent=2) + "\n")
+    EVIDENCE_PATH.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
 
 
 def write_summary(evidence: dict[str, Any]) -> None:
@@ -277,7 +304,7 @@ def write_summary(evidence: dict[str, Any]) -> None:
     lines.append(f"- Implementation: `{RUST_IMPL_PATH.relative_to(ROOT)}`")
     lines.append(f"- Evidence: `{EVIDENCE_PATH.relative_to(ROOT)}`")
     lines.append("")
-    SUMMARY_PATH.write_text("\n".join(lines) + "\n")
+    SUMMARY_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def self_test() -> bool:
