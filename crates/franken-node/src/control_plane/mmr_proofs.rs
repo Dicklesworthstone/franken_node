@@ -31,6 +31,11 @@ fn u64_to_usize(val: u64) -> usize {
 /// Canonical hash string type used by proof APIs.
 pub type Hash = String;
 
+type RawHash = [u8; 32];
+
+const SHA256_HEX_LEN: usize = 64;
+const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
+
 /// Current Merkle root for a checkpointed stream state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MmrRoot {
@@ -225,10 +230,12 @@ impl MmrCheckpoint {
             return Err(ProofError::MmrDisabled);
         }
 
-        self.leaf_hashes = retained_leaf_hashes(stream)?;
+        let leaf_hashes = retained_leaf_hashes_raw(stream)?;
 
-        let root_hash =
-            merkle_root_from_leaf_hashes(&self.leaf_hashes).ok_or(ProofError::EmptyCheckpoint)?;
+        let root_hash = merkle_root_from_raw_hashes(&leaf_hashes)
+            .map(|hash| raw_hash_to_hex(&hash))
+            .ok_or(ProofError::EmptyCheckpoint)?;
+        self.leaf_hashes = raw_hashes_to_hex(&leaf_hashes);
         let root = MmrRoot {
             tree_size: len_to_u64(stream.len()),
             root_hash,
@@ -264,9 +271,10 @@ pub fn mmr_inclusion_proof(
         return Err(ProofError::EmptyCheckpoint);
     }
 
-    let leaf_hashes = retained_leaf_hashes(stream)?;
-    let current_root_hash =
-        merkle_root_from_leaf_hashes(&leaf_hashes).ok_or(ProofError::EmptyCheckpoint)?;
+    let leaf_hashes = retained_leaf_hashes_raw(stream)?;
+    let current_root_hash = merkle_root_from_raw_hashes(&leaf_hashes)
+        .map(|hash| raw_hash_to_hex(&hash))
+        .ok_or(ProofError::EmptyCheckpoint)?;
     let checkpoint_root = checkpoint_root_or_err(checkpoint)?;
     // Compute both predicates before reducing with `||` so the operator's short-circuit
     // does not reveal whether the size or the root hash mismatched.
@@ -289,15 +297,17 @@ pub fn mmr_inclusion_proof(
     }
 
     let leaf_index = u64_to_usize(seq.saturating_sub(window_start));
-    let leaf_hash = leaf_hashes
-        .get(leaf_index)
-        .cloned()
-        .ok_or(ProofError::SequenceOutOfRange {
-            sequence: seq,
-            tree_size: len_to_u64(leaf_hashes.len()),
-        })?;
-    let audit_path =
-        merkle_audit_path(&leaf_hashes, leaf_index).ok_or(ProofError::InvalidProof {
+    let leaf_hash =
+        leaf_hashes
+            .get(leaf_index)
+            .map(raw_hash_to_hex)
+            .ok_or(ProofError::SequenceOutOfRange {
+                sequence: seq,
+                tree_size: len_to_u64(leaf_hashes.len()),
+            })?;
+    let audit_path = merkle_audit_path_raw(&leaf_hashes, leaf_index)
+        .map(|path| raw_hashes_to_hex(&path))
+        .ok_or(ProofError::InvalidProof {
             reason: format!("failed to construct audit path for seq {seq}"),
         })?;
 
@@ -343,16 +353,7 @@ pub fn verify_inclusion(
         });
     }
 
-    let mut current = proof.leaf_hash.clone();
-    let mut index = u64_to_usize(proof.leaf_index);
-    for sibling in &proof.audit_path {
-        current = if index % 2 == 0 {
-            hash_pair(&current, sibling)
-        } else {
-            hash_pair(sibling, &current)
-        };
-        index /= 2;
-    }
+    let current = inclusion_root_from_proof(proof);
 
     if !constant_time::ct_eq(&current, &root.root_hash) {
         return Err(ProofError::RootMismatch {
@@ -454,11 +455,15 @@ pub fn verify_prefix(
 
 #[must_use]
 pub fn marker_leaf_hash(marker_hash: &str) -> Hash {
+    raw_hash_to_hex(&marker_leaf_hash_raw(marker_hash))
+}
+
+fn marker_leaf_hash_raw(marker_hash: &str) -> RawHash {
     let mut hasher = Sha256::new();
     hasher.update(b"mmr_proofs_leaf_v1:");
     hasher.update((u64::try_from(marker_hash.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(marker_hash.as_bytes());
-    hex::encode(hasher.finalize())
+    finalize_raw(hasher)
 }
 
 fn retained_window_start(stream: &MarkerStream) -> Result<u64, ProofError> {
@@ -468,13 +473,18 @@ fn retained_window_start(stream: &MarkerStream) -> Result<u64, ProofError> {
         .ok_or(ProofError::EmptyCheckpoint)
 }
 
+#[cfg(test)]
 fn retained_leaf_hashes(stream: &MarkerStream) -> Result<Vec<Hash>, ProofError> {
+    retained_leaf_hashes_raw(stream).map(|hashes| raw_hashes_to_hex(&hashes))
+}
+
+fn retained_leaf_hashes_raw(stream: &MarkerStream) -> Result<Vec<RawHash>, ProofError> {
     let window_start = retained_window_start(stream)?;
     let window_end = window_start.saturating_add(len_to_u64(stream.len()));
     Ok(stream
         .range(window_start, window_end)
         .iter()
-        .map(|marker| marker_leaf_hash(&marker.marker_hash))
+        .map(|marker| marker_leaf_hash_raw(&marker.marker_hash))
         .collect())
 }
 
@@ -482,7 +492,18 @@ fn checkpoint_root_or_err(checkpoint: &MmrCheckpoint) -> Result<&MmrRoot, ProofE
     checkpoint.root().ok_or(ProofError::EmptyCheckpoint)
 }
 
+#[cfg(test)]
 fn merkle_audit_path(leaf_hashes: &[Hash], leaf_index: usize) -> Option<Vec<Hash>> {
+    if let Some(raw_leaf_hashes) = raw_hashes_from_hex(leaf_hashes) {
+        return merkle_audit_path_raw(&raw_leaf_hashes, leaf_index)
+            .map(|path| raw_hashes_to_hex(&path));
+    }
+
+    merkle_audit_path_legacy(leaf_hashes, leaf_index)
+}
+
+#[cfg(test)]
+fn merkle_audit_path_legacy(leaf_hashes: &[Hash], leaf_index: usize) -> Option<Vec<Hash>> {
     if leaf_hashes.is_empty() || leaf_index >= leaf_hashes.len() {
         return None;
     }
@@ -501,7 +522,7 @@ fn merkle_audit_path(leaf_hashes: &[Hash], leaf_index: usize) -> Option<Vec<Hash
 
         let mut next = Vec::with_capacity(level.len() / 2);
         for chunk in level.chunks(2) {
-            next.push(hash_pair(&chunk[0], &chunk[1]));
+            next.push(hash_pair_legacy(&chunk[0], &chunk[1]));
         }
         level = next;
         idx /= 2;
@@ -511,6 +532,14 @@ fn merkle_audit_path(leaf_hashes: &[Hash], leaf_index: usize) -> Option<Vec<Hash
 }
 
 fn merkle_root_from_leaf_hashes(leaf_hashes: &[Hash]) -> Option<Hash> {
+    if let Some(raw_leaf_hashes) = raw_hashes_from_hex(leaf_hashes) {
+        return merkle_root_from_raw_hashes(&raw_leaf_hashes).map(|hash| raw_hash_to_hex(&hash));
+    }
+
+    merkle_root_from_leaf_hashes_legacy(leaf_hashes)
+}
+
+fn merkle_root_from_leaf_hashes_legacy(leaf_hashes: &[Hash]) -> Option<Hash> {
     if leaf_hashes.is_empty() {
         return None;
     }
@@ -523,7 +552,7 @@ fn merkle_root_from_leaf_hashes(leaf_hashes: &[Hash]) -> Option<Hash> {
 
         let mut next = Vec::with_capacity(level.len() / 2);
         for chunk in level.chunks(2) {
-            next.push(hash_pair(&chunk[0], &chunk[1]));
+            next.push(hash_pair_legacy(&chunk[0], &chunk[1]));
         }
         level = next;
     }
@@ -531,7 +560,18 @@ fn merkle_root_from_leaf_hashes(leaf_hashes: &[Hash]) -> Option<Hash> {
     level.into_iter().next()
 }
 
+#[cfg(test)]
 fn hash_pair(left: &str, right: &str) -> Hash {
+    match (
+        raw_hash_from_lower_hex(left),
+        raw_hash_from_lower_hex(right),
+    ) {
+        (Some(left), Some(right)) => raw_hash_to_hex(&hash_pair_raw(&left, &right)),
+        _ => hash_pair_legacy(left, right),
+    }
+}
+
+fn hash_pair_legacy(left: &str, right: &str) -> Hash {
     let mut hasher = Sha256::new();
     hasher.update(b"mmr_proofs_node_v1:");
     hasher.update((u64::try_from(left.len()).unwrap_or(u64::MAX)).to_le_bytes());
@@ -541,6 +581,145 @@ fn hash_pair(left: &str, right: &str) -> Hash {
     hex::encode(hasher.finalize())
 }
 
+fn inclusion_root_from_proof(proof: &InclusionProof) -> Hash {
+    if let Some(root) = inclusion_root_from_proof_raw(proof) {
+        return raw_hash_to_hex(&root);
+    }
+
+    let mut current = proof.leaf_hash.clone();
+    let mut index = u64_to_usize(proof.leaf_index);
+    for sibling in &proof.audit_path {
+        current = if index % 2 == 0 {
+            hash_pair_legacy(&current, sibling)
+        } else {
+            hash_pair_legacy(sibling, &current)
+        };
+        index /= 2;
+    }
+    current
+}
+
+fn inclusion_root_from_proof_raw(proof: &InclusionProof) -> Option<RawHash> {
+    let mut current = raw_hash_from_lower_hex(&proof.leaf_hash)?;
+    let mut index = u64_to_usize(proof.leaf_index);
+    for sibling in &proof.audit_path {
+        let sibling = raw_hash_from_lower_hex(sibling)?;
+        current = if index % 2 == 0 {
+            hash_pair_raw(&current, &sibling)
+        } else {
+            hash_pair_raw(&sibling, &current)
+        };
+        index /= 2;
+    }
+    Some(current)
+}
+
+fn merkle_audit_path_raw(leaf_hashes: &[RawHash], leaf_index: usize) -> Option<Vec<RawHash>> {
+    if leaf_hashes.is_empty() || leaf_index >= leaf_hashes.len() {
+        return None;
+    }
+
+    let mut level = leaf_hashes.to_vec();
+    let mut idx = leaf_index;
+    let mut path = Vec::new();
+
+    while level.len() > 1 {
+        if level.len() % 2 == 1 {
+            level.push(*level.last()?);
+        }
+
+        let sibling_idx = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
+        path.push(level[sibling_idx]);
+
+        let mut next = Vec::with_capacity(level.len() / 2);
+        for chunk in level.chunks(2) {
+            next.push(hash_pair_raw(&chunk[0], &chunk[1]));
+        }
+        level = next;
+        idx /= 2;
+    }
+
+    Some(path)
+}
+
+fn merkle_root_from_raw_hashes(leaf_hashes: &[RawHash]) -> Option<RawHash> {
+    if leaf_hashes.is_empty() {
+        return None;
+    }
+
+    let mut level = leaf_hashes.to_vec();
+    while level.len() > 1 {
+        if level.len() % 2 == 1 {
+            level.push(*level.last()?);
+        }
+
+        let mut next = Vec::with_capacity(level.len() / 2);
+        for chunk in level.chunks(2) {
+            next.push(hash_pair_raw(&chunk[0], &chunk[1]));
+        }
+        level = next;
+    }
+
+    level.into_iter().next()
+}
+
+fn hash_pair_raw(left: &RawHash, right: &RawHash) -> RawHash {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mmr_proofs_node_v1:");
+    hasher.update((SHA256_HEX_LEN as u64).to_le_bytes());
+    update_hash_as_lower_hex(&mut hasher, left);
+    hasher.update((SHA256_HEX_LEN as u64).to_le_bytes());
+    update_hash_as_lower_hex(&mut hasher, right);
+    finalize_raw(hasher)
+}
+
+fn finalize_raw(hasher: Sha256) -> RawHash {
+    let digest = hasher.finalize();
+    let mut hash = [0_u8; 32];
+    hash.copy_from_slice(&digest);
+    hash
+}
+
+fn update_hash_as_lower_hex(hasher: &mut Sha256, hash: &RawHash) {
+    let mut encoded = [0_u8; SHA256_HEX_LEN];
+    for (idx, byte) in hash.iter().enumerate() {
+        encoded[idx * 2] = LOWER_HEX[usize::from(byte >> 4)];
+        encoded[idx * 2 + 1] = LOWER_HEX[usize::from(byte & 0x0f)];
+    }
+    hasher.update(encoded);
+}
+
+fn raw_hash_to_hex(hash: &RawHash) -> Hash {
+    hex::encode(hash)
+}
+
+fn raw_hashes_to_hex(hashes: &[RawHash]) -> Vec<Hash> {
+    hashes.iter().map(raw_hash_to_hex).collect()
+}
+
+fn raw_hashes_from_hex(hashes: &[Hash]) -> Option<Vec<RawHash>> {
+    hashes
+        .iter()
+        .map(|hash| raw_hash_from_lower_hex(hash))
+        .collect()
+}
+
+fn raw_hash_from_lower_hex(hash: &str) -> Option<RawHash> {
+    if hash.len() != SHA256_HEX_LEN
+        || !hash
+            .as_bytes()
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return None;
+    }
+
+    let mut raw = [0_u8; 32];
+    hex::decode_to_slice(hash, &mut raw).ok()?;
+    Some(raw)
+}
+
+#[cfg(test)]
 fn sha256_hex(input: &[u8]) -> Hash {
     let mut hasher = Sha256::new();
     hasher.update(b"mmr_proofs_v1:");
@@ -552,7 +731,9 @@ fn sha256_hex(input: &[u8]) -> Hash {
 mod tests {
     use super::{
         InclusionProof, MAX_LEAF_HASHES, MmrCheckpoint, MmrRoot, PrefixProof, ProofError,
-        marker_leaf_hash, mmr_inclusion_proof, mmr_prefix_proof, verify_inclusion, verify_prefix,
+        hash_pair_legacy, marker_leaf_hash, merkle_audit_path, merkle_audit_path_legacy,
+        merkle_root_from_leaf_hashes, merkle_root_from_leaf_hashes_legacy, mmr_inclusion_proof,
+        mmr_prefix_proof, raw_hash_from_lower_hex, verify_inclusion, verify_prefix,
     };
     use crate::control_plane::marker_stream::MarkerEventType;
     use crate::control_plane::marker_stream::MarkerStream;
@@ -585,6 +766,41 @@ mod tests {
         let mut bytes = hash.as_bytes().to_vec();
         bytes[0] = if bytes[0] == b'0' { b'1' } else { b'0' };
         String::from_utf8(bytes).expect("hex hash is valid utf-8")
+    }
+
+    #[test]
+    fn raw_merkle_helpers_preserve_public_hex_contract() {
+        let leaves = (0..17)
+            .map(|idx| marker_leaf_hash(&format!("leaf-{idx}")))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            merkle_root_from_leaf_hashes(&leaves),
+            merkle_root_from_leaf_hashes_legacy(&leaves)
+        );
+
+        for leaf_index in [0_usize, 1, 5, 16] {
+            assert_eq!(
+                merkle_audit_path(&leaves, leaf_index),
+                merkle_audit_path_legacy(&leaves, leaf_index)
+            );
+        }
+
+        let left = marker_leaf_hash("left");
+        let right = marker_leaf_hash("right");
+        assert_eq!(
+            super::hash_pair(&left, &right),
+            hash_pair_legacy(&left, &right)
+        );
+    }
+
+    #[test]
+    fn raw_hash_decoder_only_accepts_canonical_lower_hex() {
+        let hash = marker_leaf_hash("canonical");
+        assert!(raw_hash_from_lower_hex(&hash).is_some());
+        assert!(raw_hash_from_lower_hex(&hash.to_ascii_uppercase()).is_none());
+        assert!(raw_hash_from_lower_hex("abc123").is_none());
+        assert!(raw_hash_from_lower_hex(&"g".repeat(64)).is_none());
     }
 
     #[test]
@@ -1213,12 +1429,11 @@ mod tests {
         // Check for any global hash collisions
         hashes.sort_by(|a, b| a.1.cmp(&b.1));
         for window in hashes.windows(2) {
-            if window[0].1 == window[1].1 {
-                panic!(
-                    "Hash collision found: {:?} and {:?} both hash to {}",
-                    window[0].0, window[1].0, window[0].1
-                );
-            }
+            assert_ne!(
+                window[0].1, window[1].1,
+                "Hash collision found: {:?} and {:?} both hash to {}",
+                window[0].0, window[1].0, window[0].1
+            );
         }
 
         // Checkpoint should maintain integrity
