@@ -22097,7 +22097,7 @@ fn validate_corpus_manifest(path: &Path, data: &serde_json::Value) -> VerifyCorp
 
     for fixture in &fixtures {
         let Some(id) = verify_corpus_string(fixture, "fixture_id") else {
-            malformed_rows += 1;
+            malformed_rows = malformed_rows.saturating_add(1);
             continue;
         };
         if !seen_ids.insert(id.to_string()) {
@@ -22113,14 +22113,17 @@ fn validate_corpus_manifest(path: &Path, data: &serde_json::Value) -> VerifyCorp
                 .and_then(serde_json::Value::as_bool)
                 .is_some();
         if !row_valid {
-            malformed_rows += 1;
+            malformed_rows = malformed_rows.saturating_add(1);
         }
 
         if let Some(band) = verify_corpus_string(fixture, "band") {
             observed_bands.insert(band.to_string());
-            *by_band.entry(band.to_string()).or_insert(0) += 1;
+            {
+                let entry = by_band.entry(band.to_string()).or_insert(0);
+                *entry = entry.saturating_add(1);
+            }
         } else {
-            malformed_rows += 1;
+            malformed_rows = malformed_rows.saturating_add(1);
         }
     }
 
@@ -22329,7 +22332,7 @@ fn validate_compatibility_report(
             || risk_band.is_none()
             || status.is_none()
         {
-            row_shape_errors += 1;
+            row_shape_errors = row_shape_errors.saturating_add(1);
             continue;
         }
 
@@ -22348,28 +22351,28 @@ fn validate_compatibility_report(
             || !required_risk_bands.contains(risk_band)
             || !valid_statuses.contains(status)
         {
-            row_shape_errors += 1;
+            row_shape_errors = row_shape_errors.saturating_add(1);
         }
 
         observed_families.insert(family.to_string());
         observed_bands.insert(band.to_string());
         observed_risk_bands.insert(risk_band.to_string());
         if status == "pass" {
-            passed_rows += 1;
+            passed_rows = passed_rows.saturating_add(1);
         }
         if status == "fail" || status == "error" {
             failed_or_error_ids.insert(id.to_string());
         }
 
         let family_entry = family_breakdown.entry(family.to_string()).or_insert((0, 0));
-        family_entry.0 += 1;
+        family_entry.0 = family_entry.0.saturating_add(1);
         if status == "pass" {
-            family_entry.1 += 1;
+            family_entry.1 = family_entry.1.saturating_add(1);
         }
         let band_entry = band_breakdown.entry(band.to_string()).or_insert((0, 0));
-        band_entry.0 += 1;
+        band_entry.0 = band_entry.0.saturating_add(1);
         if status == "pass" {
-            band_entry.1 += 1;
+            band_entry.1 = band_entry.1.saturating_add(1);
         }
     }
 
