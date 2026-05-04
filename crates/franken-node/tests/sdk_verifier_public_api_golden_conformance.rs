@@ -13,6 +13,17 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use sha2::Digest;
 
+#[cfg(feature = "verifier-tools")]
+use frankenengine_node::sdk::{
+    replay_capsule::{
+        CapsuleInput as NodeCapsuleInput, EnvironmentSnapshot as NodeEnvironmentSnapshot,
+        create_capsule as create_node_capsule,
+    },
+    verifier_sdk::{
+        VerificationReport as NodeVerificationReport, VerifierConfig as NodeVerifierConfig,
+        VerifierSdk as NodeVerifierSdk, VerifyVerdict as NodeVerifyVerdict,
+    },
+};
 use frankenengine_verifier_sdk::{
     SDK_VERSION, SessionStep, TransparencyLogEntry, VerificationOperation, VerificationResult,
     VerificationVerdict, capsule, create_verifier_sdk,
@@ -24,6 +35,8 @@ const SESSION_STEP_FIXTURE: &str =
     include_str!("../../../sdk/verifier/tests/fixtures/public_api/session_step.json");
 const TRANSPARENCY_ENTRY_FIXTURE: &str =
     include_str!("../../../sdk/verifier/tests/fixtures/public_api/transparency_entry.json");
+#[cfg(feature = "verifier-tools")]
+const NODE_CAPSULE_BYTES_PER_COUNT_UNIT: usize = 1024;
 
 fn reference_signing_key() -> SigningKey {
     SigningKey::from_bytes(&[7_u8; 32])
@@ -85,6 +98,67 @@ fn reference_capsule() -> capsule::ReplayCapsule {
     let signing_key = reference_signing_key();
     capsule::sign_capsule(&signing_key, &mut capsule);
     capsule
+}
+
+#[cfg(feature = "verifier-tools")]
+fn node_verifier_sdk_with_capsule_count(max_capsule_count: usize) -> NodeVerifierSdk {
+    NodeVerifierSdk::new(NodeVerifierConfig {
+        verifier_identity: "verifier://node-sdk-capacity-test".to_string(),
+        require_hash_match: true,
+        strict_claims: true,
+        max_claims_per_request: 1000,
+        max_capsule_count,
+        max_chain_depth: 64,
+        extensions: BTreeMap::new(),
+    })
+}
+
+#[cfg(feature = "verifier-tools")]
+fn reference_node_capsule() -> frankenengine_node::sdk::replay_capsule::ReplayCapsule {
+    let inputs = vec![
+        NodeCapsuleInput {
+            seq: 0,
+            data: b"input-0".to_vec(),
+            metadata: BTreeMap::new(),
+        },
+        NodeCapsuleInput {
+            seq: 1,
+            data: b"input-1".to_vec(),
+            metadata: BTreeMap::new(),
+        },
+    ];
+
+    create_node_capsule(
+        "node-capsule-ref-001",
+        inputs,
+        NodeEnvironmentSnapshot {
+            runtime_version: "1.0.0".to_string(),
+            platform: "linux-x86_64".to_string(),
+            config_hash: "aabb".repeat(8),
+            properties: BTreeMap::new(),
+        },
+    )
+    .expect("node replay capsule should be valid")
+}
+
+#[cfg(feature = "verifier-tools")]
+fn assert_node_capsule_byte_capacity_failed_before_replay(report: &NodeVerificationReport) {
+    assert!(matches!(report.verdict, NodeVerifyVerdict::Fail(_)));
+    let failed = report
+        .evidence
+        .iter()
+        .filter(|entry| !entry.passed)
+        .map(|entry| entry.check_name.as_str())
+        .collect::<Vec<_>>();
+    assert!(failed.contains(&"capsule_byte_capacity_check"));
+    assert!(failed.contains(&"capsule_replay_skipped_due_to_capacity"));
+    assert!(
+        !report
+            .evidence
+            .iter()
+            .any(|entry| entry.check_name == "replay_deterministic_match"),
+        "node verifier SDK must not replay an oversized capsule"
+    );
 }
 
 fn replay_capsule_from_ordered_inputs(
@@ -190,6 +264,46 @@ fn assert_merkle_proof_shape(entry: &TransparencyLogEntry, context: &str) {
             "{context} sibling proof digest must be a bare lowercase 64-hex digest"
         );
     }
+}
+
+#[cfg(feature = "verifier-tools")]
+#[test]
+fn node_verifier_sdk_rejects_oversized_capsule_bytes_before_replay() {
+    let sdk = node_verifier_sdk_with_capsule_count(4);
+    let mut capsule = reference_node_capsule();
+    capsule.inputs[0].data = vec![0x42; NODE_CAPSULE_BYTES_PER_COUNT_UNIT * 4];
+
+    let report = sdk
+        .verify_capsule(&capsule)
+        .expect("oversized capsule should produce a fail-closed report");
+
+    assert_node_capsule_byte_capacity_failed_before_replay(&report);
+    let component_capacity = report
+        .evidence
+        .iter()
+        .find(|entry| entry.check_name == "capsule_capacity_check")
+        .expect("component capacity evidence should be present");
+    assert!(
+        component_capacity.passed,
+        "raw byte growth should fail the byte cap even when component count is in bounds"
+    );
+
+    let sdk = node_verifier_sdk_with_capsule_count(5);
+    let mut capsule = reference_node_capsule();
+    capsule.inputs[0].metadata.insert(
+        "input-metadata".to_string(),
+        "x".repeat(NODE_CAPSULE_BYTES_PER_COUNT_UNIT * 3),
+    );
+    capsule.environment.properties.insert(
+        "environment-property".to_string(),
+        "y".repeat(NODE_CAPSULE_BYTES_PER_COUNT_UNIT * 3),
+    );
+
+    let report = sdk
+        .verify_capsule(&capsule)
+        .expect("oversized metadata should produce a fail-closed report");
+
+    assert_node_capsule_byte_capacity_failed_before_replay(&report);
 }
 
 #[test]

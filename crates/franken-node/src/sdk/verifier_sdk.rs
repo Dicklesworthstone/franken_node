@@ -52,6 +52,7 @@ const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 const DEFAULT_MAX_CLAIMS_PER_REQUEST: usize = 1000;
 const DEFAULT_MAX_CAPSULE_COUNT: usize = 1000;
 const DEFAULT_MAX_CHAIN_DEPTH: usize = 64;
+const CAPSULE_BYTES_PER_COUNT_UNIT: usize = 1024;
 
 /// Security posture marker for this cryptographic verifier SDK surface.
 ///
@@ -298,6 +299,49 @@ fn capsule_component_count(capsule: &super::replay_capsule::ReplayCapsule) -> us
         .saturating_add(capsule.expected_outputs.len())
         .saturating_add(capsule.environment.properties.len())
         .saturating_add(input_metadata_count)
+}
+
+fn add_len(total: &mut usize, len: usize) {
+    *total = total.saturating_add(len);
+}
+
+fn add_str_len(total: &mut usize, value: &str) {
+    add_len(total, value.len());
+}
+
+fn add_string_map_len(total: &mut usize, values: &BTreeMap<String, String>) {
+    for (key, value) in values {
+        add_str_len(total, key);
+        add_str_len(total, value);
+    }
+}
+
+fn capsule_byte_size(capsule: &super::replay_capsule::ReplayCapsule) -> usize {
+    let mut total = 0usize;
+    add_str_len(&mut total, &capsule.capsule_id);
+    add_len(&mut total, std::mem::size_of::<u32>());
+
+    for input in &capsule.inputs {
+        add_len(&mut total, std::mem::size_of::<u64>());
+        add_len(&mut total, input.data.len());
+        add_string_map_len(&mut total, &input.metadata);
+    }
+
+    for output in &capsule.expected_outputs {
+        add_len(&mut total, std::mem::size_of::<u64>());
+        add_len(&mut total, output.data.len());
+        add_str_len(&mut total, &output.output_hash);
+    }
+
+    add_str_len(&mut total, &capsule.environment.runtime_version);
+    add_str_len(&mut total, &capsule.environment.platform);
+    add_str_len(&mut total, &capsule.environment.config_hash);
+    add_string_map_len(&mut total, &capsule.environment.properties);
+    total
+}
+
+fn capsule_byte_budget(max_capsule_count: usize) -> usize {
+    max_capsule_count.saturating_mul(CAPSULE_BYTES_PER_COUNT_UNIT)
 }
 
 #[allow(dead_code)]
@@ -560,6 +604,9 @@ impl VerifierSdk {
 
         let capsule_count = capsule_component_count(capsule);
         let capsule_within_capacity = capsule_count <= max_capsule_count;
+        let max_capsule_bytes = capsule_byte_budget(max_capsule_count);
+        let capsule_size_bytes = capsule_byte_size(capsule);
+        let capsule_bytes_within_capacity = capsule_size_bytes <= max_capsule_bytes;
         evidence.push(EvidenceEntry {
             check_name: "capsule_capacity_check".to_string(),
             passed: capsule_within_capacity,
@@ -569,8 +616,21 @@ impl VerifierSdk {
                 format!("{capsule_count} capsule components exceeds limit of {max_capsule_count}")
             },
         });
+        evidence.push(EvidenceEntry {
+            check_name: "capsule_byte_capacity_check".to_string(),
+            passed: capsule_bytes_within_capacity,
+            detail: if capsule_bytes_within_capacity {
+                format!(
+                    "{capsule_size_bytes} capsule bytes within derived limit of {max_capsule_bytes}"
+                )
+            } else {
+                format!(
+                    "{capsule_size_bytes} capsule bytes exceeds derived limit of {max_capsule_bytes}"
+                )
+            },
+        });
 
-        if !capsule_within_capacity {
+        if !capsule_within_capacity || !capsule_bytes_within_capacity {
             evidence.push(EvidenceEntry {
                 check_name: "capsule_replay_skipped_due_to_capacity".to_string(),
                 passed: false,
@@ -587,6 +647,8 @@ impl VerifierSdk {
                 &capsule.capsule_id,
                 &capsule_count.to_string(),
                 &max_capsule_count.to_string(),
+                &capsule_size_bytes.to_string(),
+                &max_capsule_bytes.to_string(),
             ]);
 
             return Ok(VerificationReport {
@@ -898,6 +960,18 @@ mod tests {
         VerifierSdk::with_defaults()
     }
 
+    fn sdk_with_capsule_count(max_capsule_count: usize) -> VerifierSdk {
+        VerifierSdk::new(VerifierConfig {
+            verifier_identity: "verifier://capacity-test".to_string(),
+            require_hash_match: true,
+            strict_claims: true,
+            max_claims_per_request: DEFAULT_MAX_CLAIMS_PER_REQUEST,
+            max_capsule_count,
+            max_chain_depth: DEFAULT_MAX_CHAIN_DEPTH,
+            extensions: BTreeMap::new(),
+        })
+    }
+
     fn valid_request() -> VerificationRequest {
         let artifact_id = "artifact-001".to_string();
         let artifact_hash = deterministic_hash(&artifact_id);
@@ -942,6 +1016,20 @@ mod tests {
             .filter(|entry| !entry.passed)
             .map(|entry| entry.check_name.as_str())
             .collect()
+    }
+
+    fn assert_capsule_byte_capacity_failed_before_replay(report: &VerificationReport) {
+        assert!(matches!(report.verdict, VerifyVerdict::Fail(_)));
+        let failures = failed_checks(report);
+        assert!(failures.contains(&"capsule_byte_capacity_check"));
+        assert!(failures.contains(&"capsule_replay_skipped_due_to_capacity"));
+        assert!(
+            !report
+                .evidence
+                .iter()
+                .any(|entry| entry.check_name == "replay_deterministic_match"),
+            "replay must not run after capsule byte capacity fails"
+        );
     }
 
     // ── VerifierSdk construction ────────────────────────────────────
@@ -1260,6 +1348,7 @@ mod tests {
         assert!(names.contains(&"inputs_non_empty"));
         assert!(names.contains(&"expected_outputs_non_empty"));
         assert!(names.contains(&"environment_present"));
+        assert!(names.contains(&"capsule_byte_capacity_check"));
         assert!(names.contains(&"input_sequence_monotonic"));
         assert!(names.contains(&"replay_deterministic_match"));
 
@@ -1279,6 +1368,56 @@ mod tests {
             replay_entry.detail,
             "replay hash matches all expected outputs"
         );
+    }
+
+    #[test]
+    fn test_verify_capsule_rejects_oversized_input_bytes_before_replay() {
+        let sdk = sdk_with_capsule_count(4);
+        let mut cap = valid_capsule();
+        cap.inputs[0].data = vec![0x42; CAPSULE_BYTES_PER_COUNT_UNIT * 4];
+
+        let report = sdk.verify_capsule(&cap).expect("should fail closed");
+
+        assert_capsule_byte_capacity_failed_before_replay(&report);
+        let count_entry = report
+            .evidence
+            .iter()
+            .find(|entry| entry.check_name == "capsule_capacity_check")
+            .expect("component capacity evidence should be present");
+        assert!(
+            count_entry.passed,
+            "oversized raw bytes should fail the byte cap, not the component cap"
+        );
+    }
+
+    #[test]
+    fn test_verify_capsule_rejects_oversized_output_bytes_before_replay() {
+        let sdk = sdk_with_capsule_count(4);
+        let mut cap = valid_capsule();
+        cap.expected_outputs[0].data = vec![0x24; CAPSULE_BYTES_PER_COUNT_UNIT * 4];
+        cap.expected_outputs[0].output_hash = "f".repeat(CAPSULE_BYTES_PER_COUNT_UNIT * 4);
+
+        let report = sdk.verify_capsule(&cap).expect("should fail closed");
+
+        assert_capsule_byte_capacity_failed_before_replay(&report);
+    }
+
+    #[test]
+    fn test_verify_capsule_rejects_metadata_and_environment_bytes_before_replay() {
+        let sdk = sdk_with_capsule_count(5);
+        let mut cap = valid_capsule();
+        cap.inputs[0].metadata.insert(
+            "input-metadata".to_string(),
+            "x".repeat(CAPSULE_BYTES_PER_COUNT_UNIT * 3),
+        );
+        cap.environment.properties.insert(
+            "environment-property".to_string(),
+            "y".repeat(CAPSULE_BYTES_PER_COUNT_UNIT * 3),
+        );
+
+        let report = sdk.verify_capsule(&cap).expect("should fail closed");
+
+        assert_capsule_byte_capacity_failed_before_replay(&report);
     }
 
     // ── verify_capsule: error paths ─────────────────────────────────
