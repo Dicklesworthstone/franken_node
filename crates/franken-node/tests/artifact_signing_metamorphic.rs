@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
 
 use frankenengine_node::supply_chain::artifact_signing::{
-    ArtifactSigningError, ChecksumManifest, KeyRing, ManifestEntry, build_and_sign_manifest,
-    sign_artifact, verify_release,
+    ArtifactSigningError, ChecksumManifest, KeyId, KeyRing, ManifestEntry, PartialSignature,
+    build_and_sign_manifest, collect_threshold_signatures, sign_artifact, sign_bytes,
+    verify_release, verify_threshold,
 };
 
 const CASES: usize = 100;
+const THRESHOLD_PARTIAL_CAP: usize = 256;
 
 #[test]
 fn manifest_canonicalization_is_permutation_idempotent_and_detects_bit_flips() {
@@ -103,6 +105,98 @@ fn parse_canonical_rejects_overlarge_manifest_without_partial_acceptance() {
         err,
         ArtifactSigningError::ManifestLineInvalid { line_number: 4097, ref reason }
             if reason == "manifest entry count exceeds maximum"
+    ));
+}
+
+#[test]
+fn threshold_collection_rejects_oversized_partial_input_before_valid_suffix() {
+    let sk1 = ed25519_dalek::SigningKey::from_bytes(&[0x44; 32]);
+    let sk2 = ed25519_dalek::SigningKey::from_bytes(&[0x45; 32]);
+    let mut key_ring = KeyRing::new();
+    let kid1 = key_ring.add_key(sk1.verifying_key());
+    let kid2 = key_ring.add_key(sk2.verifying_key());
+    let data = b"threshold oversized partial input";
+
+    let mut partials = Vec::new();
+    for index in 0..=THRESHOLD_PARTIAL_CAP {
+        partials.push(PartialSignature {
+            key_id: KeyId(format!("unknown-key-{index}")),
+            signature: vec![index.to_le_bytes()[0]; 64],
+        });
+    }
+    partials.push(PartialSignature {
+        key_id: kid1,
+        signature: sign_bytes(&sk1, data),
+    });
+    partials.push(PartialSignature {
+        key_id: kid2,
+        signature: sign_bytes(&sk2, data),
+    });
+
+    assert!(!verify_threshold(data, &partials, &key_ring, 2));
+    let err = collect_threshold_signatures(data, &partials, &key_ring, 2)
+        .expect_err("oversized partial input must fail closed before valid suffix");
+    assert!(matches!(
+        err,
+        ArtifactSigningError::ThresholdInputTooLarge {
+            max: THRESHOLD_PARTIAL_CAP,
+            actual
+        } if actual > THRESHOLD_PARTIAL_CAP
+    ));
+}
+
+#[test]
+fn threshold_collection_caps_repeated_attempts_per_key() {
+    let sk1 = ed25519_dalek::SigningKey::from_bytes(&[0x46; 32]);
+    let sk2 = ed25519_dalek::SigningKey::from_bytes(&[0x47; 32]);
+    let mut key_ring = KeyRing::new();
+    let kid1 = key_ring.add_key(sk1.verifying_key());
+    let kid2 = key_ring.add_key(sk2.verifying_key());
+    let data = b"threshold repeated attempts per key";
+
+    let allowed_retry = vec![
+        PartialSignature {
+            key_id: kid1.clone(),
+            signature: sign_bytes(&sk1, b"wrong payload"),
+        },
+        PartialSignature {
+            key_id: kid1.clone(),
+            signature: sign_bytes(&sk1, data),
+        },
+        PartialSignature {
+            key_id: kid2.clone(),
+            signature: sign_bytes(&sk2, data),
+        },
+    ];
+    assert!(verify_threshold(data, &allowed_retry, &key_ring, 2));
+
+    let capped_retry = vec![
+        PartialSignature {
+            key_id: kid1.clone(),
+            signature: sign_bytes(&sk1, b"wrong payload 1"),
+        },
+        PartialSignature {
+            key_id: kid1.clone(),
+            signature: sign_bytes(&sk1, b"wrong payload 2"),
+        },
+        PartialSignature {
+            key_id: kid1,
+            signature: sign_bytes(&sk1, data),
+        },
+        PartialSignature {
+            key_id: kid2,
+            signature: sign_bytes(&sk2, data),
+        },
+    ];
+
+    let err = collect_threshold_signatures(data, &capped_retry, &key_ring, 2)
+        .expect_err("third candidate from one key must be skipped");
+    assert!(matches!(
+        err,
+        ArtifactSigningError::ThresholdNotMet {
+            required: 2,
+            provided: 1
+        }
     ));
 }
 

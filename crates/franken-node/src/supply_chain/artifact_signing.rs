@@ -26,6 +26,10 @@ const RELEASE_MANIFEST_SIGNATURE_DOMAIN: &[u8] = b"release_manifest_v1:";
 const MAX_ARTIFACT_NAME_LEN: usize = 512;
 /// Maximum entries accepted from an attacker-controlled checksum manifest.
 const MAX_MANIFEST_ENTRIES: usize = 4096;
+/// Maximum partial signatures accepted for one threshold collection.
+const MAX_THRESHOLD_PARTIAL_SIGNATURES: usize = 256;
+/// Maximum signature candidates accepted for one key in one collection.
+const MAX_THRESHOLD_ATTEMPTS_PER_KEY: usize = 2;
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -69,6 +73,8 @@ pub enum ArtifactSigningError {
     KeyNotFound { key_id: String },
     /// Threshold not met: need M signatures, got fewer.
     ThresholdNotMet { required: usize, provided: usize },
+    /// Threshold input exceeded the bounded partial-signature budget.
+    ThresholdInputTooLarge { max: usize, actual: usize },
     /// Transition record signature invalid during key rotation.
     TransitionRecordInvalid,
     /// Signing key material is malformed or unsupported.
@@ -116,6 +122,9 @@ impl fmt::Display for ArtifactSigningError {
             }
             Self::ThresholdNotMet { required, provided } => {
                 write!(f, "threshold not met: need {required}, got {provided}")
+            }
+            Self::ThresholdInputTooLarge { max, actual } => {
+                write!(f, "threshold partial input too large: {actual} > {max}")
             }
             Self::TransitionRecordInvalid => write!(f, "transition record signature invalid"),
             Self::SigningKeyInvalid { reason } => write!(f, "signing key invalid: {reason}"),
@@ -718,14 +727,27 @@ pub fn collect_threshold_signatures(
             provided: 0,
         });
     }
+    if partials.len() > MAX_THRESHOLD_PARTIAL_SIGNATURES {
+        return Err(ArtifactSigningError::ThresholdInputTooLarge {
+            max: MAX_THRESHOLD_PARTIAL_SIGNATURES,
+            actual: partials.len(),
+        });
+    }
 
     let mut valid: Vec<PartialSignature> = Vec::new();
-    let mut seen_keys = std::collections::BTreeSet::new();
+    let mut seen_keys = BTreeSet::new();
+    let mut attempts_by_key = BTreeMap::new();
 
     for partial in partials {
         if seen_keys.contains(&partial.key_id) {
             continue; // each key holder contributes at most once
         }
+        let attempts = attempts_by_key.entry(partial.key_id.clone()).or_insert(0);
+        if *attempts >= MAX_THRESHOLD_ATTEMPTS_PER_KEY {
+            continue;
+        }
+        *attempts += 1;
+
         if let Some(vk) = key_ring.get_key(&partial.key_id)
             && verify_signature(vk, data, &partial.signature).is_ok()
         {
@@ -2144,7 +2166,7 @@ mod artifact_signing_boundary_negative_tests {
 
         // Create a large number of duplicate/invalid signatures to test iteration bounds
         let mut partials = Vec::new();
-        for i in 0..1000 {
+        for i in 0..=MAX_THRESHOLD_PARTIAL_SIGNATURES {
             partials.push(PartialSignature {
                 key_id: KeyId(format!("fake-key-{i}")),
                 signature: vec![i as u8; 64],
@@ -2160,12 +2182,54 @@ mod artifact_signing_boundary_negative_tests {
             signature: sign_bytes(&sk2, data),
         });
 
-        // Should still succeed despite many invalid signatures
-        assert!(verify_threshold(data, &partials, &ring, 2));
+        assert!(!verify_threshold(data, &partials, &ring, 2));
 
-        // Should early-return once threshold is met (can't verify timing, but logic works)
         let result = collect_threshold_signatures(data, &partials, &ring, 2);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().len(), 2);
+        assert!(matches!(
+            result,
+            Err(ArtifactSigningError::ThresholdInputTooLarge {
+                max: MAX_THRESHOLD_PARTIAL_SIGNATURES,
+                actual
+            }) if actual > MAX_THRESHOLD_PARTIAL_SIGNATURES
+        ));
+    }
+
+    #[test]
+    fn hardening_threshold_collection_caps_attempts_per_key() {
+        let sk1 = demo_signing_key();
+        let sk2 = demo_signing_key_2();
+        let mut ring = KeyRing::new();
+        let kid1 = ring.add_key(sk1.verifying_key());
+        let kid2 = ring.add_key(sk2.verifying_key());
+        let data = b"threshold per-key attempt cap";
+
+        let partials = vec![
+            PartialSignature {
+                key_id: kid1.clone(),
+                signature: sign_bytes(&sk1, b"wrong payload 1"),
+            },
+            PartialSignature {
+                key_id: kid1.clone(),
+                signature: sign_bytes(&sk1, b"wrong payload 2"),
+            },
+            PartialSignature {
+                key_id: kid1,
+                signature: sign_bytes(&sk1, data),
+            },
+            PartialSignature {
+                key_id: kid2,
+                signature: sign_bytes(&sk2, data),
+            },
+        ];
+
+        let err = collect_threshold_signatures(data, &partials, &ring, 2)
+            .expect_err("third attempt from the same key must be skipped");
+        assert!(matches!(
+            err,
+            ArtifactSigningError::ThresholdNotMet {
+                required: 2,
+                provided: 1
+            }
+        ));
     }
 }
