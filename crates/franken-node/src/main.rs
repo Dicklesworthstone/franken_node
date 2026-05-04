@@ -1072,14 +1072,16 @@ fn parse_signing_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::SigningKey> 
                             push_bounded(&mut local_candidates, text.to_string(), 64);
                         }
                     } else {
-                        local_candidates.push(text.to_string());
+                        push_bounded(&mut local_candidates, text.to_string(), 64);
                     }
                 } else if let Some(nested) = value.as_object() {
                     let (maybe_key, extras) = extract_signing_key_candidates_from_object(nested);
                     if let Some(signing_key) = maybe_key {
                         return (Some(signing_key), local_candidates);
                     }
-                    local_candidates.extend(extras);
+                    for extra in extras {
+                        push_bounded(&mut local_candidates, extra, 64);
+                    }
                 }
             }
             if let Some(data) = obj.get("data") {
@@ -1128,14 +1130,16 @@ fn parse_signing_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::SigningKey> 
                             push_bounded(&mut local_candidates, text.to_string(), 64);
                         }
                     } else {
-                        local_candidates.push(text.to_string());
+                        push_bounded(&mut local_candidates, text.to_string(), 64);
                     }
                 } else if let Some(nested) = data.as_object() {
                     let (maybe_key, extras) = extract_signing_key_candidates_from_object(nested);
                     if let Some(signing_key) = maybe_key {
                         return (Some(signing_key), local_candidates);
                     }
-                    local_candidates.extend(extras);
+                    for extra in extras {
+                        push_bounded(&mut local_candidates, extra, 64);
+                    }
                 }
             }
             if let Some(payload) = obj.get("payload") {
@@ -1184,14 +1188,16 @@ fn parse_signing_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::SigningKey> 
                             push_bounded(&mut local_candidates, text.to_string(), 64);
                         }
                     } else {
-                        local_candidates.push(text.to_string());
+                        push_bounded(&mut local_candidates, text.to_string(), 64);
                     }
                 } else if let Some(nested) = payload.as_object() {
                     let (maybe_key, extras) = extract_signing_key_candidates_from_object(nested);
                     if let Some(signing_key) = maybe_key {
                         return (Some(signing_key), local_candidates);
                     }
-                    local_candidates.extend(extras);
+                    for extra in extras {
+                        push_bounded(&mut local_candidates, extra, 64);
+                    }
                 }
             }
             (None, local_candidates)
@@ -19012,7 +19018,7 @@ fn decode_signature_blob(raw: &[u8]) -> Vec<u8> {
                         return (Some(bytes), local_candidates);
                     }
                     if let Some(text) = nested.as_str() {
-                        local_candidates.push(text.to_string());
+                        push_bounded(&mut local_candidates, text.to_string(), 64);
                     }
                 }
             }
@@ -19058,14 +19064,16 @@ fn decode_signature_blob(raw: &[u8]) -> Vec<u8> {
                             push_bounded(&mut local_candidates, text.to_string(), 64);
                         }
                     } else {
-                        local_candidates.push(text.to_string());
+                        push_bounded(&mut local_candidates, text.to_string(), 64);
                     }
                 } else if let Some(nested) = value.as_object() {
                     let (maybe_bytes, extras) = extract_signature_candidates_from_object(nested);
                     if let Some(bytes) = maybe_bytes {
                         return (Some(bytes), local_candidates);
                     }
-                    local_candidates.extend(extras);
+                    for extra in extras {
+                        push_bounded(&mut local_candidates, extra, 64);
+                    }
                 }
             }
             if let Some(data) = obj.get("data") {
@@ -19110,14 +19118,16 @@ fn decode_signature_blob(raw: &[u8]) -> Vec<u8> {
                             push_bounded(&mut local_candidates, text.to_string(), 64);
                         }
                     } else {
-                        local_candidates.push(text.to_string());
+                        push_bounded(&mut local_candidates, text.to_string(), 64);
                     }
                 } else if let Some(nested) = data.as_object() {
                     let (maybe_bytes, extras) = extract_signature_candidates_from_object(nested);
                     if let Some(bytes) = maybe_bytes {
                         return (Some(bytes), local_candidates);
                     }
-                    local_candidates.extend(extras);
+                    for extra in extras {
+                        push_bounded(&mut local_candidates, extra, 64);
+                    }
                 }
             }
             if let Some(payload) = obj.get("payload") {
@@ -19162,14 +19172,16 @@ fn decode_signature_blob(raw: &[u8]) -> Vec<u8> {
                             push_bounded(&mut local_candidates, text.to_string(), 64);
                         }
                     } else {
-                        local_candidates.push(text.to_string());
+                        push_bounded(&mut local_candidates, text.to_string(), 64);
                     }
                 } else if let Some(nested) = payload.as_object() {
                     let (maybe_bytes, extras) = extract_signature_candidates_from_object(nested);
                     if let Some(bytes) = maybe_bytes {
                         return (Some(bytes), local_candidates);
                     }
-                    local_candidates.extend(extras);
+                    for extra in extras {
+                        push_bounded(&mut local_candidates, extra, 64);
+                    }
                 }
             }
             (None, local_candidates)
@@ -19252,7 +19264,7 @@ fn decode_signature_blob(raw: &[u8]) -> Vec<u8> {
                             return bytes;
                         }
                         if let Some(entry) = entry.as_str() {
-                            candidates.push(entry.to_string());
+                            push_bounded(&mut candidates, entry.to_string(), 64);
                             continue;
                         }
                         if let Some(obj) = entry.as_object() {
@@ -19581,7 +19593,7 @@ fn parse_verifying_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::VerifyingK
                         return (Some(key), local_candidates);
                     }
                     if let Some(entry) = entry.as_str() {
-                        local_candidates.push(entry.to_string());
+                        push_bounded(&mut local_candidates, entry.to_string(), 64);
                     }
                     if let Some(nested) = entry.as_object() {
                         let (maybe_key, extras) = extract_key_candidates_from_object(nested);
@@ -19640,14 +19652,16 @@ fn parse_verifying_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::VerifyingK
                             push_bounded(&mut local_candidates, text.to_string(), 64);
                         }
                     } else {
-                        local_candidates.push(text.to_string());
+                        push_bounded(&mut local_candidates, text.to_string(), 64);
                     }
                 } else if let Some(nested) = value.as_object() {
                     let (maybe_key, extras) = extract_key_candidates_from_object(nested);
                     if let Some(key) = maybe_key {
                         return (Some(key), local_candidates);
                     }
-                    local_candidates.extend(extras);
+                    for extra in extras {
+                        push_bounded(&mut local_candidates, extra, 64);
+                    }
                 }
             }
             if let Some(data) = obj.get("data") {
@@ -19696,14 +19710,16 @@ fn parse_verifying_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::VerifyingK
                             push_bounded(&mut local_candidates, text.to_string(), 64);
                         }
                     } else {
-                        local_candidates.push(text.to_string());
+                        push_bounded(&mut local_candidates, text.to_string(), 64);
                     }
                 } else if let Some(nested) = data.as_object() {
                     let (maybe_key, extras) = extract_key_candidates_from_object(nested);
                     if let Some(key) = maybe_key {
                         return (Some(key), local_candidates);
                     }
-                    local_candidates.extend(extras);
+                    for extra in extras {
+                        push_bounded(&mut local_candidates, extra, 64);
+                    }
                 }
             }
             if let Some(payload) = obj.get("payload") {
@@ -19752,14 +19768,16 @@ fn parse_verifying_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::VerifyingK
                             push_bounded(&mut local_candidates, text.to_string(), 64);
                         }
                     } else {
-                        local_candidates.push(text.to_string());
+                        push_bounded(&mut local_candidates, text.to_string(), 64);
                     }
                 } else if let Some(nested) = payload.as_object() {
                     let (maybe_key, extras) = extract_key_candidates_from_object(nested);
                     if let Some(key) = maybe_key {
                         return (Some(key), local_candidates);
                     }
-                    local_candidates.extend(extras);
+                    for extra in extras {
+                        push_bounded(&mut local_candidates, extra, 64);
+                    }
                 }
             }
             (None, local_candidates)
