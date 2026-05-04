@@ -5,6 +5,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from scripts import check_device_profile
 
@@ -36,6 +37,27 @@ class TestDeviceProfileFixtures(unittest.TestCase):
         data = decode_json_object(FIXTURES_PATH.read_text(encoding="utf-8"))
         self.assertIn("policies", data)
         self.assertGreaterEqual(len(data["policies"]), 3)
+
+
+class TestDeviceProfileReadHelpers(unittest.TestCase):
+
+    def test_read_utf8_invalid_utf8_returns_none(self):
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "invalid.rs"
+            path.write_bytes(b"\xff")
+
+            self.assertIsNone(check_device_profile.read_utf8(path))
+
+    def test_load_json_object_invalid_utf8_fails_closed(self):
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "invalid.json"
+            path.write_bytes(b"\xff")
+
+            parsed, error = check_device_profile.load_json_object(path)
+
+        self.assertIsNone(parsed)
+        self.assertIsNotNone(error)
+        self.assertIn("invalid UTF-8", error)
 
 
 class TestDeviceProfileImpl(unittest.TestCase):

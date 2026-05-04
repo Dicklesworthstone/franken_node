@@ -5,6 +5,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from scripts import check_transparency_verifier
 
@@ -72,6 +73,27 @@ class TestTransparencyReceipts(unittest.TestCase):
         data = decode_json_object(path.read_text(encoding="utf-8"))
         for r in data["receipts"]:
             self.assertIn("trace_id", r)
+
+
+class TestTransparencyReadHelpers(unittest.TestCase):
+
+    def test_read_utf8_invalid_utf8_returns_none(self):
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "invalid.rs"
+            path.write_bytes(b"\xff")
+
+            self.assertIsNone(check_transparency_verifier.read_utf8(path))
+
+    def test_load_json_object_invalid_utf8_fails_closed(self):
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "invalid.json"
+            path.write_bytes(b"\xff")
+
+            parsed, error = check_transparency_verifier.load_json_object(path)
+
+        self.assertIsNone(parsed)
+        self.assertIsNotNone(error)
+        self.assertIn("invalid UTF-8", error)
 
 
 class TestTransparencyImplementation(unittest.TestCase):

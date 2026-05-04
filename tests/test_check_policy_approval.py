@@ -51,6 +51,17 @@ class TestSpecInvariants(TestCase):
         self.assertEqual(result["missing"], ["INV-POL-MULTI-PARTY"])
         self.assertIn("unable to read", result["reason"])
 
+    def test_invalid_utf8_input_fails_closed(self):
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "invalid.md"
+            path.write_bytes(b"\xff")
+            result = checker.check_content("spec", path, ["INV-POL-MULTI-PARTY"])
+
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["found"], [])
+        self.assertEqual(result["missing"], ["INV-POL-MULTI-PARTY"])
+        self.assertIn("invalid UTF-8", result["reason"])
+
     def test_eight_invariants(self):
         result = checker.check_content("spec", checker.SPEC_PATH, checker.REQUIRED_INVARIANTS)
         self.assertEqual(len(result["found"]), 8)

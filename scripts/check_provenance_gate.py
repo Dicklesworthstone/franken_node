@@ -36,7 +36,7 @@ EMIT_HUMAN = True
 def read_utf8(path: Path) -> str | None:
     try:
         return path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeError):
         return None
 
 
@@ -46,6 +46,8 @@ def load_json_object(path: Path) -> tuple[dict[str, object] | None, str | None]:
         parsed = JSON_DECODER.decode(raw)
     except OSError as exc:
         return None, f"unable to read {path}: {exc}"
+    except UnicodeError as exc:
+        return None, f"invalid UTF-8 in {path}: {exc}"
     except json.JSONDecodeError as exc:
         return None, f"invalid JSON in {path}: {exc}"
 

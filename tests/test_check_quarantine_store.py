@@ -5,6 +5,9 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from scripts import check_quarantine_store
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts/check_quarantine_store.py"
@@ -28,6 +31,16 @@ class TestQuarantineMetrics(unittest.TestCase):
     def test_csv_has_data(self):
         lines = [line for line in CSV_PATH.read_text(encoding="utf-8").splitlines() if line.strip()]
         self.assertGreaterEqual(len(lines), 4)
+
+
+class TestQuarantineReadHelpers(unittest.TestCase):
+
+    def test_read_utf8_invalid_utf8_returns_none(self):
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "invalid.csv"
+            path.write_bytes(b"\xff")
+
+            self.assertIsNone(check_quarantine_store.read_utf8(path))
 
 
 class TestQuarantineStoreImpl(unittest.TestCase):

@@ -145,6 +145,8 @@ def read_required_text(path: Path, missing_reason: str) -> tuple[str | None, str
         return None, missing_reason
     try:
         return path.read_text(encoding="utf-8"), None
+    except UnicodeError as exc:
+        return None, f"invalid UTF-8 in {render_path(path)}: {exc}"
     except OSError as exc:
         return None, f"unable to read {render_path(path)}: {exc}"
 

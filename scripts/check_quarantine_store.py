@@ -25,7 +25,7 @@ EVIDENCE_PATH = ROOT / "artifacts/section_10_13/bd-2eun/verification_evidence.js
 def read_utf8(path: Path) -> str | None:
     try:
         return path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeError):
         return None
 
 
