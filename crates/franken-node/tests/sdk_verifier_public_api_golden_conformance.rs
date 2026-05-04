@@ -20,6 +20,7 @@ use frankenengine_node::sdk::{
         create_capsule as create_node_capsule,
     },
     verifier_sdk::{
+        STRUCTURAL_ONLY_SECURITY_POSTURE as NODE_STRUCTURAL_ONLY_SECURITY_POSTURE,
         VerificationReport as NodeVerificationReport,
         VerificationRequest as NodeVerificationRequest, VerifierConfig as NodeVerifierConfig,
         VerifierSdk as NodeVerifierSdk, VerifyVerdict as NodeVerifyVerdict,
@@ -42,6 +43,8 @@ const NODE_CAPSULE_BYTES_PER_COUNT_UNIT: usize = 1024;
 const NODE_CLAIM_TOTAL_BYTES_PER_COUNT_UNIT: usize = 1024;
 #[cfg(feature = "verifier-tools")]
 const NODE_CLAIM_BYTES_PER_CLAIM_LIMIT: usize = 4096;
+#[cfg(feature = "verifier-tools")]
+const NODE_VERIFIER_SDK_SOURCE: &str = include_str!("../src/sdk/verifier_sdk.rs");
 
 #[cfg(feature = "verifier-tools")]
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -513,6 +516,65 @@ fn node_verifier_sdk_artifact_hash_verification_uses_content_bytes() {
         metadata_only_hash_evidence
             .detail
             .contains("artifact bytes not provided")
+    );
+}
+
+#[cfg(feature = "verifier-tools")]
+#[test]
+fn node_verifier_sdk_report_set_validation_declares_structural_only_scope() {
+    let sdk = NodeVerifierSdk::with_defaults();
+    let first_bytes = b"first independent artifact";
+    let second_bytes = b"second independent artifact";
+    let first_request = NodeVerificationRequest {
+        artifact_id: "node-report-set-first".to_string(),
+        artifact_hash: sha256_hex(first_bytes),
+        claims: vec!["structural-set-member".to_string()],
+    };
+    let second_request = NodeVerificationRequest {
+        artifact_id: "node-report-set-second".to_string(),
+        artifact_hash: sha256_hex(second_bytes),
+        claims: vec!["structural-set-member".to_string()],
+    };
+    let first_report = sdk
+        .verify_artifact_bytes(&first_request, first_bytes)
+        .expect("first report should verify");
+    let second_report = sdk
+        .verify_artifact_bytes(&second_request, second_bytes)
+        .expect("second report should verify");
+
+    let report_set = sdk
+        .verify_report_set_uniqueness(&[first_report, second_report])
+        .expect("report-set validation should produce evidence");
+
+    assert_eq!(
+        NODE_STRUCTURAL_ONLY_SECURITY_POSTURE,
+        "structural_only_not_replacement_critical"
+    );
+    assert_eq!(report_set.verdict, NodeVerifyVerdict::Pass);
+    assert!(report_set.request_id.starts_with("vrps-"));
+    let scope = report_set
+        .evidence
+        .iter()
+        .find(|entry| entry.check_name == "report_set_structural_scope")
+        .expect("report-set validation must declare its structural-only scope");
+    assert!(scope.passed);
+    assert!(
+        scope
+            .detail
+            .contains("structural-only report-set validation")
+    );
+    assert!(scope.detail.contains("no predecessor hash"));
+    assert!(scope.detail.contains("signature verification"));
+
+    assert!(NODE_VERIFIER_SDK_SOURCE.contains("pub fn verify_report_set_uniqueness("));
+    assert!(!NODE_VERIFIER_SDK_SOURCE.contains("pub fn verify_chain("));
+    assert!(
+        !NODE_VERIFIER_SDK_SOURCE
+            .contains("Verify a chain of verification reports for consistency and integrity")
+    );
+    assert!(
+        !NODE_VERIFIER_SDK_SOURCE
+            .contains("Hash-chain: each report's binding_hash should reference its own input")
     );
 }
 

@@ -347,10 +347,10 @@ mod tests {
     fn verify_chain_rejects_empty_report_chain() {
         let sdk = VerifierSdk::with_defaults();
 
-        let err = sdk.verify_chain(&[]).unwrap_err();
+        let err = sdk.verify_report_set_uniqueness(&[]).unwrap_err();
 
         match err {
-            SdkError::BrokenChain(message) => assert!(message.contains("empty")),
+            SdkError::InvalidReportSet(message) => assert!(message.contains("empty")),
             other => panic!("expected broken chain error, got {other:?}"),
         }
     }
@@ -364,7 +364,7 @@ mod tests {
             .expect("fixture report should be created");
 
         let chain_report = sdk
-            .verify_chain(&[report.clone(), report])
+            .verify_report_set_uniqueness(&[report.clone(), report])
             .expect("duplicate report chain should still emit evidence");
         let failures = failed_checks(&chain_report);
 
@@ -385,7 +385,7 @@ mod tests {
         second.schema_tag = "vsk-legacy".to_string();
 
         let chain_report = sdk
-            .verify_chain(&[first, second])
+            .verify_report_set_uniqueness(&[first, second])
             .expect("schema drift should still emit evidence");
         let failures = failed_checks(&chain_report);
 
@@ -525,7 +525,8 @@ mod tests {
                 report2.binding_hash = pattern.clone();
             }
 
-            let chain_result = sdk.verify_chain(&[report1.clone(), report2.clone()]);
+            let chain_result =
+                sdk.verify_report_set_uniqueness(&[report1.clone(), report2.clone()]);
 
             match chain_result {
                 Ok(chain_report) => {
@@ -739,7 +740,7 @@ mod tests {
 
             // Chain verification should detect different hashes
             let chain_report = sdk
-                .verify_chain(&[report1, report2])
+                .verify_report_set_uniqueness(&[report1, report2])
                 .expect("chain should verify");
             assert!(
                 matches!(chain_report.verdict, VerifyVerdict::Pass),
@@ -934,7 +935,7 @@ mod tests {
                                     evidence: Vec::new(),
                                 };
 
-                                let result = sdk.verify_chain(&[report1, report2]);
+                                let result = sdk.verify_report_set_uniqueness(&[report1, report2]);
                                 thread_results.push((
                                     "chain",
                                     thread_id,
@@ -1084,7 +1085,7 @@ mod tests {
         // Verify chain under memory pressure
         let chain_start = std::time::Instant::now();
         let chain_report = sdk
-            .verify_chain(&chain)
+            .verify_report_set_uniqueness(&chain)
             .expect("chain should verify under memory pressure");
         let chain_duration = chain_start.elapsed();
 
@@ -1098,7 +1099,7 @@ mod tests {
         drop(fragmenters);
 
         let post_cleanup_report = sdk
-            .verify_chain(&chain)
+            .verify_report_set_uniqueness(&chain)
             .expect("chain should verify after cleanup");
         assert_eq!(chain_report.binding_hash, post_cleanup_report.binding_hash);
     }
@@ -1249,7 +1250,7 @@ mod tests {
                                 SdkError::InvalidArtifact(msg) => {
                                     assert!(!msg.is_empty(), "Error message should be descriptive");
                                 }
-                                SdkError::BrokenChain(msg) => {
+                                SdkError::InvalidReportSet(msg) => {
                                     assert!(!msg.is_empty(), "Error message should be descriptive");
                                 }
                             }
@@ -1312,7 +1313,7 @@ mod tests {
         circular_reports.push(self_ref_report);
 
         // Chain verification should handle circular dependencies gracefully
-        let chain_result = sdk.verify_chain(&circular_reports);
+        let chain_result = sdk.verify_report_set_uniqueness(&circular_reports);
 
         match chain_result {
             Ok(chain_report) => {
@@ -1330,7 +1331,7 @@ mod tests {
                     }
                 }
             }
-            Err(SdkError::BrokenChain(msg)) => {
+            Err(SdkError::InvalidReportSet(msg)) => {
                 // Early detection of circular dependencies is acceptable
                 assert!(
                     !msg.is_empty(),
@@ -1344,7 +1345,7 @@ mod tests {
 
         // Verification should complete in reasonable time (no infinite loops)
         let start = std::time::Instant::now();
-        let _ = sdk.verify_chain(&circular_reports);
+        let _ = sdk.verify_report_set_uniqueness(&circular_reports);
         let duration = start.elapsed();
 
         assert!(

@@ -1,15 +1,16 @@
 //! bd-nbwo: Universal Verifier SDK for third-party verification (Section 10.17).
 //!
 //! Provides a stable, versioned API that enables independent third parties to
-//! verify artifacts, replay capsules, and verification chains. The SDK is the
-//! universal entry point for all verification operations in the franken-node
-//! ecosystem.
+//! verify artifacts, replay capsules, and bounded structural report sets. The
+//! SDK is the universal entry point for structural helper verification
+//! operations in the franken-node ecosystem.
 //!
 //! # Capabilities
 //!
 //! - `verify_artifact_bytes`: Verify a single artifact against its claimed content hash and properties
 //! - `verify_capsule`: Verify a replay capsule for deterministic re-execution
-//! - `verify_chain`: Verify a chain of verification reports for consistency
+//! - `verify_report_set_uniqueness`: Validate report schema, hash/request
+//!   uniqueness, and verdict consistency without cryptographic chain linkage
 //! - Machine-readable pass/fail evidence in every report
 //! - Stable API surface with semantic versioning
 //!
@@ -19,8 +20,8 @@
 //! - VSK-002: Artifact verification completed
 //! - VSK-003: Capsule verification started
 //! - VSK-004: Capsule verification completed
-//! - VSK-005: Chain verification started
-//! - VSK-006: Chain verification completed
+//! - VSK-005: Report-set structural validation started
+//! - VSK-006: Report-set structural validation completed
 //! - VSK-007: SDK configuration loaded
 //! - VSK-008: Verification report signed
 //!
@@ -79,10 +80,10 @@ pub mod event_codes {
     pub const VSK_003_CAPSULE_VERIFY_STARTED: &str = "VSK-003";
     /// Capsule verification completed.
     pub const VSK_004_CAPSULE_VERIFY_COMPLETED: &str = "VSK-004";
-    /// Chain verification started.
-    pub const VSK_005_CHAIN_VERIFY_STARTED: &str = "VSK-005";
-    /// Chain verification completed.
-    pub const VSK_006_CHAIN_VERIFY_COMPLETED: &str = "VSK-006";
+    /// Report-set structural validation started.
+    pub const VSK_005_REPORT_SET_VERIFY_STARTED: &str = "VSK-005";
+    /// Report-set structural validation completed.
+    pub const VSK_006_REPORT_SET_VERIFY_COMPLETED: &str = "VSK-006";
     /// SDK configuration loaded.
     pub const VSK_007_CONFIG_LOADED: &str = "VSK-007";
     /// Verification report signed.
@@ -114,8 +115,8 @@ pub enum SdkError {
     InvalidClaim(String),
     /// A capsule was malformed or incomplete.
     MalformedCapsule(String),
-    /// A verification chain was broken or inconsistent.
-    BrokenChain(String),
+    /// A report set was empty or structurally inconsistent.
+    InvalidReportSet(String),
     /// The SDK was misconfigured.
     ConfigError(String),
 }
@@ -129,7 +130,7 @@ impl std::fmt::Display for SdkError {
             }
             Self::InvalidClaim(msg) => write!(f, "invalid_claim: {msg}"),
             Self::MalformedCapsule(msg) => write!(f, "malformed_capsule: {msg}"),
-            Self::BrokenChain(msg) => write!(f, "broken_chain: {msg}"),
+            Self::InvalidReportSet(msg) => write!(f, "invalid_report_set: {msg}"),
             Self::ConfigError(msg) => write!(f, "config_error: {msg}"),
         }
     }
@@ -156,7 +157,7 @@ pub struct VerifierConfig {
     pub max_claims_per_request: usize,
     /// Maximum capsule records/properties accepted before replay or canonical serialization.
     pub max_capsule_count: usize,
-    /// Maximum verification reports accepted in a single chain verification request.
+    /// Maximum verification reports accepted in a single report-set validation request.
     pub max_chain_depth: usize,
     /// Additional properties carried forward for extensibility.
     pub extensions: BTreeMap<String, String>,
@@ -881,53 +882,66 @@ impl VerifierSdk {
         })
     }
 
-    /// Verify a chain of verification reports for consistency and integrity.
+    /// Validate a bounded set of verification reports for structural consistency.
     ///
-    /// INV-VSK-DETERMINISTIC-VERIFY: same chain always produces same result.
-    pub fn verify_chain(
+    /// This helper is structural-only: it checks schema/API consistency,
+    /// non-empty and unique binding hashes, unique request IDs, and aggregate
+    /// verdict status. It does not verify predecessor hashes, Merkle linkage,
+    /// detached signatures, or Ed25519 authenticity for any report.
+    ///
+    /// INV-VSK-DETERMINISTIC-VERIFY: the same ordered report set always produces
+    /// the same result.
+    pub fn verify_report_set_uniqueness(
         &self,
         reports: &[VerificationReport],
     ) -> Result<VerificationReport, SdkError> {
-        let max_chain_depth =
+        let max_report_set_depth =
             validate_capacity_limit("max_chain_depth", self.config.max_chain_depth)?;
 
         if reports.is_empty() {
-            return Err(SdkError::BrokenChain("chain is empty".to_string()));
+            return Err(SdkError::InvalidReportSet(
+                "report set is empty".to_string(),
+            ));
         }
 
         let mut evidence = Vec::new();
 
-        // Chain length
         evidence.push(EvidenceEntry {
-            check_name: "chain_length".to_string(),
+            check_name: "report_set_length".to_string(),
             passed: true,
-            detail: format!("{} reports in chain", reports.len()),
+            detail: format!("{} reports in report set", reports.len()),
         });
 
-        let chain_within_capacity = reports.len() <= max_chain_depth;
+        let report_set_within_capacity = reports.len() <= max_report_set_depth;
         evidence.push(EvidenceEntry {
-            check_name: "chain_depth_check".to_string(),
-            passed: chain_within_capacity,
-            detail: if chain_within_capacity {
+            check_name: "report_set_depth_check".to_string(),
+            passed: report_set_within_capacity,
+            detail: if report_set_within_capacity {
                 format!(
-                    "{} reports within chain depth limit of {}",
+                    "{} reports within report-set depth limit of {}",
                     reports.len(),
-                    max_chain_depth
+                    max_report_set_depth
                 )
             } else {
                 format!(
-                    "{} reports exceeds chain depth limit of {}",
+                    "{} reports exceeds report-set depth limit of {}",
                     reports.len(),
-                    max_chain_depth
+                    max_report_set_depth
                 )
             },
         });
+        evidence.push(EvidenceEntry {
+            check_name: "report_set_structural_scope".to_string(),
+            passed: true,
+            detail: "structural-only report-set validation; no predecessor hash, Merkle linkage, or report signature verification is performed here"
+                .to_string(),
+        });
 
-        if !chain_within_capacity {
+        if !report_set_within_capacity {
             evidence.push(EvidenceEntry {
-                check_name: "chain_verification_skipped_due_to_depth".to_string(),
+                check_name: "report_set_validation_skipped_due_to_depth".to_string(),
                 passed: false,
-                detail: "Chain-wide schema, uniqueness, and verdict checks skipped due to depth"
+                detail: "Report-set schema, uniqueness, and verdict checks skipped due to depth"
                     .to_string(),
             });
             let failures: Vec<String> = evidence
@@ -936,22 +950,25 @@ impl VerifierSdk {
                 .map(|e| e.check_name.clone())
                 .collect();
             let report_count = reports.len().to_string();
-            let chain_depth = max_chain_depth.to_string();
-            let chain_binding =
-                deterministic_hash_fields(&["chain_depth_exceeded", &report_count, &chain_depth]);
+            let report_set_depth = max_report_set_depth.to_string();
+            let report_set_binding = deterministic_hash_fields(&[
+                "report_set_depth_exceeded",
+                &report_count,
+                &report_set_depth,
+            ]);
 
             return Ok(VerificationReport {
-                request_id: format!("vchn-{}", &deterministic_hash(&chain_binding)[..24]),
+                request_id: format!("vrps-{}", &deterministic_hash(&report_set_binding)[..24]),
                 verdict: VerifyVerdict::Fail(failures),
                 evidence,
                 trace_id: format!(
                     "vtrc-{}",
-                    &deterministic_hash(&format!("chain:{chain_binding}"))[..24]
+                    &deterministic_hash(&format!("report-set:{report_set_binding}"))[..24]
                 ),
                 schema_tag: SCHEMA_TAG.to_string(),
                 api_version: API_VERSION.to_string(),
                 verifier_identity: self.config.verifier_identity.clone(),
-                binding_hash: chain_binding,
+                binding_hash: report_set_binding,
             });
         }
 
@@ -963,7 +980,7 @@ impl VerifierSdk {
             detail: if same_schema {
                 format!("all reports use {SCHEMA_TAG}")
             } else {
-                "schema_tag mismatch in chain".to_string()
+                "schema_tag mismatch in report set".to_string()
             },
         });
 
@@ -975,7 +992,7 @@ impl VerifierSdk {
             detail: if same_api {
                 format!("all reports use {API_VERSION}")
             } else {
-                "api_version mismatch in chain".to_string()
+                "api_version mismatch in report set".to_string()
             },
         });
 
@@ -1009,8 +1026,6 @@ impl VerifierSdk {
             },
         });
 
-        // Hash-chain: each report's binding_hash should reference its own input
-        // (sequential integrity: each report_id is unique)
         let unique_ids: std::collections::BTreeSet<&str> =
             reports.iter().map(|r| r.request_id.as_str()).collect();
         let ids_unique = unique_ids.len() == reports.len();
@@ -1020,18 +1035,17 @@ impl VerifierSdk {
             detail: if ids_unique {
                 "all request IDs are unique".to_string()
             } else {
-                "duplicate request IDs in chain".to_string()
+                "duplicate request IDs in report set".to_string()
             },
         });
 
-        // Per-report verdict summary
         let pass_count = reports
             .iter()
             .filter(|r| matches!(r.verdict, VerifyVerdict::Pass))
             .count();
         let fail_count = reports.len() - pass_count;
         evidence.push(EvidenceEntry {
-            check_name: "chain_verdict_summary".to_string(),
+            check_name: "report_set_verdict_summary".to_string(),
             passed: fail_count == 0,
             detail: format!("{pass_count} pass, {fail_count} fail"),
         });
@@ -1049,21 +1063,21 @@ impl VerifierSdk {
             VerifyVerdict::Fail(failures)
         };
 
-        let chain_binding =
+        let report_set_binding =
             deterministic_hash_iter(reports.iter().map(|r| r.binding_hash.as_str()));
 
         Ok(VerificationReport {
-            request_id: format!("vchn-{}", &deterministic_hash(&chain_binding)[..24]),
+            request_id: format!("vrps-{}", &deterministic_hash(&report_set_binding)[..24]),
             verdict,
             evidence,
             trace_id: format!(
                 "vtrc-{}",
-                &deterministic_hash(&format!("chain:{chain_binding}"))[..24]
+                &deterministic_hash(&format!("report-set:{report_set_binding}"))[..24]
             ),
             schema_tag: SCHEMA_TAG.to_string(),
             api_version: API_VERSION.to_string(),
             verifier_identity: self.config.verifier_identity.clone(),
-            binding_hash: chain_binding,
+            binding_hash: report_set_binding,
         })
     }
 }
@@ -2000,10 +2014,10 @@ mod tests {
 
         // Empty chain should fail fast
         let empty_chain: Vec<VerificationReport> = vec![];
-        let err = sdk.verify_chain(&empty_chain).unwrap_err();
+        let err = sdk.verify_report_set_uniqueness(&empty_chain).unwrap_err();
         match err {
-            SdkError::BrokenChain(msg) => assert!(msg.contains("empty")),
-            _ => panic!("Expected BrokenChain error"),
+            SdkError::InvalidReportSet(msg) => assert!(msg.contains("empty")),
+            _ => panic!("Expected InvalidReportSet error"),
         }
 
         // Chain with duplicate binding hashes (collision attack)
@@ -2013,7 +2027,9 @@ mod tests {
         report2.request_id = "different-request-id".to_string();
         // Same binding_hash but different request_id
         let duplicate_chain = vec![report1, report2];
-        let chain_report = sdk.verify_chain(&duplicate_chain).expect("should verify");
+        let chain_report = sdk
+            .verify_report_set_uniqueness(&duplicate_chain)
+            .expect("should verify");
         match chain_report.verdict {
             VerifyVerdict::Fail(failures) => {
                 assert!(failures.contains(&"binding_hashes_unique".to_string()));
@@ -2032,7 +2048,7 @@ mod tests {
             report_wrong_schema,
         ];
         let chain_mixed = sdk
-            .verify_chain(&mixed_schema_chain)
+            .verify_report_set_uniqueness(&mixed_schema_chain)
             .expect("should verify");
         match chain_mixed.verdict {
             VerifyVerdict::Fail(failures) => {
@@ -2051,7 +2067,9 @@ mod tests {
                 .expect("should verify"),
             report_wrong_api,
         ];
-        let chain_mixed_api = sdk.verify_chain(&mixed_api_chain).expect("should verify");
+        let chain_mixed_api = sdk
+            .verify_report_set_uniqueness(&mixed_api_chain)
+            .expect("should verify");
         match chain_mixed_api.verdict {
             VerifyVerdict::Fail(failures) => {
                 assert!(failures.contains(&"api_version_consistent".to_string()));
@@ -2071,7 +2089,7 @@ mod tests {
             long_chain.push(report);
         }
         let long_chain_report = sdk
-            .verify_chain(&long_chain)
+            .verify_report_set_uniqueness(&long_chain)
             .expect("should handle long chain");
         // Should process successfully but may have some evidence entries
         assert!(long_chain_report.evidence.len() > 0);
@@ -2086,7 +2104,9 @@ mod tests {
                 .expect("should verify"),
             report_empty_hash,
         ];
-        let chain_empty_hash = sdk.verify_chain(&empty_hash_chain).expect("should verify");
+        let chain_empty_hash = sdk
+            .verify_report_set_uniqueness(&empty_hash_chain)
+            .expect("should verify");
         match chain_empty_hash.verdict {
             VerifyVerdict::Fail(failures) => {
                 assert!(failures.contains(&"binding_hashes_present".to_string()));
@@ -2253,7 +2273,9 @@ mod tests {
         req2.artifact_id = "artifact-002".to_string();
         req2.artifact_hash = deterministic_hash("artifact-002");
         let r2 = sdk.verify_artifact(&req2).expect("should verify");
-        let chain_report = sdk.verify_chain(&[r1, r2]).expect("should chain");
+        let chain_report = sdk
+            .verify_report_set_uniqueness(&[r1, r2])
+            .expect("should chain");
         assert_eq!(chain_report.verdict, VerifyVerdict::Pass);
     }
 
@@ -2263,7 +2285,9 @@ mod tests {
         let r1 = sdk
             .verify_artifact(&valid_request())
             .expect("should verify");
-        let chain_report = sdk.verify_chain(&[r1]).expect("should chain");
+        let chain_report = sdk
+            .verify_report_set_uniqueness(&[r1])
+            .expect("should chain");
         assert!(chain_report.request_id.starts_with("vchn-"));
         assert_eq!(chain_report.schema_tag, SCHEMA_TAG);
     }
@@ -2273,8 +2297,8 @@ mod tests {
     #[test]
     fn test_verify_chain_empty() {
         let sdk = test_sdk();
-        let err = sdk.verify_chain(&[]).unwrap_err();
-        assert!(matches!(err, SdkError::BrokenChain(_)));
+        let err = sdk.verify_report_set_uniqueness(&[]).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidReportSet(_)));
     }
 
     #[test]
@@ -2289,7 +2313,9 @@ mod tests {
             claims: vec!["c".to_string()],
         };
         let failing = sdk.verify_artifact(&failing_req).expect("should verify");
-        let chain_report = sdk.verify_chain(&[passing, failing]).expect("should chain");
+        let chain_report = sdk
+            .verify_report_set_uniqueness(&[passing, failing])
+            .expect("should chain");
         assert!(matches!(chain_report.verdict, VerifyVerdict::Fail(_)));
     }
 
@@ -2301,7 +2327,9 @@ mod tests {
             .expect("should verify");
         report.schema_tag = "old-schema".to_string();
         report.api_version = "0.0.0".to_string();
-        let chain_report = sdk.verify_chain(&[report]).expect("should chain");
+        let chain_report = sdk
+            .verify_report_set_uniqueness(&[report])
+            .expect("should chain");
         let failures = failed_checks(&chain_report);
         assert!(matches!(chain_report.verdict, VerifyVerdict::Fail(_)));
         assert!(failures.contains(&"schema_tag_consistent"));
@@ -2322,7 +2350,9 @@ mod tests {
         };
         let mut second = sdk.verify_artifact(&second_req).expect("should verify");
         second.request_id = first.request_id.clone();
-        let chain_report = sdk.verify_chain(&[first, second]).expect("should chain");
+        let chain_report = sdk
+            .verify_report_set_uniqueness(&[first, second])
+            .expect("should chain");
         let failures = failed_checks(&chain_report);
         assert!(matches!(chain_report.verdict, VerifyVerdict::Fail(_)));
         assert!(failures.contains(&"request_ids_unique"));
@@ -2336,7 +2366,9 @@ mod tests {
             .verify_artifact(&valid_request())
             .expect("should verify");
         report.binding_hash.clear();
-        let chain_report = sdk.verify_chain(&[report]).expect("should chain");
+        let chain_report = sdk
+            .verify_report_set_uniqueness(&[report])
+            .expect("should chain");
         let failures = failed_checks(&chain_report);
         assert!(matches!(chain_report.verdict, VerifyVerdict::Fail(_)));
         assert!(failures.contains(&"binding_hashes_present"));
@@ -2352,9 +2384,11 @@ mod tests {
             .verify_artifact(&valid_request())
             .expect("should verify");
         let chain1 = sdk
-            .verify_chain(std::slice::from_ref(&r1))
+            .verify_report_set_uniqueness(std::slice::from_ref(&r1))
             .expect("should chain");
-        let chain2 = sdk.verify_chain(&[r1]).expect("should chain");
+        let chain2 = sdk
+            .verify_report_set_uniqueness(&[r1])
+            .expect("should chain");
         assert_eq!(chain1.binding_hash, chain2.binding_hash);
     }
 
@@ -2366,8 +2400,8 @@ mod tests {
         assert_eq!(event_codes::VSK_002_ARTIFACT_VERIFY_COMPLETED, "VSK-002");
         assert_eq!(event_codes::VSK_003_CAPSULE_VERIFY_STARTED, "VSK-003");
         assert_eq!(event_codes::VSK_004_CAPSULE_VERIFY_COMPLETED, "VSK-004");
-        assert_eq!(event_codes::VSK_005_CHAIN_VERIFY_STARTED, "VSK-005");
-        assert_eq!(event_codes::VSK_006_CHAIN_VERIFY_COMPLETED, "VSK-006");
+        assert_eq!(event_codes::VSK_005_REPORT_SET_VERIFY_STARTED, "VSK-005");
+        assert_eq!(event_codes::VSK_006_REPORT_SET_VERIFY_COMPLETED, "VSK-006");
         assert_eq!(event_codes::VSK_007_CONFIG_LOADED, "VSK-007");
         assert_eq!(event_codes::VSK_008_REPORT_SIGNED, "VSK-008");
     }
@@ -2501,9 +2535,9 @@ mod tests {
     }
 
     #[test]
-    fn test_error_display_broken_chain() {
-        let err = SdkError::BrokenChain("bad".to_string());
-        assert!(format!("{err}").contains("broken_chain"));
+    fn test_error_display_invalid_report_set() {
+        let err = SdkError::InvalidReportSet("bad".to_string());
+        assert!(format!("{err}").contains("invalid_report_set"));
     }
 
     #[test]
@@ -2903,7 +2937,9 @@ mod tests {
         report2.binding_hash = report1.binding_hash.clone();
         report2.request_id = "different-id".to_string();
 
-        let chain_result = sdk.verify_chain(&[report1, report2]).expect("should chain");
+        let chain_result = sdk
+            .verify_report_set_uniqueness(&[report1, report2])
+            .expect("should chain");
         let failures = failed_checks(&chain_result);
         assert!(
             matches!(chain_result.verdict, VerifyVerdict::Fail(_)),
@@ -2921,7 +2957,9 @@ mod tests {
         mixed_report.schema_tag = "vsk-v999.0".to_string(); // Future version
         mixed_report.api_version = "999.0.0".to_string();
 
-        let mixed_chain = sdk.verify_chain(&[mixed_report]).expect("should chain");
+        let mixed_chain = sdk
+            .verify_report_set_uniqueness(&[mixed_report])
+            .expect("should chain");
         let failures = failed_checks(&mixed_chain);
         assert!(
             matches!(mixed_chain.verdict, VerifyVerdict::Fail(_)),
@@ -3363,7 +3401,7 @@ mod verifier_sdk_boundary_negative_tests {
         };
 
         let chain_report = sdk
-            .verify_chain(&[invalid_report])
+            .verify_report_set_uniqueness(&[invalid_report])
             .expect("should verify chain");
 
         // Should fail because binding hash is empty
@@ -3546,7 +3584,9 @@ mod verifier_sdk_boundary_negative_tests {
         let original_hash = report1.binding_hash.clone();
         report2.binding_hash = format!("{}00", original_hash); // Append extra bytes
 
-        let chain_result = sdk.verify_chain(&[report1, report2]).expect("should chain");
+        let chain_result = sdk
+            .verify_report_set_uniqueness(&[report1, report2])
+            .expect("should chain");
 
         // Should detect the collision attempt
         assert!(
@@ -3922,7 +3962,7 @@ mod verifier_sdk_boundary_negative_tests {
         // Chain verification should handle circular dependencies gracefully
         let chain_start = std::time::Instant::now();
         let chain_result = sdk
-            .verify_chain(&circular_reports)
+            .verify_report_set_uniqueness(&circular_reports)
             .expect("chain should verify");
         let chain_duration = chain_start.elapsed();
 
@@ -3941,7 +3981,7 @@ mod verifier_sdk_boundary_negative_tests {
 
         // Result should be deterministic - same chain should produce same result
         let second_chain_result = sdk
-            .verify_chain(&circular_reports)
+            .verify_report_set_uniqueness(&circular_reports)
             .expect("should verify again");
         assert_eq!(chain_result.binding_hash, second_chain_result.binding_hash);
         assert_eq!(
@@ -3950,8 +3990,10 @@ mod verifier_sdk_boundary_negative_tests {
         );
 
         // Should handle empty cycles gracefully
-        let empty_chain_result = sdk.verify_chain(&[]).expect_err("empty chain should error");
-        assert!(matches!(empty_chain_result, SdkError::BrokenChain(_)));
+        let empty_chain_result = sdk
+            .verify_report_set_uniqueness(&[])
+            .expect_err("empty chain should error");
+        assert!(matches!(empty_chain_result, SdkError::InvalidReportSet(_)));
     }
 
     #[test]
@@ -4098,7 +4140,7 @@ mod verifier_sdk_boundary_negative_tests {
         // Chain verification under memory pressure
         let chain_start = std::time::Instant::now();
         let chain_result = sdk
-            .verify_chain(&chain)
+            .verify_report_set_uniqueness(&chain)
             .expect("chain should verify under pressure");
         let chain_duration = chain_start.elapsed();
 
@@ -4114,7 +4156,7 @@ mod verifier_sdk_boundary_negative_tests {
         drop(memory_pressure);
 
         let post_cleanup_chain = sdk
-            .verify_chain(&chain)
+            .verify_report_set_uniqueness(&chain)
             .expect("should verify after cleanup");
         assert_eq!(chain_result.binding_hash, post_cleanup_chain.binding_hash);
     }
@@ -4342,7 +4384,7 @@ mod verifier_sdk_boundary_negative_tests {
                         err,
                         SdkError::InvalidArtifact(_)
                             | SdkError::MalformedCapsule(_)
-                            | SdkError::BrokenChain(_)
+                            | SdkError::InvalidReportSet(_)
                     ));
                 }
             }
@@ -4561,7 +4603,7 @@ mod verifier_sdk_boundary_negative_tests {
                 },
             ];
 
-            let chain_verify_result = sdk.verify_chain(&unicode_reports);
+            let chain_verify_result = sdk.verify_report_set_uniqueness(&unicode_reports);
             match chain_verify_result {
                 Ok(chain_report) => {
                     // Chain verification should handle Unicode in individual reports
@@ -4851,7 +4893,7 @@ mod verifier_sdk_boundary_negative_tests {
         ];
 
         for (chain_idx, chain) in temporal_attack_chains.into_iter().enumerate() {
-            let verify_result = sdk.verify_chain(&chain);
+            let verify_result = sdk.verify_report_set_uniqueness(&chain);
 
             match verify_result {
                 Ok(chain_report) => {
@@ -4877,7 +4919,7 @@ mod verifier_sdk_boundary_negative_tests {
                 Err(err) => {
                     // Temporal attacks may be rejected
                     match err {
-                        SdkError::BrokenChain(msg) => {
+                        SdkError::InvalidReportSet(msg) => {
                             // Expected for temporal inconsistencies
                             assert!(
                                 msg.contains("time")
@@ -4966,7 +5008,7 @@ mod verifier_sdk_boundary_negative_tests {
         ];
 
         for (attack_idx, attack_chain) in consistency_attack_chains.into_iter().enumerate() {
-            let verify_result = sdk.verify_chain(&attack_chain);
+            let verify_result = sdk.verify_report_set_uniqueness(&attack_chain);
 
             match verify_result {
                 Ok(chain_report) => {
@@ -5013,7 +5055,7 @@ mod verifier_sdk_boundary_negative_tests {
                 Err(err) => {
                     // Consistency attacks may be rejected
                     match err {
-                        SdkError::BrokenChain(msg) => {
+                        SdkError::InvalidReportSet(msg) => {
                             // Expected for consistency violations
                             match attack_idx {
                                 0 => assert!(
@@ -5055,7 +5097,7 @@ mod verifier_sdk_boundary_negative_tests {
             .collect();
 
         let mass_start = std::time::Instant::now();
-        let mass_result = sdk.verify_chain(&massive_chain);
+        let mass_result = sdk.verify_report_set_uniqueness(&massive_chain);
         let mass_duration = mass_start.elapsed();
 
         // Should complete in reasonable time even for large chains
@@ -6677,8 +6719,8 @@ mod verifier_sdk_comprehensive_attack_vector_tests {
                                 // Chain verification with self
                                 if let Ok(report) = sdk_clone.verify_artifact(&request) {
                                     sdk_clone
-                                        .verify_chain(&[report])
-                                        .map(|r| ("verify_chain", r.verdict))
+                                        .verify_report_set_uniqueness(&[report])
+                                        .map(|r| ("verify_report_set_uniqueness", r.verdict))
                                 } else {
                                     Err(SdkError::InvalidArtifact(
                                         "failed initial verification".to_string(),
