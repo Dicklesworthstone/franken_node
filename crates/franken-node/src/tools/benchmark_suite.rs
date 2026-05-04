@@ -64,6 +64,8 @@ const DETERMINISTIC_JITTER_RATIO: f64 = 0.02;
 const MIN_MEASURED_SAMPLES: usize = 3;
 /// Maximum raw benchmark samples accepted, retained, or emitted per scenario.
 pub const MAX_RAW_BENCHMARK_SAMPLES: usize = 4096;
+/// Maximum measured workload executions per scenario, including warmup iterations.
+pub const MAX_MEASURED_TOTAL_ITERATIONS: u64 = 4096;
 
 // ---------------------------------------------------------------------------
 // Benchmark dimension enum
@@ -471,6 +473,11 @@ pub enum BenchRunError {
         max: usize,
         actual: usize,
     },
+    TooManyMeasuredIterations {
+        scenario: String,
+        max: u64,
+        actual: u64,
+    },
     NonFiniteMeasurement {
         scenario: String,
     },
@@ -519,6 +526,14 @@ impl fmt::Display for BenchRunError {
             } => write!(
                 f,
                 "scenario `{scenario}` accepts at most {max} raw benchmark samples, got {actual}"
+            ),
+            Self::TooManyMeasuredIterations {
+                scenario,
+                max,
+                actual,
+            } => write!(
+                f,
+                "scenario `{scenario}` accepts at most {max} measured workload iterations including warmup, got {actual}"
             ),
             Self::NonFiniteMeasurement { scenario } => {
                 write!(f, "scenario `{scenario}` contains a non-finite measurement")
@@ -1311,6 +1326,18 @@ impl BenchmarkSuite {
         )
     }
 
+    pub fn run_measured(
+        &mut self,
+        security_controls: BenchmarkSecurityControls,
+    ) -> Result<BenchmarkReport, BenchRunError> {
+        let sample_sets = measured_sample_map(&self.scenarios, &security_controls)?;
+        self.run_samples(
+            &sample_sets,
+            BenchmarkEvidenceMode::Measured,
+            security_controls,
+        )
+    }
+
     pub fn run_samples(
         &mut self,
         sample_sets: &BTreeMap<String, Vec<RawMeasurement>>,
@@ -1431,6 +1458,12 @@ pub fn to_canonical_json(report: &BenchmarkReport) -> Result<String, BenchRunErr
 /// Deserialize a report from JSON.
 pub fn from_json(json: &str) -> Result<BenchmarkReport, serde_json::Error> {
     serde_json::from_str(json)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MeasuredIterationBudget {
+    retained_iterations: usize,
+    total_iterations: u32,
 }
 
 fn deterministic_seed(name: &str) -> u64 {
@@ -1580,14 +1613,7 @@ fn measured_samples_for_scenario(
 ) -> Result<Vec<RawMeasurement>, BenchRunError> {
     enforce_measured_security(scenario, security_controls)?;
 
-    if (scenario.iterations as usize) < MIN_MEASURED_SAMPLES {
-        return Err(BenchRunError::InsufficientSamples {
-            scenario: scenario.name.clone(),
-            required: MIN_MEASURED_SAMPLES,
-            actual: scenario.iterations as usize,
-        });
-    }
-    validate_sample_count(&scenario.name, scenario.iterations as usize)?;
+    let budget = validate_measured_iteration_budget(scenario)?;
 
     if std::env::var("FRANKEN_NODE_BENCH_FAIL_SCENARIO")
         .ok()
@@ -1600,11 +1626,8 @@ fn measured_samples_for_scenario(
         });
     }
 
-    let total_iterations = scenario
-        .iterations
-        .saturating_add(scenario.warmup_iterations);
-    let mut samples = Vec::with_capacity(scenario.iterations as usize);
-    for iteration in 0..total_iterations {
+    let mut samples = Vec::with_capacity(budget.retained_iterations);
+    for iteration in 0..budget.total_iterations {
         let started_at_utc = chrono::Utc::now().to_rfc3339();
         let value = execute_measured_workload(scenario, iteration)?;
         let finished_at_utc = chrono::Utc::now().to_rfc3339();
@@ -1621,6 +1644,44 @@ fn measured_samples_for_scenario(
     }
 
     Ok(samples)
+}
+
+fn validate_measured_iteration_budget(
+    scenario: &ScenarioDefinition,
+) -> Result<MeasuredIterationBudget, BenchRunError> {
+    let retained_iterations = usize::try_from(scenario.iterations).unwrap_or(usize::MAX);
+    if retained_iterations < MIN_MEASURED_SAMPLES {
+        return Err(BenchRunError::InsufficientSamples {
+            scenario: scenario.name.clone(),
+            required: MIN_MEASURED_SAMPLES,
+            actual: retained_iterations,
+        });
+    }
+    validate_sample_count(&scenario.name, retained_iterations)?;
+
+    let actual_total =
+        u64::from(scenario.iterations).saturating_add(u64::from(scenario.warmup_iterations));
+    let total_iterations = scenario
+        .iterations
+        .checked_add(scenario.warmup_iterations)
+        .ok_or_else(|| BenchRunError::TooManyMeasuredIterations {
+            scenario: scenario.name.clone(),
+            max: MAX_MEASURED_TOTAL_ITERATIONS,
+            actual: actual_total,
+        })?;
+
+    if actual_total > MAX_MEASURED_TOTAL_ITERATIONS {
+        return Err(BenchRunError::TooManyMeasuredIterations {
+            scenario: scenario.name.clone(),
+            max: MAX_MEASURED_TOTAL_ITERATIONS,
+            actual: actual_total,
+        });
+    }
+
+    Ok(MeasuredIterationBudget {
+        retained_iterations,
+        total_iterations,
+    })
 }
 
 fn enforce_measured_security(
@@ -3152,6 +3213,39 @@ mod tests {
                 .expect_err("measured mode must enforce the sample floor");
 
         assert!(matches!(err, BenchRunError::InsufficientSamples { .. }));
+    }
+
+    #[test]
+    fn test_measured_mode_rejects_oversized_warmup_budget_before_workload() {
+        assert_eq!(
+            u64::try_from(MAX_RAW_BENCHMARK_SAMPLES).ok(),
+            Some(MAX_MEASURED_TOTAL_ITERATIONS)
+        );
+        let retained_iterations =
+            u32::try_from(MIN_MEASURED_SAMPLES).expect("sample floor fits u32");
+        let scenario = ScenarioDefinition {
+            dimension: BenchmarkDimension::PerformanceUnderHardening,
+            name: "secure-extension-heavy".to_string(),
+            unit: "ms".to_string(),
+            iterations: retained_iterations,
+            warmup_iterations: u32::MAX,
+            sandbox_required: true,
+            scoring: ScoringConfig::lower_is_better(250.0, 1000.0),
+        };
+
+        let err =
+            measured_samples_for_scenario(&scenario, &BenchmarkSecurityControls::measured_secure())
+                .expect_err("measured mode must cap warmup before executing workload");
+
+        assert!(matches!(
+            err,
+            BenchRunError::TooManyMeasuredIterations {
+                scenario,
+                max: MAX_MEASURED_TOTAL_ITERATIONS,
+                actual
+            } if scenario == "secure-extension-heavy"
+                && actual == u64::from(retained_iterations).saturating_add(u64::from(u32::MAX))
+        ));
     }
 
     #[test]

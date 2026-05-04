@@ -8,7 +8,9 @@
 
 use assert_cmd::Command;
 use frankenengine_node::tools::benchmark_suite::{
-    coefficient_of_variation, confidence_interval_95, mean, std_dev,
+    BenchRunError, BenchmarkDimension, BenchmarkSecurityControls, BenchmarkSuite,
+    MAX_MEASURED_TOTAL_ITERATIONS, MAX_RAW_BENCHMARK_SAMPLES, ScenarioDefinition, ScoringConfig,
+    SuiteConfig, coefficient_of_variation, confidence_interval_95, mean, std_dev,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -312,6 +314,47 @@ fn bench_conformance_matrix() -> Result<(), Box<dyn Error>> {
     );
 
     Ok(())
+}
+
+#[test]
+fn measured_suite_rejects_oversized_warmup_budget_before_workload() {
+    assert_eq!(
+        u64::try_from(MAX_RAW_BENCHMARK_SAMPLES).ok(),
+        Some(MAX_MEASURED_TOTAL_ITERATIONS)
+    );
+
+    let retained_iterations = 3;
+    let mut suite = BenchmarkSuite::new(SuiteConfig::with_defaults());
+    suite.add_scenario(ScenarioDefinition {
+        dimension: BenchmarkDimension::PerformanceUnderHardening,
+        name: "secure-extension-heavy".to_string(),
+        unit: "ms".to_string(),
+        iterations: retained_iterations,
+        warmup_iterations: u32::MAX,
+        sandbox_required: true,
+        scoring: ScoringConfig::lower_is_better(250.0, 1000.0),
+    });
+
+    let err = suite
+        .run_measured(BenchmarkSecurityControls::measured_secure())
+        .expect_err("measured run must cap warmup before executing workload");
+
+    assert!(matches!(
+        err,
+        BenchRunError::TooManyMeasuredIterations {
+            scenario,
+            max: MAX_MEASURED_TOTAL_ITERATIONS,
+            actual
+        } if scenario == "secure-extension-heavy"
+            && actual == u64::from(retained_iterations).saturating_add(u64::from(u32::MAX))
+    ));
+    assert!(
+        suite
+            .events()
+            .iter()
+            .all(|event| event.scenario_id.as_deref() != Some("secure-extension-heavy")),
+        "oversized warmup must fail before scenario execution events are emitted"
+    );
 }
 
 #[test]
