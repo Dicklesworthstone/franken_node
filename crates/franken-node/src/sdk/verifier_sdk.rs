@@ -7,7 +7,7 @@
 //!
 //! # Capabilities
 //!
-//! - `verify_artifact`: Verify a single artifact against its claimed hash and properties
+//! - `verify_artifact_bytes`: Verify a single artifact against its claimed content hash and properties
 //! - `verify_capsule`: Verify a replay capsule for deterministic re-execution
 //! - `verify_chain`: Verify a chain of verification reports for consistency
 //! - Machine-readable pass/fail evidence in every report
@@ -56,12 +56,12 @@ const CLAIM_TOTAL_BYTES_PER_COUNT_UNIT: usize = 1024;
 const CLAIM_BYTES_PER_CLAIM_LIMIT: usize = 4096;
 const CAPSULE_BYTES_PER_COUNT_UNIT: usize = 1024;
 
-/// Security posture marker for this cryptographic verifier SDK surface.
+/// Security posture marker for this structural helper SDK surface.
 ///
-/// This SDK now provides Ed25519 cryptographic verification capabilities
-/// suitable for replacement-critical verifier work with full
-/// cryptographic authenticity guarantees.
-pub const CRYPTOGRAPHIC_SECURITY_POSTURE: &str = "cryptographic_ed25519_authenticated";
+/// This in-crate helper is not the replacement-critical Ed25519 verifier.
+/// It only performs bounded structural checks plus caller-supplied artifact
+/// content hash verification when artifact bytes are provided.
+pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str = "structural_only_not_replacement_critical";
 
 /// Stable rule id used by shortcut-regression guardrails.
 pub const STRUCTURAL_ONLY_RULE_ID: &str = "VERIFIER_SHORTCUT_GUARD::SDK_VERIFIER";
@@ -273,6 +273,12 @@ fn deterministic_hash_fields(fields: &[&str]) -> String {
     deterministic_hash_iter(fields.iter().copied())
 }
 
+fn artifact_content_hash(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
 fn artifact_binding_hash(request: &VerificationRequest) -> String {
     deterministic_hash_iter(
         std::iter::once(request.artifact_id.trim())
@@ -431,12 +437,37 @@ impl VerifierSdk {
         &self.config
     }
 
-    /// Verify a single artifact against its declared hash and claims.
+    /// Verify artifact metadata against declared claims.
+    ///
+    /// This metadata-only entry point cannot prove artifact content integrity.
+    /// When `require_hash_match` is enabled it fails closed and reports that
+    /// bytes were missing; callers that need content hash verification must use
+    /// [`VerifierSdk::verify_artifact_bytes`].
     ///
     /// INV-VSK-DETERMINISTIC-VERIFY: same request always produces same report.
     pub fn verify_artifact(
         &self,
         request: &VerificationRequest,
+    ) -> Result<VerificationReport, SdkError> {
+        self.verify_artifact_inner(request, None)
+    }
+
+    /// Verify a single artifact against its declared SHA-256 content hash and claims.
+    ///
+    /// The provided bytes are hashed directly with SHA-256 and compared to
+    /// `request.artifact_hash` in constant time.
+    pub fn verify_artifact_bytes(
+        &self,
+        request: &VerificationRequest,
+        artifact_bytes: &[u8],
+    ) -> Result<VerificationReport, SdkError> {
+        self.verify_artifact_inner(request, Some(artifact_bytes))
+    }
+
+    fn verify_artifact_inner(
+        &self,
+        request: &VerificationRequest,
+        artifact_bytes: Option<&[u8]>,
     ) -> Result<VerificationReport, SdkError> {
         let max_claims_per_request =
             validate_capacity_limit("max_claims_per_request", self.config.max_claims_per_request)?;
@@ -599,21 +630,36 @@ impl VerifierSdk {
             });
         }
 
-        // Hash match check (compare artifact_hash to self-computed hash of artifact_id)
-        let computed = deterministic_hash(artifact_id);
-        let hash_match = if self.config.require_hash_match {
-            crate::security::constant_time::ct_eq(&computed, &request.artifact_hash)
+        let (hash_match, hash_detail) = if self.config.require_hash_match {
+            if let Some(bytes) = artifact_bytes {
+                let computed = artifact_content_hash(bytes);
+                let matches =
+                    crate::security::constant_time::ct_eq(&computed, &request.artifact_hash);
+                (
+                    matches,
+                    if matches {
+                        "artifact content SHA-256 matches".to_string()
+                    } else {
+                        format!("expected={}, actual={computed}", request.artifact_hash)
+                    },
+                )
+            } else {
+                (
+                    false,
+                    "artifact bytes not provided; use verify_artifact_bytes for content hash verification"
+                        .to_string(),
+                )
+            }
         } else {
-            true
+            (
+                true,
+                "artifact content hash requirement disabled by verifier config".to_string(),
+            )
         };
         evidence.push(EvidenceEntry {
-            check_name: "hash_match".to_string(),
+            check_name: "artifact_content_hash_match".to_string(),
             passed: hash_match,
-            detail: if hash_match {
-                "hash matches".to_string()
-            } else {
-                format!("expected={}, actual={}", request.artifact_hash, computed)
-            },
+            detail: hash_detail,
         });
 
         let all_pass = evidence.iter().all(|e| e.passed);
@@ -1155,8 +1201,8 @@ mod tests {
             !report
                 .evidence
                 .iter()
-                .any(|entry| entry.check_name == "hash_match"),
-            "hash_match must not run after claim capacity fails"
+                .any(|entry| entry.check_name == "artifact_content_hash_match"),
+            "artifact content hash verification must not run after claim capacity fails"
         );
     }
 
@@ -1263,7 +1309,7 @@ mod tests {
         assert!(names.contains(&"claims_capacity_check"));
         assert!(names.contains(&"claims_total_byte_capacity_check"));
         assert!(names.contains(&"claims_per_claim_byte_capacity_check"));
-        assert!(names.contains(&"hash_match"));
+        assert!(names.contains(&"artifact_content_hash_match"));
     }
 
     // ── verify_artifact: error paths ────────────────────────────────
@@ -1423,7 +1469,7 @@ mod tests {
         assert!(matches!(report.verdict, VerifyVerdict::Fail(_)));
         assert!(failures.contains(&"artifact_hash_format"));
         assert!(!failures.contains(&"claims_valid"));
-        assert!(!failures.contains(&"hash_match"));
+        assert!(!failures.contains(&"artifact_content_hash_match"));
     }
 
     #[test]
@@ -1913,7 +1959,7 @@ mod tests {
         // Hash format is valid (64 hex chars) but won't match computed hash
         match report_mixed.verdict {
             VerifyVerdict::Fail(failures) => {
-                assert!(failures.contains(&"hash_match".to_string()));
+                assert!(failures.contains(&"artifact_content_hash_match".to_string()));
             }
             _ => panic!("Expected hash mismatch failure"),
         }
@@ -2574,7 +2620,7 @@ mod tests {
     #[test]
     fn test_structural_only_markers_are_stable() {
         assert_eq!(
-            super::CRYPTOGRAPHIC_SECURITY_POSTURE,
+            super::STRUCTURAL_ONLY_SECURITY_POSTURE,
             "structural_only_not_replacement_critical"
         );
         assert_eq!(
@@ -2635,7 +2681,7 @@ mod tests {
             super::STRUCTURAL_ONLY_RULE_ID,
             "src/sdk/verifier_sdk.rs",
             SDK_VERIFIER_SOURCE,
-            super::CRYPTOGRAPHIC_SECURITY_POSTURE,
+            super::STRUCTURAL_ONLY_SECURITY_POSTURE,
         );
         assert_guard_contains(
             super::super::replay_capsule::STRUCTURAL_ONLY_RULE_ID,
