@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use ed25519_dalek::SigningKey;
 use frankenengine_node::supply_chain::artifact_signing::{self, KeyId, KeyRing};
 use frankenengine_node::supply_chain::extension_registry::{
@@ -89,11 +91,13 @@ fn registry_with_publisher_key(
 ) -> SignedExtensionRegistry {
     let mut key_ring = KeyRing::new();
     key_ring.add_key(verifying_key);
+    let mut provenance_policy = VerificationPolicy::development_profile();
+    provenance_policy.add_trusted_signer_key("pub-001", &verifying_key);
     SignedExtensionRegistry::new(
         RegistryConfig::default(),
         AdmissionKernel {
             key_ring,
-            provenance_policy: VerificationPolicy::development_profile(),
+            provenance_policy,
             transparency_policy: TransparencyPolicy {
                 required: false,
                 pinned_roots: Vec::new(),
@@ -120,7 +124,7 @@ fn registration_request(
             signature_bytes,
             signed_at: "2023-11-14T22:13:20Z".to_string(),
         },
-        provenance: provenance_attestation(now_epoch)?,
+        provenance: provenance_attestation(signing_key, now_epoch)?,
         initial_version: VersionEntry {
             version: "1.0.0".to_string(),
             parent_version: None,
@@ -134,7 +138,17 @@ fn registration_request(
     })
 }
 
-fn provenance_attestation(now_epoch: u64) -> TestResult<ProvenanceAttestation> {
+fn provenance_signing_keys(signing_key: &SigningKey) -> BTreeMap<String, SigningKey> {
+    BTreeMap::from([(
+        "pub-001".to_string(),
+        SigningKey::from_bytes(&signing_key.to_bytes()),
+    )])
+}
+
+fn provenance_attestation(
+    signing_key: &SigningKey,
+    now_epoch: u64,
+) -> TestResult<ProvenanceAttestation> {
     let mut attestation = ProvenanceAttestation {
         schema_version: "1.0".to_string(),
         source_repository_url: "https://example.invalid/franken-node/extensions.git".to_string(),
@@ -160,6 +174,6 @@ fn provenance_attestation(now_epoch: u64) -> TestResult<ProvenanceAttestation> {
         }],
         custom_claims: Default::default(),
     };
-    provenance::sign_links_in_place(&mut attestation)?;
+    provenance::sign_links_in_place(&mut attestation, &provenance_signing_keys(signing_key))?;
     Ok(attestation)
 }

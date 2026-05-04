@@ -7,10 +7,9 @@ use ed25519_dalek::SigningKey;
 use frankenengine_node::supply_chain::{
     artifact_signing::{self, KeyId, KeyRing},
     extension_registry::{
-        canonical_registration_manifest_bytes, event_codes, AdmissionKernel,
-        ExtensionRegistrationManifest, ExtensionSignature, ExtensionStatus, RegistrationRequest,
-        RegistryConfig, SignedExtensionRegistry, VersionEntry,
-        EXTENSION_REGISTRATION_MANIFEST_SCHEMA,
+        AdmissionKernel, EXTENSION_REGISTRATION_MANIFEST_SCHEMA, ExtensionRegistrationManifest,
+        ExtensionSignature, ExtensionStatus, RegistrationRequest, RegistryConfig,
+        SignedExtensionRegistry, VersionEntry, canonical_registration_manifest_bytes, event_codes,
     },
     provenance as prov, transparency_verifier as tv,
 };
@@ -51,9 +50,11 @@ fn fuzz_structured_registration(case: ExtensionRegistrationManifestCase) {
     let trusted_key_id = KeyId::from_verifying_key(&verifying_key).to_string();
     let mut key_ring = KeyRing::new();
     key_ring.add_key(verifying_key);
+    let mut provenance_policy = prov::VerificationPolicy::development_profile();
+    provenance_policy.add_trusted_signer_key("publisher-fuzz", &verifying_key);
     let kernel = AdmissionKernel {
         key_ring,
-        provenance_policy: prov::VerificationPolicy::development_profile(),
+        provenance_policy,
         transparency_policy: tv::TransparencyPolicy {
             required: false,
             pinned_roots: vec![],
@@ -99,7 +100,7 @@ fn fuzz_structured_registration(case: ExtensionRegistrationManifestCase) {
             KeyId::from_verifying_key(&unknown_key.verifying_key()).to_string()
         }
     };
-    let provenance = provenance_for_case(case.provenance_mode, NOW_EPOCH);
+    let provenance = provenance_for_case(case.provenance_mode, NOW_EPOCH, &signing_key);
     let request = RegistrationRequest {
         name: name.clone(),
         description: bounded_text(&case.description, "fuzz extension"),
@@ -283,7 +284,9 @@ fn manifest_bytes_for_case(
                 bytes.push(0xff);
             } else {
                 let index = usize::from(case.byte_selector) % bytes.len();
-                bytes[index] ^= 0x80;
+                if let Some(byte) = bytes.get_mut(index) {
+                    *byte ^= 0x80;
+                }
             }
             ManifestBytes {
                 manifest_bytes: bytes,
@@ -323,7 +326,18 @@ fn signature_for_case(
     }
 }
 
-fn provenance_for_case(mode: ProvenanceMode, now_epoch: u64) -> prov::ProvenanceAttestation {
+fn provenance_signing_keys(signing_key: &SigningKey) -> BTreeMap<String, SigningKey> {
+    BTreeMap::from([(
+        "publisher-fuzz".to_string(),
+        SigningKey::from_bytes(&signing_key.to_bytes()),
+    )])
+}
+
+fn provenance_for_case(
+    mode: ProvenanceMode,
+    now_epoch: u64,
+    signing_key: &SigningKey,
+) -> prov::ProvenanceAttestation {
     let mut attestation = prov::ProvenanceAttestation {
         schema_version: "1.0".to_string(),
         source_repository_url: "https://github.com/franken/fuzz-extension".to_string(),
@@ -370,7 +384,7 @@ fn provenance_for_case(mode: ProvenanceMode, now_epoch: u64) -> prov::Provenance
         }
     }
 
-    let _ = prov::sign_links_in_place(&mut attestation);
+    let _ = prov::sign_links_in_place(&mut attestation, &provenance_signing_keys(signing_key));
     attestation
 }
 

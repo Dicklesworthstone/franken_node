@@ -708,7 +708,11 @@ impl SignedExtensionRegistry {
 
     /// Register a publisher's verifying key in the admission kernel's key ring.
     pub fn register_publisher_key(&mut self, vk: ed25519_dalek::VerifyingKey) -> KeyId {
-        self.admission_kernel.key_ring.add_key(vk)
+        let key_id = self.admission_kernel.key_ring.add_key(vk);
+        self.admission_kernel
+            .provenance_policy
+            .add_trusted_signer_key(key_id.to_string(), &vk);
+        key_id
     }
 
     /// Get all admission receipts.
@@ -1405,8 +1409,15 @@ mod tests {
         (sk, vk)
     }
 
+    fn provenance_signing_keys(sk: &SigningKey) -> BTreeMap<String, SigningKey> {
+        BTreeMap::from([(
+            "pub-001".to_string(),
+            SigningKey::from_bytes(&sk.to_bytes()),
+        )])
+    }
+
     /// Build a valid provenance attestation with signed links.
-    fn valid_provenance(now_epoch: u64) -> prov::ProvenanceAttestation {
+    fn valid_provenance(sk: &SigningKey, now_epoch: u64) -> prov::ProvenanceAttestation {
         let mut att = prov::ProvenanceAttestation {
             schema_version: "1.0".to_string(),
             source_repository_url: "https://github.com/example/ext".to_string(),
@@ -1433,7 +1444,7 @@ mod tests {
             custom_claims: BTreeMap::new(),
         };
         // Sign links in place so the provenance verifier accepts them.
-        prov::sign_links_in_place(&mut att).expect("sign links");
+        prov::sign_links_in_place(&mut att, &provenance_signing_keys(sk)).expect("sign links");
         att
     }
 
@@ -1451,9 +1462,11 @@ mod tests {
     fn test_kernel(vk: &ed25519_dalek::VerifyingKey) -> AdmissionKernel {
         let mut key_ring = KeyRing::new();
         key_ring.add_key(*vk);
+        let mut provenance_policy = prov::VerificationPolicy::development_profile();
+        provenance_policy.add_trusted_signer_key("pub-001", vk);
         AdmissionKernel {
             key_ring,
-            provenance_policy: prov::VerificationPolicy::development_profile(),
+            provenance_policy,
             transparency_policy: tv::TransparencyPolicy {
                 required: false,
                 pinned_roots: vec![],
@@ -1492,7 +1505,7 @@ mod tests {
                 signature_bytes,
                 signed_at: Utc::now().to_rfc3339(),
             },
-            provenance: valid_provenance(now_epoch),
+            provenance: valid_provenance(sk, now_epoch),
             initial_version,
             tags,
             manifest_bytes,
@@ -1855,7 +1868,8 @@ mod tests {
             link.expires_at_epoch = now.saturating_sub(7 * 24 * 3600);
         }
         // Re-sign links with updated timestamps
-        prov::sign_links_in_place(&mut req.provenance).expect("sign");
+        prov::sign_links_in_place(&mut req.provenance, &provenance_signing_keys(&sk))
+            .expect("sign");
         let result = reg.register(req, &make_trace(), now);
         assert!(!result.success);
         assert_eq!(
@@ -1906,7 +1920,8 @@ mod tests {
         // Corrupt the provenance: valid-looking but wrong output hash
         req.provenance.output_hash = "x".repeat(64);
         // Re-sign links (the link's signed_payload_hash won't match output_hash)
-        prov::sign_links_in_place(&mut req.provenance).expect("sign");
+        prov::sign_links_in_place(&mut req.provenance, &provenance_signing_keys(&sk))
+            .expect("sign");
         let result = reg.register(req, &make_trace(), now_epoch());
         // Should fail because link payload hash doesn't match attestation output hash
         assert!(!result.success);

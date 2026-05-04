@@ -2,12 +2,52 @@
 
 use std::collections::BTreeMap;
 
+use ed25519_dalek::SigningKey;
 use frankenengine_node::supply_chain::provenance::{
     AttestationEnvelopeFormat, AttestationLink, ChainLinkRole, DownstreamGateRequirements,
     ProvenanceAttestation, ProvenanceEventCode, ProvenanceLevel, VerificationErrorCode,
     VerificationMode, VerificationPolicy, enforce_fail_closed, sign_links_in_place,
     verify_and_project_gates, verify_attestation_chain,
 };
+
+fn test_signing_key_for(signer_id: &str) -> SigningKey {
+    use sha2::Digest;
+
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"provenance_integration_signing_key_v1:");
+    hasher.update((u64::try_from(signer_id.len()).unwrap_or(u64::MAX)).to_le_bytes());
+    hasher.update(signer_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut seed = [0_u8; 32];
+    seed.copy_from_slice(&digest);
+    SigningKey::from_bytes(&seed)
+}
+
+fn signing_keys_for(attestation: &ProvenanceAttestation) -> BTreeMap<String, SigningKey> {
+    attestation
+        .links
+        .iter()
+        .map(|link| {
+            (
+                link.signer_id.clone(),
+                test_signing_key_for(&link.signer_id),
+            )
+        })
+        .collect()
+}
+
+fn sign_attestation_links(attestation: &mut ProvenanceAttestation) {
+    sign_links_in_place(attestation, &signing_keys_for(attestation)).expect("sign links");
+}
+
+fn production_policy_for(attestation: &ProvenanceAttestation) -> VerificationPolicy {
+    let mut policy = VerificationPolicy::production_default();
+    for link in &attestation.links {
+        let signing_key = test_signing_key_for(&link.signer_id);
+        policy.add_trusted_signer_key(&link.signer_id, &signing_key.verifying_key());
+    }
+    policy
+}
 
 fn valid_attestation() -> ProvenanceAttestation {
     let mut attestation = ProvenanceAttestation {
@@ -60,14 +100,15 @@ fn valid_attestation() -> ProvenanceAttestation {
             "https://slsa.dev/provenance/v1".to_string(),
         )]),
     };
-    sign_links_in_place(&mut attestation).expect("sign links");
+    sign_attestation_links(&mut attestation);
     attestation
 }
 
 #[test]
 fn inv_pat_full_chain_verifies_fail_closed() {
-    let policy = VerificationPolicy::production_default();
-    let report = verify_attestation_chain(&valid_attestation(), &policy, 1_700_000_400, "trace-a");
+    let attestation = valid_attestation();
+    let policy = production_policy_for(&attestation);
+    let report = verify_attestation_chain(&attestation, &policy, 1_700_000_400, "trace-a");
 
     assert!(report.chain_valid);
     assert_eq!(
@@ -87,9 +128,9 @@ fn inv_pat_full_chain_verifies_fail_closed() {
 fn inv_pat_missing_source_vcs_link_rejected_with_chain_incomplete() {
     let mut attestation = valid_attestation();
     attestation.links.truncate(2);
-    sign_links_in_place(&mut attestation).expect("re-sign links");
+    sign_attestation_links(&mut attestation);
 
-    let policy = VerificationPolicy::production_default();
+    let policy = production_policy_for(&attestation);
     let report = verify_attestation_chain(&attestation, &policy, 1_700_000_400, "trace-b");
 
     assert!(!report.chain_valid);
@@ -106,9 +147,14 @@ fn inv_pat_missing_source_vcs_link_rejected_with_chain_incomplete() {
 #[test]
 fn inv_pat_broken_signature_marks_specific_link() {
     let mut attestation = valid_attestation();
-    attestation.links[1].signature = "bad-signature".to_string();
+    let build_link = attestation
+        .links
+        .iter_mut()
+        .find(|link| link.role == ChainLinkRole::BuildSystem)
+        .expect("valid attestation includes build-system link");
+    build_link.signature = "bad-signature".to_string();
 
-    let policy = VerificationPolicy::production_default();
+    let policy = production_policy_for(&attestation);
     let report = verify_attestation_chain(&attestation, &policy, 1_700_000_500, "trace-c");
 
     assert!(!report.chain_valid);
@@ -121,10 +167,22 @@ fn inv_pat_broken_signature_marks_specific_link() {
 #[test]
 fn inv_pat_same_signer_source_link_is_downgraded_to_level_two() {
     let mut attestation = valid_attestation();
-    attestation.links[2].signer_id = attestation.links[1].signer_id.clone();
-    sign_links_in_place(&mut attestation).expect("re-sign duplicated source signer");
+    let build_signer_id = attestation
+        .links
+        .iter()
+        .find(|link| link.role == ChainLinkRole::BuildSystem)
+        .expect("valid attestation includes build-system link")
+        .signer_id
+        .clone();
+    let source_link = attestation
+        .links
+        .iter_mut()
+        .find(|link| link.role == ChainLinkRole::SourceVcs)
+        .expect("valid attestation includes source VCS link");
+    source_link.signer_id = build_signer_id;
+    sign_attestation_links(&mut attestation);
 
-    let policy = VerificationPolicy::production_default();
+    let policy = production_policy_for(&attestation);
     let report = verify_attestation_chain(&attestation, &policy, 1_700_000_500, "trace-c2");
 
     assert!(report.chain_valid);
@@ -152,9 +210,9 @@ fn inv_pat_cached_window_allows_soft_stale_but_emits_event() {
         link.issued_at_epoch = 960;
         link.expires_at_epoch = 970;
     }
-    sign_links_in_place(&mut attestation).expect("re-sign stale links");
+    sign_attestation_links(&mut attestation);
 
-    let mut policy = VerificationPolicy::production_default();
+    let mut policy = production_policy_for(&attestation);
     policy.mode = VerificationMode::CachedTrustWindow;
     policy.max_attestation_age_secs = 10;
     policy.cached_trust_window_secs = 100;
@@ -178,8 +236,9 @@ fn inv_pat_cached_window_allows_soft_stale_but_emits_event() {
 
 #[test]
 fn inv_pat_downstream_gate_projection_requires_10_13_checks() {
-    let policy = VerificationPolicy::production_default();
-    let outcome = verify_and_project_gates(&valid_attestation(), &policy, 1_700_000_500, "trace-e");
+    let attestation = valid_attestation();
+    let policy = production_policy_for(&attestation);
+    let outcome = verify_and_project_gates(&attestation, &policy, 1_700_000_500, "trace-e");
 
     assert!(outcome.report.chain_valid);
     assert_eq!(

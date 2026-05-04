@@ -1173,7 +1173,14 @@ mod tests {
         (sk, vk)
     }
 
-    fn valid_provenance(now_epoch: u64) -> prov::ProvenanceAttestation {
+    fn provenance_signing_keys(signing_key: &SigningKey) -> BTreeMap<String, SigningKey> {
+        BTreeMap::from([(
+            "pub-001".to_string(),
+            SigningKey::from_bytes(&signing_key.to_bytes()),
+        )])
+    }
+
+    fn valid_provenance(signing_key: &SigningKey, now_epoch: u64) -> prov::ProvenanceAttestation {
         let mut attestation = prov::ProvenanceAttestation {
             schema_version: "1.0".to_string(),
             source_repository_url: "https://github.com/example/ext".to_string(),
@@ -1199,16 +1206,19 @@ mod tests {
             }],
             custom_claims: BTreeMap::new(),
         };
-        prov::sign_links_in_place(&mut attestation).expect("sign provenance");
+        prov::sign_links_in_place(&mut attestation, &provenance_signing_keys(signing_key))
+            .expect("sign provenance");
         attestation
     }
 
     fn test_kernel(vk: &ed25519_dalek::VerifyingKey) -> AdmissionKernel {
         let mut key_ring = KeyRing::new();
         key_ring.add_key(*vk);
+        let mut provenance_policy = prov::VerificationPolicy::development_profile();
+        provenance_policy.add_trusted_signer_key("pub-001", vk);
         AdmissionKernel {
             key_ring,
-            provenance_policy: prov::VerificationPolicy::development_profile(),
+            provenance_policy,
             transparency_policy: tv::TransparencyPolicy {
                 required: false,
                 pinned_roots: vec![],
@@ -1236,7 +1246,7 @@ mod tests {
                 signature_bytes,
                 signed_at: Utc::now().to_rfc3339(),
             },
-            provenance: valid_provenance(now_epoch),
+            provenance: valid_provenance(sk, now_epoch),
             initial_version: VersionEntry {
                 version: version.to_string(),
                 parent_version: None,

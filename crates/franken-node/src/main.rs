@@ -2324,7 +2324,7 @@ mod verifying_key_parsing_tests {
                 return candidate;
             }
         }
-        panic!("expected at least one seed to yield hex letter bytes");
+        [0xab; 32]
     }
 
     fn ssh_ed25519_public_key_line(bytes: [u8; 32]) -> String {
@@ -10943,10 +10943,12 @@ mod registry_command_tests {
     fn registry_cli_registry_rejects_development_grade_provenance() {
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[13_u8; 32]);
         let mut key_ring = supply_chain::artifact_signing::KeyRing::new();
-        key_ring.add_key(signing_key.verifying_key());
+        let verifying_key = signing_key.verifying_key();
+        key_ring.add_key(verifying_key);
+        let provenance_policy = registry_cli_provenance_policy_for_keys([verifying_key]);
         let mut registry = SignedExtensionRegistry::new(
             supply_chain::extension_registry::RegistryConfig::default(),
-            registry_cli_admission_kernel(key_ring),
+            registry_cli_admission_kernel(key_ring, provenance_policy),
         );
         let mut request = build_registry_seed_request(
             "dev-only",
@@ -10959,8 +10961,13 @@ mod registry_command_tests {
         .expect("request");
         request.provenance.slsa_level_claim = 1;
         request.provenance.links.truncate(1);
-        supply_chain::provenance::sign_links_in_place(&mut request.provenance)
-            .expect("resign downgraded provenance");
+        let provenance_signing_keys =
+            provenance_link_signing_keys(&request.provenance.links, &signing_key);
+        supply_chain::provenance::sign_links_in_place(
+            &mut request.provenance,
+            &provenance_signing_keys,
+        )
+        .expect("resign downgraded provenance");
 
         let result = registry.register(request, "trace-registry-dev-profile-reject", 1_700_000_000);
 
@@ -15172,6 +15179,7 @@ fn build_registry_seed_request_with_config(
 
     let vk = signing_key.verifying_key();
     let key_id = supply_chain::artifact_signing::KeyId::from_verifying_key(&vk);
+    let key_id_string = key_id.to_string();
     let signature_bytes = supply_chain::artifact_signing::sign_bytes(signing_key, &manifest_bytes);
 
     let now_epoch = std::time::SystemTime::now()
@@ -15213,7 +15221,7 @@ fn build_registry_seed_request_with_config(
         links: vec![
             supply_chain::provenance::AttestationLink {
                 role: supply_chain::provenance::ChainLinkRole::Publisher,
-                signer_id: builder_identity,
+                signer_id: key_id_string.clone(),
                 signer_version: version.to_string(),
                 signature: String::new(),
                 signed_payload_hash: attestation_hash.clone(),
@@ -15223,7 +15231,7 @@ fn build_registry_seed_request_with_config(
             },
             supply_chain::provenance::AttestationLink {
                 role: supply_chain::provenance::ChainLinkRole::BuildSystem,
-                signer_id: build_context.build_system_identifier.clone(),
+                signer_id: key_id_string.clone(),
                 signer_version: version.to_string(),
                 signature: String::new(),
                 signed_payload_hash: attestation_hash,
@@ -15234,7 +15242,8 @@ fn build_registry_seed_request_with_config(
         ],
         custom_claims: std::collections::BTreeMap::new(),
     };
-    supply_chain::provenance::sign_links_in_place(&mut provenance)
+    let provenance_signing_keys = provenance_link_signing_keys(&provenance.links, signing_key);
+    supply_chain::provenance::sign_links_in_place(&mut provenance, &provenance_signing_keys)
         .map_err(|e| anyhow::anyhow!("failed signing registry seed provenance links: {e}"))?;
 
     Ok(RegistrationRequest {
@@ -15260,15 +15269,39 @@ fn generate_registry_seed_signing_key() -> ed25519_dalek::SigningKey {
     ed25519_dalek::SigningKey::generate(&mut rng)
 }
 
-fn registry_cli_provenance_policy() -> supply_chain::provenance::VerificationPolicy {
-    supply_chain::provenance::VerificationPolicy {
+fn provenance_link_signing_keys(
+    links: &[supply_chain::provenance::AttestationLink],
+    signing_key: &ed25519_dalek::SigningKey,
+) -> std::collections::BTreeMap<String, ed25519_dalek::SigningKey> {
+    let signing_key_bytes = signing_key.to_bytes();
+    links
+        .iter()
+        .map(|link| {
+            (
+                link.signer_id.clone(),
+                ed25519_dalek::SigningKey::from_bytes(&signing_key_bytes),
+            )
+        })
+        .collect()
+}
+
+fn registry_cli_provenance_policy_for_keys(
+    verifying_keys: impl IntoIterator<Item = ed25519_dalek::VerifyingKey>,
+) -> supply_chain::provenance::VerificationPolicy {
+    let mut policy = supply_chain::provenance::VerificationPolicy {
         min_level: supply_chain::provenance::ProvenanceLevel::Level2SignedReproducible,
         required_chain_depth: 2,
         max_attestation_age_secs: 24 * 60 * 60,
         cached_trust_window_secs: 0,
         allow_self_signed: false,
+        trusted_signer_keys: std::collections::BTreeMap::new(),
         mode: supply_chain::provenance::VerificationMode::FailClosed,
+    };
+    for verifying_key in verifying_keys {
+        let key_id = supply_chain::artifact_signing::KeyId::from_verifying_key(&verifying_key);
+        policy.add_trusted_signer_key(key_id.to_string(), &verifying_key);
     }
+    policy
 }
 
 fn registry_cli_transparency_policy() -> supply_chain::transparency_verifier::TransparencyPolicy {
@@ -15280,10 +15313,11 @@ fn registry_cli_transparency_policy() -> supply_chain::transparency_verifier::Tr
 
 fn registry_cli_admission_kernel(
     key_ring: supply_chain::artifact_signing::KeyRing,
+    provenance_policy: supply_chain::provenance::VerificationPolicy,
 ) -> AdmissionKernel {
     AdmissionKernel {
         key_ring,
-        provenance_policy: registry_cli_provenance_policy(),
+        provenance_policy,
         transparency_policy: registry_cli_transparency_policy(),
     }
 }
@@ -15301,7 +15335,12 @@ fn registry_cli_registry() -> Result<SignedExtensionRegistry> {
         key_ring.add_key(verifying_key);
     }
 
-    let admission_kernel = registry_cli_admission_kernel(key_ring);
+    let provenance_policy = registry_cli_provenance_policy_for_keys([
+        acme_seed_key.verifying_key(),
+        beta_seed_key.verifying_key(),
+        gamma_seed_key.verifying_key(),
+    ]);
+    let admission_kernel = registry_cli_admission_kernel(key_ring, provenance_policy);
 
     let mut registry = SignedExtensionRegistry::new(
         supply_chain::extension_registry::RegistryConfig::default(),
@@ -16481,7 +16520,9 @@ fn build_registry_publish_request_with_context(
         "operator_provenance_signature".to_string(),
         hex::encode(provenance_signature),
     );
-    supply_chain::provenance::sign_links_in_place(&mut provenance)
+    let provenance_signing_keys =
+        provenance_link_signing_keys(&provenance.links, &signing_material.signing_key);
+    supply_chain::provenance::sign_links_in_place(&mut provenance, &provenance_signing_keys)
         .map_err(|e| anyhow::anyhow!("failed signing registry publish provenance links: {e}"))?;
 
     Ok(RegistrationRequest {

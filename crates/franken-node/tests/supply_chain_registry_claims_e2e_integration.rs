@@ -101,7 +101,7 @@ impl SupplyChainE2EHarness {
         // Create admission kernel with real verification policies
         let admission_kernel = AdmissionKernel {
             key_ring: key_ring.as_ref().clone(),
-            provenance_policy: prov::VerificationPolicy::default(),
+            provenance_policy: prov::VerificationPolicy::development_profile(),
             transparency_policy: tv::TransparencyPolicy::default(),
         };
 
@@ -449,7 +449,10 @@ impl SupplyChainE2EHarness {
                     "Claim compilation rejected"
                 );
 
-                context.insert("rejection_reason".to_string(), "compilation_rejected".to_string());
+                context.insert(
+                    "rejection_reason".to_string(),
+                    "compilation_rejected".to_string(),
+                );
                 context.insert("error_code".to_string(), error_code);
 
                 self.log_operation(E2EOperationLog {
@@ -603,7 +606,11 @@ impl SupplyChainE2EHarness {
             let mut hasher = Sha256::new();
             hasher.update(b"contract_sig_v1:");
             let claim_text_bytes = contract.claim_text.as_bytes();
-            hasher.update(&u64::try_from(claim_text_bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+            hasher.update(
+                &u64::try_from(claim_text_bytes.len())
+                    .unwrap_or(u64::MAX)
+                    .to_le_bytes(),
+            );
             hasher.update(claim_text_bytes);
             hasher.update(&contract.compiled_at_epoch_ms.to_le_bytes());
             hasher.finalize()

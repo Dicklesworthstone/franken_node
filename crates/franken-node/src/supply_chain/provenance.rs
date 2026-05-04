@@ -17,9 +17,9 @@ use crate::push_bounded;
 /// Prevents memory exhaustion from adversarial attestations with many problems.
 const MAX_CHAIN_ISSUES: usize = 1024;
 
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 /// Canonical attestation envelope formats accepted by franken_node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +89,7 @@ pub struct AttestationLink {
     pub role: ChainLinkRole,
     pub signer_id: String,
     pub signer_version: String,
+    /// Hex-encoded Ed25519 signature over the canonical signable payload.
     pub signature: String,
     pub signed_payload_hash: String,
     pub issued_at_epoch: u64,
@@ -131,6 +132,8 @@ pub struct VerificationPolicy {
     pub max_attestation_age_secs: u64,
     pub cached_trust_window_secs: u64,
     pub allow_self_signed: bool,
+    #[serde(default)]
+    pub trusted_signer_keys: BTreeMap<String, String>,
     pub mode: VerificationMode,
 }
 
@@ -143,6 +146,7 @@ impl VerificationPolicy {
             max_attestation_age_secs: 24 * 60 * 60,
             cached_trust_window_secs: 0,
             allow_self_signed: false,
+            trusted_signer_keys: BTreeMap::new(),
             mode: VerificationMode::FailClosed,
         }
     }
@@ -155,9 +159,34 @@ impl VerificationPolicy {
             max_attestation_age_secs: 7 * 24 * 60 * 60,
             cached_trust_window_secs: 30 * 60,
             allow_self_signed: true,
+            trusted_signer_keys: BTreeMap::new(),
             mode: VerificationMode::CachedTrustWindow,
         }
     }
+
+    pub fn add_trusted_signer_key(
+        &mut self,
+        signer_id: impl Into<String>,
+        verifying_key: &VerifyingKey,
+    ) {
+        self.trusted_signer_keys
+            .insert(signer_id.into(), trusted_signer_key_hex(verifying_key));
+    }
+
+    #[must_use]
+    pub fn with_trusted_signer_key(
+        mut self,
+        signer_id: impl Into<String>,
+        verifying_key: &VerifyingKey,
+    ) -> Self {
+        self.add_trusted_signer_key(signer_id, verifying_key);
+        self
+    }
+}
+
+#[must_use]
+pub fn trusted_signer_key_hex(verifying_key: &VerifyingKey) -> String {
+    hex::encode(verifying_key.as_bytes())
 }
 
 /// Stable reason codes for verification results and failures.
@@ -266,13 +295,27 @@ pub fn canonical_attestation_json(
     canonical_json(attestation)
 }
 
-/// Deterministically sign all links in-place using the canonical signable payload.
+/// Sign all links in-place using Ed25519 over the canonical signable payload.
 pub fn sign_links_in_place(
     attestation: &mut ProvenanceAttestation,
+    signing_keys: &BTreeMap<String, SigningKey>,
 ) -> Result<(), VerificationFailure> {
-    for idx in 0..attestation.links.len() {
-        let signature = expected_link_signature(attestation, &attestation.links[idx])?;
-        attestation.links[idx].signature = signature;
+    let mut signatures = Vec::with_capacity(attestation.links.len());
+    for link in &attestation.links {
+        let signer_id = link.signer_id.clone();
+        let signing_key = signing_keys
+            .get(&signer_id)
+            .ok_or_else(|| VerificationFailure {
+                code: VerificationErrorCode::InvalidSignature,
+                broken_link: Some(link.role),
+                message: format!("missing signing key for signer_id {signer_id}"),
+                remediation: "Provide an Ed25519 signing key for every attestation link signer_id."
+                    .to_string(),
+            })?;
+        signatures.push(sign_link_signature(attestation, link, signing_key)?);
+    }
+    for (link, signature) in attestation.links.iter_mut().zip(signatures) {
+        link.signature = signature;
     }
     Ok(())
 }
@@ -471,8 +514,14 @@ fn validate_link_order(
         .min(expected.len())
         .min(attestation.links.len());
 
-    for (index, expected_role) in expected.iter().copied().enumerate().take(checks) {
-        let actual = attestation.links[index].role;
+    for (index, (link, expected_role)) in attestation
+        .links
+        .iter()
+        .zip(expected.iter().copied())
+        .take(checks)
+        .enumerate()
+    {
+        let actual = link.role;
         if actual != expected_role {
             push_bounded(issues, ChainIssue {
                 code: VerificationErrorCode::ChainLinkOrderInvalid,
@@ -579,22 +628,8 @@ fn validate_links(
             );
         }
 
-        match expected_link_signature(attestation, link) {
-            Ok(expected) => {
-                if link.signature.trim().is_empty()
-                    || !crate::security::constant_time::ct_eq(&link.signature, &expected)
-                {
-                    push_bounded(issues, ChainIssue {
-                        code: VerificationErrorCode::InvalidSignature,
-                        link_role: Some(link.role),
-                        message: "link signature failed deterministic canonical verification".to_string(),
-                        remediation:
-                            "Regenerate link signature from canonical signable payload and re-submit."
-                                .to_string(),
-                        allow_in_cached_mode: false,
-                    }, MAX_CHAIN_ISSUES);
-                }
-            }
+        match verify_link_signature(attestation, policy, link) {
+            Ok(()) => {}
             Err(error) => {
                 push_bounded(
                     issues,
@@ -777,12 +812,99 @@ fn push_unique_event(events: &mut Vec<ProvenanceEventCode>, event: ProvenanceEve
     }
 }
 
-fn expected_link_signature(
+fn sign_link_signature(
     attestation: &ProvenanceAttestation,
     link: &AttestationLink,
+    signing_key: &SigningKey,
 ) -> Result<String, VerificationFailure> {
     let payload = canonical_signable_payload(attestation, link)?;
-    Ok(sha256_hex(payload.as_bytes()))
+    Ok(hex::encode(signing_key.sign(payload.as_bytes()).to_bytes()))
+}
+
+fn verify_link_signature(
+    attestation: &ProvenanceAttestation,
+    policy: &VerificationPolicy,
+    link: &AttestationLink,
+) -> Result<(), VerificationFailure> {
+    let verifying_key_hex =
+        policy
+            .trusted_signer_keys
+            .get(&link.signer_id)
+            .ok_or_else(|| VerificationFailure {
+                code: VerificationErrorCode::InvalidSignature,
+                broken_link: Some(link.role),
+                message: format!("signer_id {} is not in trusted signer keys", link.signer_id),
+                remediation:
+                    "Register the signer_id public key in the verification policy before admitting this attestation."
+                        .to_string(),
+            })?;
+    let verifying_key = parse_trusted_verifying_key(verifying_key_hex, link.role)?;
+    let signature = parse_link_signature(&link.signature, link.role)?;
+    let payload = canonical_signable_payload(attestation, link)?;
+    verifying_key
+        .verify(payload.as_bytes(), &signature)
+        .map_err(|_| VerificationFailure {
+            code: VerificationErrorCode::InvalidSignature,
+            broken_link: Some(link.role),
+            message: "link Ed25519 signature failed verification".to_string(),
+            remediation:
+                "Re-sign the canonical attestation link payload with the signer_id private key."
+                    .to_string(),
+        })
+}
+
+fn parse_trusted_verifying_key(
+    verifying_key_hex: &str,
+    role: ChainLinkRole,
+) -> Result<VerifyingKey, VerificationFailure> {
+    let key_bytes = decode_lower_hex_fixed::<32>(verifying_key_hex, "trusted signer key", role)?;
+    VerifyingKey::from_bytes(&key_bytes).map_err(|error| VerificationFailure {
+        code: VerificationErrorCode::InvalidSignature,
+        broken_link: Some(role),
+        message: format!("trusted signer key is not a valid Ed25519 public key: {error}"),
+        remediation:
+            "Replace the trusted signer key with 32-byte lowercase hex Ed25519 public key material."
+                .to_string(),
+    })
+}
+
+fn parse_link_signature(
+    signature_hex: &str,
+    role: ChainLinkRole,
+) -> Result<Signature, VerificationFailure> {
+    let signature_bytes = decode_lower_hex_fixed::<64>(signature_hex, "link signature", role)?;
+    Ok(Signature::from_bytes(&signature_bytes))
+}
+
+fn decode_lower_hex_fixed<const N: usize>(
+    value: &str,
+    field_name: &str,
+    role: ChainLinkRole,
+) -> Result<[u8; N], VerificationFailure> {
+    if value.len() != N * 2
+        || !value
+            .as_bytes()
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(VerificationFailure {
+            code: VerificationErrorCode::InvalidSignature,
+            broken_link: Some(role),
+            message: format!("{field_name} must be {} lowercase hex characters", N * 2),
+            remediation:
+                "Use canonical lowercase hex encoding for Ed25519 signature and key material."
+                    .to_string(),
+        });
+    }
+
+    let mut bytes = [0_u8; N];
+    hex::decode_to_slice(value, &mut bytes).map_err(|error| VerificationFailure {
+        code: VerificationErrorCode::InvalidSignature,
+        broken_link: Some(role),
+        message: format!("{field_name} is not valid hex: {error}"),
+        remediation: "Re-encode the field as canonical lowercase hex.".to_string(),
+    })?;
+    Ok(bytes)
 }
 
 fn canonical_signable_payload(
@@ -874,22 +996,67 @@ fn canonicalize_value(value: Value) -> Value {
     }
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"provenance_hash_v1:");
-    hasher.update((u64::try_from(bytes.len()).unwrap_or(u64::MAX)).to_le_bytes());
-    hasher.update(bytes);
-    hex::encode(hasher.finalize())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         AttestationEnvelopeFormat, AttestationLink, ChainLinkRole, ProvenanceAttestation,
         ProvenanceLevel, VerificationFailure, VerificationMode, VerificationPolicy,
-        canonical_attestation_json, sign_links_in_place, verify_and_project_gates,
-        verify_attestation_chain,
+        canonical_attestation_json, sign_links_in_place as sign_links_in_place_with_keys,
+        verify_and_project_gates, verify_attestation_chain,
     };
+
+    fn test_signing_key_for(signer_id: &str) -> ed25519_dalek::SigningKey {
+        use sha2::Digest;
+
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"provenance_test_signing_key_v1:");
+        hasher.update((u64::try_from(signer_id.len()).unwrap_or(u64::MAX)).to_le_bytes());
+        hasher.update(signer_id.as_bytes());
+        let digest = hasher.finalize();
+        let mut seed = [0_u8; 32];
+        seed.copy_from_slice(&digest);
+        ed25519_dalek::SigningKey::from_bytes(&seed)
+    }
+
+    fn signing_keys_for(
+        attestation: &ProvenanceAttestation,
+    ) -> BTreeMap<String, ed25519_dalek::SigningKey> {
+        attestation
+            .links
+            .iter()
+            .map(|link| {
+                (
+                    link.signer_id.clone(),
+                    test_signing_key_for(&link.signer_id),
+                )
+            })
+            .collect()
+    }
+
+    fn sign_links_in_place(
+        attestation: &mut ProvenanceAttestation,
+    ) -> Result<(), VerificationFailure> {
+        sign_links_in_place_with_keys(attestation, &signing_keys_for(attestation))
+    }
+
+    fn policy_for_attestation(
+        mut policy: VerificationPolicy,
+        attestation: &ProvenanceAttestation,
+    ) -> VerificationPolicy {
+        for link in &attestation.links {
+            let signing_key = test_signing_key_for(&link.signer_id);
+            policy.add_trusted_signer_key(link.signer_id.clone(), &signing_key.verifying_key());
+        }
+        policy
+    }
+
+    fn production_policy_for(attestation: &ProvenanceAttestation) -> VerificationPolicy {
+        policy_for_attestation(VerificationPolicy::production_default(), attestation)
+    }
+
+    fn development_policy_for(attestation: &ProvenanceAttestation) -> VerificationPolicy {
+        policy_for_attestation(VerificationPolicy::development_profile(), attestation)
+    }
 
     fn base_attestation() -> ProvenanceAttestation {
         let mut attestation = ProvenanceAttestation {
@@ -948,7 +1115,7 @@ mod tests {
 
     #[test]
     fn inv_pat_full_chain_passes_and_projects_gates() {
-        let policy = VerificationPolicy::production_default();
+        let policy = production_policy_for(&base_attestation());
         let outcome =
             verify_and_project_gates(&base_attestation(), &policy, 1_700_000_400, "trace-1");
 
@@ -979,7 +1146,7 @@ mod tests {
         attestation.links.truncate(2);
         sign_links_in_place(&mut attestation).expect("re-sign truncated links");
 
-        let policy = VerificationPolicy::production_default();
+        let policy = production_policy_for(&attestation);
         let report = verify_attestation_chain(&attestation, &policy, 1_700_000_500, "trace-2");
 
         assert!(!report.chain_valid);
@@ -996,12 +1163,17 @@ mod tests {
     #[test]
     fn inv_pat_invalid_signature_identifies_broken_link() {
         let mut attestation = base_attestation();
-        let mut tampered = attestation.links[1].signature.clone();
+        let build_link = attestation
+            .links
+            .iter_mut()
+            .find(|link| link.role == ChainLinkRole::BuildSystem)
+            .expect("base attestation includes build-system link");
+        let mut tampered = build_link.signature.clone();
         let replacement = if tampered.starts_with('a') { "b" } else { "a" };
         tampered.replace_range(0..1, replacement);
-        attestation.links[1].signature = tampered;
+        build_link.signature = tampered;
 
-        let policy = VerificationPolicy::production_default();
+        let policy = production_policy_for(&attestation);
         let report = verify_attestation_chain(&attestation, &policy, 1_700_000_600, "trace-3");
 
         assert!(!report.chain_valid);
@@ -1014,12 +1186,17 @@ mod tests {
     #[test]
     fn inv_pat_invalid_signed_payload_hash_detects_broken_link() {
         let mut attestation = base_attestation();
-        let mut tampered = attestation.links[1].signed_payload_hash.clone();
+        let build_link = attestation
+            .links
+            .iter_mut()
+            .find(|link| link.role == ChainLinkRole::BuildSystem)
+            .expect("base attestation includes build-system link");
+        let mut tampered = build_link.signed_payload_hash.clone();
         let replacement = if tampered.starts_with('a') { "b" } else { "a" };
         tampered.replace_range(0..1, replacement);
-        attestation.links[1].signed_payload_hash = tampered;
+        build_link.signed_payload_hash = tampered;
 
-        let policy = VerificationPolicy::production_default();
+        let policy = production_policy_for(&attestation);
         let report = verify_attestation_chain(&attestation, &policy, 1_700_000_600, "trace-3b");
 
         assert!(!report.chain_valid);
@@ -1042,7 +1219,7 @@ mod tests {
         }
         sign_links_in_place(&mut attestation).expect("re-sign stale links");
 
-        let mut policy = VerificationPolicy::production_default();
+        let mut policy = production_policy_for(&attestation);
         policy.mode = VerificationMode::CachedTrustWindow;
         policy.max_attestation_age_secs = 10;
         policy.cached_trust_window_secs = 100;
@@ -1074,7 +1251,7 @@ mod tests {
         }
         sign_links_in_place(&mut attestation).expect("re-sign stale links");
 
-        let mut policy = VerificationPolicy::production_default();
+        let mut policy = production_policy_for(&attestation);
         policy.mode = VerificationMode::CachedTrustWindow;
         policy.max_attestation_age_secs = 10;
         policy.cached_trust_window_secs = 20;
@@ -1104,7 +1281,7 @@ mod tests {
         attestation.slsa_level_claim = 1;
         sign_links_in_place(&mut attestation).expect("re-sign self link");
 
-        let policy = VerificationPolicy::development_profile();
+        let policy = development_policy_for(&attestation);
         let report = verify_attestation_chain(&attestation, &policy, 1_700_000_050, "trace-6");
 
         assert!(report.chain_valid);
@@ -1132,7 +1309,7 @@ mod tests {
         attestation.slsa_level_claim = 0;
         sign_links_in_place(&mut attestation).expect("re-sign degraded links");
 
-        let policy = VerificationPolicy::development_profile();
+        let policy = development_policy_for(&attestation);
         let report = verify_attestation_chain(&attestation, &policy, 1_700_000_050, "trace-6b");
 
         assert!(report.chain_valid);
@@ -1153,10 +1330,22 @@ mod tests {
     #[test]
     fn inv_pat_same_signer_source_link_cannot_claim_independent_reproduction() {
         let mut attestation = base_attestation();
-        attestation.links[2].signer_id = attestation.links[1].signer_id.clone();
+        let build_signer_id = attestation
+            .links
+            .iter()
+            .find(|link| link.role == ChainLinkRole::BuildSystem)
+            .expect("base attestation includes build-system link")
+            .signer_id
+            .clone();
+        let source_link = attestation
+            .links
+            .iter_mut()
+            .find(|link| link.role == ChainLinkRole::SourceVcs)
+            .expect("base attestation includes source VCS link");
+        source_link.signer_id = build_signer_id;
         sign_links_in_place(&mut attestation).expect("re-sign duplicated source signer");
 
-        let policy = VerificationPolicy::production_default();
+        let policy = production_policy_for(&attestation);
         let report = verify_attestation_chain(&attestation, &policy, 1_700_000_400, "trace-6c");
 
         assert!(report.chain_valid);
@@ -1213,7 +1402,7 @@ mod tests {
             canonical_attestation_json(&second).expect("second canonical json")
         );
 
-        let policy = VerificationPolicy::production_default();
+        let policy = production_policy_for(&first);
         let first_report = verify_attestation_chain(&first, &policy, 1_700_000_400, "same-trace");
         let second_report = verify_attestation_chain(&second, &policy, 1_700_000_400, "same-trace");
         assert_eq!(first_report, second_report);
@@ -1222,7 +1411,7 @@ mod tests {
     #[test]
     fn mr_trace_id_change_preserves_verification_decision() {
         let attestation = base_attestation();
-        let policy = VerificationPolicy::production_default();
+        let policy = production_policy_for(&attestation);
 
         let first = verify_attestation_chain(&attestation, &policy, 1_700_000_400, "trace-a");
         let second = verify_attestation_chain(&attestation, &policy, 1_700_000_400, "trace-b");
@@ -1241,7 +1430,7 @@ mod tests {
         permuted.links.swap(0, 1);
         sign_links_in_place(&mut permuted).expect("sign permuted links");
 
-        let policy = VerificationPolicy::production_default();
+        let policy = production_policy_for(&ordered);
         let ordered_report = verify_attestation_chain(&ordered, &policy, 1_700_000_400, "ordered");
         let permuted_report =
             verify_attestation_chain(&permuted, &policy, 1_700_000_400, "permuted");
@@ -1269,7 +1458,7 @@ mod tests {
         level_one_claim.slsa_level_claim = 1;
         sign_links_in_place(&mut level_one_claim).expect("sign level one claim");
 
-        let policy = VerificationPolicy::production_default();
+        let policy = production_policy_for(&high_claim);
         let high_report = verify_attestation_chain(&high_claim, &policy, 1_700_000_400, "level-3");
         let level_two_report =
             verify_attestation_chain(&level_two_claim, &policy, 1_700_000_400, "level-2");
@@ -1300,8 +1489,8 @@ mod tests {
         attestation.links.truncate(2);
         sign_links_in_place(&mut attestation).expect("re-sign shortened chain");
 
-        let strict_policy = VerificationPolicy::production_default();
-        let mut relaxed_policy = VerificationPolicy::production_default();
+        let strict_policy = production_policy_for(&attestation);
+        let mut relaxed_policy = production_policy_for(&attestation);
         relaxed_policy.required_chain_depth = 2;
 
         let strict_report =
@@ -1334,7 +1523,7 @@ mod tests {
         attestation.output_hash = "sha256:output-transformed".to_string();
         sign_links_in_place(&mut attestation).expect("re-sign transformed output hash");
 
-        let policy = VerificationPolicy::production_default();
+        let policy = production_policy_for(&attestation);
         let mismatched_report =
             verify_attestation_chain(&attestation, &policy, 1_700_000_400, "mismatch");
         assert!(!mismatched_report.chain_valid);
@@ -1380,7 +1569,7 @@ mod tests {
             canonical_attestation_json(&transformed).expect("transformed canonical json")
         );
 
-        let policy = VerificationPolicy::production_default();
+        let policy = production_policy_for(&original);
         let original_report =
             verify_attestation_chain(&original, &policy, 1_700_000_400, "original");
         let transformed_report =
@@ -1407,7 +1596,7 @@ mod tests {
             max_attestation_age_secs: u64::MAX,
             cached_trust_window_secs: 50,
             mode: VerificationMode::CachedTrustWindow,
-            ..VerificationPolicy::development_profile()
+            ..development_policy_for(&attestation)
         };
 
         let before_expiry =
@@ -1440,7 +1629,7 @@ mod tests {
         independent_source_signer.links[2].signer_id = "independent-vcs-key".to_string();
         sign_links_in_place(&mut independent_source_signer).expect("re-sign independent signer");
 
-        let policy = VerificationPolicy::production_default();
+        let policy = production_policy_for(&independent_source_signer);
         let shared_report = verify_attestation_chain(
             &shared_source_signer,
             &policy,
@@ -1472,7 +1661,7 @@ mod tests {
         attestation.links[2].revoked = true;
         sign_links_in_place(&mut attestation).expect("re-sign revoked link");
 
-        let policy = VerificationPolicy::production_default();
+        let policy = production_policy_for(&attestation);
         let report = verify_attestation_chain(&attestation, &policy, 1_700_000_400, "revoked");
 
         assert!(!report.chain_valid);
@@ -1501,7 +1690,7 @@ mod tests {
 
         let policy = VerificationPolicy {
             max_attestation_age_secs: u64::MAX, // don't trigger age-based staleness
-            ..VerificationPolicy::development_profile()
+            ..development_policy_for(&attestation)
         };
 
         // Verify at exact expiry: must detect staleness (fail-closed).
@@ -1525,7 +1714,7 @@ mod tests {
         let now_epoch = 1_700_000_200 + 86_400; // 1 day later
         let policy = VerificationPolicy {
             max_attestation_age_secs: 86_400,
-            ..VerificationPolicy::development_profile()
+            ..development_policy_for(&attestation)
         };
 
         let report = verify_attestation_chain(&attestation, &policy, now_epoch, "age-boundary");
@@ -1544,7 +1733,7 @@ mod tests {
 
         let report = verify_attestation_chain(
             &attestation,
-            &VerificationPolicy::production_default(),
+            &production_policy_for(&attestation),
             1_700_000_400,
             "self-signed-prod",
         );
@@ -1564,7 +1753,7 @@ mod tests {
 
         let report = verify_attestation_chain(
             &attestation,
-            &VerificationPolicy::production_default(),
+            &production_policy_for(&attestation),
             1_700_000_400,
             "empty-signature",
         );
@@ -1583,7 +1772,7 @@ mod tests {
 
         let report = verify_attestation_chain(
             &attestation,
-            &VerificationPolicy::production_default(),
+            &production_policy_for(&attestation),
             1_700_000_400,
             "missing-source-repository",
         );
@@ -1603,7 +1792,7 @@ mod tests {
 
         let report = verify_attestation_chain(
             &attestation,
-            &VerificationPolicy::production_default(),
+            &production_policy_for(&attestation),
             1_700_000_400,
             "missing-vcs-commit",
         );
@@ -1626,7 +1815,7 @@ mod tests {
 
         let outcome = verify_and_project_gates(
             &attestation,
-            &VerificationPolicy::production_default(),
+            &production_policy_for(&attestation),
             1_700_000_400,
             "projection-deny-all",
         );
@@ -1641,7 +1830,7 @@ mod tests {
     #[test]
     fn negative_attestation_stale_at_exact_age_boundary_fails_closed() {
         let attestation = base_attestation();
-        let mut policy = VerificationPolicy::production_default();
+        let mut policy = production_policy_for(&attestation);
         policy.max_attestation_age_secs = 300;
         let now_epoch = attestation
             .build_timestamp_epoch
@@ -1661,7 +1850,7 @@ mod tests {
         let mut attestation = base_attestation();
         attestation.build_timestamp_epoch = 1_700_000_000;
         sign_links_in_place(&mut attestation).expect("re-sign boundary attestation");
-        let mut policy = VerificationPolicy::development_profile();
+        let mut policy = development_policy_for(&attestation);
         policy.max_attestation_age_secs = 100;
         policy.cached_trust_window_secs = 50;
         policy.mode = VerificationMode::CachedTrustWindow;
@@ -1683,7 +1872,7 @@ mod tests {
 
         let report = verify_attestation_chain(
             &attestation,
-            &VerificationPolicy::production_default(),
+            &production_policy_for(&attestation),
             1_700_000_400,
             "revoked-publisher",
         );
@@ -1704,7 +1893,7 @@ mod tests {
 
         let report = verify_attestation_chain(
             &attestation,
-            &VerificationPolicy::production_default(),
+            &production_policy_for(&attestation),
             1_700_000_400,
             "missing-schema-version",
         );
@@ -1724,7 +1913,7 @@ mod tests {
 
         let report = verify_attestation_chain(
             &attestation,
-            &VerificationPolicy::production_default(),
+            &production_policy_for(&attestation),
             1_700_000_400,
             "missing-builder-identity",
         );
@@ -1744,7 +1933,7 @@ mod tests {
 
         let report = verify_attestation_chain(
             &attestation,
-            &VerificationPolicy::production_default(),
+            &production_policy_for(&attestation),
             1_700_000_400,
             "missing-output-hash",
         );
@@ -1768,7 +1957,7 @@ mod tests {
 
         let report = verify_attestation_chain(
             &attestation,
-            &VerificationPolicy::production_default(),
+            &production_policy_for(&attestation),
             1_700_000_400,
             "blank-signed-payload",
         );
@@ -1784,7 +1973,7 @@ mod tests {
     #[test]
     fn negative_required_depth_above_available_roles_is_incomplete() {
         let attestation = base_attestation();
-        let mut policy = VerificationPolicy::production_default();
+        let mut policy = production_policy_for(&attestation);
         policy.required_chain_depth = 4;
 
         let report =
@@ -1870,7 +2059,7 @@ mod tests {
         assert!(canonical.contains("claim_09999"));
 
         // Verification should work despite size
-        let policy = VerificationPolicy::production_default();
+        let policy = production_policy_for(&attestation);
         let report =
             verify_attestation_chain(&attestation, &policy, 1_700_000_400, "massive-claims");
 
@@ -1911,7 +2100,7 @@ mod tests {
 
         sign_links_in_place(&mut attestation).expect("sign unicode attestation");
 
-        let policy = VerificationPolicy::production_default();
+        let policy = production_policy_for(&attestation);
         let report = verify_attestation_chain(&attestation, &policy, 1_700_000_400, "unicode-test");
 
         assert!(report.chain_valid);
@@ -1945,7 +2134,7 @@ mod tests {
         let policy = VerificationPolicy {
             max_attestation_age_secs: u64::MAX / 2,
             cached_trust_window_secs: u64::MAX / 4,
-            ..VerificationPolicy::production_default()
+            ..production_policy_for(&attestation)
         };
 
         // Verification at timestamp that could cause overflow
@@ -2016,7 +2205,7 @@ mod tests {
         }
 
         // All should have valid signatures
-        let policy = VerificationPolicy::production_default();
+        let policy = production_policy_for(&variant1);
         for (idx, variant) in [&variant1, &variant2, &variant3, &variant4]
             .iter()
             .enumerate()
@@ -2098,6 +2287,7 @@ mod tests {
             cached_trust_window_secs: 0, // Zero cache window
             allow_self_signed: false,
             mode: VerificationMode::FailClosed,
+            ..production_policy_for(&attestation)
         };
 
         let report =
@@ -2112,6 +2302,7 @@ mod tests {
             cached_trust_window_secs: u64::MAX,
             allow_self_signed: true,
             mode: VerificationMode::CachedTrustWindow,
+            ..production_policy_for(&attestation)
         };
 
         let max_report =
@@ -2141,7 +2332,7 @@ mod tests {
 
         sign_links_in_place(&mut attestation).expect("sign whitespace attestation");
 
-        let policy = VerificationPolicy::production_default();
+        let policy = production_policy_for(&attestation);
         let report =
             verify_attestation_chain(&attestation, &policy, 1_700_000_400, "whitespace-fields");
 
@@ -2190,7 +2381,7 @@ mod tests {
         duplicate_attestation.links.push(publisher_link); // Add duplicate publisher link
         sign_links_in_place(&mut duplicate_attestation).expect("sign duplicate links");
 
-        let policy = VerificationPolicy::production_default();
+        let policy = production_policy_for(&duplicate_attestation);
         let duplicate_report = verify_attestation_chain(
             &duplicate_attestation,
             &policy,
@@ -2273,7 +2464,7 @@ mod tests {
             });
         }
 
-        let policy = VerificationPolicy::production_default();
+        let policy = production_policy_for(&problematic_attestation);
         let report = verify_attestation_chain(
             &problematic_attestation,
             &policy,
@@ -2352,7 +2543,7 @@ mod tests {
         }
 
         // Verification results should be identical
-        let policy = VerificationPolicy::production_default();
+        let policy = production_policy_for(&attestation1);
         let report1 =
             verify_attestation_chain(&attestation1, &policy, 1_700_000_400, "order-test-1");
         let report2 =

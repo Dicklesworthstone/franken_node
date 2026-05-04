@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::DateTime;
 use ed25519_dalek::SigningKey;
@@ -90,6 +90,14 @@ fn publisher_key_id() -> String {
     KeyId::from_verifying_key(&signing_key().verifying_key()).to_string()
 }
 
+fn provenance_signing_keys() -> BTreeMap<String, SigningKey> {
+    let key = signing_key();
+    BTreeMap::from([(
+        PUBLISHER_ID.to_string(),
+        SigningKey::from_bytes(&key.to_bytes()),
+    )])
+}
+
 fn trace_id(name: &str) -> String {
     format!("{TRACE_PREFIX}-{name}")
 }
@@ -130,7 +138,7 @@ fn base_provenance(now_epoch: u64) -> Result<ProvenanceAttestation, String> {
         }],
         custom_claims: std::collections::BTreeMap::new(),
     };
-    prov::sign_links_in_place(&mut attestation)
+    prov::sign_links_in_place(&mut attestation, &provenance_signing_keys())
         .map_err(|err| format!("conformance provenance should sign: {err}"))?;
     Ok(attestation)
 }
@@ -183,6 +191,8 @@ fn registry(transparency_required: bool) -> SignedExtensionRegistry {
     let signing_key = signing_key();
     let mut key_ring = KeyRing::new();
     key_ring.add_key(signing_key.verifying_key());
+    let mut provenance_policy = prov::VerificationPolicy::development_profile();
+    provenance_policy.add_trusted_signer_key(PUBLISHER_ID, &signing_key.verifying_key());
 
     let mut transparency_policy = tv::TransparencyPolicy {
         required: false,
@@ -194,7 +204,7 @@ fn registry(transparency_required: bool) -> SignedExtensionRegistry {
         RegistryConfig::default(),
         AdmissionKernel {
             key_ring,
-            provenance_policy: prov::VerificationPolicy::development_profile(),
+            provenance_policy,
             transparency_policy,
         },
     )

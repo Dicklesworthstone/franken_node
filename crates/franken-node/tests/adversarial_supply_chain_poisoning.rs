@@ -29,11 +29,13 @@ fn attacker_signing_key() -> SigningKey {
 fn registry_with_trusted_key(verifying_key: VerifyingKey) -> SignedExtensionRegistry {
     let mut key_ring = KeyRing::new();
     key_ring.add_key(verifying_key);
+    let mut provenance_policy = VerificationPolicy::development_profile();
+    provenance_policy.add_trusted_signer_key("pub-001", &verifying_key);
     SignedExtensionRegistry::new(
         RegistryConfig::default(),
         AdmissionKernel {
             key_ring,
-            provenance_policy: VerificationPolicy::development_profile(),
+            provenance_policy,
             transparency_policy: TransparencyPolicy {
                 required: false,
                 pinned_roots: vec![],
@@ -52,7 +54,14 @@ fn valid_version() -> VersionEntry {
     }
 }
 
-fn valid_provenance(now_epoch: u64) -> ProvenanceAttestation {
+fn provenance_signing_keys(signing_key: &SigningKey) -> BTreeMap<String, SigningKey> {
+    BTreeMap::from([(
+        "pub-001".to_string(),
+        SigningKey::from_bytes(&signing_key.to_bytes()),
+    )])
+}
+
+fn valid_provenance(signing_key: &SigningKey, now_epoch: u64) -> ProvenanceAttestation {
     let mut attestation = ProvenanceAttestation {
         schema_version: "1.0".to_string(),
         source_repository_url: "https://github.com/acme/supply-chain-target".to_string(),
@@ -81,7 +90,8 @@ fn valid_provenance(now_epoch: u64) -> ProvenanceAttestation {
             "npm:trusted-core@1.0.0".to_string(),
         )]),
     };
-    prov::sign_links_in_place(&mut attestation).expect("baseline provenance should sign");
+    prov::sign_links_in_place(&mut attestation, &provenance_signing_keys(signing_key))
+        .expect("baseline provenance should sign");
     attestation
 }
 
@@ -102,7 +112,7 @@ fn valid_request(name: &str, signing_key: &SigningKey, now_epoch: u64) -> Regist
             signature_bytes: artifact_signing::sign_bytes(signing_key, &manifest_bytes),
             signed_at: SIGNED_AT.to_string(),
         },
-        provenance: valid_provenance(now_epoch),
+        provenance: valid_provenance(signing_key, now_epoch),
         initial_version,
         tags,
         manifest_bytes,
