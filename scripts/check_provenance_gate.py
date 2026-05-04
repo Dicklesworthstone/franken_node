@@ -160,6 +160,18 @@ def run_gate_security_tests():
     return summary, output
 
 
+def should_run_rust_tests(args):
+    return args.run_rust_tests or not args.structural_only
+
+
+def compute_verdict(*, failing, skipped, mode):
+    if failing > 0:
+        return "FAIL"
+    if skipped > 0:
+        return "PARTIAL" if mode == "structural" else "FAIL"
+    return "PASS"
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit evidence JSON to stdout")
@@ -187,7 +199,7 @@ def parse_args(argv):
 def main(argv=None):
     global EMIT_HUMAN
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    run_tests = args.run_rust_tests or (not args.json and not args.structural_only)
+    run_tests = should_run_rust_tests(args)
     write_artifact = args.write_evidence or not args.json
     EMIT_HUMAN = not args.json
     CHECKS.clear()
@@ -354,7 +366,11 @@ def main(argv=None):
         "bead": "bd-3i9o",
         "section": "10.13",
         "mode": "full" if run_tests else "structural",
-        "verdict": "PASS" if failing == 0 else "FAIL",
+        "verdict": compute_verdict(
+            failing=failing,
+            skipped=skipped,
+            mode="full" if run_tests else "structural",
+        ),
         "checks": CHECKS,
         "summary": {
             "total_checks": total,

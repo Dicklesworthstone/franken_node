@@ -103,6 +103,18 @@ def run_rust_tests() -> tuple[bool, str]:
     return tests_pass, f"{rust_tests} tests passed"
 
 
+def should_run_rust_tests(args: argparse.Namespace) -> bool:
+    return args.run_rust_tests or not args.structural_only
+
+
+def compute_verdict(*, failing: int, skipped: int, mode: str) -> str:
+    if failing > 0:
+        return "FAIL"
+    if skipped > 0:
+        return "PARTIAL" if mode == "structural" else "FAIL"
+    return "PASS"
+
+
 def build_evidence(checks: list[dict[str, str]], mode: str) -> dict[str, object]:
     passing = sum(1 for check_entry in checks if check_entry["status"] == "PASS")
     failing = sum(1 for check_entry in checks if check_entry["status"] == "FAIL")
@@ -113,7 +125,7 @@ def build_evidence(checks: list[dict[str, str]], mode: str) -> dict[str, object]
         "bead": "bd-8vby",
         "section": "10.13",
         "mode": mode,
-        "verdict": "PASS" if failing == 0 else "FAIL",
+        "verdict": compute_verdict(failing=failing, skipped=skipped, mode=mode),
         "checks": checks,
         "summary": {
             "total_checks": total,
@@ -281,7 +293,7 @@ def write_evidence(path: Path, evidence: dict[str, object]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    run_tests = args.run_rust_tests or (not args.json and not args.structural_only)
+    run_tests = should_run_rust_tests(args)
     write_artifact = args.write_evidence or not args.json
     logger = configure_test_logging("check_device_profile")
     logger.info(

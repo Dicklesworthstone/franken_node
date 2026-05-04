@@ -152,6 +152,21 @@ test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
         )
         self.assertIn("error[E0004]: non-exhaustive patterns", excerpt)
 
+    def test_json_mode_requests_full_proof_by_default(self):
+        args = check_provenance_gate.parse_args(["--json"])
+
+        self.assertTrue(check_provenance_gate.should_run_rust_tests(args))
+
+    def test_skipped_structural_verdict_is_partial(self):
+        self.assertEqual(
+            check_provenance_gate.compute_verdict(failing=0, skipped=1, mode="structural"),
+            "PARTIAL",
+        )
+        self.assertEqual(
+            check_provenance_gate.compute_verdict(failing=0, skipped=1, mode="full"),
+            "FAIL",
+        )
+
     @mock.patch("scripts.check_provenance_gate.subprocess.run")
     def test_run_gate_unit_tests_uses_rch_and_lib_filter(self, run_mock):
         run_mock.return_value = mock.Mock(
@@ -236,35 +251,38 @@ class TestProvenanceSpec(unittest.TestCase):
 
 class TestProvenanceCli(unittest.TestCase):
 
-    def test_json_mode_is_structural_and_machine_readable(self):
+    def test_structural_json_mode_is_partial_and_machine_readable(self):
         result = subprocess.run(
-            [sys.executable, str(SCRIPT), "--json"],
+            [sys.executable, str(SCRIPT), "--json", "--structural-only"],
             cwd=ROOT,
             capture_output=True,
             text=True,
             timeout=30,
-            check=True,
+            check=False,
         )
         evidence = decode_json_object(result.stdout)
         statuses = {check["id"]: check["status"] for check in evidence["checks"]}
 
         self.assertEqual(evidence["gate"], "provenance_gate_verification")
         self.assertEqual(evidence["mode"], "structural")
+        self.assertEqual(evidence["verdict"], "PARTIAL")
         self.assertEqual(statuses["PG-TESTS"], "SKIP")
         self.assertEqual(evidence["summary"]["skipped_checks"], 1)
+        self.assertEqual(result.returncode, 1)
         self.assertNotIn("bd-3i9o:", result.stdout)
 
     def test_json_mode_does_not_rewrite_evidence_artifact(self):
         before = EVIDENCE_PATH.read_text(encoding="utf-8")
-        subprocess.run(
-            [sys.executable, str(SCRIPT), "--json"],
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--json", "--structural-only"],
             cwd=ROOT,
             capture_output=True,
             text=True,
             timeout=30,
-            check=True,
+            check=False,
         )
         after = EVIDENCE_PATH.read_text(encoding="utf-8")
+        self.assertEqual(result.returncode, 1)
         self.assertEqual(before, after)
 
 
