@@ -489,7 +489,10 @@ fn node_verifier_sdk_artifact_hash_verification_uses_content_bytes() {
         .expect("legacy id-bound hash should produce a fail report");
     assert!(matches!(legacy_report.verdict, NodeVerifyVerdict::Fail(_)));
     assert!(
-        failed_checks(&legacy_report).contains(&"artifact_content_hash_match"),
+        legacy_report
+            .evidence
+            .iter()
+            .any(|entry| entry.check_name == "artifact_content_hash_match" && !entry.passed),
         "old artifact-id-derived hashes must not satisfy content hash verification"
     );
 
