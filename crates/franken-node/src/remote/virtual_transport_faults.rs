@@ -217,7 +217,7 @@ pub struct FaultSchedule {
 impl FaultSchedule {
     /// Create a deterministic schedule from seed and config, rejecting inputs
     /// that would exceed bounded campaign capacities.
-    pub fn try_from_seed(
+    pub fn from_seed(
         seed: u64,
         config: &FaultConfig,
         total_messages: usize,
@@ -300,15 +300,6 @@ impl FaultSchedule {
         Ok(FaultSchedule {
             seed,
             faults,
-            total_messages,
-        })
-    }
-
-    /// Create a deterministic schedule from seed and config.
-    pub fn from_seed(seed: u64, config: &FaultConfig, total_messages: usize) -> Self {
-        Self::try_from_seed(seed, config, total_messages).unwrap_or_else(|_| FaultSchedule {
-            seed,
-            faults: Vec::new(),
             total_messages,
         })
     }
@@ -613,7 +604,7 @@ impl VirtualTransportFaultHarness {
             serde_json::json!({"scenario": scenario_name, "messages": total_messages}),
         );
 
-        let schedule = match FaultSchedule::try_from_seed(self.seed, config, total_messages) {
+        let schedule = match FaultSchedule::from_seed(self.seed, config, total_messages) {
             Ok(schedule) => schedule,
             Err(reason) => {
                 self.log_audit(
@@ -780,11 +771,16 @@ impl VirtualTransportFaultHarness {
 mod tests {
     use super::*;
 
+    fn build_schedule(seed: u64, config: &FaultConfig, total_messages: usize) -> FaultSchedule {
+        FaultSchedule::from_seed(seed, config, total_messages)
+            .expect("valid fault config must build a schedule")
+    }
+
     #[test]
     fn test_schedule_determinism() {
         let config = chaos();
-        let s1 = FaultSchedule::from_seed(42, &config, 100);
-        let s2 = FaultSchedule::from_seed(42, &config, 100);
+        let s1 = build_schedule(42, &config, 100);
+        let s2 = build_schedule(42, &config, 100);
         assert_eq!(s1.faults.len(), s2.faults.len());
         for (a, b) in s1.faults.iter().zip(s2.faults.iter()) {
             assert_eq!(a.message_index, b.message_index);
@@ -795,8 +791,8 @@ mod tests {
     #[test]
     fn test_different_seeds_different_schedules() {
         let config = chaos();
-        let s1 = FaultSchedule::from_seed(42, &config, 100);
-        let s2 = FaultSchedule::from_seed(99, &config, 100);
+        let s1 = build_schedule(42, &config, 100);
+        let s2 = build_schedule(99, &config, 100);
         // Very unlikely to be identical
         let same = s1
             .faults
@@ -809,7 +805,7 @@ mod tests {
     #[test]
     fn test_no_faults_scenario() {
         let config = no_faults();
-        let schedule = FaultSchedule::from_seed(42, &config, 100);
+        let schedule = build_schedule(42, &config, 100);
         assert_eq!(schedule.faults.len(), 0);
     }
 
@@ -850,9 +846,8 @@ mod tests {
 
     #[test]
     fn test_fault_schedule_rejects_unbounded_message_count() {
-        let err =
-            FaultSchedule::try_from_seed(42, &chaos(), MAX_CAMPAIGN_MESSAGES.saturating_add(1))
-                .expect_err("message counts above the campaign cap must fail");
+        let err = FaultSchedule::from_seed(42, &chaos(), MAX_CAMPAIGN_MESSAGES.saturating_add(1))
+            .expect_err("message counts above the campaign cap must fail");
 
         assert!(err.contains("total_messages"));
     }
@@ -1125,8 +1120,9 @@ mod tests {
             .validate()
             .expect_err("NaN corruption probability must fail");
         assert!(err.contains("corrupt_probability"));
-        let schedule = FaultSchedule::from_seed(42, &bad, 10);
-        assert!(schedule.faults.is_empty());
+        let err = FaultSchedule::from_seed(42, &bad, 10)
+            .expect_err("NaN corruption probability must fail closed");
+        assert!(err.contains("corrupt_probability"));
     }
 
     #[test]
@@ -1196,8 +1192,9 @@ mod tests {
             .validate()
             .expect_err("zero corrupt bit count must fail when corruption is enabled");
         assert!(err.contains("corrupt_bit_count"));
-        let schedule = FaultSchedule::from_seed(42, &bad, 10);
-        assert!(schedule.faults.is_empty());
+        let err = FaultSchedule::from_seed(42, &bad, 10)
+            .expect_err("zero corrupt bit count must fail closed");
+        assert!(err.contains("corrupt_bit_count"));
     }
 
     #[test]
@@ -1215,8 +1212,9 @@ mod tests {
             .validate()
             .expect_err("corrupt bit count above cap must fail");
         assert!(err.contains("corrupt_bit_count"));
-        let schedule = FaultSchedule::from_seed(42, &bad, 10);
-        assert!(schedule.faults.is_empty());
+        let err = FaultSchedule::from_seed(42, &bad, 10)
+            .expect_err("corrupt bit counts above the cap must fail closed");
+        assert!(err.contains("corrupt_bit_count"));
     }
 
     #[test]
@@ -1231,7 +1229,7 @@ mod tests {
         };
 
         assert!(good.validate().is_ok());
-        let schedule = FaultSchedule::from_seed(42, &good, 1);
+        let schedule = build_schedule(42, &good, 1);
         assert_eq!(schedule.faults.len(), 1);
         match &schedule.faults[0].fault {
             FaultClass::Corrupt { bit_positions } => {
@@ -1242,7 +1240,7 @@ mod tests {
     }
 
     #[test]
-    fn test_schedule_with_zero_fault_budget_injects_no_faults() {
+    fn test_schedule_with_zero_fault_budget_rejects() {
         let config = FaultConfig {
             drop_probability: 1.0,
             reorder_probability: 0.0,
@@ -1252,9 +1250,10 @@ mod tests {
             max_faults: 0,
         };
 
-        let schedule = FaultSchedule::from_seed(42, &config, 10);
+        let err = FaultSchedule::from_seed(42, &config, 10)
+            .expect_err("zero fault budgets must fail closed");
 
-        assert!(schedule.faults.is_empty());
+        assert!(err.contains("max_faults"));
     }
 
     #[test]
@@ -1463,6 +1462,75 @@ mod tests {
                 .and_then(serde_json::Value::as_bool)
                 == Some(true)
         }));
+    }
+
+    fn assert_campaign_rejects_invalid_config(config: FaultConfig, expected_reason: &str) {
+        let mut harness = VirtualTransportFaultHarness::new(42);
+
+        let result = harness.run_campaign("invalid", &config, 10, "t-invalid");
+
+        assert_eq!(result.total_messages, 10);
+        assert_eq!(result.total_faults, 0);
+        assert_eq!(result.drops, 0);
+        assert_eq!(result.reorders, 0);
+        assert_eq!(result.corruptions, 0);
+        assert_eq!(harness.fault_count(), 0);
+        assert!(
+            !harness
+                .audit_log()
+                .iter()
+                .any(|record| record.event_code == event_codes::FAULT_SCHEDULE_CREATED)
+        );
+        assert!(harness.audit_log().iter().any(|record| {
+            record.event_code == event_codes::FAULT_SCENARIO_END
+                && record
+                    .detail
+                    .get("rejected")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                && record
+                    .detail
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|reason| reason.contains(expected_reason))
+        }));
+    }
+
+    #[test]
+    fn test_invalid_campaign_configs_reject_instead_of_no_fault_schedule() {
+        assert_campaign_rejects_invalid_config(
+            FaultConfig {
+                drop_probability: f64::NAN,
+                reorder_probability: 0.0,
+                reorder_max_depth: 0,
+                corrupt_probability: 0.0,
+                corrupt_bit_count: 0,
+                max_faults: 1,
+            },
+            "drop_probability",
+        );
+        assert_campaign_rejects_invalid_config(
+            FaultConfig {
+                drop_probability: 0.6,
+                reorder_probability: 0.3,
+                reorder_max_depth: 1,
+                corrupt_probability: 0.2,
+                corrupt_bit_count: 1,
+                max_faults: 10,
+            },
+            "sum",
+        );
+        assert_campaign_rejects_invalid_config(
+            FaultConfig {
+                drop_probability: 1.0,
+                reorder_probability: 0.0,
+                reorder_max_depth: 0,
+                corrupt_probability: 0.0,
+                corrupt_bit_count: 0,
+                max_faults: 0,
+            },
+            "max_faults",
+        );
     }
 
     #[test]

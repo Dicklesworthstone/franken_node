@@ -51,7 +51,7 @@ mod tests {
         };
 
         let message_err =
-            FaultSchedule::try_from_seed(42, &config, MAX_CAMPAIGN_MESSAGES.saturating_add(1))
+            FaultSchedule::from_seed(42, &config, MAX_CAMPAIGN_MESSAGES.saturating_add(1))
                 .expect_err("unbounded total_messages must be rejected");
         assert!(message_err.contains("total_messages"));
     }
@@ -63,8 +63,10 @@ mod tests {
         let config = chaos();
 
         for &seed in &edge_seeds {
-            let s1 = FaultSchedule::from_seed(seed, &config, 100);
-            let s2 = FaultSchedule::from_seed(seed, &config, 100);
+            let s1 = FaultSchedule::from_seed(seed, &config, 100)
+                .expect("valid chaos config must build a deterministic schedule");
+            let s2 = FaultSchedule::from_seed(seed, &config, 100)
+                .expect("valid chaos config must build a deterministic schedule");
 
             assert_eq!(s1.faults.len(), s2.faults.len());
             for (a, b) in s1.faults.iter().zip(s2.faults.iter()) {
@@ -127,7 +129,8 @@ mod tests {
         assert!(config.validate().is_ok());
 
         // Generate schedule - should not panic with very small probabilities
-        let schedule = FaultSchedule::from_seed(42, &config, 10000);
+        let schedule = FaultSchedule::from_seed(42, &config, 10000)
+            .expect("valid tiny-probability config must build a schedule");
         assert!(schedule.faults.len() >= 0); // May be 0 due to tiny probabilities
     }
 

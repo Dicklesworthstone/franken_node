@@ -1,6 +1,6 @@
 use frankenengine_node::remote::virtual_transport_faults::{
     FaultClass, FaultConfig, FaultSchedule, MAX_CAMPAIGN_MESSAGES, MAX_SCHEDULED_FAULTS,
-    ScheduledFault, VirtualTransportFaultHarness, chaos,
+    ScheduledFault, VirtualTransportFaultHarness, chaos, event_codes,
 };
 
 #[test]
@@ -67,7 +67,7 @@ fn fault_config_rejects_unbounded_fault_budget() {
 
 #[test]
 fn fault_schedule_rejects_unbounded_message_count() {
-    let err = FaultSchedule::try_from_seed(42, &chaos(), MAX_CAMPAIGN_MESSAGES.saturating_add(1))
+    let err = FaultSchedule::from_seed(42, &chaos(), MAX_CAMPAIGN_MESSAGES.saturating_add(1))
         .expect_err("message counts above the campaign cap must fail closed");
 
     assert!(err.contains("total_messages"));
@@ -101,4 +101,73 @@ fn oversized_campaign_rejects_without_processing_messages() {
             .and_then(serde_json::Value::as_bool)
             == Some(true)
     }));
+}
+
+fn assert_campaign_rejects_invalid_config(config: FaultConfig, expected_reason: &str) {
+    let mut harness = VirtualTransportFaultHarness::new(42);
+
+    let result = harness.run_campaign("invalid", &config, 10, "t-invalid");
+
+    assert_eq!(result.total_messages, 10);
+    assert_eq!(result.total_faults, 0);
+    assert_eq!(result.drops, 0);
+    assert_eq!(result.reorders, 0);
+    assert_eq!(result.corruptions, 0);
+    assert_eq!(harness.fault_count(), 0);
+    assert!(
+        !harness
+            .audit_log()
+            .iter()
+            .any(|record| record.event_code == event_codes::FAULT_SCHEDULE_CREATED)
+    );
+    assert!(harness.audit_log().iter().any(|record| {
+        record.event_code == event_codes::FAULT_SCENARIO_END
+            && record
+                .detail
+                .get("rejected")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            && record
+                .detail
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|reason| reason.contains(expected_reason))
+    }));
+}
+
+#[test]
+fn invalid_campaign_configs_reject_instead_of_no_fault_schedule() {
+    assert_campaign_rejects_invalid_config(
+        FaultConfig {
+            drop_probability: f64::NAN,
+            reorder_probability: 0.0,
+            reorder_max_depth: 0,
+            corrupt_probability: 0.0,
+            corrupt_bit_count: 0,
+            max_faults: 1,
+        },
+        "drop_probability",
+    );
+    assert_campaign_rejects_invalid_config(
+        FaultConfig {
+            drop_probability: 0.6,
+            reorder_probability: 0.3,
+            reorder_max_depth: 1,
+            corrupt_probability: 0.2,
+            corrupt_bit_count: 1,
+            max_faults: 10,
+        },
+        "sum",
+    );
+    assert_campaign_rejects_invalid_config(
+        FaultConfig {
+            drop_probability: 1.0,
+            reorder_probability: 0.0,
+            reorder_max_depth: 0,
+            corrupt_probability: 0.0,
+            corrupt_bit_count: 0,
+            max_faults: 0,
+        },
+        "max_faults",
+    );
 }

@@ -85,7 +85,8 @@ mod remote_module_negative_tests {
             ..valid_config()
         };
 
-        let schedule = FaultSchedule::from_seed(42, &config, 0);
+        let schedule = FaultSchedule::from_seed(42, &config, 0)
+            .expect("valid zero-message config must build a schedule");
 
         assert!(schedule.faults.is_empty());
         assert_eq!(schedule.total_messages, 0);
@@ -99,7 +100,8 @@ mod remote_module_negative_tests {
             ..valid_config()
         };
 
-        let schedule = FaultSchedule::from_seed(42, &config, 20);
+        let schedule = FaultSchedule::from_seed(42, &config, 20)
+            .expect("valid drop config must build a schedule");
 
         assert_eq!(schedule.faults.len(), 3);
         assert!(
