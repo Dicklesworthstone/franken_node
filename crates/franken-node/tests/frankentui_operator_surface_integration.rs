@@ -59,3 +59,40 @@ fn frankentui_dependency_is_workspace_relative_not_absolute() {
         "FrankenTUI dependency paths must not be absolute"
     );
 }
+
+#[test]
+fn fsqlite_crates_io_patches_are_workspace_relative_not_absolute() {
+    let workspace_manifest = include_str!("../../../Cargo.toml");
+
+    for (package, relative_patch, absolute_patch) in [
+        (
+            "fsqlite",
+            r#"fsqlite = { path = "../frankensqlite/crates/fsqlite""#,
+            r#"fsqlite = { path = "/dp/frankensqlite"#,
+        ),
+        (
+            "fsqlite-core",
+            r#"fsqlite-core = { path = "../frankensqlite/crates/fsqlite-core""#,
+            r#"fsqlite-core = { path = "/dp/frankensqlite"#,
+        ),
+        (
+            "fsqlite-types",
+            r#"fsqlite-types = { path = "../frankensqlite/crates/fsqlite-types""#,
+            r#"fsqlite-types = { path = "/dp/frankensqlite"#,
+        ),
+        (
+            "fsqlite-error",
+            r#"fsqlite-error = { path = "../frankensqlite/crates/fsqlite-error""#,
+            r#"fsqlite-error = { path = "/dp/frankensqlite"#,
+        ),
+    ] {
+        assert!(
+            workspace_manifest.contains(relative_patch),
+            "{package} crates.io patch must use the sibling frankensqlite checkout"
+        );
+        assert!(
+            !workspace_manifest.contains(absolute_patch),
+            "{package} crates.io patch must not point at a machine-local /dp path"
+        );
+    }
+}

@@ -28,7 +28,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 frankentui = { package = "ftui", path = "../../../dp/frankentui/crates/ftui", default-features = false }
 
 [patch.crates-io]
-fsqlite = { path = "/dp/frankensqlite/crates/fsqlite" }
-fsqlite-core = { path = "/dp/frankensqlite/crates/fsqlite-core" }
-fsqlite-types = { path = "/dp/frankensqlite/crates/fsqlite-types" }
-fsqlite-error = { path = "/dp/frankensqlite/crates/fsqlite-error" }
+fsqlite = { path = "../frankensqlite/crates/fsqlite" }
+fsqlite-core = { path = "../frankensqlite/crates/fsqlite-core" }
+fsqlite-types = { path = "../frankensqlite/crates/fsqlite-types" }
+fsqlite-error = { path = "../frankensqlite/crates/fsqlite-error" }
