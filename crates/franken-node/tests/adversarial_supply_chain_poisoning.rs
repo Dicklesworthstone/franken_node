@@ -1,22 +1,27 @@
 use std::collections::BTreeMap;
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use frankenengine_node::supply_chain::{
-    artifact_signing::{self, KeyId, KeyRing},
-    extension_registry::{
-        AdmissionKernel, ExtensionSignature, RegistrationRequest, RegistryConfig, RegistryResult,
-        SignedExtensionRegistry, VersionEntry, canonical_registration_manifest_bytes, event_codes,
+use frankenengine_node::{
+    capacity_defaults,
+    supply_chain::{
+        artifact_signing::{self, KeyId, KeyRing},
+        extension_registry::{
+            AdmissionKernel, ExtensionSignature, RegistrationRequest, RegistryConfig,
+            RegistryResult, SignedExtensionRegistry, VersionEntry,
+            canonical_registration_manifest_bytes, event_codes,
+        },
+        provenance::{
+            self as prov, AttestationEnvelopeFormat, AttestationLink, ChainLinkRole,
+            ProvenanceAttestation, VerificationPolicy,
+        },
+        transparency_verifier::TransparencyPolicy,
     },
-    provenance::{
-        self as prov, AttestationEnvelopeFormat, AttestationLink, ChainLinkRole,
-        ProvenanceAttestation, VerificationPolicy,
-    },
-    transparency_verifier::TransparencyPolicy,
 };
 
 const NOW_EPOCH: u64 = 1_777_000_000;
 const SIGNED_AT: &str = "2026-04-26T00:00:00Z";
 const TRACE_PREFIX: &str = "trace-adversarial-supply-chain";
+const ED25519_SIGNATURE_BYTES: usize = 64;
 
 fn legitimate_signing_key() -> SigningKey {
     SigningKey::from_bytes(&[41_u8; 32])
@@ -144,6 +149,30 @@ fn assert_fail_closed(
     assert_eq!(witness.rejection_code, expected_code);
 }
 
+fn assert_rejected_before_admission(
+    registry: &SignedExtensionRegistry,
+    result: &RegistryResult,
+    expected_code: &str,
+    expected_field: &str,
+) {
+    assert!(!result.success, "oversized registration must fail closed");
+    assert_eq!(result.error_code.as_deref(), Some(expected_code));
+    assert!(
+        registry.list(None).is_empty(),
+        "oversized request must not be admitted into the registry"
+    );
+    assert!(
+        registry.admission_receipts().is_empty(),
+        "oversized request must fail before admission hashing or signature verification"
+    );
+    let audit = registry
+        .audit_log()
+        .last()
+        .expect("pre-admission rejection must emit an audit record");
+    assert_eq!(audit.event_code, expected_code);
+    assert_eq!(audit.details["field"], expected_field);
+}
+
 #[test]
 fn adversarial_supply_chain_baseline_request_is_admitted() {
     let signing_key = legitimate_signing_key();
@@ -157,6 +186,50 @@ fn adversarial_supply_chain_baseline_request_is_admitted() {
 
     assert!(result.success, "baseline request must be admitted");
     assert_eq!(registry.list(None).len(), 1);
+}
+
+#[test]
+fn adversarial_supply_chain_rejects_oversized_signature_before_admission() {
+    let signing_key = legitimate_signing_key();
+    let mut registry = registry_with_trusted_key(signing_key.verifying_key());
+    let mut request = valid_request("supply-chain-target", &signing_key, NOW_EPOCH);
+    request.signature.signature_bytes = vec![0xAA; ED25519_SIGNATURE_BYTES + 1];
+
+    let result = registry.register(
+        request,
+        &format!("{TRACE_PREFIX}-oversized-signature"),
+        NOW_EPOCH,
+    );
+
+    assert_rejected_before_admission(
+        &registry,
+        &result,
+        event_codes::SER_ERR_INVALID_SIGNATURE,
+        "signature.signature_bytes",
+    );
+    assert!(result.detail.contains("exactly 64 bytes"));
+}
+
+#[test]
+fn adversarial_supply_chain_rejects_oversized_manifest_before_admission() {
+    let signing_key = legitimate_signing_key();
+    let mut registry = registry_with_trusted_key(signing_key.verifying_key());
+    let mut request = valid_request("supply-chain-target", &signing_key, NOW_EPOCH);
+    request.manifest_bytes = vec![b'a'; capacity_defaults::base::LARGE + 1];
+
+    let result = registry.register(
+        request,
+        &format!("{TRACE_PREFIX}-oversized-manifest"),
+        NOW_EPOCH,
+    );
+
+    assert_rejected_before_admission(
+        &registry,
+        &result,
+        event_codes::SER_ERR_INVALID_INPUT,
+        "manifest_bytes",
+    );
+    assert!(result.detail.contains("Manifest bytes too large"));
 }
 
 #[test]

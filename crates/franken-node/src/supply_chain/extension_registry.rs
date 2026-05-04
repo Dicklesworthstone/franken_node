@@ -58,6 +58,8 @@ const MAX_PUBLISHER_ID_LEN: usize = 256;
 const MAX_TAG_LEN: usize = 128;
 const MAX_TAGS_COUNT: usize = 32;
 const MAX_TRACE_ID_LEN: usize = 256;
+const MAX_MANIFEST_BYTES: usize = crate::capacity_defaults::base::LARGE;
+const MAX_SIGNATURE_BYTES: usize = 64;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
@@ -860,6 +862,53 @@ impl SignedExtensionRegistry {
                 };
             }
         }
+
+        if request.manifest_bytes.len() > MAX_MANIFEST_BYTES {
+            self.log(
+                event_codes::SER_ERR_INVALID_INPUT,
+                "",
+                trace_id,
+                serde_json::json!({
+                    "field": "manifest_bytes",
+                    "length": request.manifest_bytes.len(),
+                    "max_allowed": MAX_MANIFEST_BYTES,
+                }),
+            );
+            return RegistryResult {
+                success: false,
+                extension_id: None,
+                error_code: Some(event_codes::SER_ERR_INVALID_INPUT.to_string()),
+                detail: format!(
+                    "Manifest bytes too large: {} bytes (max: {})",
+                    request.manifest_bytes.len(),
+                    MAX_MANIFEST_BYTES
+                ),
+            };
+        }
+
+        if request.signature.signature_bytes.len() != MAX_SIGNATURE_BYTES {
+            self.log(
+                event_codes::SER_ERR_INVALID_SIGNATURE,
+                "",
+                trace_id,
+                serde_json::json!({
+                    "field": "signature.signature_bytes",
+                    "length": request.signature.signature_bytes.len(),
+                    "required": MAX_SIGNATURE_BYTES,
+                }),
+            );
+            return RegistryResult {
+                success: false,
+                extension_id: None,
+                error_code: Some(event_codes::SER_ERR_INVALID_SIGNATURE.to_string()),
+                detail: format!(
+                    "Ed25519 signature must be exactly {} bytes: got {}",
+                    MAX_SIGNATURE_BYTES,
+                    request.signature.signature_bytes.len()
+                ),
+            };
+        }
+
         // Evaluate admission via the shared kernel
         let receipt = self.admission_kernel.evaluate(
             &request.manifest_bytes,
@@ -1717,6 +1766,54 @@ mod tests {
             result.error_code.as_deref(),
             Some(event_codes::SER_ERR_INVALID_SIGNATURE)
         );
+    }
+
+    #[test]
+    fn adversarial_oversized_signature_rejected_before_admission_evaluation() {
+        let (sk, vk) = test_keypair();
+        let mut reg = test_registry(&vk);
+        let mut req = valid_request("ext-a", &sk, now_epoch());
+        req.signature.signature_bytes = vec![0xAA; MAX_SIGNATURE_BYTES + 1];
+
+        let result = reg.register(req, &make_trace(), now_epoch());
+
+        assert!(!result.success);
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some(event_codes::SER_ERR_INVALID_SIGNATURE)
+        );
+        assert!(result.detail.contains("exactly 64 bytes"));
+        assert!(
+            reg.admission_receipts().is_empty(),
+            "oversized signatures must fail before admission receipt hashing"
+        );
+        let audit = reg.audit_log().last().expect("invalid input audit");
+        assert_eq!(audit.event_code, event_codes::SER_ERR_INVALID_SIGNATURE);
+        assert_eq!(audit.details["field"], "signature.signature_bytes");
+    }
+
+    #[test]
+    fn adversarial_oversized_manifest_rejected_before_admission_evaluation() {
+        let (sk, vk) = test_keypair();
+        let mut reg = test_registry(&vk);
+        let mut req = valid_request("ext-a", &sk, now_epoch());
+        req.manifest_bytes = vec![b'a'; MAX_MANIFEST_BYTES + 1];
+
+        let result = reg.register(req, &make_trace(), now_epoch());
+
+        assert!(!result.success);
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some(event_codes::SER_ERR_INVALID_INPUT)
+        );
+        assert!(result.detail.contains("Manifest bytes too large"));
+        assert!(
+            reg.admission_receipts().is_empty(),
+            "oversized manifests must fail before admission digest hashing"
+        );
+        let audit = reg.audit_log().last().expect("invalid input audit");
+        assert_eq!(audit.event_code, event_codes::SER_ERR_INVALID_INPUT);
+        assert_eq!(audit.details["field"], "manifest_bytes");
     }
 
     #[test]
