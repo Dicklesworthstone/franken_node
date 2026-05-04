@@ -493,6 +493,68 @@ fn adversarial_supply_chain_rejects_provenance_custom_claim_total_bytes_before_p
 }
 
 #[test]
+fn adversarial_supply_chain_rejects_oversized_provenance_link_count_before_projection() {
+    let signing_key = legitimate_signing_key();
+    let mut registry = registry_with_trusted_key(signing_key.verifying_key());
+    let mut request = valid_request("supply-chain-target", &signing_key, NOW_EPOCH);
+
+    let cloned_link = request
+        .provenance
+        .links
+        .first()
+        .expect("valid provenance includes publisher link")
+        .clone();
+    while request.provenance.links.len() <= ChainLinkRole::expected_order().len() {
+        request.provenance.links.push(cloned_link.clone());
+    }
+
+    let signing_error = prov::sign_links_in_place(
+        &mut request.provenance,
+        &provenance_signing_keys(&signing_key),
+    )
+    .expect_err("oversized provenance link count must fail before signing");
+    assert_eq!(
+        signing_error.code,
+        VerificationErrorCode::AttestationCapacityExceeded
+    );
+    assert!(signing_error.message.contains("attestation links count"));
+
+    let canonical_error = prov::canonical_attestation_json(&request.provenance)
+        .expect_err("oversized provenance link count must fail before canonical JSON");
+    assert_eq!(
+        canonical_error.code,
+        VerificationErrorCode::AttestationCapacityExceeded
+    );
+
+    let mut policy = VerificationPolicy::development_profile();
+    policy.add_trusted_signer_key("pub-001", &signing_key.verifying_key());
+    let report = prov::verify_attestation_chain(
+        &request.provenance,
+        &policy,
+        NOW_EPOCH,
+        &format!("{TRACE_PREFIX}-link-count"),
+    );
+    assert!(!report.chain_valid);
+    assert!(report.issues.iter().any(|issue| {
+        issue.code == VerificationErrorCode::AttestationCapacityExceeded
+            && issue.message.contains("attestation links count")
+    }));
+    assert!(
+        !report
+            .issues
+            .iter()
+            .any(|issue| issue.code == VerificationErrorCode::InvalidSignature)
+    );
+
+    let result = registry.register(request, &format!("{TRACE_PREFIX}-link-count"), NOW_EPOCH);
+    assert_fail_closed(
+        &registry,
+        &result,
+        event_codes::SER_ERR_PROVENANCE_CHAIN_INVALID,
+    );
+}
+
+#[test]
 fn adversarial_supply_chain_rejects_dependency_injection_after_signing() {
     let signing_key = legitimate_signing_key();
     let mut registry = registry_with_trusted_key(signing_key.verifying_key());

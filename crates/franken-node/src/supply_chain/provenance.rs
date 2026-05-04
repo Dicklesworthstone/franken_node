@@ -16,6 +16,7 @@ use crate::push_bounded;
 /// Maximum number of issues that can be reported during attestation verification.
 /// Prevents memory exhaustion from adversarial attestations with many problems.
 const MAX_CHAIN_ISSUES: usize = 1024;
+const MAX_ATTESTATION_LINKS: usize = ChainLinkRole::EXPECTED_ORDER.len();
 const MAX_CUSTOM_CLAIMS: usize = crate::capacity_defaults::base::SMALL;
 const MAX_CUSTOM_CLAIM_KEY_BYTES: usize = crate::capacity_defaults::base::SMALL;
 const MAX_CUSTOM_CLAIM_VALUE_BYTES: usize = crate::capacity_defaults::base::MEDIUM;
@@ -77,13 +78,15 @@ pub enum ChainLinkRole {
 }
 
 impl ChainLinkRole {
+    const EXPECTED_ORDER: [ChainLinkRole; 3] = [
+        ChainLinkRole::Publisher,
+        ChainLinkRole::BuildSystem,
+        ChainLinkRole::SourceVcs,
+    ];
+
     #[must_use]
     pub fn expected_order() -> &'static [ChainLinkRole] {
-        &[
-            ChainLinkRole::Publisher,
-            ChainLinkRole::BuildSystem,
-            ChainLinkRole::SourceVcs,
-        ]
+        &Self::EXPECTED_ORDER
     }
 }
 
@@ -297,7 +300,7 @@ pub struct ProvenanceVerificationOutcome {
 pub fn canonical_attestation_json(
     attestation: &ProvenanceAttestation,
 ) -> Result<String, VerificationFailure> {
-    validate_custom_claim_capacity(attestation)?;
+    validate_attestation_capacity(attestation)?;
     canonical_json(attestation)
 }
 
@@ -306,7 +309,7 @@ pub fn sign_links_in_place(
     attestation: &mut ProvenanceAttestation,
     signing_keys: &BTreeMap<String, SigningKey>,
 ) -> Result<(), VerificationFailure> {
-    validate_custom_claim_capacity(attestation)?;
+    validate_attestation_capacity(attestation)?;
     let mut signatures = Vec::with_capacity(attestation.links.len());
     for link in &attestation.links {
         let signer_id = link.signer_id.clone();
@@ -337,16 +340,21 @@ pub fn verify_attestation_chain(
 ) -> ChainValidityReport {
     let mut issues = Vec::new();
     let claimed_level = claimed_provenance_level(attestation);
+    let input_capacity_valid = validate_attestation_capacity_for_report(attestation, &mut issues);
 
     validate_required_fields(attestation, &mut issues);
     validate_chain_depth(attestation, policy, &mut issues);
     validate_link_order(attestation, policy, &mut issues);
     validate_attestation_freshness(attestation, policy, now_epoch, &mut issues);
-    if validate_custom_claim_capacity_for_report(attestation, &mut issues) {
+    if input_capacity_valid {
         validate_links(attestation, policy, now_epoch, &mut issues);
     }
 
-    let level = derive_level(attestation, &issues);
+    let level = if input_capacity_valid {
+        derive_level(attestation, &issues)
+    } else {
+        ProvenanceLevel::Level0Unsigned
+    };
     if level < policy.min_level {
         push_bounded(&mut issues, ChainIssue {
             code: VerificationErrorCode::LevelInsufficient,
@@ -490,11 +498,11 @@ fn validate_required_fields(attestation: &ProvenanceAttestation, issues: &mut Ve
     }
 }
 
-fn validate_custom_claim_capacity_for_report(
+fn validate_attestation_capacity_for_report(
     attestation: &ProvenanceAttestation,
     issues: &mut Vec<ChainIssue>,
 ) -> bool {
-    match validate_custom_claim_capacity(attestation) {
+    match validate_attestation_capacity(attestation) {
         Ok(()) => true,
         Err(error) => {
             push_bounded(
@@ -513,25 +521,42 @@ fn validate_custom_claim_capacity_for_report(
     }
 }
 
+fn validate_attestation_capacity(
+    attestation: &ProvenanceAttestation,
+) -> Result<(), VerificationFailure> {
+    validate_link_capacity(attestation)?;
+    validate_custom_claim_capacity(attestation)
+}
+
+fn validate_link_capacity(attestation: &ProvenanceAttestation) -> Result<(), VerificationFailure> {
+    let link_count = attestation.links.len();
+    if link_count > MAX_ATTESTATION_LINKS {
+        return Err(attestation_capacity_failure(format!(
+            "attestation links count {link_count} exceeds {MAX_ATTESTATION_LINKS}"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_custom_claim_capacity(
     attestation: &ProvenanceAttestation,
 ) -> Result<(), VerificationFailure> {
     let claim_count = attestation.custom_claims.len();
     if claim_count > MAX_CUSTOM_CLAIMS {
-        return Err(custom_claim_capacity_failure(format!(
+        return Err(attestation_capacity_failure(format!(
             "custom claims count {claim_count} exceeds {MAX_CUSTOM_CLAIMS}"
         )));
     }
 
     for (index, (key, value)) in attestation.custom_claims.iter().enumerate() {
         if key.len() > MAX_CUSTOM_CLAIM_KEY_BYTES {
-            return Err(custom_claim_capacity_failure(format!(
+            return Err(attestation_capacity_failure(format!(
                 "custom claim key at sorted index {index} is {} bytes, exceeding {MAX_CUSTOM_CLAIM_KEY_BYTES}",
                 key.len()
             )));
         }
         if value.len() > MAX_CUSTOM_CLAIM_VALUE_BYTES {
-            return Err(custom_claim_capacity_failure(format!(
+            return Err(attestation_capacity_failure(format!(
                 "custom claim value at sorted index {index} is {} bytes, exceeding {MAX_CUSTOM_CLAIM_VALUE_BYTES}",
                 value.len()
             )));
@@ -540,7 +565,7 @@ fn validate_custom_claim_capacity(
 
     let canonical_bytes = custom_claims_canonical_json_bytes(&attestation.custom_claims)?;
     if canonical_bytes > MAX_CUSTOM_CLAIMS_CANONICAL_BYTES {
-        return Err(custom_claim_capacity_failure(format!(
+        return Err(attestation_capacity_failure(format!(
             "custom claims canonical JSON is {canonical_bytes} bytes, exceeding {MAX_CUSTOM_CLAIMS_CANONICAL_BYTES}"
         )));
     }
@@ -582,13 +607,13 @@ fn canonical_json_string_len(value: &str) -> Result<usize, VerificationFailure> 
         })
 }
 
-fn custom_claim_capacity_failure(message: String) -> VerificationFailure {
+fn attestation_capacity_failure(message: String) -> VerificationFailure {
     VerificationFailure {
         code: VerificationErrorCode::AttestationCapacityExceeded,
         broken_link: None,
         message,
         remediation: format!(
-            "Reduce provenance custom claims to at most {MAX_CUSTOM_CLAIMS} entries, {MAX_CUSTOM_CLAIM_KEY_BYTES} bytes per key, {MAX_CUSTOM_CLAIM_VALUE_BYTES} bytes per value, and {MAX_CUSTOM_CLAIMS_CANONICAL_BYTES} canonical JSON bytes."
+            "Reduce provenance attestations to at most {MAX_ATTESTATION_LINKS} links, {MAX_CUSTOM_CLAIMS} custom claims, {MAX_CUSTOM_CLAIM_KEY_BYTES} bytes per claim key, {MAX_CUSTOM_CLAIM_VALUE_BYTES} bytes per claim value, and {MAX_CUSTOM_CLAIMS_CANONICAL_BYTES} custom-claim canonical JSON bytes."
         ),
     }
 }
@@ -1111,10 +1136,10 @@ fn canonicalize_value(value: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        AttestationEnvelopeFormat, AttestationLink, ChainLinkRole, MAX_CUSTOM_CLAIM_VALUE_BYTES,
-        MAX_CUSTOM_CLAIMS, MAX_CUSTOM_CLAIMS_CANONICAL_BYTES, ProvenanceAttestation,
-        ProvenanceLevel, VerificationErrorCode, VerificationFailure, VerificationMode,
-        VerificationPolicy, canonical_attestation_json,
+        AttestationEnvelopeFormat, AttestationLink, ChainLinkRole, MAX_ATTESTATION_LINKS,
+        MAX_CUSTOM_CLAIM_VALUE_BYTES, MAX_CUSTOM_CLAIMS, MAX_CUSTOM_CLAIMS_CANONICAL_BYTES,
+        ProvenanceAttestation, ProvenanceLevel, VerificationErrorCode, VerificationFailure,
+        VerificationMode, VerificationPolicy, canonical_attestation_json,
         sign_links_in_place as sign_links_in_place_with_keys, verify_and_project_gates,
         verify_attestation_chain,
     };
@@ -2534,9 +2559,14 @@ mod tests {
         let mut duplicate_attestation = base_attestation();
         let publisher_link = duplicate_attestation.links[0].clone();
         duplicate_attestation.links.push(publisher_link); // Add duplicate publisher link
-        sign_links_in_place(&mut duplicate_attestation).expect("sign duplicate links");
+        let duplicate_signing_error = sign_links_in_place(&mut duplicate_attestation)
+            .expect_err("duplicate links over capacity must not sign");
+        assert_eq!(
+            duplicate_signing_error.code,
+            VerificationErrorCode::AttestationCapacityExceeded
+        );
 
-        let policy = production_policy_for(&duplicate_attestation);
+        let policy = production_policy_for(&base_attestation());
         let duplicate_report = verify_attestation_chain(
             &duplicate_attestation,
             &policy,
@@ -2544,8 +2574,11 @@ mod tests {
             "duplicate-links",
         );
 
-        // Should fail due to order validation (extra link at wrong position)
         assert!(!duplicate_report.chain_valid);
+        assert!(duplicate_report.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::AttestationCapacityExceeded
+                && issue.message.contains("attestation links count")
+        }));
 
         // Test completely reversed order
         let mut reversed_attestation = base_attestation();
@@ -2634,12 +2667,12 @@ mod tests {
             report.issues.iter().map(|i| i.code).collect();
 
         assert!(
-            issue_types.len() >= 4,
+            issue_types.len() >= 3,
             "Should have multiple types of issues"
         );
         assert!(issue_types.contains(&VerificationErrorCode::AttestationMissingField));
-        assert!(issue_types.contains(&VerificationErrorCode::ChainLinkOrderInvalid));
-        assert!(issue_types.contains(&VerificationErrorCode::InvalidSignature));
+        assert!(issue_types.contains(&VerificationErrorCode::AttestationCapacityExceeded));
+        assert!(issue_types.contains(&VerificationErrorCode::LevelInsufficient));
 
         // Events should be generated despite massive issues
         assert!(!report.events.is_empty());
@@ -2647,6 +2680,49 @@ mod tests {
             report
                 .events
                 .contains(&ProvenanceEventCode::AttestationRejected)
+        );
+    }
+
+    #[test]
+    fn negative_oversized_link_vector_rejected_before_link_traversal() {
+        let mut attestation = base_attestation();
+        let publisher_link = attestation
+            .links
+            .first()
+            .expect("base attestation includes publisher link")
+            .clone();
+        while attestation.links.len() <= MAX_ATTESTATION_LINKS {
+            attestation.links.push(publisher_link.clone());
+        }
+
+        let signing_error =
+            sign_links_in_place(&mut attestation).expect_err("oversized links must not sign");
+        assert_eq!(
+            signing_error.code,
+            VerificationErrorCode::AttestationCapacityExceeded
+        );
+        assert!(signing_error.message.contains("attestation links count"));
+
+        let canonical_error = canonical_attestation_json(&attestation)
+            .expect_err("oversized links must not serialize");
+        assert_eq!(
+            canonical_error.code,
+            VerificationErrorCode::AttestationCapacityExceeded
+        );
+
+        let policy = production_policy_for(&base_attestation());
+        let report =
+            verify_attestation_chain(&attestation, &policy, 1_700_000_400, "oversized-links");
+        assert!(!report.chain_valid);
+        assert!(report.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::AttestationCapacityExceeded
+                && issue.message.contains("attestation links count")
+        }));
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|issue| issue.code == VerificationErrorCode::InvalidSignature)
         );
     }
 
