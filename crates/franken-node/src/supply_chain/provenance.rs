@@ -16,6 +16,10 @@ use crate::push_bounded;
 /// Maximum number of issues that can be reported during attestation verification.
 /// Prevents memory exhaustion from adversarial attestations with many problems.
 const MAX_CHAIN_ISSUES: usize = 1024;
+const MAX_CUSTOM_CLAIMS: usize = crate::capacity_defaults::base::SMALL;
+const MAX_CUSTOM_CLAIM_KEY_BYTES: usize = crate::capacity_defaults::base::SMALL;
+const MAX_CUSTOM_CLAIM_VALUE_BYTES: usize = crate::capacity_defaults::base::MEDIUM;
+const MAX_CUSTOM_CLAIMS_CANONICAL_BYTES: usize = crate::capacity_defaults::base::LARGE;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -201,6 +205,7 @@ pub enum VerificationErrorCode {
     ChainLinkOrderInvalid,
     LevelInsufficient,
     CanonicalizationFailed,
+    AttestationCapacityExceeded,
 }
 
 /// Detailed chain issue emitted by verification.
@@ -292,6 +297,7 @@ pub struct ProvenanceVerificationOutcome {
 pub fn canonical_attestation_json(
     attestation: &ProvenanceAttestation,
 ) -> Result<String, VerificationFailure> {
+    validate_custom_claim_capacity(attestation)?;
     canonical_json(attestation)
 }
 
@@ -300,6 +306,7 @@ pub fn sign_links_in_place(
     attestation: &mut ProvenanceAttestation,
     signing_keys: &BTreeMap<String, SigningKey>,
 ) -> Result<(), VerificationFailure> {
+    validate_custom_claim_capacity(attestation)?;
     let mut signatures = Vec::with_capacity(attestation.links.len());
     for link in &attestation.links {
         let signer_id = link.signer_id.clone();
@@ -335,7 +342,9 @@ pub fn verify_attestation_chain(
     validate_chain_depth(attestation, policy, &mut issues);
     validate_link_order(attestation, policy, &mut issues);
     validate_attestation_freshness(attestation, policy, now_epoch, &mut issues);
-    validate_links(attestation, policy, now_epoch, &mut issues);
+    if validate_custom_claim_capacity_for_report(attestation, &mut issues) {
+        validate_links(attestation, policy, now_epoch, &mut issues);
+    }
 
     let level = derive_level(attestation, &issues);
     if level < policy.min_level {
@@ -478,6 +487,109 @@ fn validate_required_fields(attestation: &ProvenanceAttestation, issues: &mut Ve
                 allow_in_cached_mode: false,
             }, MAX_CHAIN_ISSUES);
         }
+    }
+}
+
+fn validate_custom_claim_capacity_for_report(
+    attestation: &ProvenanceAttestation,
+    issues: &mut Vec<ChainIssue>,
+) -> bool {
+    match validate_custom_claim_capacity(attestation) {
+        Ok(()) => true,
+        Err(error) => {
+            push_bounded(
+                issues,
+                ChainIssue {
+                    code: error.code,
+                    link_role: None,
+                    message: error.message,
+                    remediation: error.remediation,
+                    allow_in_cached_mode: false,
+                },
+                MAX_CHAIN_ISSUES,
+            );
+            false
+        }
+    }
+}
+
+fn validate_custom_claim_capacity(
+    attestation: &ProvenanceAttestation,
+) -> Result<(), VerificationFailure> {
+    let claim_count = attestation.custom_claims.len();
+    if claim_count > MAX_CUSTOM_CLAIMS {
+        return Err(custom_claim_capacity_failure(format!(
+            "custom claims count {claim_count} exceeds {MAX_CUSTOM_CLAIMS}"
+        )));
+    }
+
+    for (index, (key, value)) in attestation.custom_claims.iter().enumerate() {
+        if key.len() > MAX_CUSTOM_CLAIM_KEY_BYTES {
+            return Err(custom_claim_capacity_failure(format!(
+                "custom claim key at sorted index {index} is {} bytes, exceeding {MAX_CUSTOM_CLAIM_KEY_BYTES}",
+                key.len()
+            )));
+        }
+        if value.len() > MAX_CUSTOM_CLAIM_VALUE_BYTES {
+            return Err(custom_claim_capacity_failure(format!(
+                "custom claim value at sorted index {index} is {} bytes, exceeding {MAX_CUSTOM_CLAIM_VALUE_BYTES}",
+                value.len()
+            )));
+        }
+    }
+
+    let canonical_bytes = custom_claims_canonical_json_bytes(&attestation.custom_claims)?;
+    if canonical_bytes > MAX_CUSTOM_CLAIMS_CANONICAL_BYTES {
+        return Err(custom_claim_capacity_failure(format!(
+            "custom claims canonical JSON is {canonical_bytes} bytes, exceeding {MAX_CUSTOM_CLAIMS_CANONICAL_BYTES}"
+        )));
+    }
+
+    Ok(())
+}
+
+fn custom_claims_canonical_json_bytes(
+    custom_claims: &BTreeMap<String, String>,
+) -> Result<usize, VerificationFailure> {
+    let mut total = 2usize;
+    for (index, (key, value)) in custom_claims.iter().enumerate() {
+        let key_len = canonical_json_string_len(key)?;
+        let value_len = canonical_json_string_len(value)?;
+        if index > 0 {
+            total = total.saturating_add(1);
+        }
+        total = total
+            .saturating_add(key_len)
+            .saturating_add(1)
+            .saturating_add(value_len);
+        if total > MAX_CUSTOM_CLAIMS_CANONICAL_BYTES {
+            return Ok(total);
+        }
+    }
+    Ok(total)
+}
+
+fn canonical_json_string_len(value: &str) -> Result<usize, VerificationFailure> {
+    serde_json::to_string(value)
+        .map(|serialized| serialized.len())
+        .map_err(|error| VerificationFailure {
+            code: VerificationErrorCode::CanonicalizationFailed,
+            broken_link: None,
+            message: format!("failed to encode custom claim string as canonical JSON: {error}"),
+            remediation:
+                "Ensure custom claim keys and values contain serializable UTF-8 before signing."
+                    .to_string(),
+        })
+}
+
+fn custom_claim_capacity_failure(message: String) -> VerificationFailure {
+    VerificationFailure {
+        code: VerificationErrorCode::AttestationCapacityExceeded,
+        broken_link: None,
+        message,
+        remediation: format!(
+            "Reduce provenance custom claims to at most {MAX_CUSTOM_CLAIMS} entries, {MAX_CUSTOM_CLAIM_KEY_BYTES} bytes per key, {MAX_CUSTOM_CLAIM_VALUE_BYTES} bytes per value, and {MAX_CUSTOM_CLAIMS_CANONICAL_BYTES} canonical JSON bytes."
+        ),
     }
 }
 
@@ -999,10 +1111,12 @@ fn canonicalize_value(value: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        AttestationEnvelopeFormat, AttestationLink, ChainLinkRole, ProvenanceAttestation,
-        ProvenanceLevel, VerificationFailure, VerificationMode, VerificationPolicy,
-        canonical_attestation_json, sign_links_in_place as sign_links_in_place_with_keys,
-        verify_and_project_gates, verify_attestation_chain,
+        AttestationEnvelopeFormat, AttestationLink, ChainLinkRole, MAX_CUSTOM_CLAIM_VALUE_BYTES,
+        MAX_CUSTOM_CLAIMS, MAX_CUSTOM_CLAIMS_CANONICAL_BYTES, ProvenanceAttestation,
+        ProvenanceLevel, VerificationErrorCode, VerificationFailure, VerificationMode,
+        VerificationPolicy, canonical_attestation_json,
+        sign_links_in_place as sign_links_in_place_with_keys, verify_and_project_gates,
+        verify_attestation_chain,
     };
 
     fn test_signing_key_for(signer_id: &str) -> ed25519_dalek::SigningKey {
@@ -2035,40 +2149,81 @@ mod tests {
         assert!(err.to_string().contains("signature"));
     }
 
-    /// Negative path: extremely large custom claims causing memory pressure
+    /// Negative path: extremely large custom claims fail closed before signing or verification
     #[test]
-    fn negative_massive_custom_claims_handled_without_overflow() {
+    fn negative_massive_custom_claims_rejected_before_canonicalization() {
         let mut attestation = base_attestation();
 
-        // Add 10,000 custom claims with large values
-        for i in 0..10_000 {
+        for i in 0..=MAX_CUSTOM_CLAIMS {
             attestation.custom_claims.insert(
                 format!("claim_{:05}", i),
                 format!("value_{}_with_large_content_{}", i, "x".repeat(1000)),
             );
         }
 
-        sign_links_in_place(&mut attestation).expect("sign massive custom claims");
+        let signing_error =
+            sign_links_in_place(&mut attestation).expect_err("massive custom claims must not sign");
+        assert_eq!(
+            signing_error.code,
+            VerificationErrorCode::AttestationCapacityExceeded
+        );
 
-        // Canonical serialization should handle large data
-        let canonical = canonical_attestation_json(&attestation)
-            .expect("massive custom claims should serialize");
+        let canonical_error = canonical_attestation_json(&attestation)
+            .expect_err("massive custom claims must not serialize");
+        assert_eq!(
+            canonical_error.code,
+            VerificationErrorCode::AttestationCapacityExceeded
+        );
 
-        assert!(!canonical.is_empty());
-        assert!(canonical.contains("claim_00000"));
-        assert!(canonical.contains("claim_09999"));
-
-        // Verification should work despite size
         let policy = production_policy_for(&attestation);
         let report =
             verify_attestation_chain(&attestation, &policy, 1_700_000_400, "massive-claims");
 
-        // Should pass verification (large data is not invalid)
-        assert!(report.chain_valid);
-        assert_eq!(
-            report.provenance_level,
-            ProvenanceLevel::Level3IndependentReproduced
+        assert!(!report.chain_valid);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == VerificationErrorCode::AttestationCapacityExceeded)
         );
+    }
+
+    #[test]
+    fn negative_custom_claim_value_length_rejected_before_signing() {
+        let mut attestation = base_attestation();
+        attestation.custom_claims.insert(
+            "large.value".to_string(),
+            "x".repeat(MAX_CUSTOM_CLAIM_VALUE_BYTES + 1),
+        );
+
+        let error = sign_links_in_place(&mut attestation)
+            .expect_err("oversized custom claim value must not sign");
+        assert_eq!(
+            error.code,
+            VerificationErrorCode::AttestationCapacityExceeded
+        );
+        assert!(error.message.contains("custom claim value"));
+    }
+
+    #[test]
+    fn negative_custom_claim_total_canonical_bytes_rejected_before_signing() {
+        let mut attestation = base_attestation();
+        attestation.custom_claims.clear();
+        let claims_needed = (MAX_CUSTOM_CLAIMS_CANONICAL_BYTES / MAX_CUSTOM_CLAIM_VALUE_BYTES) + 2;
+        for i in 0..claims_needed {
+            attestation.custom_claims.insert(
+                format!("claim_{i:03}"),
+                "x".repeat(MAX_CUSTOM_CLAIM_VALUE_BYTES),
+            );
+        }
+
+        let error = sign_links_in_place(&mut attestation)
+            .expect_err("custom claims total canonical bytes must not sign");
+        assert_eq!(
+            error.code,
+            VerificationErrorCode::AttestationCapacityExceeded
+        );
+        assert!(error.message.contains("canonical JSON"));
     }
 
     /// Negative path: unicode characters in attestation fields

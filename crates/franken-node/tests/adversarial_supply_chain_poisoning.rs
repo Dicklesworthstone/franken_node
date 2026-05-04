@@ -20,7 +20,7 @@ use frankenengine_node::{
         },
         provenance::{
             self as prov, AttestationEnvelopeFormat, AttestationLink, ChainLinkRole,
-            ProvenanceAttestation, VerificationPolicy,
+            ProvenanceAttestation, VerificationErrorCode, VerificationPolicy,
         },
         transparency_verifier::TransparencyPolicy,
     },
@@ -393,6 +393,103 @@ fn adversarial_signed_manifest_rejects_control_chars_and_huge_vector_fields() {
         ManifestSchemaError::InvalidField { ref field, .. }
             if field == "provenance.reproducibility_markers[0]"
     ));
+}
+
+#[test]
+fn adversarial_supply_chain_rejects_oversized_provenance_custom_claim_count_before_projection() {
+    let signing_key = legitimate_signing_key();
+    let mut registry = registry_with_trusted_key(signing_key.verifying_key());
+    let mut request = valid_request("supply-chain-target", &signing_key, NOW_EPOCH);
+
+    request.provenance.custom_claims.clear();
+    for index in 0..=capacity_defaults::base::SMALL {
+        request
+            .provenance
+            .custom_claims
+            .insert(format!("claim_{index:03}"), "bounded".to_string());
+    }
+
+    let signing_error = prov::sign_links_in_place(
+        &mut request.provenance,
+        &provenance_signing_keys(&signing_key),
+    )
+    .expect_err("oversized custom claim count must fail before signing");
+    assert_eq!(
+        signing_error.code,
+        VerificationErrorCode::AttestationCapacityExceeded
+    );
+
+    let canonical_error = prov::canonical_attestation_json(&request.provenance)
+        .expect_err("oversized custom claim count must fail before canonical attestation JSON");
+    assert_eq!(
+        canonical_error.code,
+        VerificationErrorCode::AttestationCapacityExceeded
+    );
+
+    let mut policy = VerificationPolicy::development_profile();
+    policy.add_trusted_signer_key("pub-001", &signing_key.verifying_key());
+    let report = prov::verify_attestation_chain(
+        &request.provenance,
+        &policy,
+        NOW_EPOCH,
+        &format!("{TRACE_PREFIX}-custom-claims-count"),
+    );
+    assert!(!report.chain_valid);
+    assert!(report.issues.iter().any(|issue| {
+        issue.code == VerificationErrorCode::AttestationCapacityExceeded
+            && issue.message.contains("custom claims count")
+    }));
+
+    let result = registry.register(
+        request,
+        &format!("{TRACE_PREFIX}-custom-claims-count"),
+        NOW_EPOCH,
+    );
+    assert_fail_closed(
+        &registry,
+        &result,
+        event_codes::SER_ERR_PROVENANCE_CHAIN_INVALID,
+    );
+}
+
+#[test]
+fn adversarial_supply_chain_rejects_provenance_custom_claim_total_bytes_before_projection() {
+    let signing_key = legitimate_signing_key();
+    let mut request = valid_request("supply-chain-target", &signing_key, NOW_EPOCH);
+
+    request.provenance.custom_claims.clear();
+    let claims_needed = (capacity_defaults::base::LARGE / capacity_defaults::base::MEDIUM) + 2;
+    for index in 0..claims_needed {
+        request.provenance.custom_claims.insert(
+            format!("claim_{index:03}"),
+            "x".repeat(capacity_defaults::base::MEDIUM),
+        );
+    }
+
+    let signing_error = prov::sign_links_in_place(
+        &mut request.provenance,
+        &provenance_signing_keys(&signing_key),
+    )
+    .expect_err("oversized custom claim total must fail before signing");
+    assert_eq!(
+        signing_error.code,
+        VerificationErrorCode::AttestationCapacityExceeded
+    );
+    assert!(signing_error.message.contains("canonical JSON"));
+
+    let mut policy = VerificationPolicy::development_profile();
+    policy.add_trusted_signer_key("pub-001", &signing_key.verifying_key());
+    let report = prov::verify_attestation_chain(
+        &request.provenance,
+        &policy,
+        NOW_EPOCH,
+        &format!("{TRACE_PREFIX}-custom-claims-total"),
+    );
+    assert!(!report.chain_valid);
+    assert!(report.issues.iter().any(|issue| {
+        issue.code == VerificationErrorCode::AttestationCapacityExceeded
+            && issue.message.contains("canonical JSON")
+    }));
 }
 
 #[test]
