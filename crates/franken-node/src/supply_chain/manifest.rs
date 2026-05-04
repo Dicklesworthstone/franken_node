@@ -28,6 +28,8 @@ use crate::push_bounded;
 const MAX_CAPABILITIES: usize = 1024;
 
 pub const MANIFEST_SCHEMA_VERSION: &str = "1.0";
+const ED25519_SIGNATURE_BYTES: usize = 64;
+const THRESHOLD_SIGNATURE_ENVELOPE_OVERHEAD_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedExtensionManifest {
@@ -158,6 +160,7 @@ impl SignedExtensionManifest {
         // manifest field drift while still projecting required core fields.
         // Projects publisher_signature, trust_chain_ref, and min_engine_version
         // for engine-level supply-chain checks.
+        validate_signature(&self.signature)?;
         let sig_bytes = base64::engine::general_purpose::STANDARD
             .decode(&self.signature.signature)
             .map_err(|e| ManifestSchemaError::EngineManifestProjection {
@@ -339,11 +342,19 @@ fn validate_signature(signature: &ManifestSignature) -> Result<(), ManifestSchem
         });
     }
 
+    let decoded_len = decoded_base64_len_hint(&signature.signature);
     match signature.scheme {
         SignatureScheme::Ed25519 => {
             if signature.threshold.is_some() {
                 return Err(ManifestSchemaError::InvalidThresholdConfiguration {
                     reason: "ed25519 signatures must not define threshold policy".to_string(),
+                });
+            }
+            if decoded_len != ED25519_SIGNATURE_BYTES {
+                return Err(ManifestSchemaError::SignatureMalformed {
+                    reason: format!(
+                        "ed25519 signature must decode to exactly {ED25519_SIGNATURE_BYTES} bytes"
+                    ),
                 });
             }
         }
@@ -381,10 +392,47 @@ fn validate_signature(signature: &ManifestSignature) -> Result<(), ManifestSchem
                     reason: "signer_key_ids must not contain duplicates".to_string(),
                 });
             }
+            let max_decoded_len = threshold_signature_decoded_limit(policy.total_signers);
+            if decoded_len > max_decoded_len {
+                return Err(ManifestSchemaError::SignatureMalformed {
+                    reason: format!(
+                        "threshold_ed25519 signature decodes to {decoded_len} bytes, max {max_decoded_len}"
+                    ),
+                });
+            }
         }
     }
 
     Ok(())
+}
+
+fn threshold_signature_decoded_limit(total_signers: u8) -> usize {
+    usize::from(total_signers)
+        .saturating_mul(ED25519_SIGNATURE_BYTES)
+        .saturating_add(THRESHOLD_SIGNATURE_ENVELOPE_OVERHEAD_BYTES)
+}
+
+fn decoded_base64_len_hint(value: &str) -> usize {
+    let trailing_padding = value
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'=')
+        .count()
+        .min(2);
+    value
+        .len()
+        .saturating_div(4)
+        .saturating_mul(3)
+        .saturating_sub(trailing_padding)
+}
+
+#[cfg(test)]
+fn max_base64_encoded_len(decoded_len: usize) -> usize {
+    decoded_len
+        .saturating_add(2)
+        .saturating_div(3)
+        .saturating_mul(4)
 }
 
 fn looks_like_base64(value: &str) -> bool {
@@ -1152,17 +1200,29 @@ mod tests {
     fn negative_massive_signature_memory_exhaustion() {
         let mut manifest = valid_manifest();
 
-        // Create massive base64-encoded signature (10MB)
-        let massive_data = vec![b'A'; 10_usize.saturating_mul(1024).saturating_mul(1024)];
-        let massive_signature = base64::engine::general_purpose::STANDARD.encode(&massive_data);
-        manifest.signature.signature = massive_signature;
+        let max_decoded_len = threshold_signature_decoded_limit(3);
+        manifest.signature.signature =
+            "A".repeat(max_base64_encoded_len(max_decoded_len.saturating_add(1)));
 
         let result = validate_signed_manifest(&manifest);
-        // Should handle large signatures without memory issues
-        if let Err(e) = result {
-            // Acceptable to reject due to size, but shouldn't panic
-            assert!(e.code() == "EMS_ENGINE_PROJECTION" || e.code() == "EMS_SIGNATURE_MALFORMED");
-        }
+        let error = result.expect_err("oversized signature must fail before engine projection");
+
+        assert_eq!(error.code(), "EMS_SIGNATURE_MALFORMED");
+        assert!(error.to_string().contains("threshold_ed25519"));
+    }
+
+    #[test]
+    fn ed25519_signature_requires_exact_decoded_size() {
+        let mut manifest = valid_manifest();
+        manifest.signature.scheme = SignatureScheme::Ed25519;
+        manifest.signature.threshold = None;
+        manifest.signature.signature =
+            base64::engine::general_purpose::STANDARD.encode([0_u8; ED25519_SIGNATURE_BYTES - 1]);
+
+        let error = validate_signed_manifest(&manifest).expect_err("short ed25519 must fail");
+
+        assert_eq!(error.code(), "EMS_SIGNATURE_MALFORMED");
+        assert!(error.to_string().contains("exactly 64 bytes"));
     }
 
     #[test]
