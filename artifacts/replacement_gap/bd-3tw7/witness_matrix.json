@@ -1,11 +1,16 @@
 [
   {
-    "detail": "all 1 required anchor(s) present",
+    "detail": "banned surrogate marker present: blocked_",
     "missing_required_markers": [],
     "offending_path": "crates/franken-node/src/connector/migration_pipeline.rs",
-    "pass": true,
-    "present_banned_markers": [],
-    "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
+    "pass": false,
+    "present_banned_markers": [
+      {
+        "marker": "blocked_",
+        "path": "crates/franken-node/src/connector/migration_pipeline.rs"
+      }
+    ],
+    "reason_code": "TRUTHFULNESS_GATE_SURROGATE_REINTRODUCED",
     "related_checkers": [
       "scripts/check_migration_pipeline.py"
     ],
@@ -172,12 +177,14 @@
     "witness_id": "certification_evidence_binding"
   },
   {
-    "detail": "all 5 required anchor(s) present",
-    "missing_required_markers": [],
+    "detail": "missing required marker(s): pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str = \"structural_only_not_replacement_critical\";",
+    "missing_required_markers": [
+      "pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str = \"structural_only_not_replacement_critical\";"
+    ],
     "offending_path": "sdk/verifier/src/lib.rs",
-    "pass": true,
+    "pass": false,
     "present_banned_markers": [],
-    "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
+    "reason_code": "TRUTHFULNESS_GATE_MISSING_ANCHOR",
     "related_checkers": [
       "scripts/check_verifier_sdk_capsule.py"
     ],
@@ -194,12 +201,14 @@
     "witness_id": "workspace_verifier_sdk_structural_only_posture"
   },
   {
-    "detail": "all 1 required anchor(s) present",
-    "missing_required_markers": [],
+    "detail": "missing required marker(s): description = \"Structural-only verifier SDK for replaying structurally bound capsules and reproducing claim verdicts\"",
+    "missing_required_markers": [
+      "description = \"Structural-only verifier SDK for replaying structurally bound capsules and reproducing claim verdicts\""
+    ],
     "offending_path": "sdk/verifier/Cargo.toml",
-    "pass": true,
+    "pass": false,
     "present_banned_markers": [],
-    "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
+    "reason_code": "TRUTHFULNESS_GATE_MISSING_ANCHOR",
     "related_checkers": [
       "scripts/check_verifier_sdk_capsule.py"
     ],
@@ -232,12 +241,14 @@
     "witness_id": "incrate_sdk_verifier_structural_only_posture"
   },
   {
-    "detail": "all 3 required anchor(s) present",
-    "missing_required_markers": [],
+    "detail": "missing required marker(s): pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str =",
+    "missing_required_markers": [
+      "pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str ="
+    ],
     "offending_path": "crates/franken-node/src/sdk/replay_capsule.rs",
-    "pass": true,
+    "pass": false,
     "present_banned_markers": [],
-    "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
+    "reason_code": "TRUTHFULNESS_GATE_MISSING_ANCHOR",
     "related_checkers": [
       "scripts/check_replacement_truthfulness_gate.py"
     ],

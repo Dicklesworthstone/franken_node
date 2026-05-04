@@ -43,6 +43,21 @@ const NODE_CLAIM_TOTAL_BYTES_PER_COUNT_UNIT: usize = 1024;
 #[cfg(feature = "verifier-tools")]
 const NODE_CLAIM_BYTES_PER_CLAIM_LIMIT: usize = 4096;
 
+#[cfg(feature = "verifier-tools")]
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+#[cfg(feature = "verifier-tools")]
+fn legacy_artifact_id_hash(artifact_id: &str) -> String {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"verifier_sdk_v1:");
+    hasher.update(artifact_id.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
 fn reference_signing_key() -> SigningKey {
     SigningKey::from_bytes(&[7_u8; 32])
 }
@@ -204,8 +219,8 @@ fn assert_node_claim_capacity_failed_before_binding(
         !report
             .evidence
             .iter()
-            .any(|entry| entry.check_name == "hash_match"),
-        "node verifier SDK must not run hash_match after claim capacity fails"
+            .any(|entry| entry.check_name == "artifact_content_hash_match"),
+        "node verifier SDK must not run artifact content hash verification after claim capacity fails"
     );
 }
 
@@ -436,6 +451,65 @@ fn node_verifier_sdk_rejects_oversized_claim_bytes_before_binding() {
             .detail
             .contains(&format!("limit of {expected_total_limit}")),
         "total capacity evidence should expose the bounded byte limit"
+    );
+}
+
+#[cfg(feature = "verifier-tools")]
+#[test]
+fn node_verifier_sdk_artifact_hash_verification_uses_content_bytes() {
+    let sdk = NodeVerifierSdk::with_defaults();
+    let artifact_id = "node-content-hash-artifact";
+    let artifact_bytes = b"real artifact bytes whose digest is the integrity input";
+    let content_hash = sha256_hex(artifact_bytes);
+
+    let request = NodeVerificationRequest {
+        artifact_id: artifact_id.to_string(),
+        artifact_hash: content_hash,
+        claims: vec!["content-hash-bound".to_string()],
+    };
+
+    let report = sdk
+        .verify_artifact_bytes(&request, artifact_bytes)
+        .expect("content-backed verification should produce a report");
+    assert_eq!(report.verdict, NodeVerifyVerdict::Pass);
+    let content_hash_evidence = report
+        .evidence
+        .iter()
+        .find(|entry| entry.check_name == "artifact_content_hash_match")
+        .expect("content hash evidence must be present");
+    assert!(content_hash_evidence.passed);
+
+    let legacy_id_bound_request = NodeVerificationRequest {
+        artifact_id: artifact_id.to_string(),
+        artifact_hash: legacy_artifact_id_hash(artifact_id),
+        claims: vec!["content-hash-bound".to_string()],
+    };
+    let legacy_report = sdk
+        .verify_artifact_bytes(&legacy_id_bound_request, artifact_bytes)
+        .expect("legacy id-bound hash should produce a fail report");
+    assert!(matches!(legacy_report.verdict, NodeVerifyVerdict::Fail(_)));
+    assert!(
+        failed_checks(&legacy_report).contains(&"artifact_content_hash_match"),
+        "old artifact-id-derived hashes must not satisfy content hash verification"
+    );
+
+    let metadata_only_report = sdk
+        .verify_artifact(&request)
+        .expect("metadata-only verification should fail closed with a report");
+    assert!(matches!(
+        metadata_only_report.verdict,
+        NodeVerifyVerdict::Fail(_)
+    ));
+    let metadata_only_hash_evidence = metadata_only_report
+        .evidence
+        .iter()
+        .find(|entry| entry.check_name == "artifact_content_hash_match")
+        .expect("metadata-only call should explain missing artifact bytes");
+    assert!(!metadata_only_hash_evidence.passed);
+    assert!(
+        metadata_only_hash_evidence
+            .detail
+            .contains("artifact bytes not provided")
     );
 }
 

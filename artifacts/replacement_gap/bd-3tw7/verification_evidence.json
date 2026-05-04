@@ -23,8 +23,8 @@
       "reason": "Reserved under bd-1z5a.8"
     }
   ],
-  "failed_witnesses": 0,
-  "generated_at": "2026-03-25T00:33:32+00:00",
+  "failed_witnesses": 4,
+  "generated_at": "2026-05-04T22:11:58+00:00",
   "notes": [
     "This support shard still excludes the replacement-critical verifier/capsule Rust files currently reserved under bd-1z5a.8: crates/franken-node/src/verifier_economy/mod.rs and crates/franken-node/src/connector/verifier_sdk.rs.",
     "bd-3tw7.2 extends the static seed to the standalone sdk/verifier workspace crate and its public verifier contract docs.",
@@ -39,8 +39,8 @@
     "suite": "tests/e2e/replacement_truthfulness_gate_suite.sh",
     "verification_method": "TRACE_ID=trace-bd-3tw7-operator-e2e tests/e2e/replacement_truthfulness_gate_suite.sh"
   },
-  "overall_pass": true,
-  "passed_witnesses": 15,
+  "overall_pass": false,
+  "passed_witnesses": 11,
   "schema_version": "replacement-truthfulness-gate-v1.0",
   "support_bead_ids": [
     "bd-3tw7.1",
@@ -52,16 +52,21 @@
   ],
   "title": "Replacement-critical truthfulness gate static seed",
   "total_witnesses": 15,
-  "verdict": "PASS",
+  "verdict": "FAIL",
   "verification_method": "python3 scripts/check_replacement_truthfulness_gate.py --json",
   "witness_matrix": [
     {
-      "detail": "all 1 required anchor(s) present",
+      "detail": "banned surrogate marker present: blocked_",
       "missing_required_markers": [],
       "offending_path": "crates/franken-node/src/connector/migration_pipeline.rs",
-      "pass": true,
-      "present_banned_markers": [],
-      "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
+      "pass": false,
+      "present_banned_markers": [
+        {
+          "marker": "blocked_",
+          "path": "crates/franken-node/src/connector/migration_pipeline.rs"
+        }
+      ],
+      "reason_code": "TRUTHFULNESS_GATE_SURROGATE_REINTRODUCED",
       "related_checkers": [
         "scripts/check_migration_pipeline.py"
       ],
@@ -228,12 +233,14 @@
       "witness_id": "certification_evidence_binding"
     },
     {
-      "detail": "all 5 required anchor(s) present",
-      "missing_required_markers": [],
+      "detail": "missing required marker(s): pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str = \"structural_only_not_replacement_critical\";",
+      "missing_required_markers": [
+        "pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str = \"structural_only_not_replacement_critical\";"
+      ],
       "offending_path": "sdk/verifier/src/lib.rs",
-      "pass": true,
+      "pass": false,
       "present_banned_markers": [],
-      "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
+      "reason_code": "TRUTHFULNESS_GATE_MISSING_ANCHOR",
       "related_checkers": [
         "scripts/check_verifier_sdk_capsule.py"
       ],
@@ -250,12 +257,14 @@
       "witness_id": "workspace_verifier_sdk_structural_only_posture"
     },
     {
-      "detail": "all 1 required anchor(s) present",
-      "missing_required_markers": [],
+      "detail": "missing required marker(s): description = \"Structural-only verifier SDK for replaying structurally bound capsules and reproducing claim verdicts\"",
+      "missing_required_markers": [
+        "description = \"Structural-only verifier SDK for replaying structurally bound capsules and reproducing claim verdicts\""
+      ],
       "offending_path": "sdk/verifier/Cargo.toml",
-      "pass": true,
+      "pass": false,
       "present_banned_markers": [],
-      "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
+      "reason_code": "TRUTHFULNESS_GATE_MISSING_ANCHOR",
       "related_checkers": [
         "scripts/check_verifier_sdk_capsule.py"
       ],
@@ -288,12 +297,14 @@
       "witness_id": "incrate_sdk_verifier_structural_only_posture"
     },
     {
-      "detail": "all 3 required anchor(s) present",
-      "missing_required_markers": [],
+      "detail": "missing required marker(s): pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str =",
+      "missing_required_markers": [
+        "pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str ="
+      ],
       "offending_path": "crates/franken-node/src/sdk/replay_capsule.rs",
-      "pass": true,
+      "pass": false,
       "present_banned_markers": [],
-      "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
+      "reason_code": "TRUTHFULNESS_GATE_MISSING_ANCHOR",
       "related_checkers": [
         "scripts/check_replacement_truthfulness_gate.py"
       ],
