@@ -2,7 +2,7 @@ use assert_cmd::Command;
 use insta::Settings;
 use insta::assert_snapshot;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 #[path = "migrate_golden_helpers.rs"]
@@ -14,6 +14,27 @@ fn copy_fixture_to_temp(fixture: &str) -> TempDir {
     let temp_dir = TempDir::new().expect("temp project dir");
     copy_dir_recursive(&fixture_path(fixture), temp_dir.path()).expect("copy fixture project");
     temp_dir
+}
+
+fn crate_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn output_artifact_path(test_name: &str, relative_leaf: &str) -> (TempDir, PathBuf, String) {
+    let root = crate_root();
+    let artifact_root = root.join("target/migrate-rewrite-golden-output");
+    fs::create_dir_all(&artifact_root).expect("test output artifact root");
+    let temp = tempfile::Builder::new()
+        .prefix(test_name)
+        .tempdir_in(&artifact_root)
+        .expect("test output artifact temp dir");
+    let output_path = temp.path().join(relative_leaf);
+    let output_arg = output_path
+        .strip_prefix(&root)
+        .expect("artifact path must stay below crate root")
+        .to_string_lossy()
+        .to_string();
+    (temp, output_path, output_arg)
 }
 
 fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -50,6 +71,10 @@ fn with_rewrite_snapshot_settings<R>(
         "[ROLLBACK_PLAN]",
     );
     settings.add_filter(
+        r"target/migrate-rewrite-golden-output/\S+/rollback-plan\.json",
+        "[ROLLBACK_PLAN]",
+    );
+    settings.add_filter(
         &regex::escape(&project_path.display().to_string()),
         "[PROJECT]",
     );
@@ -63,16 +88,18 @@ fn with_rewrite_snapshot_settings<R>(
 #[test]
 fn migrate_rewrite_shell_commonjs_dry_run_matches_golden() {
     let project = copy_fixture_to_temp("rewrite_shell_commonjs");
-    let rollback_path = project.path().join("rollback-plan.json");
+    let (_rollback_temp, rollback_path, rollback_arg) =
+        output_artifact_path("shell_commonjs", "rollback-plan.json");
 
     let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
     let assertion = command
+        .current_dir(crate_root())
         .args([
             "migrate",
             "rewrite",
             project.path().to_str().expect("utf-8 project path"),
             "--emit-rollback",
-            rollback_path.to_str().expect("utf-8 rollback path"),
+            &rollback_arg,
         ])
         .assert()
         .success();

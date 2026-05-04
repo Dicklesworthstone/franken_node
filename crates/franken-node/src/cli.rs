@@ -418,7 +418,7 @@ impl clap::Args for MigrateAuditArgs {
                 .long("out")
                 .value_name("PATH")
                 .help("Output file path.")
-                .value_parser(clap::value_parser!(PathBuf)),
+                .value_parser(parse_safe_content_pathbuf),
         )
     }
 
@@ -497,7 +497,7 @@ pub struct MigrateRewriteArgs {
     pub apply: bool,
 
     /// Path to emit rollback plan.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub emit_rollback: Option<PathBuf>,
 
     /// Emit structured JSON output.
@@ -525,7 +525,7 @@ pub struct MigrateReportArgs {
     pub format: String,
 
     /// Output file path. When omitted, the report is written to stdout.
-    #[arg(long, alias = "out")]
+    #[arg(long, alias = "out", value_parser = parse_safe_content_pathbuf)]
     pub output: Option<PathBuf>,
 }
 
@@ -1537,6 +1537,61 @@ mod parser_contract_extra_tests {
             let err = parse(&["franken-node", "bench", "run", "--output", unsafe_path])
                 .expect_err("unsafe bench output paths must be rejected by clap parsing");
             assert_eq!(err.kind(), ErrorKind::ValueValidation);
+        }
+    }
+
+    #[test]
+    fn migration_output_flags_reject_unsafe_content_paths() {
+        let command_prefixes: &[(&[&str], &str)] = &[
+            (
+                &["franken-node", "migrate-report", "project", "--output"],
+                "migrate-report --output",
+            ),
+            (
+                &["franken-node", "migrate-report", "project", "--out"],
+                "migrate-report --out",
+            ),
+            (
+                &[
+                    "franken-node",
+                    "migrate",
+                    "audit",
+                    "project",
+                    "--format",
+                    "sarif",
+                    "--out",
+                ],
+                "migrate audit --out",
+            ),
+            (
+                &[
+                    "franken-node",
+                    "migrate",
+                    "rewrite",
+                    "project",
+                    "--emit-rollback",
+                ],
+                "migrate rewrite --emit-rollback",
+            ),
+        ];
+
+        for (prefix, label) in command_prefixes {
+            for unsafe_path in [
+                "../migration-report.sarif",
+                "/tmp/migration-report.sarif",
+                "migration\0report.sarif",
+                "reports\\migration-report.sarif",
+            ] {
+                let mut args = prefix.to_vec();
+                args.push(unsafe_path);
+                let err = parse(&args)
+                    .expect_err("unsafe migration output paths must be rejected by clap parsing");
+                assert_eq!(
+                    err.kind(),
+                    ErrorKind::ValueValidation,
+                    "{label} rejected `{unsafe_path}` with wrong error kind"
+                );
+            }
         }
     }
 

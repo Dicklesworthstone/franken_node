@@ -23,6 +23,23 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn output_artifact_path(test_name: &str, relative_leaf: &str) -> (TempDir, PathBuf, String) {
+    let repo = repo_root();
+    let artifact_root = repo.join("target/migrate-cli-e2e-output");
+    std::fs::create_dir_all(&artifact_root).expect("test output artifact root");
+    let temp = tempfile::Builder::new()
+        .prefix(test_name)
+        .tempdir_in(&artifact_root)
+        .expect("test output artifact temp dir");
+    let output_path = temp.path().join(relative_leaf);
+    let output_arg = output_path
+        .strip_prefix(&repo)
+        .expect("artifact path must stay below repo root")
+        .to_string_lossy()
+        .to_string();
+    (temp, output_path, output_arg)
+}
+
 fn resolve_binary_path() -> PathBuf {
     if let Some(exe) = std::env::var_os("CARGO_BIN_EXE_franken-node") {
         return PathBuf::from(exe);
@@ -31,6 +48,10 @@ fn resolve_binary_path() -> PathBuf {
 }
 
 fn run_cli(args: &[&str]) -> Output {
+    run_cli_in_dir(args, &repo_root())
+}
+
+fn run_cli_in_dir(args: &[&str], current_dir: &Path) -> Output {
     let binary_path = resolve_binary_path();
     assert!(
         binary_path.is_file(),
@@ -38,7 +59,7 @@ fn run_cli(args: &[&str]) -> Output {
         binary_path.display()
     );
     Command::new(&binary_path)
-        .current_dir(repo_root())
+        .current_dir(current_dir)
         .args(args)
         .output()
         .unwrap_or_else(|err| panic!("failed running `{}`: {err}", args.join(" ")))
@@ -242,9 +263,9 @@ fn migrate_report_html_output_writes_escaped_report_file() {
     let temp = TempDir::new().expect("temp dir");
     let project_path = temp.path().join("project<demo&report>");
     write_risky_report_project(&project_path);
-    let output_path = temp.path().join("reports/migration-report.html");
+    let (_output_temp, output_path, output_arg) =
+        output_artifact_path(test_name, "reports/migration-report.html");
     let project_arg = project_path.to_string_lossy().to_string();
-    let output_arg = output_path.to_string_lossy().to_string();
     log_phase(
         test_name,
         "fixtures_written",
@@ -308,15 +329,98 @@ fn migrate_report_html_output_writes_escaped_report_file() {
 }
 
 #[test]
+fn migration_output_paths_reject_unsafe_values_before_writing() {
+    let test_name = "migration_output_paths_reject_unsafe_values_before_writing";
+    let temp = TempDir::new().expect("temp dir");
+    let project_path = temp.path().join("project");
+    write_risky_report_project(&project_path);
+    let project_arg = project_path.to_string_lossy().to_string();
+    let absolute_output = temp
+        .path()
+        .join("forbidden/migration-report.html")
+        .to_string_lossy()
+        .to_string();
+    let cases: Vec<(&str, Vec<String>)> = vec![
+        (
+            "migrate-report absolute output",
+            vec![
+                "migrate-report".to_string(),
+                project_arg.clone(),
+                "--format".to_string(),
+                "html".to_string(),
+                "--output".to_string(),
+                absolute_output,
+            ],
+        ),
+        (
+            "migrate-report traversal alias output",
+            vec![
+                "migrate-report".to_string(),
+                project_arg.clone(),
+                "--out".to_string(),
+                "../escape/migration-report.json".to_string(),
+            ],
+        ),
+        (
+            "migrate audit backslash output",
+            vec![
+                "migrate".to_string(),
+                "audit".to_string(),
+                project_arg.clone(),
+                "--format".to_string(),
+                "sarif".to_string(),
+                "--out".to_string(),
+                "reports\\migration-audit.sarif".to_string(),
+            ],
+        ),
+        (
+            "migrate rewrite traversal rollback output",
+            vec![
+                "migrate".to_string(),
+                "rewrite".to_string(),
+                project_arg,
+                "--emit-rollback".to_string(),
+                "../escape/rollback.json".to_string(),
+            ],
+        ),
+    ];
+
+    for (label, args) in cases {
+        let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let output = run_cli_in_dir(&refs, temp.path());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log_phase(
+            test_name,
+            "rejection_checked",
+            serde_json::json!({
+                "case": label,
+                "success": output.status.success(),
+                "stderr": stderr,
+            }),
+        );
+        assert!(
+            !output.status.success(),
+            "{label} should fail closed before writing: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            stderr
+        );
+        assert!(
+            stderr.contains("Invalid content path"),
+            "{label} should report content-path validation failure: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn migrate_audit_sarif_out_writes_artifact_without_stdout_payload() {
     let test_name = "migrate_audit_sarif_out_writes_artifact_without_stdout_payload";
     let temp = TempDir::new().expect("temp dir");
     let project_path = temp.path().join("project");
     write_risky_report_project(&project_path);
 
-    let out_path = temp.path().join("reports/migration-audit.sarif");
+    let (_out_temp, out_path, out_arg) =
+        output_artifact_path(test_name, "reports/migration-audit.sarif");
     let project_arg = project_path.to_string_lossy().to_string();
-    let out_arg = out_path.to_string_lossy().to_string();
     log_phase(
         test_name,
         "fixtures_written",
@@ -408,9 +512,9 @@ fn migrate_audit_json_out_writes_artifact_without_stdout_payload() {
     let project_path = temp.path().join("project");
     write_risky_report_project(&project_path);
 
-    let out_path = temp.path().join("reports/migration-audit.json");
+    let (_out_temp, out_path, out_arg) =
+        output_artifact_path(test_name, "reports/migration-audit.json");
     let project_arg = project_path.to_string_lossy().to_string();
-    let out_arg = out_path.to_string_lossy().to_string();
     log_phase(
         test_name,
         "fixtures_written",
@@ -477,10 +581,14 @@ fn migrate_audit_json_out_writes_artifact_without_stdout_payload() {
     assert!(
         report["findings"].as_array().is_some_and(|findings| {
             findings.iter().any(|finding| {
-                finding["path"] == serde_json::json!("package.json")
+                finding["id"] == serde_json::json!("mig-audit-002")
+                    && finding["category"] == serde_json::json!("scripts")
+                    && finding["severity"] == serde_json::json!("high")
                     && finding["message"]
-                        .as_str()
-                        .is_some_and(|message| message.contains("postinstall"))
+                        == serde_json::json!(
+                            "risky install/build script pattern detected in package.json"
+                        )
+                    && finding["path"] == serde_json::json!("package.json")
             })
         }),
         "JSON report must include the real package.json script finding: {report:#?}"
@@ -521,9 +629,9 @@ fn migrate_rewrite_apply_emits_rollback_plan_and_updates_manifest() {
     let project_path = temp.path().join("project");
     write_basic_rewrite_project(&project_path);
 
-    let rollback_path = temp.path().join("rollback/plan.json");
+    let (_rollback_temp, rollback_path, rollback_arg) =
+        output_artifact_path("migrate_rewrite_apply_rollback", "rollback/plan.json");
     let project_arg = project_path.to_string_lossy().to_string();
-    let rollback_arg = rollback_path.to_string_lossy().to_string();
     let output = run_cli(&[
         "migrate",
         "rewrite",
@@ -557,7 +665,8 @@ fn migrate_rewrite_apply_emits_rollback_plan_and_updates_manifest() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("migration rollback artifact written:"));
-    golden::assert_scrubbed_golden("migrate/rewrite_apply_stderr", &stderr);
+    let stderr_for_golden = stderr.replace(&rollback_arg, "/tmp/rollback-plan.json");
+    golden::assert_scrubbed_golden("migrate/rewrite_apply_stderr", &stderr_for_golden);
 
     let rollback_json =
         std::fs::read_to_string(&rollback_path).expect("rollback artifact should be written");
@@ -666,7 +775,8 @@ fn migrate_rewrite_apply_json_keeps_rollback_artifact_separate() {
     let temp = TempDir::new().expect("temp dir");
     let project_path = temp.path().join("project");
     write_basic_rewrite_project(&project_path);
-    let rollback_path = temp.path().join("rollback/plan.json");
+    let (_rollback_temp, rollback_path, rollback_arg) =
+        output_artifact_path(test_name, "rollback/plan.json");
     log_phase(
         test_name,
         "project_created",
@@ -677,7 +787,6 @@ fn migrate_rewrite_apply_json_keeps_rollback_artifact_separate() {
     );
 
     let project_arg = project_path.to_string_lossy().to_string();
-    let rollback_arg = rollback_path.to_string_lossy().to_string();
     let output = run_cli(&[
         "migrate",
         "rewrite",

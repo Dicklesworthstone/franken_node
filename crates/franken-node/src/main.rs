@@ -75,8 +75,6 @@ mod policy {
     pub mod policy_explainer;
 }
 
-#[cfg(feature = "control-plane")]
-use crate::api::fleet_quarantine::{RevocationScope, RevocationSeverity};
 use crate::api::session_auth::{SessionConfig, SessionManager};
 use crate::api::{
     fleet_quarantine::{
@@ -115,6 +113,10 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::{DateTime, Utc};
 use clap::Parser;
+#[cfg(feature = "control-plane")]
+use frankenengine_node::api::fleet_quarantine::{
+    RevocationScope as PersistedRevocationScope, RevocationSeverity as PersistedRevocationSeverity,
+};
 use frankenengine_node::control_plane::control_epoch::ControlEpoch;
 use frankenengine_node::control_plane::fleet_transport::{
     FLEET_ACTION_LOG_FILE, FLEET_NODE_DIR, FileFleetTransport, FleetAction as PersistedFleetAction,
@@ -5788,7 +5790,11 @@ fn write_migration_report_file(
     out_path: &Path,
     report_label: &str,
 ) -> Result<PathBuf> {
-    if let Some(parent) = out_path.parent()
+    let validated_path_buf = out_path.to_path_buf();
+    let safe_out_path = cli::validate_user_content_pathbuf(&validated_path_buf)
+        .with_context(|| format!("invalid {report_label} output path {}", out_path.display()))?;
+
+    if let Some(parent) = safe_out_path.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent).with_context(|| {
@@ -5798,9 +5804,13 @@ fn write_migration_report_file(
             )
         })?;
     }
-    std::fs::write(out_path, rendered.as_bytes())
-        .with_context(|| format!("failed writing {report_label} to {}", out_path.display()))?;
-    Ok(out_path.to_path_buf())
+    std::fs::write(safe_out_path, rendered.as_bytes()).with_context(|| {
+        format!(
+            "failed writing {report_label} to {}",
+            safe_out_path.display()
+        )
+    })?;
+    Ok(safe_out_path.to_path_buf())
 }
 
 fn emit_migration_audit_report(rendered: &str, out_path: Option<&Path>) -> Result<Option<PathBuf>> {
@@ -18438,10 +18448,10 @@ fn apply_fleet_quarantine_action(
 fn apply_fleet_revoke_action(
     project_root: &Path,
     extension_id: &str,
-    scope: &RevocationScope,
+    scope: &PersistedRevocationScope,
     now_secs: u64,
 ) -> Result<bool> {
-    if scope.severity == RevocationSeverity::Advisory {
+    if scope.severity == PersistedRevocationSeverity::Advisory {
         return Ok(false);
     }
 
@@ -18459,9 +18469,9 @@ fn apply_fleet_revoke_action(
     }
 
     let severity = match scope.severity {
-        RevocationSeverity::Advisory => "advisory",
-        RevocationSeverity::Mandatory => "mandatory",
-        RevocationSeverity::Emergency => "emergency",
+        PersistedRevocationSeverity::Advisory => "advisory",
+        PersistedRevocationSeverity::Mandatory => "mandatory",
+        PersistedRevocationSeverity::Emergency => "emergency",
     };
     let now_rfc3339 = rfc3339_timestamp_from_secs(now_secs);
     state
