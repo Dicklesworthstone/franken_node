@@ -20,7 +20,7 @@
 - `workspace_verifier_sdk_structural_only_posture` (workspace_verifier_sdk): `FAIL` via `TRUTHFULNESS_GATE_MISSING_ANCHOR`
 - `workspace_verifier_sdk_package_metadata_truthfulness` (workspace_verifier_sdk_metadata): `FAIL` via `TRUTHFULNESS_GATE_MISSING_ANCHOR`
 - `incrate_sdk_verifier_structural_only_posture` (incrate_sdk_verifier): `PASS` via `TRUTHFULNESS_GATE_STATIC_PASS`
-- `incrate_sdk_replay_capsule_structural_only_posture` (incrate_sdk_replay_capsule): `FAIL` via `TRUTHFULNESS_GATE_MISSING_ANCHOR`
+- `incrate_sdk_replay_capsule_structural_only_posture` (incrate_sdk_replay_capsule): `PASS` via `TRUTHFULNESS_GATE_STATIC_PASS`
 - `supervision_time_budget_real_clock` (supervision): `PASS` via `TRUTHFULNESS_GATE_STATIC_PASS`
 - `migration_artifact_real_signature_verification` (migration_artifact): `PASS` via `TRUTHFULNESS_GATE_STATIC_PASS`
 

@@ -115,6 +115,25 @@ class EvaluateWitnessTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], mod.MISSING_ANCHOR)
         self.assertIn("SDK_REPLAY_CAPSULE", result["detail"])
 
+    def test_incrate_sdk_replay_capsule_witness_fails_on_retired_crypto_claim(self) -> None:
+        spec = _witness_spec("incrate_sdk_replay_capsule_structural_only_posture")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _materialize_spec_sources(spec, root)
+            target = root / "crates/franken-node/src/sdk/replay_capsule.rs"
+            target.write_text(
+                target.read_text(encoding="utf-8")
+                + '\npub const BAD_POSTURE: &str = "cryptographic_ed25519_authenticated";\n',
+                encoding="utf-8",
+            )
+            result = mod.evaluate_witness(spec, root)
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["reason_code"], mod.SURROGATE_REINTRODUCED)
+        self.assertEqual(
+            result["offending_path"],
+            "crates/franken-node/src/sdk/replay_capsule.rs",
+        )
+
 
 class RealRepoTests(unittest.TestCase):
     def test_run_all_passes_on_shared_tree(self) -> None:

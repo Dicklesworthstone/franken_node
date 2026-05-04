@@ -245,6 +245,7 @@ WITNESS_SPECS = (
         banned_markers=(
             "crate::connector::verifier_sdk",
             "crate::verifier_economy",
+            "cryptographic_ed25519_authenticated",
         ),
         related_checkers=("scripts/check_replacement_truthfulness_gate.py",),
         support_bead="bd-3tw7.6",
@@ -262,6 +263,8 @@ WITNESS_SPECS = (
         banned_markers=(
             "crate::connector::verifier_sdk",
             "crate::verifier_economy",
+            "cryptographic_ed25519_authenticated",
+            "Ed25519 cryptographic signature verification",
         ),
         related_checkers=("scripts/check_replacement_truthfulness_gate.py",),
         support_bead="bd-3tw7.6",

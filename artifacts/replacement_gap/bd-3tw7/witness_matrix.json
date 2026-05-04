@@ -241,14 +241,12 @@
     "witness_id": "incrate_sdk_verifier_structural_only_posture"
   },
   {
-    "detail": "missing required marker(s): pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str =",
-    "missing_required_markers": [
-      "pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str ="
-    ],
+    "detail": "all 3 required anchor(s) present",
+    "missing_required_markers": [],
     "offending_path": "crates/franken-node/src/sdk/replay_capsule.rs",
-    "pass": false,
+    "pass": true,
     "present_banned_markers": [],
-    "reason_code": "TRUTHFULNESS_GATE_MISSING_ANCHOR",
+    "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
     "related_checkers": [
       "scripts/check_replacement_truthfulness_gate.py"
     ],

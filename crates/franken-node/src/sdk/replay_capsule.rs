@@ -36,11 +36,12 @@ pub const MIN_FORMAT_VERSION: u32 = 1;
 /// Schema identifier for the replay capsule format.
 pub const CAPSULE_SCHEMA_ID: &str = "replay-capsule-v1";
 
-/// Security posture marker for this cryptographic replay capsule helper.
+/// Security posture marker for this structural replay capsule helper.
 ///
-/// This helper provides Ed25519 cryptographic signature verification suitable
-/// for replacement-critical signed capsule verification.
-pub const CRYPTOGRAPHIC_SECURITY_POSTURE: &str = "cryptographic_ed25519_authenticated";
+/// This helper performs deterministic replay and structural capsule checks. It
+/// does not perform signature verification and must not be used as the
+/// replacement-critical authenticity verifier.
+pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str = "structural_only_not_replacement_critical";
 
 /// Stable rule id used by shortcut-regression guardrails.
 pub const STRUCTURAL_ONLY_RULE_ID: &str = "VERIFIER_SHORTCUT_GUARD::SDK_REPLAY_CAPSULE";
@@ -443,6 +444,18 @@ mod tests {
     #[test]
     fn test_capsule_schema_id() {
         assert_eq!(CAPSULE_SCHEMA_ID, "replay-capsule-v1");
+    }
+
+    #[test]
+    fn test_structural_only_security_posture_marker() {
+        assert_eq!(
+            STRUCTURAL_ONLY_SECURITY_POSTURE,
+            "structural_only_not_replacement_critical"
+        );
+        assert_eq!(
+            STRUCTURAL_ONLY_RULE_ID,
+            "VERIFIER_SHORTCUT_GUARD::SDK_REPLAY_CAPSULE"
+        );
     }
 
     // ── create_capsule ──────────────────────────────────────────────

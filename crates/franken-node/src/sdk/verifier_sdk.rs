@@ -2628,7 +2628,7 @@ mod tests {
             "VERIFIER_SHORTCUT_GUARD::SDK_VERIFIER"
         );
         assert_eq!(
-            super::super::replay_capsule::CRYPTOGRAPHIC_SECURITY_POSTURE,
+            super::super::replay_capsule::STRUCTURAL_ONLY_SECURITY_POSTURE,
             "structural_only_not_replacement_critical"
         );
         assert_eq!(
@@ -2687,7 +2687,27 @@ mod tests {
             super::super::replay_capsule::STRUCTURAL_ONLY_RULE_ID,
             "src/sdk/replay_capsule.rs",
             SDK_REPLAY_CAPSULE_SOURCE,
-            super::super::replay_capsule::CRYPTOGRAPHIC_SECURITY_POSTURE,
+            super::super::replay_capsule::STRUCTURAL_ONLY_SECURITY_POSTURE,
+        );
+        let retired_ed25519_posture = concat!("cryptographic_", "ed25519_authenticated");
+        assert_guard_absent(
+            "VERIFIER_SHORTCUT_GUARD::NO_SDK_STRUCTURAL_CRYPTO_POSTURE",
+            "src/sdk/verifier_sdk.rs",
+            SDK_VERIFIER_SOURCE,
+            retired_ed25519_posture,
+        );
+        assert_guard_absent(
+            "VERIFIER_SHORTCUT_GUARD::NO_REPLAY_CAPSULE_CRYPTO_POSTURE",
+            "src/sdk/replay_capsule.rs",
+            SDK_REPLAY_CAPSULE_SOURCE,
+            retired_ed25519_posture,
+        );
+        let retired_ed25519_doc_claim = concat!("Ed25519 ", "cryptographic signature verification");
+        assert_guard_absent(
+            "VERIFIER_SHORTCUT_GUARD::NO_REPLAY_CAPSULE_CRYPTO_DOC_CLAIM",
+            "src/sdk/replay_capsule.rs",
+            SDK_REPLAY_CAPSULE_SOURCE,
+            retired_ed25519_doc_claim,
         );
         assert_guard_contains(
             "VERIFIER_SHORTCUT_GUARD::CONNECTOR_REPLAY_HELPER_MARKER",
