@@ -211,6 +211,10 @@ name = "frankentui_surface_migration"
 path = "tests/frankentui_surface_migration.rs"
 
 [[test]]
+name = "frankentui_operator_surface_integration"
+path = "tests/frankentui_operator_surface_integration.rs"
+
+[[test]]
 name = "asupersync_control_lane_integration"
 path = "tests/asupersync_control_lane_integration.rs"
 required-features = ["asupersync-transport"]
