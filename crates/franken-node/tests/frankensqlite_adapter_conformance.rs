@@ -3,7 +3,8 @@ mod frankensqlite_adapter_conformance;
 
 use frankenengine_node::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 use frankenengine_node::storage::frankensqlite_adapter::{
-    CallerContext, FrankensqliteAdapter, PersistenceClass,
+    AdapterError, CallerContext, FrankensqliteAdapter, MAX_STORE_ENTRIES, MAX_STORE_KEY_BYTES,
+    MAX_STORE_VALUE_BYTES, PersistenceClass, event_codes,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -248,6 +249,83 @@ fn audit_replay_truncation_sentinel_is_first_and_preserves_window() {
         MAX_AUDIT_LOG_ENTRIES
     );
     assert_eq!(adapter.summary().replay_mismatches, 1);
+}
+
+#[test]
+fn adapter_write_rejects_oversized_keys_values_and_new_entries_at_capacity() {
+    let mut adapter = FrankensqliteAdapter::default();
+    let caller = CallerContext::system(
+        "tests::frankensqlite_adapter_conformance",
+        "trace-store-bounds",
+    );
+
+    let oversized_key = "k".repeat(MAX_STORE_KEY_BYTES + 1);
+    let key_err = adapter
+        .write(
+            &caller,
+            PersistenceClass::ControlState,
+            &oversized_key,
+            b"value",
+        )
+        .expect_err("oversized key must fail closed before insertion");
+    assert!(matches!(key_err, AdapterError::WriteFailure { .. }));
+
+    let oversized_value = vec![0x42; MAX_STORE_VALUE_BYTES + 1];
+    let value_err = adapter
+        .write(
+            &caller,
+            PersistenceClass::Snapshot,
+            "snapshot-too-large",
+            &oversized_value,
+        )
+        .expect_err("oversized value must fail closed before insertion");
+    assert!(matches!(value_err, AdapterError::WriteFailure { .. }));
+
+    assert_eq!(adapter.summary().total_writes, 0);
+    assert_eq!(adapter.summary().write_failures, 2);
+    assert!(adapter.events().iter().any(|event| {
+        event.code == event_codes::FRANKENSQLITE_WRITE_FAIL && event.detail.contains("key length")
+    }));
+    assert!(adapter.events().iter().any(|event| {
+        event.code == event_codes::FRANKENSQLITE_WRITE_FAIL && event.detail.contains("value length")
+    }));
+
+    for idx in 0..MAX_STORE_ENTRIES {
+        adapter
+            .write(
+                &caller,
+                PersistenceClass::Cache,
+                &format!("cache-{idx}"),
+                b"x",
+            )
+            .expect("bounded store should accept entries until capacity");
+    }
+
+    let overflow_err = adapter
+        .write(
+            &caller,
+            PersistenceClass::Cache,
+            "cache-overflow",
+            b"blocked",
+        )
+        .expect_err("new entry past store capacity must fail closed");
+    assert!(matches!(overflow_err, AdapterError::WriteFailure { .. }));
+    assert_eq!(adapter.summary().total_writes, MAX_STORE_ENTRIES);
+    assert_eq!(adapter.summary().write_failures, 3);
+    assert!(
+        !adapter
+            .read(&caller, PersistenceClass::Cache, "cache-overflow")
+            .expect("read should remain authorized")
+            .found
+    );
+
+    adapter
+        .write(&caller, PersistenceClass::Cache, "cache-0", b"updated")
+        .expect("overwrite at capacity must not grow the store");
+    let updated = adapter
+        .read(&caller, PersistenceClass::Cache, "cache-0")
+        .expect("updated entry should remain readable");
+    assert_eq!(updated.value.as_deref(), Some(b"updated".as_slice()));
 }
 
 #[cfg(feature = "advanced-features")]

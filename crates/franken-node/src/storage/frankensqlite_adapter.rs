@@ -56,6 +56,10 @@ const MAX_AUDIT_REPLAY_RESULTS: usize = MAX_AUDIT_LOG_ENTRIES + 1;
 
 use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_EVENTS, MAX_SCHEMA_VERSIONS};
 
+pub const MAX_STORE_ENTRIES: usize = crate::capacity_defaults::base::LARGE;
+pub const MAX_STORE_KEY_BYTES: usize = crate::capacity_defaults::base::MEDIUM;
+pub const MAX_STORE_VALUE_BYTES: usize = crate::capacity_defaults::base::XL * 8;
+
 /// SECURITY: Sanitizes keys for safe inclusion in log messages by escaping
 /// control characters, newlines, and other characters that could be used
 /// for log injection attacks.
@@ -71,6 +75,22 @@ fn sanitize_log_key(key: &str) -> String {
             c => c.to_string(),
         })
         .collect()
+}
+
+fn bounded_log_key(key: &str) -> String {
+    if key.len() > MAX_STORE_KEY_BYTES {
+        format!("<oversized-key:{} bytes>", key.len())
+    } else {
+        sanitize_log_key(key)
+    }
+}
+
+fn bounded_error_key(key: &str) -> String {
+    if key.len() > MAX_STORE_KEY_BYTES {
+        format!("<oversized-key:{} bytes>", key.len())
+    } else {
+        key.to_string()
+    }
 }
 
 pub const INV_FSA_TIER1_DURABLE: &str = "INV-FSA-TIER1-DURABLE";
@@ -571,22 +591,50 @@ impl FrankensqliteAdapter {
         check_authorization(caller, "write", class).map_err(AdapterError::AuthorizationFailed)?;
         let start = Instant::now();
         let tier = class.tier();
-        let store_key = (class, key.to_string());
+
+        if key.len() > MAX_STORE_KEY_BYTES {
+            return Err(self.reject_write(
+                class,
+                key,
+                format!(
+                    "key length {} bytes exceeds maximum {}",
+                    key.len(),
+                    MAX_STORE_KEY_BYTES
+                ),
+            ));
+        }
+        if value.len() > MAX_STORE_VALUE_BYTES {
+            return Err(self.reject_write(
+                class,
+                key,
+                format!(
+                    "value length {} bytes exceeds maximum {}",
+                    value.len(),
+                    MAX_STORE_VALUE_BYTES
+                ),
+            ));
+        }
+
+        let key_string = key.to_string();
+        let store_key = (class, key_string.clone());
 
         if class == PersistenceClass::AuditLog && self.store.contains_key(&store_key) {
-            self.write_failures = self.write_failures.saturating_add(1);
-            self.emit_event(
-                event_codes::FRANKENSQLITE_WRITE_FAIL,
-                class.label(),
+            return Err(self.reject_write(
+                class,
+                key,
+                "duplicate audit log keys violate append-only semantics",
+            ));
+        }
+
+        if !self.store.contains_key(&store_key) && self.store.len() >= MAX_STORE_ENTRIES {
+            return Err(self.reject_write(
+                class,
+                key,
                 format!(
-                    "key={}, duplicate audit log entry rejected",
-                    sanitize_log_key(key)
+                    "store entry capacity {} reached for new key",
+                    MAX_STORE_ENTRIES
                 ),
-            );
-            return Err(AdapterError::WriteFailure {
-                key: key.to_string(),
-                reason: "duplicate audit log keys violate append-only semantics".into(),
-            });
+            ));
         }
 
         self.store.insert(store_key, value.to_vec());
@@ -608,7 +656,7 @@ impl FrankensqliteAdapter {
             }
             push_bounded(
                 &mut self.audit_log,
-                (key.to_string(), value.to_vec()),
+                (key_string.clone(), value.to_vec()),
                 MAX_AUDIT_LOG_ENTRIES,
             );
         }
@@ -626,11 +674,30 @@ impl FrankensqliteAdapter {
 
         Ok(WriteResult {
             success: true,
-            key: key.to_string(),
+            key: key_string,
             persistence_class: class,
             tier,
             latency_us: latency,
         })
+    }
+
+    fn reject_write(
+        &mut self,
+        class: PersistenceClass,
+        key: &str,
+        reason: impl Into<String>,
+    ) -> AdapterError {
+        let reason = reason.into();
+        self.write_failures = self.write_failures.saturating_add(1);
+        self.emit_event(
+            event_codes::FRANKENSQLITE_WRITE_FAIL,
+            class.label(),
+            format!("key={}, {reason}", bounded_log_key(key)),
+        );
+        AdapterError::WriteFailure {
+            key: bounded_error_key(key),
+            reason,
+        }
     }
 
     /// Read a value by persistence class and key.
@@ -1211,6 +1278,64 @@ mod tests {
                 .iter()
                 .any(|event| event.code == event_codes::FRANKENSQLITE_WRITE_FAIL)
         );
+    }
+
+    #[test]
+    fn test_write_rejects_oversized_key_and_value_before_store_insert() {
+        let mut adapter = FrankensqliteAdapter::default();
+        let oversized_key = "k".repeat(MAX_STORE_KEY_BYTES + 1);
+        let oversized_value = vec![0x42; MAX_STORE_VALUE_BYTES + 1];
+
+        let key_err = adapter
+            .write_legacy(PersistenceClass::ControlState, &oversized_key, b"value")
+            .expect_err("oversized key must fail closed");
+        let value_err = adapter
+            .write_legacy(PersistenceClass::Snapshot, "valid-key", &oversized_value)
+            .expect_err("oversized value must fail closed");
+
+        assert!(matches!(key_err, AdapterError::WriteFailure { .. }));
+        assert!(matches!(value_err, AdapterError::WriteFailure { .. }));
+        assert_eq!(adapter.summary().total_writes, 0);
+        assert_eq!(adapter.summary().write_failures, 2);
+        assert!(
+            adapter
+                .events()
+                .iter()
+                .any(|event| event.code == event_codes::FRANKENSQLITE_WRITE_FAIL
+                    && event.detail.contains("key length"))
+        );
+        assert!(
+            adapter
+                .events()
+                .iter()
+                .any(|event| event.code == event_codes::FRANKENSQLITE_WRITE_FAIL
+                    && event.detail.contains("value length"))
+        );
+    }
+
+    #[test]
+    fn test_store_entry_capacity_rejects_new_keys_but_allows_overwrite() {
+        let mut adapter = FrankensqliteAdapter::default();
+        for idx in 0..MAX_STORE_ENTRIES {
+            adapter.store.insert(
+                (PersistenceClass::Cache, format!("cache-{idx}")),
+                vec![0x11],
+            );
+        }
+
+        let err = adapter
+            .write_legacy(PersistenceClass::Cache, "new-cache-entry", b"blocked")
+            .expect_err("new key at store capacity must fail closed");
+        assert!(matches!(err, AdapterError::WriteFailure { .. }));
+        assert_eq!(adapter.store.len(), MAX_STORE_ENTRIES);
+        assert_eq!(adapter.summary().write_failures, 1);
+
+        adapter
+            .write_legacy(PersistenceClass::Cache, "cache-0", b"updated")
+            .expect("overwrite at store capacity should not grow the store");
+        assert_eq!(adapter.store.len(), MAX_STORE_ENTRIES);
+        let updated = adapter.read_legacy(PersistenceClass::Cache, "cache-0");
+        assert_eq!(updated.value.as_deref(), Some(b"updated".as_slice()));
     }
 
     // -- Replay tests --
