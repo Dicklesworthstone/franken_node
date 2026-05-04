@@ -50,6 +50,7 @@ use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_REVOCATIONS: usize = 4096;
 const MAX_ADMISSION_RECEIPTS: usize = 4096;
 const MAX_VERSIONS_PER_EXTENSION: usize = 1024;
+const MAX_EXTENSIONS: usize = crate::capacity_defaults::base::MEDIUM;
 
 // Input validation limits to prevent DoS attacks
 const MAX_EXTENSION_NAME_LEN: usize = 256;
@@ -319,6 +320,7 @@ pub mod event_codes {
     pub const SER_ERR_INTERNAL: &str = "SER-ERR-008";
     pub const SER_ERR_DUPLICATE_NAME: &str = "SER-ERR-009";
     pub const SER_ERR_INVALID_INPUT: &str = "SER-ERR-010";
+    pub const SER_ERR_REGISTRY_CAPACITY: &str = "SER-ERR-011";
 }
 
 pub mod invariants {
@@ -837,6 +839,8 @@ pub struct RegistryConfig {
     pub require_provenance: bool,
     pub require_signature: bool,
     pub allow_self_revocation: bool,
+    #[serde(default = "default_max_extensions")]
+    pub max_extensions: usize,
 }
 
 impl Default for RegistryConfig {
@@ -846,8 +850,13 @@ impl Default for RegistryConfig {
             require_provenance: true,
             require_signature: true,
             allow_self_revocation: true,
+            max_extensions: MAX_EXTENSIONS,
         }
     }
+}
+
+fn default_max_extensions() -> usize {
+    MAX_EXTENSIONS
 }
 
 // ---------------------------------------------------------------------------
@@ -1242,6 +1251,30 @@ impl SignedExtensionRegistry {
             };
         }
 
+        if self.extensions.len() >= self.config.max_extensions {
+            self.log(
+                event_codes::SER_ERR_REGISTRY_CAPACITY,
+                "",
+                trace_id,
+                serde_json::json!({
+                    "name": &signed_manifest.name,
+                    "current": self.extensions.len(),
+                    "max_allowed": self.config.max_extensions,
+                    "reason": "registry_at_capacity",
+                }),
+            );
+            return RegistryResult {
+                success: false,
+                extension_id: None,
+                error_code: Some(event_codes::SER_ERR_REGISTRY_CAPACITY.to_string()),
+                detail: format!(
+                    "Extension registry is at capacity: {} active or retained extensions (max: {})",
+                    self.extensions.len(),
+                    self.config.max_extensions
+                ),
+            };
+        }
+
         // Signature verified
         self.log(
             event_codes::SER_SIGNATURE_VERIFIED,
@@ -1595,6 +1628,7 @@ impl SignedExtensionRegistry {
             "require_provenance": self.config.require_provenance,
             "require_signature": self.config.require_signature,
             "allow_self_revocation": self.config.allow_self_revocation,
+            "max_extensions": self.config.max_extensions,
             "registry_version": &self.config.registry_version,
         })
         .to_string();
@@ -1854,6 +1888,85 @@ mod tests {
         assert_eq!(reg.admission_receipts().len(), 1);
         assert!(reg.admission_receipts()[0].admitted);
         assert!(reg.admission_receipts()[0].witness.is_none());
+    }
+
+    #[test]
+    fn register_rejects_new_extension_when_registry_at_capacity() {
+        let (sk, vk) = test_keypair();
+        let now = now_epoch();
+        let mut config = RegistryConfig::default();
+        config.max_extensions = 1;
+        let mut reg = SignedExtensionRegistry::new(config, test_kernel(&vk));
+        let admitted = reg.register(valid_request("cap-existing", &sk, now), &make_trace(), now);
+        assert!(
+            admitted.success,
+            "setup admission failed: {}",
+            admitted.detail
+        );
+
+        let result = reg.register(valid_request("cap-overflow", &sk, now), &make_trace(), now);
+
+        assert!(!result.success);
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some(event_codes::SER_ERR_REGISTRY_CAPACITY)
+        );
+        assert!(
+            result.detail.contains("registry is at capacity"),
+            "detail: {}",
+            result.detail
+        );
+        assert_eq!(reg.extensions.len(), 1);
+        assert!(reg.query_by_name("cap-overflow").is_none());
+        assert_eq!(reg.admission_receipts().len(), 2);
+        assert!(
+            reg.admission_receipts()
+                .iter()
+                .all(|receipt| receipt.admitted)
+        );
+
+        let audit = reg
+            .audit_log()
+            .last()
+            .expect("capacity rejection must emit an audit record");
+        assert_eq!(audit.event_code, event_codes::SER_ERR_REGISTRY_CAPACITY);
+        assert_eq!(audit.details["name"], "cap-overflow");
+        assert_eq!(audit.details["current"].as_u64(), Some(1));
+        assert_eq!(audit.details["max_allowed"].as_u64(), Some(1));
+        assert!(!reg.audit_log().iter().any(|record| record.event_code
+            == event_codes::SER_EXTENSION_REGISTERED
+            && record.details["name"] == "cap-overflow"));
+    }
+
+    #[test]
+    fn register_duplicate_name_takes_precedence_when_registry_at_capacity() {
+        let (sk, vk) = test_keypair();
+        let now = now_epoch();
+        let mut config = RegistryConfig::default();
+        config.max_extensions = 1;
+        let mut reg = SignedExtensionRegistry::new(config, test_kernel(&vk));
+        let admitted = reg.register(valid_request("cap-existing", &sk, now), &make_trace(), now);
+        assert!(
+            admitted.success,
+            "setup admission failed: {}",
+            admitted.detail
+        );
+
+        let duplicate = reg.register(valid_request("cap-existing", &sk, now), &make_trace(), now);
+
+        assert!(!duplicate.success);
+        assert_eq!(
+            duplicate.error_code.as_deref(),
+            Some(event_codes::SER_ERR_DUPLICATE_NAME)
+        );
+        assert_eq!(reg.extensions.len(), 1);
+        assert_eq!(reg.admission_receipts().len(), 2);
+        let audit = reg
+            .audit_log()
+            .last()
+            .expect("duplicate rejection must emit an audit record");
+        assert_eq!(audit.event_code, event_codes::SER_ERR_DUPLICATE_NAME);
+        assert_eq!(audit.details["name"], "cap-existing");
     }
 
     // === Adversarial: signature verification ===

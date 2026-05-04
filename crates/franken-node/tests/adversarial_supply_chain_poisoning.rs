@@ -40,12 +40,21 @@ fn attacker_signing_key() -> SigningKey {
 }
 
 fn registry_with_trusted_key(verifying_key: VerifyingKey) -> SignedExtensionRegistry {
+    registry_with_trusted_key_and_cap(verifying_key, usize::MAX)
+}
+
+fn registry_with_trusted_key_and_cap(
+    verifying_key: VerifyingKey,
+    max_extensions: usize,
+) -> SignedExtensionRegistry {
     let mut key_ring = KeyRing::new();
     key_ring.add_key(verifying_key);
     let mut provenance_policy = VerificationPolicy::development_profile();
     provenance_policy.add_trusted_signer_key("pub-001", &verifying_key);
+    let mut config = RegistryConfig::default();
+    config.max_extensions = max_extensions;
     SignedExtensionRegistry::new(
-        RegistryConfig::default(),
+        config,
         AdmissionKernel {
             key_ring,
             provenance_policy,
@@ -266,6 +275,90 @@ fn adversarial_supply_chain_baseline_request_is_admitted() {
 
     assert!(result.success, "baseline request must be admitted");
     assert_eq!(registry.list(None).len(), 1);
+}
+
+#[test]
+fn adversarial_supply_chain_rejects_new_extension_when_registry_at_capacity() {
+    let signing_key = legitimate_signing_key();
+    let mut registry = registry_with_trusted_key_and_cap(signing_key.verifying_key(), 1);
+
+    let admitted = registry.register(
+        valid_request("supply-chain-existing", &signing_key, NOW_EPOCH),
+        &format!("{TRACE_PREFIX}-capacity-setup"),
+        NOW_EPOCH,
+    );
+    assert!(admitted.success, "setup request must be admitted");
+
+    let rejected = registry.register(
+        valid_request("supply-chain-overflow", &signing_key, NOW_EPOCH),
+        &format!("{TRACE_PREFIX}-capacity-overflow"),
+        NOW_EPOCH,
+    );
+
+    assert!(!rejected.success, "capacity overflow must fail closed");
+    assert_eq!(
+        rejected.error_code.as_deref(),
+        Some(event_codes::SER_ERR_REGISTRY_CAPACITY)
+    );
+    assert!(rejected.detail.contains("registry is at capacity"));
+    assert_eq!(
+        registry.list(None).len(),
+        1,
+        "capacity rejection must not grow the registry"
+    );
+    assert_eq!(registry.admission_receipts().len(), 2);
+    assert!(
+        registry
+            .admission_receipts()
+            .iter()
+            .all(|receipt| receipt.admitted)
+    );
+
+    let audit = registry
+        .audit_log()
+        .last()
+        .expect("capacity rejection must emit an audit record");
+    assert_eq!(audit.event_code, event_codes::SER_ERR_REGISTRY_CAPACITY);
+    assert_eq!(audit.details["name"], "supply-chain-overflow");
+    assert_eq!(audit.details["current"].as_u64(), Some(1));
+    assert_eq!(audit.details["max_allowed"].as_u64(), Some(1));
+}
+
+#[test]
+fn adversarial_supply_chain_duplicate_name_precedes_registry_capacity_error() {
+    let signing_key = legitimate_signing_key();
+    let mut registry = registry_with_trusted_key_and_cap(signing_key.verifying_key(), 1);
+
+    let admitted = registry.register(
+        valid_request("supply-chain-existing", &signing_key, NOW_EPOCH),
+        &format!("{TRACE_PREFIX}-duplicate-capacity-setup"),
+        NOW_EPOCH,
+    );
+    assert!(admitted.success, "setup request must be admitted");
+
+    let duplicate = registry.register(
+        valid_request("supply-chain-existing", &signing_key, NOW_EPOCH),
+        &format!("{TRACE_PREFIX}-duplicate-at-capacity"),
+        NOW_EPOCH,
+    );
+
+    assert!(!duplicate.success, "duplicate name must fail closed");
+    assert_eq!(
+        duplicate.error_code.as_deref(),
+        Some(event_codes::SER_ERR_DUPLICATE_NAME)
+    );
+    assert_eq!(
+        registry.list(None).len(),
+        1,
+        "duplicate rejection must not grow the registry"
+    );
+    assert_eq!(registry.admission_receipts().len(), 2);
+    let audit = registry
+        .audit_log()
+        .last()
+        .expect("duplicate rejection must emit an audit record");
+    assert_eq!(audit.event_code, event_codes::SER_ERR_DUPLICATE_NAME);
+    assert_eq!(audit.details["name"], "supply-chain-existing");
 }
 
 #[test]
