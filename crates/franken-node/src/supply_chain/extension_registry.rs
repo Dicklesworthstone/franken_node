@@ -60,6 +60,12 @@ const MAX_TAGS_COUNT: usize = 32;
 const MAX_TRACE_ID_LEN: usize = 256;
 const MAX_MANIFEST_BYTES: usize = crate::capacity_defaults::base::LARGE;
 const MAX_SIGNATURE_BYTES: usize = 64;
+const MAX_VERSION_LEN: usize = 128;
+const MAX_VERSION_COMPONENT_LEN: usize = 20;
+const VERSION_CONTENT_HASH_HEX_LEN: usize = 64;
+const MAX_REGISTERED_AT_LEN: usize = 64;
+const MAX_COMPATIBLE_WITH_COUNT: usize = 32;
+const MAX_COMPATIBLE_WITH_LEN: usize = 128;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
@@ -82,11 +88,38 @@ fn len_to_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VersionEntryValidationError {
+    field: String,
+    reason: &'static str,
+    detail: String,
+}
+
+fn version_entry_error(
+    field_prefix: &str,
+    field: &str,
+    reason: &'static str,
+    detail: String,
+) -> VersionEntryValidationError {
+    VersionEntryValidationError {
+        field: format!("{field_prefix}.{field}"),
+        reason,
+        detail,
+    }
+}
+
 fn parse_monotonic_version(version: &str) -> Option<[u64; 3]> {
-    let parts: Vec<_> = version.split('.').collect();
-    let [major, minor, patch] = parts.as_slice() else {
+    if version.is_empty() || version.len() > MAX_VERSION_LEN {
         return None;
-    };
+    }
+
+    let mut parts = version.split('.');
+    let major = parts.next()?;
+    let minor = parts.next()?;
+    let patch = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
 
     Some([
         parse_version_component(major)?,
@@ -96,10 +129,153 @@ fn parse_monotonic_version(version: &str) -> Option<[u64; 3]> {
 }
 
 fn parse_version_component(component: &str) -> Option<u64> {
-    if component.is_empty() || !component.bytes().all(|b| b.is_ascii_digit()) {
+    if component.is_empty()
+        || component.len() > MAX_VERSION_COMPONENT_LEN
+        || !component.bytes().all(|b| b.is_ascii_digit())
+    {
         return None;
     }
     component.parse().ok()
+}
+
+fn validate_version_entry(
+    entry: &VersionEntry,
+    field_prefix: &str,
+) -> Result<(), VersionEntryValidationError> {
+    if entry.version.is_empty() {
+        return Err(version_entry_error(
+            field_prefix,
+            "version",
+            "empty_version",
+            "Version entry must include a non-empty version".to_string(),
+        ));
+    }
+    if entry.version.len() > MAX_VERSION_LEN {
+        return Err(version_entry_error(
+            field_prefix,
+            "version",
+            "version_too_long",
+            format!(
+                "Version too long: {} characters (max: {})",
+                entry.version.len(),
+                MAX_VERSION_LEN
+            ),
+        ));
+    }
+    if parse_monotonic_version(&entry.version).is_none() {
+        return Err(version_entry_error(
+            field_prefix,
+            "version",
+            "invalid_semver",
+            "Version must use numeric major.minor.patch form".to_string(),
+        ));
+    }
+
+    if let Some(parent_version) = entry.parent_version.as_ref() {
+        if parent_version.is_empty() {
+            return Err(version_entry_error(
+                field_prefix,
+                "parent_version",
+                "empty_parent_version",
+                "Parent version must be non-empty when provided".to_string(),
+            ));
+        }
+        if parent_version.len() > MAX_VERSION_LEN {
+            return Err(version_entry_error(
+                field_prefix,
+                "parent_version",
+                "parent_version_too_long",
+                format!(
+                    "Parent version too long: {} characters (max: {})",
+                    parent_version.len(),
+                    MAX_VERSION_LEN
+                ),
+            ));
+        }
+        if parse_monotonic_version(parent_version).is_none() {
+            return Err(version_entry_error(
+                field_prefix,
+                "parent_version",
+                "invalid_parent_semver",
+                "Parent version must use numeric major.minor.patch form".to_string(),
+            ));
+        }
+    }
+
+    if entry.content_hash.len() != VERSION_CONTENT_HASH_HEX_LEN
+        || !entry
+            .content_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(version_entry_error(
+            field_prefix,
+            "content_hash",
+            "invalid_content_hash",
+            format!(
+                "Content hash must be exactly {} hex characters",
+                VERSION_CONTENT_HASH_HEX_LEN
+            ),
+        ));
+    }
+
+    if entry.registered_at.is_empty() {
+        return Err(version_entry_error(
+            field_prefix,
+            "registered_at",
+            "empty_registered_at",
+            "Version registration timestamp must be non-empty".to_string(),
+        ));
+    }
+    if entry.registered_at.len() > MAX_REGISTERED_AT_LEN {
+        return Err(version_entry_error(
+            field_prefix,
+            "registered_at",
+            "registered_at_too_long",
+            format!(
+                "Version registration timestamp too long: {} characters (max: {})",
+                entry.registered_at.len(),
+                MAX_REGISTERED_AT_LEN
+            ),
+        ));
+    }
+
+    if entry.compatible_with.len() > MAX_COMPATIBLE_WITH_COUNT {
+        return Err(version_entry_error(
+            field_prefix,
+            "compatible_with",
+            "compatible_with_too_many",
+            format!(
+                "Too many compatibility markers: {} (max: {})",
+                entry.compatible_with.len(),
+                MAX_COMPATIBLE_WITH_COUNT
+            ),
+        ));
+    }
+    for (index, marker) in entry.compatible_with.iter().enumerate() {
+        if marker.is_empty() {
+            return Err(version_entry_error(
+                field_prefix,
+                &format!("compatible_with[{index}]"),
+                "empty_compatibility_marker",
+                "Compatibility marker must be non-empty".to_string(),
+            ));
+        }
+        if marker.len() > MAX_COMPATIBLE_WITH_LEN {
+            return Err(version_entry_error(
+                field_prefix,
+                &format!("compatible_with[{index}]"),
+                "compatibility_marker_too_long",
+                format!(
+                    "Compatibility marker {index} too long: {} characters (max: {})",
+                    marker.len(),
+                    MAX_COMPATIBLE_WITH_LEN
+                ),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_monotonic_version(previous: &str, candidate: &str) -> Result<(), String> {
@@ -886,6 +1062,24 @@ impl SignedExtensionRegistry {
             };
         }
 
+        if let Err(error) = validate_version_entry(&request.initial_version, "initial_version") {
+            self.log(
+                event_codes::SER_ERR_INVALID_INPUT,
+                "",
+                trace_id,
+                serde_json::json!({
+                    "field": error.field,
+                    "reason": error.reason,
+                }),
+            );
+            return RegistryResult {
+                success: false,
+                extension_id: None,
+                error_code: Some(event_codes::SER_ERR_INVALID_INPUT.to_string()),
+                detail: error.detail,
+            };
+        }
+
         if request.signature.signature_bytes.len() != MAX_SIGNATURE_BYTES {
             self.log(
                 event_codes::SER_ERR_INVALID_SIGNATURE,
@@ -1140,6 +1334,24 @@ impl SignedExtensionRegistry {
                 };
             }
             Some(false) => {}
+        }
+
+        if let Err(error) = validate_version_entry(&version, "version") {
+            self.log(
+                event_codes::SER_ERR_INVALID_INPUT,
+                extension_id,
+                trace_id,
+                serde_json::json!({
+                    "field": error.field,
+                    "reason": error.reason,
+                }),
+            );
+            return RegistryResult {
+                success: false,
+                extension_id: Some(extension_id.to_string()),
+                error_code: Some(event_codes::SER_ERR_INVALID_INPUT.to_string()),
+                detail: error.detail,
+            };
         }
 
         if let Some(previous_version) = self

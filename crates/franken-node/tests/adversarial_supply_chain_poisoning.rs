@@ -249,6 +249,10 @@ fn assert_manifest_collection_too_large(
     ));
 }
 
+fn oversized_compatibility_markers() -> Vec<String> {
+    (0..33).map(|index| format!("runtime-{index}")).collect()
+}
+
 #[test]
 fn adversarial_supply_chain_baseline_request_is_admitted() {
     let signing_key = legitimate_signing_key();
@@ -306,6 +310,118 @@ fn adversarial_supply_chain_rejects_oversized_manifest_before_admission() {
         "manifest_bytes",
     );
     assert!(result.detail.contains("Manifest bytes too large"));
+}
+
+#[test]
+fn adversarial_supply_chain_rejects_oversized_initial_version_before_admission() {
+    let signing_key = legitimate_signing_key();
+    let mut registry = registry_with_trusted_key(signing_key.verifying_key());
+    let mut request = valid_request("supply-chain-target", &signing_key, NOW_EPOCH);
+    request.initial_version.version = "1".repeat(129);
+
+    let result = registry.register(
+        request,
+        &format!("{TRACE_PREFIX}-oversized-initial-version"),
+        NOW_EPOCH,
+    );
+
+    assert_rejected_before_admission(
+        &registry,
+        &result,
+        event_codes::SER_ERR_INVALID_INPUT,
+        "initial_version.version",
+    );
+    assert!(result.detail.contains("Version too long"));
+}
+
+#[test]
+fn adversarial_supply_chain_rejects_invalid_initial_version_hash_before_admission() {
+    let signing_key = legitimate_signing_key();
+    let mut registry = registry_with_trusted_key(signing_key.verifying_key());
+    let mut request = valid_request("supply-chain-target", &signing_key, NOW_EPOCH);
+    request.initial_version.content_hash = "g".repeat(64);
+
+    let result = registry.register(
+        request,
+        &format!("{TRACE_PREFIX}-invalid-initial-version-hash"),
+        NOW_EPOCH,
+    );
+
+    assert_rejected_before_admission(
+        &registry,
+        &result,
+        event_codes::SER_ERR_INVALID_INPUT,
+        "initial_version.content_hash",
+    );
+    assert!(result.detail.contains("64 hex characters"));
+}
+
+#[test]
+fn adversarial_supply_chain_rejects_oversized_initial_compatibility_before_admission() {
+    let signing_key = legitimate_signing_key();
+    let mut registry = registry_with_trusted_key(signing_key.verifying_key());
+    let mut request = valid_request("supply-chain-target", &signing_key, NOW_EPOCH);
+    request.initial_version.compatible_with = oversized_compatibility_markers();
+
+    let result = registry.register(
+        request,
+        &format!("{TRACE_PREFIX}-oversized-initial-compatibility"),
+        NOW_EPOCH,
+    );
+
+    assert_rejected_before_admission(
+        &registry,
+        &result,
+        event_codes::SER_ERR_INVALID_INPUT,
+        "initial_version.compatible_with",
+    );
+    assert!(result.detail.contains("Too many compatibility markers"));
+}
+
+#[test]
+fn adversarial_supply_chain_rejects_oversized_added_version_compatibility_without_lineage_growth() {
+    let signing_key = legitimate_signing_key();
+    let mut registry = registry_with_trusted_key(signing_key.verifying_key());
+
+    let result = registry.register(
+        valid_request("supply-chain-target", &signing_key, NOW_EPOCH),
+        &format!("{TRACE_PREFIX}-add-version-setup"),
+        NOW_EPOCH,
+    );
+    assert!(result.success, "baseline registration must succeed");
+    let extension_id = result.extension_id.expect("extension id");
+
+    let mut version = valid_version();
+    version.version = "1.2.4".to_string();
+    version.parent_version = Some("1.2.3".to_string());
+    version.compatible_with = oversized_compatibility_markers();
+
+    let result = registry.add_version(
+        &extension_id,
+        version,
+        &format!("{TRACE_PREFIX}-oversized-added-compatibility"),
+    );
+
+    assert!(!result.success, "oversized version metadata must fail");
+    assert_eq!(
+        result.error_code.as_deref(),
+        Some(event_codes::SER_ERR_INVALID_INPUT)
+    );
+    assert!(result.detail.contains("Too many compatibility markers"));
+    assert_eq!(
+        registry
+            .version_lineage(&extension_id)
+            .expect("extension remains registered")
+            .len(),
+        1,
+        "rejected version metadata must not grow lineage"
+    );
+    let audit = registry
+        .audit_log()
+        .last()
+        .expect("append rejection must emit an audit record");
+    assert_eq!(audit.event_code, event_codes::SER_ERR_INVALID_INPUT);
+    assert_eq!(audit.details["field"], "version.compatible_with");
 }
 
 #[test]
