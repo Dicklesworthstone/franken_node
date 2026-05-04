@@ -99,7 +99,7 @@ lazy_static = "1.5.0"
 [dev-dependencies]
 assert_cmd = "2.0.16"
 assert2 = "0.4.0"
-fsqlite = { path = "/dp/frankensqlite/crates/fsqlite", default-features = false, features = ["native"] }
+fsqlite = { path = "../../../frankensqlite/crates/fsqlite", default-features = false, features = ["native"] }
 frankenengine-verifier-sdk = { path = "../../sdk/verifier" }
 fastapi_rust = { package = "fastapi-rust", path = "/dp/fastapi_rust/crates/fastapi", default-features = false }
 loom = "0.7"

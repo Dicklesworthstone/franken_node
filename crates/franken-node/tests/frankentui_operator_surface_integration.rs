@@ -63,6 +63,7 @@ fn frankentui_dependency_is_workspace_relative_not_absolute() {
 #[test]
 fn fsqlite_crates_io_patches_are_workspace_relative_not_absolute() {
     let workspace_manifest = include_str!("../../../Cargo.toml");
+    let crate_manifest = include_str!("../Cargo.toml");
 
     for (package, relative_patch, absolute_patch) in [
         (
@@ -95,4 +96,13 @@ fn fsqlite_crates_io_patches_are_workspace_relative_not_absolute() {
             "{package} crates.io patch must not point at a machine-local /dp path"
         );
     }
+
+    assert!(
+        crate_manifest.contains(r#"fsqlite = { path = "../../../frankensqlite/crates/fsqlite""#),
+        "crate dev-dependency must consume the same sibling frankensqlite checkout"
+    );
+    assert!(
+        !crate_manifest.contains(r#"fsqlite = { path = "/dp/frankensqlite"#),
+        "crate fsqlite dev-dependency must not point at a machine-local /dp path"
+    );
 }
