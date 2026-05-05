@@ -388,6 +388,107 @@ pub mod support {
     pub const NODES_CAP: usize = base::STANDARD;
 }
 
+/// Shared bounded-input policy metadata and fail-closed validation helpers.
+pub mod bounded_input {
+    use std::fmt;
+
+    /// Stable default error code for surfaces that do not already own one.
+    pub const ERR_BOUNDED_INPUT_CAP_EXCEEDED: &str = "ERR_BOUNDED_INPUT_CAP_EXCEEDED";
+    /// Stable audit code for operator evidence when input is rejected pre-work.
+    pub const AUDIT_BOUNDED_INPUT_REJECTED: &str = "AUDIT_BOUNDED_INPUT_REJECTED";
+
+    /// Reviewable cap metadata for one attacker-controlled input dimension.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct BoundedInputPolicy {
+        pub surface: &'static str,
+        pub field: &'static str,
+        pub max_bytes: usize,
+        pub error_code: &'static str,
+        pub audit_code: &'static str,
+        pub rationale: &'static str,
+    }
+
+    impl BoundedInputPolicy {
+        pub const fn new(
+            surface: &'static str,
+            field: &'static str,
+            max_bytes: usize,
+            error_code: &'static str,
+            audit_code: &'static str,
+            rationale: &'static str,
+        ) -> Self {
+            Self {
+                surface,
+                field,
+                max_bytes,
+                error_code,
+                audit_code,
+                rationale,
+            }
+        }
+
+        pub fn validate_len(&self, actual_bytes: usize) -> Result<(), BoundedInputViolation> {
+            validate_len(
+                self.surface,
+                self.field,
+                actual_bytes,
+                self.max_bytes,
+                self.error_code,
+                self.audit_code,
+            )
+        }
+    }
+
+    /// Stable rejection payload for fail-closed bounded-input checks.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct BoundedInputViolation {
+        pub surface: &'static str,
+        pub field: String,
+        pub actual_bytes: usize,
+        pub max_bytes: usize,
+        pub error_code: &'static str,
+        pub audit_code: &'static str,
+    }
+
+    impl fmt::Display for BoundedInputViolation {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                f,
+                "{}: {}.{} has {} bytes, cap is {}; audit_code={}",
+                self.error_code,
+                self.surface,
+                self.field,
+                self.actual_bytes,
+                self.max_bytes,
+                self.audit_code
+            )
+        }
+    }
+
+    impl std::error::Error for BoundedInputViolation {}
+
+    pub fn validate_len(
+        surface: &'static str,
+        field: impl Into<String>,
+        actual_bytes: usize,
+        max_bytes: usize,
+        error_code: &'static str,
+        audit_code: &'static str,
+    ) -> Result<(), BoundedInputViolation> {
+        if actual_bytes > max_bytes {
+            return Err(BoundedInputViolation {
+                surface,
+                field: field.into(),
+                actual_bytes,
+                max_bytes,
+                error_code,
+                audit_code,
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Exact-name aliases that downstream migration beads can adopt verbatim.
 pub mod aliases {
     use super::{audit, collections, runtime, security, support, verifier};

@@ -21,6 +21,9 @@ use crate::capacity_defaults::aliases::MAX_CONTROL_EVENTS;
 use crate::push_bounded;
 use crate::{
     capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP},
+    capacity_defaults::bounded_input::{
+        AUDIT_BOUNDED_INPUT_REJECTED, BoundedInputPolicy, ERR_BOUNDED_INPUT_CAP_EXCEEDED,
+    },
     config::timeouts,
 };
 
@@ -50,6 +53,15 @@ const MAX_ZONE_ID_LEN: usize = 128;
 const MAX_ACTION_ID_LEN: usize = 128;
 const MAX_ACTION_RECORD_BYTES: usize = 2_048;
 const MAX_ACTION_RECORD_LINE_BYTES: usize = MAX_ACTION_RECORD_BYTES * 2;
+pub const ERR_FLEET_JSONL_LINE_TOO_LARGE: &str = ERR_BOUNDED_INPUT_CAP_EXCEEDED;
+pub const FLEET_ACTION_RECORD_LINE_POLICY: BoundedInputPolicy = BoundedInputPolicy::new(
+    "control_plane.fleet_transport",
+    "action_jsonl_line",
+    MAX_ACTION_RECORD_LINE_BYTES,
+    ERR_FLEET_JSONL_LINE_TOO_LARGE,
+    AUDIT_BOUNDED_INPUT_REJECTED,
+    "bound fleet action JSONL lines before serde allocates a full record",
+);
 const ACTION_LOG_COMPACTION_THRESHOLD_BYTES: u64 = 10 * 1024 * 1024;
 const ACTION_LOG_RETENTION_DAYS: i64 = 30;
 const LOCK_RETRY_BACKOFF_MILLIS: [u64; 5] = timeouts::FLEET_LOCK_RETRY_BACKOFF_MILLIS;
@@ -1849,7 +1861,8 @@ fn read_bounded_jsonl_line<R: BufRead>(
     line_number: usize,
     line: &mut Vec<u8>,
 ) -> Result<usize, FleetTransportError> {
-    let limit = u64::try_from(MAX_ACTION_RECORD_LINE_BYTES.saturating_add(1)).unwrap_or(u64::MAX);
+    let limit = u64::try_from(FLEET_ACTION_RECORD_LINE_POLICY.max_bytes.saturating_add(1))
+        .unwrap_or(u64::MAX);
     let bytes_read = reader.take(limit).read_until(b'\n', line).map_err(|err| {
         FleetTransportError::io(format!(
             "failed reading JSONL line {} from {}: {err}",
@@ -1857,11 +1870,12 @@ fn read_bounded_jsonl_line<R: BufRead>(
             path.display()
         ))
     })?;
-    if bytes_read > MAX_ACTION_RECORD_LINE_BYTES {
+    if let Err(violation) = FLEET_ACTION_RECORD_LINE_POLICY.validate_len(bytes_read) {
         return Err(FleetTransportError::serialization(format!(
-            "JSONL line {} in {} exceeds {MAX_ACTION_RECORD_LINE_BYTES} bytes",
+            "JSONL line {} in {} exceeds {} bytes; {violation}",
             line_number,
-            path.display()
+            path.display(),
+            FLEET_ACTION_RECORD_LINE_POLICY.max_bytes
         )));
     }
     Ok(bytes_read)

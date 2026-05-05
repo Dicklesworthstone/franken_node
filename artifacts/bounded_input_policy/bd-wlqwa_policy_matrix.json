@@ -1,0 +1,69 @@
+{
+  "schema": "franken-node/bounded-input-policy-matrix/v1",
+  "bead": "bd-wlqwa",
+  "audit_code": "AUDIT_BOUNDED_INPUT_REJECTED",
+  "policies": [
+    {
+      "surface": "control_plane.audience_token",
+      "policy_constant": "TOKEN_FIELD_INPUT_POLICY",
+      "cap": 4096,
+      "unit": "bytes",
+      "error_code": "ERR_ABT_TOKEN_TOO_LARGE",
+      "rationale": "reject overlong token fields before hash or signature work"
+    },
+    {
+      "surface": "control_plane.audience_token",
+      "policy_constant": "TOKEN_AUDIENCE_INPUT_POLICY",
+      "cap": 256,
+      "unit": "entries",
+      "error_code": "ERR_ABT_TOKEN_TOO_LARGE",
+      "rationale": "bound audience fanout before preimage construction"
+    },
+    {
+      "surface": "control_plane.audience_token",
+      "policy_constant": "TOKEN_PREIMAGE_INPUT_POLICY",
+      "cap": 65536,
+      "unit": "bytes",
+      "error_code": "ERR_ABT_TOKEN_TOO_LARGE",
+      "rationale": "bound canonical preimage growth before allocation"
+    },
+    {
+      "surface": "control_plane.audience_token",
+      "policy_constant": "TOKEN_SIGNATURE_INPUT_POLICY",
+      "cap": 136,
+      "unit": "bytes",
+      "error_code": "ERR_ABT_TOKEN_TOO_LARGE",
+      "rationale": "reject overlong signatures before hex decode and verification"
+    },
+    {
+      "surface": "extensions.artifact_contract",
+      "policy_constant": "ARTIFACT_TOKEN_INPUT_POLICY",
+      "cap": 256,
+      "unit": "bytes",
+      "error_code": "ERR_ARTIFACT_INVALID_CONTRACT",
+      "rationale": "reject overlong artifact identifiers before admission hashing or comparison"
+    },
+    {
+      "surface": "extensions.artifact_contract",
+      "policy_constant": "ARTIFACT_CAPABILITY_LIST_POLICY",
+      "cap": 16384,
+      "unit": "entries",
+      "error_code": "ERR_ARTIFACT_INVALID_CONTRACT",
+      "rationale": "bound capability list validation before duplicate scans and signature checks"
+    },
+    {
+      "surface": "control_plane.fleet_transport",
+      "policy_constant": "FLEET_ACTION_RECORD_LINE_POLICY",
+      "cap": 4096,
+      "unit": "bytes",
+      "error_code": "ERR_BOUNDED_INPUT_CAP_EXCEEDED",
+      "rationale": "bound fleet action JSONL lines before serde allocates a full record"
+    }
+  ],
+  "conformance_target": "extension_artifact_contract_conformance::bounded_input_policy_contract",
+  "acceptance_notes": [
+    "Each policy has a stable constant, error code, audit code, and rationale.",
+    "The contract test proves boundary acceptance and one-past-cap rejection.",
+    "The three representative surfaces share the capacity_defaults::bounded_input helper without compatibility shims."
+  ]
+}

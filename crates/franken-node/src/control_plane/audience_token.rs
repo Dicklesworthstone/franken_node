@@ -20,6 +20,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use ed25519_dalek::{Signature, Verifier};
 
+use crate::capacity_defaults::bounded_input::{
+    self, AUDIT_BOUNDED_INPUT_REJECTED, BoundedInputPolicy,
+};
 use crate::security::constant_time;
 
 // ---------------------------------------------------------------------------
@@ -80,6 +83,42 @@ pub const MAX_TOKEN_SIGNATURE_BYTES: usize = "ed25519:".len() + (64 * 2);
 /// Maximum tokens in a chain. `max_delegation_depth` is `u8`, so 256 covers the
 /// largest valid root-plus-delegates chain while bounding serialized input.
 pub const MAX_TOKENS: usize = crate::capacity_defaults::base::SMALL;
+/// Shared bounded-input policy for token string fields.
+pub const TOKEN_FIELD_INPUT_POLICY: BoundedInputPolicy = BoundedInputPolicy::new(
+    "control_plane.audience_token",
+    "token_field",
+    MAX_TOKEN_FIELD_BYTES,
+    ERR_ABT_TOKEN_TOO_LARGE,
+    AUDIT_BOUNDED_INPUT_REJECTED,
+    "reject overlong token fields before hash or signature work",
+);
+/// Shared bounded-input policy for audience vectors.
+pub const TOKEN_AUDIENCE_INPUT_POLICY: BoundedInputPolicy = BoundedInputPolicy::new(
+    "control_plane.audience_token",
+    "audience",
+    MAX_AUDIENCES_PER_TOKEN,
+    ERR_ABT_TOKEN_TOO_LARGE,
+    AUDIT_BOUNDED_INPUT_REJECTED,
+    "bound audience fanout before preimage construction",
+);
+/// Shared bounded-input policy for canonical signature preimages.
+pub const TOKEN_PREIMAGE_INPUT_POLICY: BoundedInputPolicy = BoundedInputPolicy::new(
+    "control_plane.audience_token",
+    "signature_preimage",
+    MAX_TOKEN_PREIMAGE_BYTES,
+    ERR_ABT_TOKEN_TOO_LARGE,
+    AUDIT_BOUNDED_INPUT_REJECTED,
+    "bound canonical preimage growth before allocation",
+);
+/// Shared bounded-input policy for serialized token signatures.
+pub const TOKEN_SIGNATURE_INPUT_POLICY: BoundedInputPolicy = BoundedInputPolicy::new(
+    "control_plane.audience_token",
+    "signature",
+    MAX_TOKEN_SIGNATURE_BYTES,
+    ERR_ABT_TOKEN_TOO_LARGE,
+    AUDIT_BOUNDED_INPUT_REJECTED,
+    "reject overlong signatures before hex decode and verification",
+);
 
 // ---------------------------------------------------------------------------
 // Types
@@ -350,20 +389,29 @@ fn validate_bounded_str(
             "{field} must not be empty"
         )));
     }
-    if value.len() > max_bytes {
-        return Err(TokenError::token_too_large(format!(
-            "{field} has {} bytes, cap is {max_bytes}",
-            value.len()
-        )));
+    if let Err(violation) = bounded_input::validate_len(
+        "control_plane.audience_token",
+        field,
+        value.len(),
+        max_bytes,
+        ERR_ABT_TOKEN_TOO_LARGE,
+        AUDIT_BOUNDED_INPUT_REJECTED,
+    ) {
+        return Err(TokenError::token_too_large(violation.to_string()));
     }
     Ok(())
 }
 
 fn validate_collection_len(field: &str, len: usize, cap: usize) -> Result<(), TokenError> {
-    if len > cap {
-        return Err(TokenError::token_too_large(format!(
-            "{field} has {len} entries, cap is {cap}"
-        )));
+    if let Err(violation) = bounded_input::validate_len(
+        "control_plane.audience_token",
+        field,
+        len,
+        cap,
+        ERR_ABT_TOKEN_TOO_LARGE,
+        AUDIT_BOUNDED_INPUT_REJECTED,
+    ) {
+        return Err(TokenError::token_too_large(violation.to_string()));
     }
     Ok(())
 }
@@ -372,11 +420,15 @@ fn add_budget(total: &mut usize, field: &str, amount: usize) -> Result<(), Token
     *total = total.checked_add(amount).ok_or_else(|| {
         TokenError::token_too_large(format!("{field} length overflows preimage budget"))
     })?;
-    if *total > MAX_TOKEN_PREIMAGE_BYTES {
-        return Err(TokenError::token_too_large(format!(
-            "{field} pushes signature preimage to {} bytes, cap is {MAX_TOKEN_PREIMAGE_BYTES}",
-            *total
-        )));
+    if let Err(violation) = bounded_input::validate_len(
+        "control_plane.audience_token",
+        field,
+        *total,
+        MAX_TOKEN_PREIMAGE_BYTES,
+        ERR_ABT_TOKEN_TOO_LARGE,
+        AUDIT_BOUNDED_INPUT_REJECTED,
+    ) {
+        return Err(TokenError::token_too_large(violation.to_string()));
     }
     Ok(())
 }

@@ -12,6 +12,8 @@ use frankenengine_node::extensions::artifact_contract::{
 };
 use serde_json::{Value, json};
 
+mod bounded_input_policy_contract;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequirementLevel {
     Must,

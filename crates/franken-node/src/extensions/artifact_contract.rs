@@ -10,6 +10,9 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::capacity_defaults::aliases::MAX_TRUSTED_SIGNERS;
+use crate::capacity_defaults::bounded_input::{
+    self, AUDIT_BOUNDED_INPUT_REJECTED, BoundedInputPolicy,
+};
 
 /// Report schema version for capability artifact vectors.
 pub const SCHEMA_VERSION: &str = "capability-artifact-v1.0";
@@ -19,6 +22,24 @@ const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 const DEFAULT_EXTENSION_VERSION: &str = "1.0.0";
 const MAX_TOKEN_BYTES: usize = crate::capacity_defaults::base::SMALL;
 const MAX_CAPABILITIES_PER_CONTRACT: usize = crate::capacity_defaults::base::STANDARD;
+/// Shared bounded-input policy for artifact and contract token fields.
+pub const ARTIFACT_TOKEN_INPUT_POLICY: BoundedInputPolicy = BoundedInputPolicy::new(
+    "extensions.artifact_contract",
+    "token_field",
+    MAX_TOKEN_BYTES,
+    error_codes::ERR_ARTIFACT_INVALID_CONTRACT,
+    AUDIT_BOUNDED_INPUT_REJECTED,
+    "reject overlong artifact identifiers before admission hashing or comparison",
+);
+/// Shared bounded-input policy for capability contract fanout.
+pub const ARTIFACT_CAPABILITY_LIST_POLICY: BoundedInputPolicy = BoundedInputPolicy::new(
+    "extensions.artifact_contract",
+    "capabilities",
+    MAX_CAPABILITIES_PER_CONTRACT,
+    error_codes::ERR_ARTIFACT_INVALID_CONTRACT,
+    AUDIT_BOUNDED_INPUT_REJECTED,
+    "bound capability list validation before duplicate scans and signature checks",
+);
 
 fn is_reserved_artifact_id(artifact_id: &str) -> bool {
     artifact_id.trim() == RESERVED_ARTIFACT_ID
@@ -41,8 +62,17 @@ fn invalid_token_detail(field_name: &str, value: &str) -> Option<String> {
     if !value.is_ascii() {
         return Some(format!("{field_name} contains non-ASCII characters"));
     }
-    if value.len() > MAX_TOKEN_BYTES {
-        return Some(format!("{field_name} exceeds {MAX_TOKEN_BYTES} bytes"));
+    if let Err(violation) = bounded_input::validate_len(
+        "extensions.artifact_contract",
+        field_name,
+        value.len(),
+        MAX_TOKEN_BYTES,
+        error_codes::ERR_ARTIFACT_INVALID_CONTRACT,
+        AUDIT_BOUNDED_INPUT_REJECTED,
+    ) {
+        return Some(format!(
+            "{field_name} exceeds {MAX_TOKEN_BYTES} bytes; {violation}"
+        ));
     }
     if value.bytes().any(|byte| byte.is_ascii_control()) {
         return Some(format!("{field_name} contains control characters"));
@@ -487,12 +517,12 @@ impl AdmissionGate {
             };
         }
 
-        if contract.capabilities.len() > MAX_CAPABILITIES_PER_CONTRACT {
+        if let Err(violation) =
+            ARTIFACT_CAPABILITY_LIST_POLICY.validate_len(contract.capabilities.len())
+        {
             return AdmissionOutcome::Denied {
                 reason: AdmissionDenialReason::InvalidContract {
-                    detail: format!(
-                        "capability list exceeds maximum of {MAX_CAPABILITIES_PER_CONTRACT}"
-                    ),
+                    detail: violation.to_string(),
                 },
                 event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
             };
