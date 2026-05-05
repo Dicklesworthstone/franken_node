@@ -56,6 +56,8 @@ const MAX_AUDIT_REPLAY_RESULTS: usize = MAX_AUDIT_LOG_ENTRIES + 1;
 
 use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_EVENTS, MAX_SCHEMA_VERSIONS};
 
+use std::sync::Arc;
+
 pub const MAX_STORE_ENTRIES: usize = crate::capacity_defaults::base::LARGE;
 pub const MAX_STORE_KEY_BYTES: usize = crate::capacity_defaults::base::MEDIUM;
 pub const MAX_STORE_VALUE_BYTES: usize = crate::capacity_defaults::base::XL * 8;
@@ -64,17 +66,22 @@ pub const MAX_STORE_VALUE_BYTES: usize = crate::capacity_defaults::base::XL * 8;
 /// control characters, newlines, and other characters that could be used
 /// for log injection attacks.
 fn sanitize_log_key(key: &str) -> String {
-    key.chars()
-        .map(|c| match c {
-            '\n' => "\\n".to_string(),
-            '\r' => "\\r".to_string(),
-            '\t' => "\\t".to_string(),
-            '\0' => "\\0".to_string(),
-            '\\' => "\\\\".to_string(),
-            c if c.is_control() => format!("\\u{{{:04x}}}", c as u32),
-            c => c.to_string(),
-        })
-        .collect()
+    let mut sanitized = String::with_capacity(key.len());
+    for c in key.chars() {
+        match c {
+            '\n' => sanitized.push_str("\\n"),
+            '\r' => sanitized.push_str("\\r"),
+            '\t' => sanitized.push_str("\\t"),
+            '\0' => sanitized.push_str("\\0"),
+            '\\' => sanitized.push_str("\\\\"),
+            c if c.is_control() => {
+                use std::fmt::Write as _;
+                let _ = write!(sanitized, "\\u{{{:04x}}}", c as u32);
+            }
+            c => sanitized.push(c),
+        }
+    }
+    sanitized
 }
 
 fn bounded_log_key(key: &str) -> String {
@@ -517,8 +524,8 @@ pub struct AdapterSummary {
 
 pub struct FrankensqliteAdapter {
     config: AdapterConfig,
-    store: BTreeMap<(PersistenceClass, String), Vec<u8>>,
-    audit_log: Vec<(String, Vec<u8>)>,
+    store: BTreeMap<(PersistenceClass, String), Arc<[u8]>>,
+    audit_log: Vec<(String, Arc<[u8]>)>,
     events: Vec<AdapterEvent>,
     write_count: usize,
     read_count: usize,
@@ -637,7 +644,8 @@ impl FrankensqliteAdapter {
             ));
         }
 
-        self.store.insert(store_key, value.to_vec());
+        let value_bytes = Arc::<[u8]>::from(value);
+        self.store.insert(store_key, Arc::clone(&value_bytes));
         let tier_writes = self.writes_by_tier.entry(tier).or_insert(0);
         *tier_writes = tier_writes.saturating_add(1);
         self.write_count = self.write_count.saturating_add(1);
@@ -656,7 +664,7 @@ impl FrankensqliteAdapter {
             }
             push_bounded(
                 &mut self.audit_log,
-                (key_string.clone(), value.to_vec()),
+                (key_string.clone(), value_bytes),
                 MAX_AUDIT_LOG_ENTRIES,
             );
         }
@@ -717,7 +725,7 @@ impl FrankensqliteAdapter {
         Ok(ReadResult {
             found: entry.is_some(),
             key: key.to_string(),
-            value: entry.cloned(),
+            value: entry.map(|value| value.as_ref().to_vec()),
             persistence_class: class,
             tier,
             cache_hit: tier == DurabilityTier::Tier3,
@@ -785,7 +793,8 @@ impl FrankensqliteAdapter {
         let log_snapshot: Vec<_> = self.audit_log.clone();
         for (key, expected) in &log_snapshot {
             let stored = self.store.get(&(PersistenceClass::AuditLog, key.clone()));
-            let matches = stored.is_some_and(|v| constant_time::ct_eq_bytes(v, expected));
+            let matches =
+                stored.is_some_and(|v| constant_time::ct_eq_bytes(v.as_ref(), expected.as_ref()));
             if !matches {
                 self.replay_mismatches = self.replay_mismatches.saturating_add(1);
                 self.emit_event(
@@ -1319,7 +1328,7 @@ mod tests {
         for idx in 0..MAX_STORE_ENTRIES {
             adapter.store.insert(
                 (PersistenceClass::Cache, format!("cache-{idx}")),
-                vec![0x11],
+                Arc::<[u8]>::from([0x11]),
             );
         }
 
@@ -1766,7 +1775,7 @@ mod tests {
             .store
             .get(&(PersistenceClass::AuditLog, "audit-1".to_string()))
             .expect("original audit entry should remain");
-        assert!(constant_time::ct_eq_bytes(stored, b"original"));
+        assert!(constant_time::ct_eq_bytes(stored.as_ref(), b"original"));
     }
 
     #[test]
@@ -1797,7 +1806,7 @@ mod tests {
             .expect("audit write should succeed");
         adapter.store.insert(
             (PersistenceClass::AuditLog, "audit-1".to_string()),
-            b"actual".to_vec(),
+            Arc::<[u8]>::from(b"actual".as_slice()),
         );
 
         let results = adapter.replay();
@@ -2524,7 +2533,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         // Tamper with one entry to create deliberate mismatch
         adapter.store.insert(
             (PersistenceClass::AuditLog, "medium_hash".to_string()),
-            vec![0xCC; 1000], // Different value, same length
+            Arc::<[u8]>::from(vec![0xCC; 1000]), // Different value, same length
         );
 
         // Replay should use constant-time comparison regardless of data size/patterns
@@ -2804,7 +2813,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         // Tamper with stored value to create hash mismatch
         adapter.store.insert(
             (PersistenceClass::AuditLog, "audit_entry".to_string()),
-            tampered_data.to_vec(),
+            Arc::<[u8]>::from(tampered_data.as_slice()),
         );
 
         // Replay should use ct_eq_bytes for constant-time comparison
