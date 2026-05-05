@@ -620,9 +620,12 @@ pub fn verify_signature(
 ///
 /// ```rust
 /// # #[cfg(feature = "test-support")] {
+/// use ed25519_dalek::{SigningKey, VerifyingKey};
 /// use frankenengine_verifier_sdk::capsule::{build_reference_capsule, replay, CapsuleVerdict};
 ///
-/// let result = replay(&build_reference_capsule(), "verifier://docs")?;
+/// let signing_key = SigningKey::from_bytes(&[1_u8; 32]);
+/// let verifying_key = VerifyingKey::from(&signing_key);
+/// let result = replay(&verifying_key, &build_reference_capsule(), "verifier://docs")?;
 /// assert_eq!(result.verdict, CapsuleVerdict::Pass);
 /// # }
 /// # Ok::<(), frankenengine_verifier_sdk::capsule::CapsuleError>(())
