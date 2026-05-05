@@ -420,17 +420,14 @@ fn e2e_divergence_gate_recover_rejects_tampered_authorization() -> Result<(), St
     let mut chars: Vec<char> = auth.authorization_hash.chars().collect();
     chars[0] = if chars[0] == '0' { '1' } else { '0' };
     auth.authorization_hash = chars.into_iter().collect();
-    assert!(!auth.verify(&auth_key(&auth)), "tampered auth must NOT verify");
+    assert!(
+        !auth.verify(&auth_key(&auth)),
+        "tampered auth must NOT verify"
+    );
     h.log_phase("auth_tampered", true, json!({}));
 
     let err = gate
-        .respond_recover(
-            &auth,
-            &auth_key(&auth),
-            100,
-            1_745_750_120,
-            "trace-rec-bad",
-        )
+        .respond_recover(&auth, &auth_key(&auth), 100, 1_745_750_120, "trace-rec-bad")
         .expect_err("tampered auth rejected");
     match err {
         DivergenceGateError::UnauthorizedRecovery { reason } => {

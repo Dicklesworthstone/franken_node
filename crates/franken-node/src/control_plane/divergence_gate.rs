@@ -328,7 +328,8 @@ impl OperatorAuthorizationKeyRecord {
 
 impl OperatorAuthorizationKeyResolver for OperatorAuthorizationKeyRecord {
     fn resolve_operator_key(&self, operator_id: &str, key_id: &str) -> Option<&[u8]> {
-        if constant_time_eq(&self.operator_id, operator_id) && constant_time_eq(&self.key_id, key_id)
+        if constant_time_eq(&self.operator_id, operator_id)
+            && constant_time_eq(&self.key_id, key_id)
         {
             Some(&self.verification_key)
         } else {
@@ -1724,7 +1725,8 @@ mod tests {
         let (local, remote) = forked_pair();
         gate.check_propagation(&local, &remote, 2000, "trace-1");
         let auth = recovery_auth(&gate, "operator-1", 9, 2001, "fix fork", b"test-key");
-        let result = gate.respond_recover(&auth, &auth_key(&auth, b"test-key"), 10, 2001, "trace-2");
+        let result =
+            gate.respond_recover(&auth, &auth_key(&auth, b"test-key"), 10, 2001, "trace-2");
         assert!(result.is_ok());
         let recovery = result.unwrap();
         assert!(recovery.success);
@@ -1740,7 +1742,8 @@ mod tests {
         gate.check_propagation(&local, &remote, 2000, "trace-1");
         gate.respond_alert(2001, "trace-2").unwrap();
         let auth = recovery_auth(&gate, "operator-1", 9, 2002, "fix fork", b"test-key");
-        let result = gate.respond_recover(&auth, &auth_key(&auth, b"test-key"), 10, 2002, "trace-3");
+        let result =
+            gate.respond_recover(&auth, &auth_key(&auth, b"test-key"), 10, 2002, "trace-3");
         assert!(result.is_ok());
         assert_eq!(gate.state(), GateState::Normal);
     }
@@ -1782,8 +1785,13 @@ mod tests {
         let (local, remote) = gapped_pair();
         other_gate.check_propagation(&local, &remote, 2001, "trace-other");
 
-        let result =
-            other_gate.respond_recover(&auth, &auth_key(&auth, b"test-key"), 10, 2002, "trace-wrong");
+        let result = other_gate.respond_recover(
+            &auth,
+            &auth_key(&auth, b"test-key"),
+            10,
+            2002,
+            "trace-wrong",
+        );
 
         assert!(matches!(
             result.unwrap_err(),
@@ -1797,7 +1805,8 @@ mod tests {
     fn test_recover_from_normal_fails() {
         let mut gate = ControlPlaneDivergenceGate::new("test");
         let auth = OperatorAuthorization::new("operator-1", 9, 2000, "fix", b"test-key");
-        let result = gate.respond_recover(&auth, &auth_key(&auth, b"test-key"), 10, 2000, "trace-1");
+        let result =
+            gate.respond_recover(&auth, &auth_key(&auth, b"test-key"), 10, 2000, "trace-1");
         assert!(result.is_err());
     }
 
@@ -1870,7 +1879,8 @@ mod tests {
         let (local, remote) = forked_pair();
         gate.check_propagation(&local, &remote, 2000, "trace-1");
         let auth = OperatorAuthorization::new("", 9, 2001, "fix", b"test-key");
-        let result = gate.respond_recover(&auth, &auth_key(&auth, b"test-key"), 10, 2001, "trace-2");
+        let result =
+            gate.respond_recover(&auth, &auth_key(&auth, b"test-key"), 10, 2001, "trace-2");
         assert!(result.is_err());
     }
 
@@ -1934,9 +1944,16 @@ mod tests {
 
     #[test]
     fn test_operator_authorization_rejects_key_id_substitution() {
-        let auth =
-            OperatorAuthorization::new_with_key_id("op-1", "operator-key-a", 50, 3000, "reason", b"test-key");
-        let matching = OperatorAuthorizationKeyRecord::new("op-1", "operator-key-a", b"test-key".to_vec());
+        let auth = OperatorAuthorization::new_with_key_id(
+            "op-1",
+            "operator-key-a",
+            50,
+            3000,
+            "reason",
+            b"test-key",
+        );
+        let matching =
+            OperatorAuthorizationKeyRecord::new("op-1", "operator-key-a", b"test-key".to_vec());
         let wrong_id_same_key =
             OperatorAuthorizationKeyRecord::new("op-1", "operator-key-b", b"test-key".to_vec());
         let same_id_wrong_key =
@@ -1975,7 +1992,8 @@ mod tests {
         let (local, remote) = forked_pair();
         gate.check_propagation(&local, &remote, 2000, "trace-1");
         let auth = OperatorAuthorization::new("operator-1", 9, 2001, "", b"test-key");
-        let result = gate.respond_recover(&auth, &auth_key(&auth, b"test-key"), 10, 2001, "trace-2");
+        let result =
+            gate.respond_recover(&auth, &auth_key(&auth, b"test-key"), 10, 2001, "trace-2");
         assert!(result.is_err());
     }
 
@@ -2777,14 +2795,13 @@ mod tests {
 
         // Replay attempt must fail: the nonce was consumed and the token is
         // bound to the previous active divergence.
-        let replay_result =
-            gate.respond_recover(
-                &valid_auth,
-                &auth_key(&valid_auth, b"test-key"),
-                45,
-                4005,
-                "replay-attempt",
-            );
+        let replay_result = gate.respond_recover(
+            &valid_auth,
+            &auth_key(&valid_auth, b"test-key"),
+            45,
+            4005,
+            "replay-attempt",
+        );
 
         assert!(
             matches!(
@@ -2901,8 +2918,13 @@ mod tests {
                     "reset for next test",
                     b"reset-key",
                 );
-                let _ =
-                    gate.respond_recover(&auth, &auth_key(&auth, b"reset-key"), 50, 5003, "reset-trace");
+                let _ = gate.respond_recover(
+                    &auth,
+                    &auth_key(&auth, b"reset-key"),
+                    50,
+                    5003,
+                    "reset-trace",
+                );
             }
         }
 

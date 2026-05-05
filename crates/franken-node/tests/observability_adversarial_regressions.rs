@@ -38,6 +38,20 @@ fn quarantine_decision(
 }
 
 #[test]
+fn quarantine_controller_debug_redacts_hmac_signing_key() {
+    let signing_key = "super-secret-quarantine-hmac-key";
+    let controller = QuarantineController::new(QuarantineThresholdPolicy::default(), signing_key)
+        .expect("controller");
+
+    let debug = format!("{controller:?}");
+
+    assert!(debug.contains("QuarantineController"));
+    assert!(debug.contains("signing_key"));
+    assert!(debug.contains("<redacted>"));
+    assert!(!debug.contains(signing_key));
+}
+
+#[test]
 fn observability_adversarial_regressions_locator_injection_attacks_fail_closed() {
     for locator in malicious_replay_bundle_locators() {
         let entry = obs_entry("obs-locator-injection", DecisionKind::Quarantine);
