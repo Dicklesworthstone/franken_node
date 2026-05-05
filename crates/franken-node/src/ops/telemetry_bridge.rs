@@ -1716,7 +1716,10 @@ fn assert_persistence_loop_batches_ready_envelopes_impl() {
     let mut db = adapter_ref.lock().expect("adapter lock");
     for bridge_seq in 1..=event_count {
         let key = TelemetryBridge::persistence_key(bridge_seq);
-        let result = db.read(PersistenceClass::AuditLog, &key);
+        let caller = CallerContext::service("observability::telemetry_bridge_test", &key);
+        let result = db
+            .read(&caller, PersistenceClass::AuditLog, &key)
+            .expect("batched persistence read should succeed");
         assert!(result.found, "batched persistence missing key {key}");
     }
 }
