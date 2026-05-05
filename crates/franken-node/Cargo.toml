@@ -144,6 +144,10 @@ name = "validation_planner"
 path = "tests/validation_planner.rs"
 
 [[test]]
+name = "validation_proof_cache"
+path = "tests/validation_proof_cache.rs"
+
+[[test]]
 name = "validation_readiness"
 path = "tests/validation_readiness.rs"
 

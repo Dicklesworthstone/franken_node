@@ -8,6 +8,7 @@ pub mod tokio_drift_checker;
 pub mod validation_broker;
 pub mod validation_closeout;
 pub mod validation_planner;
+pub mod validation_proof_cache;
 pub mod validation_readiness;
 
 #[cfg(test)]
