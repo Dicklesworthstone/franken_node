@@ -636,7 +636,7 @@ impl Config {
         &mut self,
         overrides: &ConfigOverrides,
         stage: MergeStage,
-        mut decisions: &mut Vec<MergeDecision>,
+        decisions: &mut Vec<MergeDecision>,
     ) {
         #[allow(non_snake_case)]
         let mut MAX_MERGE_DECISIONS = self.security.max_merge_decisions;
@@ -647,7 +647,7 @@ impl Config {
             self.security.max_merge_decisions = value;
             MAX_MERGE_DECISIONS = value;
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(stage.clone(), "security.max_merge_decisions", value),
                 MAX_MERGE_DECISIONS,
             );
@@ -657,7 +657,7 @@ impl Config {
             if let Some(value) = section.mode {
                 self.compatibility.mode = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "compatibility.mode", value.to_string()),
                     MAX_MERGE_DECISIONS,
                 );
@@ -665,7 +665,7 @@ impl Config {
             if let Some(value) = section.emit_divergence_receipts {
                 self.compatibility.emit_divergence_receipts = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(
                         stage.clone(),
                         "compatibility.emit_divergence_receipts",
@@ -677,7 +677,7 @@ impl Config {
             if let Some(value) = section.default_receipt_ttl_secs {
                 self.compatibility.default_receipt_ttl_secs = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(
                         stage.clone(),
                         "compatibility.default_receipt_ttl_secs",
@@ -689,7 +689,7 @@ impl Config {
             if let Some(value) = section.gate_ttl_secs {
                 self.compatibility.gate_ttl_secs = Some(value);
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "compatibility.gate_ttl_secs", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -700,7 +700,7 @@ impl Config {
             if let Some(value) = section.autofix {
                 self.migration.autofix = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "migration.autofix", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -708,7 +708,7 @@ impl Config {
             if let Some(value) = section.require_lockstep_validation {
                 self.migration.require_lockstep_validation = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(
                         stage.clone(),
                         "migration.require_lockstep_validation",
@@ -720,7 +720,7 @@ impl Config {
             if let Some(value) = section.verification_threshold {
                 self.migration.verification_threshold = Some(value);
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "migration.verification_threshold", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -728,7 +728,7 @@ impl Config {
             if let Some(value) = section.confidence_level {
                 self.migration.confidence_level = Some(value);
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "migration.confidence_level", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -736,7 +736,7 @@ impl Config {
             if let Some(value) = section.determinism_rate {
                 self.migration.determinism_rate = Some(value);
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "migration.determinism_rate", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -747,7 +747,7 @@ impl Config {
             if let Some(value) = section.risky_requires_fresh_revocation {
                 self.trust.risky_requires_fresh_revocation = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(
                         stage.clone(),
                         "trust.risky_requires_fresh_revocation",
@@ -759,7 +759,7 @@ impl Config {
             if let Some(value) = section.dangerous_requires_fresh_revocation {
                 self.trust.dangerous_requires_fresh_revocation = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(
                         stage.clone(),
                         "trust.dangerous_requires_fresh_revocation",
@@ -771,7 +771,7 @@ impl Config {
             if let Some(value) = section.quarantine_on_high_risk {
                 self.trust.quarantine_on_high_risk = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "trust.quarantine_on_high_risk", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -779,7 +779,7 @@ impl Config {
             if let Some(value) = section.card_cache_ttl_secs {
                 self.trust.card_cache_ttl_secs = Some(value);
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "trust.card_cache_ttl_secs", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -787,7 +787,7 @@ impl Config {
             if let Some(value) = section.freshness_window_secs {
                 self.trust.freshness_window_secs = Some(value);
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "trust.freshness_window_secs", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -795,7 +795,7 @@ impl Config {
             if let Some(value) = section.min_trust_score {
                 self.trust.min_trust_score = Some(value);
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "trust.min_trust_score", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -803,7 +803,7 @@ impl Config {
             if let Some(value) = section.decay_factor {
                 self.trust.decay_factor = Some(value);
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "trust.decay_factor", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -811,7 +811,7 @@ impl Config {
             if let Some(value) = &section.registry_signing_key {
                 self.trust.registry_signing_key = Some(value.clone());
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "trust.registry_signing_key", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -822,7 +822,7 @@ impl Config {
             if let Some(value) = section.persist_high_severity {
                 self.replay.persist_high_severity = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "replay.persist_high_severity", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -830,7 +830,7 @@ impl Config {
             if let Some(value) = &section.bundle_version {
                 self.replay.bundle_version = value.clone();
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "replay.bundle_version", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -838,7 +838,7 @@ impl Config {
             if let Some(value) = section.max_replay_capsule_freshness_secs {
                 self.replay.max_replay_capsule_freshness_secs = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(
                         stage.clone(),
                         "replay.max_replay_capsule_freshness_secs",
@@ -850,7 +850,7 @@ impl Config {
             if let Some(value) = section.capsule_freshness_secs {
                 self.replay.capsule_freshness_secs = Some(value);
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "replay.capsule_freshness_secs", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -861,7 +861,7 @@ impl Config {
             if let Some(value) = section.require_signatures {
                 self.registry.require_signatures = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "registry.require_signatures", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -869,7 +869,7 @@ impl Config {
             if let Some(value) = section.require_provenance {
                 self.registry.require_provenance = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "registry.require_provenance", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -877,7 +877,7 @@ impl Config {
             if let Some(value) = section.minimum_assurance_level {
                 self.registry.minimum_assurance_level = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "registry.minimum_assurance_level", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -885,7 +885,7 @@ impl Config {
             if let Some(value) = &section.builder_identity {
                 self.registry.builder_identity = Some(value.clone());
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "registry.builder_identity", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -896,7 +896,7 @@ impl Config {
             if let Some(value) = &section.state_dir {
                 self.fleet.state_dir = Some(value.clone());
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "fleet.state_dir", value.display()),
                     MAX_MERGE_DECISIONS,
                 );
@@ -904,7 +904,7 @@ impl Config {
             if let Some(value) = &section.node_id {
                 self.fleet.node_id = Some(value.clone());
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "fleet.node_id", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -912,7 +912,7 @@ impl Config {
             if let Some(value) = section.poll_interval_seconds {
                 self.fleet.poll_interval_seconds = Some(value);
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "fleet.poll_interval_seconds", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -920,7 +920,7 @@ impl Config {
             if let Some(value) = section.convergence_timeout_seconds {
                 self.fleet.convergence_timeout_seconds = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "fleet.convergence_timeout_seconds", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -928,7 +928,7 @@ impl Config {
             if let Some(value) = section.barrier_timeout_ms {
                 self.fleet.barrier_timeout_ms = Some(value);
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "fleet.barrier_timeout_ms", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -939,7 +939,7 @@ impl Config {
             if let Some(value) = &section.namespace {
                 self.observability.namespace = value.clone();
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "observability.namespace", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -947,7 +947,7 @@ impl Config {
             if let Some(value) = section.emit_structured_audit_events {
                 self.observability.emit_structured_audit_events = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(
                         stage.clone(),
                         "observability.emit_structured_audit_events",
@@ -959,7 +959,7 @@ impl Config {
             if let Some(value) = section.max_receipts {
                 self.observability.max_receipts = Some(value);
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "observability.max_receipts", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -971,7 +971,7 @@ impl Config {
         {
             self.remote.idempotency_ttl_secs = value;
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(stage.clone(), "remote.idempotency_ttl_secs", value),
                 MAX_MERGE_DECISIONS,
             );
@@ -982,7 +982,7 @@ impl Config {
         {
             self.security.max_degraded_duration_secs = value;
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(stage.clone(), "security.max_degraded_duration_secs", value),
                 MAX_MERGE_DECISIONS,
             );
@@ -992,7 +992,7 @@ impl Config {
         {
             self.security.decision_receipt_signing_key_path = Some(value.clone());
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(
                     stage.clone(),
                     "security.decision_receipt_signing_key_path",
@@ -1006,7 +1006,7 @@ impl Config {
         {
             self.security.authorized_api_keys = value.clone();
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(
                     stage.clone(),
                     "security.authorized_api_keys",
@@ -1021,7 +1021,7 @@ impl Config {
         {
             self.engine.binary_path = Some(value.clone());
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(stage.clone(), "engine.binary_path", value.display()),
                 MAX_MERGE_DECISIONS,
             );
@@ -1031,7 +1031,7 @@ impl Config {
             if let Some(value) = section.preferred {
                 self.runtime.preferred = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "runtime.preferred", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -1039,7 +1039,7 @@ impl Config {
             if let Some(value) = section.remote_max_in_flight {
                 self.runtime.remote_max_in_flight = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "runtime.remote_max_in_flight", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -1047,7 +1047,7 @@ impl Config {
             if let Some(value) = section.bulkhead_retry_after_ms {
                 self.runtime.bulkhead_retry_after_ms = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "runtime.bulkhead_retry_after_ms", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -1058,7 +1058,7 @@ impl Config {
                         if let Some(value) = lane_overrides.max_concurrent {
                             target.max_concurrent = value;
                             push_bounded(
-                                &mut decisions,
+                                decisions,
                                 MergeDecision::new(
                                     stage.clone(),
                                     format!("runtime.lanes.{lane_name}.max_concurrent").as_str(),
@@ -1070,7 +1070,7 @@ impl Config {
                         if let Some(value) = lane_overrides.priority_weight {
                             target.priority_weight = value;
                             push_bounded(
-                                &mut decisions,
+                                decisions,
                                 MergeDecision::new(
                                     stage.clone(),
                                     format!("runtime.lanes.{lane_name}.priority_weight").as_str(),
@@ -1082,7 +1082,7 @@ impl Config {
                         if let Some(value) = lane_overrides.queue_limit {
                             target.queue_limit = value;
                             push_bounded(
-                                &mut decisions,
+                                decisions,
                                 MergeDecision::new(
                                     stage.clone(),
                                     format!("runtime.lanes.{lane_name}.queue_limit").as_str(),
@@ -1094,7 +1094,7 @@ impl Config {
                         if let Some(value) = lane_overrides.enqueue_timeout_ms {
                             target.enqueue_timeout_ms = value;
                             push_bounded(
-                                &mut decisions,
+                                decisions,
                                 MergeDecision::new(
                                     stage.clone(),
                                     format!("runtime.lanes.{lane_name}.enqueue_timeout_ms")
@@ -1107,7 +1107,7 @@ impl Config {
                         if let Some(value) = lane_overrides.overflow_policy {
                             target.overflow_policy = value;
                             push_bounded(
-                                &mut decisions,
+                                decisions,
                                 MergeDecision::new(
                                     stage.clone(),
                                     format!("runtime.lanes.{lane_name}.overflow_policy").as_str(),
@@ -1122,7 +1122,7 @@ impl Config {
             if let Some(value) = section.drain_timeout_ms {
                 self.runtime.drain_timeout_ms = Some(value);
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "runtime.drain_timeout_ms", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -1133,7 +1133,7 @@ impl Config {
             if let Some(value) = section.max_failure_rate {
                 self.thresholds.max_failure_rate = Some(value);
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "thresholds.max_failure_rate", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -1141,7 +1141,7 @@ impl Config {
             if let Some(value) = section.min_quality_score {
                 self.thresholds.min_quality_score = Some(value);
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "thresholds.min_quality_score", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -1149,7 +1149,7 @@ impl Config {
             if let Some(value) = section.max_variance_pct {
                 self.thresholds.max_variance_pct = Some(value);
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "thresholds.max_variance_pct", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -1157,7 +1157,7 @@ impl Config {
             if let Some(value) = section.regression_threshold_pct {
                 self.thresholds.regression_threshold_pct = Some(value);
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "thresholds.regression_threshold_pct", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -1165,7 +1165,7 @@ impl Config {
             if let Some(value) = section.min_resilience_score {
                 self.thresholds.min_resilience_score = Some(value);
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "thresholds.min_resilience_score", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -1176,7 +1176,7 @@ impl Config {
             if let Some(value) = &section.summary_path {
                 self.benchmark.summary_path = value.clone();
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "benchmark.summary_path", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -1184,7 +1184,7 @@ impl Config {
             if let Some(value) = section.min_aggregate_score {
                 self.benchmark.min_aggregate_score = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "benchmark.min_aggregate_score", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -1192,7 +1192,7 @@ impl Config {
             if let Some(value) = section.max_latency_ms {
                 self.benchmark.max_latency_ms = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "benchmark.max_latency_ms", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -1200,7 +1200,7 @@ impl Config {
             if let Some(value) = section.min_throughput_ops {
                 self.benchmark.min_throughput_ops = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "benchmark.min_throughput_ops", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -1211,7 +1211,7 @@ impl Config {
             if let Some(value) = section.max_claims_per_request {
                 self.verifier.max_claims_per_request = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "verifier.max_claims_per_request", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -1219,7 +1219,7 @@ impl Config {
             if let Some(value) = section.max_capsule_count {
                 self.verifier.max_capsule_count = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "verifier.max_capsule_count", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -1227,7 +1227,7 @@ impl Config {
             if let Some(value) = section.max_chain_depth {
                 self.verifier.max_chain_depth = value;
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(stage.clone(), "verifier.max_chain_depth", value),
                     MAX_MERGE_DECISIONS,
                 );
@@ -1238,7 +1238,7 @@ impl Config {
     fn apply_env_overrides(
         &mut self,
         env_lookup: &impl Fn(&str) -> Option<String>,
-        mut decisions: &mut Vec<MergeDecision>,
+        decisions: &mut Vec<MergeDecision>,
     ) -> Result<(), ConfigError> {
         #[allow(non_snake_case)]
         let mut MAX_MERGE_DECISIONS = self.security.max_merge_decisions;
@@ -1248,7 +1248,7 @@ impl Config {
             self.security.max_merge_decisions = parsed;
             MAX_MERGE_DECISIONS = parsed;
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "security.max_merge_decisions", parsed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1273,7 +1273,7 @@ impl Config {
                     })?;
             self.compatibility.mode = parsed;
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "compatibility.mode", parsed.to_string()),
                 MAX_MERGE_DECISIONS,
             );
@@ -1283,7 +1283,7 @@ impl Config {
                 parse_env_u64("FRANKEN_NODE_COMPATIBILITY_DEFAULT_RECEIPT_TTL_SECS", &raw)?;
             self.compatibility.default_receipt_ttl_secs = parsed;
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(
                     MergeStage::Env,
                     "compatibility.default_receipt_ttl_secs",
@@ -1296,7 +1296,7 @@ impl Config {
             let parsed = parse_env_u64("FRANKEN_NODE_COMPATIBILITY_GATE_TTL_SECS", &raw)?;
             self.compatibility.gate_ttl_secs = Some(parsed);
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "compatibility.gate_ttl_secs", parsed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1371,7 +1371,7 @@ impl Config {
             let parsed = parse_env_u64("FRANKEN_NODE_TRUST_CARD_CACHE_TTL_SECS", &raw)?;
             self.trust.card_cache_ttl_secs = Some(parsed);
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "trust.card_cache_ttl_secs", parsed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1380,7 +1380,7 @@ impl Config {
             let parsed = parse_env_u64("FRANKEN_NODE_TRUST_FRESHNESS_WINDOW_SECS", &raw)?;
             self.trust.freshness_window_secs = Some(parsed);
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "trust.freshness_window_secs", parsed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1404,7 +1404,7 @@ impl Config {
         if let Some(value) = env_lookup("FRANKEN_NODE_TRUST_REGISTRY_SIGNING_KEY") {
             self.trust.registry_signing_key = Some(value.clone());
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "trust.registry_signing_key", value),
                 MAX_MERGE_DECISIONS,
             );
@@ -1421,7 +1421,7 @@ impl Config {
         if let Some(value) = env_lookup("FRANKEN_NODE_REPLAY_BUNDLE_VERSION") {
             self.replay.bundle_version = value.clone();
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "replay.bundle_version", value),
                 MAX_MERGE_DECISIONS,
             );
@@ -1433,7 +1433,7 @@ impl Config {
             )?;
             self.replay.max_replay_capsule_freshness_secs = parsed;
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(
                     MergeStage::Env,
                     "replay.max_replay_capsule_freshness_secs",
@@ -1446,7 +1446,7 @@ impl Config {
             let parsed = parse_env_u64("FRANKEN_NODE_REPLAY_CAPSULE_FRESHNESS_SECS", &raw)?;
             self.replay.capsule_freshness_secs = Some(parsed);
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "replay.capsule_freshness_secs", parsed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1473,7 +1473,7 @@ impl Config {
             let parsed = parse_env_u8("FRANKEN_NODE_REGISTRY_MINIMUM_ASSURANCE_LEVEL", &raw)?;
             self.registry.minimum_assurance_level = parsed;
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "registry.minimum_assurance_level", parsed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1489,7 +1489,7 @@ impl Config {
             }
             self.registry.builder_identity = Some(trimmed.to_string());
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "registry.builder_identity", trimmed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1507,7 +1507,7 @@ impl Config {
             let parsed = PathBuf::from(trimmed);
             self.fleet.state_dir = Some(parsed.clone());
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "fleet.state_dir", parsed.display()),
                 MAX_MERGE_DECISIONS,
             );
@@ -1523,7 +1523,7 @@ impl Config {
             }
             self.fleet.node_id = Some(trimmed.to_string());
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "fleet.node_id", trimmed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1532,7 +1532,7 @@ impl Config {
             let parsed = parse_env_u64("FRANKEN_NODE_FLEET_POLL_INTERVAL_SECONDS", &raw)?;
             self.fleet.poll_interval_seconds = Some(parsed);
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "fleet.poll_interval_seconds", parsed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1541,7 +1541,7 @@ impl Config {
             let parsed = parse_env_u64("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", &raw)?;
             self.fleet.convergence_timeout_seconds = parsed;
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "fleet.convergence_timeout_seconds", parsed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1550,7 +1550,7 @@ impl Config {
             let parsed = parse_env_u64("FRANKEN_NODE_FLEET_BARRIER_TIMEOUT_MS", &raw)?;
             self.fleet.barrier_timeout_ms = Some(parsed);
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "fleet.barrier_timeout_ms", parsed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1559,7 +1559,7 @@ impl Config {
         if let Some(value) = env_lookup("FRANKEN_NODE_OBSERVABILITY_NAMESPACE") {
             self.observability.namespace = value.clone();
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "observability.namespace", value),
                 MAX_MERGE_DECISIONS,
             );
@@ -1576,7 +1576,7 @@ impl Config {
             let parsed = parse_env_usize("FRANKEN_NODE_OBSERVABILITY_MAX_RECEIPTS", &raw)?;
             self.observability.max_receipts = Some(parsed);
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "observability.max_receipts", parsed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1585,7 +1585,7 @@ impl Config {
             let parsed = parse_env_u64("FRANKEN_NODE_REMOTE_IDEMPOTENCY_TTL_SECS", &raw)?;
             self.remote.idempotency_ttl_secs = parsed;
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "remote.idempotency_ttl_secs", parsed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1594,7 +1594,7 @@ impl Config {
             let parsed = parse_env_u64("FRANKEN_NODE_SECURITY_MAX_DEGRADED_DURATION_SECS", &raw)?;
             self.security.max_degraded_duration_secs = parsed;
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(
                     MergeStage::Env,
                     "security.max_degraded_duration_secs",
@@ -1609,7 +1609,7 @@ impl Config {
                 let path = PathBuf::from(trimmed);
                 self.security.decision_receipt_signing_key_path = Some(path.clone());
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(
                         MergeStage::Env,
                         "security.decision_receipt_signing_key_path",
@@ -1626,7 +1626,7 @@ impl Config {
                 let path = PathBuf::from(trimmed);
                 self.engine.binary_path = Some(path.clone());
                 push_bounded(
-                    &mut decisions,
+                    decisions,
                     MergeDecision::new(MergeStage::Env, "engine.binary_path", path.display()),
                     MAX_MERGE_DECISIONS,
                 );
@@ -1637,7 +1637,7 @@ impl Config {
             let parsed = parse_env_usize("FRANKEN_NODE_RUNTIME_REMOTE_MAX_IN_FLIGHT", &raw)?;
             self.runtime.remote_max_in_flight = parsed;
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "runtime.remote_max_in_flight", parsed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1646,7 +1646,7 @@ impl Config {
             let parsed = parse_env_u64("FRANKEN_NODE_RUNTIME_BULKHEAD_RETRY_AFTER_MS", &raw)?;
             self.runtime.bulkhead_retry_after_ms = parsed;
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "runtime.bulkhead_retry_after_ms", parsed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1661,7 +1661,7 @@ impl Config {
                     })?;
             self.runtime.preferred = parsed;
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "runtime.preferred", parsed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1670,7 +1670,7 @@ impl Config {
             let parsed = parse_env_u64("FRANKEN_NODE_RUNTIME_DRAIN_TIMEOUT_MS", &raw)?;
             self.runtime.drain_timeout_ms = Some(parsed);
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "runtime.drain_timeout_ms", parsed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1728,7 +1728,7 @@ impl Config {
             }
             self.benchmark.summary_path = trimmed.to_string();
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "benchmark.summary_path", trimmed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1737,7 +1737,7 @@ impl Config {
             let parsed = parse_env_u32("FRANKEN_NODE_BENCHMARK_MIN_AGGREGATE_SCORE", &raw)?;
             self.benchmark.min_aggregate_score = parsed;
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "benchmark.min_aggregate_score", parsed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1746,7 +1746,7 @@ impl Config {
             let parsed = parse_env_f64("FRANKEN_NODE_BENCHMARK_MAX_LATENCY_MS", &raw)?;
             self.benchmark.max_latency_ms = parsed;
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "benchmark.max_latency_ms", parsed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1755,7 +1755,7 @@ impl Config {
             let parsed = parse_env_u64("FRANKEN_NODE_BENCHMARK_MIN_THROUGHPUT_OPS", &raw)?;
             self.benchmark.min_throughput_ops = parsed;
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "benchmark.min_throughput_ops", parsed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1765,7 +1765,7 @@ impl Config {
             let parsed = parse_env_usize("FRANKEN_NODE_VERIFIER_MAX_CLAIMS_PER_REQUEST", &raw)?;
             self.verifier.max_claims_per_request = parsed;
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "verifier.max_claims_per_request", parsed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1774,7 +1774,7 @@ impl Config {
             let parsed = parse_env_usize("FRANKEN_NODE_VERIFIER_MAX_CAPSULE_COUNT", &raw)?;
             self.verifier.max_capsule_count = parsed;
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "verifier.max_capsule_count", parsed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1783,7 +1783,7 @@ impl Config {
             let parsed = parse_env_usize("FRANKEN_NODE_VERIFIER_MAX_CHAIN_DEPTH", &raw)?;
             self.verifier.max_chain_depth = parsed;
             push_bounded(
-                &mut decisions,
+                decisions,
                 MergeDecision::new(MergeStage::Env, "verifier.max_chain_depth", parsed),
                 MAX_MERGE_DECISIONS,
             );
@@ -1995,14 +1995,14 @@ fn apply_env_field_bool(
     env_lookup: &impl Fn(&str) -> Option<String>,
     slot: &mut bool,
     field: &str,
-    mut decisions: &mut Vec<MergeDecision>,
+    decisions: &mut Vec<MergeDecision>,
     merge_decision_cap: usize,
 ) -> Result<(), ConfigError> {
     if let Some(raw) = env_lookup(key) {
         let parsed = parse_env_bool(key, &raw)?;
         *slot = parsed;
         push_bounded(
-            &mut decisions,
+            decisions,
             MergeDecision::new(MergeStage::Env, field, parsed),
             merge_decision_cap,
         );
@@ -2087,14 +2087,14 @@ fn apply_env_field_opt_f64(
     env_lookup: &impl Fn(&str) -> Option<String>,
     slot: &mut Option<f64>,
     field: &str,
-    mut decisions: &mut Vec<MergeDecision>,
+    decisions: &mut Vec<MergeDecision>,
     merge_decision_cap: usize,
 ) -> Result<(), ConfigError> {
     if let Some(raw) = env_lookup(key) {
         let parsed = parse_env_f64(key, &raw)?;
         *slot = Some(parsed);
         push_bounded(
-            &mut decisions,
+            decisions,
             MergeDecision::new(MergeStage::Env, field, parsed),
             merge_decision_cap,
         );
