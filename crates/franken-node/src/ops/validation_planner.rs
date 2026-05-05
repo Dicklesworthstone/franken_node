@@ -93,6 +93,7 @@ impl PlannerInput {
 #[serde(rename_all = "snake_case")]
 pub enum PlannedCommandKind {
     SourceOnly,
+    ProofCacheLookup,
     RchCargo,
     PythonGate,
 }
@@ -247,6 +248,10 @@ pub fn plan_validation(input: &PlannerInput) -> ValidationPlan {
             "run focused RCH cargo tests if the artifact changes a Rust-consumed schema or fixture",
         );
         return builder.finish(true);
+    }
+
+    if has_rust || has_manifest || has_sibling_drift {
+        builder.add_proof_cache_lookup();
     }
 
     if has_manifest {
@@ -424,6 +429,38 @@ impl<'a> PlanBuilder<'a> {
             argv,
             rationale: "validation broker contract artifacts changed; run the contract gate"
                 .to_string(),
+            covers: self.changed_paths.clone(),
+        });
+    }
+
+    fn add_proof_cache_lookup(&mut self) {
+        let changed_paths = self.changed_paths.join(",");
+        let argv = vec![
+            "franken-node".to_string(),
+            "ops".to_string(),
+            "validation-proof-cache".to_string(),
+            "lookup".to_string(),
+            "--bead-id".to_string(),
+            self.input.bead_id.clone(),
+            "--thread-id".to_string(),
+            self.input.thread_id.clone(),
+            "--package".to_string(),
+            self.input.package.clone(),
+            "--cargo-toolchain".to_string(),
+            self.input.cargo_toolchain.clone(),
+            "--changed-paths".to_string(),
+            changed_paths,
+        ];
+        self.add_command(PlannedCommand {
+            command_id: "cache-lookup".to_string(),
+            kind: PlannedCommandKind::ProofCacheLookup,
+            strength: GateStrength::Recommended,
+            shell: shell_command(&BTreeMap::new(), &argv),
+            env: BTreeMap::new(),
+            argv,
+            rationale:
+                "look up a fresh validation proof-cache receipt before scheduling RCH cargo work"
+                    .to_string(),
             covers: self.changed_paths.clone(),
         });
     }

@@ -235,6 +235,33 @@
       "event_code": "VPC-009"
     }
   ],
+  "operator_output_examples": [
+    {
+      "name": "cache_hit_closeout",
+      "proof_source": "proof_cache_hit",
+      "cache_key_hex": "60eee0596a97604ebed13b0f59d08577a25472d8b97718b5bf787058f8d19252",
+      "receipt_path": "artifacts/validation_broker/proof_cache/examples/bd-jbkiq/receipt.json",
+      "closeout_contains": [
+        "proof_source=proof_cache_hit",
+        "cache_key=60eee0596a97604ebed13b0f59d08577a25472d8b97718b5bf787058f8d19252",
+        "cache_receipt=artifacts/validation_broker/proof_cache/examples/bd-jbkiq/receipt.json"
+      ]
+    },
+    {
+      "name": "stale_cache_rejection",
+      "decision": "stale",
+      "reason_code": "VPC_REJECT_STALE",
+      "required_action": "refresh_validation",
+      "fail_closed": true
+    },
+    {
+      "name": "corrupted_cache_rejection",
+      "decision": "corrupted_entry",
+      "reason_code": "VPC_REJECT_CORRUPTED",
+      "required_action": "repair_cache",
+      "fail_closed": true
+    }
+  ],
   "valid_gc_reports": [
     {
       "schema_version": "franken-node/validation-proof-cache/gc-report/v1",

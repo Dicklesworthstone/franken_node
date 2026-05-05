@@ -4,8 +4,8 @@
 //! agents can paste into `br close --reason` and Agent Mail completion replies.
 
 use crate::ops::validation_broker::{
-    RchMode, ValidationBrokerError, ValidationErrorClass, ValidationExitKind, ValidationReceipt,
-    error_codes,
+    ProofEvidenceSource, RchMode, ValidationBrokerError, ValidationErrorClass, ValidationExitKind,
+    ValidationProofCacheReuseEvidence, ValidationReceipt, error_codes,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -45,6 +45,9 @@ pub struct ValidationCloseoutOptions {
     pub bead_id: String,
     pub trace_id: String,
     pub max_output_excerpt_bytes: usize,
+    pub proof_source: ProofEvidenceSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof_cache: Option<ValidationProofCacheReuseEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stdout_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -58,9 +61,21 @@ impl ValidationCloseoutOptions {
             bead_id: bead_id.into(),
             trace_id: trace_id.into(),
             max_output_excerpt_bytes: DEFAULT_MAX_OUTPUT_EXCERPT_BYTES,
+            proof_source: ProofEvidenceSource::FreshExecution,
+            proof_cache: None,
             stdout_text: None,
             stderr_text: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_proof_cache_reuse(
+        mut self,
+        proof_cache: ValidationProofCacheReuseEvidence,
+    ) -> Self {
+        self.proof_source = ProofEvidenceSource::ProofCacheHit;
+        self.proof_cache = Some(proof_cache);
+        self
     }
 }
 
@@ -76,6 +91,9 @@ pub struct ValidationCloseoutReport {
     pub request_id: String,
     pub status: ValidationCloseoutStatus,
     pub status_label: String,
+    pub proof_source: ProofEvidenceSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof_cache: Option<ValidationProofCacheReuseEvidence>,
     pub close_reason: String,
     pub agent_mail_markdown: String,
     pub receipt: ValidationCloseoutReceiptSummary,
@@ -170,9 +188,23 @@ pub fn build_validation_closeout_report(
     let warnings = closeout_warnings(receipt, validation_error.as_ref());
     let summary = receipt_summary(receipt);
     let output_excerpts = closeout_output_excerpts(options);
-    let close_reason = render_close_reason(receipt, status, &warnings);
-    let agent_mail_markdown =
-        render_agent_mail_markdown(receipt, status, &summary, &warnings, &output_excerpts);
+    let proof_source = closeout_proof_source(receipt, options);
+    let close_reason = render_close_reason(
+        receipt,
+        status,
+        proof_source,
+        options.proof_cache.as_ref(),
+        &warnings,
+    );
+    let agent_mail_markdown = render_agent_mail_markdown(
+        receipt,
+        status,
+        proof_source,
+        options.proof_cache.as_ref(),
+        &summary,
+        &warnings,
+        &output_excerpts,
+    );
 
     Ok(ValidationCloseoutReport {
         schema_version: VALIDATION_CLOSEOUT_REPORT_SCHEMA_VERSION.to_string(),
@@ -185,6 +217,8 @@ pub fn build_validation_closeout_report(
         request_id: receipt.request_id.clone(),
         status,
         status_label: status.as_str().to_string(),
+        proof_source,
+        proof_cache: options.proof_cache.clone(),
         close_reason,
         agent_mail_markdown,
         receipt: summary,
@@ -363,6 +397,8 @@ fn closeout_output_excerpts(
 fn render_close_reason(
     receipt: &ValidationReceipt,
     status: ValidationCloseoutStatus,
+    proof_source: ProofEvidenceSource,
+    proof_cache: Option<&ValidationProofCacheReuseEvidence>,
     warnings: &[String],
 ) -> String {
     let worker = receipt.rch.worker_id.as_deref().unwrap_or("unknown-worker");
@@ -374,16 +410,24 @@ fn render_close_reason(
     } else {
         format!(" warnings={}", warnings.join(" | "))
     };
+    let cache_suffix = proof_cache.map_or_else(String::new, |cache| {
+        format!(
+            " cache_key={} cache_receipt={} cache_entry={}",
+            cache.cache_key_hex, cache.receipt_path, cache.entry_path
+        )
+    });
     format!(
-        "{} validation receipt {} status={} exit={} error_class={} worker={} command=\"{}\" artifacts={}{}",
+        "{} validation receipt {} status={} proof_source={} exit={} error_class={} worker={} command=\"{}\" artifacts={}{}{}",
         receipt.bead_id,
         receipt.receipt_id,
         status.as_str(),
+        proof_source.as_str(),
         exit,
         error,
         worker,
         command,
         receipt.artifacts.summary_path,
+        cache_suffix,
         warning_suffix
     )
 }
@@ -391,6 +435,8 @@ fn render_close_reason(
 fn render_agent_mail_markdown(
     receipt: &ValidationReceipt,
     status: ValidationCloseoutStatus,
+    proof_source: ProofEvidenceSource,
+    proof_cache: Option<&ValidationProofCacheReuseEvidence>,
     summary: &ValidationCloseoutReceiptSummary,
     warnings: &[String],
     output_excerpts: &[ValidationCloseoutOutputExcerpt],
@@ -404,6 +450,7 @@ fn render_agent_mail_markdown(
         String::new(),
         format!("- receipt: `{}`", receipt.receipt_id),
         format!("- request: `{}`", receipt.request_id),
+        format!("- proof_source: `{}`", proof_source.as_str()),
         format!("- command: `{}`", summary.command_line),
         format!(
             "- exit: `{}` code={:?} error_class=`{}` timeout_class=`{}` retryable={}",
@@ -422,6 +469,17 @@ fn render_agent_mail_markdown(
         format!("- summary_artifact: `{}`", summary.artifact_summary_path),
         format!("- receipt_artifact: `{}`", summary.artifact_receipt_path),
     ];
+
+    if let Some(cache) = proof_cache {
+        lines.push(format!("- proof_cache_decision: `{}`", cache.decision_id));
+        lines.push(format!("- proof_cache_key: `{}`", cache.cache_key_hex));
+        lines.push(format!("- proof_cache_entry: `{}`", cache.entry_path));
+        lines.push(format!("- proof_cache_receipt: `{}`", cache.receipt_path));
+        lines.push(format!(
+            "- proof_cache_reason: `{}` action=`{}` event=`{}`",
+            cache.reason_code, cache.required_action, cache.event_code
+        ));
+    }
 
     if warnings.is_empty() {
         lines.push("- warnings: none".to_string());
@@ -447,6 +505,21 @@ fn render_agent_mail_markdown(
     }
 
     lines.join("\n")
+}
+
+fn closeout_proof_source(
+    receipt: &ValidationReceipt,
+    options: &ValidationCloseoutOptions,
+) -> ProofEvidenceSource {
+    if options.proof_cache.is_some() || options.proof_source == ProofEvidenceSource::ProofCacheHit {
+        ProofEvidenceSource::ProofCacheHit
+    } else if receipt.classifications.source_only_fallback
+        || receipt.exit.kind == ValidationExitKind::SourceOnly
+    {
+        ProofEvidenceSource::SourceOnlyFallback
+    } else {
+        options.proof_source
+    }
 }
 
 fn command_line(program: &str, argv: &[String]) -> String {

@@ -5,19 +5,22 @@ use frankenengine_node::ops::rch_adapter::{
 };
 use frankenengine_node::ops::validation_broker::{
     CommandSpec, DigestRef, EnvironmentPolicy, FallbackPolicy, InputDigest, InputSet, OutputPolicy,
-    ProofStatusKind, QueueState, RECEIPT_SCHEMA_VERSION, RchMode, RchReceipt, ReceiptArtifacts,
-    ReceiptClassifications, ReceiptRequestRef, ReceiptTrust, SourceOnlyReason, TargetDirPolicy,
-    TimeoutClass, ValidationBrokerError, ValidationBrokerQueue, ValidationBrokerRequest,
-    ValidationErrorClass, ValidationExit, ValidationExitKind, ValidationPriority,
-    ValidationProofStatus, ValidationReceipt, ValidationTiming, WorkerRequirements, error_codes,
+    ProofEvidenceSource, ProofStatusKind, QueueState, RECEIPT_SCHEMA_VERSION, RchMode, RchReceipt,
+    ReceiptArtifacts, ReceiptClassifications, ReceiptRequestRef, ReceiptTrust, SourceOnlyReason,
+    TargetDirPolicy, TimeoutClass, ValidationBrokerError, ValidationBrokerQueue,
+    ValidationBrokerRequest, ValidationErrorClass, ValidationExit, ValidationExitKind,
+    ValidationPriority, ValidationProofCacheReuseEvidence, ValidationProofStatus,
+    ValidationReceipt, ValidationTiming, WorkerRequirements, error_codes,
     render_validation_proof_status_json, write_validation_receipt_at,
 };
 use frankenengine_node::ops::validation_closeout::{
     ValidationCloseoutOptions, ValidationCloseoutStatus, build_validation_closeout_report,
+    render_validation_closeout_json,
 };
 use frankenengine_node::ops::validation_readiness::{
     RchWorkerReadiness, ResourceContentionSnapshot, TrackedValidationBead, ValidationBeadState,
     ValidationReadinessInput, ValidationReadinessStatus, build_validation_readiness_report,
+    render_validation_readiness_human,
 };
 use frankenengine_node::runtime::resource_governor::{
     ObservedValidationProcess, ResourceGovernorDecisionKind, ResourceGovernorObservation,
@@ -257,6 +260,24 @@ fn remote_worker(worker_id: &str) -> RchWorkerReadiness {
     }
 }
 
+fn proof_cache_reuse(receipt: &ValidationReceipt) -> ValidationProofCacheReuseEvidence {
+    ValidationProofCacheReuseEvidence {
+        decision_id: format!("vpc-decision-{}-hit", receipt.bead_id),
+        cache_key_hex: "8".repeat(64),
+        entry_id: format!("vpc-entry-{}", receipt.bead_id),
+        entry_path: format!(
+            "artifacts/validation_broker/proof_cache/entries/88/{}.json",
+            "8".repeat(64)
+        ),
+        receipt_id: receipt.receipt_id.clone(),
+        receipt_path: receipt.artifacts.receipt_path.clone(),
+        reason_code: "VPC_HIT_FRESH".to_string(),
+        event_code: "VPC-002".to_string(),
+        required_action: "reuse_receipt".to_string(),
+        diagnostic: "fresh proof cache entry accepted".to_string(),
+    }
+}
+
 fn allow_resource_snapshot() -> ResourceContentionSnapshot {
     ResourceContentionSnapshot {
         decision: "allow".to_string(),
@@ -338,6 +359,116 @@ fn receipt_writer_round_trips_and_status_reports_passed() -> Result<(), Box<dyn 
     assert!(status_json.contains("\"status\": \"passed\""));
     assert!(status_json.contains("artifacts/validation_broker/bd-6efmv/stdout.txt"));
     Ok(())
+}
+
+#[test]
+fn cache_reuse_status_is_structured_and_not_a_rerun() -> Result<(), Box<dyn std::error::Error>> {
+    let receipt = receipt();
+    let reuse = proof_cache_reuse(&receipt);
+
+    let status = ValidationProofStatus::from_cache_reuse(&receipt, reuse.clone(), ts(3))?;
+    let status_json = render_validation_proof_status_json(&status)?;
+
+    assert_eq!(status.status, ProofStatusKind::Reused);
+    assert_eq!(status.proof_source, ProofEvidenceSource::ProofCacheHit);
+    assert_eq!(
+        status
+            .proof_cache
+            .as_ref()
+            .expect("proof cache")
+            .cache_key_hex,
+        reuse.cache_key_hex
+    );
+    assert!(status_json.contains("\"proof_source\": \"proof_cache_hit\""));
+    assert!(status_json.contains("\"reason_code\": \"VPC_HIT_FRESH\""));
+    assert!(status_json.contains("artifacts/validation_broker/bd-6efmv/receipt.json"));
+    Ok(())
+}
+
+#[test]
+fn cache_reuse_readiness_and_closeout_surface_receipt_and_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    let receipt = receipt();
+    let reuse = proof_cache_reuse(&receipt);
+    let status = ValidationProofStatus::from_cache_reuse(&receipt, reuse.clone(), ts(3))?;
+
+    let readiness_input = ValidationReadinessInput {
+        tracked_beads: vec![TrackedValidationBead::new(
+            &receipt.bead_id,
+            ValidationBeadState::Closed,
+        )],
+        proof_statuses: vec![status],
+        receipts: vec![receipt.clone()],
+        rch_workers: vec![remote_worker("ts2")],
+        resource_governor: Some(allow_resource_snapshot()),
+        ..ValidationReadinessInput::default()
+    };
+    let readiness_report =
+        build_validation_readiness_report(&readiness_input, "bd-cache-readiness", ts(3));
+    let readiness_human = render_validation_readiness_human(&readiness_report);
+
+    assert_eq!(
+        readiness_report.overall_status,
+        ValidationReadinessStatus::Pass
+    );
+    assert_eq!(readiness_report.summary.proof_cache_hits, 1);
+    assert_eq!(readiness_report.summary.proof_counts.reused, 1);
+    assert!(readiness_human.contains("proof_cache_hits:1"));
+
+    let closeout_options = ValidationCloseoutOptions::new(&receipt.bead_id, "bd-cache-closeout")
+        .with_proof_cache_reuse(reuse.clone());
+    let closeout_report = build_validation_closeout_report(&receipt, &closeout_options, ts(3))?;
+    let closeout_json = render_validation_closeout_json(&closeout_report)?;
+
+    assert_eq!(closeout_report.status, ValidationCloseoutStatus::Ready);
+    assert_eq!(
+        closeout_report.proof_source,
+        ProofEvidenceSource::ProofCacheHit
+    );
+    assert!(
+        closeout_report
+            .close_reason
+            .contains("proof_source=proof_cache_hit")
+    );
+    assert!(closeout_report.close_reason.contains(&reuse.cache_key_hex));
+    assert!(closeout_report.close_reason.contains(&reuse.receipt_path));
+    assert!(
+        closeout_report
+            .agent_mail_markdown
+            .contains("- proof_cache_key:")
+    );
+    assert!(closeout_json.contains("\"proof_source\": \"proof_cache_hit\""));
+    Ok(())
+}
+
+#[test]
+fn stale_cache_reuse_cannot_satisfy_closeout() {
+    let stale_receipt = receipt_for_bead(
+        "bd-stale-cache",
+        ts(1),
+        ts(2),
+        ts(3),
+        ValidationExitKind::Success,
+        ValidationErrorClass::None,
+        TimeoutClass::None,
+        RchMode::Remote,
+        Some("ts2"),
+        None,
+    );
+    let err = ValidationProofStatus::from_cache_reuse(
+        &stale_receipt,
+        proof_cache_reuse(&stale_receipt),
+        ts(4),
+    )
+    .expect_err("stale cache reuse must validate receipt freshness");
+
+    assert!(matches!(
+        err,
+        ValidationBrokerError::ContractViolation {
+            code: error_codes::ERR_VB_STALE_RECEIPT,
+            ..
+        }
+    ));
 }
 
 #[test]

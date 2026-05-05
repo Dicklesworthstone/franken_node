@@ -15,9 +15,11 @@
       "acceptance": "Run the exact registered RCH adapter classification test.",
       "expect_command_ids": [
         "source-diff-check",
+        "cache-lookup",
         "cargo-test-rch_adapter_classification"
       ],
       "expect_shell_contains": [
+        "validation-proof-cache lookup",
         "RCH_REQUIRE_REMOTE=1",
         "--test rch_adapter_classification"
       ],
@@ -56,9 +58,11 @@
       "acceptance": "Feature gated fleet CLI coverage changed.",
       "expect_command_ids": [
         "source-diff-check",
+        "cache-lookup",
         "cargo-test-fleet_cli_e2e"
       ],
       "expect_shell_contains": [
+        "validation-proof-cache lookup",
         "--no-default-features --features test-support",
         "--test fleet_cli_e2e"
       ],
@@ -76,9 +80,11 @@
       "acceptance": "Sibling franken_engine compile drift blocked default validation.",
       "expect_command_ids": [
         "source-diff-check",
+        "cache-lookup",
         "cargo-check-sibling-drift"
       ],
       "expect_shell_contains": [
+        "validation-proof-cache lookup",
         "cargo +nightly-2026-02-19 check -p frankenengine-node --tests"
       ],
       "source_only_allowed": false

@@ -273,6 +273,22 @@ pub enum ValidationProofCacheDecisionKind {
     CorruptedEntry,
 }
 
+impl ValidationProofCacheDecisionKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Miss => "miss",
+            Self::Stale => "stale",
+            Self::DigestMismatch => "digest_mismatch",
+            Self::PolicyMismatch => "policy_mismatch",
+            Self::DirtyStateMismatch => "dirty_state_mismatch",
+            Self::QuotaBlocked => "quota_blocked",
+            Self::CorruptedEntry => "corrupted_entry",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationProofCacheRequiredAction {
@@ -282,6 +298,20 @@ pub enum ValidationProofCacheRequiredAction {
     RepairCache,
     FreeSpace,
     SourceOnlyNotAllowed,
+}
+
+impl ValidationProofCacheRequiredAction {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReuseReceipt => "reuse_receipt",
+            Self::RunValidation => "run_validation",
+            Self::RefreshValidation => "refresh_validation",
+            Self::RepairCache => "repair_cache",
+            Self::FreeSpace => "free_space",
+            Self::SourceOnlyNotAllowed => "source_only_not_allowed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -313,6 +343,36 @@ pub struct ValidationProofCacheDecision {
     pub diagnostics: ValidationProofCacheDecisionDiagnostics,
 }
 
+impl ValidationProofCacheDecision {
+    #[must_use]
+    pub fn to_broker_reuse_evidence(
+        &self,
+    ) -> Option<validation_broker::ValidationProofCacheReuseEvidence> {
+        if !matches!(self.decision, ValidationProofCacheDecisionKind::Hit)
+            || !matches!(
+                self.required_action,
+                ValidationProofCacheRequiredAction::ReuseReceipt
+            )
+        {
+            return None;
+        }
+        let entry_ref = self.entry_ref.as_ref()?;
+        let receipt_ref = self.receipt_ref.as_ref()?;
+        Some(validation_broker::ValidationProofCacheReuseEvidence {
+            decision_id: self.decision_id.clone(),
+            cache_key_hex: self.cache_key.hex.clone(),
+            entry_id: entry_ref.entry_id.clone(),
+            entry_path: entry_ref.path.clone(),
+            receipt_id: receipt_ref.receipt_id.clone(),
+            receipt_path: receipt_ref.path.clone(),
+            reason_code: self.reason_code.clone(),
+            event_code: self.diagnostics.event_code.clone(),
+            required_action: self.required_action.as_str().to_string(),
+            diagnostic: self.diagnostics.message.clone(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationProofCacheHit {
     pub entry: ValidationProofCacheEntry,
@@ -324,6 +384,86 @@ pub struct ValidationProofCacheHit {
 pub enum ValidationProofCacheLookup {
     Hit(Box<ValidationProofCacheHit>),
     Miss(ValidationProofCacheDecision),
+}
+
+pub fn render_validation_proof_cache_decision_json(
+    decision: &ValidationProofCacheDecision,
+) -> Result<String, ValidationProofCacheError> {
+    serde_json::to_string_pretty(decision).map_err(|source| ValidationProofCacheError::Json {
+        path: "validation-proof-cache-decision".to_string(),
+        source,
+    })
+}
+
+#[must_use]
+pub fn render_validation_proof_cache_decision_human(
+    decision: &ValidationProofCacheDecision,
+) -> String {
+    let entry = decision.entry_ref.as_ref().map_or_else(
+        || "none".to_string(),
+        |entry| format!("{} at {}", entry.entry_id, entry.path),
+    );
+    let receipt = decision.receipt_ref.as_ref().map_or_else(
+        || "none".to_string(),
+        |receipt| format!("{} at {}", receipt.receipt_id, receipt.path),
+    );
+    [
+        format!(
+            "validation proof-cache: decision={} action={} reason_code={} event_code={} fail_closed={}",
+            decision.decision.as_str(),
+            decision.required_action.as_str(),
+            decision.reason_code,
+            decision.diagnostics.event_code,
+            decision.diagnostics.fail_closed
+        ),
+        format!("  bead_id={}", decision.bead_id),
+        format!("  trace_id={}", decision.trace_id),
+        format!("  cache_key={}", decision.cache_key.hex),
+        format!("  entry={entry}"),
+        format!("  receipt={receipt}"),
+        format!("  diagnostic={}", decision.diagnostics.message),
+    ]
+    .join("\n")
+}
+
+#[must_use]
+pub fn validation_proof_cache_rejection_decision(
+    key: ValidationProofCacheKey,
+    decided_at: DateTime<Utc>,
+    checked_path: impl Into<String>,
+    error: &ValidationProofCacheError,
+) -> ValidationProofCacheDecision {
+    let checked_path = checked_path.into();
+    let (decision, reason_code, required_action, event_code) = rejection_parts(error.code());
+    ValidationProofCacheDecision {
+        schema_version: DECISION_SCHEMA_VERSION.to_string(),
+        decision_id: format!(
+            "vpc-decision-reject-{}-{}",
+            decision.as_str(),
+            key_hex_prefix(&key.hex, 16)
+        ),
+        bead_id: key.package.clone(),
+        trace_id: format!(
+            "vpc-trace-reject-{}-{}",
+            decision.as_str(),
+            key_hex_prefix(&key.hex, 16)
+        ),
+        decided_at,
+        decision,
+        reason_code: reason_code.to_string(),
+        entry_ref: Some(ValidationProofCacheEntryRef {
+            entry_id: "unknown".to_string(),
+            path: checked_path,
+        }),
+        receipt_ref: None,
+        required_action,
+        diagnostics: ValidationProofCacheDecisionDiagnostics {
+            message: error.to_string(),
+            fail_closed: true,
+            event_code: event_code.to_string(),
+        },
+        cache_key: key,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1322,6 +1462,72 @@ fn miss_decision(
             event_code: event_codes::MISS_RECORDED.to_string(),
         },
         cache_key: key,
+    }
+}
+
+fn rejection_parts(
+    code: &str,
+) -> (
+    ValidationProofCacheDecisionKind,
+    &'static str,
+    ValidationProofCacheRequiredAction,
+    &'static str,
+) {
+    match code {
+        error_codes::ERR_VPC_STALE_ENTRY => (
+            ValidationProofCacheDecisionKind::Stale,
+            "VPC_REJECT_STALE",
+            ValidationProofCacheRequiredAction::RefreshValidation,
+            event_codes::STALE_REJECTED,
+        ),
+        error_codes::ERR_VPC_RECEIPT_DIGEST_MISMATCH => (
+            ValidationProofCacheDecisionKind::DigestMismatch,
+            "VPC_REJECT_RECEIPT_DIGEST",
+            ValidationProofCacheRequiredAction::RepairCache,
+            event_codes::RECEIPT_DIGEST_REJECTED,
+        ),
+        error_codes::ERR_VPC_COMMAND_DIGEST_MISMATCH => (
+            ValidationProofCacheDecisionKind::DigestMismatch,
+            "VPC_REJECT_COMMAND_DIGEST",
+            ValidationProofCacheRequiredAction::RepairCache,
+            event_codes::COMMAND_OR_INPUT_REJECTED,
+        ),
+        error_codes::ERR_VPC_INPUT_DIGEST_MISMATCH => (
+            ValidationProofCacheDecisionKind::DigestMismatch,
+            "VPC_REJECT_INPUT_DIGEST",
+            ValidationProofCacheRequiredAction::RepairCache,
+            event_codes::COMMAND_OR_INPUT_REJECTED,
+        ),
+        error_codes::ERR_VPC_POLICY_MISMATCH => (
+            ValidationProofCacheDecisionKind::PolicyMismatch,
+            "VPC_REJECT_POLICY",
+            ValidationProofCacheRequiredAction::RunValidation,
+            event_codes::POLICY_REJECTED,
+        ),
+        error_codes::ERR_VPC_DIRTY_STATE_MISMATCH => (
+            ValidationProofCacheDecisionKind::DirtyStateMismatch,
+            "VPC_REJECT_DIRTY_STATE",
+            ValidationProofCacheRequiredAction::RunValidation,
+            event_codes::POLICY_REJECTED,
+        ),
+        error_codes::ERR_VPC_QUOTA_BLOCKED => (
+            ValidationProofCacheDecisionKind::QuotaBlocked,
+            "VPC_REJECT_QUOTA",
+            ValidationProofCacheRequiredAction::FreeSpace,
+            event_codes::QUOTA_REJECTED,
+        ),
+        error_codes::ERR_VPC_CORRUPTED_ENTRY => (
+            ValidationProofCacheDecisionKind::CorruptedEntry,
+            "VPC_REJECT_CORRUPTED",
+            ValidationProofCacheRequiredAction::RepairCache,
+            event_codes::CORRUPTED_REJECTED,
+        ),
+        _ => (
+            ValidationProofCacheDecisionKind::CorruptedEntry,
+            "VPC_REJECT_CORRUPTED",
+            ValidationProofCacheRequiredAction::RepairCache,
+            event_codes::CORRUPTED_REJECTED,
+        ),
     }
 }
 

@@ -5,8 +5,8 @@
 //! that explains whether validation evidence is trustworthy right now.
 
 use crate::ops::validation_broker::{
-    ProofStatusKind, RchMode, SourceOnlyReason, ValidationErrorClass, ValidationExitKind,
-    ValidationProofStatus, ValidationReceipt,
+    ProofEvidenceSource, ProofStatusKind, RchMode, SourceOnlyReason, ValidationErrorClass,
+    ValidationExitKind, ValidationProofStatus, ValidationReceipt,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -214,6 +214,7 @@ pub struct ValidationReadinessSummary {
     pub receipts: usize,
     pub proof_statuses: usize,
     pub proof_counts: ProofKindCounts,
+    pub proof_cache_hits: usize,
     pub stale_receipt_count: usize,
     pub malformed_receipt_count: usize,
     pub missing_required_receipts: usize,
@@ -343,13 +344,15 @@ pub fn render_validation_readiness_human(report: &ValidationReadinessReport) -> 
             report.summary.tracked_beads, report.summary.receipts, report.summary.proof_statuses
         ),
         format!(
-            "  proof_counts=passed:{} failed:{} running:{} queued:{} source_only:{} unknown:{}",
+            "  proof_counts=passed:{} reused:{} failed:{} running:{} queued:{} source_only:{} unknown:{} proof_cache_hits:{}",
             report.summary.proof_counts.passed,
+            report.summary.proof_counts.reused,
             report.summary.proof_counts.failed,
             report.summary.proof_counts.running,
             report.summary.proof_counts.queued,
             report.summary.proof_counts.source_only,
-            report.summary.proof_counts.unknown
+            report.summary.proof_counts.unknown,
+            report.summary.proof_cache_hits
         ),
         format!(
             "  stale_receipts={} missing_required_receipts={} malformed_receipts={}",
@@ -395,9 +398,14 @@ fn summarize_validation_readiness(
     let mut rch_remote_receipts = 0usize;
     let mut rch_remote_missing_worker_id = 0usize;
     let mut last_successful_cargo_proof_at = None;
+    let mut proof_cache_hits = 0usize;
 
     for status in &input.proof_statuses {
         increment_proof_count(&mut proof_counts, status.status);
+        if status.proof_source == ProofEvidenceSource::ProofCacheHit || status.proof_cache.is_some()
+        {
+            proof_cache_hits = proof_cache_hits.saturating_add(1);
+        }
         if status.status == ProofStatusKind::Failed {
             let domain = status
                 .exit
@@ -474,6 +482,7 @@ fn summarize_validation_readiness(
         receipts: input.receipts.len(),
         proof_statuses: input.proof_statuses.len(),
         proof_counts,
+        proof_cache_hits,
         stale_receipt_count,
         malformed_receipt_count,
         missing_required_receipts,

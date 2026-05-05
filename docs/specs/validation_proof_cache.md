@@ -166,6 +166,27 @@ stale or quota removal. `rejected_entries` are not safe to trust because the
 entry is malformed, corrupted, missing its receipt artifact, or no longer
 matches the current git/input/dirty-state validation scope.
 
+## Planner, Readiness, and Closeout Integration
+
+Validation plans for Rust, Cargo manifest, or sibling dependency surfaces must
+include a `proof_cache_lookup` step before any RCH cargo command whenever the
+changed-path set is specific enough to produce deterministic input material. The
+lookup is advisory: a miss or rejected cache entry must fall through to the
+planned RCH cargo proof, while a hit can be converted into a validation broker
+`reused` status with `proof_source=proof_cache_hit`.
+
+Readiness reports must count cache hits separately from fresh execution while
+still requiring the referenced validation receipt to be fresh and valid. Closeout
+reports and Agent Mail summaries must include the proof source, cache key, cache
+entry path, reused receipt path, and cache decision reason when proof reuse is
+accepted.
+
+Cache rejections are operator-visible decisions. Stale entries require
+`refresh_validation`; digest mismatches and corrupted entries require
+`repair_cache`; policy or dirty-state drift requires fresh validation; quota
+pressure requires `free_space`. All rejection decisions are fail-closed and
+cannot satisfy Beads closeout.
+
 ## Invariants
 
 - **INV-VPC-KEY-DETERMINISTIC** - Cache keys are SHA-256 digests over canonical
@@ -191,6 +212,9 @@ matches the current git/input/dirty-state validation scope.
   action, and trace ID.
 - **INV-VPC-BOUNDED-GROWTH** - Cache storage is quota-governed and stale or
   invalid entries are eligible for GC.
+- **INV-VPC-REUSE-SOURCE-EXPLICIT** - Broker status, readiness output, closeout
+  reasons, and Agent Mail summaries must label accepted cache reuse as
+  `proof_cache_hit` and include the cache key plus reused receipt path.
 
 ## Error Codes
 

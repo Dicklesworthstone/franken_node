@@ -60,6 +60,40 @@ must be enough to validate the receipt format on a busy machine.
 | `capabilities` | Object | Yes | Toolchain, CPU, disk, and supported cargo feature notes |
 | `failure` | Object or null | Yes | Error class and detail when capability probing failed |
 
+### ValidationProofStatus
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `schema_version` | String | Yes | `franken-node/validation-broker/status/v1` |
+| `bead_id` | String | Yes | Bead whose validation state is being reported |
+| `thread_id` | String | Yes | Agent Mail thread associated with the proof |
+| `status` | Enum | Yes | `unknown`, `queued`, `leased`, `running`, `reused`, `failed`, `passed`, `source_only`, or `cancelled` |
+| `proof_source` | Enum | Yes | `unknown`, `broker_queue`, `fresh_execution`, `source_only_fallback`, or `proof_cache_hit` |
+| `proof_cache` | Object or null | No | Cache reuse evidence when `proof_source=proof_cache_hit` |
+| `artifact_paths` | Object or null | No | stdout, stderr, summary, and receipt paths when known |
+| `command_digest` | DigestRef or null | No | Command digest for queued, completed, or reused proof |
+| `exit` | Object or null | No | Terminal validation exit when known |
+| `reason` | String or null | No | Operator-facing reason for unknown/source-only/cache status |
+
+`reused` is reserved for two distinct cases that must stay visible:
+queue deduplication uses `proof_source=broker_queue`, while proof-cache reuse
+uses `proof_source=proof_cache_hit` and includes `proof_cache`.
+
+### ValidationProofCacheReuseEvidence
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `decision_id` | String | Yes | Proof-cache decision ID that authorized reuse |
+| `cache_key_hex` | SHA-256 hex | Yes | Cache key digest used for the hit |
+| `entry_id` | String | Yes | Cache entry ID |
+| `entry_path` | String | Yes | Cache entry artifact path |
+| `receipt_id` | String | Yes | Reused validation receipt ID |
+| `receipt_path` | String | Yes | Reused validation receipt path |
+| `reason_code` | String | Yes | Stable proof-cache reason code such as `VPC_HIT_FRESH` |
+| `event_code` | String | Yes | Stable proof-cache event code such as `VPC-002` |
+| `required_action` | String | Yes | Must be `reuse_receipt` for cache-hit closeout |
+| `diagnostic` | String | Yes | Human-readable cache diagnostic |
+
 ### ValidationReceipt
 
 | Field | Type | Required | Description |
@@ -133,6 +167,10 @@ must be enough to validate the receipt format on a busy machine.
 - **INV-VB-CI-CONSUMABLE** - CI gate consumers can fail closed by reading only
   schema version, bead ID, command digest, timing, exit, artifact paths, and
   trust freshness.
+- **INV-VB-PROOF-SOURCE-VISIBLE** - Readiness, closeout, and Agent Mail output
+  must distinguish fresh execution, source-only fallback, broker queue reuse,
+  and proof-cache hits. Proof-cache hits must include the cache key and reused
+  receipt path.
 
 ## Error Codes
 
@@ -171,6 +209,11 @@ Beads closeout must require `receipt_id`, `bead_id`, `thread_id`,
 `artifacts.receipt_path`, `trust.git_commit`, and `trust.freshness`. If
 `exit.kind` is not `success`, closeout must also include `exit.error_class`,
 `exit.timeout_class`, and the accepted blocker or fallback reason.
+
+When a proof-cache hit is reused, Beads closeout and Agent Mail completion text
+must include `proof_source=proof_cache_hit`, the `cache_key_hex`, the reused
+`receipt_path`, and the cache `reason_code`. The closeout consumer must still
+validate the referenced receipt freshness before treating reuse as evidence.
 
 ### Doctor Readiness
 

@@ -169,6 +169,43 @@ pub enum ProofStatusKind {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProofEvidenceSource {
+    Unknown,
+    BrokerQueue,
+    FreshExecution,
+    SourceOnlyFallback,
+    ProofCacheHit,
+}
+
+impl ProofEvidenceSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::BrokerQueue => "broker_queue",
+            Self::FreshExecution => "fresh_execution",
+            Self::SourceOnlyFallback => "source_only_fallback",
+            Self::ProofCacheHit => "proof_cache_hit",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationProofCacheReuseEvidence {
+    pub decision_id: String,
+    pub cache_key_hex: String,
+    pub entry_id: String,
+    pub entry_path: String,
+    pub receipt_id: String,
+    pub receipt_path: String,
+    pub reason_code: String,
+    pub event_code: String,
+    pub required_action: String,
+    pub diagnostic: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DigestRef {
     pub algorithm: String,
@@ -502,6 +539,8 @@ pub struct ValidationProofStatus {
     pub request_id: Option<String>,
     pub queue_id: Option<String>,
     pub status: ProofStatusKind,
+    #[serde(default = "default_proof_evidence_source")]
+    pub proof_source: ProofEvidenceSource,
     pub queue_state: Option<QueueState>,
     pub deduplicated: bool,
     pub queue_depth: usize,
@@ -509,6 +548,8 @@ pub struct ValidationProofStatus {
     pub command_digest: Option<DigestRef>,
     pub exit: Option<ValidationExit>,
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof_cache: Option<ValidationProofCacheReuseEvidence>,
     pub observed_at: DateTime<Utc>,
 }
 
@@ -522,6 +563,7 @@ impl ValidationProofStatus {
             request_id: None,
             queue_id: None,
             status: ProofStatusKind::Unknown,
+            proof_source: ProofEvidenceSource::Unknown,
             queue_state: None,
             deduplicated: false,
             queue_depth: 0,
@@ -529,6 +571,7 @@ impl ValidationProofStatus {
             command_digest: None,
             exit: None,
             reason: Some("no validation broker request or receipt matched".to_string()),
+            proof_cache: None,
             observed_at,
         }
     }
@@ -547,6 +590,7 @@ impl ValidationProofStatus {
             request_id: Some(entry.request.request_id.clone()),
             queue_id: Some(entry.queue_id.clone()),
             status: proof_status_from_queue_state(entry.queue_state, deduplicated),
+            proof_source: ProofEvidenceSource::BrokerQueue,
             queue_state: Some(entry.queue_state),
             deduplicated,
             queue_depth,
@@ -561,6 +605,7 @@ impl ValidationProofStatus {
             )),
             exit: None,
             reason: None,
+            proof_cache: None,
             observed_at,
         }
     }
@@ -577,6 +622,7 @@ impl ValidationProofStatus {
             request_id: Some(receipt.request_id.clone()),
             queue_id: None,
             status: proof_status_from_exit(receipt.exit.kind),
+            proof_source: proof_source_from_receipt(receipt),
             queue_state: None,
             deduplicated: false,
             queue_depth: 0,
@@ -595,6 +641,41 @@ impl ValidationProofStatus {
                 .classifications
                 .source_only_reason
                 .map(|reason| reason.as_str().to_string()),
+            proof_cache: None,
+            observed_at,
+        })
+    }
+
+    pub fn from_cache_reuse(
+        receipt: &ValidationReceipt,
+        proof_cache: ValidationProofCacheReuseEvidence,
+        observed_at: DateTime<Utc>,
+    ) -> Result<Self, ValidationBrokerError> {
+        receipt.validate_at(observed_at)?;
+        Ok(Self {
+            schema_version: STATUS_SCHEMA_VERSION.to_string(),
+            bead_id: receipt.bead_id.clone(),
+            thread_id: receipt.thread_id.clone(),
+            request_id: Some(receipt.request_id.clone()),
+            queue_id: None,
+            status: ProofStatusKind::Reused,
+            proof_source: ProofEvidenceSource::ProofCacheHit,
+            queue_state: None,
+            deduplicated: false,
+            queue_depth: 0,
+            artifact_paths: Some(ProofArtifactPaths {
+                stdout_path: receipt.artifacts.stdout_path.clone(),
+                stderr_path: receipt.artifacts.stderr_path.clone(),
+                summary_path: receipt.artifacts.summary_path.clone(),
+                receipt_path: receipt.artifacts.receipt_path.clone(),
+            }),
+            command_digest: Some(DigestRef {
+                algorithm: receipt.command_digest.algorithm.clone(),
+                hex: receipt.command_digest.hex.clone(),
+            }),
+            exit: Some(receipt.exit.clone()),
+            reason: Some(format!("proof cache hit: {}", proof_cache.reason_code)),
+            proof_cache: Some(proof_cache),
             observed_at,
         })
     }
@@ -1094,6 +1175,20 @@ fn proof_status_from_exit(exit_kind: ValidationExitKind) -> ProofStatusKind {
         ValidationExitKind::Failed | ValidationExitKind::Timeout => ProofStatusKind::Failed,
         ValidationExitKind::SourceOnly => ProofStatusKind::SourceOnly,
         ValidationExitKind::Cancelled => ProofStatusKind::Cancelled,
+    }
+}
+
+const fn default_proof_evidence_source() -> ProofEvidenceSource {
+    ProofEvidenceSource::Unknown
+}
+
+fn proof_source_from_receipt(receipt: &ValidationReceipt) -> ProofEvidenceSource {
+    if receipt.classifications.source_only_fallback
+        || receipt.exit.kind == ValidationExitKind::SourceOnly
+    {
+        ProofEvidenceSource::SourceOnlyFallback
+    } else {
+        ProofEvidenceSource::FreshExecution
     }
 }
 

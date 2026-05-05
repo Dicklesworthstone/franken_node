@@ -44,6 +44,12 @@ fn direct_test_file_maps_to_exact_rch_test_command() {
         "Run the exact registered test target.",
     );
 
+    let cache_lookup = plan
+        .command("cache-lookup")
+        .expect("Rust validation plan should check proof cache first");
+    assert_eq!(cache_lookup.kind, PlannedCommandKind::ProofCacheLookup);
+    assert!(cache_lookup.shell.contains("validation-proof-cache lookup"));
+
     let command = plan
         .command("cargo-test-rch_adapter_classification")
         .expect("direct test file should map to registered test");
@@ -52,6 +58,17 @@ fn direct_test_file_maps_to_exact_rch_test_command() {
     assert!(command.shell.contains("rch exec -- env"));
     assert!(command.shell.contains("--test rch_adapter_classification"));
     assert!(command.shell.contains("RCH_REQUIRE_REMOTE=1"));
+    let cache_index = plan
+        .commands
+        .iter()
+        .position(|command| command.command_id == "cache-lookup")
+        .expect("cache lookup command index");
+    let cargo_index = plan
+        .commands
+        .iter()
+        .position(|command| command.command_id == "cargo-test-rch_adapter_classification")
+        .expect("cargo command index");
+    assert!(cache_index < cargo_index);
     assert!(!plan.source_only_allowed);
 }
 

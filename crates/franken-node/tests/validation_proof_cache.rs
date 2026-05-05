@@ -10,7 +10,8 @@ use frankenengine_node::ops::validation_proof_cache::{
     DirtyStatePolicy, GC_REPORT_SCHEMA_VERSION, ValidationProofCacheDecisionKind,
     ValidationProofCacheKey, ValidationProofCacheLookup, ValidationProofCacheQuotaPolicy,
     ValidationProofCacheRequiredAction, ValidationProofCacheScope, ValidationProofCacheStore,
-    error_codes,
+    error_codes, render_validation_proof_cache_decision_human,
+    render_validation_proof_cache_decision_json, validation_proof_cache_rejection_decision,
 };
 use std::fs;
 use std::path::Path;
@@ -372,6 +373,48 @@ fn cache_lookup_misses_without_entry() {
 }
 
 #[test]
+fn decision_renderers_surface_hit_and_miss_diagnostics() {
+    let (_dir, store, key, _entry) = populated_store(|_| {});
+    let lookup = store.lookup(&key, ts(4)).expect("hit lookup");
+    assert!(matches!(lookup, ValidationProofCacheLookup::Hit(_)));
+    let hit = if let ValidationProofCacheLookup::Hit(hit) = lookup {
+        hit
+    } else {
+        return;
+    };
+    let hit_json =
+        render_validation_proof_cache_decision_json(&hit.decision).expect("hit decision json");
+    let hit_human = render_validation_proof_cache_decision_human(&hit.decision);
+    let reuse = hit
+        .decision
+        .to_broker_reuse_evidence()
+        .expect("hit converts to broker reuse evidence");
+
+    assert!(hit_json.contains("\"decision\": \"hit\""));
+    assert!(hit_human.contains("decision=hit"));
+    assert!(hit_human.contains("action=reuse_receipt"));
+    assert_eq!(reuse.cache_key_hex, key.hex);
+    assert_eq!(reuse.receipt_path, "receipts/bd-8j9au.json");
+
+    let dir = TempDir::new().expect("tempdir");
+    let empty_store = ValidationProofCacheStore::new(dir.path());
+    let lookup = empty_store.lookup(&key, ts(4)).expect("miss lookup");
+    assert!(matches!(lookup, ValidationProofCacheLookup::Miss(_)));
+    let miss = if let ValidationProofCacheLookup::Miss(decision) = lookup {
+        decision
+    } else {
+        return;
+    };
+    let miss_json = render_validation_proof_cache_decision_json(&miss).expect("miss decision json");
+    let miss_human = render_validation_proof_cache_decision_human(&miss);
+
+    assert!(miss_json.contains("\"decision\": \"miss\""));
+    assert!(miss_human.contains("decision=miss"));
+    assert!(miss_human.contains("fail_closed=true"));
+    assert!(miss.to_broker_reuse_evidence().is_none());
+}
+
+#[test]
 fn stale_receipt_fails_closed() {
     let dir = TempDir::new().expect("tempdir");
     let store = ValidationProofCacheStore::new(dir.path());
@@ -395,6 +438,18 @@ fn stale_receipt_fails_closed() {
     let err = store.lookup(&key, ts(4)).expect_err("stale entry rejects");
 
     assert_eq!(err.code(), error_codes::ERR_VPC_STALE_ENTRY);
+    let decision =
+        validation_proof_cache_rejection_decision(key, ts(4), "entries/stale.json", &err);
+    let human = render_validation_proof_cache_decision_human(&decision);
+    let json = render_validation_proof_cache_decision_json(&decision).expect("stale json");
+
+    assert_eq!(decision.decision, ValidationProofCacheDecisionKind::Stale);
+    assert_eq!(
+        decision.required_action,
+        ValidationProofCacheRequiredAction::RefreshValidation
+    );
+    assert!(human.contains("decision=stale"));
+    assert!(json.contains("\"reason_code\": \"VPC_REJECT_STALE\""));
 }
 
 #[test]
@@ -471,6 +526,21 @@ fn corrupted_entry_fails_closed() {
         .expect_err("corrupted entry rejects");
 
     assert_eq!(err.code(), error_codes::ERR_VPC_CORRUPTED_ENTRY);
+    let decision =
+        validation_proof_cache_rejection_decision(key, ts(4), "entries/corrupt.json", &err);
+    let human = render_validation_proof_cache_decision_human(&decision);
+    let json = render_validation_proof_cache_decision_json(&decision).expect("corrupt json");
+
+    assert_eq!(
+        decision.decision,
+        ValidationProofCacheDecisionKind::CorruptedEntry
+    );
+    assert_eq!(
+        decision.required_action,
+        ValidationProofCacheRequiredAction::RepairCache
+    );
+    assert!(human.contains("decision=corrupted_entry"));
+    assert!(json.contains("\"reason_code\": \"VPC_REJECT_CORRUPTED\""));
 }
 
 #[test]

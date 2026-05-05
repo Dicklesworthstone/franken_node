@@ -1,9 +1,9 @@
 use chrono::{DateTime, TimeZone, Utc};
 use frankenengine_node::ops::validation_broker::{
-    CommandSpec, DigestRef, EnvironmentPolicy, InputDigest, ProofStatusKind, RchMode, RchReceipt,
-    ReceiptArtifacts, ReceiptClassifications, ReceiptRequestRef, ReceiptTrust, SourceOnlyReason,
-    TargetDirPolicy, TimeoutClass, ValidationErrorClass, ValidationExit, ValidationExitKind,
-    ValidationProofStatus, ValidationReceipt, ValidationTiming,
+    CommandSpec, DigestRef, EnvironmentPolicy, InputDigest, ProofEvidenceSource, ProofStatusKind,
+    RchMode, RchReceipt, ReceiptArtifacts, ReceiptClassifications, ReceiptRequestRef, ReceiptTrust,
+    SourceOnlyReason, TargetDirPolicy, TimeoutClass, ValidationErrorClass, ValidationExit,
+    ValidationExitKind, ValidationProofStatus, ValidationReceipt, ValidationTiming,
 };
 use frankenengine_node::ops::validation_readiness::{
     RchWorkerReadiness, ResourceContentionSnapshot, TrackedValidationBead, ValidationBeadState,
@@ -244,6 +244,7 @@ fn worker_timeout_is_warn_not_product_failure() {
             request_id: Some("bd-worker-request".to_string()),
             queue_id: None,
             status: ProofStatusKind::Failed,
+            proof_source: ProofEvidenceSource::FreshExecution,
             queue_state: None,
             deduplicated: false,
             queue_depth: 0,
@@ -251,6 +252,7 @@ fn worker_timeout_is_warn_not_product_failure() {
             command_digest: None,
             exit: None,
             reason: Some("worker timeout".to_string()),
+            proof_cache: None,
             observed_at: ts(30),
         }],
         receipts: vec![receipt(
@@ -288,6 +290,7 @@ fn failed_status_with_product_exit_fails_readiness() {
             request_id: Some("bd-product-request".to_string()),
             queue_id: None,
             status: ProofStatusKind::Failed,
+            proof_source: ProofEvidenceSource::FreshExecution,
             queue_state: None,
             deduplicated: false,
             queue_depth: 0,
@@ -302,6 +305,7 @@ fn failed_status_with_product_exit_fails_readiness() {
                 retryable: false,
             }),
             reason: Some("test failure".to_string()),
+            proof_cache: None,
             observed_at: ts(30),
         }],
         rch_workers: vec![remote_worker()],
