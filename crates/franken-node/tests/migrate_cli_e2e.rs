@@ -3,6 +3,7 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use assert_cmd::cargo::CommandCargoExt;
 use frankenengine_node::migration::{
     migration_runtime_smoke_stderr_sha256_hex, migration_runtime_smoke_stdout_sha256_hex,
 };
@@ -40,11 +41,8 @@ fn output_artifact_path(test_name: &str, relative_leaf: &str) -> (TempDir, PathB
     (temp, output_path, output_arg)
 }
 
-fn resolve_binary_path() -> PathBuf {
-    if let Some(exe) = std::env::var_os("CARGO_BIN_EXE_franken-node") {
-        return PathBuf::from(exe);
-    }
-    repo_root().join("target/debug/franken-node")
+fn franken_node_command() -> Command {
+    Command::cargo_bin("franken-node").expect("franken-node binary")
 }
 
 fn run_cli(args: &[&str]) -> Output {
@@ -52,13 +50,8 @@ fn run_cli(args: &[&str]) -> Output {
 }
 
 fn run_cli_in_dir(args: &[&str], current_dir: &Path) -> Output {
-    let binary_path = resolve_binary_path();
-    assert!(
-        binary_path.is_file(),
-        "franken-node binary not found at {}",
-        binary_path.display()
-    );
-    Command::new(&binary_path)
+    let mut command = franken_node_command();
+    command
         .current_dir(current_dir)
         .args(args)
         .output()
@@ -66,13 +59,8 @@ fn run_cli_in_dir(args: &[&str], current_dir: &Path) -> Output {
 }
 
 fn run_cli_with_wall_timeout(args: &[&str], timeout: Duration, envs: &[(&str, String)]) -> Output {
-    let binary_path = resolve_binary_path();
-    assert!(
-        binary_path.is_file(),
-        "franken-node binary not found at {}",
-        binary_path.display()
-    );
-    let mut child = Command::new(&binary_path)
+    let mut command = franken_node_command();
+    let mut child = command
         .current_dir(repo_root())
         .args(args)
         .envs(envs.iter().map(|(key, value)| (*key, value)))
