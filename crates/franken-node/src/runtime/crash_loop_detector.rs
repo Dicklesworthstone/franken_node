@@ -2521,23 +2521,31 @@ mod tests {
             }
 
             // Verify state consistency
-            let mut successful_rollbacks = 0;
-            let mut cooldown_blocks = 0;
-            let mut trust_errors = 0;
-            let mut no_pin_errors = 0;
+            let mut successful_rollbacks = 0_u32;
+            let mut cooldown_blocks = 0_u32;
+            let mut trust_errors = 0_u32;
+            let mut no_pin_errors = 0_u32;
 
             for (idx, result) in evaluation_results {
                 match result {
                     Ok(decision) => {
                         if decision.rollback_allowed {
-                            successful_rollbacks += 1;
+                            successful_rollbacks = successful_rollbacks.saturating_add(1);
                         }
                     }
                     Err(err) => match err {
-                        CrashLoopError::CooldownActive { .. } => cooldown_blocks += 1,
-                        CrashLoopError::PinUntrusted { .. } => trust_errors += 1,
-                        CrashLoopError::NoKnownGood { .. } => no_pin_errors += 1,
-                        CrashLoopError::PinConnectorMismatch { .. } => trust_errors += 1,
+                        CrashLoopError::CooldownActive { .. } => {
+                            cooldown_blocks = cooldown_blocks.saturating_add(1);
+                        }
+                        CrashLoopError::PinUntrusted { .. } => {
+                            trust_errors = trust_errors.saturating_add(1);
+                        }
+                        CrashLoopError::NoKnownGood { .. } => {
+                            no_pin_errors = no_pin_errors.saturating_add(1);
+                        }
+                        CrashLoopError::PinConnectorMismatch { .. } => {
+                            trust_errors = trust_errors.saturating_add(1);
+                        }
                         _ => panic!("Unexpected error at evaluation {}: {:?}", idx, err),
                     },
                 }
