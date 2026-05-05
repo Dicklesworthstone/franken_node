@@ -196,6 +196,40 @@ fn expected_authorization_signature(auth: &OperatorAuthorization) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
+fn active_divergence_fingerprint(gate: &ControlPlaneDivergenceGate) -> String {
+    gate.active_divergence()
+        .expect("active divergence")
+        .authorization_fingerprint()
+}
+
+fn assert_unauthorized_recovery_preserves_divergence(
+    h: &Harness,
+    gate: &ControlPlaneDivergenceGate,
+    err: DivergenceGateError,
+    audit_before: usize,
+    events_before: usize,
+    fingerprint_before: &str,
+    expected_reason: &str,
+    phase: &str,
+) {
+    if let DivergenceGateError::UnauthorizedRecovery { reason } = err {
+        assert!(
+            reason.contains(expected_reason),
+            "expected reason containing {expected_reason:?}, got {reason:?}"
+        );
+        assert_eq!(gate.state(), GateState::Diverged);
+        assert_eq!(gate.audit_log().len(), audit_before);
+        assert_eq!(gate.events().len(), events_before);
+        assert_eq!(active_divergence_fingerprint(gate), fingerprint_before);
+        h.log_phase(phase, true, json!({"reason": reason}));
+    } else {
+        assert!(matches!(
+            err,
+            DivergenceGateError::UnauthorizedRecovery { .. }
+        ));
+    }
+}
+
 #[test]
 fn e2e_divergence_gate_normal_path_allows_mutations() -> Result<(), String> {
     let h = Harness::new("e2e_divergence_gate_normal_path_allows_mutations");
@@ -488,6 +522,243 @@ fn e2e_divergence_gate_rejects_mismatched_authorization_key_id() {
     ));
     assert_eq!(gate.state(), GateState::Diverged);
     h.log_phase("mismatched_key_id_rejected", true, json!({}));
+}
+
+#[test]
+fn e2e_divergence_gate_recovery_authorization_binding_contract() {
+    let h = Harness::new("e2e_divergence_gate_recovery_authorization_binding_contract");
+
+    let mut gate = ControlPlaneDivergenceGate::new("node-A");
+
+    let cycle_a_local = sv("node-A", 10, "cycle-a-local", "parent-a");
+    let cycle_a_remote = sv("node-B", 10, "cycle-a-remote-diverged", "parent-a");
+    let (cycle_a_result, _, _) = gate.check_propagation(
+        &cycle_a_local,
+        &cycle_a_remote,
+        1_745_760_000,
+        "trace-a-fork",
+    );
+    assert_eq!(cycle_a_result, DetectionResult::Forked);
+    assert_eq!(gate.state(), GateState::Diverged);
+    let cycle_a_fingerprint = active_divergence_fingerprint(&gate);
+    h.log_phase(
+        "cycle_a_diverged",
+        true,
+        json!({"fingerprint": cycle_a_fingerprint.as_str()}),
+    );
+
+    let auth_a = recovery_auth(
+        &gate,
+        "operator-prod-1",
+        15,
+        1_745_760_010,
+        "cycle-a-approved-recovery",
+    );
+    assert!(auth_a.verify(&auth_key(&auth_a)));
+    h.log_phase(
+        "cycle_a_auth_bound",
+        true,
+        json!({
+            "checkpoint": auth_a.resync_checkpoint_epoch,
+            "key_id": auth_a.key_id.as_str(),
+            "nonce": auth_a.nonce.as_str()
+        }),
+    );
+
+    let wrong_key_id = OperatorAuthorizationKeyRecord::new(
+        "operator-prod-1",
+        "e2e-operator-key-v2",
+        SIGNING_KEY.to_vec(),
+    );
+    let audit_before = gate.audit_log().len();
+    let events_before = gate.events().len();
+    let err = gate
+        .respond_recover(
+            &auth_a,
+            &wrong_key_id,
+            100,
+            1_745_760_020,
+            "trace-a-wrong-key",
+        )
+        .expect_err("wrong key id must reject recovery");
+    assert_unauthorized_recovery_preserves_divergence(
+        &h,
+        &gate,
+        err,
+        audit_before,
+        events_before,
+        &cycle_a_fingerprint,
+        "verification failed",
+        "wrong_key_id_rejected",
+    );
+
+    let mut wrong_checkpoint = auth_a.clone();
+    wrong_checkpoint.resync_checkpoint_epoch = wrong_checkpoint
+        .resync_checkpoint_epoch
+        .checked_add(1)
+        .expect("checkpoint increment");
+    let audit_before = gate.audit_log().len();
+    let events_before = gate.events().len();
+    let err = gate
+        .respond_recover(
+            &wrong_checkpoint,
+            &auth_key(&wrong_checkpoint),
+            100,
+            1_745_760_021,
+            "trace-a-wrong-checkpoint",
+        )
+        .expect_err("checkpoint tamper must reject recovery");
+    assert_unauthorized_recovery_preserves_divergence(
+        &h,
+        &gate,
+        err,
+        audit_before,
+        events_before,
+        &cycle_a_fingerprint,
+        "verification failed",
+        "wrong_checkpoint_rejected",
+    );
+
+    let stale_auth = recovery_auth(
+        &gate,
+        "operator-prod-1",
+        15,
+        1_745_760_030,
+        "cycle-a-stale-recovery",
+    );
+    let audit_before = gate.audit_log().len();
+    let events_before = gate.events().len();
+    let err = gate
+        .respond_recover(
+            &stale_auth,
+            &auth_key(&stale_auth),
+            100,
+            1_746_060_031,
+            "trace-a-expired",
+        )
+        .expect_err("expired authorization must reject recovery");
+    assert_unauthorized_recovery_preserves_divergence(
+        &h,
+        &gate,
+        err,
+        audit_before,
+        events_before,
+        &cycle_a_fingerprint,
+        "expired",
+        "expired_timestamp_rejected",
+    );
+
+    let recovery_a = gate
+        .respond_recover(
+            &auth_a,
+            &auth_key(&auth_a),
+            100,
+            1_745_760_040,
+            "trace-a-recover",
+        )
+        .expect("cycle A recovery succeeds");
+    assert!(recovery_a.success);
+    assert_eq!(recovery_a.resync_checkpoint, 15);
+    assert_eq!(gate.state(), GateState::Normal);
+    assert!(gate.active_divergence().is_none());
+    h.log_phase(
+        "cycle_a_recovered",
+        true,
+        json!({"checkpoint": recovery_a.resync_checkpoint}),
+    );
+
+    let cycle_b_local = sv("node-A", 11, "cycle-b-local", "parent-b");
+    let cycle_b_remote = sv("node-C", 11, "cycle-b-remote-diverged", "parent-b");
+    let (cycle_b_result, _, _) = gate.check_propagation(
+        &cycle_b_local,
+        &cycle_b_remote,
+        1_745_760_100,
+        "trace-b-fork",
+    );
+    assert_eq!(cycle_b_result, DetectionResult::Forked);
+    assert_eq!(gate.state(), GateState::Diverged);
+    let cycle_b_fingerprint = active_divergence_fingerprint(&gate);
+    assert_ne!(cycle_b_fingerprint, auth_a.divergence_fingerprint);
+    h.log_phase(
+        "cycle_b_diverged",
+        true,
+        json!({"fingerprint": cycle_b_fingerprint.as_str()}),
+    );
+
+    let audit_before = gate.audit_log().len();
+    let events_before = gate.events().len();
+    let err = gate
+        .respond_recover(
+            &auth_a,
+            &auth_key(&auth_a),
+            100,
+            1_745_760_110,
+            "trace-b-replay-cycle-a",
+        )
+        .expect_err("cycle A authorization must not recover cycle B");
+    assert_unauthorized_recovery_preserves_divergence(
+        &h,
+        &gate,
+        err,
+        audit_before,
+        events_before,
+        &cycle_b_fingerprint,
+        "active divergence",
+        "cycle_a_authorization_rejected_for_cycle_b",
+    );
+
+    let auth_b = recovery_auth(
+        &gate,
+        "operator-prod-1",
+        16,
+        1_745_760_120,
+        "cycle-b-approved-recovery",
+    );
+    let mut replayed_nonce = auth_b.clone();
+    replayed_nonce.nonce = auth_a.nonce.clone();
+    replayed_nonce.authorization_hash = expected_authorization_hash(&replayed_nonce);
+    replayed_nonce.signature = expected_authorization_signature(&replayed_nonce);
+    assert!(replayed_nonce.verify(&auth_key(&replayed_nonce)));
+    let audit_before = gate.audit_log().len();
+    let events_before = gate.events().len();
+    let err = gate
+        .respond_recover(
+            &replayed_nonce,
+            &auth_key(&replayed_nonce),
+            100,
+            1_745_760_130,
+            "trace-b-replayed-nonce",
+        )
+        .expect_err("consumed nonce must reject recovery");
+    assert_unauthorized_recovery_preserves_divergence(
+        &h,
+        &gate,
+        err,
+        audit_before,
+        events_before,
+        &cycle_b_fingerprint,
+        "nonce already consumed",
+        "consumed_nonce_rejected",
+    );
+
+    let recovery_b = gate
+        .respond_recover(
+            &auth_b,
+            &auth_key(&auth_b),
+            101,
+            1_745_760_140,
+            "trace-b-recover",
+        )
+        .expect("cycle B recovery succeeds with fresh authorization");
+    assert!(recovery_b.success);
+    assert_eq!(recovery_b.resync_checkpoint, 16);
+    assert_eq!(gate.state(), GateState::Normal);
+    assert!(gate.active_divergence().is_none());
+    h.log_phase(
+        "cycle_b_recovered",
+        true,
+        json!({"checkpoint": recovery_b.resync_checkpoint}),
+    );
 }
 
 #[test]
