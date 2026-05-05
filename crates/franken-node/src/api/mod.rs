@@ -18,6 +18,62 @@ pub mod session_auth;
 pub mod trust_card_routes;
 pub mod verifier_routes;
 
+pub use service::{ControlPlaneService, ServiceConfig};
+
+/// Canonical state for assembling the in-process API surface.
+///
+/// This is intentionally a service/catalog state wrapper, not a live network
+/// router state. The current API surface owns middleware metadata, dispatch
+/// provenance, and endpoint reports through `ControlPlaneService`; it does not
+/// bind an HTTP listener.
+#[derive(Debug, Clone, Default)]
+pub struct ApiState {
+    service_config: ServiceConfig,
+}
+
+impl ApiState {
+    /// Create API state from the control-plane service configuration.
+    pub fn new(service_config: ServiceConfig) -> Self {
+        Self { service_config }
+    }
+
+    /// Borrow the service configuration used by the canonical API assembly.
+    pub fn service_config(&self) -> &ServiceConfig {
+        &self.service_config
+    }
+
+    /// Consume this state into the service configuration.
+    pub fn into_service_config(self) -> ServiceConfig {
+        self.service_config
+    }
+}
+
+impl From<ServiceConfig> for ApiState {
+    fn from(service_config: ServiceConfig) -> Self {
+        Self::new(service_config)
+    }
+}
+
+/// Canonical assembled API service.
+///
+/// Callers should prefer `build_api_service` over importing route modules and
+/// assembling middleware requirements by hand.
+pub type ApiService = ControlPlaneService;
+
+/// Build the canonical in-process API service.
+///
+/// The returned service includes the operator, verifier, fleet-control, and
+/// gated fleet-quarantine route metadata exposed by `api::service`, plus the
+/// fail-closed middleware coverage checks attached to those route groups.
+pub fn build_api_service(state: ApiState) -> ApiService {
+    ControlPlaneService::new(state.into_service_config())
+}
+
+/// Build the canonical API service from default state.
+pub fn build_default_api_service() -> ApiService {
+    build_api_service(ApiState::default())
+}
+
 /// Return at most `max_chars` Unicode scalar values from `input` without
 /// violating UTF-8 boundaries.
 pub(crate) fn utf8_prefix(input: &str, max_chars: usize) -> &str {
@@ -33,7 +89,7 @@ pub(crate) fn utf8_prefix(input: &str, max_chars: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::utf8_prefix;
+    use super::{ApiState, build_api_service, build_default_api_service, service, utf8_prefix};
 
     #[test]
     fn utf8_prefix_ascii() {
@@ -57,6 +113,62 @@ mod tests {
         assert_eq!(utf8_prefix("", 0), "");
         assert_eq!(utf8_prefix("", 1), "");
         assert_eq!(utf8_prefix("", usize::MAX), "");
+    }
+
+    #[test]
+    fn canonical_api_service_builder_assembles_all_route_groups() {
+        let _lock = super::operator_routes::process_start_test_lock();
+        super::operator_routes::clear_process_start_override_for_tests();
+
+        let api = build_default_api_service();
+        let catalog = api.catalog();
+        let report = api.report();
+
+        assert_eq!(catalog.len(), service::all_route_metadata().len());
+        assert_eq!(report.endpoints.len(), catalog.len());
+        assert!(catalog.iter().any(|entry| entry.group == "operator"));
+        assert!(catalog.iter().any(|entry| entry.group == "verifier"));
+        assert!(catalog.iter().any(|entry| entry.group == "fleet_control"));
+        assert!(catalog.iter().all(|entry| !entry.policy_hook.is_empty()));
+    }
+
+    #[test]
+    fn canonical_api_service_builder_preserves_middleware_contracts() {
+        let _lock = super::operator_routes::process_start_test_lock();
+        super::operator_routes::clear_process_start_override_for_tests();
+
+        let api = build_api_service(ApiState::new(service::ServiceConfig::default()));
+        let coverage = api.report().middleware_coverage;
+
+        assert!(coverage.auth_coverage);
+        assert!(coverage.policy_hook_coverage);
+        assert!(coverage.error_formatting_coverage);
+        assert!(coverage.tracing_coverage);
+        assert!(coverage.rate_limiting_coverage);
+    }
+
+    #[test]
+    fn canonical_api_state_preserves_service_config() {
+        let _lock = super::operator_routes::process_start_test_lock();
+        super::operator_routes::clear_process_start_override_for_tests();
+        let state = ApiState::new(service::ServiceConfig {
+            bind_target_hint: "10.0.0.25:9443".to_string(),
+            otel_enabled: true,
+            ..Default::default()
+        });
+
+        assert_eq!(state.service_config().bind_target_hint, "10.0.0.25:9443");
+        assert!(state.service_config().otel_enabled);
+
+        let api = build_api_service(state);
+
+        assert_eq!(api.config().bind_target_hint, "10.0.0.25:9443");
+        assert!(api.config().otel_enabled);
+        assert_eq!(
+            api.transport_boundary().kind,
+            service::TransportBoundaryKind::InProcessCatalog
+        );
+        assert!(!api.transport_boundary().owns_listener);
     }
 
     #[test]

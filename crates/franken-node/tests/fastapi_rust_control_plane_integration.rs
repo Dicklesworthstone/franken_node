@@ -11,6 +11,10 @@ use frankenengine_node::api::middleware::{
     AuthIdentity, AuthMethod, TraceContext, span_id_from_unix_nanos_for_tests,
 };
 use frankenengine_node::api::operator_routes::assert_process_start_cleanup_lock_order_for_tests;
+use frankenengine_node::api::service::TransportBoundaryKind;
+use frankenengine_node::api::{
+    ApiState, ServiceConfig, build_api_service, build_default_api_service,
+};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -40,6 +44,41 @@ fn lock_shared_fleet_state() -> MutexGuard<'static, ()> {
 #[test]
 fn operator_process_start_cleanup_uses_init_lock_before_data_locks() {
     assert_process_start_cleanup_lock_order_for_tests();
+}
+
+#[test]
+fn canonical_api_service_builder_exports_full_control_plane_catalog() {
+    let api = build_default_api_service();
+    let catalog = api.catalog();
+    let report = api.report();
+
+    assert_eq!(catalog.len(), report.endpoints.len());
+    assert!(catalog.iter().any(|entry| entry.group == "operator"));
+    assert!(catalog.iter().any(|entry| entry.group == "verifier"));
+    assert!(catalog.iter().any(|entry| entry.group == "fleet_control"));
+    assert!(catalog.iter().all(|entry| !entry.policy_hook.is_empty()));
+    assert!(report.middleware_coverage.auth_coverage);
+    assert!(report.middleware_coverage.policy_hook_coverage);
+    assert!(report.middleware_coverage.tracing_coverage);
+    assert!(report.middleware_coverage.error_formatting_coverage);
+    assert!(report.middleware_coverage.rate_limiting_coverage);
+}
+
+#[test]
+fn canonical_api_service_builder_preserves_public_state_config() {
+    let api = build_api_service(ApiState::new(ServiceConfig {
+        bind_target_hint: "10.0.0.25:9443".to_string(),
+        otel_enabled: true,
+        ..Default::default()
+    }));
+
+    assert_eq!(api.config().bind_target_hint, "10.0.0.25:9443");
+    assert!(api.config().otel_enabled);
+    assert_eq!(
+        api.transport_boundary().kind,
+        TransportBoundaryKind::InProcessCatalog
+    );
+    assert!(!api.transport_boundary().owns_listener);
 }
 
 #[test]
@@ -284,7 +323,6 @@ fn api_error_response(err: ApiError, trace: &TraceContext) -> Response {
             detail,
             &trace.trace_id,
         ),
-        #[cfg(feature = "extended-surfaces")]
         other => problem_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "FASTAPI_INTERNAL_ERROR",
