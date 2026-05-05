@@ -1324,8 +1324,38 @@ pub enum DebugCommand {
     /// external API redacts for oracle-prevention reasons, is surfaced
     /// here.
     Explain(DebugExplainArgs),
+    /// Inspect verifier-facing evidence artifacts through the shared evidence
+    /// verification spine and emit per-check diagnostics.
+    Evidence(DebugEvidenceArgs),
     /// Trace policy evaluation steps for debugging policy logic.
     Trace(DebugTraceArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum DebugEvidenceKind {
+    Auto,
+    NodeReplayCapsule,
+    ProvenanceAttestation,
+    VefEvidenceCapsule,
+}
+
+#[derive(Debug, Parser)]
+pub struct DebugEvidenceArgs {
+    /// Path to the evidence artifact JSON on the operator's local filesystem.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub artifact: PathBuf,
+
+    /// Evidence artifact kind. `auto` detects the supported JSON shapes.
+    #[arg(long, value_enum, default_value_t = DebugEvidenceKind::Auto)]
+    pub kind: DebugEvidenceKind,
+
+    /// Stable verifier identity recorded in replay-style explanation output.
+    #[arg(long, default_value = "verifier://debug-evidence")]
+    pub verifier_identity: String,
+
+    /// Emit results as machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]

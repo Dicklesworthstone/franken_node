@@ -1,0 +1,27 @@
+{
+  "schema_version": "franken-node/evidence-explain-contract/v1",
+  "bead": "bd-6z0tq",
+  "command": "franken-node debug evidence",
+  "output_schema_version": "franken-node/evidence-explain/v1",
+  "supported_artifact_kinds": [
+    "node-replay-capsule",
+    "provenance-attestation",
+    "vef-evidence-capsule"
+  ],
+  "required_step_fields": [
+    "check_id",
+    "input_artifact",
+    "expected_value",
+    "observed_value",
+    "verdict",
+    "recovery_hint"
+  ],
+  "required_negative_fixtures": [
+    "tampered_content",
+    "swapped_key_id",
+    "missing_parent_link",
+    "stale_timestamp_or_epoch",
+    "malformed_bundle_path"
+  ],
+  "fail_closed_rule": "Producer-supplied verified flags are diagnostic metadata only and never override live verification-spine verdicts."
+}

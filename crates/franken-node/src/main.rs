@@ -89,13 +89,14 @@ use crate::api::{
     },
 };
 use crate::cli::{
-    BenchCommand, Cli, Command, DebugCommand, DebugExplainArgs, DebugTraceArgs,
-    DoctorCloseConditionArgs, DoctorCommand, DoctorPolicyActivationInput, FleetAgentArgs,
-    FleetCommand, IncidentCommand, MigrateCommand, MigrateReportArgs, OpsCommand,
-    OpsConfigAuditArgs, OpsMetricsFormat, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs,
-    RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand,
-    TrustCardCommand, TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs,
-    VerifyMigrationArgs, VerifyModuleArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
+    BenchCommand, Cli, Command, DebugCommand, DebugEvidenceArgs, DebugEvidenceKind,
+    DebugExplainArgs, DebugTraceArgs, DoctorCloseConditionArgs, DoctorCommand,
+    DoctorPolicyActivationInput, FleetAgentArgs, FleetCommand, IncidentCommand, MigrateCommand,
+    MigrateReportArgs, OpsCommand, OpsConfigAuditArgs, OpsMetricsFormat, RegistryCommand,
+    RemoteCapCommand, RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs,
+    RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand, TrustCardCommand, TrustCommand,
+    VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
+    VerifyModuleArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
     load_doctor_policy_activation_input,
 };
 use crate::policy::{
@@ -23562,6 +23563,39 @@ fn emit_explain_steps<S: serde::Serialize>(
     }
 }
 
+fn handle_debug_evidence(args: &DebugEvidenceArgs) -> Result<()> {
+    let kind = match args.kind {
+        DebugEvidenceKind::Auto => tools::evidence_explain::EvidenceArtifactKind::Auto,
+        DebugEvidenceKind::NodeReplayCapsule => {
+            tools::evidence_explain::EvidenceArtifactKind::NodeReplayCapsule
+        }
+        DebugEvidenceKind::ProvenanceAttestation => {
+            tools::evidence_explain::EvidenceArtifactKind::ProvenanceAttestation
+        }
+        DebugEvidenceKind::VefEvidenceCapsule => {
+            tools::evidence_explain::EvidenceArtifactKind::VefEvidenceCapsule
+        }
+    };
+    let report = tools::evidence_explain::explain_evidence_file(
+        &args.artifact,
+        kind,
+        &args.verifier_identity,
+    );
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "{}",
+            tools::evidence_explain::render_evidence_explain_human(&report)
+        );
+    }
+    if report.is_pass() {
+        Ok(())
+    } else {
+        anyhow::bail!("debug evidence reported one or more failed verification steps");
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -24316,6 +24350,9 @@ fn main() -> Result<()> {
             }
             DebugCommand::Explain(args) => {
                 handle_debug_explain(&args)?;
+            }
+            DebugCommand::Evidence(args) => {
+                handle_debug_evidence(&args)?;
             }
         },
 

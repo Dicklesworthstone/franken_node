@@ -10,6 +10,7 @@ pub mod containment_revocation_metrics;
 pub mod counterfactual_replay;
 #[cfg(feature = "admin-tools")]
 pub mod enterprise_governance;
+pub mod evidence_explain;
 pub mod evidence_replay_validator;
 #[cfg(feature = "advanced-features")]
 pub mod external_replication_claims;

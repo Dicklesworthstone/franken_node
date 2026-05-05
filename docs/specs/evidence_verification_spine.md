@@ -33,3 +33,24 @@ Every participating surface must account for:
 The registered `evidence_verification_spine_contract` integration target loads
 `artifacts/evidence_verification_spine/bd-hp1hy_fixture_matrix.json` and proves
 the checked-in matrix against the live APIs above.
+
+## Operator Explain Surface
+
+`bd-6z0tq` exposes the shared spine through:
+
+```bash
+franken-node debug evidence --artifact <relative-json-path> --kind <kind> --json
+```
+
+Supported `kind` values are `auto`, `node-replay-capsule`,
+`provenance-attestation`, and `vef-evidence-capsule`. The command emits
+`franken-node/evidence-explain/v1` JSON with an ordered trace. Every trace step
+has `check_id`, `input_artifact`, `expected_value`, `observed_value`, `verdict`,
+and `recovery_hint`; human output is the same information rendered as compact
+line-oriented fields.
+
+The command delegates to the live verifier APIs listed above. It does not treat
+producer-supplied `verified=true` metadata as evidence, and it exits non-zero
+when any step fails. The contract artifact
+`artifacts/evidence_explain/bd-6z0tq_contract.json` records the supported
+artifact kinds and required negative fixture classes.

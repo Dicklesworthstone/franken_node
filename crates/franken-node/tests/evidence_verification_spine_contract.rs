@@ -5,7 +5,12 @@
 //! behavior instead of letting each surface drift into a local definition of
 //! "verified".
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::PathBuf,
+    process::Command,
+};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use frankenengine_node::{
@@ -14,14 +19,17 @@ use frankenengine_node::{
         self as prov, AttestationEnvelopeFormat, AttestationLink, ChainLinkRole,
         ProvenanceAttestation, ProvenanceLevel, VerificationErrorCode, VerificationPolicy,
     },
+    tools::evidence_explain::{self, EvidenceArtifactKind},
     vef::evidence_capsule::{EvidenceCapsule, EvidenceVerificationContext, VefEvidence},
 };
 use frankenengine_verifier_sdk::{SDK_VERSION, capsule as external_capsule};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const FIXTURE_MATRIX_JSON: &str =
     include_str!("../../../artifacts/evidence_verification_spine/bd-hp1hy_fixture_matrix.json");
+const EVIDENCE_EXPLAIN_CONTRACT_JSON: &str =
+    include_str!("../../../artifacts/evidence_explain/bd-6z0tq_contract.json");
 
 type TestResult = Result<(), String>;
 
@@ -272,6 +280,35 @@ fn artifact_cases_for(surface: &str) -> Result<BTreeSet<String>, String> {
         .collect())
 }
 
+fn repo_root() -> Result<PathBuf, String> {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .map_err(|err| format!("repo root canonicalizes: {err}"))
+}
+
+fn franken_node_bin() -> Result<PathBuf, String> {
+    if let Some(exe) = std::env::var_os("CARGO_BIN_EXE_franken-node") {
+        Ok(PathBuf::from(exe))
+    } else {
+        Ok(repo_root()?.join("target/debug/franken-node"))
+    }
+}
+
+fn explain_json_value(
+    value: &Value,
+    kind: EvidenceArtifactKind,
+    label: &str,
+) -> Result<evidence_explain::EvidenceExplainReport, String> {
+    let bytes = serde_json::to_vec(value).map_err(|err| format!("fixture serializes: {err}"))?;
+    Ok(evidence_explain::explain_evidence_bytes(
+        &bytes,
+        label,
+        kind,
+        "verifier://spine",
+    ))
+}
+
 fn issue_is_invalid_signature(issue: &prov::ChainIssue) -> bool {
     matches!(issue.code, VerificationErrorCode::InvalidSignature)
 }
@@ -327,6 +364,290 @@ fn evidence_spine_fixture_matrix_declares_required_contract() -> TestResult {
             "{surface} must declare at least one negative case"
         );
     }
+
+    Ok(())
+}
+
+#[test]
+fn evidence_explain_contract_declares_debug_surface() -> TestResult {
+    let contract: Value = serde_json::from_str(EVIDENCE_EXPLAIN_CONTRACT_JSON)
+        .map_err(|err| format!("evidence explain contract must parse: {err}"))?;
+    assert_eq!(
+        contract.get("schema_version").and_then(Value::as_str),
+        Some("franken-node/evidence-explain-contract/v1")
+    );
+    assert_eq!(
+        contract.get("command").and_then(Value::as_str),
+        Some("franken-node debug evidence")
+    );
+    let kinds: BTreeSet<_> = contract
+        .get("supported_artifact_kinds")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "supported_artifact_kinds must be an array".to_string())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "node-replay-capsule",
+            "provenance-attestation",
+            "vef-evidence-capsule",
+        ]
+        .into_iter()
+        .collect()
+    );
+
+    let fields: BTreeSet<_> = contract
+        .get("required_step_fields")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "required_step_fields must be an array".to_string())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            "check_id",
+            "input_artifact",
+            "expected_value",
+            "observed_value",
+            "verdict",
+            "recovery_hint",
+        ]
+        .into_iter()
+        .collect()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn evidence_explain_api_inspects_three_spine_artifact_classes() -> TestResult {
+    let node_report = explain_json_value(
+        &serde_json::to_value(node_replay_capsule()).map_err(|err| err.to_string())?,
+        EvidenceArtifactKind::Auto,
+        "node-capsule.json",
+    )?;
+    assert!(node_report.is_pass(), "{node_report:#?}");
+    assert_eq!(node_report.artifact_kind, "node-replay-capsule");
+    assert!(
+        node_report
+            .steps
+            .iter()
+            .any(|step| step.check_id == "EVEX-NODE-REPLAY")
+    );
+
+    let attestation = base_provenance_attestation()?;
+    let provenance_report = explain_json_value(
+        &json!({
+            "attestation": attestation,
+            "policy": provenance_policy_for(&base_provenance_attestation()?),
+            "now_epoch": 1_700_000_400_u64,
+            "trace_id": "spine-explain-ok"
+        }),
+        EvidenceArtifactKind::Auto,
+        "provenance.json",
+    )?;
+    assert!(provenance_report.is_pass(), "{provenance_report:#?}");
+    assert_eq!(provenance_report.artifact_kind, "provenance-attestation");
+    assert!(
+        provenance_report
+            .steps
+            .iter()
+            .any(|step| step.check_id == "EVEX-PROVENANCE-CHAIN")
+    );
+
+    let (capsule, context) = evidence_capsule_with_context()?;
+    let vef_report = explain_json_value(
+        &json!({
+            "capsule": capsule,
+            "context": context
+        }),
+        EvidenceArtifactKind::Auto,
+        "vef-capsule.json",
+    )?;
+    assert!(vef_report.is_pass(), "{vef_report:#?}");
+    assert_eq!(vef_report.artifact_kind, "vef-evidence-capsule");
+    assert!(
+        vef_report
+            .steps
+            .iter()
+            .any(|step| step.check_id == "EVEX-VEF-VERIFY")
+    );
+
+    let rendered = evidence_explain::render_evidence_explain_human(&vef_report);
+    assert!(rendered.contains("evidence_explain artifact=vef-capsule.json"));
+    assert!(rendered.contains("check_id=EVEX-VEF-VERIFY"));
+    assert!(!rendered.contains("marketing"));
+
+    Ok(())
+}
+
+#[test]
+fn evidence_explain_negative_fixtures_fail_closed() -> TestResult {
+    let mut tampered = node_replay_capsule();
+    tampered.payload.push_str("-tampered");
+    let tampered_report = explain_json_value(
+        &serde_json::to_value(&tampered).map_err(|err| err.to_string())?,
+        EvidenceArtifactKind::NodeReplayCapsule,
+        "node-tampered.json",
+    )?;
+    assert!(!tampered_report.is_pass());
+    assert!(
+        tampered_report
+            .steps
+            .iter()
+            .any(|step| step.check_id == "EVEX-NODE-SIGNATURE" && step.verdict == "fail")
+    );
+    assert!(
+        tampered_report
+            .steps
+            .iter()
+            .all(|step| !step.observed_value.contains(&tampered.signature)),
+        "raw signature must not be echoed in explain output"
+    );
+
+    let mut swapped_key = node_replay_capsule();
+    swapped_key.manifest.metadata.insert(
+        "ed25519_public_key".to_string(),
+        hex::encode(VerifyingKey::from(&SigningKey::from_bytes(&[99_u8; 32])).to_bytes()),
+    );
+    let swapped_report = explain_json_value(
+        &serde_json::to_value(&swapped_key).map_err(|err| err.to_string())?,
+        EvidenceArtifactKind::NodeReplayCapsule,
+        "node-swapped-key.json",
+    )?;
+    assert!(!swapped_report.is_pass());
+    assert!(
+        swapped_report
+            .steps
+            .iter()
+            .any(|step| step.check_id == "EVEX-NODE-SIGNATURE" && step.verdict == "fail")
+    );
+
+    let mut missing_parent = node_replay_capsule();
+    missing_parent.manifest.input_refs.pop();
+    let missing_parent_report = explain_json_value(
+        &serde_json::to_value(&missing_parent).map_err(|err| err.to_string())?,
+        EvidenceArtifactKind::NodeReplayCapsule,
+        "node-missing-parent.json",
+    )?;
+    assert!(!missing_parent_report.is_pass());
+    assert!(
+        missing_parent_report
+            .steps
+            .iter()
+            .any(|step| step.check_id == "EVEX-NODE-REPLAY" && step.verdict == "fail")
+    );
+
+    let stale_attestation = base_provenance_attestation()?;
+    let stale_report = explain_json_value(
+        &json!({
+            "attestation": stale_attestation.clone(),
+            "policy": provenance_policy_for(&stale_attestation),
+            "now_epoch": 1_800_000_000_u64,
+            "trace_id": "spine-explain-stale"
+        }),
+        EvidenceArtifactKind::ProvenanceAttestation,
+        "provenance-stale.json",
+    )?;
+    assert!(!stale_report.is_pass());
+    assert!(
+        stale_report
+            .steps
+            .iter()
+            .any(|step| step.observed_value.contains("ChainStale"))
+    );
+
+    let mut producer_asserted = EvidenceCapsule::new("vef-spine-001".to_string(), 1_700_000_000);
+    producer_asserted
+        .add_evidence(VefEvidence {
+            receipt_chain_commitment: "sha256:".to_string() + &"0".repeat(64),
+            proof_id: "proof-spine-001".to_string(),
+            proof_type: "receipt_chain".to_string(),
+            window_start: 10,
+            window_end: 20,
+            verified: true,
+            policy_constraints: vec!["no-network".to_string()],
+        })
+        .map_err(|err| err.to_string())?;
+    producer_asserted.seal().map_err(|err| err.to_string())?;
+    let (_, context) = evidence_capsule_with_context()?;
+    let producer_report = explain_json_value(
+        &json!({
+            "capsule": producer_asserted,
+            "context": context
+        }),
+        EvidenceArtifactKind::VefEvidenceCapsule,
+        "vef-producer-asserted.json",
+    )?;
+    assert!(!producer_report.is_pass());
+    assert!(
+        producer_report
+            .steps
+            .iter()
+            .any(|step| step.check_id == "EVEX-VEF-VERIFY" && step.verdict == "fail")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn evidence_explain_cli_json_and_malformed_path_contract() -> TestResult {
+    let workspace = tempfile::tempdir().map_err(|err| err.to_string())?;
+    let capsule_path = workspace.path().join("node-capsule.json");
+    fs::write(
+        &capsule_path,
+        serde_json::to_string_pretty(&node_replay_capsule()).map_err(|err| err.to_string())?,
+    )
+    .map_err(|err| err.to_string())?;
+
+    let output = Command::new(franken_node_bin()?)
+        .current_dir(workspace.path())
+        .args([
+            "debug",
+            "evidence",
+            "--artifact",
+            "node-capsule.json",
+            "--kind",
+            "node-replay-capsule",
+            "--json",
+        ])
+        .output()
+        .map_err(|err| format!("debug evidence command must run: {err}"))?;
+    assert!(
+        output.status.success(),
+        "debug evidence should pass: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value =
+        serde_json::from_slice(&output.stdout).map_err(|err| format!("stdout JSON: {err}"))?;
+    assert_eq!(
+        report.get("schema_version").and_then(Value::as_str),
+        Some("franken-node/evidence-explain/v1")
+    );
+    assert_eq!(
+        report.get("artifact_kind").and_then(Value::as_str),
+        Some("node-replay-capsule")
+    );
+    assert_eq!(
+        report.get("overall_verdict").and_then(Value::as_str),
+        Some("pass")
+    );
+
+    let malformed = Command::new(franken_node_bin()?)
+        .current_dir(workspace.path())
+        .args(["debug", "evidence", "--artifact", "../bad.json", "--json"])
+        .output()
+        .map_err(|err| format!("malformed path command must run: {err}"))?;
+    assert!(!malformed.status.success());
+    let stderr = String::from_utf8_lossy(&malformed.stderr);
+    assert!(
+        stderr.contains("Path traversal") || stderr.contains("Invalid content path"),
+        "stderr should explain path validation failure: {stderr}"
+    );
 
     Ok(())
 }
