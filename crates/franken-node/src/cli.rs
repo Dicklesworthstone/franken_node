@@ -1387,6 +1387,10 @@ pub enum DoctorCommand {
     /// Emit the dual-oracle close-condition receipt.
     #[command(name = "close-condition")]
     CloseCondition(DoctorCloseConditionArgs),
+
+    /// Report whether generated evidence is ready for operator trust.
+    #[command(name = "evidence-readiness")]
+    EvidenceReadiness(DoctorEvidenceReadinessArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -1398,6 +1402,17 @@ pub struct DoctorCloseConditionArgs {
     /// Ed25519 trusted key used to sign the close-condition receipt.
     #[arg(long)]
     pub receipt_signing_key: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+pub struct DoctorEvidenceReadinessArgs {
+    /// Evidence-readiness snapshot JSON exported by operator tooling.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub input: PathBuf,
+
+    /// Emit evidence-readiness report JSON to stdout.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]

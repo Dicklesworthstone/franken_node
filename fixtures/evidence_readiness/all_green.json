@@ -1,0 +1,36 @@
+{
+  "schema_version": "franken-node/evidence-readiness-input/v1",
+  "signed_decisions": [
+    {
+      "decision_id": "quarantine-release-001",
+      "signature_verified": true,
+      "trusted_signer": true,
+      "signer_key_id": "operator-ed25519-2026-05",
+      "evidence_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "trust_roots": [
+    {
+      "key_id": "operator-root-2026-05",
+      "source": "operator-keyring",
+      "operator_managed": true
+    }
+  ],
+  "evidence_artifacts": [
+    {
+      "artifact_id": "vef-capsule-001",
+      "verification_verdict": "pass",
+      "signature_verified": true,
+      "producer_trusted": false,
+      "producer_claimed_verified": false,
+      "content_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "telemetry_exporter": {
+    "exporter_id": "telemetry-main",
+    "active": true,
+    "last_export_unix_secs": 1800000000,
+    "now_unix_secs": 1800000060,
+    "max_staleness_secs": 300
+  }
+}

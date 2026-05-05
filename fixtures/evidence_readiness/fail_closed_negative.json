@@ -1,0 +1,36 @@
+{
+  "schema_version": "franken-node/evidence-readiness-input/v1",
+  "signed_decisions": [
+    {
+      "decision_id": "quarantine-release-sentinel",
+      "signature_verified": false,
+      "trusted_signer": true,
+      "signer_key_id": "operator-ed25519-2026-05",
+      "evidence_hash": "sentinel"
+    }
+  ],
+  "trust_roots": [
+    {
+      "key_id": "public-registry-default-key",
+      "source": "public_registry_default",
+      "operator_managed": false
+    }
+  ],
+  "evidence_artifacts": [
+    {
+      "artifact_id": "producer-only-capsule",
+      "verification_verdict": "pass",
+      "signature_verified": false,
+      "producer_trusted": true,
+      "producer_claimed_verified": true,
+      "content_digest": "placeholder"
+    }
+  ],
+  "telemetry_exporter": {
+    "exporter_id": "telemetry-main",
+    "active": false,
+    "last_export_unix_secs": 1800000000,
+    "now_unix_secs": 1800000901,
+    "max_staleness_secs": 300
+  }
+}

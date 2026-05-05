@@ -87,6 +87,27 @@ const REQUIRED_POLICY_FIELDS: &[&str] = &[
     "wording_validation",
 ];
 
+const REQUIRED_EVIDENCE_READINESS_TOP_LEVEL_FIELDS: &[&str] = &[
+    "schema_version",
+    "command",
+    "trace_id",
+    "generated_at_utc",
+    "input_path",
+    "overall_status",
+    "status_counts",
+    "checks",
+];
+
+const REQUIRED_EVIDENCE_READINESS_CHECK_FIELDS: &[&str] = &[
+    "code",
+    "event_code",
+    "scope",
+    "status",
+    "message",
+    "recovery_hint",
+    "duration_ms",
+];
+
 #[derive(Debug, Clone, Copy)]
 struct RequirementRow {
     section: &'static str,
@@ -231,6 +252,21 @@ fn doctor_args(trace_id: &str, extra: impl IntoIterator<Item = String>) -> Vec<S
         trace_id.to_string(),
     ];
     args.extend(extra);
+    args
+}
+
+fn evidence_readiness_args(trace_id: &str, fixture_name: &str, json: bool) -> Vec<String> {
+    let mut args = vec![
+        "doctor".to_string(),
+        "--trace-id".to_string(),
+        trace_id.to_string(),
+        "evidence-readiness".to_string(),
+        "--input".to_string(),
+        format!("fixtures/evidence_readiness/{fixture_name}"),
+    ];
+    if json {
+        args.push("--json".to_string());
+    }
     args
 }
 
@@ -533,6 +569,78 @@ fn assert_doctor_report_schema(report: &Value, vector: &DoctorVector) {
     assert_check_matrix_contract(report, vector.policy);
 }
 
+fn assert_evidence_readiness_report_schema(report: &Value, trace_id: &str) {
+    assert_has_fields(
+        report,
+        REQUIRED_EVIDENCE_READINESS_TOP_LEVEL_FIELDS,
+        "evidence-readiness report",
+    );
+    assert_eq!(
+        required_string(report, "schema_version"),
+        "franken-node/evidence-readiness-report/v1"
+    );
+    assert_eq!(
+        required_string(report, "command"),
+        "doctor evidence-readiness"
+    );
+    assert_eq!(required_string(report, "trace_id"), trace_id);
+    assert!(
+        required_string(report, "generated_at_utc").contains('T'),
+        "generated_at_utc must be an RFC3339-like timestamp"
+    );
+    assert!(
+        required_string(report, "input_path").ends_with(".json"),
+        "input_path must identify the readiness fixture: {report}"
+    );
+    assert_status(report, "overall_status");
+
+    let checks = required_array(report, "checks");
+    let codes = checks
+        .iter()
+        .map(|check| required_string(check, "code"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        codes,
+        vec![
+            "DR-EVIDENCE-016",
+            "DR-EVIDENCE-017",
+            "DR-EVIDENCE-018",
+            "DR-EVIDENCE-019",
+            "DR-EVIDENCE-020",
+        ]
+    );
+
+    let mut seen_codes = BTreeSet::new();
+    for check in checks {
+        assert_has_fields(
+            check,
+            REQUIRED_EVIDENCE_READINESS_CHECK_FIELDS,
+            "evidence-readiness check",
+        );
+        assert!(
+            seen_codes.insert(required_string(check, "code")),
+            "evidence-readiness check codes must be unique: {check}"
+        );
+        assert!(required_string(check, "code").starts_with("DR-EVIDENCE-"));
+        assert!(required_string(check, "event_code").starts_with("DOC-"));
+        assert!(!required_string(check, "scope").is_empty());
+        assert_status(check, "status");
+        assert!(!required_string(check, "message").is_empty());
+        assert!(!required_string(check, "recovery_hint").is_empty());
+        required_u64(check, "duration_ms");
+    }
+
+    assert_counted_overall_status(report);
+}
+
+fn evidence_readiness_message_for<'a>(report: &'a Value, code: &str) -> &'a str {
+    required_array(report, "checks")
+        .iter()
+        .find(|check| required_string(check, "code") == code)
+        .and_then(|check| check["message"].as_str())
+        .unwrap_or_else(|| panic!("missing evidence-readiness check message for {code}"))
+}
+
 fn assert_jsonl_contract(report: &Value, log_lines: &[Value]) {
     let report_logs = required_array(report, "structured_logs");
     assert_eq!(
@@ -671,6 +779,70 @@ fn doctor_json_live_vectors_match_schema() {
         let report = parse_report(&output);
         assert_doctor_report_schema(&report, &vector);
     }
+}
+
+#[test]
+fn doctor_evidence_readiness_json_reports_all_green_snapshot() {
+    let trace_id = "doctor-evidence-ready-green";
+    let output = run_doctor(&evidence_readiness_args(trace_id, "all_green.json", true));
+    let report = parse_report(&output);
+
+    assert_evidence_readiness_report_schema(&report, trace_id);
+    assert_eq!(required_string(&report, "overall_status"), "pass");
+    assert_eq!(required_u64(&report["status_counts"], "pass"), 5);
+    assert_eq!(required_u64(&report["status_counts"], "warn"), 0);
+    assert_eq!(required_u64(&report["status_counts"], "fail"), 0);
+}
+
+#[test]
+fn doctor_evidence_readiness_fails_closed_for_negative_fixtures() {
+    let trace_id = "doctor-evidence-ready-negative";
+    let output = run_doctor(&evidence_readiness_args(
+        trace_id,
+        "fail_closed_negative.json",
+        true,
+    ));
+    let report = parse_report(&output);
+
+    assert_evidence_readiness_report_schema(&report, trace_id);
+    assert_eq!(required_string(&report, "overall_status"), "fail");
+    assert_eq!(required_u64(&report["status_counts"], "pass"), 1);
+    assert_eq!(required_u64(&report["status_counts"], "warn"), 0);
+    assert_eq!(required_u64(&report["status_counts"], "fail"), 4);
+    assert!(
+        evidence_readiness_message_for(&report, "DR-EVIDENCE-017")
+            .contains("sentinel evidence_hash")
+    );
+    assert!(
+        evidence_readiness_message_for(&report, "DR-EVIDENCE-018")
+            .contains("default or non-operator-managed trust root")
+    );
+    assert!(
+        evidence_readiness_message_for(&report, "DR-EVIDENCE-019")
+            .contains("producer-trusted verdict")
+    );
+    assert!(
+        evidence_readiness_message_for(&report, "DR-EVIDENCE-020").contains("exporter inactive")
+    );
+}
+
+#[test]
+fn doctor_evidence_readiness_human_output_is_quiet_and_actionable() {
+    let output = run_doctor(&evidence_readiness_args(
+        "doctor-evidence-ready-human",
+        "fail_closed_negative.json",
+        false,
+    ));
+    assert!(
+        output.status.success(),
+        "human evidence-readiness command failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("franken-node doctor evidence-readiness"));
+    assert!(stdout.contains("DR-EVIDENCE-017"));
+    assert!(stdout.contains("recovery_hint:"));
 }
 
 #[test]

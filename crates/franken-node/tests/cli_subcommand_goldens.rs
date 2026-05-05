@@ -378,7 +378,12 @@ fn fleet_help_output() {
 #[test]
 fn doctor_help_output() {
     let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
-    let assertion = cmd.args(["doctor", "--help"]).assert().success();
+    let assertion = cmd
+        .env("NO_COLOR", "1")
+        .env("CLICOLOR", "0")
+        .args(["doctor", "--help"])
+        .assert()
+        .success();
 
     let stdout = String::from_utf8_lossy(&assertion.get_output().stdout);
     with_scrubbed_snapshot_settings("doctor_cli", || {

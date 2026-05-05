@@ -91,11 +91,11 @@ use crate::api::{
 use crate::cli::{
     BenchCommand, Cli, Command, DebugCommand, DebugEvidenceArgs, DebugEvidenceKind,
     DebugExplainArgs, DebugTraceArgs, DoctorCloseConditionArgs, DoctorCommand,
-    DoctorPolicyActivationInput, FleetAgentArgs, FleetCommand, IncidentCommand, MigrateCommand,
-    MigrateReportArgs, OpsCommand, OpsConfigAuditArgs, OpsMetricsFormat, RegistryCommand,
-    RemoteCapCommand, RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs,
-    RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand, TrustCardCommand, TrustCommand,
-    VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
+    DoctorEvidenceReadinessArgs, DoctorPolicyActivationInput, FleetAgentArgs, FleetCommand,
+    IncidentCommand, MigrateCommand, MigrateReportArgs, OpsCommand, OpsConfigAuditArgs,
+    OpsMetricsFormat, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs, RemoteCapRevokeArgs,
+    RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand, TrustCardCommand,
+    TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
     VerifyModuleArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
     load_doctor_policy_activation_input,
 };
@@ -5895,6 +5895,25 @@ fn handle_doctor_close_condition(args: &DoctorCloseConditionArgs) -> Result<()> 
     Ok(())
 }
 
+fn handle_doctor_evidence_readiness(
+    args: &DoctorEvidenceReadinessArgs,
+    trace_id: &str,
+    parent_json: bool,
+) -> Result<()> {
+    let input_path = cli::validate_user_content_pathbuf(&args.input)
+        .with_context(|| format!("invalid evidence-readiness input path: {:?}", args.input))?;
+    let report = build_evidence_readiness_report_from_path(input_path, trace_id)?;
+    if args.json || parent_json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        emit_operator_surface_output(
+            "doctor-evidence-readiness",
+            &render_evidence_readiness_report_human(&report),
+        )?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum InitFileActionKind {
@@ -8320,6 +8339,523 @@ struct DoctorReport {
     policy_activation: Option<DoctorPolicyActivationReport>,
 }
 
+const EVIDENCE_READINESS_INPUT_SCHEMA_VERSION: &str = "franken-node/evidence-readiness-input/v1";
+const EVIDENCE_READINESS_REPORT_SCHEMA_VERSION: &str = "franken-node/evidence-readiness-report/v1";
+
+#[derive(Debug, Clone, Deserialize)]
+struct EvidenceReadinessInput {
+    #[serde(default)]
+    schema_version: String,
+    #[serde(default)]
+    signed_decisions: Vec<EvidenceReadinessSignedDecision>,
+    #[serde(default)]
+    trust_roots: Vec<EvidenceReadinessTrustRoot>,
+    #[serde(default)]
+    evidence_artifacts: Vec<EvidenceReadinessArtifact>,
+    #[serde(default)]
+    telemetry_exporter: Option<EvidenceReadinessTelemetryExporter>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct EvidenceReadinessSignedDecision {
+    #[serde(default)]
+    decision_id: String,
+    #[serde(default)]
+    signature_verified: bool,
+    #[serde(default)]
+    trusted_signer: bool,
+    #[serde(default)]
+    signer_key_id: String,
+    #[serde(default)]
+    evidence_hash: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct EvidenceReadinessTrustRoot {
+    #[serde(default)]
+    key_id: String,
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    operator_managed: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct EvidenceReadinessArtifact {
+    #[serde(default)]
+    artifact_id: String,
+    #[serde(default)]
+    verification_verdict: String,
+    #[serde(default)]
+    signature_verified: bool,
+    #[serde(default)]
+    producer_trusted: bool,
+    #[serde(default)]
+    producer_claimed_verified: bool,
+    #[serde(default)]
+    content_digest: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct EvidenceReadinessTelemetryExporter {
+    #[serde(default)]
+    exporter_id: String,
+    #[serde(default)]
+    active: bool,
+    #[serde(default)]
+    last_export_unix_secs: Option<u64>,
+    #[serde(default)]
+    now_unix_secs: Option<u64>,
+    #[serde(default = "default_evidence_readiness_max_staleness_secs")]
+    max_staleness_secs: u64,
+}
+
+const fn default_evidence_readiness_max_staleness_secs() -> u64 {
+    300
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EvidenceReadinessCheck {
+    code: String,
+    event_code: String,
+    scope: String,
+    status: DoctorStatus,
+    message: String,
+    recovery_hint: String,
+    duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EvidenceReadinessReport {
+    schema_version: String,
+    command: String,
+    trace_id: String,
+    generated_at_utc: String,
+    input_path: String,
+    overall_status: DoctorStatus,
+    status_counts: DoctorStatusCounts,
+    checks: Vec<EvidenceReadinessCheck>,
+}
+
+fn evidence_readiness_label(value: &str, index: usize, prefix: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        format!("{prefix}#{index}")
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn normalize_evidence_hash(hash: &str) -> String {
+    let trimmed = hash.trim();
+    trimmed
+        .strip_prefix("sha256:")
+        .unwrap_or(trimmed)
+        .to_ascii_lowercase()
+}
+
+fn evidence_hash_is_sentinel(hash: &str) -> bool {
+    let normalized = normalize_evidence_hash(hash);
+    normalized.is_empty()
+        || normalized == "zero-hash"
+        || normalized == "placeholder"
+        || normalized == "sentinel"
+        || normalized.contains("sentinel")
+        || normalized.chars().all(|ch| ch == '0')
+}
+
+fn evidence_hash_has_sha256_shape(hash: &str) -> bool {
+    let normalized = normalize_evidence_hash(hash);
+    normalized.len() == 64 && normalized.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn evidence_readiness_failures(failures: &[String]) -> String {
+    let mut visible = failures.iter().take(4).cloned().collect::<Vec<_>>();
+    if failures.len() > visible.len() {
+        visible.push(format!(
+            "{} additional failure(s)",
+            failures.len() - visible.len()
+        ));
+    }
+    visible.join("; ")
+}
+
+fn evaluate_evidence_readiness_check(
+    code: &str,
+    event_code: &str,
+    scope: &str,
+    check: impl FnOnce() -> (DoctorStatus, String, String),
+) -> EvidenceReadinessCheck {
+    let start = Instant::now();
+    let (status, message, recovery_hint) = check();
+    EvidenceReadinessCheck {
+        code: code.to_string(),
+        event_code: event_code.to_string(),
+        scope: scope.to_string(),
+        status,
+        message,
+        recovery_hint,
+        duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+    }
+}
+
+fn evaluate_evidence_readiness_schema(
+    input: &EvidenceReadinessInput,
+) -> (DoctorStatus, String, String) {
+    if input.schema_version == EVIDENCE_READINESS_INPUT_SCHEMA_VERSION {
+        (
+            DoctorStatus::Pass,
+            "Evidence-readiness snapshot schema is supported.".to_string(),
+            "No action required.".to_string(),
+        )
+    } else {
+        (
+            DoctorStatus::Fail,
+            format!(
+                "Evidence-readiness snapshot schema is unsupported: {}.",
+                input.schema_version
+            ),
+            format!(
+                "Export a snapshot with schema_version={EVIDENCE_READINESS_INPUT_SCHEMA_VERSION}."
+            ),
+        )
+    }
+}
+
+fn evaluate_signed_decision_readiness(
+    decisions: &[EvidenceReadinessSignedDecision],
+) -> (DoctorStatus, String, String) {
+    let mut failures = Vec::new();
+    if decisions.is_empty() {
+        failures.push("no signed decisions reported".to_string());
+    }
+
+    for (index, decision) in decisions.iter().enumerate() {
+        let label = evidence_readiness_label(&decision.decision_id, index, "decision");
+        if !decision.signature_verified {
+            failures.push(format!("{label}: signature not verified"));
+        }
+        if !decision.trusted_signer {
+            failures.push(format!("{label}: signer is not trusted"));
+        }
+        if decision.signer_key_id.trim().is_empty() {
+            failures.push(format!("{label}: missing signer_key_id"));
+        }
+        if evidence_hash_is_sentinel(&decision.evidence_hash) {
+            failures.push(format!("{label}: sentinel evidence_hash"));
+        } else if !evidence_hash_has_sha256_shape(&decision.evidence_hash) {
+            failures.push(format!("{label}: evidence_hash is not sha256 hex"));
+        }
+    }
+
+    if failures.is_empty() {
+        (
+            DoctorStatus::Pass,
+            format!(
+                "{} signed decision(s) have trusted signatures and non-sentinel evidence hashes.",
+                decisions.len()
+            ),
+            "No action required.".to_string(),
+        )
+    } else {
+        (
+            DoctorStatus::Fail,
+            format!(
+                "Signed decision readiness failed: {}.",
+                evidence_readiness_failures(&failures)
+            ),
+            "Re-sign decisions with trusted operator keys and bind them to real sha256 evidence hashes."
+                .to_string(),
+        )
+    }
+}
+
+fn trust_root_uses_default_material(root: &EvidenceReadinessTrustRoot) -> bool {
+    let source = root.source.to_ascii_lowercase();
+    let key_id = root.key_id.to_ascii_lowercase();
+    const DEFAULT_MARKERS: &[&str] = &[
+        "default",
+        "demo",
+        "built-in",
+        "builtin",
+        "public-registry",
+        "public_registry",
+        "placeholder",
+    ];
+    !root.operator_managed
+        || DEFAULT_MARKERS
+            .iter()
+            .any(|marker| source.contains(marker) || key_id.contains(marker))
+}
+
+fn evaluate_trust_root_readiness(
+    roots: &[EvidenceReadinessTrustRoot],
+) -> (DoctorStatus, String, String) {
+    let mut failures = Vec::new();
+    if roots.is_empty() {
+        failures.push("no trust roots reported".to_string());
+    }
+
+    let mut seen = BTreeSet::new();
+    for (index, root) in roots.iter().enumerate() {
+        let label = evidence_readiness_label(&root.key_id, index, "trust-root");
+        if !seen.insert(label.clone()) {
+            failures.push(format!("{label}: duplicate trust root"));
+        }
+        if root.key_id.trim().is_empty() {
+            failures.push(format!("{label}: missing key_id"));
+        }
+        if root.source.trim().is_empty() {
+            failures.push(format!("{label}: missing source"));
+        }
+        if trust_root_uses_default_material(root) {
+            failures.push(format!(
+                "{label}: default or non-operator-managed trust root"
+            ));
+        }
+    }
+
+    if failures.is_empty() {
+        (
+            DoctorStatus::Pass,
+            format!("{} operator-managed trust root(s) are active.", roots.len()),
+            "No action required.".to_string(),
+        )
+    } else {
+        (
+            DoctorStatus::Fail,
+            format!(
+                "Trust root readiness failed: {}.",
+                evidence_readiness_failures(&failures)
+            ),
+            "Replace demo/default trust roots with operator-managed verifier keys.".to_string(),
+        )
+    }
+}
+
+fn evaluate_evidence_artifact_readiness(
+    artifacts: &[EvidenceReadinessArtifact],
+) -> (DoctorStatus, String, String) {
+    let mut failures = Vec::new();
+    if artifacts.is_empty() {
+        failures.push("no evidence artifacts reported".to_string());
+    }
+
+    for (index, artifact) in artifacts.iter().enumerate() {
+        let label = evidence_readiness_label(&artifact.artifact_id, index, "artifact");
+        if artifact.verification_verdict.to_ascii_lowercase() != "pass" {
+            failures.push(format!("{label}: verifier verdict is not pass"));
+        }
+        if !artifact.signature_verified {
+            failures.push(format!("{label}: signature not verified"));
+        }
+        if artifact.producer_trusted {
+            failures.push(format!("{label}: producer-trusted verdict"));
+        }
+        if artifact.producer_claimed_verified && !artifact.signature_verified {
+            failures.push(format!(
+                "{label}: producer verified claim without signature proof"
+            ));
+        }
+        if evidence_hash_is_sentinel(&artifact.content_digest) {
+            failures.push(format!("{label}: sentinel content_digest"));
+        } else if !evidence_hash_has_sha256_shape(&artifact.content_digest) {
+            failures.push(format!("{label}: content_digest is not sha256 hex"));
+        }
+    }
+
+    if failures.is_empty() {
+        (
+            DoctorStatus::Pass,
+            format!(
+                "{} evidence artifact(s) have verifier-owned pass verdicts.",
+                artifacts.len()
+            ),
+            "No action required.".to_string(),
+        )
+    } else {
+        (
+            DoctorStatus::Fail,
+            format!(
+                "Evidence artifact readiness failed: {}.",
+                evidence_readiness_failures(&failures)
+            ),
+            "Run `franken-node debug evidence --json` and trust only verifier-owned pass verdicts."
+                .to_string(),
+        )
+    }
+}
+
+fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
+fn evaluate_telemetry_exporter_readiness(
+    exporter: Option<&EvidenceReadinessTelemetryExporter>,
+) -> (DoctorStatus, String, String) {
+    let Some(exporter) = exporter else {
+        return (
+            DoctorStatus::Fail,
+            "Telemetry exporter readiness failed: no exporter status reported.".to_string(),
+            "Start the telemetry exporter and include its freshness status in the readiness snapshot."
+                .to_string(),
+        );
+    };
+
+    let label = evidence_readiness_label(&exporter.exporter_id, 0, "telemetry-exporter");
+    let mut failures = Vec::new();
+    if !exporter.active {
+        failures.push(format!("{label}: exporter inactive"));
+    }
+    if exporter.max_staleness_secs == 0 {
+        failures.push(format!("{label}: max_staleness_secs is zero"));
+    }
+    let Some(last_export) = exporter.last_export_unix_secs else {
+        failures.push(format!("{label}: missing last_export_unix_secs"));
+        return (
+            DoctorStatus::Fail,
+            format!(
+                "Telemetry exporter readiness failed: {}.",
+                evidence_readiness_failures(&failures)
+            ),
+            "Emit at least one telemetry export before trusting readiness evidence.".to_string(),
+        );
+    };
+
+    let now = exporter.now_unix_secs.unwrap_or_else(current_unix_secs);
+    if now < last_export {
+        failures.push(format!("{label}: last export is in the future"));
+    } else {
+        let age = now.saturating_sub(last_export);
+        if age > exporter.max_staleness_secs {
+            failures.push(format!(
+                "{label}: last export age {age}s exceeds {}s",
+                exporter.max_staleness_secs
+            ));
+        }
+    }
+
+    if failures.is_empty() {
+        (
+            DoctorStatus::Pass,
+            format!(
+                "Telemetry exporter `{label}` is active and fresh within {}s.",
+                exporter.max_staleness_secs
+            ),
+            "No action required.".to_string(),
+        )
+    } else {
+        (
+            DoctorStatus::Fail,
+            format!(
+                "Telemetry exporter readiness failed: {}.",
+                evidence_readiness_failures(&failures)
+            ),
+            "Restart telemetry export or fix exporter lag before trusting generated evidence."
+                .to_string(),
+        )
+    }
+}
+
+fn summarize_evidence_readiness_statuses(
+    checks: &[EvidenceReadinessCheck],
+) -> (DoctorStatusCounts, DoctorStatus) {
+    let pass = checks
+        .iter()
+        .filter(|check| matches!(check.status, DoctorStatus::Pass))
+        .count();
+    let warn = checks
+        .iter()
+        .filter(|check| matches!(check.status, DoctorStatus::Warn))
+        .count();
+    let fail = checks
+        .iter()
+        .filter(|check| matches!(check.status, DoctorStatus::Fail))
+        .count();
+    let overall = if fail > 0 {
+        DoctorStatus::Fail
+    } else if warn > 0 {
+        DoctorStatus::Warn
+    } else {
+        DoctorStatus::Pass
+    };
+    (DoctorStatusCounts { pass, warn, fail }, overall)
+}
+
+fn build_evidence_readiness_report(
+    input: &EvidenceReadinessInput,
+    input_path: &Path,
+    trace_id: &str,
+) -> EvidenceReadinessReport {
+    let checks = vec![
+        evaluate_evidence_readiness_check(
+            "DR-EVIDENCE-016",
+            "DOC-016",
+            "evidence.snapshot_schema",
+            || evaluate_evidence_readiness_schema(input),
+        ),
+        evaluate_evidence_readiness_check(
+            "DR-EVIDENCE-017",
+            "DOC-017",
+            "evidence.signed_decisions",
+            || evaluate_signed_decision_readiness(&input.signed_decisions),
+        ),
+        evaluate_evidence_readiness_check(
+            "DR-EVIDENCE-018",
+            "DOC-018",
+            "evidence.trust_roots",
+            || evaluate_trust_root_readiness(&input.trust_roots),
+        ),
+        evaluate_evidence_readiness_check(
+            "DR-EVIDENCE-019",
+            "DOC-019",
+            "evidence.verification_basis",
+            || evaluate_evidence_artifact_readiness(&input.evidence_artifacts),
+        ),
+        evaluate_evidence_readiness_check(
+            "DR-EVIDENCE-020",
+            "DOC-020",
+            "observability.telemetry_exporter",
+            || evaluate_telemetry_exporter_readiness(input.telemetry_exporter.as_ref()),
+        ),
+    ];
+    let (status_counts, overall_status) = summarize_evidence_readiness_statuses(&checks);
+
+    EvidenceReadinessReport {
+        schema_version: EVIDENCE_READINESS_REPORT_SCHEMA_VERSION.to_string(),
+        command: "doctor evidence-readiness".to_string(),
+        trace_id: trace_id.to_string(),
+        generated_at_utc: chrono::Utc::now().to_rfc3339(),
+        input_path: input_path.display().to_string(),
+        overall_status,
+        status_counts,
+        checks,
+    }
+}
+
+fn build_evidence_readiness_report_from_path(
+    input_path: &Path,
+    trace_id: &str,
+) -> Result<EvidenceReadinessReport> {
+    let raw = std::fs::read_to_string(input_path).with_context(|| {
+        format!(
+            "failed reading evidence-readiness input {}",
+            input_path.display()
+        )
+    })?;
+    let input = serde_json::from_str::<EvidenceReadinessInput>(&raw).with_context(|| {
+        format!(
+            "failed parsing evidence-readiness input {}",
+            input_path.display()
+        )
+    })?;
+    Ok(build_evidence_readiness_report(
+        &input, input_path, trace_id,
+    ))
+}
+
 fn summarize_statuses(checks: &[DoctorCheck]) -> (DoctorStatusCounts, DoctorStatus) {
     let pass = checks
         .iter()
@@ -9454,6 +9990,38 @@ fn render_doctor_report_human(report: &DoctorReport, verbose: bool) -> String {
                 event.duration_ms
             ));
         }
+    }
+
+    lines.join("\n")
+}
+
+fn render_evidence_readiness_report_human(report: &EvidenceReadinessReport) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "franken-node doctor evidence-readiness: overall={} trace_id={}",
+        report.overall_status.as_str(),
+        report.trace_id
+    ));
+    lines.push(format!("input={}", report.input_path));
+    lines.push(format!(
+        "status_counts: pass={} warn={} fail={}",
+        report.status_counts.pass, report.status_counts.warn, report.status_counts.fail
+    ));
+    lines.push(String::new());
+
+    for check in &report.checks {
+        lines.push(format!(
+            "[{}] {} ({}) {} - {}",
+            check.status.as_str(),
+            check.code,
+            check.event_code,
+            check.scope,
+            check.message
+        ));
+        lines.push(format!(
+            "  recovery_hint: {} (duration_ms={})",
+            check.recovery_hint, check.duration_ms
+        ));
     }
 
     lines.join("\n")
@@ -18172,7 +18740,7 @@ fn sleep_until_next_fleet_poll(
     shutdown_requested: &std::sync::atomic::AtomicBool,
 ) {
     use std::sync::atomic::Ordering;
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     let started = Instant::now();
     while started.elapsed() < poll_interval {
@@ -24357,8 +24925,19 @@ fn main() -> Result<()> {
         },
 
         Command::Doctor(args) => {
-            if let Some(DoctorCommand::CloseCondition(close_args)) = &args.command {
-                handle_doctor_close_condition(close_args)?;
+            if let Some(command) = &args.command {
+                match command {
+                    DoctorCommand::CloseCondition(close_args) => {
+                        handle_doctor_close_condition(close_args)?;
+                    }
+                    DoctorCommand::EvidenceReadiness(readiness_args) => {
+                        handle_doctor_evidence_readiness(
+                            readiness_args,
+                            &args.trace_id,
+                            args.json,
+                        )?;
+                    }
+                }
                 return Ok(());
             }
 

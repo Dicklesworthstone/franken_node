@@ -6,14 +6,15 @@ Diagnose environment and policy setup
 Usage: franken-node doctor [OPTIONS] [COMMAND]
 
 Commands:
-  close-condition  Emit the dual-oracle close-condition receipt
-  help             Print this message or the help of the given subcommand(s)
+  close-condition     Emit the dual-oracle close-condition receipt
+  evidence-readiness  Report whether generated evidence is ready for operator trust
+  help                Print this message or the help of the given subcommand(s)
 
 Options:
       --config <CONFIG>
           Config file override (default discovery is used when omitted)
       --profile <PROFILE>
-          Runtime profile override: strict, balanced, or legacy-risky
+          Runtime profile override: strict, balanced, or legacy-risky. Controls security[PATH] behavior (not packaging profiles like local[PATH])
       --policy-activation-input <POLICY_ACTIVATION_INPUT>
           Path to policy activation input JSON for live guardrail diagnostics
       --json

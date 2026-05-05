@@ -7,11 +7,13 @@ Define deterministic diagnostics output for `franken-node doctor` so operators a
 ## Command Surface
 
 - `franken-node doctor [--config <path>] [--profile <profile>] [--policy-activation-input <path>] [--json] [--structured-logs-jsonl] [--trace-id <id>] [--verbose]`
+- `franken-node doctor [--trace-id <id>] evidence-readiness --input <path> [--json]`
 - `--json` emits machine-readable report.
 - `--structured-logs-jsonl` emits one structured diagnostic log event per line to stderr without changing stdout.
 - default output is human-readable text.
 - `--trace-id` binds all check log events to a stable correlation identifier.
 - `--policy-activation-input` activates live policy pipeline diagnostics (guardrails, decision engine, explainer wording) from JSON input.
+- `evidence-readiness` aggregates an operator-exported readiness snapshot so generated evidence is not trusted while sentinel hashes, default trust roots, producer-owned verdicts, or stale telemetry are present.
 
 ## Determinism Contract
 
@@ -46,6 +48,29 @@ Runtime metadata (`generated_at_utc`, per-check `duration_ms`) may vary, but doe
 
 `DR-POLICY-009..011` are emitted only when `--policy-activation-input` is supplied.
 `DR-STORAGE-012`, `DR-SECURITY-013`, and `DR-ENGINE-014` are emitted only when their corresponding config paths are set.
+
+## Evidence-Readiness Subcommand
+
+`doctor evidence-readiness` consumes a JSON snapshot with schema
+`franken-node/evidence-readiness-input/v1` and emits
+`franken-node/evidence-readiness-report/v1`. The input is expected to be an
+operator-side aggregation of existing verification surfaces such as signed
+decision receipts, trust-root inventory, `debug evidence` verifier verdicts,
+and telemetry exporter state.
+
+Readiness checks:
+
+| Code | Event Code | Scope | Pass Condition | Fail Condition | Recovery Hint |
+|---|---|---|---|---|---|
+| `DR-EVIDENCE-016` | `DOC-016` | `evidence.snapshot_schema` | snapshot schema is `franken-node/evidence-readiness-input/v1` | unsupported or missing schema | export a supported readiness snapshot |
+| `DR-EVIDENCE-017` | `DOC-017` | `evidence.signed_decisions` | each decision has a verified trusted signature and non-sentinel sha256 evidence hash | unsigned decision, untrusted signer, missing signer key, sentinel hash, or malformed hash | re-sign with trusted operator keys and bind to real evidence hashes |
+| `DR-EVIDENCE-018` | `DOC-018` | `evidence.trust_roots` | active roots are operator-managed and not demo/default/public-registry material | missing roots, duplicate roots, or default/non-operator roots | replace demo/default roots with operator-managed verifier keys |
+| `DR-EVIDENCE-019` | `DOC-019` | `evidence.verification_basis` | evidence artifacts have verifier-owned pass verdicts, verified signatures, and real content digests | producer-trusted verdict, missing signature proof, failing verifier verdict, sentinel digest, or malformed digest | run `franken-node debug evidence --json` and trust only verifier-owned pass verdicts |
+| `DR-EVIDENCE-020` | `DOC-020` | `observability.telemetry_exporter` | telemetry exporter is active and latest export age is within `max_staleness_secs` | inactive exporter, missing export timestamp, clock regression, or stale export | restart/fix telemetry export before trusting generated evidence |
+
+Machine-readable evidence-readiness reports use the same status aggregation
+rule as bootstrap doctor. Each check includes `code`, `event_code`, `scope`,
+`status`, `message`, `recovery_hint`, and `duration_ms`.
 
 ## Status Aggregation
 
