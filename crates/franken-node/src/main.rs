@@ -93,11 +93,11 @@ use crate::cli::{
     DebugExplainArgs, DebugTraceArgs, DoctorCloseConditionArgs, DoctorCommand,
     DoctorEvidenceReadinessArgs, DoctorPolicyActivationInput, FleetAgentArgs, FleetCommand,
     IncidentCommand, MigrateCommand, MigrateReportArgs, OpsCommand, OpsConfigAuditArgs,
-    OpsMetricsFormat, OpsResourceGovernorArgs, OpsValidationReadinessArgs, RegistryCommand,
-    RemoteCapCommand, RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs,
-    RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand, TrustCardCommand, TrustCommand,
-    VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
-    VerifyModuleArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
+    OpsMetricsFormat, OpsResourceGovernorArgs, OpsValidationCloseoutArgs,
+    OpsValidationReadinessArgs, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs,
+    RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand,
+    TrustCardCommand, TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs,
+    VerifyMigrationArgs, VerifyModuleArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
     load_doctor_policy_activation_input,
 };
 use crate::policy::{
@@ -6675,6 +6675,49 @@ fn emit_ops_validation_readiness_report(
         println!(
             "{}",
             ops::validation_readiness::render_validation_readiness_human(report)
+        );
+    }
+    Ok(())
+}
+
+fn ops_validation_closeout_report(
+    args: &OpsValidationCloseoutArgs,
+) -> Result<ops::validation_closeout::ValidationCloseoutReport> {
+    let receipt = ops::validation_readiness::read_validation_receipt(&args.receipt)
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    let mut options =
+        ops::validation_closeout::ValidationCloseoutOptions::new(&args.bead_id, &args.trace_id);
+    options.max_output_excerpt_bytes = args.max_output_bytes;
+    if let Some(path) = &args.stdout_excerpt {
+        options.stdout_text = Some(
+            ops::validation_closeout::read_closeout_output_text(path)
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?,
+        );
+    }
+    if let Some(path) = &args.stderr_excerpt {
+        options.stderr_text = Some(
+            ops::validation_closeout::read_closeout_output_text(path)
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?,
+        );
+    }
+    ops::validation_closeout::build_validation_closeout_report(&receipt, &options, Utc::now())
+        .map_err(|err| anyhow::anyhow!(err.to_string()))
+}
+
+fn emit_ops_validation_closeout_report(
+    report: &ops::validation_closeout::ValidationCloseoutReport,
+    json: bool,
+) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            ops::validation_closeout::render_validation_closeout_json(report)
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?
+        );
+    } else {
+        println!(
+            "{}",
+            ops::validation_closeout::render_validation_closeout_human(report)
         );
     }
     Ok(())
@@ -24995,6 +25038,10 @@ fn main() -> Result<()> {
             OpsCommand::ValidationReadiness(args) => {
                 let report = ops_validation_readiness_report(&args)?;
                 emit_ops_validation_readiness_report(&report, args.json)?;
+            }
+            OpsCommand::ValidationCloseout(args) => {
+                let report = ops_validation_closeout_report(&args)?;
+                emit_ops_validation_closeout_report(&report, args.json)?;
             }
             OpsCommand::ConfigAudit(args) => {
                 let report = ops_config_audit_report(&args)?;

@@ -1091,6 +1091,9 @@ pub enum OpsCommand {
     /// Report whether validation broker evidence is fresh and trustworthy.
     #[command(name = "validation-readiness")]
     ValidationReadiness(OpsValidationReadinessArgs),
+    /// Render a closeout-ready summary from one validation broker receipt.
+    #[command(name = "validation-closeout")]
+    ValidationCloseout(OpsValidationCloseoutArgs),
     /// Audit the active config and compare operational impact across profiles.
     #[command(name = "config-audit")]
     ConfigAudit(OpsConfigAuditArgs),
@@ -1165,6 +1168,37 @@ pub struct OpsValidationReadinessArgs {
     /// Validation broker receipt JSON path. Repeat to include multiple receipts.
     #[arg(long = "receipt", value_parser = parse_safe_content_pathbuf)]
     pub receipts: Vec<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+pub struct OpsValidationCloseoutArgs {
+    /// Emit JSON instead of Agent Mail-oriented Markdown.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Stable trace ID for correlating validation-closeout output.
+    #[arg(long, default_value = "ops-validation-closeout")]
+    pub trace_id: String,
+
+    /// Bead ID that the receipt is intended to close or update.
+    #[arg(long)]
+    pub bead_id: String,
+
+    /// Validation broker receipt JSON path.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub receipt: PathBuf,
+
+    /// Optional stdout text path to include as a bounded excerpt.
+    #[arg(long = "stdout-excerpt", value_parser = parse_safe_content_pathbuf)]
+    pub stdout_excerpt: Option<PathBuf>,
+
+    /// Optional stderr text path to include as a bounded excerpt.
+    #[arg(long = "stderr-excerpt", value_parser = parse_safe_content_pathbuf)]
+    pub stderr_excerpt: Option<PathBuf>,
+
+    /// Maximum bytes to include from each output excerpt.
+    #[arg(long, default_value_t = 4096)]
+    pub max_output_bytes: usize,
 }
 
 #[derive(Debug, Parser)]
@@ -1967,6 +2001,53 @@ mod parser_contract_extra_tests {
             ]
         );
         assert_eq!(args.trace_id, "vr-cli-test");
+        assert!(args.json);
+    }
+
+    #[test]
+    fn ops_validation_closeout_parses_receipt_paths_and_json() {
+        let cli = parse(&[
+            "franken-node",
+            "ops",
+            "validation-closeout",
+            "--bead-id",
+            "bd-y4mkq",
+            "--receipt",
+            "artifacts/validation_broker/bd-y4mkq/receipt.json",
+            "--stdout-excerpt",
+            "artifacts/validation_broker/bd-y4mkq/stdout.txt",
+            "--stderr-excerpt",
+            "artifacts/validation_broker/bd-y4mkq/stderr.txt",
+            "--max-output-bytes",
+            "128",
+            "--trace-id",
+            "vc-cli-test",
+            "--json",
+        ])
+        .expect("ops validation-closeout command should parse");
+
+        let Command::Ops(OpsCommand::ValidationCloseout(args)) = cli.command else {
+            std::panic::panic_any("expected ops validation-closeout command");
+        };
+        assert_eq!(args.bead_id, "bd-y4mkq");
+        assert_eq!(
+            args.receipt,
+            PathBuf::from("artifacts/validation_broker/bd-y4mkq/receipt.json")
+        );
+        assert_eq!(
+            args.stdout_excerpt,
+            Some(PathBuf::from(
+                "artifacts/validation_broker/bd-y4mkq/stdout.txt"
+            ))
+        );
+        assert_eq!(
+            args.stderr_excerpt,
+            Some(PathBuf::from(
+                "artifacts/validation_broker/bd-y4mkq/stderr.txt"
+            ))
+        );
+        assert_eq!(args.max_output_bytes, 128);
+        assert_eq!(args.trace_id, "vc-cli-test");
         assert!(args.json);
     }
 
