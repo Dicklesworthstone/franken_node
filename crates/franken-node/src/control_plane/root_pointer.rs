@@ -411,12 +411,12 @@ fn publish_lock_registry() -> &'static Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>> 
 }
 
 fn publication_lock_registry_key(dir: &Path) -> Result<PathBuf, RootPointerError> {
-    let canonical_dir = dir.canonicalize().map_err(|source| RootPointerError::Io {
-        step: "canonicalize_publication_dir",
-        path: dir.display().to_string(),
+    let lock_path = root_publication_lock_path(dir);
+    crate::canonical_lock_key(&lock_path).map_err(|source| RootPointerError::Io {
+        step: "canonicalize_publication_lock",
+        path: lock_path.display().to_string(),
         source,
-    })?;
-    Ok(canonical_dir.join(ROOT_POINTER_LOCK_FILE))
+    })
 }
 
 fn publish_lock(dir: &Path) -> Result<Arc<Mutex<()>>, RootPointerError> {

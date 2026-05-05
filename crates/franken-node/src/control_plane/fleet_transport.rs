@@ -979,25 +979,12 @@ fn fleet_action_compaction_registry() -> &'static (Mutex<BTreeSet<PathBuf>>, Con
 }
 
 fn fleet_action_compaction_root_key(root_dir: &Path) -> Result<PathBuf, FleetTransportError> {
-    if let Ok(canonical_root) = root_dir.canonicalize() {
-        return Ok(canonical_root);
-    }
-
-    let parent = root_dir.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = root_dir.file_name().ok_or_else(|| {
+    crate::canonical_lock_key(root_dir).map_err(|err| {
         FleetTransportError::io(format!(
-            "fleet action compaction root has no final path component: {}",
+            "failed deriving fleet action compaction root lock key for {}: {err}",
             root_dir.display()
         ))
-    })?;
-    let canonical_parent = parent.canonicalize().map_err(|err| {
-        FleetTransportError::io(format!(
-            "failed canonicalizing fleet action compaction root parent {} for {}: {err}",
-            parent.display(),
-            root_dir.display()
-        ))
-    })?;
-    Ok(canonical_parent.join(Path::new(file_name)))
+    })
 }
 
 /// RAII guard for fleet action compaction process coordination

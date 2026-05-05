@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
@@ -347,43 +348,34 @@ fn persist_lock_registry() -> &'static Mutex<BTreeMap<PathBuf, Weak<Mutex<()>>>>
 /// Serialize concurrent rollout `persist()` calls targeting the same state file.
 ///
 /// Canonical lifecycle: callers first acquire the path-scoped cross-process
-/// flock file, then acquire this process-local mutex keyed by the canonical
-/// parent directory plus lock filename before reading the current state,
-/// reserving the obligation, writing the temp file, renaming it into place, and
-/// committing the obligation. The guard releases on every return path after any
-/// temp-file orphaning attempt. No other module persist lock may be acquired
-/// before this lock pair. If either lock is left held or poisoned, rollout state
-/// version checks and obligation commits for that same persisted path stall or
-/// fail before a new temp file is written, but unrelated rollout files should
-/// keep making progress.
+/// flock file, then acquire this process-local mutex using the crate-level
+/// canonical lock-key helper before reading the current state, reserving the
+/// obligation, writing the temp file, renaming it into place, and committing the
+/// obligation. The guard releases on every return path after any temp-file
+/// orphaning attempt. No other module persist lock may be acquired before this
+/// lock pair. If either lock is left held or poisoned, rollout state version
+/// checks and obligation commits for that same persisted path stall or fail
+/// before a new temp file is written, but unrelated rollout files should keep
+/// making progress.
 fn persist_lock_path(path: &Path) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path
+    let mut file_name = path
         .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("rollout-state.json");
-    parent.join(format!("{file_name}.lock"))
+        .map(OsString::from)
+        .unwrap_or_else(|| OsString::from("rollout-state.json"));
+    file_name.push(".lock");
+    parent.join(file_name)
 }
 
 fn persist_lock_registry_key(path: &Path) -> Result<PathBuf, PersistError> {
     let lock_path = persist_lock_path(path);
-    let lock_parent = lock_path.parent().unwrap_or_else(|| Path::new("."));
-    let canonical_parent = lock_parent
-        .canonicalize()
-        .map_err(|err| PersistError::IoError {
-            message: format!(
-                "failed canonicalizing rollout persist lock parent {} for {}: {err}",
-                lock_parent.display(),
-                path.display()
-            ),
-        })?;
-    let lock_file_name = lock_path.file_name().ok_or_else(|| PersistError::IoError {
+    crate::canonical_lock_key(&lock_path).map_err(|err| PersistError::IoError {
         message: format!(
-            "rollout persist lock path has no file name: {}",
-            lock_path.display()
+            "failed deriving rollout persist lock key {} for {}: {err}",
+            lock_path.display(),
+            path.display()
         ),
-    })?;
-    Ok(canonical_parent.join(Path::new(lock_file_name)))
+    })
 }
 
 fn persist_lock(path: &Path) -> Result<Arc<Mutex<()>>, PersistError> {

@@ -18,6 +18,50 @@ pub(crate) fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
 }
 
+/// Derive one stable process-local mutex key for a file-backed lock path.
+///
+/// Use this for in-memory lock registries that protect a durable file or
+/// directory while the real file may not exist yet, such as create-then-rename
+/// persistence flows. The key is the canonical path when the target exists; for
+/// missing targets it is the canonical parent directory plus the exact final
+/// path component. That preserves non-UTF8 names and normalizes symlinked
+/// parents without requiring the protected file to exist.
+///
+/// This is not a replacement for an OS file lock when cross-process exclusion is
+/// required. Callers that need cross-process serialization must still acquire a
+/// flock or equivalent lock file. The helper fails closed when the parent cannot
+/// be canonicalized or the path has no final component.
+pub fn canonical_lock_key(lock_path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    if let Ok(canonical_path) = lock_path.canonicalize() {
+        return Ok(canonical_path);
+    }
+
+    let parent = lock_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let file_name = lock_path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "lock key path has no final component: {}",
+                lock_path.display()
+            ),
+        )
+    })?;
+    let canonical_parent = parent.canonicalize().map_err(|source| {
+        std::io::Error::new(
+            source.kind(),
+            format!(
+                "failed canonicalizing lock key parent {} for {}: {source}",
+                parent.display(),
+                lock_path.display()
+            ),
+        )
+    })?;
+
+    Ok(canonical_parent.join(std::path::Path::new(file_name)))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ActionableError {
     message: String,

@@ -1,6 +1,8 @@
 #[path = "../../../tests/conformance/control_lane_policy.rs"]
 mod control_lane_policy;
 
+use frankenengine_node::canonical_lock_key;
+
 mod security {
     pub mod constant_time {
         pub fn ct_eq(a: &str, b: &str) -> bool {
