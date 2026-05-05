@@ -1,0 +1,380 @@
+{
+  "schema_version": "franken-node/validation-proof-cache/fixtures/v1",
+  "validation_time": "2026-05-05T20:32:00Z",
+  "valid_cache_keys": [
+    {
+      "schema_version": "franken-node/validation-proof-cache/key/v1",
+      "key_id": "vpckey-60eee0596a97604e",
+      "algorithm": "sha256",
+      "hex": "60eee0596a97604ebed13b0f59d08577a25472d8b97718b5bf787058f8d19252",
+      "canonical_material": "command_digest=sha256:c33fa97cf279843b8719fc9f9d51b31c1806954434daca0bd6bbb81dc058db03\u0000inputs=crates/franken-node/tests/validation_broker.rs:0d60aeadd7807369906b25ac054db36aee507378b9bdc53a14507309e7a70961\u0000git_commit=536c5a18\u0000dirty=false\u0000dirty_policy=clean_required\u0000features=http-client,external-commands\u0000toolchain=nightly-2026-02-19\u0000package=frankenengine-node\u0000test_target=validation_broker\u0000env_policy=validation-broker/env-policy/v1\u0000target_policy=validation-broker/target-dir/off-repo/v1",
+      "command_digest": {
+        "algorithm": "sha256",
+        "hex": "c33fa97cf279843b8719fc9f9d51b31c1806954434daca0bd6bbb81dc058db03",
+        "canonical_material": "cargo +nightly-2026-02-19 test -p frankenengine-node --no-default-features --features http-client,external-commands --test validation_broker -- --nocapture\u0000cwd=/data/projects/franken_node\u0000rch=required\u0000target_dir=off-repo"
+      },
+      "input_digests": [
+        {
+          "path": "crates/franken-node/tests/validation_broker.rs",
+          "algorithm": "sha256",
+          "hex": "0d60aeadd7807369906b25ac054db36aee507378b9bdc53a14507309e7a70961",
+          "canonical_material": "crates/franken-node/tests/validation_broker.rs\u0000docs/specs/validation_broker.md\u0000scripts/check_validation_broker_contract.py\u0000artifacts/validation_broker/validation_broker_contract.schema.json"
+        }
+      ],
+      "git_commit": "536c5a18",
+      "dirty_worktree": false,
+      "dirty_state_policy": "clean_required",
+      "feature_flags": [
+        "http-client",
+        "external-commands"
+      ],
+      "cargo_toolchain": "nightly-2026-02-19",
+      "package": "frankenengine-node",
+      "test_target": "validation_broker",
+      "environment_policy_id": "validation-broker/env-policy/v1",
+      "target_dir_policy_id": "validation-broker/target-dir/off-repo/v1"
+    }
+  ],
+  "valid_entries": [
+    {
+      "schema_version": "franken-node/validation-proof-cache/entry/v1",
+      "entry_id": "vpc-entry-bd-jbkiq-0001",
+      "cache_key": {
+        "schema_version": "franken-node/validation-proof-cache/key/v1",
+        "key_id": "vpckey-60eee0596a97604e",
+        "algorithm": "sha256",
+        "hex": "60eee0596a97604ebed13b0f59d08577a25472d8b97718b5bf787058f8d19252",
+        "canonical_material": "command_digest=sha256:c33fa97cf279843b8719fc9f9d51b31c1806954434daca0bd6bbb81dc058db03\u0000inputs=crates/franken-node/tests/validation_broker.rs:0d60aeadd7807369906b25ac054db36aee507378b9bdc53a14507309e7a70961\u0000git_commit=536c5a18\u0000dirty=false\u0000dirty_policy=clean_required\u0000features=http-client,external-commands\u0000toolchain=nightly-2026-02-19\u0000package=frankenengine-node\u0000test_target=validation_broker\u0000env_policy=validation-broker/env-policy/v1\u0000target_policy=validation-broker/target-dir/off-repo/v1",
+        "command_digest": {
+          "algorithm": "sha256",
+          "hex": "c33fa97cf279843b8719fc9f9d51b31c1806954434daca0bd6bbb81dc058db03",
+          "canonical_material": "cargo +nightly-2026-02-19 test -p frankenengine-node --no-default-features --features http-client,external-commands --test validation_broker -- --nocapture\u0000cwd=/data/projects/franken_node\u0000rch=required\u0000target_dir=off-repo"
+        },
+        "input_digests": [
+          {
+            "path": "crates/franken-node/tests/validation_broker.rs",
+            "algorithm": "sha256",
+            "hex": "0d60aeadd7807369906b25ac054db36aee507378b9bdc53a14507309e7a70961",
+            "canonical_material": "crates/franken-node/tests/validation_broker.rs\u0000docs/specs/validation_broker.md\u0000scripts/check_validation_broker_contract.py\u0000artifacts/validation_broker/validation_broker_contract.schema.json"
+          }
+        ],
+        "git_commit": "536c5a18",
+        "dirty_worktree": false,
+        "dirty_state_policy": "clean_required",
+        "feature_flags": [
+          "http-client",
+          "external-commands"
+        ],
+        "cargo_toolchain": "nightly-2026-02-19",
+        "package": "frankenengine-node",
+        "test_target": "validation_broker",
+        "environment_policy_id": "validation-broker/env-policy/v1",
+        "target_dir_policy_id": "validation-broker/target-dir/off-repo/v1"
+      },
+      "bead_id": "bd-jbkiq",
+      "receipt_ref": {
+        "receipt_id": "vbrcpt-bd-jbkiq-proof-cache-0001",
+        "path": "artifacts/validation_broker/proof_cache/examples/bd-jbkiq/receipt.json",
+        "bead_id": "bd-jbkiq",
+        "command_digest": {
+          "algorithm": "sha256",
+          "hex": "c33fa97cf279843b8719fc9f9d51b31c1806954434daca0bd6bbb81dc058db03",
+          "canonical_material": "cargo +nightly-2026-02-19 test -p frankenengine-node --no-default-features --features http-client,external-commands --test validation_broker -- --nocapture\u0000cwd=/data/projects/franken_node\u0000rch=required\u0000target_dir=off-repo"
+        },
+        "input_digests": [
+          {
+            "path": "crates/franken-node/tests/validation_broker.rs",
+            "algorithm": "sha256",
+            "hex": "0d60aeadd7807369906b25ac054db36aee507378b9bdc53a14507309e7a70961",
+            "canonical_material": "crates/franken-node/tests/validation_broker.rs\u0000docs/specs/validation_broker.md\u0000scripts/check_validation_broker_contract.py\u0000artifacts/validation_broker/validation_broker_contract.schema.json"
+          }
+        ],
+        "dirty_worktree": false,
+        "dirty_state_policy": "clean_required",
+        "environment_policy_id": "validation-broker/env-policy/v1",
+        "target_dir_policy_id": "validation-broker/target-dir/off-repo/v1"
+      },
+      "receipt_digest": {
+        "algorithm": "sha256",
+        "hex": "3a76e5b5914d1fba906720ad2b1332b4b2ac6a464fc11d1299dd5490c479d3ec",
+        "canonical_material": "receipt=vbrcpt-bd-jbkiq-proof-cache-0001\u0000path=artifacts/validation_broker/proof_cache/examples/bd-jbkiq/receipt.json\u0000command_digest=sha256:c33fa97cf279843b8719fc9f9d51b31c1806954434daca0bd6bbb81dc058db03\u0000input_digest=sha256:0d60aeadd7807369906b25ac054db36aee507378b9bdc53a14507309e7a70961"
+      },
+      "producer_agent": "LavenderElk",
+      "created_at": "2026-05-05T20:20:00Z",
+      "freshness_expires_at": "2026-12-31T00:00:00Z",
+      "trust": {
+        "state": "fresh",
+        "git_commit": "536c5a18",
+        "signature_status": "unsigned-test-fixture",
+        "dirty_worktree": false,
+        "dirty_state_policy": "clean_required",
+        "environment_policy_id": "validation-broker/env-policy/v1",
+        "target_dir_policy_id": "validation-broker/target-dir/off-repo/v1"
+      },
+      "reuse": {
+        "count": 0,
+        "last_reused_at": null
+      },
+      "storage": {
+        "path": "artifacts/validation_broker/proof_cache/entries/60/60eee0596a97604e.json",
+        "bytes": 4096,
+        "quota_class": "validation-proof-cache",
+        "retention_policy": "fresh-until-expiry"
+      },
+      "invalidation": {
+        "active": false,
+        "reason": null,
+        "corrupted": false
+      }
+    }
+  ],
+  "valid_decisions": [
+    {
+      "schema_version": "franken-node/validation-proof-cache/decision/v1",
+      "decision_id": "vpc-decision-bd-jbkiq-hit-0001",
+      "cache_key": {
+        "schema_version": "franken-node/validation-proof-cache/key/v1",
+        "key_id": "vpckey-60eee0596a97604e",
+        "algorithm": "sha256",
+        "hex": "60eee0596a97604ebed13b0f59d08577a25472d8b97718b5bf787058f8d19252",
+        "canonical_material": "command_digest=sha256:c33fa97cf279843b8719fc9f9d51b31c1806954434daca0bd6bbb81dc058db03\u0000inputs=crates/franken-node/tests/validation_broker.rs:0d60aeadd7807369906b25ac054db36aee507378b9bdc53a14507309e7a70961\u0000git_commit=536c5a18\u0000dirty=false\u0000dirty_policy=clean_required\u0000features=http-client,external-commands\u0000toolchain=nightly-2026-02-19\u0000package=frankenengine-node\u0000test_target=validation_broker\u0000env_policy=validation-broker/env-policy/v1\u0000target_policy=validation-broker/target-dir/off-repo/v1",
+        "command_digest": {
+          "algorithm": "sha256",
+          "hex": "c33fa97cf279843b8719fc9f9d51b31c1806954434daca0bd6bbb81dc058db03",
+          "canonical_material": "cargo +nightly-2026-02-19 test -p frankenengine-node --no-default-features --features http-client,external-commands --test validation_broker -- --nocapture\u0000cwd=/data/projects/franken_node\u0000rch=required\u0000target_dir=off-repo"
+        },
+        "input_digests": [
+          {
+            "path": "crates/franken-node/tests/validation_broker.rs",
+            "algorithm": "sha256",
+            "hex": "0d60aeadd7807369906b25ac054db36aee507378b9bdc53a14507309e7a70961",
+            "canonical_material": "crates/franken-node/tests/validation_broker.rs\u0000docs/specs/validation_broker.md\u0000scripts/check_validation_broker_contract.py\u0000artifacts/validation_broker/validation_broker_contract.schema.json"
+          }
+        ],
+        "git_commit": "536c5a18",
+        "dirty_worktree": false,
+        "dirty_state_policy": "clean_required",
+        "feature_flags": [
+          "http-client",
+          "external-commands"
+        ],
+        "cargo_toolchain": "nightly-2026-02-19",
+        "package": "frankenengine-node",
+        "test_target": "validation_broker",
+        "environment_policy_id": "validation-broker/env-policy/v1",
+        "target_dir_policy_id": "validation-broker/target-dir/off-repo/v1"
+      },
+      "bead_id": "bd-jbkiq",
+      "trace_id": "vpc-trace-bd-jbkiq-hit-0001",
+      "decided_at": "2026-05-05T20:31:00Z",
+      "decision": "hit",
+      "reason_code": "VPC_HIT_FRESH",
+      "entry_ref": {
+        "entry_id": "vpc-entry-bd-jbkiq-0001",
+        "path": "artifacts/validation_broker/proof_cache/entries/60/60eee0596a97604e.json"
+      },
+      "receipt_ref": {
+        "receipt_id": "vbrcpt-bd-jbkiq-proof-cache-0001",
+        "path": "artifacts/validation_broker/proof_cache/examples/bd-jbkiq/receipt.json"
+      },
+      "required_action": "reuse_receipt",
+      "diagnostics": {
+        "message": "fresh proof cache entry accepted",
+        "fail_closed": false,
+        "event_code": "VPC-002"
+      }
+    }
+  ],
+  "decision_examples": [
+    {
+      "decision": "hit",
+      "reason_code": "VPC_HIT_FRESH",
+      "required_action": "reuse_receipt",
+      "event_code": "VPC-002"
+    },
+    {
+      "decision": "miss",
+      "reason_code": "VPC_MISS_NO_ENTRY",
+      "required_action": "run_validation",
+      "event_code": "VPC-003"
+    },
+    {
+      "decision": "stale",
+      "reason_code": "VPC_REJECT_STALE",
+      "required_action": "refresh_validation",
+      "event_code": "VPC-004"
+    },
+    {
+      "decision": "digest_mismatch",
+      "reason_code": "VPC_REJECT_RECEIPT_DIGEST",
+      "required_action": "repair_cache",
+      "event_code": "VPC-005"
+    },
+    {
+      "decision": "policy_mismatch",
+      "reason_code": "VPC_REJECT_POLICY",
+      "required_action": "run_validation",
+      "event_code": "VPC-007"
+    },
+    {
+      "decision": "dirty_state_mismatch",
+      "reason_code": "VPC_REJECT_DIRTY_STATE",
+      "required_action": "run_validation",
+      "event_code": "VPC-007"
+    },
+    {
+      "decision": "quota_blocked",
+      "reason_code": "VPC_REJECT_QUOTA",
+      "required_action": "free_space",
+      "event_code": "VPC-008"
+    },
+    {
+      "decision": "corrupted_entry",
+      "reason_code": "VPC_REJECT_CORRUPTED",
+      "required_action": "repair_cache",
+      "event_code": "VPC-009"
+    }
+  ],
+  "invalid_entries": [
+    {
+      "name": "malformed_entry",
+      "expected_errors": [
+        "ERR_VPC_MALFORMED_ENTRY"
+      ],
+      "patch": {
+        "remove": [
+          "receipt_digest"
+        ]
+      }
+    },
+    {
+      "name": "bad_cache_key",
+      "expected_errors": [
+        "ERR_VPC_BAD_CACHE_KEY"
+      ],
+      "patch": {
+        "set": {
+          "cache_key.hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      }
+    },
+    {
+      "name": "stale_entry",
+      "expected_errors": [
+        "ERR_VPC_STALE_ENTRY"
+      ],
+      "patch": {
+        "set": {
+          "freshness_expires_at": "2026-05-05T19:00:00Z"
+        }
+      }
+    },
+    {
+      "name": "receipt_digest_mismatch",
+      "expected_errors": [
+        "ERR_VPC_RECEIPT_DIGEST_MISMATCH"
+      ],
+      "patch": {
+        "set": {
+          "receipt_digest.hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        }
+      }
+    },
+    {
+      "name": "command_digest_mismatch",
+      "expected_errors": [
+        "ERR_VPC_COMMAND_DIGEST_MISMATCH"
+      ],
+      "patch": {
+        "set": {
+          "receipt_ref.command_digest.hex": "1111111111111111111111111111111111111111111111111111111111111111"
+        }
+      }
+    },
+    {
+      "name": "input_digest_mismatch",
+      "expected_errors": [
+        "ERR_VPC_INPUT_DIGEST_MISMATCH"
+      ],
+      "patch": {
+        "set": {
+          "receipt_ref.input_digests.0.hex": "2222222222222222222222222222222222222222222222222222222222222222"
+        }
+      }
+    },
+    {
+      "name": "dirty_state_mismatch",
+      "expected_errors": [
+        "ERR_VPC_DIRTY_STATE_MISMATCH"
+      ],
+      "patch": {
+        "set": {
+          "receipt_ref.dirty_worktree": true
+        }
+      }
+    },
+    {
+      "name": "policy_mismatch",
+      "expected_errors": [
+        "ERR_VPC_POLICY_MISMATCH"
+      ],
+      "patch": {
+        "set": {
+          "receipt_ref.target_dir_policy_id": "validation-broker/target-dir/repo-local/v1"
+        }
+      }
+    },
+    {
+      "name": "corrupted_entry",
+      "expected_errors": [
+        "ERR_VPC_CORRUPTED_ENTRY"
+      ],
+      "patch": {
+        "set": {
+          "invalidation.active": true,
+          "invalidation.reason": "checksum mismatch from prior read",
+          "invalidation.corrupted": true
+        }
+      }
+    }
+  ],
+  "invalid_decisions": [
+    {
+      "name": "quota_blocked_decision",
+      "expected_errors": [
+        "ERR_VPC_QUOTA_BLOCKED"
+      ],
+      "patch": {
+        "set": {
+          "decision": "quota_blocked",
+          "reason_code": "VPC_REJECT_QUOTA",
+          "required_action": "free_space"
+        }
+      }
+    },
+    {
+      "name": "corrupted_decision",
+      "expected_errors": [
+        "ERR_VPC_CORRUPTED_ENTRY"
+      ],
+      "patch": {
+        "set": {
+          "decision": "corrupted_entry",
+          "reason_code": "VPC_REJECT_CORRUPTED",
+          "required_action": "repair_cache"
+        }
+      }
+    },
+    {
+      "name": "hit_without_reuse_action",
+      "expected_errors": [
+        "ERR_VPC_MALFORMED_DECISION"
+      ],
+      "patch": {
+        "set": {
+          "required_action": "run_validation"
+        }
+      }
+    }
+  ]
+}

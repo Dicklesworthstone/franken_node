@@ -1,0 +1,200 @@
+{
+  "schema_version": "franken-node/validation-proof-cache/schema-catalog/v1",
+  "json_schema_draft": "https://json-schema.org/draft/2020-12/schema",
+  "cache_key_schema_uri": "https://franken-node.local/schemas/validation-proof-cache/key/v1",
+  "entry_schema_uri": "https://franken-node.local/schemas/validation-proof-cache/entry/v1",
+  "decision_schema_uri": "https://franken-node.local/schemas/validation-proof-cache/decision/v1",
+  "gc_report_schema_uri": "https://franken-node.local/schemas/validation-proof-cache/gc-report/v1",
+  "decision_kinds": [
+    "hit",
+    "miss",
+    "stale",
+    "digest_mismatch",
+    "policy_mismatch",
+    "dirty_state_mismatch",
+    "quota_blocked",
+    "corrupted_entry"
+  ],
+  "reason_codes": [
+    "VPC_HIT_FRESH",
+    "VPC_MISS_NO_ENTRY",
+    "VPC_REJECT_STALE",
+    "VPC_REJECT_RECEIPT_DIGEST",
+    "VPC_REJECT_COMMAND_DIGEST",
+    "VPC_REJECT_INPUT_DIGEST",
+    "VPC_REJECT_POLICY",
+    "VPC_REJECT_DIRTY_STATE",
+    "VPC_REJECT_QUOTA",
+    "VPC_REJECT_CORRUPTED"
+  ],
+  "required_actions": [
+    "reuse_receipt",
+    "run_validation",
+    "refresh_validation",
+    "repair_cache",
+    "free_space",
+    "source_only_not_allowed"
+  ],
+  "dirty_state_policies": [
+    "clean_required",
+    "dirty_allowed_with_digest",
+    "source_only_documented"
+  ],
+  "event_codes": [
+    "VPC-001",
+    "VPC-002",
+    "VPC-003",
+    "VPC-004",
+    "VPC-005",
+    "VPC-006",
+    "VPC-007",
+    "VPC-008",
+    "VPC-009",
+    "VPC-010"
+  ],
+  "required_key_fields": [
+    "schema_version",
+    "key_id",
+    "algorithm",
+    "hex",
+    "canonical_material",
+    "command_digest",
+    "input_digests",
+    "git_commit",
+    "dirty_worktree",
+    "dirty_state_policy",
+    "feature_flags",
+    "cargo_toolchain",
+    "package",
+    "test_target",
+    "environment_policy_id",
+    "target_dir_policy_id"
+  ],
+  "required_entry_fields": [
+    "schema_version",
+    "entry_id",
+    "cache_key",
+    "bead_id",
+    "receipt_ref",
+    "receipt_digest",
+    "producer_agent",
+    "created_at",
+    "freshness_expires_at",
+    "trust",
+    "reuse",
+    "storage",
+    "invalidation"
+  ],
+  "required_decision_fields": [
+    "schema_version",
+    "decision_id",
+    "cache_key",
+    "bead_id",
+    "trace_id",
+    "decided_at",
+    "decision",
+    "reason_code",
+    "entry_ref",
+    "receipt_ref",
+    "required_action",
+    "diagnostics"
+  ],
+  "required_gc_report_fields": [
+    "schema_version",
+    "report_id",
+    "generated_at",
+    "policy",
+    "kept_entries",
+    "removed_entries",
+    "rejected_entries",
+    "disk_pressure"
+  ],
+  "schemas": {
+    "DigestRef": {
+      "type": "object",
+      "required": [
+        "algorithm",
+        "hex",
+        "canonical_material"
+      ]
+    },
+    "InputDigestRef": {
+      "type": "object",
+      "required": [
+        "path",
+        "algorithm",
+        "hex",
+        "canonical_material"
+      ]
+    },
+    "ValidationProofCacheKey": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "key_id",
+        "algorithm",
+        "hex",
+        "canonical_material",
+        "command_digest",
+        "input_digests",
+        "git_commit",
+        "dirty_worktree",
+        "dirty_state_policy",
+        "feature_flags",
+        "cargo_toolchain",
+        "package",
+        "test_target",
+        "environment_policy_id",
+        "target_dir_policy_id"
+      ]
+    },
+    "ValidationProofCacheEntry": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "entry_id",
+        "cache_key",
+        "bead_id",
+        "receipt_ref",
+        "receipt_digest",
+        "producer_agent",
+        "created_at",
+        "freshness_expires_at",
+        "trust",
+        "reuse",
+        "storage",
+        "invalidation"
+      ]
+    },
+    "ValidationProofCacheDecision": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "decision_id",
+        "cache_key",
+        "bead_id",
+        "trace_id",
+        "decided_at",
+        "decision",
+        "reason_code",
+        "entry_ref",
+        "receipt_ref",
+        "required_action",
+        "diagnostics"
+      ]
+    },
+    "ValidationProofCacheGcReport": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "report_id",
+        "generated_at",
+        "policy",
+        "kept_entries",
+        "removed_entries",
+        "rejected_entries",
+        "disk_pressure"
+      ]
+    }
+  }
+}
