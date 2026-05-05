@@ -245,6 +245,11 @@ name = "sdk_verifier_replay_bundle_frame_conformance"
 path = "tests/sdk_verifier_replay_bundle_frame_conformance.rs"
 
 [[test]]
+name = "evidence_verification_spine_contract"
+path = "tests/evidence_verification_spine_contract.rs"
+required-features = ["control-plane"]
+
+[[test]]
 name = "idempotency_key_derivation"
 path = "../../tests/conformance/idempotency_key_derivation.rs"
 required-features = ["extended-surfaces"]

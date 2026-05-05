@@ -1,0 +1,122 @@
+{
+  "schema_version": "franken-node/evidence-verification-spine/v1",
+  "contract": "producer-independent evidence verification",
+  "bead": "bd-hp1hy",
+  "required_fields": [
+    "content_digest",
+    "signer_key_id",
+    "signature_algorithm",
+    "chain_parent_binding",
+    "producer_independent_verdict"
+  ],
+  "cases": [
+    {
+      "surface": "provenance_attestation_chain",
+      "case": "positive",
+      "expected_verdict": "pass",
+      "binding": "trusted Ed25519 signer keys plus publisher/build/source chain"
+    },
+    {
+      "surface": "provenance_attestation_chain",
+      "case": "negative_tampered_content_digest",
+      "expected_verdict": "fail",
+      "binding": "signed_payload_hash must match attested output_hash"
+    },
+    {
+      "surface": "provenance_attestation_chain",
+      "case": "negative_swapped_signer_key_id",
+      "expected_verdict": "fail",
+      "binding": "link signer_id selects trusted verifying key"
+    },
+    {
+      "surface": "provenance_attestation_chain",
+      "case": "negative_missing_parent_link",
+      "expected_verdict": "fail",
+      "binding": "required chain depth must be complete"
+    },
+    {
+      "surface": "provenance_attestation_chain",
+      "case": "negative_producer_verified_true_invalid_signature",
+      "expected_verdict": "fail",
+      "binding": "producer custom_claims cannot override signature verification"
+    },
+    {
+      "surface": "node_universal_replay_capsule",
+      "case": "positive",
+      "expected_verdict": "pass",
+      "binding": "manifest metadata Ed25519 key and signature over canonical capsule payload"
+    },
+    {
+      "surface": "node_universal_replay_capsule",
+      "case": "negative_tampered_content_digest",
+      "expected_verdict": "fail",
+      "binding": "payload tamper invalidates capsule signature"
+    },
+    {
+      "surface": "node_universal_replay_capsule",
+      "case": "negative_swapped_signer_key_id",
+      "expected_verdict": "fail",
+      "binding": "metadata public key swap invalidates signature verification"
+    },
+    {
+      "surface": "node_universal_replay_capsule",
+      "case": "negative_missing_parent_link",
+      "expected_verdict": "fail",
+      "binding": "manifest input_refs must match supplied inputs"
+    },
+    {
+      "surface": "node_universal_replay_capsule",
+      "case": "negative_producer_verified_true_invalid_signature",
+      "expected_verdict": "fail",
+      "binding": "producer metadata cannot override signature verification"
+    },
+    {
+      "surface": "external_verifier_sdk_capsule",
+      "case": "positive",
+      "expected_verdict": "pass",
+      "binding": "caller-provided Ed25519 verifying key and signature over canonical capsule payload"
+    },
+    {
+      "surface": "external_verifier_sdk_capsule",
+      "case": "negative_tampered_content_digest",
+      "expected_verdict": "fail",
+      "binding": "payload tamper invalidates capsule signature"
+    },
+    {
+      "surface": "external_verifier_sdk_capsule",
+      "case": "negative_swapped_signer_key_id",
+      "expected_verdict": "fail",
+      "binding": "wrong verifying key cannot authenticate capsule"
+    },
+    {
+      "surface": "external_verifier_sdk_capsule",
+      "case": "negative_missing_parent_link",
+      "expected_verdict": "fail",
+      "binding": "manifest input_refs must match supplied inputs"
+    },
+    {
+      "surface": "external_verifier_sdk_capsule",
+      "case": "negative_producer_verified_true_invalid_signature",
+      "expected_verdict": "fail",
+      "binding": "producer metadata cannot override signature verification"
+    },
+    {
+      "surface": "vef_evidence_capsule",
+      "case": "positive",
+      "expected_verdict": "pass",
+      "binding": "derived receipt-chain commitment plus trusted verification context"
+    },
+    {
+      "surface": "vef_evidence_capsule",
+      "case": "negative_missing_parent_link",
+      "expected_verdict": "fail",
+      "binding": "verification without trusted receipt-chain context fails closed"
+    },
+    {
+      "surface": "vef_evidence_capsule",
+      "case": "negative_producer_verified_true_invalid_signature",
+      "expected_verdict": "fail",
+      "binding": "verified=true cannot override commitment and context checks"
+    }
+  ]
+}
