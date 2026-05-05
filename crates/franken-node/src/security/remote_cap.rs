@@ -1522,14 +1522,6 @@ impl CapabilityProvider {
         self.with_audit_log_fail_closed(|audit_log| audit_log.len())
     }
 
-    fn with_audit_log<R>(
-        &self,
-        action: impl FnOnce(&mut Vec<RemoteCapAuditEvent>) -> R,
-    ) -> Result<R, RemoteCapError> {
-        let mut audit_log = self.try_lock_audit_log_with_timeout(Duration::from_millis(100))?;
-        Ok(action(&mut audit_log))
-    }
-
     // Public audit paths must preserve audit state under contention. If the
     // optimistic timeout expires, block for the real lock instead of returning
     // a fabricated empty snapshot or dropping the event entirely.

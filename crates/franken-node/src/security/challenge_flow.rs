@@ -30,6 +30,7 @@ const MAX_RECEIVED_PROOFS_PER_CHALLENGE: usize = 64;
 const MAX_TIMEOUT_BATCH_SIZE: usize = 1024;
 
 /// Safe conversion of field length to u64 with overflow protection.
+#[cfg(test)]
 fn safe_field_len_as_u64(len: usize, field_name: &str) -> Result<u64, ChallengeError> {
     u64::try_from(len).map_err(|_| {
         ChallengeError::new(
@@ -39,6 +40,7 @@ fn safe_field_len_as_u64(len: usize, field_name: &str) -> Result<u64, ChallengeE
     })
 }
 
+#[cfg(test)]
 fn update_length_prefixed(hasher: &mut Sha256, field: &[u8]) -> Result<(), ChallengeError> {
     let len_u64 = safe_field_len_as_u64(field.len(), "hash_field")?;
     hasher.update(len_u64.to_le_bytes());

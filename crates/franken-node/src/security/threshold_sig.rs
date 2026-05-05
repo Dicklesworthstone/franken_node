@@ -218,6 +218,7 @@ struct PreparedThresholdKeys<'a> {
 }
 
 impl<'a> PreparedThresholdKeys<'a> {
+    #[cfg(test)]
     fn new(config: &'a ThresholdConfig) -> Self {
         let mut verifying_keys = HashMap::with_capacity(config.signer_keys.len());
         for signer in &config.signer_keys {
@@ -602,6 +603,7 @@ fn parse_signature(signature_hex: &str) -> Option<Signature> {
 }
 
 /// Verify a partial signature using Ed25519.
+#[cfg(test)]
 fn verify_signature(
     key: &SignerKey,
     artifact_id: &str,
@@ -613,6 +615,7 @@ fn verify_signature(
     verify_signature_with_message(key, &message, sig)
 }
 
+#[cfg(test)]
 fn verify_signature_with_message(
     key: &SignerKey,
     message_bytes: &[u8],
@@ -625,6 +628,7 @@ fn verify_signature_with_message(
     verify_signature_with_parsed_key(&verifying_key, message_bytes, sig)
 }
 
+#[cfg(test)]
 fn verify_signature_with_parsed_key(
     verifying_key: &VerifyingKey,
     message_bytes: &[u8],

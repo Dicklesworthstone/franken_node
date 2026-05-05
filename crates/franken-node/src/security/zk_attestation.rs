@@ -37,9 +37,12 @@ pub const DEFAULT_VALIDITY_MS: u64 = 600_000; // 10 minutes
 pub const MAX_BATCH_SIZE: usize = 256;
 
 /// Security: bounds for push_bounded to prevent memory exhaustion
+#[cfg(test)]
 const MAX_TIMING_SAMPLES: usize = 10_000;
 const MAX_AUDIT_TRAIL_ENTRIES: usize = 100_000;
+#[cfg(test)]
 const MAX_ATTESTATIONS_LIST: usize = 10_000;
+#[cfg(test)]
 const MAX_THREAD_HANDLES: usize = 1_000;
 
 // ── Invariant constants ─────────────────────────────────────────────────────

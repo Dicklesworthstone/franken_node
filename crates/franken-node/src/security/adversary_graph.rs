@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Hardening: Push with bounded capacity to prevent memory exhaustion attacks
+#[cfg(test)]
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
         return;
