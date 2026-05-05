@@ -93,11 +93,11 @@ use crate::cli::{
     DebugExplainArgs, DebugTraceArgs, DoctorCloseConditionArgs, DoctorCommand,
     DoctorEvidenceReadinessArgs, DoctorPolicyActivationInput, FleetAgentArgs, FleetCommand,
     IncidentCommand, MigrateCommand, MigrateReportArgs, OpsCommand, OpsConfigAuditArgs,
-    OpsMetricsFormat, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs, RemoteCapRevokeArgs,
-    RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand, TrustCardCommand,
-    TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
-    VerifyModuleArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
-    load_doctor_policy_activation_input,
+    OpsMetricsFormat, OpsResourceGovernorArgs, RegistryCommand, RemoteCapCommand,
+    RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand,
+    RuntimeLaneCommand, TrustCardCommand, TrustCommand, VerifyCommand, VerifyCompatibilityArgs,
+    VerifyCorpusArgs, VerifyMigrationArgs, VerifyModuleArgs, VerifyReleaseArgs,
+    VerifyTransparencyLogArgs, load_doctor_policy_activation_input,
 };
 use crate::policy::{
     bayesian_diagnostics::{BayesianDiagnostics, CandidateRef, Observation},
@@ -6562,6 +6562,75 @@ fn emit_ops_health_check_report(report: &OpsHealthCheckReport, json: bool) -> Re
         println!("  last_successful_evidence_ledger_flush_timestamp={flush_timestamp}");
         println!("  build_version={}", report.build_version);
         println!("  git_sha={}", report.git_sha);
+    }
+    Ok(())
+}
+
+fn ops_resource_governor_report(
+    args: &OpsResourceGovernorArgs,
+) -> Result<runtime::resource_governor::ResourceGovernorReport> {
+    let now = Utc::now();
+    let mut observation = if let Some(path) = &args.process_snapshot {
+        runtime::resource_governor::read_snapshot_file(path, now)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?
+    } else {
+        runtime::resource_governor::observe_live_validation_processes(now)
+    };
+    observation.merge_hints(
+        args.rch_queue_depth,
+        args.active_proof_classes.clone(),
+        args.target_dir_usage_mb,
+        args.memory_used_mb,
+        args.cpu_load_permyriad,
+    );
+
+    Ok(runtime::resource_governor::evaluate_resource_governor(
+        runtime::resource_governor::ResourceGovernorRequest {
+            trace_id: args.trace_id.clone(),
+            requested_proof_class: args.requested_proof_class.clone(),
+            source_only_allowed: args.source_only_allowed,
+        },
+        observation,
+        runtime::resource_governor::ResourceGovernorThresholds::default(),
+        now,
+    ))
+}
+
+fn emit_ops_resource_governor_report(
+    report: &runtime::resource_governor::ResourceGovernorReport,
+    json: bool,
+) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(report)?);
+    } else {
+        let rch_queue_depth = report
+            .observation
+            .rch_queue_depth
+            .map(|depth| depth.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let active_proof_classes = if report.observation.active_proof_classes.is_empty() {
+            "none".to_string()
+        } else {
+            report.observation.active_proof_classes.join(",")
+        };
+        println!(
+            "ops resource-governor: decision={}",
+            report.decision.kind.as_str()
+        );
+        println!("  trace_id={}", report.trace_id);
+        println!("  reason_code={}", report.decision.reason_code);
+        println!("  reason={}", report.decision.reason);
+        println!(
+            "  recommended_backoff_ms={}",
+            report.decision.recommended_backoff_ms
+        );
+        println!(
+            "  validation_processes={}",
+            report.observation.process_counts.total_validation_processes
+        );
+        println!("  rch_queue_depth={rch_queue_depth}");
+        println!("  active_proof_classes={active_proof_classes}");
+        println!("  next_action={}", report.decision.next_action);
     }
     Ok(())
 }
@@ -24873,6 +24942,10 @@ fn main() -> Result<()> {
             OpsCommand::HealthCheck(args) => {
                 let report = ops_health_check_report(Path::new("."))?;
                 emit_ops_health_check_report(&report, args.json)?;
+            }
+            OpsCommand::ResourceGovernor(args) => {
+                let report = ops_resource_governor_report(&args)?;
+                emit_ops_resource_governor_report(&report, args.json)?;
             }
             OpsCommand::ConfigAudit(args) => {
                 let report = ops_config_audit_report(&args)?;

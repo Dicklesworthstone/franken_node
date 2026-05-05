@@ -24,6 +24,7 @@ pub mod nversion_oracle;
 pub mod obligation_channel;
 pub mod optimization_governor;
 pub mod region_tree;
+pub mod resource_governor;
 #[cfg(any(test, feature = "admin-tools"))]
 pub mod safe_mode;
 pub mod speculation;

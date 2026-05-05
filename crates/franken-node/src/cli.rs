@@ -1085,6 +1085,9 @@ pub struct FleetAgentArgs {
 pub enum OpsCommand {
     /// Inspect process/runtime health signals.
     HealthCheck(OpsHealthCheckArgs),
+    /// Advise whether cargo/RCH validation should run, defer, dedupe, or fall back to source-only work.
+    #[command(name = "resource-governor")]
+    ResourceGovernor(OpsResourceGovernorArgs),
     /// Audit the active config and compare operational impact across profiles.
     #[command(name = "config-audit")]
     ConfigAudit(OpsConfigAuditArgs),
@@ -1097,6 +1100,49 @@ pub struct OpsHealthCheckArgs {
     /// Emit JSON instead of human-readable output.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct OpsResourceGovernorArgs {
+    /// Emit JSON instead of human-readable output.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Stable trace ID for correlating resource-governor output.
+    #[arg(long, default_value = "ops-resource-governor")]
+    pub trace_id: String,
+
+    /// JSON fixture containing process/RCH/resource observations.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub process_snapshot: Option<PathBuf>,
+
+    /// Proof class the caller wants to run, used for dedupe decisions.
+    #[arg(long)]
+    pub requested_proof_class: Option<String>,
+
+    /// Proof class already running in the swarm or validation broker.
+    #[arg(long = "active-proof-class")]
+    pub active_proof_classes: Vec<String>,
+
+    /// Optional RCH queue depth hint when available.
+    #[arg(long)]
+    pub rch_queue_depth: Option<u64>,
+
+    /// Optional target-dir usage hint in MiB.
+    #[arg(long)]
+    pub target_dir_usage_mb: Option<u64>,
+
+    /// Optional memory usage hint in MiB.
+    #[arg(long)]
+    pub memory_used_mb: Option<u64>,
+
+    /// Optional CPU load hint, where 10000 means 100%.
+    #[arg(long)]
+    pub cpu_load_permyriad: Option<u64>,
+
+    /// Permit source-only progress when validation pressure is too high.
+    #[arg(long)]
+    pub source_only_allowed: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1816,6 +1862,51 @@ mod parser_contract_extra_tests {
         let Command::Ops(OpsCommand::HealthCheck(args)) = cli.command else {
             panic!("expected ops health-check command");
         };
+        assert!(args.json);
+    }
+
+    #[test]
+    fn ops_resource_governor_parses_snapshot_hints_and_json() {
+        let cli = parse(&[
+            "franken-node",
+            "ops",
+            "resource-governor",
+            "--process-snapshot",
+            "fixtures/resource-governor/processes.json",
+            "--requested-proof-class",
+            "cargo-check",
+            "--active-proof-class",
+            "cargo-clippy",
+            "--rch-queue-depth",
+            "3",
+            "--target-dir-usage-mb",
+            "8192",
+            "--memory-used-mb",
+            "64000",
+            "--cpu-load-permyriad",
+            "7500",
+            "--source-only-allowed",
+            "--trace-id",
+            "rg-cli-test",
+            "--json",
+        ])
+        .expect("ops resource-governor command should parse");
+
+        let Command::Ops(OpsCommand::ResourceGovernor(args)) = cli.command else {
+            std::panic::panic_any("expected ops resource-governor command");
+        };
+        assert_eq!(
+            args.process_snapshot,
+            Some(PathBuf::from("fixtures/resource-governor/processes.json"))
+        );
+        assert_eq!(args.requested_proof_class.as_deref(), Some("cargo-check"));
+        assert_eq!(args.active_proof_classes, vec!["cargo-clippy"]);
+        assert_eq!(args.rch_queue_depth, Some(3));
+        assert_eq!(args.target_dir_usage_mb, Some(8192));
+        assert_eq!(args.memory_used_mb, Some(64000));
+        assert_eq!(args.cpu_load_permyriad, Some(7500));
+        assert!(args.source_only_allowed);
+        assert_eq!(args.trace_id, "rg-cli-test");
         assert!(args.json);
     }
 
