@@ -8,12 +8,14 @@ use frankenengine_node::supply_chain::trust_card::{
     TrustCardRegistry,
 };
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Instant;
+
+use assert_cmd::cargo::CommandCargoExt;
 
 const ARTIFACT_RELATIVE_PATH: &str = "artifacts/adversarial/detection_latency_v1.json";
 const TRUST_CARD_REGISTRY_RELATIVE_PATH: &str = ".franken-node/state/trust-card-registry.v1.json";
@@ -159,41 +161,41 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn resolve_binary_path() -> PathBuf {
-    if let Some(exe) = std::env::var_os("CARGO_BIN_EXE_franken-node") {
-        return PathBuf::from(exe);
-    }
-    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
-        return PathBuf::from(target_dir).join("debug/franken-node");
-    }
-    repo_root().join("target/debug/franken-node")
+fn franken_node_command() -> Command {
+    Command::cargo_bin("franken-node").expect("franken-node binary")
 }
 
 fn args(items: &[&str]) -> Vec<String> {
     items.iter().map(|item| (*item).to_string()).collect()
 }
 
+fn fail_test(message: String) -> ! {
+    std::panic::panic_any(message)
+}
+
+fn fail_command(action: &str, args: &[String], err: std::io::Error) -> ! {
+    fail_test(format!("{action} `franken-node {}`: {err}", args.join(" ")))
+}
+
 fn run_cli_in_workspace(workspace: &Path, args: &[String]) -> (Output, f64) {
-    let binary_path = resolve_binary_path();
-    assert!(
-        binary_path.is_file(),
-        "franken-node binary not found at {}",
-        binary_path.display()
-    );
+    let mut command = franken_node_command();
     let started = Instant::now();
-    let output = Command::new(&binary_path)
+    let output = command
         .current_dir(workspace)
         .args(args)
         .output()
-        .unwrap_or_else(|err| panic!("failed running `franken-node {}`: {err}", args.join(" ")));
+        .unwrap_or_else(|err| fail_command("failed running", args, err));
     let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
     (output, elapsed_ms)
 }
 
 fn parse_json_stdout(output: &Output, context: &str) -> Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str(&stdout)
-        .unwrap_or_else(|err| panic!("{context} should emit valid JSON: {err}\nstdout:\n{stdout}"))
+    serde_json::from_str(&stdout).unwrap_or_else(|err| {
+        fail_test(format!(
+            "{context} should emit valid JSON: {err}\nstdout:\n{stdout}"
+        ))
+    })
 }
 
 fn write_fixture_workspace(workspace: &Path, fixture: &AdversarialExtensionFixture) {
