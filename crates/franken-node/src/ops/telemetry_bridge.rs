@@ -1363,12 +1363,7 @@ impl TelemetryBridge {
             let key = Self::persistence_key(envelope.bridge_seq);
             let caller = CallerContext::service("observability::telemetry_bridge", &key);
             let error = db
-                .write(
-                    &caller,
-                    PersistenceClass::AuditLog,
-                    &key,
-                    &envelope.payload,
-                )
+                .write(&caller, PersistenceClass::AuditLog, &key, &envelope.payload)
                 .err()
                 .map(|err| err.to_string());
 
@@ -1633,6 +1628,102 @@ fn assert_slowloris_partial_fragments_exceed_cap_after_timeout_shed_impl() {
 #[cfg(feature = "test-support")]
 pub fn assert_slowloris_partial_fragments_exceed_cap_after_timeout_shed_for_tests() {
     assert_slowloris_partial_fragments_exceed_cap_after_timeout_shed_impl();
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn assert_persistence_loop_batches_ready_envelopes_impl() {
+    let (sender, receiver) = mpsc::sync_channel(PERSIST_QUEUE_CAPACITY);
+    for bridge_seq in 2..=(PERSIST_BATCH_MAX as u64 + 3) {
+        sender
+            .try_send(PersistEnvelope {
+                connection_id: 1,
+                bridge_seq,
+                payload: br#"{"event":"queued"}"#.to_vec(),
+            })
+            .expect("seeded persistence queue should fit");
+    }
+
+    let abort_flag = AtomicBool::new(false);
+    let batch = TelemetryBridge::recv_persistence_batch(
+        PersistEnvelope {
+            connection_id: 1,
+            bridge_seq: 1,
+            payload: br#"{"event":"first"}"#.to_vec(),
+        },
+        &receiver,
+        &abort_flag,
+    );
+
+    assert_eq!(
+        batch.len(),
+        PERSIST_BATCH_MAX,
+        "ready envelopes should drain into a bounded persistence batch"
+    );
+    assert_eq!(batch.first().map(|envelope| envelope.bridge_seq), Some(1));
+    assert_eq!(
+        batch.last().map(|envelope| envelope.bridge_seq),
+        Some(PERSIST_BATCH_MAX as u64)
+    );
+    assert_eq!(
+        receiver.try_iter().count(),
+        3,
+        "batch drain must leave overflow work queued for the next loop"
+    );
+
+    let state = Arc::new(Mutex::new(TelemetryBridgeState::new(
+        PERSIST_QUEUE_CAPACITY,
+    )));
+    let (sender, receiver) = mpsc::sync_channel(PERSIST_QUEUE_CAPACITY);
+    let event_count = 8u64;
+    for bridge_seq in 1..=event_count {
+        let admitted = TelemetryBridge::enqueue_with_timeout(
+            &sender,
+            PersistEnvelope {
+                connection_id: 7,
+                bridge_seq,
+                payload: br#"{"event":"batched"}"#.to_vec(),
+            },
+            &state,
+            Duration::from_millis(10),
+        );
+        assert!(admitted);
+    }
+    drop(sender);
+
+    let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+    let adapter_ref = Arc::clone(&adapter);
+    TelemetryBridge::run_persistence_loop(
+        receiver,
+        adapter,
+        Arc::clone(&state),
+        Arc::new(AtomicBool::new(false)),
+    );
+
+    let snapshot = state.lock().expect("state lock").snapshot();
+    assert_eq!(snapshot.accepted_total, event_count);
+    assert_eq!(snapshot.persisted_total, event_count);
+    assert_eq!(snapshot.queue_depth, 0);
+    assert_eq!(
+        snapshot
+            .recent_events
+            .iter()
+            .filter(|event| event.code == event_codes::PERSIST_SUCCESS)
+            .count(),
+        event_count as usize,
+        "each batched write should retain per-envelope success telemetry"
+    );
+
+    let mut db = adapter_ref.lock().expect("adapter lock");
+    for bridge_seq in 1..=event_count {
+        let key = TelemetryBridge::persistence_key(bridge_seq);
+        let result = db.read(PersistenceClass::AuditLog, &key);
+        assert!(result.found, "batched persistence missing key {key}");
+    }
+}
+
+#[cfg(feature = "test-support")]
+pub fn assert_persistence_loop_batches_ready_envelopes_for_tests() {
+    assert_persistence_loop_batches_ready_envelopes_impl();
 }
 
 #[cfg(test)]
