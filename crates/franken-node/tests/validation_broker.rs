@@ -774,22 +774,32 @@ fn stress_harness_covers_backpressure_contention_and_fail_closed_paths()
 }
 
 #[test]
-fn checked_in_bd_tdoga_harness_artifact_covers_acceptance_matrix() {
+fn checked_in_bd_tdoga_harness_artifact_covers_acceptance_matrix()
+-> Result<(), Box<dyn std::error::Error>> {
     let artifact: Value = serde_json::from_str(include_str!(
         "../../../artifacts/validation_broker/bd-tdoga/validation_broker_e2e_harness.v1.json"
-    ))
-    .expect("bd-tdoga harness artifact parses");
+    ))?;
     assert_eq!(
-        artifact["schema_version"],
+        artifact
+            .get("schema_version")
+            .and_then(Value::as_str)
+            .ok_or("missing schema_version")?,
         "franken-node/validation-broker/e2e-harness/v1"
     );
-    assert_eq!(artifact["bead_id"], "bd-tdoga");
+    assert_eq!(
+        artifact
+            .get("bead_id")
+            .and_then(Value::as_str)
+            .ok_or("missing bead_id")?,
+        "bd-tdoga"
+    );
 
-    let covered_cases = artifact["required_cases"]
-        .as_array()
-        .expect("required_cases array")
+    let covered_cases = artifact
+        .get("required_cases")
+        .and_then(Value::as_array)
+        .ok_or("missing required_cases")?
         .iter()
-        .filter_map(|case| case["case"].as_str())
+        .filter_map(|case| case.get("case").and_then(Value::as_str))
         .collect::<BTreeSet<_>>();
     for required_case in [
         "happy_path_source_only_validation",
@@ -809,9 +819,10 @@ fn checked_in_bd_tdoga_harness_artifact_covers_acceptance_matrix() {
         );
     }
 
-    let structured_fields = artifact["structured_log_fields"]
-        .as_array()
-        .expect("structured_log_fields array")
+    let structured_fields = artifact
+        .get("structured_log_fields")
+        .and_then(Value::as_array)
+        .ok_or("missing structured_log_fields")?
         .iter()
         .filter_map(Value::as_str)
         .collect::<BTreeSet<_>>();
@@ -828,4 +839,6 @@ fn checked_in_bd_tdoga_harness_artifact_covers_acceptance_matrix() {
     ] {
         assert!(structured_fields.contains(field), "missing field {field}");
     }
+
+    Ok(())
 }
