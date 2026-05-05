@@ -2,7 +2,12 @@ use asupersync::obligation::ledger::{LedgerStats, ObligationLedger};
 use asupersync::record::{ObligationAbortReason, ObligationKind};
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::{CancelKind, Cx, Time};
+use chrono::{DateTime, Utc};
 use frankenengine_node::config::RuntimeConfig;
+use frankenengine_node::control_plane::fleet_transport::{
+    AsupersyncFleetNetwork, AsupersyncFleetTransport, FleetAction, FleetActionRecord,
+    FleetTargetKind, FleetTransport, NodeHealth, NodeStatus,
+};
 use frankenengine_node::runtime::bounded_mask::CapabilityContext;
 use frankenengine_node::runtime::lane_router::{
     LaneRouter, LaneRouterError, ProductLane, error_codes as router_error_codes,
@@ -235,4 +240,70 @@ fn lane_router_rejects_multi_scope_priority_downgrade() {
             .iter()
             .all(|lane| lane.in_flight == 0 && lane.queued == 0)
     );
+}
+
+#[test]
+fn asupersync_fleet_transport_read_snapshots_record_events_independently() {
+    let network = AsupersyncFleetNetwork::new();
+    let mut writer = AsupersyncFleetTransport::for_testing("writer", network.clone());
+    let reader = AsupersyncFleetTransport::for_testing("reader", network.clone());
+
+    writer.initialize().expect("initialize writer");
+    writer
+        .publish_action(&FleetActionRecord {
+            action_id: "fleet-op-asupersync-read-snapshot".to_string(),
+            emitted_at: DateTime::parse_from_rfc3339("2026-05-05T04:44:00Z")
+                .expect("timestamp")
+                .with_timezone(&Utc),
+            action: FleetAction::Quarantine {
+                zone_id: "zone-read-snapshot".to_string(),
+                incident_id: "inc-read-snapshot".to_string(),
+                target_id: "sha256:read-snapshot".to_string(),
+                target_kind: FleetTargetKind::Artifact,
+                reason: "exercise asupersync read snapshot path".to_string(),
+                quarantine_version: 3,
+            },
+        })
+        .expect("publish action");
+    writer
+        .upsert_node_status(&NodeStatus {
+            zone_id: "zone-read-snapshot".to_string(),
+            node_id: "node-read-snapshot".to_string(),
+            last_seen: DateTime::parse_from_rfc3339("2026-05-05T04:44:01Z")
+                .expect("timestamp")
+                .with_timezone(&Utc),
+            quarantine_version: 3,
+            health: NodeHealth::Healthy,
+        })
+        .expect("upsert node");
+
+    let actions = reader.list_actions().expect("list actions");
+    let nodes = reader.list_node_statuses().expect("list node statuses");
+    let shared_state = reader.read_shared_state().expect("read shared state");
+
+    assert_eq!(actions.len(), 1);
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(shared_state.actions[0].action_id, actions[0].action_id);
+    assert_eq!(shared_state.nodes[0].node_id, nodes[0].node_id);
+
+    let operations = network
+        .control_events()
+        .expect("control events")
+        .into_iter()
+        .map(|event| event.operation)
+        .collect::<Vec<_>>();
+
+    for expected in [
+        "initialize",
+        "publish_action",
+        "upsert_node_status",
+        "list_actions",
+        "list_node_statuses",
+        "read_shared_state",
+    ] {
+        assert!(
+            operations.iter().any(|operation| operation == expected),
+            "missing asupersync control event {expected}; got {operations:?}"
+        );
+    }
 }

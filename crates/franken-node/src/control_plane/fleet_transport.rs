@@ -4,7 +4,7 @@
 //! and object-safe transport trait used by the fleet-control track.
 
 #[cfg(feature = "asupersync-transport")]
-use std::sync::{Arc, MutexGuard};
+use std::sync::{Arc, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions, TryLockError},
@@ -729,16 +729,16 @@ pub struct AsupersyncFleetControlEvent {
 #[cfg(feature = "asupersync-transport")]
 #[derive(Debug, Clone, Default)]
 pub struct AsupersyncFleetNetwork {
-    inner: Arc<Mutex<AsupersyncFleetNetworkState>>,
+    state: Arc<RwLock<AsupersyncFleetNetworkState>>,
+    control_events: Arc<Mutex<Vec<AsupersyncFleetControlEvent>>>,
 }
 
 #[cfg(feature = "asupersync-transport")]
 #[derive(Debug, Clone, Default)]
 struct AsupersyncFleetNetworkState {
     initialized: bool,
-    actions: Vec<FleetActionRecord>,
-    nodes: Vec<NodeStatus>,
-    control_events: Vec<AsupersyncFleetControlEvent>,
+    actions: Arc<Vec<FleetActionRecord>>,
+    nodes: Arc<Vec<NodeStatus>>,
 }
 
 #[cfg(feature = "asupersync-transport")]
@@ -749,11 +749,29 @@ impl AsupersyncFleetNetwork {
     }
 
     pub fn control_events(&self) -> Result<Vec<AsupersyncFleetControlEvent>, FleetTransportError> {
-        Ok(self.lock()?.control_events.clone())
+        Ok(self.control_events_lock()?.clone())
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, AsupersyncFleetNetworkState>, FleetTransportError> {
-        self.inner
+    fn read_state(
+        &self,
+    ) -> Result<RwLockReadGuard<'_, AsupersyncFleetNetworkState>, FleetTransportError> {
+        self.state
+            .read()
+            .map_err(|err| FleetTransportError::lock_contention(err.to_string()))
+    }
+
+    fn write_state(
+        &self,
+    ) -> Result<RwLockWriteGuard<'_, AsupersyncFleetNetworkState>, FleetTransportError> {
+        self.state
+            .write()
+            .map_err(|err| FleetTransportError::lock_contention(err.to_string()))
+    }
+
+    fn control_events_lock(
+        &self,
+    ) -> Result<MutexGuard<'_, Vec<AsupersyncFleetControlEvent>>, FleetTransportError> {
+        self.control_events
             .lock()
             .map_err(|err| FleetTransportError::lock_contention(err.to_string()))
     }
@@ -808,13 +826,15 @@ impl AsupersyncFleetTransport {
         })
     }
 
-    fn record_event(&self, state: &mut AsupersyncFleetNetworkState, operation: &'static str) {
+    fn record_event(&self, operation: &'static str) -> Result<(), FleetTransportError> {
         let event = AsupersyncFleetControlEvent {
             operation: operation.to_string(),
             node_id: self.node_id.clone(),
             observed_at: clock::wall_now(),
         };
-        push_bounded(&mut state.control_events, event, MAX_CONTROL_EVENTS);
+        let mut control_events = self.network.control_events_lock()?;
+        push_bounded(&mut control_events, event, MAX_CONTROL_EVENTS);
+        Ok(())
     }
 
     fn ensure_initialized(
@@ -835,9 +855,11 @@ impl AsupersyncFleetTransport {
 impl FleetTransport for AsupersyncFleetTransport {
     fn initialize(&mut self) -> Result<(), FleetTransportError> {
         self.checkpoint("initialize")?;
-        let mut state = self.network.lock()?;
-        state.initialized = true;
-        self.record_event(&mut state, "initialize");
+        {
+            let mut state = self.network.write_state()?;
+            state.initialized = true;
+        }
+        self.record_event("initialize")?;
         Ok(())
     }
 
@@ -857,19 +879,26 @@ impl FleetTransport for AsupersyncFleetTransport {
             )));
         }
 
-        let mut state = self.network.lock()?;
-        self.ensure_initialized(&state)?;
-        push_bounded(&mut state.actions, action.clone(), MAX_ACTION_LOG_ENTRIES);
-        self.record_event(&mut state, "publish_action");
+        {
+            let mut state = self.network.write_state()?;
+            self.ensure_initialized(&state)?;
+            let mut actions = state.actions.as_ref().clone();
+            push_bounded(&mut actions, action.clone(), MAX_ACTION_LOG_ENTRIES);
+            state.actions = Arc::new(actions);
+        }
+        self.record_event("publish_action")?;
         Ok(())
     }
 
     fn list_actions(&self) -> Result<Vec<FleetActionRecord>, FleetTransportError> {
         self.checkpoint("list_actions")?;
-        let mut state = self.network.lock()?;
-        self.ensure_initialized(&state)?;
-        self.record_event(&mut state, "list_actions");
-        Ok(state.actions.clone())
+        let actions = {
+            let state = self.network.read_state()?;
+            self.ensure_initialized(&state)?;
+            Arc::clone(&state.actions)
+        };
+        self.record_event("list_actions")?;
+        Ok(actions.as_ref().clone())
     }
 
     fn upsert_node_status(&mut self, status: &NodeStatus) -> Result<(), FleetTransportError> {
@@ -877,43 +906,52 @@ impl FleetTransport for AsupersyncFleetTransport {
         validate_zone_id(&status.zone_id)?;
         validate_node_id(&status.node_id)?;
 
-        let mut state = self.network.lock()?;
-        self.ensure_initialized(&state)?;
-        if let Some(existing) = state
-            .nodes
-            .iter_mut()
-            .find(|existing| existing.node_id == status.node_id)
         {
-            *existing = status.clone();
-        } else {
-            push_bounded(&mut state.nodes, status.clone(), MAX_NODES_CAP);
+            let mut state = self.network.write_state()?;
+            self.ensure_initialized(&state)?;
+            let mut nodes = state.nodes.as_ref().clone();
+            if let Some(existing) = nodes
+                .iter_mut()
+                .find(|existing| existing.node_id == status.node_id)
+            {
+                *existing = status.clone();
+            } else {
+                push_bounded(&mut nodes, status.clone(), MAX_NODES_CAP);
+            }
+            state.nodes = Arc::new(nodes);
         }
-        self.record_event(&mut state, "upsert_node_status");
+        self.record_event("upsert_node_status")?;
         Ok(())
     }
 
     fn list_node_statuses(&self) -> Result<Vec<NodeStatus>, FleetTransportError> {
         self.checkpoint("list_node_statuses")?;
-        let mut state = self.network.lock()?;
-        self.ensure_initialized(&state)?;
-        self.record_event(&mut state, "list_node_statuses");
-        Ok(state.nodes.clone())
+        let nodes = {
+            let state = self.network.read_state()?;
+            self.ensure_initialized(&state)?;
+            Arc::clone(&state.nodes)
+        };
+        self.record_event("list_node_statuses")?;
+        Ok(nodes.as_ref().clone())
     }
 
     fn read_shared_state(&self) -> Result<FleetSharedState, FleetTransportError> {
         self.checkpoint("read_shared_state")?;
-        let mut state = self.network.lock()?;
-        self.ensure_initialized(&state)?;
-        self.record_event(&mut state, "read_shared_state");
+        let (actions, nodes) = {
+            let state = self.network.read_state()?;
+            self.ensure_initialized(&state)?;
+            (Arc::clone(&state.actions), Arc::clone(&state.nodes))
+        };
+        self.record_event("read_shared_state")?;
 
-        let mut actions = state.actions.clone();
+        let mut actions = actions.as_ref().clone();
         actions.sort_by(|left, right| {
             left.emitted_at
                 .cmp(&right.emitted_at)
                 .then_with(|| left.action_id.cmp(&right.action_id))
         });
 
-        let mut nodes = state.nodes.clone();
+        let mut nodes = nodes.as_ref().clone();
         nodes.sort_by(|left, right| {
             left.zone_id
                 .cmp(&right.zone_id)
