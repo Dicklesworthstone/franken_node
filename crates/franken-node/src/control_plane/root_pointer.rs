@@ -19,7 +19,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use fs2::FileExt;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
@@ -260,6 +259,7 @@ pub struct RootPublishEvent {
     pub new_epoch: ControlEpoch,
     pub marker_stream_head_seq: u64,
     pub manifest_hash: String,
+    pub key_id: String,
     pub timestamp: String,
     pub signature: String,
 }
@@ -646,11 +646,20 @@ pub fn publish_root_with_crash_injection(
     )
 }
 
-/// Verify a signed root publication event with the same key used to sign it.
+/// Verify a signed root publication event with a trusted key registry.
 pub fn verify_publish_event(
     event: &RootPublishEvent,
-    signing_key: &[u8],
+    trusted_keys: &BTreeMap<String, Vec<u8>>,
 ) -> Result<bool, RootPointerError> {
+    let Some(signing_key) = trusted_keys.get(&event.key_id) else {
+        return Ok(false);
+    };
+
+    let expected_key_id = root_publish_key_id(signing_key);
+    if !constant_time_eq(&expected_key_id, &event.key_id) {
+        return Ok(false);
+    }
+
     let canonical = canonical_event_payload(event)?;
     let expected = sign_payload(&canonical, signing_key).map_err(|source| {
         RootPointerError::SigningKeyInvalid {
@@ -855,6 +864,7 @@ fn publish_root_internal(
     trace.steps.push(PublishStep::FsyncDir);
     maybe_crash(options.crash_after, PublishStep::FsyncDir)?;
 
+    let key_id = root_publish_key_id(signing_key);
     let event_unsigned = UnsignedRootPublishEvent {
         event_code: ROOT_PUBLISH_COMPLETE.to_string(),
         trace_id: trace_id.to_string(),
@@ -862,6 +872,7 @@ fn publish_root_internal(
         new_epoch: root.epoch,
         marker_stream_head_seq: root.marker_stream_head_seq,
         manifest_hash: manifest_hash.clone(),
+        key_id: key_id.clone(),
         timestamp: Utc::now().to_rfc3339(),
     };
     let signature_payload =
@@ -881,6 +892,7 @@ fn publish_root_internal(
         new_epoch: root.epoch,
         marker_stream_head_seq: root.marker_stream_head_seq,
         manifest_hash,
+        key_id,
         timestamp: event_unsigned.timestamp,
         signature,
     };
@@ -929,6 +941,14 @@ fn sign_payload(payload: &str, signing_key: &[u8]) -> Result<String, hmac::diges
     Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
+#[must_use]
+pub fn root_publish_key_id(signing_key: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"root_pointer_keyid_v1:");
+    hasher.update(signing_key);
+    hex::encode(hasher.finalize())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UnsignedRootPublishEvent {
     event_code: String,
@@ -937,6 +957,7 @@ struct UnsignedRootPublishEvent {
     new_epoch: ControlEpoch,
     marker_stream_head_seq: u64,
     manifest_hash: String,
+    key_id: String,
     timestamp: String,
 }
 
@@ -948,6 +969,7 @@ fn canonical_event_payload(event: &RootPublishEvent) -> Result<String, RootPoint
         new_epoch: event.new_epoch,
         marker_stream_head_seq: event.marker_stream_head_seq,
         manifest_hash: event.manifest_hash.clone(),
+        key_id: event.key_id.clone(),
         timestamp: event.timestamp.clone(),
     })
     .map_err(RootPointerError::EventSerialize)
@@ -981,13 +1003,21 @@ mod tests {
         RootAuthRecord, RootPointer, RootPointerError, Sha256, TempFileGuard, Utc, bootstrap_root,
         fs, hash_hex, publish_lock, publish_root, publish_root_with_crash_injection,
         publish_root_with_delay_for_test, read_root, root_auth_path, root_pointer_path,
-        root_publication_lock_path, sign_payload, thread, verify_publish_event,
+        root_publication_lock_path, root_publish_key_id, sign_payload, thread,
+        verify_publish_event,
     };
+    use std::collections::BTreeMap;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
     fn key() -> Vec<u8> {
         b"unit-test-control-plane-key".to_vec()
+    }
+
+    fn trusted_keys<'a>(keys: impl IntoIterator<Item = &'a [u8]>) -> BTreeMap<String, Vec<u8>> {
+        keys.into_iter()
+            .map(|key| (root_publish_key_id(key), key.to_vec()))
+            .collect()
     }
 
     fn root(epoch: u64, seq: u64, hash: &str) -> RootPointer {
@@ -1033,6 +1063,14 @@ mod tests {
             sign_payload(mac_payload, &signing_key).expect("sign"),
             hex::encode(expected_mac.finalize().into_bytes())
         );
+
+        let mut expected_key_id = Sha256::new();
+        expected_key_id.update(b"root_pointer_keyid_v1:");
+        expected_key_id.update(&signing_key);
+        assert_eq!(
+            root_publish_key_id(&signing_key),
+            hex::encode(expected_key_id.finalize())
+        );
     }
 
     #[test]
@@ -1067,6 +1105,7 @@ mod tests {
         let loaded = read_root(dir.path()).expect("read");
 
         assert_eq!(loaded, r);
+        assert_eq!(outcome.event.key_id, root_publish_key_id(&key()));
         assert_eq!(
             outcome.trace.steps,
             vec![
@@ -1076,7 +1115,10 @@ mod tests {
                 PublishStep::FsyncDir
             ]
         );
-        assert!(verify_publish_event(&outcome.event, &key()).expect("verify"));
+        assert!(
+            verify_publish_event(&outcome.event, &trusted_keys([key().as_slice()]))
+                .expect("verify")
+        );
     }
 
     #[test]
@@ -1360,10 +1402,14 @@ mod tests {
         let k = key();
         let mut outcome =
             publish_root(dir.path(), &root(1, 10, "hash"), &k, "trace-sign").expect("publish");
-        assert!(verify_publish_event(&outcome.event, &k).expect("verify"));
+        assert!(
+            verify_publish_event(&outcome.event, &trusted_keys([k.as_slice()])).expect("verify")
+        );
 
         outcome.event.manifest_hash = "tampered".to_string();
-        assert!(!verify_publish_event(&outcome.event, &k).expect("verify"));
+        assert!(
+            !verify_publish_event(&outcome.event, &trusted_keys([k.as_slice()])).expect("verify")
+        );
     }
 
     #[test]
@@ -1729,7 +1775,8 @@ mod tests {
             .event;
         event.signature.clear();
 
-        let verified = verify_publish_event(&event, &k).expect("verification should run");
+        let verified = verify_publish_event(&event, &trusted_keys([k.as_slice()]))
+            .expect("verification should run");
 
         assert!(!verified);
     }
@@ -1747,8 +1794,31 @@ mod tests {
         .expect("publish")
         .event;
 
-        let verified = verify_publish_event(&event, b"wrong-publication-key")
-            .expect("verification should run");
+        let verified =
+            verify_publish_event(&event, &trusted_keys([b"wrong-publication-key".as_slice()]))
+                .expect("verification should run");
+
+        assert!(!verified);
+    }
+
+    #[test]
+    fn verify_publish_event_rejects_tampered_key_id() {
+        let dir = TempDir::new().expect("tempdir");
+        let k = key();
+        let mut event = publish_root(
+            dir.path(),
+            &root(41, 411, "wrong-key-id"),
+            &k,
+            "trace-wrong-key-id",
+        )
+        .expect("publish")
+        .event;
+        let wrong_key = b"wrong-publication-key";
+        event.key_id = root_publish_key_id(wrong_key);
+
+        let verified =
+            verify_publish_event(&event, &trusted_keys([k.as_slice(), wrong_key.as_slice()]))
+                .expect("verification should run");
 
         assert!(!verified);
     }
@@ -1762,7 +1832,8 @@ mod tests {
             .event;
         event.trace_id = "trace-tampered".to_string();
 
-        let verified = verify_publish_event(&event, &k).expect("verification should run");
+        let verified = verify_publish_event(&event, &trusted_keys([k.as_slice()]))
+            .expect("verification should run");
 
         assert!(!verified);
     }
@@ -1776,7 +1847,8 @@ mod tests {
             .event;
         event.new_epoch = ControlEpoch(44);
 
-        let verified = verify_publish_event(&event, &k).expect("verification should run");
+        let verified = verify_publish_event(&event, &trusted_keys([k.as_slice()]))
+            .expect("verification should run");
 
         assert!(!verified);
     }
@@ -1970,7 +2042,8 @@ mod tests {
             .event;
         event.event_code = ROOT_PUBLISH_START.to_string();
 
-        let verified = verify_publish_event(&event, &k).expect("verification should run");
+        let verified = verify_publish_event(&event, &trusted_keys([k.as_slice()]))
+            .expect("verification should run");
 
         assert!(!verified);
     }
@@ -1986,7 +2059,9 @@ mod tests {
             publish_root(dir.path(), &root, &k, malicious_trace).expect("publish unicode trace");
 
         assert_eq!(outcome.event.trace_id, malicious_trace);
-        assert!(verify_publish_event(&outcome.event, &k).expect("verify"));
+        assert!(
+            verify_publish_event(&outcome.event, &trusted_keys([k.as_slice()])).expect("verify")
+        );
     }
 
     #[test]
@@ -2105,7 +2180,6 @@ mod tests {
 
     #[test]
     fn test_bootstrap_path_traversal_protection() {
-        use crate::security::constant_time;
         use std::path::PathBuf;
 
         // Create temp directory structure
