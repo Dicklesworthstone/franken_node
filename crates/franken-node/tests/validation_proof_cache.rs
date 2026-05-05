@@ -7,9 +7,10 @@ use frankenengine_node::ops::validation_broker::{
     ValidationPriority, ValidationReceipt, ValidationTiming,
 };
 use frankenengine_node::ops::validation_proof_cache::{
-    DirtyStatePolicy, ValidationProofCacheDecisionKind, ValidationProofCacheKey,
-    ValidationProofCacheLookup, ValidationProofCacheRequiredAction, ValidationProofCacheScope,
-    ValidationProofCacheStore, error_codes,
+    DirtyStatePolicy, GC_REPORT_SCHEMA_VERSION, ValidationProofCacheDecisionKind,
+    ValidationProofCacheKey, ValidationProofCacheLookup, ValidationProofCacheQuotaPolicy,
+    ValidationProofCacheRequiredAction, ValidationProofCacheScope, ValidationProofCacheStore,
+    error_codes,
 };
 use std::fs;
 use std::path::Path;
@@ -177,12 +178,119 @@ fn scope() -> ValidationProofCacheScope {
 }
 
 fn write_receipt(root: &Path, receipt: &ValidationReceipt) -> (String, Vec<u8>) {
-    let relative_path = "receipts/bd-8j9au.json".to_string();
+    let relative_path = format!("receipts/{}.json", receipt.bead_id);
     let path = root.join(&relative_path);
     fs::create_dir_all(path.parent().expect("receipt parent")).expect("receipt parent");
     let bytes = serde_json::to_vec_pretty(receipt).expect("receipt json");
     fs::write(&path, &bytes).expect("receipt written");
     (relative_path, bytes)
+}
+
+fn request_for(bead_id: &str, seed: &str) -> ValidationBrokerRequest {
+    let input_path = format!("crates/franken-node/src/ops/validation_proof_cache_{seed}.rs");
+    let inputs = InputSet {
+        git_commit: format!("commit-{seed}"),
+        dirty_worktree: false,
+        changed_paths: vec![input_path.clone()],
+        content_digests: vec![InputDigest::new(input_path, seed.as_bytes(), "fixture")],
+        feature_flags: vec!["external-commands".to_string(), "http-client".to_string()],
+    };
+    ValidationBrokerRequest::new(
+        format!("vbreq-{bead_id}-{seed}"),
+        bead_id,
+        bead_id,
+        "LavenderElk",
+        ts(0),
+        ValidationPriority::High,
+        command(),
+        inputs,
+        OutputPolicy {
+            stdout_path: format!("artifacts/validation_broker/{bead_id}/stdout.txt"),
+            stderr_path: format!("artifacts/validation_broker/{bead_id}/stderr.txt"),
+            summary_path: format!("artifacts/validation_broker/{bead_id}/summary.md"),
+            receipt_path: format!("receipts/{bead_id}.json"),
+            retention: "until-closeout".to_string(),
+        },
+        FallbackPolicy {
+            source_only_allowed: false,
+            allowed_reasons: vec![SourceOnlyReason::DocsOnly],
+        },
+    )
+}
+
+fn receipt_for(
+    bead_id: &str,
+    seed: &str,
+    freshness_expires_at: DateTime<Utc>,
+) -> ValidationReceipt {
+    let request = request_for(bead_id, seed);
+    let mut receipt = receipt_with_expiry(freshness_expires_at);
+    receipt.receipt_id = format!("vbrcpt-{bead_id}-{seed}");
+    receipt.request_id = request.request_id.clone();
+    receipt.bead_id = request.bead_id.clone();
+    receipt.thread_id = request.thread_id.clone();
+    receipt.request_ref = ReceiptRequestRef {
+        request_id: request.request_id.clone(),
+        bead_id: request.bead_id.clone(),
+        thread_id: request.thread_id.clone(),
+        dedupe_key: DigestRef {
+            algorithm: request.dedupe_key.algorithm.clone(),
+            hex: request.dedupe_key.hex.clone(),
+        },
+        cross_thread_waiver: None,
+    };
+    receipt.input_digests = request.inputs.content_digests.clone();
+    receipt.artifacts.stdout_path = request.output_policy.stdout_path.clone();
+    receipt.artifacts.stderr_path = request.output_policy.stderr_path.clone();
+    receipt.artifacts.summary_path = request.output_policy.summary_path.clone();
+    receipt.artifacts.receipt_path = request.output_policy.receipt_path.clone();
+    receipt.trust.git_commit = request.inputs.git_commit.clone();
+    receipt
+}
+
+fn insert_entry_for(
+    store: &ValidationProofCacheStore,
+    root: &Path,
+    bead_id: &str,
+    seed: &str,
+    created_at: DateTime<Utc>,
+    freshness_expires_at: DateTime<Utc>,
+    mutate_entry: impl FnOnce(
+        &mut frankenengine_node::ops::validation_proof_cache::ValidationProofCacheEntry,
+    ),
+) -> frankenengine_node::ops::validation_proof_cache::ValidationProofCacheEntry {
+    let request = request_for(bead_id, seed);
+    let receipt = receipt_for(bead_id, seed, freshness_expires_at);
+    let (receipt_path, receipt_bytes) = write_receipt(root, &receipt);
+    let key = ValidationProofCacheKey::from_request_and_receipt(&request, &receipt, scope())
+        .expect("key");
+    let mut entry = store
+        .build_entry(
+            key,
+            receipt_path,
+            &receipt,
+            &receipt_bytes,
+            "LavenderElk",
+            created_at,
+        )
+        .expect("entry");
+    entry.storage.bytes = 10;
+    mutate_entry(&mut entry);
+    store.put_entry(&entry).expect("entry persisted");
+    entry
+}
+
+fn quota_policy() -> ValidationProofCacheQuotaPolicy {
+    ValidationProofCacheQuotaPolicy {
+        max_total_bytes: 1_000,
+        max_entries: 10,
+        max_age_seconds: 100,
+        min_available_bytes: 100,
+        active_beads: Vec::new(),
+        expected_git_commit: None,
+        expected_input_digests: Vec::new(),
+        expected_dirty_state_policy: Some(DirtyStatePolicy::CleanRequired),
+    }
 }
 
 fn populated_store(
@@ -411,6 +519,216 @@ fn preexisting_unrelated_entry_file_is_not_overwritten() {
 }
 
 #[test]
+fn quota_policy_refuses_disk_pressure_writes() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = ValidationProofCacheStore::new(dir.path());
+    let request = request_for("bd-pressure", "pressure");
+    let receipt = receipt_for("bd-pressure", "pressure", ts(50));
+    let (receipt_path, receipt_bytes) = write_receipt(dir.path(), &receipt);
+    let key = ValidationProofCacheKey::from_request_and_receipt(&request, &receipt, scope())
+        .expect("key");
+    let entry = store
+        .build_entry(
+            key,
+            receipt_path,
+            &receipt,
+            &receipt_bytes,
+            "LavenderElk",
+            ts(3),
+        )
+        .expect("entry");
+    let policy = quota_policy();
+
+    let err = store
+        .put_entry_with_quota(&entry, &policy, 50, ts(4))
+        .expect_err("disk pressure blocks writes");
+
+    assert_eq!(err.code(), error_codes::ERR_VPC_QUOTA_BLOCKED);
+}
+
+#[test]
+fn gc_report_removes_entries_past_max_age() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = ValidationProofCacheStore::new(dir.path());
+    let entry = insert_entry_for(&store, dir.path(), "bd-old", "old", ts(1), ts(50), |_| {});
+    let mut policy = quota_policy();
+    policy.max_age_seconds = 2;
+
+    let report = store
+        .plan_garbage_collection(&policy, ts(10), 1_000)
+        .expect("gc report");
+
+    assert_eq!(report.schema_version, GC_REPORT_SCHEMA_VERSION);
+    assert_eq!(report.removed_entries.len(), 1);
+    assert_eq!(report.removed_entries[0].entry_id, entry.entry_id);
+    assert_eq!(
+        report.removed_entries[0].reason_code,
+        error_codes::ERR_VPC_STALE_ENTRY
+    );
+    assert!(report.kept_entries.is_empty());
+}
+
+#[test]
+fn gc_report_rejects_missing_receipt_artifacts() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = ValidationProofCacheStore::new(dir.path());
+    let entry = insert_entry_for(
+        &store,
+        dir.path(),
+        "bd-missing",
+        "missing",
+        ts(3),
+        ts(50),
+        |entry| {
+            entry.receipt_ref.path = "receipts/missing-artifact.json".to_string();
+        },
+    );
+    let policy = quota_policy();
+
+    let report = store
+        .plan_garbage_collection(&policy, ts(4), 1_000)
+        .expect("gc report");
+
+    assert_eq!(report.rejected_entries.len(), 1);
+    assert_eq!(report.rejected_entries[0].entry_id, entry.entry_id);
+    assert_eq!(
+        report.rejected_entries[0].reason_code,
+        error_codes::ERR_VPC_MALFORMED_ENTRY
+    );
+}
+
+#[test]
+fn gc_report_quarantines_corrupted_entries() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = ValidationProofCacheStore::new(dir.path());
+    let entry = insert_entry_for(
+        &store,
+        dir.path(),
+        "bd-corrupt",
+        "corrupt",
+        ts(3),
+        ts(50),
+        |entry| {
+            entry.invalidation.active = true;
+            entry.invalidation.corrupted = true;
+            entry.invalidation.reason = Some("test corruption".to_string());
+        },
+    );
+    let policy = quota_policy();
+
+    let report = store
+        .plan_garbage_collection(&policy, ts(4), 1_000)
+        .expect("gc report");
+
+    assert_eq!(report.rejected_entries.len(), 1);
+    assert_eq!(report.rejected_entries[0].entry_id, entry.entry_id);
+    assert_eq!(
+        report.rejected_entries[0].reason_code,
+        error_codes::ERR_VPC_CORRUPTED_ENTRY
+    );
+}
+
+#[test]
+fn gc_quota_eviction_preserves_active_beads_when_possible() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = ValidationProofCacheStore::new(dir.path());
+    let active = insert_entry_for(
+        &store,
+        dir.path(),
+        "bd-active",
+        "active",
+        ts(1),
+        ts(20),
+        |_| {},
+    );
+    let fresh = insert_entry_for(
+        &store,
+        dir.path(),
+        "bd-fresh",
+        "fresh",
+        ts(3),
+        ts(40),
+        |_| {},
+    );
+    let old = insert_entry_for(&store, dir.path(), "bd-old", "old", ts(2), ts(30), |_| {});
+    let mut policy = quota_policy();
+    policy.max_entries = 2;
+    policy.active_beads = vec!["bd-active".to_string()];
+
+    let report = store
+        .plan_garbage_collection(&policy, ts(4), 1_000)
+        .expect("gc report");
+    let kept_ids = report
+        .kept_entries
+        .iter()
+        .map(|entry| entry.entry_id.as_str())
+        .collect::<Vec<_>>();
+    let removed_ids = report
+        .removed_entries
+        .iter()
+        .map(|entry| entry.entry_id.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(kept_ids.contains(&active.entry_id.as_str()));
+    assert!(kept_ids.contains(&fresh.entry_id.as_str()));
+    assert!(removed_ids.contains(&old.entry_id.as_str()));
+}
+
+#[test]
+fn gc_report_rejects_input_and_dirty_policy_drift() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = ValidationProofCacheStore::new(dir.path());
+    let input_drift = insert_entry_for(
+        &store,
+        dir.path(),
+        "bd-input-drift",
+        "actual",
+        ts(3),
+        ts(50),
+        |_| {},
+    );
+    let dirty_drift = insert_entry_for(
+        &store,
+        dir.path(),
+        "bd-dirty-drift",
+        "dirty",
+        ts(3),
+        ts(50),
+        |_| {},
+    );
+    let mut policy = quota_policy();
+    policy.expected_input_digests = request_for("bd-input-drift", "expected")
+        .inputs
+        .content_digests;
+
+    let input_report = store
+        .plan_garbage_collection(&policy, ts(4), 1_000)
+        .expect("input drift gc report");
+
+    assert!(input_report.rejected_entries.iter().any(|entry| {
+        entry.entry_id == input_drift.entry_id
+            && entry
+                .reason_code
+                .as_str()
+                .eq(error_codes::ERR_VPC_INPUT_DIGEST_MISMATCH)
+    }));
+
+    policy.expected_input_digests = Vec::new();
+    policy.expected_dirty_state_policy = Some(DirtyStatePolicy::SourceOnlyDocumented);
+    let dirty_report = store
+        .plan_garbage_collection(&policy, ts(4), 1_000)
+        .expect("dirty drift gc report");
+
+    assert!(dirty_report.rejected_entries.iter().any(|entry| {
+        entry.entry_id == dirty_drift.entry_id
+            && entry
+                .reason_code
+                .as_str()
+                .eq(error_codes::ERR_VPC_DIRTY_STATE_MISMATCH)
+    }));
+}
+
+#[test]
 fn deterministic_contract_fixture_loads() {
     let fixture: serde_json::Value = serde_json::from_str(FIXTURE_JSON).expect("fixture json");
 
@@ -424,6 +742,13 @@ fn deterministic_contract_fixture_loads() {
     );
     assert_eq!(
         fixture["valid_entries"].as_array().expect("entries").len(),
+        1
+    );
+    assert_eq!(
+        fixture["valid_gc_reports"]
+            .as_array()
+            .expect("gc reports")
+            .len(),
         1
     );
 }

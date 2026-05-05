@@ -19,6 +19,7 @@ use std::path::{Component, Path, PathBuf};
 pub const KEY_SCHEMA_VERSION: &str = "franken-node/validation-proof-cache/key/v1";
 pub const ENTRY_SCHEMA_VERSION: &str = "franken-node/validation-proof-cache/entry/v1";
 pub const DECISION_SCHEMA_VERSION: &str = "franken-node/validation-proof-cache/decision/v1";
+pub const GC_REPORT_SCHEMA_VERSION: &str = "franken-node/validation-proof-cache/gc-report/v1";
 const SHA256_HEX_LEN: usize = 64;
 
 pub mod error_codes {
@@ -325,6 +326,59 @@ pub enum ValidationProofCacheLookup {
     Miss(ValidationProofCacheDecision),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationProofCacheQuotaPolicy {
+    pub max_total_bytes: u64,
+    pub max_entries: usize,
+    pub max_age_seconds: i64,
+    pub min_available_bytes: u64,
+    pub active_beads: Vec<String>,
+    pub expected_git_commit: Option<String>,
+    pub expected_input_digests: Vec<InputDigest>,
+    pub expected_dirty_state_policy: Option<DirtyStatePolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationProofCacheDiskPressure {
+    pub available_bytes: u64,
+    pub minimum_required_bytes: u64,
+    pub blocked: bool,
+    pub reason_code: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationProofCacheGcEntry {
+    pub entry_id: String,
+    pub path: String,
+    pub bead_id: String,
+    pub cache_key_hex: String,
+    pub bytes: u64,
+    pub active_bead: bool,
+    pub reason_code: String,
+    pub event_code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationProofCacheGcReport {
+    pub schema_version: String,
+    pub report_id: String,
+    pub generated_at: DateTime<Utc>,
+    pub policy: ValidationProofCacheQuotaPolicy,
+    pub kept_entries: Vec<ValidationProofCacheGcEntry>,
+    pub removed_entries: Vec<ValidationProofCacheGcEntry>,
+    pub rejected_entries: Vec<ValidationProofCacheGcEntry>,
+    pub disk_pressure: ValidationProofCacheDiskPressure,
+}
+
+struct ValidationProofCacheGcCandidate {
+    entry: ValidationProofCacheEntry,
+    path: String,
+    bytes: u64,
+    active_bead: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ValidationProofCacheStore {
     root: PathBuf,
@@ -438,6 +492,50 @@ impl ValidationProofCacheStore {
         Ok(path)
     }
 
+    pub fn put_entry_with_quota(
+        &self,
+        entry: &ValidationProofCacheEntry,
+        policy: &ValidationProofCacheQuotaPolicy,
+        available_bytes: u64,
+        now: DateTime<Utc>,
+    ) -> Result<PathBuf, ValidationProofCacheError> {
+        let disk_pressure = disk_pressure_snapshot(policy, available_bytes);
+        if disk_pressure.blocked {
+            return Err(ValidationProofCacheError::contract(
+                error_codes::ERR_VPC_QUOTA_BLOCKED,
+                disk_pressure.message,
+            ));
+        }
+        if available_bytes.saturating_sub(entry.storage.bytes) < policy.min_available_bytes {
+            return Err(ValidationProofCacheError::contract(
+                error_codes::ERR_VPC_QUOTA_BLOCKED,
+                "proof cache write would drop available bytes below the minimum free-space policy",
+            ));
+        }
+        if entry.storage.bytes > policy.max_total_bytes {
+            return Err(ValidationProofCacheError::contract(
+                error_codes::ERR_VPC_QUOTA_BLOCKED,
+                "proof cache entry exceeds total byte quota",
+            ));
+        }
+
+        let report = self.plan_garbage_collection(policy, now, available_bytes)?;
+        let kept_bytes = report
+            .kept_entries
+            .iter()
+            .fold(0_u64, |total, entry| total.saturating_add(entry.bytes));
+        if report.kept_entries.len() >= policy.max_entries
+            || kept_bytes.saturating_add(entry.storage.bytes) > policy.max_total_bytes
+        {
+            return Err(ValidationProofCacheError::contract(
+                error_codes::ERR_VPC_QUOTA_BLOCKED,
+                "proof cache quota requires garbage collection before accepting a new entry",
+            ));
+        }
+
+        self.put_entry(entry)
+    }
+
     pub fn read_entry(
         &self,
         key: &ValidationProofCacheKey,
@@ -494,6 +592,239 @@ impl ValidationProofCacheStore {
         )))
     }
 
+    pub fn plan_garbage_collection(
+        &self,
+        policy: &ValidationProofCacheQuotaPolicy,
+        now: DateTime<Utc>,
+        available_bytes: u64,
+    ) -> Result<ValidationProofCacheGcReport, ValidationProofCacheError> {
+        let mut candidates = Vec::new();
+        let mut removed_entries = Vec::new();
+        let mut rejected_entries = Vec::new();
+
+        for path in self.entry_files()? {
+            let relative_path = self.relative_path_or_display(&path);
+            let file_bytes = fs::metadata(&path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            let bytes = fs::read(&path).map_err(|source| ValidationProofCacheError::Io {
+                path: path.display().to_string(),
+                source,
+            })?;
+            let Ok(entry) = serde_json::from_slice::<ValidationProofCacheEntry>(&bytes) else {
+                rejected_entries.push(gc_entry_from_parts(
+                    "malformed-entry",
+                    relative_path,
+                    "",
+                    "",
+                    file_bytes,
+                    false,
+                    error_codes::ERR_VPC_MALFORMED_ENTRY,
+                    event_codes::CORRUPTED_REJECTED,
+                    "proof cache entry JSON could not be parsed",
+                ));
+                continue;
+            };
+            let stored_bytes = if entry.storage.bytes == 0 {
+                file_bytes
+            } else {
+                entry.storage.bytes
+            };
+            let active_bead = policy
+                .active_beads
+                .iter()
+                .any(|bead| string_eq(bead, &entry.bead_id));
+
+            if !string_eq(&entry.schema_version, ENTRY_SCHEMA_VERSION) {
+                rejected_entries.push(gc_entry_from_entry(
+                    &entry,
+                    relative_path,
+                    stored_bytes,
+                    active_bead,
+                    error_codes::ERR_VPC_INVALID_SCHEMA_VERSION,
+                    event_codes::CORRUPTED_REJECTED,
+                    "unsupported proof cache entry schema version",
+                ));
+                continue;
+            }
+            if !entry.cache_key.verifies() {
+                rejected_entries.push(gc_entry_from_entry(
+                    &entry,
+                    relative_path,
+                    stored_bytes,
+                    active_bead,
+                    error_codes::ERR_VPC_BAD_CACHE_KEY,
+                    event_codes::CORRUPTED_REJECTED,
+                    "proof cache key does not verify",
+                ));
+                continue;
+            }
+            if entry.invalidation.active || entry.invalidation.corrupted {
+                rejected_entries.push(gc_entry_from_entry(
+                    &entry,
+                    relative_path,
+                    stored_bytes,
+                    active_bead,
+                    error_codes::ERR_VPC_CORRUPTED_ENTRY,
+                    event_codes::CORRUPTED_REJECTED,
+                    "proof cache entry is invalidated or corrupted",
+                ));
+                continue;
+            }
+            if let Err(error) = self
+                .resolve_artifact_path(&entry.receipt_ref.path)
+                .and_then(|path| {
+                    if path.exists() {
+                        Ok(path)
+                    } else {
+                        Err(ValidationProofCacheError::contract(
+                            error_codes::ERR_VPC_MALFORMED_ENTRY,
+                            "proof cache receipt artifact is missing",
+                        ))
+                    }
+                })
+            {
+                rejected_entries.push(gc_entry_from_entry(
+                    &entry,
+                    relative_path,
+                    stored_bytes,
+                    active_bead,
+                    error.code(),
+                    event_codes::CORRUPTED_REJECTED,
+                    "proof cache receipt artifact is missing or outside the cache root",
+                ));
+                continue;
+            }
+            if entry.freshness_expires_at < now || entry_is_older_than_policy(&entry, policy, now) {
+                removed_entries.push(gc_entry_from_entry(
+                    &entry,
+                    relative_path,
+                    stored_bytes,
+                    active_bead,
+                    error_codes::ERR_VPC_STALE_ENTRY,
+                    event_codes::STALE_REJECTED,
+                    "proof cache entry exceeded freshness or max-age policy",
+                ));
+                continue;
+            }
+            if let Some(expected_git_commit) = &policy.expected_git_commit {
+                if !string_eq(expected_git_commit, &entry.trust.git_commit) {
+                    rejected_entries.push(gc_entry_from_entry(
+                        &entry,
+                        relative_path,
+                        stored_bytes,
+                        active_bead,
+                        error_codes::ERR_VPC_STALE_ENTRY,
+                        event_codes::STALE_REJECTED,
+                        "proof cache entry git commit is not in the expected validation scope",
+                    ));
+                    continue;
+                }
+            }
+            if !policy.expected_input_digests.is_empty()
+                && !input_digest_sets_match(
+                    &policy.expected_input_digests,
+                    &entry.cache_key.input_digests,
+                )
+            {
+                rejected_entries.push(gc_entry_from_entry(
+                    &entry,
+                    relative_path,
+                    stored_bytes,
+                    active_bead,
+                    error_codes::ERR_VPC_INPUT_DIGEST_MISMATCH,
+                    event_codes::COMMAND_OR_INPUT_REJECTED,
+                    "proof cache entry input digest set drifted from the expected validation scope",
+                ));
+                continue;
+            }
+            if let Some(expected_dirty_state_policy) = policy.expected_dirty_state_policy {
+                if !string_eq(
+                    expected_dirty_state_policy.as_str(),
+                    entry.cache_key.dirty_state_policy.as_str(),
+                ) {
+                    rejected_entries.push(gc_entry_from_entry(
+                        &entry,
+                        relative_path,
+                        stored_bytes,
+                        active_bead,
+                        error_codes::ERR_VPC_DIRTY_STATE_MISMATCH,
+                        event_codes::POLICY_REJECTED,
+                        "proof cache entry dirty-state policy drifted from the expected validation scope",
+                    ));
+                    continue;
+                }
+            }
+            candidates.push(ValidationProofCacheGcCandidate {
+                entry,
+                path: relative_path,
+                bytes: stored_bytes,
+                active_bead,
+            });
+        }
+
+        candidates.sort_by(|left, right| {
+            right
+                .active_bead
+                .cmp(&left.active_bead)
+                .then_with(|| {
+                    right
+                        .entry
+                        .freshness_expires_at
+                        .cmp(&left.entry.freshness_expires_at)
+                })
+                .then_with(|| right.entry.created_at.cmp(&left.entry.created_at))
+                .then_with(|| left.entry.entry_id.cmp(&right.entry.entry_id))
+        });
+
+        let mut kept_entries = Vec::new();
+        let mut kept_bytes = 0_u64;
+        for candidate in candidates {
+            if kept_entries.len() < policy.max_entries
+                && kept_bytes.saturating_add(candidate.bytes) <= policy.max_total_bytes
+            {
+                kept_bytes = kept_bytes.saturating_add(candidate.bytes);
+                kept_entries.push(gc_entry_from_entry(
+                    &candidate.entry,
+                    candidate.path,
+                    candidate.bytes,
+                    candidate.active_bead,
+                    "VPC_KEEP_FRESH",
+                    event_codes::HIT_ACCEPTED,
+                    "proof cache entry is fresh and within quota",
+                ));
+            } else {
+                removed_entries.push(gc_entry_from_entry(
+                    &candidate.entry,
+                    candidate.path,
+                    candidate.bytes,
+                    candidate.active_bead,
+                    error_codes::ERR_VPC_QUOTA_BLOCKED,
+                    event_codes::QUOTA_REJECTED,
+                    "proof cache entry is outside the quota-retained set",
+                ));
+            }
+        }
+
+        let report_id = format!(
+            "vpc-gc-{}-{}-{}-{}",
+            now.timestamp(),
+            kept_entries.len(),
+            removed_entries.len(),
+            rejected_entries.len()
+        );
+        Ok(ValidationProofCacheGcReport {
+            schema_version: GC_REPORT_SCHEMA_VERSION.to_string(),
+            report_id,
+            generated_at: now,
+            policy: policy.clone(),
+            kept_entries,
+            removed_entries,
+            rejected_entries,
+            disk_pressure: disk_pressure_snapshot(policy, available_bytes),
+        })
+    }
+
     fn resolve_artifact_path(
         &self,
         relative_path: &str,
@@ -524,6 +855,132 @@ impl ValidationProofCacheStore {
         }
         Ok(resolved)
     }
+
+    fn entry_files(&self) -> Result<Vec<PathBuf>, ValidationProofCacheError> {
+        let entries_root = self.root.join("entries");
+        if !entries_root.exists() {
+            return Ok(Vec::new());
+        }
+        let mut files = Vec::new();
+        collect_entry_files(&entries_root, &mut files)?;
+        files.sort();
+        Ok(files)
+    }
+
+    fn relative_path_or_display(&self, path: &Path) -> String {
+        path.strip_prefix(&self.root)
+            .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| path.display().to_string())
+    }
+}
+
+fn disk_pressure_snapshot(
+    policy: &ValidationProofCacheQuotaPolicy,
+    available_bytes: u64,
+) -> ValidationProofCacheDiskPressure {
+    let blocked = available_bytes < policy.min_available_bytes;
+    let reason_code = blocked.then(|| error_codes::ERR_VPC_QUOTA_BLOCKED.to_string());
+    let message = if blocked {
+        "available bytes are below the proof cache minimum free-space policy".to_string()
+    } else {
+        "available bytes satisfy the proof cache minimum free-space policy".to_string()
+    };
+    ValidationProofCacheDiskPressure {
+        available_bytes,
+        minimum_required_bytes: policy.min_available_bytes,
+        blocked,
+        reason_code,
+        message,
+    }
+}
+
+fn collect_entry_files(
+    root: &Path,
+    files: &mut Vec<PathBuf>,
+) -> Result<(), ValidationProofCacheError> {
+    for entry in fs::read_dir(root).map_err(|source| ValidationProofCacheError::Io {
+        path: root.display().to_string(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| ValidationProofCacheError::Io {
+            path: root.display().to_string(),
+            source,
+        })?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|source| ValidationProofCacheError::Io {
+                path: path.display().to_string(),
+                source,
+            })?;
+        if file_type.is_dir() {
+            collect_entry_files(&path, files)?;
+        } else if file_type.is_file()
+            && path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq("json"))
+        {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn entry_is_older_than_policy(
+    entry: &ValidationProofCacheEntry,
+    policy: &ValidationProofCacheQuotaPolicy,
+    now: DateTime<Utc>,
+) -> bool {
+    policy.max_age_seconds >= 0
+        && now.signed_duration_since(entry.created_at).num_seconds() > policy.max_age_seconds
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gc_entry_from_parts(
+    entry_id: impl Into<String>,
+    path: impl Into<String>,
+    bead_id: impl Into<String>,
+    cache_key_hex: impl Into<String>,
+    bytes: u64,
+    active_bead: bool,
+    reason_code: impl Into<String>,
+    event_code: impl Into<String>,
+    message: impl Into<String>,
+) -> ValidationProofCacheGcEntry {
+    ValidationProofCacheGcEntry {
+        entry_id: entry_id.into(),
+        path: path.into(),
+        bead_id: bead_id.into(),
+        cache_key_hex: cache_key_hex.into(),
+        bytes,
+        active_bead,
+        reason_code: reason_code.into(),
+        event_code: event_code.into(),
+        message: message.into(),
+    }
+}
+
+fn gc_entry_from_entry(
+    entry: &ValidationProofCacheEntry,
+    path: impl Into<String>,
+    bytes: u64,
+    active_bead: bool,
+    reason_code: impl Into<String>,
+    event_code: impl Into<String>,
+    message: impl Into<String>,
+) -> ValidationProofCacheGcEntry {
+    gc_entry_from_parts(
+        entry.entry_id.clone(),
+        path,
+        entry.bead_id.clone(),
+        entry.cache_key.hex.clone(),
+        bytes,
+        active_bead,
+        reason_code,
+        event_code,
+        message,
+    )
 }
 
 #[derive(Debug, thiserror::Error)]

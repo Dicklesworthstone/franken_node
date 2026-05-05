@@ -129,6 +129,43 @@ Required actions:
 The GC report is included in this spec so the implementation can be bounded from
 the start. The `bd-zvxqb` implementation bead owns the runtime behavior.
 
+The implementation exposes GC as deterministic planning/reporting over the
+cache entry tree. A caller can use the report to remove or quarantine entries in
+operator tooling without letting cache growth silently endanger the workspace.
+
+### ValidationProofCacheQuotaPolicy
+
+| Field | Type | Required | Meaning |
+|-------|------|----------|---------|
+| `max_total_bytes` | Integer | Yes | Maximum retained proof-cache bytes |
+| `max_entries` | Integer | Yes | Maximum retained cache entries |
+| `max_age_seconds` | Integer | Yes | Maximum entry age before stale invalidation |
+| `min_available_bytes` | Integer | Yes | Minimum observed free bytes required before accepting new entries |
+| `active_beads` | Array | Yes | Beads whose fresh entries should be preserved when quota allows |
+| `expected_git_commit` | String or null | Yes | Optional current validation scope commit |
+| `expected_input_digests` | Array | Yes | Optional current validation scope input set |
+| `expected_dirty_state_policy` | Enum or null | Yes | Optional current dirty-state reuse policy |
+
+### ValidationProofCacheGcEntry
+
+| Field | Type | Required | Meaning |
+|-------|------|----------|---------|
+| `entry_id` | String | Yes | Entry considered by the GC planner |
+| `path` | String | Yes | Cache-relative entry path or diagnostic path |
+| `bead_id` | String | Yes | Bead proven by the entry |
+| `cache_key_hex` | SHA-256 hex | Yes | Cache key digest when available |
+| `bytes` | Integer | Yes | Bytes charged against quota |
+| `active_bead` | Boolean | Yes | Whether the entry belongs to an active bead |
+| `reason_code` | String | Yes | Stable keep/remove/reject reason |
+| `event_code` | String | Yes | Stable event code |
+| `message` | String | Yes | Operator-facing diagnostic |
+
+The GC report splits entries into `kept_entries`, `removed_entries`, and
+`rejected_entries`. `removed_entries` are well-formed entries selected for
+stale or quota removal. `rejected_entries` are not safe to trust because the
+entry is malformed, corrupted, missing its receipt artifact, or no longer
+matches the current git/input/dirty-state validation scope.
+
 ## Invariants
 
 - **INV-VPC-KEY-DETERMINISTIC** - Cache keys are SHA-256 digests over canonical

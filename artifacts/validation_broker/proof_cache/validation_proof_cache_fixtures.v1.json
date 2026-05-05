@@ -235,6 +235,78 @@
       "event_code": "VPC-009"
     }
   ],
+  "valid_gc_reports": [
+    {
+      "schema_version": "franken-node/validation-proof-cache/gc-report/v1",
+      "report_id": "vpc-gc-1778013180-1-1-1",
+      "generated_at": "2026-05-05T20:33:00Z",
+      "policy": {
+        "max_total_bytes": 8192,
+        "max_entries": 1,
+        "max_age_seconds": 86400,
+        "min_available_bytes": 1073741824,
+        "active_beads": [
+          "bd-jbkiq"
+        ],
+        "expected_git_commit": "536c5a18",
+        "expected_input_digests": [
+          {
+            "path": "crates/franken-node/tests/validation_broker.rs",
+            "algorithm": "sha256",
+            "hex": "0d60aeadd7807369906b25ac054db36aee507378b9bdc53a14507309e7a70961",
+            "canonical_material": "crates/franken-node/tests/validation_broker.rs\u0000docs/specs/validation_broker.md\u0000scripts/check_validation_broker_contract.py\u0000artifacts/validation_broker/validation_broker_contract.schema.json"
+          }
+        ],
+        "expected_dirty_state_policy": "clean_required"
+      },
+      "kept_entries": [
+        {
+          "entry_id": "vpc-entry-bd-jbkiq-0001",
+          "path": "artifacts/validation_broker/proof_cache/entries/60/60eee0596a97604e.json",
+          "bead_id": "bd-jbkiq",
+          "cache_key_hex": "60eee0596a97604ebed13b0f59d08577a25472d8b97718b5bf787058f8d19252",
+          "bytes": 4096,
+          "active_bead": true,
+          "reason_code": "VPC_KEEP_FRESH",
+          "event_code": "VPC-002",
+          "message": "proof cache entry is fresh and within quota"
+        }
+      ],
+      "removed_entries": [
+        {
+          "entry_id": "vpc-entry-old-fixture",
+          "path": "artifacts/validation_broker/proof_cache/entries/aa/old.json",
+          "bead_id": "bd-old",
+          "cache_key_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bytes": 4096,
+          "active_bead": false,
+          "reason_code": "ERR_VPC_QUOTA_BLOCKED",
+          "event_code": "VPC-008",
+          "message": "proof cache entry is outside the quota-retained set"
+        }
+      ],
+      "rejected_entries": [
+        {
+          "entry_id": "vpc-entry-corrupt-fixture",
+          "path": "artifacts/validation_broker/proof_cache/entries/bb/corrupt.json",
+          "bead_id": "bd-corrupt",
+          "cache_key_hex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "bytes": 4096,
+          "active_bead": false,
+          "reason_code": "ERR_VPC_CORRUPTED_ENTRY",
+          "event_code": "VPC-009",
+          "message": "proof cache entry is invalidated or corrupted"
+        }
+      ],
+      "disk_pressure": {
+        "available_bytes": 2147483648,
+        "minimum_required_bytes": 1073741824,
+        "blocked": false,
+        "reason_code": null,
+        "message": "available bytes satisfy the proof cache minimum free-space policy"
+      }
+    }
+  ],
   "invalid_entries": [
     {
       "name": "malformed_entry",
