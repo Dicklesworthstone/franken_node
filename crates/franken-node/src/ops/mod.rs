@@ -2,6 +2,7 @@ pub mod close_condition;
 pub mod engine_dispatcher;
 #[cfg(feature = "admin-tools")]
 pub mod mitigation_synthesis;
+pub mod rch_adapter;
 pub mod telemetry_bridge;
 pub mod tokio_drift_checker;
 pub mod validation_broker;

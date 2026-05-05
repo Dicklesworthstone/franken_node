@@ -1,0 +1,104 @@
+{
+  "schema_version": "franken-node/rch-adapter/fixtures/v1",
+  "bead_id": "bd-lozra",
+  "fixtures": [
+    {
+      "id": "remote_success_check",
+      "argv": [
+        "env",
+        "CARGO_TARGET_DIR=/data/tmp/franken_node-rch-adapter-target",
+        "cargo",
+        "+nightly-2026-02-19",
+        "check",
+        "-p",
+        "frankenengine-node",
+        "--all-targets"
+      ],
+      "env": {
+        "RCH_REQUIRE_REMOTE": "1"
+      },
+      "exit_code": 0,
+      "stdout": "Finished `dev` profile [unoptimized + debuginfo]\n[RCH] remote vmi1293453 (803.3s)\n",
+      "stderr": "",
+      "expected": {
+        "outcome": "passed",
+        "execution_mode": "remote",
+        "worker_id": "vmi1293453",
+        "product_failure": false,
+        "retryable": false,
+        "green": true
+      }
+    },
+    {
+      "id": "ssh_timeout_no_local_fallback",
+      "argv": [
+        "cargo",
+        "+nightly-2026-02-19",
+        "test",
+        "-p",
+        "frankenengine-node",
+        "--test",
+        "migrate_cli_e2e"
+      ],
+      "env": {
+        "RCH_REQUIRE_REMOTE": "1"
+      },
+      "exit_code": 101,
+      "stdout": "",
+      "stderr": "[RCH-E104] SSH command timed out (no local fallback)\n",
+      "expected": {
+        "outcome": "worker_timeout",
+        "timeout_class": "ssh_command",
+        "product_failure": false,
+        "retryable": true,
+        "green": false
+      }
+    },
+    {
+      "id": "missing_toolchain",
+      "argv": [
+        "cargo",
+        "+nightly-2099-01-01",
+        "check",
+        "-p",
+        "frankenengine-node"
+      ],
+      "env": {
+        "RCH_REQUIRE_REMOTE": "1"
+      },
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "error: toolchain 'nightly-2099-01-01-x86_64-unknown-linux-gnu' is not installed\n[RCH] remote ts2 (1.2s)\n",
+      "expected": {
+        "outcome": "worker_missing_toolchain",
+        "execution_mode": "remote",
+        "product_failure": false,
+        "retryable": true,
+        "green": false
+      }
+    },
+    {
+      "id": "local_fallback_refused",
+      "argv": [
+        "cargo",
+        "check",
+        "-p",
+        "frankenengine-node",
+        "--tests"
+      ],
+      "env": {
+        "RCH_REQUIRE_REMOTE": "1"
+      },
+      "exit_code": 0,
+      "stdout": "[RCH] local fallback\nFinished `dev` profile\n",
+      "stderr": "",
+      "expected": {
+        "outcome": "local_fallback_refused",
+        "execution_mode": "local_fallback",
+        "product_failure": false,
+        "retryable": true,
+        "green": false
+      }
+    }
+  ]
+}

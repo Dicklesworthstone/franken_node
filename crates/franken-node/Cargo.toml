@@ -128,6 +128,10 @@ name = "incident_cli_e2e"
 path = "tests/incident_cli_e2e.rs"
 
 [[test]]
+name = "rch_adapter_classification"
+path = "tests/rch_adapter_classification.rs"
+
+[[test]]
 name = "validation_broker"
 path = "tests/validation_broker.rs"
 
