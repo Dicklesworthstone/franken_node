@@ -63,6 +63,7 @@ fn decision_receipts_sign_with_configured_key_material() -> Result<(), Box<dyn E
     let receipt = Receipt::new(
         "quarantine",
         "control-plane@prod",
+        "franken-node-control-plane",
         &json!({"target":"node-a","policy":"strict"}),
         &json!({"status":"accepted"}),
         Decision::Approved,
@@ -89,6 +90,7 @@ fn decision_receipt_cbor_preserves_confidence_bit_pattern() -> Result<(), Box<dy
     let receipt = Receipt::new(
         "quarantine",
         "control-plane@prod",
+        "franken-node-control-plane",
         &json!({"target":"node-a","policy":"strict"}),
         &json!({"status":"accepted"}),
         Decision::Approved,
@@ -115,6 +117,7 @@ fn decision_receipt_export_failure_leaves_no_partial_target_file() -> Result<(),
     let receipt = Receipt::new(
         "quarantine",
         "control-plane@prod",
+        "franken-node-control-plane",
         &json!({"target":"node-a","policy":"strict"}),
         &json!({"status":"accepted"}),
         Decision::Approved,
