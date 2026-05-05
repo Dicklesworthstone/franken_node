@@ -14,6 +14,7 @@ pub mod integrity_sweep_scheduler;
 pub mod object_class_tuning;
 pub mod perf_budget_guard;
 pub mod policy_explainer;
+pub mod resource_admission;
 pub mod retroactive_hardening;
 
 #[cfg(test)]

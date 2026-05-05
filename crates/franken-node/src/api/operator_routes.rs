@@ -7,6 +7,7 @@
 //! - `GET /v1/operator/rollout` — rollout state query
 
 use crate::config::Config as RuntimeConfig;
+use crate::policy::resource_admission::AdmissionTelemetrySnapshot;
 use serde::{Deserialize, Serialize};
 #[cfg(any(test, feature = "control-plane"))]
 use std::sync::OnceLock;
@@ -48,6 +49,8 @@ static OPERATOR_CONFIG_VIEW: std::sync::LazyLock<RwLock<ConfigView>> =
     std::sync::LazyLock::new(|| {
         RwLock::new(ConfigView::from_runtime_config(&RuntimeConfig::default()))
     });
+static OPERATOR_RESOURCE_ADMISSION: std::sync::LazyLock<RwLock<AdmissionTelemetrySnapshot>> =
+    std::sync::LazyLock::new(|| RwLock::new(AdmissionTelemetrySnapshot::default()));
 
 #[cfg(any(test, feature = "control-plane"))]
 static PROCESS_START_OVERRIDE: Mutex<Option<ProcessStartState>> = Mutex::new(None);
@@ -193,6 +196,29 @@ fn operator_config_view() -> ConfigView {
         .read()
         .unwrap_or_else(|poison| poison.into_inner())
         .clone()
+}
+
+fn operator_resource_admission_snapshot() -> AdmissionTelemetrySnapshot {
+    OPERATOR_RESOURCE_ADMISSION
+        .read()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone()
+}
+
+/// Update the operator readiness view with the latest resource admission counters.
+///
+/// Resource admission feeds the existing health/readiness surface as a component detail instead of
+/// creating a parallel telemetry endpoint.
+pub fn update_resource_admission_readiness(snapshot: AdmissionTelemetrySnapshot) {
+    let mut view = OPERATOR_RESOURCE_ADMISSION
+        .write()
+        .unwrap_or_else(|poison| poison.into_inner());
+    *view = snapshot;
+}
+
+#[cfg(test)]
+fn clear_resource_admission_readiness_for_tests() {
+    update_resource_admission_readiness(AdmissionTelemetrySnapshot::default());
 }
 
 #[cfg(loom)]
@@ -574,6 +600,16 @@ pub enum ComponentStatus {
     Down,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ResourceAdmissionReadinessDetail {
+    admitted: u64,
+    deferred: u64,
+    shed: u64,
+    rejected: u64,
+    reason_code: String,
+    recovery_hint: String,
+}
+
 /// Current configuration view returned by `GET /v1/operator/config`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigView {
@@ -736,9 +772,11 @@ pub fn get_health(
     trace: &TraceContext,
 ) -> Result<ApiResponse<HealthCheck>, ApiError> {
     enforce_handler_contract(identity, trace, "GET", "/v1/operator/health")?;
+    let admission_component = resource_admission_health_component();
+    let ready = !matches!(admission_component.status, ComponentStatus::Down);
     let health = HealthCheck {
         live: true,
-        ready: true,
+        ready,
         checks: vec![
             HealthComponent {
                 name: "control_plane".to_string(),
@@ -755,6 +793,7 @@ pub fn get_health(
                 status: ComponentStatus::Ok,
                 detail: None,
             },
+            admission_component,
         ],
     };
 
@@ -763,6 +802,31 @@ pub fn get_health(
         data: health,
         page: None,
     })
+}
+
+fn resource_admission_health_component() -> HealthComponent {
+    let snapshot = operator_resource_admission_snapshot();
+    let status = if snapshot.total.rejected > 0 {
+        ComponentStatus::Down
+    } else if snapshot.total.deferred > 0 || snapshot.total.shed > 0 {
+        ComponentStatus::Degraded
+    } else {
+        ComponentStatus::Ok
+    };
+    let detail = ResourceAdmissionReadinessDetail {
+        admitted: snapshot.total.admitted,
+        deferred: snapshot.total.deferred,
+        shed: snapshot.total.shed,
+        rejected: snapshot.total.rejected,
+        reason_code: snapshot.readiness_reason_code().to_string(),
+        recovery_hint: snapshot.readiness_hint().to_string(),
+    };
+
+    HealthComponent {
+        name: "resource_admission".to_string(),
+        status,
+        detail: serde_json::to_string(&detail).ok(),
+    }
 }
 
 /// Handle `GET /v1/operator/config`.
@@ -826,6 +890,7 @@ mod tests {
             .write()
             .unwrap_or_else(|poison| poison.into_inner());
         *config_view = ConfigView::from_runtime_config(&RuntimeConfig::default());
+        clear_resource_admission_readiness_for_tests();
     }
 
     fn test_identity() -> AuthIdentity {
@@ -977,6 +1042,7 @@ mod tests {
 
     #[test]
     fn get_health_returns_live_ready() {
+        clear_resource_admission_readiness_for_tests();
         let identity = test_identity();
         let trace = test_trace();
         let result = get_health(&identity, &trace).expect("health");
@@ -984,6 +1050,53 @@ mod tests {
         assert!(result.data.live);
         assert!(result.data.ready);
         assert!(!result.data.checks.is_empty());
+        assert!(result.data.checks.iter().any(|component| {
+            component.name.as_str().eq("resource_admission")
+                && matches!(component.status, ComponentStatus::Ok)
+        }));
+    }
+
+    #[test]
+    fn get_health_exposes_resource_admission_readiness_counts() {
+        use crate::policy::resource_admission::{
+            AdmissionDecisionCounts, AdmissionTelemetrySnapshot, RA_REJECT_MEMORY_BUDGET_EXCEEDED,
+        };
+
+        clear_resource_admission_readiness_for_tests();
+        update_resource_admission_readiness(AdmissionTelemetrySnapshot::new(
+            AdmissionDecisionCounts {
+                admitted: 3,
+                deferred: 2,
+                shed: 1,
+                rejected: 1,
+            },
+            Default::default(),
+        ));
+
+        let result = get_health(&test_identity(), &test_trace()).expect("health");
+        assert!(!result.data.ready);
+        let admission = result
+            .data
+            .checks
+            .iter()
+            .find(|component| component.name.as_str().eq("resource_admission"))
+            .expect("resource admission readiness component");
+
+        assert!(matches!(admission.status, ComponentStatus::Down));
+        let detail: ResourceAdmissionReadinessDetail = serde_json::from_str(
+            admission
+                .detail
+                .as_deref()
+                .expect("machine-readable readiness detail"),
+        )
+        .expect("valid resource admission readiness detail");
+        assert_eq!(detail.admitted, 3);
+        assert_eq!(detail.deferred, 2);
+        assert_eq!(detail.shed, 1);
+        assert_eq!(detail.rejected, 1);
+        assert_eq!(detail.reason_code, RA_REJECT_MEMORY_BUDGET_EXCEEDED);
+
+        clear_resource_admission_readiness_for_tests();
     }
 
     #[test]

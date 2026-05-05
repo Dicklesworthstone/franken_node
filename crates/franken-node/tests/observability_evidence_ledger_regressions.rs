@@ -15,6 +15,14 @@ use frankenengine_node::observability::metrics::{
 use frankenengine_node::observability::witness_ref::{
     WitnessKind, WitnessRef, WitnessSet, WitnessValidator,
 };
+#[cfg(feature = "policy-engine")]
+use frankenengine_node::policy::resource_admission::{
+    AdmissionController, AdmissionDecision, AdmissionWorkClass, RA_ADMIT_WITHIN_BUDGET,
+    RA_DEFER_CPU_SLOTS_EXHAUSTED, RA_REJECT_MEMORY_BUDGET_EXCEEDED, RA_SHED_QUEUE_DEPTH_EXCEEDED,
+    ResourceAdmissionRequest, ResourceBudget, ResourceUsage,
+    default_resource_admission_evidence_report, representative_admission_path_requests,
+    resource_admission_work_class_inventory,
+};
 
 const EXPECTED_MAX_CAUSAL_EVENTS: usize = 1024;
 const EXPECTED_MAX_FAILED_ARTIFACTS: usize = 512;
@@ -509,4 +517,139 @@ fn observability_metrics_registry_rejects_invalid_operator_metrics() {
         non_finite,
         MetricValidationError::NonFiniteValue { .. }
     ));
+}
+
+#[cfg(feature = "policy-engine")]
+#[test]
+fn resource_admission_decision_states_are_stable() {
+    let budget = ResourceBudget {
+        max_cpu_slots: 2,
+        max_memory_bytes: 256,
+        max_io_leases: 2,
+        max_queue_depth: 3,
+        min_deadline_ms: 100,
+    };
+
+    let admit = AdmissionController::new(budget.clone()).dry_run(
+        &ResourceAdmissionRequest::new(AdmissionWorkClass::ControlPlaneLane, "trace-admit")
+            .with_memory_bytes(64),
+    );
+    assert_eq!(admit.decision, AdmissionDecision::Admit);
+    assert_eq!(admit.reason_code, RA_ADMIT_WITHIN_BUDGET);
+
+    let defer = AdmissionController::with_usage(
+        budget.clone(),
+        ResourceUsage {
+            active_cpu_slots: 2,
+            ..ResourceUsage::default()
+        },
+    )
+    .dry_run(
+        &ResourceAdmissionRequest::new(
+            AdmissionWorkClass::RemoteComputationDispatch,
+            "trace-defer",
+        )
+        .with_memory_bytes(64),
+    );
+    assert_eq!(defer.decision, AdmissionDecision::Defer);
+    assert_eq!(defer.reason_code, RA_DEFER_CPU_SLOTS_EXHAUSTED);
+
+    let shed = AdmissionController::with_usage(
+        budget.clone(),
+        ResourceUsage {
+            queued_work: 3,
+            ..ResourceUsage::default()
+        },
+    )
+    .dry_run(
+        &ResourceAdmissionRequest::new(AdmissionWorkClass::ReplayIncidentGeneration, "trace-shed")
+            .with_memory_bytes(64),
+    );
+    assert_eq!(shed.decision, AdmissionDecision::Shed);
+    assert_eq!(shed.reason_code, RA_SHED_QUEUE_DEPTH_EXCEEDED);
+
+    let reject = AdmissionController::new(budget).dry_run(
+        &ResourceAdmissionRequest::new(AdmissionWorkClass::EvidenceAppendExport, "trace-reject")
+            .with_memory_bytes(512),
+    );
+    assert_eq!(reject.decision, AdmissionDecision::Reject);
+    assert_eq!(reject.reason_code, RA_REJECT_MEMORY_BUDGET_EXCEEDED);
+}
+
+#[cfg(feature = "policy-engine")]
+#[test]
+fn resource_admission_rejects_before_evidence_mutation_and_emits_metrics() {
+    let mut controller = AdmissionController::new(ResourceBudget {
+        max_cpu_slots: 2,
+        max_memory_bytes: 128,
+        max_io_leases: 2,
+        max_queue_depth: 4,
+        min_deadline_ms: 100,
+    });
+    let request =
+        ResourceAdmissionRequest::new(AdmissionWorkClass::EvidenceAppendExport, "trace-no-mutate")
+            .with_memory_bytes(512);
+    let usage_before = controller.usage().clone();
+    let mut evidence_mutations = 0_u64;
+
+    let result = controller.run_if_admitted(&request, || {
+        evidence_mutations += 1;
+    });
+
+    assert!(result.is_err());
+    assert_eq!(evidence_mutations, 0);
+    assert_eq!(controller.usage(), &usage_before);
+    let snapshot = controller.telemetry_snapshot();
+    assert_eq!(snapshot.total.rejected, 1);
+    assert_eq!(
+        snapshot.readiness_reason_code(),
+        RA_REJECT_MEMORY_BUDGET_EXCEEDED
+    );
+
+    let mut registry = MetricsRegistry::new();
+    snapshot
+        .record_observability_metrics(&mut registry)
+        .expect("resource admission metrics");
+    let rendered = registry.render_prometheus();
+    assert!(rendered.contains("franken_node_resource_admission_decisions_total"));
+    assert!(rendered.contains("decision=\"reject\"} 1"));
+    assert!(rendered.contains("decision=\"reject\",work_class=\"evidence_append_export\"} 1"));
+}
+
+#[cfg(feature = "policy-engine")]
+#[test]
+fn resource_admission_inventory_and_evidence_artifact_are_machine_readable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let inventory = resource_admission_work_class_inventory();
+    assert_eq!(inventory.len(), 7);
+    assert!(inventory.contains(&AdmissionWorkClass::ControlPlaneLane));
+    assert!(inventory.contains(&AdmissionWorkClass::ExternalCommandHelper));
+    assert!(representative_admission_path_requests().len() >= 3);
+
+    let report = default_resource_admission_evidence_report();
+    assert_eq!(report.verdict, "PASS");
+    assert_eq!(report.admission_counts.admitted, 1);
+    assert_eq!(report.admission_counts.deferred, 1);
+    assert_eq!(report.admission_counts.shed, 1);
+    assert_eq!(report.admission_counts.rejected, 1);
+
+    let committed: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../artifacts/resource_admission/bd-w7tx8_admission_evidence.json"
+    ))?;
+    let generated = serde_json::to_value(&report)?;
+    assert_eq!(committed["schema_version"], generated["schema_version"]);
+    assert_eq!(committed["bead_id"], generated["bead_id"]);
+    assert_eq!(committed["verdict"], generated["verdict"]);
+    assert_eq!(committed["admission_counts"], generated["admission_counts"]);
+    assert_eq!(
+        committed["representative_admission_path_work_classes"],
+        generated["representative_admission_path_work_classes"]
+    );
+    assert!(
+        committed["observability_metric_names"]
+            .as_array()
+            .is_some_and(|names| names.len() == 2)
+    );
+
+    Ok(())
 }

@@ -1,0 +1,73 @@
+{
+  "schema_version": "franken-node/resource-admission/v1",
+  "bead_id": "bd-w7tx8",
+  "verdict": "PASS",
+  "work_class_inventory": [
+    "control_plane_lane",
+    "fleet_reconciliation",
+    "evidence_append_export",
+    "replay_incident_generation",
+    "remote_computation_dispatch",
+    "benchmark_perf_work",
+    "external_command_helper"
+  ],
+  "representative_admission_path_work_classes": [
+    "control_plane_lane",
+    "evidence_append_export",
+    "replay_incident_generation",
+    "remote_computation_dispatch"
+  ],
+  "budget": {
+    "max_cpu_slots": 2,
+    "max_memory_bytes": 256,
+    "max_io_leases": 2,
+    "max_queue_depth": 3,
+    "min_deadline_ms": 100
+  },
+  "cases": [
+    {
+      "name": "admit_control_plane_lane",
+      "work_class": "control_plane_lane",
+      "expected_decision": "admit",
+      "observed_decision": "admit",
+      "reason_code": "RA_ADMIT_WITHIN_BUDGET",
+      "pass": true
+    },
+    {
+      "name": "defer_remote_dispatch_cpu",
+      "work_class": "remote_computation_dispatch",
+      "expected_decision": "defer",
+      "observed_decision": "defer",
+      "reason_code": "RA_DEFER_CPU_SLOTS_EXHAUSTED",
+      "pass": true
+    },
+    {
+      "name": "shed_replay_queue",
+      "work_class": "replay_incident_generation",
+      "expected_decision": "shed",
+      "observed_decision": "shed",
+      "reason_code": "RA_SHED_QUEUE_DEPTH_EXCEEDED",
+      "pass": true
+    },
+    {
+      "name": "reject_evidence_memory",
+      "work_class": "evidence_append_export",
+      "expected_decision": "reject",
+      "observed_decision": "reject",
+      "reason_code": "RA_REJECT_MEMORY_BUDGET_EXCEEDED",
+      "pass": true
+    }
+  ],
+  "admission_counts": {
+    "admitted": 1,
+    "deferred": 1,
+    "shed": 1,
+    "rejected": 1
+  },
+  "observability_metric_names": [
+    "franken_node_resource_admission_decisions_total",
+    "franken_node_resource_admission_work_class_decisions_total"
+  ],
+  "readiness_reason_code": "RA_REJECT_MEMORY_BUDGET_EXCEEDED",
+  "readiness_recovery_hint": "The node is rejecting new over-budget work before mutation; reduce load or raise resource budgets."
+}
