@@ -45,6 +45,14 @@ fn franken_node_command() -> Command {
     Command::cargo_bin("franken-node").expect("franken-node binary")
 }
 
+fn fail_test(message: String) -> ! {
+    std::panic::panic_any(message)
+}
+
+fn fail_command(action: &str, args: &[&str], err: std::io::Error) -> ! {
+    fail_test(format!("{action} `{}`: {err}", args.join(" ")))
+}
+
 fn run_cli(args: &[&str]) -> Output {
     run_cli_in_dir(args, &repo_root())
 }
@@ -55,7 +63,7 @@ fn run_cli_in_dir(args: &[&str], current_dir: &Path) -> Output {
         .current_dir(current_dir)
         .args(args)
         .output()
-        .unwrap_or_else(|err| panic!("failed running `{}`: {err}", args.join(" ")))
+        .unwrap_or_else(|err| fail_command("failed running", args, err))
 }
 
 fn run_cli_with_wall_timeout(args: &[&str], timeout: Duration, envs: &[(&str, String)]) -> Output {
@@ -67,27 +75,27 @@ fn run_cli_with_wall_timeout(args: &[&str], timeout: Duration, envs: &[(&str, St
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .unwrap_or_else(|err| panic!("failed spawning `{}`: {err}", args.join(" ")));
+        .unwrap_or_else(|err| fail_command("failed spawning", args, err));
     let started = Instant::now();
 
     loop {
         if child
             .try_wait()
-            .unwrap_or_else(|err| panic!("failed polling `{}`: {err}", args.join(" ")))
+            .unwrap_or_else(|err| fail_command("failed polling", args, err))
             .is_some()
         {
             return child
                 .wait_with_output()
-                .unwrap_or_else(|err| panic!("failed collecting `{}`: {err}", args.join(" ")));
+                .unwrap_or_else(|err| fail_command("failed collecting", args, err));
         }
         if started.elapsed() >= timeout {
             let _ = child.kill();
             let _ = child.wait();
-            panic!(
+            fail_test(format!(
                 "`{}` exceeded external test timeout of {}ms",
                 args.join(" "),
                 timeout.as_millis()
-            );
+            ));
         }
         thread::sleep(Duration::from_millis(25));
     }
@@ -113,11 +121,11 @@ fn log_phase(test_name: &str, phase: &str, detail: serde_json::Value) {
 
 fn parse_json_stdout(output: &Output, label: &str) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
-        panic!(
+        fail_test(format!(
             "{label} stdout must be JSON: {err}\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
-        )
+        ))
     })
 }
 
@@ -460,7 +468,7 @@ fn migrate_audit_sarif_out_writes_artifact_without_stdout_payload() {
 
     let sarif_raw = std::fs::read_to_string(&out_path).expect("SARIF report should be written");
     let sarif: serde_json::Value = serde_json::from_str(&sarif_raw)
-        .unwrap_or_else(|err| panic!("SARIF report must be JSON: {err}\n{sarif_raw}"));
+        .unwrap_or_else(|err| fail_test(format!("SARIF report must be JSON: {err}\n{sarif_raw}")));
     log_phase(
         test_name,
         "sarif_artifact_parsed",
@@ -554,7 +562,7 @@ fn migrate_audit_json_out_writes_artifact_without_stdout_payload() {
 
     let report_raw = std::fs::read_to_string(&out_path).expect("JSON report should be written");
     let report: serde_json::Value = serde_json::from_str(&report_raw)
-        .unwrap_or_else(|err| panic!("audit report must be JSON: {err}\n{report_raw}"));
+        .unwrap_or_else(|err| fail_test(format!("audit report must be JSON: {err}\n{report_raw}")));
     log_phase(
         test_name,
         "json_artifact_parsed",
@@ -659,7 +667,7 @@ fn migrate_rewrite_apply_emits_rollback_plan_and_updates_manifest() {
     let rollback_json =
         std::fs::read_to_string(&rollback_path).expect("rollback artifact should be written");
     let rollback: serde_json::Value = serde_json::from_str(&rollback_json)
-        .unwrap_or_else(|err| panic!("invalid rollback json: {err}\n{rollback_json}"));
+        .unwrap_or_else(|err| fail_test(format!("invalid rollback json: {err}\n{rollback_json}")));
     assert_eq!(
         rollback["schema_version"],
         serde_json::Value::String("1.0.0".to_string())
@@ -676,7 +684,7 @@ fn migrate_rewrite_apply_emits_rollback_plan_and_updates_manifest() {
         std::fs::read_to_string(project_path.join("package.json")).expect("read rewritten package");
     golden::assert_scrubbed_golden("migrate/rewrite_apply_manifest", &rewritten_package);
     let rewritten: serde_json::Value = serde_json::from_str(&rewritten_package)
-        .unwrap_or_else(|err| panic!("rewritten package should be valid json: {err}"));
+        .unwrap_or_else(|err| fail_test(format!("rewritten package should be valid json: {err}")));
     assert_eq!(
         rewritten["engines"]["node"],
         serde_json::Value::String(">=20 <23".to_string())
@@ -826,7 +834,7 @@ fn migrate_rewrite_apply_json_keeps_rollback_artifact_separate() {
     let rollback_json =
         std::fs::read_to_string(&rollback_path).expect("rollback artifact should be written");
     let rollback: serde_json::Value = serde_json::from_str(&rollback_json)
-        .unwrap_or_else(|err| panic!("invalid rollback json: {err}\n{rollback_json}"));
+        .unwrap_or_else(|err| fail_test(format!("invalid rollback json: {err}\n{rollback_json}")));
     assert_eq!(rollback["schema_version"], "1.0.0");
     assert_eq!(rollback["apply_mode"], true);
     assert_eq!(rollback["entry_count"].as_u64(), Some(2));
