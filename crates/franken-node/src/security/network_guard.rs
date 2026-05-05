@@ -7,11 +7,22 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::net::IpAddr;
 
 use crate::security::remote_cap::{CapabilityGate, RemoteCap, RemoteOperation};
 
 use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_RULES};
 use crate::push_bounded;
+
+const BLOCKED_IPV4_CIDRS: [([u8; 4], u8, &str); 7] = [
+    ([127, 0, 0, 0], 8, "127.0.0.0/8"),
+    ([10, 0, 0, 0], 8, "10.0.0.0/8"),
+    ([172, 16, 0, 0], 12, "172.16.0.0/12"),
+    ([192, 168, 0, 0], 16, "192.168.0.0/16"),
+    ([169, 254, 0, 0], 16, "169.254.0.0/16"),
+    ([100, 64, 0, 0], 10, "100.64.0.0/10"),
+    ([0, 0, 0, 0], 8, "0.0.0.0/8"),
+];
 
 /// Network protocol for egress rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -115,6 +126,49 @@ fn normalize_host_for_match(host: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn ipv4_in_cidr(ip: [u8; 4], network: [u8; 4], prefix_len: u8) -> bool {
+    if prefix_len > 32 {
+        return true;
+    }
+    if prefix_len == 0 {
+        return true;
+    }
+    let net = u32::from_be_bytes(network);
+    let addr = u32::from_be_bytes(ip);
+    let mask = if prefix_len == 32 {
+        u32::MAX
+    } else {
+        u32::MAX << (32_u8.saturating_sub(prefix_len))
+    };
+    (addr & mask) == (net & mask)
+}
+
+fn resolved_ip_block_label(ip: IpAddr) -> Option<&'static str> {
+    match ip {
+        IpAddr::V4(ipv4) => BLOCKED_IPV4_CIDRS
+            .iter()
+            .find(|(network, prefix_len, _label)| {
+                ipv4_in_cidr(ipv4.octets(), *network, *prefix_len)
+            })
+            .map(|(_network, _prefix_len, label)| *label),
+        IpAddr::V6(_) => Some("ipv6_unsupported"),
+    }
+}
+
+fn unresolved_or_blocked_without_dns_evidence(host: &str) -> bool {
+    match host.trim().parse::<IpAddr>() {
+        Ok(ip) => resolved_ip_block_label(ip).is_some(),
+        Err(_) => true,
+    }
+}
+
+fn resolved_ips_are_public(resolved_ips: &[IpAddr]) -> bool {
+    !resolved_ips.is_empty()
+        && resolved_ips
+            .iter()
+            .all(|ip| resolved_ip_block_label(*ip).is_none())
+}
+
 /// Egress policy for a connector.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EgressPolicy {
@@ -164,6 +218,42 @@ impl EgressPolicy {
             }
         }
         (self.default_action, None)
+    }
+
+    /// Evaluate a request after DNS resolution, denying if any resolved IP is blocked.
+    pub fn evaluate_resolved_ips(
+        &self,
+        host: &str,
+        resolved_ips: &[IpAddr],
+        port: u16,
+        protocol: Protocol,
+    ) -> (Action, Option<usize>) {
+        let (action, rule_idx) = self.evaluate(host, port, protocol);
+        if action == Action::Deny {
+            return (action, rule_idx);
+        }
+        if unresolved_or_blocked_without_dns_evidence(host)
+            && !resolved_ips_are_public(resolved_ips)
+        {
+            return (Action::Deny, None);
+        }
+        if host.trim().parse::<IpAddr>().is_ok() && unresolved_or_blocked_without_dns_evidence(host)
+        {
+            return (Action::Deny, None);
+        }
+        (action, rule_idx)
+    }
+
+    /// Evaluate a request after DNS resolution has selected one connect IP.
+    pub fn evaluate_resolved(
+        &self,
+        host: &str,
+        resolved_ip: IpAddr,
+        port: u16,
+        protocol: Protocol,
+    ) -> (Action, Option<usize>) {
+        let resolved_ips = [resolved_ip];
+        self.evaluate_resolved_ips(host, &resolved_ips, port, protocol)
     }
 
     /// Validate that the policy is well-formed.
@@ -244,7 +334,11 @@ impl NetworkGuard {
             });
         }
 
-        let (action, rule_idx) = self.policy.evaluate(host, port, protocol);
+        let (mut action, mut rule_idx) = self.policy.evaluate(host, port, protocol);
+        if action == Action::Allow && unresolved_or_blocked_without_dns_evidence(host) {
+            action = Action::Deny;
+            rule_idx = None;
+        }
 
         let event = AuditEvent {
             connector_id: self.policy.connector_id.clone(),
@@ -268,6 +362,102 @@ impl NetworkGuard {
         }
 
         Ok(action)
+    }
+
+    /// Process an egress request with all resolved A/AAAA records supplied by the caller.
+    #[allow(clippy::too_many_arguments)]
+    pub fn process_egress_resolved_ips(
+        &mut self,
+        host: &str,
+        resolved_ips: &[IpAddr],
+        port: u16,
+        protocol: Protocol,
+        remote_cap: Option<&RemoteCap>,
+        capability_gate: &mut CapabilityGate,
+        trace_id: &str,
+        timestamp: &str,
+        now_epoch_secs: u64,
+    ) -> Result<Action, GuardError> {
+        let endpoint = format!("{protocol}://{host}:{port}");
+        if let Err(err) = capability_gate.authorize_network(
+            remote_cap,
+            RemoteOperation::NetworkEgress,
+            &endpoint,
+            now_epoch_secs,
+            trace_id,
+        ) {
+            let event = AuditEvent {
+                connector_id: self.policy.connector_id.clone(),
+                timestamp: timestamp.to_string(),
+                protocol,
+                host: host.to_string(),
+                port,
+                action: Action::Deny,
+                rule_matched: None,
+                trace_id: trace_id.to_string(),
+            };
+            push_bounded(&mut self.audit_log, event, MAX_AUDIT_LOG_ENTRIES);
+            return Err(GuardError::RemoteCapDenied {
+                code: err.code().to_string(),
+                compatibility_code: err.compatibility_code().map(ToString::to_string),
+                detail: err.to_string(),
+            });
+        }
+
+        let (action, rule_idx) =
+            self.policy
+                .evaluate_resolved_ips(host, resolved_ips, port, protocol);
+
+        let event = AuditEvent {
+            connector_id: self.policy.connector_id.clone(),
+            timestamp: timestamp.to_string(),
+            protocol,
+            host: host.to_string(),
+            port,
+            action,
+            rule_matched: rule_idx,
+            trace_id: trace_id.to_string(),
+        };
+
+        push_bounded(&mut self.audit_log, event, MAX_AUDIT_LOG_ENTRIES);
+
+        if action == Action::Deny {
+            return Err(GuardError::EgressDenied {
+                host: host.to_string(),
+                port,
+                protocol,
+            });
+        }
+
+        Ok(action)
+    }
+
+    /// Process an egress request with the selected connect IP supplied by the caller.
+    #[allow(clippy::too_many_arguments)]
+    pub fn process_egress_resolved(
+        &mut self,
+        host: &str,
+        resolved_ip: IpAddr,
+        port: u16,
+        protocol: Protocol,
+        remote_cap: Option<&RemoteCap>,
+        capability_gate: &mut CapabilityGate,
+        trace_id: &str,
+        timestamp: &str,
+        now_epoch_secs: u64,
+    ) -> Result<Action, GuardError> {
+        let resolved_ips = [resolved_ip];
+        self.process_egress_resolved_ips(
+            host,
+            &resolved_ips,
+            port,
+            protocol,
+            remote_cap,
+            capability_gate,
+            trace_id,
+            timestamp,
+            now_epoch_secs,
+        )
     }
 
     /// Get all audit events.
@@ -336,6 +526,7 @@ mod tests {
     use crate::security::remote_cap::{
         CapabilityGate, CapabilityProvider, RemoteOperation, RemoteScope,
     };
+    use std::net::Ipv4Addr;
 
     fn sample_policy() -> EgressPolicy {
         let mut policy = EgressPolicy::new("conn-1".into(), Action::Deny);
@@ -388,6 +579,14 @@ mod tests {
             .expect("issue remote cap");
         let gate = CapabilityGate::new("guard-secret");
         (gate, cap)
+    }
+
+    fn public_ip() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))
+    }
+
+    fn metadata_ip() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254))
     }
 
     // === Host matching ===
@@ -537,8 +736,9 @@ mod tests {
     fn guard_allows_matching_request() {
         let mut guard = NetworkGuard::new(sample_policy());
         let (mut gate, cap) = gate_and_cap(false);
-        let result = guard.process_egress(
+        let result = guard.process_egress_resolved(
             "api.example.com",
+            public_ip(),
             443,
             Protocol::Http,
             Some(&cap),
@@ -550,6 +750,75 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(guard.audit_log.len(), 1);
         assert_eq!(guard.audit_log[0].action, Action::Allow);
+    }
+
+    #[test]
+    fn guard_denies_allowed_hostname_without_resolved_ip() {
+        let mut guard = NetworkGuard::new(sample_policy());
+        let (mut gate, cap) = gate_and_cap(false);
+        let err = guard
+            .process_egress(
+                "api.example.com",
+                443,
+                Protocol::Http,
+                Some(&cap),
+                &mut gate,
+                "trace-unresolved",
+                "t",
+                1_700_000_010,
+            )
+            .expect_err("hostname allow requires resolved IP evidence");
+
+        assert!(matches!(err, GuardError::EgressDenied { .. }));
+        assert_eq!(guard.audit_log.len(), 1);
+        assert_eq!(guard.audit_log[0].action, Action::Deny);
+        assert_eq!(guard.audit_log[0].rule_matched, None);
+    }
+
+    #[test]
+    fn guard_denies_allowed_hostname_when_any_resolved_ip_is_blocked() {
+        let mut guard = NetworkGuard::new(sample_policy());
+        let (mut gate, cap) = gate_and_cap(false);
+        let err = guard
+            .process_egress_resolved_ips(
+                "api.example.com",
+                &[public_ip(), metadata_ip()],
+                443,
+                Protocol::Http,
+                Some(&cap),
+                &mut gate,
+                "trace-private-dns",
+                "t",
+                1_700_000_010,
+            )
+            .expect_err("any private DNS answer must fail closed");
+
+        assert!(matches!(err, GuardError::EgressDenied { .. }));
+        assert_eq!(guard.audit_log[0].action, Action::Deny);
+        assert_eq!(guard.audit_log[0].rule_matched, None);
+    }
+
+    #[test]
+    fn guard_denies_allowed_hostname_with_empty_resolution_set() {
+        let mut guard = NetworkGuard::new(sample_policy());
+        let (mut gate, cap) = gate_and_cap(false);
+        let err = guard
+            .process_egress_resolved_ips(
+                "api.example.com",
+                &[],
+                443,
+                Protocol::Http,
+                Some(&cap),
+                &mut gate,
+                "trace-empty-dns",
+                "t",
+                1_700_000_010,
+            )
+            .expect_err("empty DNS answer set must fail closed");
+
+        assert!(matches!(err, GuardError::EgressDenied { .. }));
+        assert_eq!(guard.audit_log[0].action, Action::Deny);
+        assert_eq!(guard.audit_log[0].rule_matched, None);
     }
 
     #[test]
@@ -876,8 +1145,9 @@ mod tests {
         let (mut gate, cap) = gate_and_cap(true);
 
         guard
-            .process_egress(
+            .process_egress_resolved(
                 "api.example.com",
+                public_ip(),
                 443,
                 Protocol::Http,
                 Some(&cap),
@@ -888,8 +1158,9 @@ mod tests {
             )
             .expect("first single-use request should pass");
         let err = guard
-            .process_egress(
+            .process_egress_resolved(
                 "api.example.com",
+                public_ip(),
                 443,
                 Protocol::Http,
                 Some(&cap),

@@ -20,8 +20,12 @@ use frankenengine_node::security::remote_cap::{
 use frankenengine_node::security::ssrf_policy::SsrfPolicyTemplate;
 use frankenengine_node::security::network_guard::Protocol;
 use frankenengine_node::control_plane::control_epoch::ControlEpoch;
-
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+fn public_fixture_ip() -> IpAddr {
+    IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))
+}
 
 // === 1. CONSTANT-TIME COMPARISON CONFORMANCE ===
 
@@ -397,11 +401,18 @@ fn ssrf_policy_allows_legitimate_public_targets() {
     ];
 
     for (target, description) in &legitimate_targets {
-        let result = policy.check_ssrf(target, 443, Protocol::Http, "test-trace", "test-time");
         if target.chars().next().unwrap().is_alphabetic() {
-            // DNS names should be allowed (they'll be resolved elsewhere)
+            let result = policy.check_ssrf_resolved(
+                target,
+                public_fixture_ip(),
+                443,
+                Protocol::Http,
+                "test-trace",
+                "test-time",
+            );
             assert!(result.is_ok(), "Should allow {}: {}", description, target);
         } else if let Some(octets) = parse_simple_ipv4(target) {
+            let result = policy.check_ssrf(target, 443, Protocol::Http, "test-trace", "test-time");
             // Simple check for common public IPs
             if is_simple_public_ip(octets) {
                 assert!(result.is_ok(), "Should allow public IP {}: {}", description, target);
@@ -722,8 +733,9 @@ mod security_hardening_comprehensive_negative_tests {
         }
 
         // Policy should still function correctly
-        let check_result = policy.check_ssrf(
+        let check_result = policy.check_ssrf_resolved(
             "allowed-host-0.example.com",
+            public_fixture_ip(),
             8080,
             Protocol::Http,
             "test",
@@ -1066,7 +1078,14 @@ mod security_hardening_comprehensive_negative_tests {
                 assert!(!receipt.receipt_id.is_empty(), "Receipt ID should not be empty");
 
                 // Test that the allowlisted host still works correctly
-                let check_result = policy.check_ssrf("safe.example.com", 443, Protocol::Http, "test", "test");
+                let check_result = policy.check_ssrf_resolved(
+                    "safe.example.com",
+                    public_fixture_ip(),
+                    443,
+                    Protocol::Http,
+                    "test",
+                    "test",
+                );
                 assert!(check_result.is_ok(), "Allowlisted host should still work after injection attempt");
             },
             Err(_) => {
@@ -1285,7 +1304,14 @@ mod security_hardening_comprehensive_negative_tests {
             let result = policy.add_allowlist(invalid_host, Some(443), description, "trace", "time");
 
             // Whether accepted or rejected, valid entries should still work
-            let check_result = policy.check_ssrf("valid1.example.com", 443, Protocol::Http, "test", "test");
+            let check_result = policy.check_ssrf_resolved(
+                "valid1.example.com",
+                public_fixture_ip(),
+                443,
+                Protocol::Http,
+                "test",
+                "test",
+            );
             assert!(check_result.is_ok(),
                    "Valid allowlist entries should still work after invalid entry attempt: {}",
                    description);

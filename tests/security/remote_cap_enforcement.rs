@@ -8,7 +8,7 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{IpAddr, Ipv4Addr, TcpListener};
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex, Once};
@@ -24,6 +24,7 @@ use frankenengine_node::security::remote_cap::{
     CapabilityGate, CapabilityProvider, ConnectivityMode, RemoteCapError, RemoteOperation,
     RemoteScope,
 };
+use frankenengine_node::security::ssrf_policy::{SsrfError, SsrfPolicyTemplate};
 use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
 use frankenengine_node::supply_chain::trust_card::{
     BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
@@ -43,6 +44,18 @@ fn init_test_tracing() {
     TEST_TRACING_INIT.call_once(|| {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     });
+}
+
+fn public_fixture_ip() -> IpAddr {
+    IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))
+}
+
+fn metadata_fixture_ip() -> IpAddr {
+    IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254))
+}
+
+fn private_fixture_ip() -> IpAddr {
+    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 42))
 }
 
 fn read_http_request(stream: &mut impl Read) -> String {
@@ -895,8 +908,9 @@ fn network_guard_is_enforced_by_capability_gate() {
     }
 
     let cap = issue_cap(false);
-    let ok = guard.process_egress(
+    let ok = guard.process_egress_resolved(
         "api.example.com",
+        public_fixture_ip(),
         443,
         Protocol::Http,
         Some(&cap),
@@ -906,6 +920,142 @@ fn network_guard_is_enforced_by_capability_gate() {
         1_700_000_041,
     );
     assert!(ok.is_ok(), "valid cap should permit policy evaluation");
+}
+
+#[test]
+fn network_guard_requires_dns_resolution_for_policy_allowed_hostname() {
+    let mut policy = EgressPolicy::new("conn-dns-proof".to_string(), Action::Deny);
+    policy
+        .add_rule(EgressRule {
+            host: "api.example.com".to_string(),
+            port: Some(443),
+            action: Action::Allow,
+            protocol: Protocol::Http,
+        })
+        .expect("add allow rule");
+    let mut guard = NetworkGuard::new(policy);
+    let cap = issue_cap(false);
+    let mut gate = CapabilityGate::new("remote-cap-test-secret")
+        .expect("remote cap test gate should be valid");
+
+    let err = guard
+        .process_egress(
+            "api.example.com",
+            443,
+            Protocol::Http,
+            Some(&cap),
+            &mut gate,
+            "trace-unresolved-dns",
+            "ts",
+            1_700_000_041,
+        )
+        .expect_err("hostname allow must require resolved IP evidence");
+
+    assert!(matches!(
+        err,
+        frankenengine_node::security::network_guard::GuardError::EgressDenied { .. }
+    ));
+    assert_eq!(
+        guard.audit_events().last().expect("audit event").action,
+        Action::Deny
+    );
+    assert_eq!(
+        guard
+            .audit_events()
+            .last()
+            .expect("audit event")
+            .rule_matched,
+        None
+    );
+}
+
+#[test]
+fn network_guard_denies_private_dns_answer_even_when_hostname_rule_allows() {
+    let mut policy = EgressPolicy::new("conn-dns-rebind".to_string(), Action::Deny);
+    policy
+        .add_rule(EgressRule {
+            host: "api.example.com".to_string(),
+            port: Some(443),
+            action: Action::Allow,
+            protocol: Protocol::Http,
+        })
+        .expect("add allow rule");
+    let mut guard = NetworkGuard::new(policy);
+    let cap = issue_cap(false);
+    let mut gate = CapabilityGate::new("remote-cap-test-secret")
+        .expect("remote cap test gate should be valid");
+
+    let err = guard
+        .process_egress_resolved_ips(
+            "api.example.com",
+            &[public_fixture_ip(), metadata_fixture_ip()],
+            443,
+            Protocol::Http,
+            Some(&cap),
+            &mut gate,
+            "trace-rebind-dns",
+            "ts",
+            1_700_000_041,
+        )
+        .expect_err("any private DNS answer must fail closed");
+
+    assert!(matches!(
+        err,
+        frankenengine_node::security::network_guard::GuardError::EgressDenied { .. }
+    ));
+    assert_eq!(
+        guard.audit_events().last().expect("audit event").action,
+        Action::Deny
+    );
+}
+
+#[test]
+fn ssrf_policy_requires_dns_resolution_for_hostname() {
+    let mut template = SsrfPolicyTemplate::default_template("conn-dns-proof".to_string());
+
+    let err = template
+        .check_ssrf(
+            "api.example.com",
+            443,
+            Protocol::Http,
+            "trace-ssrf-unresolved",
+            "ts",
+        )
+        .expect_err("unresolved hostname must fail closed");
+
+    assert!(matches!(
+        err,
+        SsrfError::SsrfDenied { cidr, .. } if cidr == "dns_resolution_required"
+    ));
+    assert_eq!(
+        template.audit_log.last().expect("audit event").action,
+        Action::Deny
+    );
+}
+
+#[test]
+fn ssrf_policy_denies_private_dns_answer_for_public_hostname() {
+    let mut template = SsrfPolicyTemplate::default_template("conn-dns-rebind".to_string());
+
+    let err = template
+        .check_ssrf_resolved_ips(
+            "api.example.com",
+            &[public_fixture_ip(), private_fixture_ip()],
+            443,
+            Protocol::Http,
+            "trace-ssrf-rebind",
+            "ts",
+        )
+        .expect_err("any private DNS answer must fail closed");
+
+    assert!(matches!(
+        err,
+        SsrfError::SsrfDenied { cidr, .. } if cidr.contains("10.0.0.0/8")
+    ));
+    assert_eq!(
+        template.audit_log.last().expect("audit event").action,
+        Action::Deny
+    );
 }
 
 #[test]

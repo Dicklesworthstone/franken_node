@@ -4,11 +4,16 @@
 //! cloud metadata, tailnet, and IPv6 loopback. Tests allowlist
 //! exceptions with receipts and common SSRF attack patterns.
 
-use frankenengine_node::security::ssrf_policy::*;
 use frankenengine_node::security::network_guard::{Action, Protocol};
+use frankenengine_node::security::ssrf_policy::*;
+use std::net::{IpAddr, Ipv4Addr};
 
 fn fresh_template() -> SsrfPolicyTemplate {
     SsrfPolicyTemplate::default_template("conn-test".into())
+}
+
+fn public_fixture_ip() -> IpAddr {
+    IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))
 }
 
 // === Default deny for all private CIDRs ===
@@ -62,7 +67,7 @@ fn denies_ipv6_loopback() {
     assert!(result.is_err());
 }
 
-// === Public IPs and hostnames allowed ===
+// === Public IPs and resolved hostnames allowed ===
 
 #[test]
 fn allows_public_ip() {
@@ -72,9 +77,23 @@ fn allows_public_ip() {
 }
 
 #[test]
-fn allows_hostname() {
+fn denies_unresolved_hostname() {
     let mut t = fresh_template();
     let result = t.check_ssrf("api.example.com", 443, Protocol::Http, "t9", "ts");
+    assert!(result.is_err());
+}
+
+#[test]
+fn allows_resolved_public_hostname() {
+    let mut t = fresh_template();
+    let result = t.check_ssrf_resolved(
+        "api.example.com",
+        public_fixture_ip(),
+        443,
+        Protocol::Http,
+        "t9-resolved",
+        "ts",
+    );
     assert!(result.is_ok());
 }
 
@@ -83,7 +102,9 @@ fn allows_hostname() {
 #[test]
 fn allowlist_overrides_deny() {
     let mut t = fresh_template();
-    let receipt = t.add_allowlist("10.0.0.5", Some(8080), "health check", "t10", "ts").unwrap();
+    let receipt = t
+        .add_allowlist("10.0.0.5", Some(8080), "health check", "t10", "ts")
+        .unwrap();
     assert!(!receipt.receipt_id.is_empty());
     let result = t.check_ssrf("10.0.0.5", 8080, Protocol::Http, "t11", "ts");
     assert!(result.is_ok());
@@ -99,7 +120,9 @@ fn allowlist_requires_reason() {
 #[test]
 fn allowlist_receipt_has_trace_id() {
     let mut t = fresh_template();
-    let receipt = t.add_allowlist("192.168.1.1", None, "dev db", "trace-abc", "ts").unwrap();
+    let receipt = t
+        .add_allowlist("192.168.1.1", None, "dev db", "trace-abc", "ts")
+        .unwrap();
     assert_eq!(receipt.trace_id, "trace-abc");
 }
 

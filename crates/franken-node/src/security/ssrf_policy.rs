@@ -6,13 +6,18 @@
 //! PolicyReceipt with reason and trace_id.
 
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::{fmt, net::IpAddr};
 
 use super::network_guard::{Action, EgressPolicy, EgressRule, Protocol};
 
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 use crate::push_bounded;
 const MAX_ALLOWLIST_ENTRIES: usize = 4096;
+
+enum DnsHostnameResolution<'a> {
+    Required,
+    Resolved(&'a [IpAddr]),
+}
 
 // ── CIDR range ──────────────────────────────────────────────────────
 
@@ -316,6 +321,63 @@ impl SsrfPolicyTemplate {
         })
     }
 
+    fn resolved_ip_block_label(&self, ip: IpAddr) -> Option<String> {
+        match ip {
+            IpAddr::V4(ipv4) => self
+                .blocked_cidrs
+                .iter()
+                .find(|cidr| cidr.contains(ipv4.octets()))
+                .map(|cidr| cidr.to_string()),
+            IpAddr::V6(_) => Some("ipv6_unsupported".to_string()),
+        }
+    }
+
+    fn evaluate_resolved_hostname(
+        &mut self,
+        host: &str,
+        resolved_ips: &[IpAddr],
+        port: u16,
+        trace_id: &str,
+        timestamp: &str,
+    ) -> Result<Action, SsrfError> {
+        if resolved_ips.is_empty() {
+            self.emit_audit(
+                host,
+                port,
+                Action::Deny,
+                Some("dns_resolution_required"),
+                false,
+                trace_id,
+                timestamp,
+            );
+            return Err(SsrfError::SsrfDenied {
+                host: host.to_string(),
+                cidr: "dns_resolution_required".to_string(),
+            });
+        }
+
+        for resolved_ip in resolved_ips {
+            if let Some(label) = self.resolved_ip_block_label(*resolved_ip) {
+                self.emit_audit(
+                    host,
+                    port,
+                    Action::Deny,
+                    Some(&label),
+                    false,
+                    trace_id,
+                    timestamp,
+                );
+                return Err(SsrfError::SsrfDenied {
+                    host: host.to_string(),
+                    cidr: label,
+                });
+            }
+        }
+
+        self.emit_audit(host, port, Action::Allow, None, false, trace_id, timestamp);
+        Ok(Action::Allow)
+    }
+
     /// Evaluate a request against the SSRF policy.
     pub fn check_ssrf(
         &mut self,
@@ -324,6 +386,61 @@ impl SsrfPolicyTemplate {
         _protocol: Protocol,
         trace_id: &str,
         timestamp: &str,
+    ) -> Result<Action, SsrfError> {
+        self.check_ssrf_with_resolution(
+            host,
+            port,
+            _protocol,
+            trace_id,
+            timestamp,
+            DnsHostnameResolution::Required,
+        )
+    }
+
+    /// Evaluate a request after DNS resolution has selected one connect IP.
+    #[allow(clippy::too_many_arguments)]
+    pub fn check_ssrf_resolved(
+        &mut self,
+        host: &str,
+        resolved_ip: IpAddr,
+        port: u16,
+        protocol: Protocol,
+        trace_id: &str,
+        timestamp: &str,
+    ) -> Result<Action, SsrfError> {
+        let resolved_ips = [resolved_ip];
+        self.check_ssrf_resolved_ips(host, &resolved_ips, port, protocol, trace_id, timestamp)
+    }
+
+    /// Evaluate a request after DNS resolution, denying if any A/AAAA record is blocked.
+    #[allow(clippy::too_many_arguments)]
+    pub fn check_ssrf_resolved_ips(
+        &mut self,
+        host: &str,
+        resolved_ips: &[IpAddr],
+        port: u16,
+        protocol: Protocol,
+        trace_id: &str,
+        timestamp: &str,
+    ) -> Result<Action, SsrfError> {
+        self.check_ssrf_with_resolution(
+            host,
+            port,
+            protocol,
+            trace_id,
+            timestamp,
+            DnsHostnameResolution::Resolved(resolved_ips),
+        )
+    }
+
+    fn check_ssrf_with_resolution(
+        &mut self,
+        host: &str,
+        port: u16,
+        _protocol: Protocol,
+        trace_id: &str,
+        timestamp: &str,
+        dns_resolution: DnsHostnameResolution<'_>,
     ) -> Result<Action, SsrfError> {
         let host = host.trim();
         if has_null_byte(host) {
@@ -510,10 +627,28 @@ impl SsrfPolicyTemplate {
                         host: host.to_string(),
                     });
                 }
-                // Not an IP literal and not a reserved loopback alias —
-                // allow through (DNS names handled by the egress guard policy)
-                self.emit_audit(host, port, Action::Allow, None, false, trace_id, timestamp);
-                return Ok(Action::Allow);
+                // DNS hostnames must be paired with resolved address evidence;
+                // otherwise a public-looking name can resolve or rebind to a
+                // blocked range after this check.
+                return match dns_resolution {
+                    DnsHostnameResolution::Required => {
+                        self.emit_audit(
+                            host,
+                            port,
+                            Action::Deny,
+                            Some("dns_resolution_required"),
+                            false,
+                            trace_id,
+                            timestamp,
+                        );
+                        Err(SsrfError::SsrfDenied {
+                            host: host.to_string(),
+                            cidr: "dns_resolution_required".to_string(),
+                        })
+                    }
+                    DnsHostnameResolution::Resolved(resolved_ips) => self
+                        .evaluate_resolved_hostname(host, resolved_ips, port, trace_id, timestamp),
+                };
             }
         };
 
@@ -759,6 +894,7 @@ impl std::error::Error for SsrfError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
 
     // === CidrRange ===
 
@@ -980,10 +1116,91 @@ mod tests {
     }
 
     #[test]
-    fn check_ssrf_allows_hostname() {
+    fn check_ssrf_denies_unresolved_hostname() {
         let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
         let result = t.check_ssrf("api.example.com", 443, Protocol::Http, "t5", "ts");
+        match result.expect_err("hostnames require resolved IP evidence") {
+            SsrfError::SsrfDenied { host, cidr } => {
+                assert_eq!(host, "api.example.com");
+                assert_eq!(cidr, "dns_resolution_required");
+            }
+            other => unreachable!("expected unresolved DNS denial, got {:?}", other),
+        }
+        assert_eq!(t.audit_log[0].action, Action::Deny);
+        assert_eq!(
+            t.audit_log[0].cidr_matched.as_deref(),
+            Some("dns_resolution_required")
+        );
+    }
+
+    #[test]
+    fn check_ssrf_resolved_allows_public_hostname() {
+        let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
+        let result = t.check_ssrf_resolved(
+            "api.example.com",
+            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            443,
+            Protocol::Http,
+            "t5r",
+            "ts",
+        );
+
         assert!(result.is_ok());
+        assert_eq!(t.audit_log[0].action, Action::Allow);
+    }
+
+    #[test]
+    fn check_ssrf_resolved_denies_private_dns_answer() {
+        let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
+        let result = t.check_ssrf_resolved(
+            "api.example.com",
+            IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)),
+            443,
+            Protocol::Http,
+            "t5p",
+            "ts",
+        );
+
+        match result.expect_err("metadata DNS answer must be denied") {
+            SsrfError::SsrfDenied { cidr, .. } => assert!(cidr.contains("169.254.0.0/16")),
+            other => unreachable!("expected private DNS denial, got {:?}", other),
+        }
+        assert_eq!(t.audit_log[0].action, Action::Deny);
+    }
+
+    #[test]
+    fn check_ssrf_resolved_ips_denies_any_private_answer() {
+        let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
+        let result = t.check_ssrf_resolved_ips(
+            "api.example.com",
+            &[
+                IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 42)),
+            ],
+            443,
+            Protocol::Http,
+            "t5m",
+            "ts",
+        );
+
+        match result.expect_err("mixed DNS answer set must fail closed") {
+            SsrfError::SsrfDenied { cidr, .. } => assert!(cidr.contains("10.0.0.0/8")),
+            other => unreachable!("expected private DNS denial, got {:?}", other),
+        }
+        assert_eq!(t.audit_log[0].action, Action::Deny);
+    }
+
+    #[test]
+    fn check_ssrf_resolved_ips_denies_empty_answer_set() {
+        let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
+        let result =
+            t.check_ssrf_resolved_ips("api.example.com", &[], 443, Protocol::Http, "t5e", "ts");
+
+        match result.expect_err("empty DNS answer set must fail closed") {
+            SsrfError::SsrfDenied { cidr, .. } => assert_eq!(cidr, "dns_resolution_required"),
+            other => unreachable!("expected empty DNS denial, got {:?}", other),
+        }
+        assert_eq!(t.audit_log[0].action, Action::Deny);
     }
 
     #[test]
@@ -1950,10 +2167,17 @@ mod tests {
         let add_result = policy.add_allowlist(&long_host, None, &long_reason, &long_trace, "ts");
         assert!(add_result.is_ok(), "Should handle very long inputs");
 
-        let check_result = policy.check_ssrf(&long_host, 443, Protocol::Http, &long_trace, "ts");
+        let check_result = policy.check_ssrf_resolved(
+            &long_host,
+            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            443,
+            Protocol::Http,
+            &long_trace,
+            "ts",
+        );
         assert!(
             check_result.is_ok(),
-            "Should allow very long allowlisted host"
+            "Should allow very long allowlisted host after public DNS resolution"
         );
 
         // Test serialization with boundary data
