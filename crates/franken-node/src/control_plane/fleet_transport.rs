@@ -38,7 +38,6 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::runtime::clock;
-use fs2::FileExt;
 
 pub const FLEET_SHARED_STATE_SCHEMA: &str = "franken-node/fleet-transport-state/v1";
 pub const FLEET_ACTION_LOG_FILE: &str = "actions.jsonl";
