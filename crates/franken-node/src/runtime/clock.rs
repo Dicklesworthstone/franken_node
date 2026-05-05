@@ -4,7 +4,9 @@
 //! enabling deterministic testing and handling of clock skew/NTP failures.
 
 use chrono::{DateTime, Utc};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 
 /// Global clock instance for production use.
 static GLOBAL_CLOCK: std::sync::OnceLock<Arc<dyn Clock + Send + Sync>> = std::sync::OnceLock::new();

@@ -20,7 +20,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::push_bounded;
-use fs2::FileExt;
 
 // Security: bounds for push_bounded to prevent memory exhaustion
 const MAX_COMBINED_OUTPUT_BYTES: usize = 16_777_216; // 16MB limit per runtime execution
@@ -645,7 +644,6 @@ impl LockstepHarness {
                         )
                     });
                 }
-                Err(_) => {}
             }
         }
 

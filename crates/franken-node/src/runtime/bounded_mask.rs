@@ -11,7 +11,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
+#[cfg(test)]
+use sha2::{Digest, Sha256};
 
 use crate::capacity_defaults::aliases::MAX_EVENTS;
 

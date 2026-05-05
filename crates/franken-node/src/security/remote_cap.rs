@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::Duration;
 
 // bd-1vjbv: Modernized Ed25519 signature verification imports
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use hmac::{Hmac, KeyInit, Mac};
 use rand; // For jitter in lock timeout backoff
 use serde::{Deserialize, Serialize};

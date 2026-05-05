@@ -105,7 +105,7 @@ pub mod lock_utils {
     ///
     /// Replaces the dangerous pattern: `mutex.lock().unwrap()`
     /// With safe pattern: `safe_lock(&mutex)?`
-    pub fn safe_lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<T>, ActionableError> {
+    pub fn safe_lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, ActionableError> {
         mutex.lock().map_err(|poison_err| {
             ActionableError::new(
                 format!(

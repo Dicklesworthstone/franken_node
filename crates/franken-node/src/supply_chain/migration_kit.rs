@@ -23,7 +23,6 @@
 //! - **INV-MKE-AUDITABLE**: Every migration operation logged with event code.
 //! - **INV-MKE-VERSIONED**: Kit version embedded in every migration plan.
 
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;

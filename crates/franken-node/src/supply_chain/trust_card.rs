@@ -19,7 +19,6 @@ use std::{
 };
 
 use base64::Engine as _;
-use fs2::FileExt;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
