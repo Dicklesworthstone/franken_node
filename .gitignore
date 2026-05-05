@@ -139,3 +139,27 @@ target_*/
 /security_conformance_tests.rs
 /test_adversary_graph_hardening.rs
 /test_bocpd_hardening_fixes.rs
+
+# Empty placeholder files at root (looks like a stray `touch` or shell-redirect
+# accident; refuse to track them again)
+/threshold
+
+# Compiled rust libraries — should never be in repo at any depth
+*.rlib
+*.rmeta
+
+# Legacy in-progress cleanup directory; has no semantic role and any file under
+# it is by definition cleanup-bound, not load-bearing
+/artifacts/root_cleanup/
+
+# Legacy root paths for docs that now live under docs/{plans,reports,audit}
+# (kept here so a fresh agent checkout that drops a stale copy at root won't
+# re-track it)
+/PLAN_TO_CREATE_FRANKEN_NODE.md
+/GEMINI_SWARM_FINAL_REPORT.md
+/HASH_OPTIMIZATION_AUDIT.md
+/COMMIT_STANDARDS.md
+/CONCURRENCY.md
+
+# Legacy root path for the swarm orchestrator tick — canonical home is scripts/
+/.swarm-tick.sh
