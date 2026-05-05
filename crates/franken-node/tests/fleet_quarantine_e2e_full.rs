@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, mpsc};
+use std::time::Duration;
 
 use chrono::Utc;
 use frankenengine_node::api::error::ApiError;
@@ -17,6 +18,7 @@ use frankenengine_node::api::middleware::{AuthIdentity, AuthMethod, TraceContext
 use frankenengine_node::control_plane::fleet_transport::{
     FileFleetTransport, FleetAction as PersistedFleetAction, FleetActionRecord, FleetTargetKind,
     FleetTransport, FleetTransportError, NodeHealth, NodeStatus,
+    fleet_action_compaction_root_key_for_test, lock_fleet_action_compaction_process_for_test,
 };
 use serde_json::{Value, json};
 use tempfile::tempdir;
@@ -181,6 +183,49 @@ fn fleet_transport_rejects_oversized_action_log_line_before_parsing() {
         rendered.contains("exceeds"),
         "error should report the bounded-line rejection: {rendered}"
     );
+}
+
+#[test]
+fn fleet_transport_compaction_guard_serializes_equivalent_root_spellings() {
+    let tempdir = tempdir().expect("tempdir");
+    let state_root = tempdir.path().join("fleet-state");
+    let equivalent_parent = state_root.join("nested");
+    fs::create_dir_all(&equivalent_parent).expect("create equivalent parent");
+    let equivalent_root = equivalent_parent.join("..");
+    let mut transport = FileFleetTransport::new(&state_root);
+    transport
+        .initialize()
+        .expect("initialize real fleet transport");
+
+    assert_eq!(
+        fleet_action_compaction_root_key_for_test(transport.layout().root_dir())
+            .expect("canonical root key"),
+        fleet_action_compaction_root_key_for_test(&equivalent_root).expect("equivalent root key"),
+        "equivalent fleet roots must share one process-lock registry key"
+    );
+
+    let guard = lock_fleet_action_compaction_process_for_test(transport.layout().root_dir())
+        .expect("take first process guard");
+    let (sender, receiver) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let _guard = lock_fleet_action_compaction_process_for_test(&equivalent_root)
+            .expect("equivalent process guard waits then acquires");
+        sender.send(()).expect("send acquisition");
+    });
+
+    assert!(
+        matches!(
+            receiver.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ),
+        "equivalent root spelling must wait behind the existing process guard"
+    );
+
+    drop(guard);
+    receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("equivalent root guard should acquire after release");
+    waiter.join().expect("equivalent root waiter join");
 }
 
 fn log_current_state(

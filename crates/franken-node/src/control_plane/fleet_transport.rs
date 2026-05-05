@@ -1034,6 +1034,26 @@ fn lock_fleet_action_compaction_process(
     Ok(FleetActionCompactionGuard { root_key })
 }
 
+#[cfg(feature = "test-support")]
+pub struct FleetActionCompactionGuardForTest {
+    _guard: FleetActionCompactionGuard,
+}
+
+#[cfg(feature = "test-support")]
+pub fn fleet_action_compaction_root_key_for_test(
+    root_dir: &Path,
+) -> Result<PathBuf, FleetTransportError> {
+    fleet_action_compaction_root_key(root_dir)
+}
+
+#[cfg(feature = "test-support")]
+pub fn lock_fleet_action_compaction_process_for_test(
+    root_dir: &Path,
+) -> Result<FleetActionCompactionGuardForTest, FleetTransportError> {
+    lock_fleet_action_compaction_process(root_dir)
+        .map(|guard| FleetActionCompactionGuardForTest { _guard: guard })
+}
+
 impl FileFleetTransport {
     #[must_use]
     pub fn new(root_dir: impl Into<PathBuf>) -> Self {
