@@ -1090,9 +1090,6 @@ pub enum OpsCommand {
     ConfigAudit(OpsConfigAuditArgs),
     /// Emit operator metrics in a scrape-friendly text format.
     Metrics(OpsMetricsArgs),
-    /// Validate a new signing key as a non-remediating preview (does NOT rotate).
-    #[command(name = "rotate-key")]
-    RotateKey(OpsRotateKeyArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -1132,16 +1129,6 @@ pub struct OpsMetricsArgs {
     /// Metrics output format.
     #[arg(long, value_enum, default_value_t = OpsMetricsFormat::Prometheus)]
     pub format: OpsMetricsFormat,
-}
-
-#[derive(Debug, Parser)]
-pub struct OpsRotateKeyArgs {
-    /// Path to new ed25519 signing key. Preview only: does NOT update signer config or evidence ledger.
-    #[arg(long, value_parser = parse_safe_content_pathbuf)]
-    pub new_key: PathBuf,
-    /// Emit JSON instead of human-readable output.
-    #[arg(long)]
-    pub json: bool,
 }
 
 // -- incident --

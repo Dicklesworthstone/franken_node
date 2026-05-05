@@ -92,11 +92,11 @@ use crate::cli::{
     BenchCommand, Cli, Command, DebugCommand, DebugExplainArgs, DebugTraceArgs,
     DoctorCloseConditionArgs, DoctorCommand, DoctorPolicyActivationInput, FleetAgentArgs,
     FleetCommand, IncidentCommand, MigrateCommand, MigrateReportArgs, OpsCommand,
-    OpsConfigAuditArgs, OpsMetricsFormat, OpsRotateKeyArgs, RegistryCommand, RemoteCapCommand,
-    RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand,
-    RuntimeLaneCommand, TrustCardCommand, TrustCommand, VerifyCommand, VerifyCompatibilityArgs,
-    VerifyCorpusArgs, VerifyMigrationArgs, VerifyModuleArgs, VerifyReleaseArgs,
-    VerifyTransparencyLogArgs, load_doctor_policy_activation_input,
+    OpsConfigAuditArgs, OpsMetricsFormat, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs,
+    RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand,
+    TrustCardCommand, TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs,
+    VerifyMigrationArgs, VerifyModuleArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
+    load_doctor_policy_activation_input,
 };
 use crate::policy::{
     bayesian_diagnostics::{BayesianDiagnostics, CandidateRef, Observation},
@@ -467,18 +467,6 @@ struct OpsConfigValueChange {
     current: String,
     candidate: String,
     effect: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct OpsRotateKeyResult {
-    rotation_event_id: String,
-    new_key_fingerprint: String,
-    old_key_fingerprint: String,
-    active_signer_path: PathBuf,
-    active_signer_source: &'static str,
-    new_key_path: PathBuf,
-    trace_id: String,
-    reason: String,
 }
 
 struct Ed25519SigningMaterial {
@@ -7435,163 +7423,6 @@ fn render_ops_metrics_prometheus(report: &OpsPrometheusMetricsReport) -> String 
     .expect("write metric");
 
     rendered
-}
-
-/// Handle ops rotate-key command (Phase 1: PREVIEW ONLY).
-///
-/// WARNING: This function validates the new key file but does NOT:
-/// - Update any signer configuration
-/// - Append to the evidence ledger
-/// - Fence the old key from further use
-///
-/// The old signing key remains active and can continue signing after this command.
-/// This is Phase 1 implementation for validation only. See bd-2xya9 Phase 2 for
-/// actual rotation implementation.
-///
-/// # Security Notice
-/// If responding to a key compromise, the compromised key remains active after
-/// running this command. Do not rely on this for actual key rotation.
-fn handle_ops_rotate_key(args: &OpsRotateKeyArgs) -> Result<OpsRotateKeyResult> {
-    use crate::cli::validate_user_content_pathbuf;
-    use crate::security::decision_receipt::signing_key_id;
-    use std::fs;
-
-    // Validate the new key path
-    let validated_path = validate_user_content_pathbuf(&args.new_key)
-        .with_context(|| format!("Invalid key path: {:?}", args.new_key))?;
-
-    // Read the new signing key from file
-    let key_bytes = fs::read(&validated_path)
-        .with_context(|| format!("Failed to read key from {:?}", validated_path))?;
-
-    let Some(new_signing_key) = parse_signing_key_from_blob(&key_bytes) else {
-        anyhow::bail!(
-            "failed decoding Ed25519 new signing key from {}",
-            validated_path.display()
-        );
-    };
-    let new_verifying_key = new_signing_key.verifying_key();
-
-    // Generate key fingerprints
-    let new_key_fingerprint = signing_key_id(&new_verifying_key);
-
-    // Try to load current signing key fingerprint from default receipt signing key location
-    // If not loadable, return error rather than using placeholder to be honest about capability
-    let current_material = match load_receipt_signing_material(None)? {
-        Some(current_material) => current_material,
-        None => {
-            anyhow::bail!(
-                "Cannot determine current key fingerprint. Phase 1 rotate-key requires existing receipt signing key configuration."
-            )
-        }
-    };
-    let old_key_fingerprint = signing_key_id(&current_material.signing_key.verifying_key());
-
-    // Generate rotation event ID
-    let rotation_event_id = format!("rotate-{}", Uuid::now_v7());
-    let trace_id = format!("key-rotation-{rotation_event_id}");
-
-    // TODO Phase 2: Actually update the configured signer and add the evidence entry to ledger
-    // For Phase 1, we just validate the key and return the result
-
-    Ok(OpsRotateKeyResult {
-        rotation_event_id,
-        new_key_fingerprint,
-        old_key_fingerprint,
-        active_signer_path: current_material.path,
-        active_signer_source: current_material.source,
-        new_key_path: validated_path.to_path_buf(),
-        trace_id,
-        reason: "manual key rotation via ops rotate-key command".to_string(),
-    })
-}
-
-fn emit_ops_rotate_key_result(result: &OpsRotateKeyResult, json: bool) -> Result<()> {
-    if json {
-        // Add warning field to JSON output to prevent automation from missing the warning
-        let events = [
-            "rotate_key_started",
-            "key_validated",
-            "rotation_preview_only",
-            "rotate_key_completed",
-        ]
-        .into_iter()
-        .map(|event| {
-            serde_json::json!({
-                "event": event,
-                "trace_id": result.trace_id,
-                "old_fingerprint": result.old_key_fingerprint,
-                "new_fingerprint": result.new_key_fingerprint,
-                "apply": false,
-                "dry_run": true,
-                "config_path": serde_json::Value::Null,
-                "evidence_path": serde_json::Value::Null,
-            })
-        })
-        .collect::<Vec<_>>();
-        let output_with_warning = serde_json::json!({
-            "command": "ops rotate-key",
-            "status": "preview_only",
-            "rotation_status": "not_applied",
-            "remediation_status": "not_remediated",
-            "automation_contract": "non_remediating_preview",
-            "WARNING": "Phase 1 rotate-key validates key file but does NOT update signer config or evidence ledger. The old key remains active. This is NOT a real rotation.",
-            "rotation_event_id": result.rotation_event_id,
-            "trace_id": result.trace_id,
-            "new_key_fingerprint": result.new_key_fingerprint,
-            "old_key_fingerprint": result.old_key_fingerprint,
-            "active_signer_path": result.active_signer_path.display().to_string(),
-            "active_signer_source": result.active_signer_source,
-            "new_key_path": result.new_key_path.display().to_string(),
-            "reason": result.reason,
-            "phase": "preview-only",
-            "actual_rotation_occurred": false,
-            "signer_config_updated": false,
-            "evidence_ledger_appended": false,
-            "old_key_still_active": true,
-            "exit_code": 2,
-            "feasibility_decision": "hardened_preview_boundary",
-            "events": events
-        });
-        println!("{}", serde_json::to_string_pretty(&output_with_warning)?);
-    } else {
-        print!("{}", render_ops_rotate_key_result_human(result));
-    }
-    Ok(())
-}
-
-fn render_ops_rotate_key_result_human(result: &OpsRotateKeyResult) -> String {
-    format!(
-        concat!(
-            "⚠️  WARNING: PHASE 1 KEY ROTATION PREVIEW ONLY\n",
-            "⚠️  This command validates the key file but does NOT:\n",
-            "⚠️    - Update any signer configuration\n",
-            "⚠️    - Append to the evidence ledger\n",
-            "⚠️    - Fence the old key from further use\n",
-            "⚠️  THE OLD KEY REMAINS ACTIVE AND CAN STILL SIGN.\n",
-            "⚠️  See bd-2xya9 Phase 2 for actual rotation implementation.\n",
-            "\n",
-            "Key rotation PREVIEW completed:\n",
-            "  status: preview_only\n",
-            "  automation_contract: non_remediating_preview\n",
-            "  actual_rotation_occurred: false\n",
-            "  rotation_event_id: {rotation_event_id}\n",
-            "  new_key_fingerprint: {new_key_fingerprint}\n",
-            "  old_key_fingerprint: {old_key_fingerprint}\n",
-            "  active_signer_path: {active_signer_path}\n",
-            "  new_key_path: {new_key_path}\n",
-            "  reason: {reason}\n",
-            "\n",
-            "⚠️  SECURITY NOTICE: If you're responding to a key compromise,\n",
-            "⚠️  the compromised key is STILL ACTIVE after this command.\n"
-        ),
-        rotation_event_id = result.rotation_event_id,
-        new_key_fingerprint = result.new_key_fingerprint,
-        old_key_fingerprint = result.old_key_fingerprint,
-        active_signer_path = result.active_signer_path.display(),
-        new_key_path = result.new_key_path.display(),
-        reason = result.reason,
-    )
 }
 
 fn write_prometheus_metric_prelude(
@@ -24456,11 +24287,6 @@ fn main() -> Result<()> {
                 let report = ops_metrics_report(Path::new("."))?;
                 emit_ops_metrics_report(&report, args.format)?;
             }
-            OpsCommand::RotateKey(args) => {
-                let result = handle_ops_rotate_key(&args)?;
-                emit_ops_rotate_key_result(&result, args.json)?;
-                std::process::exit(2);
-            }
         },
 
         Command::Registry(sub) => match sub {
@@ -26824,31 +26650,6 @@ mod run_trust_gate_tests {
             assert_ne!(
                 receipt.core.receipt_id, receipt2.core.receipt_id,
                 "Receipt IDs should be unique per call"
-            );
-        }
-
-        #[test]
-        fn rotate_key_preview_human_output_uses_real_old_fingerprint() {
-            let result = OpsRotateKeyResult {
-                rotation_event_id: "rotate-123".to_string(),
-                new_key_fingerprint: "new-key-abc".to_string(),
-                old_key_fingerprint: "old-key-def".to_string(),
-                active_signer_path: PathBuf::from("keys/old.key"),
-                active_signer_source: "env",
-                new_key_path: PathBuf::from("keys/new.key"),
-                trace_id: "key-rotation-rotate-123".to_string(),
-                reason: "manual key rotation via ops rotate-key command".to_string(),
-            };
-
-            let rendered = render_ops_rotate_key_result_human(&result);
-
-            assert!(
-                rendered.contains("  old_key_fingerprint: old-key-def\n"),
-                "rendered output should include the real old fingerprint without a placeholder marker: {rendered}"
-            );
-            assert!(
-                !rendered.contains("old_key_fingerprint: old-key-def (placeholder)"),
-                "rendered output must not label a real old fingerprint as placeholder: {rendered}"
             );
         }
     }
