@@ -9,6 +9,9 @@ use frankenengine_node::observability::evidence_ledger::{
     DecisionKind, EvidenceEntry, EvidenceLedger, LabSpillMode, LedgerCapacity, LedgerError,
     SharedEvidenceLedger, sign_evidence_entry, verify_evidence_entry,
 };
+use frankenengine_node::observability::metrics::{
+    MetricKind, MetricSnapshot, MetricValidationError, MetricsRegistry,
+};
 use frankenengine_node::observability::witness_ref::{
     WitnessKind, WitnessRef, WitnessSet, WitnessValidator,
 };
@@ -430,4 +433,80 @@ fn witness_strict_locator_rejects_traversal_and_network_locators() {
             "unsafe locator should fail closed in strict mode: {locator:?}"
         );
     }
+}
+
+#[test]
+fn observability_metrics_registry_renders_operator_prometheus_snapshot() {
+    let mut registry = MetricsRegistry::new();
+
+    registry
+        .record_gauge(
+            "franken_node_health_pass",
+            "Whether the latest operator health check passed.",
+            1.0,
+            &[("surface", "operator")],
+        )
+        .expect("health pass metric should be valid");
+    registry
+        .record_counter(
+            "franken_node_fleet_active_quarantines",
+            "Active fleet quarantine count.",
+            2.0,
+            &[("zone", "prod\"east\\a\nb")],
+        )
+        .expect("fleet quarantine metric should be valid");
+
+    let rendered = registry.render_prometheus();
+
+    assert!(
+        rendered.contains(
+            "# HELP franken_node_fleet_active_quarantines Active fleet quarantine count."
+        )
+    );
+    assert!(rendered.contains("# TYPE franken_node_fleet_active_quarantines counter"));
+    assert!(
+        rendered
+            .contains("franken_node_fleet_active_quarantines{zone=\"prod\\\"east\\\\a\\nb\"} 2")
+    );
+    assert!(rendered.contains("# TYPE franken_node_health_pass gauge"));
+    assert!(rendered.contains("franken_node_health_pass{surface=\"operator\"} 1"));
+}
+
+#[test]
+fn observability_metrics_registry_rejects_invalid_operator_metrics() {
+    let invalid_name = MetricSnapshot::new("bad name", "help", MetricKind::Gauge, 1.0, vec![])
+        .expect_err("metric names reject whitespace");
+    assert!(matches!(
+        invalid_name,
+        MetricValidationError::InvalidMetricName { .. }
+    ));
+
+    let duplicate_label = MetricSnapshot::new(
+        "franken_node_health_pass",
+        "help",
+        MetricKind::Gauge,
+        1.0,
+        vec![
+            ("surface".to_owned(), "operator".to_owned()),
+            ("surface".to_owned(), "fleet".to_owned()),
+        ],
+    )
+    .expect_err("metric labels must be unique");
+    assert!(matches!(
+        duplicate_label,
+        MetricValidationError::DuplicateLabelName { .. }
+    ));
+
+    let non_finite = MetricSnapshot::new(
+        "franken_node_health_pass",
+        "help",
+        MetricKind::Gauge,
+        f64::NAN,
+        vec![],
+    )
+    .expect_err("metric values must be finite");
+    assert!(matches!(
+        non_finite,
+        MetricValidationError::NonFiniteValue { .. }
+    ));
 }

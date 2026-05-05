@@ -1,5 +1,6 @@
 pub mod durability_violation;
 pub mod evidence_ledger;
+pub mod metrics;
 pub mod witness_ref;
 
 #[cfg(feature = "test-support")]
@@ -128,10 +129,12 @@ mod tests {
             .expect_err("quarantine decisions require witnesses");
 
         assert!(matches!(
-            err,
-            WitnessValidationError::MissingWitnesses { ref entry_id, .. }
-                if entry_id == "obs-quarantine-missing"
+            &err,
+            WitnessValidationError::MissingWitnesses { .. }
         ));
+        if let WitnessValidationError::MissingWitnesses { entry_id, .. } = err {
+            assert_eq!(entry_id, "obs-quarantine-missing");
+        }
         assert_eq!(validator.rejected_count(), 1);
         assert_eq!(validator.validated_count(), 0);
     }
@@ -177,10 +180,12 @@ mod tests {
             .expect_err("duplicate witness IDs should fail before locator checks");
 
         assert!(matches!(
-            err,
-            WitnessValidationError::DuplicateWitnessId { ref witness_id, .. }
-                if witness_id == "obs-wit-dup"
+            &err,
+            WitnessValidationError::DuplicateWitnessId { .. }
         ));
+        if let WitnessValidationError::DuplicateWitnessId { witness_id, .. } = err {
+            assert_eq!(witness_id, "obs-wit-dup");
+        }
         assert_eq!(validator.rejected_count(), 1);
     }
 
@@ -196,10 +201,12 @@ mod tests {
             .expect_err("strict validator should require locators on every witness");
 
         assert!(matches!(
-            err,
-            WitnessValidationError::UnresolvableLocator { ref witness_id, .. }
-                if witness_id == "obs-wit-no-locator"
+            &err,
+            WitnessValidationError::UnresolvableLocator { .. }
         ));
+        if let WitnessValidationError::UnresolvableLocator { witness_id, .. } = err {
+            assert_eq!(witness_id, "obs-wit-no-locator");
+        }
         assert_eq!(validator.rejected_count(), 1);
     }
 
@@ -231,10 +238,12 @@ mod tests {
             .expect_err("different witness content should fail integrity verification");
 
         assert!(matches!(
-            err,
-            WitnessValidationError::IntegrityHashMismatch { ref witness_id, .. }
-                if witness_id == "obs-wit-integrity"
+            &err,
+            WitnessValidationError::IntegrityHashMismatch { .. }
         ));
+        if let WitnessValidationError::IntegrityHashMismatch { witness_id, .. } = err {
+            assert_eq!(witness_id, "obs-wit-integrity");
+        }
         assert_eq!(validator.rejected_count(), 1);
         assert_eq!(validator.validated_count(), 0);
     }
@@ -274,10 +283,17 @@ mod tests {
             .expect_err("duplicate witness IDs should be rejected for every entry kind");
 
         assert!(matches!(
-            err,
-            WitnessValidationError::DuplicateWitnessId { ref entry_id, ref witness_id }
-                if entry_id == "obs-low-impact-duplicate" && witness_id == "obs-dup-low"
+            &err,
+            WitnessValidationError::DuplicateWitnessId { .. }
         ));
+        if let WitnessValidationError::DuplicateWitnessId {
+            entry_id,
+            witness_id,
+        } = err
+        {
+            assert_eq!(entry_id, "obs-low-impact-duplicate");
+            assert_eq!(witness_id, "obs-dup-low");
+        }
         assert_eq!(validator.rejected_count(), 1);
         assert_eq!(validator.validated_count(), 0);
     }
@@ -302,10 +318,12 @@ mod tests {
             .expect_err("strict validation should check every witness locator");
 
         assert!(matches!(
-            err,
-            WitnessValidationError::UnresolvableLocator { ref witness_id, .. }
-                if witness_id == "obs-locator-missing"
+            &err,
+            WitnessValidationError::UnresolvableLocator { .. }
         ));
+        if let WitnessValidationError::UnresolvableLocator { witness_id, .. } = err {
+            assert_eq!(witness_id, "obs-locator-missing");
+        }
         assert_eq!(validator.rejected_count(), 1);
     }
 
@@ -323,11 +341,17 @@ mod tests {
             .expect_err("blank locator must not satisfy strict high-impact validation");
 
         assert!(matches!(
-            err,
-            WitnessValidationError::UnresolvableLocator { ref entry_id, ref witness_id }
-                if entry_id == "obs-high-impact-blank-locator"
-                    && witness_id == "obs-blank-high-impact"
+            &err,
+            WitnessValidationError::UnresolvableLocator { .. }
         ));
+        if let WitnessValidationError::UnresolvableLocator {
+            entry_id,
+            witness_id,
+        } = err
+        {
+            assert_eq!(entry_id, "obs-high-impact-blank-locator");
+            assert_eq!(witness_id, "obs-blank-high-impact");
+        }
         assert_eq!(validator.rejected_count(), 1);
     }
 
@@ -342,18 +366,22 @@ mod tests {
             .expect_err("different witness digest should be reported precisely");
 
         assert!(matches!(
-            err,
-            WitnessValidationError::IntegrityHashMismatch {
-                ref entry_id,
-                ref witness_id,
-                ref expected_hex,
-                ref actual_hex,
-            } if entry_id == "obs-hex-entry"
-                && witness_id == "obs-wit-hex-mismatch"
-                && expected_hex.starts_with("0d")
-                && actual_hex.starts_with("0e")
-                && expected_hex != actual_hex
+            &err,
+            WitnessValidationError::IntegrityHashMismatch { .. }
         ));
+        if let WitnessValidationError::IntegrityHashMismatch {
+            entry_id,
+            witness_id,
+            expected_hex,
+            actual_hex,
+        } = err
+        {
+            assert_eq!(entry_id, "obs-hex-entry");
+            assert_eq!(witness_id, "obs-wit-hex-mismatch");
+            assert!(expected_hex.starts_with("0d"));
+            assert!(actual_hex.starts_with("0e"));
+            assert_ne!(expected_hex, actual_hex);
+        }
         assert_eq!(validator.rejected_count(), 1);
     }
 
@@ -416,10 +444,17 @@ mod tests {
             .expect_err("duplicate blank witness IDs should still be rejected");
 
         assert!(matches!(
-            err,
-            WitnessValidationError::DuplicateWitnessId { ref entry_id, ref witness_id }
-                if entry_id == "obs-blank-duplicate-id" && witness_id.is_empty()
+            &err,
+            WitnessValidationError::DuplicateWitnessId { .. }
         ));
+        if let WitnessValidationError::DuplicateWitnessId {
+            entry_id,
+            witness_id,
+        } = err
+        {
+            assert_eq!(entry_id, "obs-blank-duplicate-id");
+            assert!(witness_id.is_empty());
+        }
         assert_eq!(validator.rejected_count(), 1);
     }
 
@@ -438,10 +473,12 @@ mod tests {
             .expect_err("the first duplicate encountered should be reported");
 
         assert!(matches!(
-            err,
-            WitnessValidationError::DuplicateWitnessId { ref witness_id, .. }
-                if witness_id == "obs-dup-a"
+            &err,
+            WitnessValidationError::DuplicateWitnessId { .. }
         ));
+        if let WitnessValidationError::DuplicateWitnessId { witness_id, .. } = err {
+            assert_eq!(witness_id, "obs-dup-a");
+        }
         assert_eq!(validator.rejected_count(), 1);
     }
 
@@ -468,10 +505,12 @@ mod tests {
             .expect_err("strict mode should inspect every locator, not just the first");
 
         assert!(matches!(
-            err,
-            WitnessValidationError::UnresolvableLocator { ref witness_id, .. }
-                if witness_id == "obs-locator-late-blank"
+            &err,
+            WitnessValidationError::UnresolvableLocator { .. }
         ));
+        if let WitnessValidationError::UnresolvableLocator { witness_id, .. } = err {
+            assert_eq!(witness_id, "obs-locator-late-blank");
+        }
         assert_eq!(validator.validated_count(), 0);
         assert_eq!(validator.rejected_count(), 1);
     }
@@ -529,16 +568,20 @@ mod tests {
             .expect_err("all-zero actual digest should not match a non-zero witness digest");
 
         assert!(matches!(
-            err,
-            WitnessValidationError::IntegrityHashMismatch {
-                ref entry_id,
-                ref witness_id,
-                ref actual_hex,
-                ..
-            } if entry_id == "obs-zero-actual-entry"
-                && witness_id == "obs-zero-actual"
-                && actual_hex.chars().all(|ch| ch == '0')
+            &err,
+            WitnessValidationError::IntegrityHashMismatch { .. }
         ));
+        if let WitnessValidationError::IntegrityHashMismatch {
+            entry_id,
+            witness_id,
+            actual_hex,
+            ..
+        } = err
+        {
+            assert_eq!(entry_id, "obs-zero-actual-entry");
+            assert_eq!(witness_id, "obs-zero-actual");
+            assert!(actual_hex.chars().all(|ch| ch == '0'));
+        }
         assert_eq!(validator.rejected_count(), 1);
     }
 
@@ -782,24 +825,18 @@ mod tests {
 
             let validation_result = strict_validator.validate(&entry, &witnesses);
 
-            // Malicious locators should be rejected by strict validation
-            match validation_result {
-                Ok(_) => {
-                    // If validation passes, the locator should be properly sanitized
-                    panic!(
-                        "Malicious locator should not pass strict validation: {} - {}",
-                        description, malicious_locator
-                    );
-                }
-                Err(error) => {
-                    // Expected rejection of malicious locators
-                    assert!(
-                        error.to_string().contains("locator")
-                            || error.to_string().contains("witness"),
-                        "Error should mention locator/witness issue for: {}",
-                        description
-                    );
-                }
+            assert!(
+                validation_result.is_err(),
+                "Malicious locator should not pass strict validation: {} - {}",
+                description,
+                malicious_locator
+            );
+            if let Err(error) = validation_result {
+                assert!(
+                    error.to_string().contains("locator") || error.to_string().contains("witness"),
+                    "Error should mention locator/witness issue for: {}",
+                    description
+                );
             }
         }
     }
@@ -865,22 +902,25 @@ mod tests {
                 &malicious_digest,
             );
 
-            // Different digests should always result in integrity failure
-            if expected_digest != malicious_digest {
-                assert!(
-                    integrity_result.is_err(),
-                    "Hash collision attempt should fail integrity check: {}",
-                    description
-                );
+            assert_ne!(
+                expected_digest, malicious_digest,
+                "collision vector should contain distinct digests: {}",
+                description
+            );
+            assert!(
+                integrity_result.is_err(),
+                "Hash collision attempt should fail integrity check: {}",
+                description
+            );
 
-                let error = integrity_result.unwrap_err();
-                assert_eq!(
-                    error.code(),
-                    "ERR_INTEGRITY_HASH_MISMATCH",
-                    "Collision should result in hash mismatch error: {}",
-                    description
-                );
-            }
+            let error =
+                integrity_result.expect_err("collision attempt should fail integrity check");
+            assert_eq!(
+                error.code(),
+                "ERR_INTEGRITY_HASH_MISMATCH",
+                "Collision should result in hash mismatch error: {}",
+                description
+            );
         }
 
         // Test timing attack resistance
@@ -1500,16 +1540,11 @@ mod tests {
             duplicate_elapsed.as_millis()
         );
 
-        // Should detect duplicates properly
-        match duplicate_result {
-            Ok(_) => panic!("Duplicate witnesses should be rejected"),
-            Err(error) => {
-                assert_eq!(
-                    error.code(),
-                    "ERR_DUPLICATE_WITNESS_ID",
-                    "Should detect duplicate witnesses in stress scenario"
-                );
-            }
-        }
+        let error = duplicate_result.expect_err("Duplicate witnesses should be rejected");
+        assert_eq!(
+            error.code(),
+            "ERR_DUPLICATE_WITNESS_ID",
+            "Should detect duplicate witnesses in stress scenario"
+        );
     }
 }
