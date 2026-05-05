@@ -16902,7 +16902,7 @@ fn handle_registry_gc(args: &cli::RegistryGcArgs) -> Result<()> {
                         .cmp(&right.manifest.extension.extension_id)
                 })
         });
-        active += artifacts.len().min(args.keep);
+        active = active.saturating_add(artifacts.len().min(args.keep));
         for artifact in artifacts.iter().skip(args.keep) {
             archive_local_registry_artifact(&project_root, artifact)?;
             archived = archived.saturating_add(1);
