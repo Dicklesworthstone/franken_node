@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+use assert_cmd::cargo::CommandCargoExt;
 use chrono::{TimeDelta, Utc};
 #[cfg(feature = "asupersync-transport")]
 use frankenengine_node::control_plane::fleet_transport::{
@@ -28,11 +29,8 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn resolve_binary_path() -> PathBuf {
-    if let Some(exe) = std::env::var_os("CARGO_BIN_EXE_franken-node") {
-        return PathBuf::from(exe);
-    }
-    repo_root().join("target/debug/franken-node")
+fn franken_node_command() -> Command {
+    Command::cargo_bin("franken-node").expect("franken-node binary")
 }
 
 fn run_cli(args: &[&str]) -> Output {
@@ -58,13 +56,8 @@ fn run_cli_in_dir_with_fleet_state_and_env(
     fleet_state_dir: &std::path::Path,
     extra_env: &[(&str, &str)],
 ) -> Output {
-    let binary_path = resolve_binary_path();
-    assert!(
-        binary_path.is_file(),
-        "franken-node binary not found at {}",
-        binary_path.display()
-    );
-    Command::new(&binary_path)
+    let mut command = franken_node_command();
+    command
         .current_dir(current_dir)
         .args(args)
         .env("FRANKEN_NODE_FLEET_STATE_DIR", fleet_state_dir)
@@ -80,13 +73,8 @@ fn run_cli_in_dir_with_env(
     args: &[&str],
     extra_env: &[(&str, &str)],
 ) -> Output {
-    let binary_path = resolve_binary_path();
-    assert!(
-        binary_path.is_file(),
-        "franken-node binary not found at {}",
-        binary_path.display()
-    );
-    Command::new(&binary_path)
+    let mut command = franken_node_command();
+    command
         .current_dir(current_dir)
         .args(args)
         .env_remove("FRANKEN_NODE_PROFILE")
@@ -100,13 +88,8 @@ fn spawn_cli_in_dir_with_fleet_state(
     args: &[&str],
     fleet_state_dir: &std::path::Path,
 ) -> Child {
-    let binary_path = resolve_binary_path();
-    assert!(
-        binary_path.is_file(),
-        "franken-node binary not found at {}",
-        binary_path.display()
-    );
-    Command::new(&binary_path)
+    let mut command = franken_node_command();
+    command
         .current_dir(current_dir)
         .args(args)
         .env("FRANKEN_NODE_FLEET_STATE_DIR", fleet_state_dir)
