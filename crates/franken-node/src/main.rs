@@ -93,11 +93,12 @@ use crate::cli::{
     DebugExplainArgs, DebugTraceArgs, DoctorCloseConditionArgs, DoctorCommand,
     DoctorEvidenceReadinessArgs, DoctorPolicyActivationInput, FleetAgentArgs, FleetCommand,
     IncidentCommand, MigrateCommand, MigrateReportArgs, OpsCommand, OpsConfigAuditArgs,
-    OpsMetricsFormat, OpsResourceGovernorArgs, RegistryCommand, RemoteCapCommand,
-    RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand,
-    RuntimeLaneCommand, TrustCardCommand, TrustCommand, VerifyCommand, VerifyCompatibilityArgs,
-    VerifyCorpusArgs, VerifyMigrationArgs, VerifyModuleArgs, VerifyReleaseArgs,
-    VerifyTransparencyLogArgs, load_doctor_policy_activation_input,
+    OpsMetricsFormat, OpsResourceGovernorArgs, OpsValidationReadinessArgs, RegistryCommand,
+    RemoteCapCommand, RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs,
+    RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand, TrustCardCommand, TrustCommand,
+    VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
+    VerifyModuleArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
+    load_doctor_policy_activation_input,
 };
 use crate::policy::{
     bayesian_diagnostics::{BayesianDiagnostics, CandidateRef, Observation},
@@ -6631,6 +6632,50 @@ fn emit_ops_resource_governor_report(
         println!("  rch_queue_depth={rch_queue_depth}");
         println!("  active_proof_classes={active_proof_classes}");
         println!("  next_action={}", report.decision.next_action);
+    }
+    Ok(())
+}
+
+fn ops_validation_readiness_report(
+    args: &OpsValidationReadinessArgs,
+) -> Result<ops::validation_readiness::ValidationReadinessReport> {
+    let mut input = if let Some(path) = &args.input {
+        ops::validation_readiness::read_validation_readiness_input(path)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?
+    } else {
+        ops::validation_readiness::ValidationReadinessInput::default()
+    };
+
+    for receipt_path in &args.receipts {
+        let receipt = ops::validation_readiness::read_validation_receipt(receipt_path)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        input.receipts.push(receipt);
+    }
+
+    Ok(
+        ops::validation_readiness::build_validation_readiness_report(
+            &input,
+            args.trace_id.clone(),
+            Utc::now(),
+        ),
+    )
+}
+
+fn emit_ops_validation_readiness_report(
+    report: &ops::validation_readiness::ValidationReadinessReport,
+    json: bool,
+) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            ops::validation_readiness::render_validation_readiness_json(report)
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?
+        );
+    } else {
+        println!(
+            "{}",
+            ops::validation_readiness::render_validation_readiness_human(report)
+        );
     }
     Ok(())
 }
@@ -24946,6 +24991,10 @@ fn main() -> Result<()> {
             OpsCommand::ResourceGovernor(args) => {
                 let report = ops_resource_governor_report(&args)?;
                 emit_ops_resource_governor_report(&report, args.json)?;
+            }
+            OpsCommand::ValidationReadiness(args) => {
+                let report = ops_validation_readiness_report(&args)?;
+                emit_ops_validation_readiness_report(&report, args.json)?;
             }
             OpsCommand::ConfigAudit(args) => {
                 let report = ops_config_audit_report(&args)?;

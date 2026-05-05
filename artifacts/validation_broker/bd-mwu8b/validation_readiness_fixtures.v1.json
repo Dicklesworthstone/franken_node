@@ -1,0 +1,166 @@
+{
+  "schema_version": "franken-node/validation-readiness/fixtures/v1",
+  "fixtures": [
+    {
+      "name": "empty broker snapshot warns",
+      "input": {
+        "schema_version": "franken-node/validation-readiness/input/v1",
+        "tracked_beads": [],
+        "proof_statuses": [],
+        "receipts": [],
+        "rch_workers": [],
+        "resource_governor": null,
+        "max_receipt_age_secs": 86400
+      },
+      "expect_overall_status": "warn",
+      "expect_check_codes": [
+        "VR-BROKER-002",
+        "VR-PROOF-005",
+        "VR-RCH-006",
+        "VR-RESOURCE-007"
+      ],
+      "expect_missing_required_receipts": 0
+    },
+    {
+      "name": "blocked bead without receipt fails",
+      "input": {
+        "schema_version": "franken-node/validation-readiness/input/v1",
+        "tracked_beads": [
+          {
+            "bead_id": "bd-blocked",
+            "thread_id": "bd-blocked",
+            "state": "blocked",
+            "requires_receipt": true
+          }
+        ],
+        "proof_statuses": [],
+        "receipts": [],
+        "rch_workers": [
+          {
+            "worker_id": "ts2",
+            "reachable": true,
+            "mode": "remote",
+            "required_toolchains": [
+              "nightly-2026-02-19"
+            ],
+            "observed_toolchains": [
+              "nightly-2026-02-19"
+            ],
+            "failure": null
+          }
+        ],
+        "resource_governor": {
+          "decision": "allow",
+          "reason_code": "RG-ALLOW",
+          "reason": "validation pressure is acceptable",
+          "rch_queue_depth": 0,
+          "active_proof_classes": []
+        },
+        "max_receipt_age_secs": 86400
+      },
+      "expect_overall_status": "fail",
+      "expect_check_codes": [
+        "VR-BEAD-003",
+        "VR-RECEIPT-004"
+      ],
+      "expect_missing_required_receipts": 1
+    },
+    {
+      "name": "source only waiver avoids missing receipt failure",
+      "input": {
+        "schema_version": "franken-node/validation-readiness/input/v1",
+        "tracked_beads": [
+          {
+            "bead_id": "bd-docs",
+            "thread_id": "bd-docs",
+            "state": "blocked",
+            "requires_receipt": true,
+            "source_only_waiver": "docs_only"
+          }
+        ],
+        "proof_statuses": [],
+        "receipts": [],
+        "rch_workers": [
+          {
+            "worker_id": "ts2",
+            "reachable": true,
+            "mode": "remote",
+            "required_toolchains": [],
+            "observed_toolchains": [],
+            "failure": null
+          }
+        ],
+        "resource_governor": {
+          "decision": "allow",
+          "reason_code": "RG-ALLOW",
+          "reason": "validation pressure is acceptable",
+          "rch_queue_depth": 0,
+          "active_proof_classes": []
+        },
+        "max_receipt_age_secs": 86400
+      },
+      "expect_overall_status": "warn",
+      "expect_check_codes": [
+        "VR-BEAD-003",
+        "VR-BROKER-002"
+      ],
+      "expect_missing_required_receipts": 0
+    },
+    {
+      "name": "contention deferral warns",
+      "input": {
+        "schema_version": "franken-node/validation-readiness/input/v1",
+        "tracked_beads": [],
+        "proof_statuses": [
+          {
+            "schema_version": "franken-node/validation-broker/status/v1",
+            "bead_id": "bd-running",
+            "thread_id": "bd-running",
+            "request_id": "bd-running-request",
+            "queue_id": "bd-running-queue",
+            "status": "running",
+            "queue_state": "running",
+            "deduplicated": false,
+            "queue_depth": 2,
+            "artifact_paths": null,
+            "command_digest": null,
+            "exit": null,
+            "reason": null,
+            "observed_at": "2026-05-05T12:00:30Z"
+          }
+        ],
+        "receipts": [],
+        "rch_workers": [
+          {
+            "worker_id": "ts2",
+            "reachable": true,
+            "mode": "remote",
+            "required_toolchains": [
+              "nightly-2026-02-19"
+            ],
+            "observed_toolchains": [
+              "nightly-2026-02-19"
+            ],
+            "failure": null
+          }
+        ],
+        "resource_governor": {
+          "decision": "defer",
+          "reason_code": "RG-RCH-QUEUE",
+          "reason": "RCH queue is saturated",
+          "rch_queue_depth": 9,
+          "active_proof_classes": [
+            "cargo-test"
+          ]
+        },
+        "max_receipt_age_secs": 86400
+      },
+      "expect_overall_status": "warn",
+      "expect_check_codes": [
+        "VR-PROOF-005",
+        "VR-RESOURCE-007"
+      ],
+      "expect_missing_required_receipts": 0
+    }
+  ]
+}

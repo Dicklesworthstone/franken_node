@@ -1088,6 +1088,9 @@ pub enum OpsCommand {
     /// Advise whether cargo/RCH validation should run, defer, dedupe, or fall back to source-only work.
     #[command(name = "resource-governor")]
     ResourceGovernor(OpsResourceGovernorArgs),
+    /// Report whether validation broker evidence is fresh and trustworthy.
+    #[command(name = "validation-readiness")]
+    ValidationReadiness(OpsValidationReadinessArgs),
     /// Audit the active config and compare operational impact across profiles.
     #[command(name = "config-audit")]
     ConfigAudit(OpsConfigAuditArgs),
@@ -1143,6 +1146,25 @@ pub struct OpsResourceGovernorArgs {
     /// Permit source-only progress when validation pressure is too high.
     #[arg(long)]
     pub source_only_allowed: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct OpsValidationReadinessArgs {
+    /// Emit JSON instead of human-readable output.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Stable trace ID for correlating validation-readiness output.
+    #[arg(long, default_value = "ops-validation-readiness")]
+    pub trace_id: String,
+
+    /// JSON snapshot of Beads, broker status, worker, and resource readiness inputs.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub input: Option<PathBuf>,
+
+    /// Validation broker receipt JSON path. Repeat to include multiple receipts.
+    #[arg(long = "receipt", value_parser = parse_safe_content_pathbuf)]
+    pub receipts: Vec<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
@@ -1907,6 +1929,44 @@ mod parser_contract_extra_tests {
         assert_eq!(args.cpu_load_permyriad, Some(7500));
         assert!(args.source_only_allowed);
         assert_eq!(args.trace_id, "rg-cli-test");
+        assert!(args.json);
+    }
+
+    #[test]
+    fn ops_validation_readiness_parses_input_receipts_and_json() {
+        let cli = parse(&[
+            "franken-node",
+            "ops",
+            "validation-readiness",
+            "--input",
+            "artifacts/validation_broker/bd-mwu8b/snapshot.json",
+            "--receipt",
+            "artifacts/validation_broker/bd-mwu8b/receipt-pass.json",
+            "--receipt",
+            "artifacts/validation_broker/bd-mwu8b/receipt-timeout.json",
+            "--trace-id",
+            "vr-cli-test",
+            "--json",
+        ])
+        .expect("ops validation-readiness command should parse");
+
+        let Command::Ops(OpsCommand::ValidationReadiness(args)) = cli.command else {
+            std::panic::panic_any("expected ops validation-readiness command");
+        };
+        assert_eq!(
+            args.input,
+            Some(PathBuf::from(
+                "artifacts/validation_broker/bd-mwu8b/snapshot.json"
+            ))
+        );
+        assert_eq!(
+            args.receipts,
+            vec![
+                PathBuf::from("artifacts/validation_broker/bd-mwu8b/receipt-pass.json"),
+                PathBuf::from("artifacts/validation_broker/bd-mwu8b/receipt-timeout.json"),
+            ]
+        );
+        assert_eq!(args.trace_id, "vr-cli-test");
         assert!(args.json);
     }
 

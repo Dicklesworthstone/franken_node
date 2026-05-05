@@ -1,0 +1,9 @@
+{
+  "schema_version": "franken-node/validation-readiness/input/v1",
+  "tracked_beads": [],
+  "proof_statuses": [],
+  "receipts": [],
+  "rch_workers": [],
+  "resource_governor": null,
+  "max_receipt_age_secs": 86400
+}
