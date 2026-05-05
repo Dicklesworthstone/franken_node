@@ -3,18 +3,21 @@ use frankenengine_node::operator_json_contracts::{
     operator_json_registry_report, registered_surface_names, validate_operator_json_value,
 };
 use serde_json::Value;
+use std::error::Error;
 
-fn snapshot_json(snapshot: &str) -> Value {
+fn snapshot_json(snapshot: &str) -> Result<Value, Box<dyn Error>> {
     let trimmed = snapshot.trim_start();
     let json_start = if let Some(stripped) = trimmed.strip_prefix("---") {
         let end = stripped
             .find("\n---")
-            .expect("insta snapshot frontmatter terminator");
-        &stripped[end + "\n---".len()..]
+            .ok_or("insta snapshot frontmatter terminator missing")?;
+        stripped
+            .get(end + "\n---".len()..)
+            .ok_or("insta snapshot frontmatter terminator was not a string boundary")?
     } else {
         trimmed
     };
-    serde_json::from_str(json_start.trim()).expect("snapshot should contain JSON")
+    Ok(serde_json::from_str(json_start.trim())?)
 }
 
 #[test]
@@ -44,7 +47,7 @@ fn registry_reports_eight_operator_contracts_with_redaction_guidance() {
 }
 
 #[test]
-fn existing_golden_json_outputs_satisfy_registered_contracts() {
+fn existing_golden_json_outputs_satisfy_registered_contracts() -> Result<(), Box<dyn Error>> {
     let cases = [
         (
             OperatorJsonSurface::DoctorReport,
@@ -81,19 +84,28 @@ fn existing_golden_json_outputs_satisfy_registered_contracts() {
     ];
 
     for (surface, raw) in cases {
-        let json = snapshot_json(raw);
-        validate_operator_json_value(surface, &json)
-            .unwrap_or_else(|errors| panic!("{surface:?} contract errors: {errors:?}"));
+        let json = snapshot_json(raw)?;
+        let result = validate_operator_json_value(surface, &json);
+        assert!(
+            result.is_ok(),
+            "{surface:?} contract errors: {:?}",
+            result.err()
+        );
     }
+    Ok(())
 }
 
 #[test]
-fn validator_fails_negative_fixture_when_required_field_is_renamed_or_dropped() {
+fn validator_fails_negative_fixture_when_required_field_is_renamed_or_dropped()
+-> Result<(), Box<dyn Error>> {
     let negative = snapshot_json(include_str!(
         "../../../artifacts/operator_json_contracts/bd-mka4a_negative_fixture.json"
-    ));
-    let errors = validate_operator_json_value(OperatorJsonSurface::VerifyReleaseReport, &negative)
-        .expect_err("negative fixture must fail");
+    ))?;
+    let Err(errors) =
+        validate_operator_json_value(OperatorJsonSurface::VerifyReleaseReport, &negative)
+    else {
+        return Err("negative fixture must fail".into());
+    };
     assert_eq!(
         errors,
         vec![OperatorJsonContractError::MissingRequiredField {
@@ -101,19 +113,23 @@ fn validator_fails_negative_fixture_when_required_field_is_renamed_or_dropped() 
             field_path: "overall_pass".to_string(),
         }]
     );
+    Ok(())
 }
 
 #[test]
-fn additive_optional_fields_do_not_break_registered_contract() {
-    let mut value = snapshot_json(include_str!("goldens/doctor_cli/doctor_json.snap"));
-    value
-        .as_object_mut()
-        .expect("doctor report should be an object")
-        .insert(
-            "future_additive_diagnostic".to_string(),
-            serde_json::json!({"ok": true}),
-        );
+fn additive_optional_fields_do_not_break_registered_contract() -> Result<(), Box<dyn Error>> {
+    let mut value = snapshot_json(include_str!("goldens/doctor_cli/doctor_json.snap"))?;
+    let Some(object) = value.as_object_mut() else {
+        return Err("doctor report should be an object".into());
+    };
+    object.insert(
+        "future_additive_diagnostic".to_string(),
+        serde_json::json!({"ok": true}),
+    );
 
-    validate_operator_json_value(OperatorJsonSurface::DoctorReport, &value)
-        .expect("additive optional diagnostic field should pass");
+    assert!(
+        validate_operator_json_value(OperatorJsonSurface::DoctorReport, &value).is_ok(),
+        "additive optional diagnostic field should pass"
+    );
+    Ok(())
 }

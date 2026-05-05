@@ -83,6 +83,9 @@ pub struct OperatorJsonContract {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum OperatorJsonContractError {
+    UnregisteredSurface {
+        surface: OperatorJsonSurface,
+    },
     MissingRequiredField {
         surface: OperatorJsonSurface,
         field_path: String,
@@ -426,8 +429,11 @@ pub fn validate_operator_json_value(
     surface: OperatorJsonSurface,
     value: &Value,
 ) -> Result<(), Vec<OperatorJsonContractError>> {
-    let contract = operator_json_contract(surface)
-        .expect("operator JSON surface must be registered before validation");
+    let Some(contract) = operator_json_contract(surface) else {
+        return Err(vec![OperatorJsonContractError::UnregisteredSurface {
+            surface,
+        }]);
+    };
     let mut errors = Vec::new();
 
     for required in contract.required_fields {
@@ -468,7 +474,11 @@ fn field_at_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        OperatorJsonContractError, OperatorJsonSurface, all_operator_json_contracts,
+        validate_operator_json_value,
+    };
+    use std::collections::BTreeSet;
 
     #[test]
     fn registry_has_unique_surfaces_and_schema_ids() {
