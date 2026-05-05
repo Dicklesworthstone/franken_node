@@ -252,6 +252,7 @@ fn update_hash_json_bytes_len_prefixed(hasher: &mut Sha256, json_bytes: &[u8]) {
     hasher.update(json_bytes);
 }
 
+#[cfg(test)]
 fn update_hash_serialized_json_len_prefixed<T>(
     hasher: &mut Sha256,
     value: &T,
@@ -1200,6 +1201,7 @@ impl EvidenceLedger {
 
     /// Check for replay attacks using constant-time comparison to prevent timing side-channels.
     /// This prevents attackers from distinguishing known vs unknown signatures via response timing.
+    #[cfg(test)]
     fn is_replay_attack_ct(&self, timestamp_ms: u64, signature: &str) -> bool {
         let Ok(signature_bytes) = decode_replay_signature(signature) else {
             return false;
@@ -1267,6 +1269,7 @@ impl EvidenceLedger {
     }
 
     /// Compute SHA-256 hash of an entry for hash chain integrity.
+    #[cfg(test)]
     fn compute_entry_hash(&self, entry: &EvidenceEntry) -> EntryHash {
         compute_entry_hash_bytes(entry)
     }

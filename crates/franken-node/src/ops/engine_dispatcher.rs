@@ -26,8 +26,11 @@ use std::time::Instant;
 
 // Security epoch constants to prevent hardcoded value drift across the module
 // These values must stay synchronized with franken-engine SecurityEpoch evolution
+#[cfg(feature = "engine")]
 const LEGACY_SECURITY_EPOCH: u64 = 1; // Legacy security epoch for compatibility (LegacyRisky profile)
+#[cfg(feature = "engine")]
 const STANDARD_SECURITY_EPOCH: u64 = 2; // Standard security epoch (Balanced profile)
+#[cfg(feature = "engine")]
 const CURRENT_SECURITY_EPOCH: u64 = 3; // Latest security epoch (Strict profile)
 
 /// Validate runtime path to prevent command injection attacks
@@ -1388,7 +1391,6 @@ impl EngineDispatcher {
         // Set up panic hook to capture panic information
         let (panic_tx, panic_rx) = mpsc::channel();
         let original_hook = panic::take_hook();
-        let app_path_for_panic = app_path_buf.clone();
 
         panic::set_hook(Box::new(move |panic_info| {
             let panic_message = format!("{}", panic_info);
@@ -1764,6 +1766,7 @@ impl EngineDispatcher {
     ///
     /// Uses deterministic but opaque identifiers instead of exposing internal
     /// profile names in policy IDs to prevent information disclosure.
+    #[cfg(feature = "engine")]
     fn generate_opaque_policy_id(profile: Profile, policy_mode: Option<&str>) -> String {
         // Use hash-based opaque identifiers to prevent profile name leakage
         // Use cryptographic hash with domain separation to prevent collisions
@@ -2011,6 +2014,7 @@ impl EngineDispatcher {
         Ok((output, telemetry_report))
     }
 
+    #[cfg(any(not(feature = "engine"), test))]
     fn run_engine_process(
         cmd: &mut Command,
         telemetry_handle: TelemetryRuntimeHandle,

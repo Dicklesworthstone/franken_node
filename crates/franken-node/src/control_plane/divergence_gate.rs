@@ -91,8 +91,6 @@ pub mod event_codes {
 // ---------------------------------------------------------------------------
 
 const MAX_EVENT_CODES: usize = 10_000;
-const MAX_TIMING_SAMPLES: usize = 10_000;
-const MAX_ATTACK_STEPS: usize = 1_000;
 const MAX_CONSUMED_AUTHORIZATION_NONCES: usize = 4_096;
 const AUTHORIZATION_MAX_AGE_MS: u64 = 300_000;
 

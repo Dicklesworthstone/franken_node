@@ -1685,6 +1685,7 @@ fn validate_action_text_field(field_name: &str, value: &str) -> Result<(), Fleet
     Ok(())
 }
 
+#[cfg(test)]
 fn lock_retry_base_backoffs() -> [Duration; LOCK_RETRY_BACKOFF_MILLIS.len()] {
     LOCK_RETRY_BACKOFF_MILLIS.map(Duration::from_millis)
 }

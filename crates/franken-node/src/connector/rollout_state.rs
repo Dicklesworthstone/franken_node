@@ -600,6 +600,7 @@ fn persist_with_shared_tracker_and_rename_and_orphan(
     )
 }
 
+#[cfg(feature = "test-support")]
 fn persist_with_obligation_tracker(
     state: &RolloutState,
     path: &Path,
@@ -611,6 +612,7 @@ fn persist_with_obligation_tracker(
     })
 }
 
+#[cfg(feature = "test-support")]
 fn persist_with_obligation_tracker_and_rename(
     state: &RolloutState,
     path: &Path,
