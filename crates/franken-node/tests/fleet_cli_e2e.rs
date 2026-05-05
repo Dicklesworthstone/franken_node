@@ -33,6 +33,18 @@ fn franken_node_command() -> Command {
     Command::cargo_bin("franken-node").expect("franken-node binary")
 }
 
+fn fail_test(message: String) -> ! {
+    std::panic::panic_any(message)
+}
+
+fn fail_command(action: &str, args: &[&str], err: std::io::Error) -> ! {
+    fail_test(format!("{action} `{}`: {err}", args.join(" ")))
+}
+
+fn test_clock_now() -> Instant {
+    Instant::now()
+}
+
 fn run_cli(args: &[&str]) -> Output {
     let fleet_state = tempdir().expect("tempdir");
     run_cli_with_fleet_state(args, &fleet_state.path().join("fleet-state"))
@@ -65,7 +77,7 @@ fn run_cli_in_dir_with_fleet_state_and_env(
         .env_remove("FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH")
         .envs(extra_env.iter().copied())
         .output()
-        .unwrap_or_else(|err| panic!("failed running `{}`: {err}", args.join(" ")))
+        .unwrap_or_else(|err| fail_command("failed running", args, err))
 }
 
 fn run_cli_in_dir_with_env(
@@ -80,7 +92,7 @@ fn run_cli_in_dir_with_env(
         .env_remove("FRANKEN_NODE_PROFILE")
         .envs(extra_env.iter().copied())
         .output()
-        .unwrap_or_else(|err| panic!("failed running `{}`: {err}", args.join(" ")))
+        .unwrap_or_else(|err| fail_command("failed running", args, err))
 }
 
 fn spawn_cli_in_dir_with_fleet_state(
@@ -96,7 +108,7 @@ fn spawn_cli_in_dir_with_fleet_state(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .unwrap_or_else(|err| panic!("failed spawning `{}`: {err}", args.join(" ")))
+        .unwrap_or_else(|err| fail_command("failed spawning", args, err))
 }
 
 fn seed_transport(fleet_state_dir: &std::path::Path) -> FileFleetTransport {
@@ -1019,7 +1031,7 @@ fn fleet_reconcile_waits_for_delayed_node_convergence_receipt() {
 
     let updater_state_dir = fleet_state_dir.clone();
     let updater = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = test_clock_now() + Duration::from_secs(5);
         loop {
             let mut delayed_transport = FileFleetTransport::new(&updater_state_dir);
             delayed_transport
@@ -1053,7 +1065,7 @@ fn fleet_reconcile_waits_for_delayed_node_convergence_receipt() {
             }
 
             assert!(
-                Instant::now() < deadline,
+                test_clock_now() < deadline,
                 "fleet reconcile never republished delayed quarantine"
             );
             std::thread::sleep(Duration::from_millis(25));
@@ -1781,7 +1793,7 @@ fn fleet_agent_release_actions_clear_local_quarantine_state_across_poll_cycles()
     let release_fleet_state_dir = fleet_state_dir.clone();
     let release_publisher = std::thread::spawn(move || {
         let registry_path = project_root.join(".franken-node/state/trust-card-registry.v1.json");
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = test_clock_now() + Duration::from_secs(5);
         loop {
             let mut registry = TrustCardRegistry::load_authoritative_state(
                 &registry_path,
@@ -1802,7 +1814,7 @@ fn fleet_agent_release_actions_clear_local_quarantine_state_across_poll_cycles()
                 break;
             }
             assert!(
-                Instant::now() < deadline,
+                test_clock_now() < deadline,
                 "fleet agent never applied quarantine before release publish"
             );
             std::thread::sleep(Duration::from_millis(50));
@@ -3306,7 +3318,10 @@ fn fleet_release_with_structured_logging_and_real_pipeline() {
                 &json!(reason),
             );
         }
-        _ => panic!("Expected release action, got: {:?}", release_action.action),
+        _ => fail_test(format!(
+            "Expected release action, got: {:?}",
+            release_action.action
+        )),
     }
 
     log.phase("teardown");
@@ -3514,7 +3529,7 @@ fn fleet_reconcile_with_complete_transport_verification() {
     );
 
     log.phase("act");
-    let start_reconcile = Instant::now();
+    let start_reconcile = test_clock_now();
     let output = run_cli_in_dir_with_fleet_state_and_env(
         &repo_root(),
         &["fleet", "reconcile", "--json"],
@@ -3652,7 +3667,9 @@ fn fleet_reconcile_with_complete_transport_verification() {
             assert_eq!(reason.as_str(), "reconcile transport verification test");
             assert_eq!(*quarantine_version, 9);
         }
-        other => panic!("expected reconcile to republish quarantine action, got: {other:?}"),
+        other => fail_test(format!(
+            "expected reconcile to republish quarantine action, got: {other:?}"
+        )),
     }
 
     // Verify signature round-trip
