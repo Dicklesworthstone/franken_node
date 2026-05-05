@@ -3,7 +3,7 @@
 > When divergences are detected, automatically generate the smallest fixture
 > that reproduces the behavior difference.
 
-**Authority**: [PLAN_TO_CREATE_FRANKEN_NODE.md](../PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2
+**Authority**: [PLAN_TO_CREATE_FRANKEN_NODE.md](plans/PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2
 **Related**: [L1_LOCKSTEP_RUNNER.md](L1_LOCKSTEP_RUNNER.md), [fixture_runner.py](../scripts/fixture_runner.py)
 
 ---

@@ -62,8 +62,8 @@ Category-defining differentiators (impossible-by-default execution, cryptographi
 
 ## References
 
-- [PLAN_TO_CREATE_FRANKEN_NODE.md](../../PLAN_TO_CREATE_FRANKEN_NODE.md) Section 3.3 — Baseline Build Strategy Decision
-- [PLAN_TO_CREATE_FRANKEN_NODE.md](../../PLAN_TO_CREATE_FRANKEN_NODE.md) Section 5.4 — Spec-First Essence Extraction Protocol
+- [PLAN_TO_CREATE_FRANKEN_NODE.md](../plans/PLAN_TO_CREATE_FRANKEN_NODE.md) Section 3.3 — Baseline Build Strategy Decision
+- [PLAN_TO_CREATE_FRANKEN_NODE.md](../plans/PLAN_TO_CREATE_FRANKEN_NODE.md) Section 5.4 — Spec-First Essence Extraction Protocol
 - [PRODUCT_CHARTER.md](../PRODUCT_CHARTER.md) Section 1 — Category-Creating Doctrine
 - [PRODUCT_CHARTER.md](../PRODUCT_CHARTER.md) Section 10 — Off-Charter Behaviors
 - [ENGINE_SPLIT_CONTRACT.md](../ENGINE_SPLIT_CONTRACT.md) — Engine split boundary

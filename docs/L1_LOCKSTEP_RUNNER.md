@@ -3,7 +3,7 @@
 > Executes compatibility fixtures across Node.js, Bun, and franken_node in lockstep,
 > canonicalizes results, and produces structured divergence reports.
 
-**Authority**: [PLAN_TO_CREATE_FRANKEN_NODE.md](../PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2
+**Authority**: [PLAN_TO_CREATE_FRANKEN_NODE.md](plans/PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2
 **Related**: [COMPATIBILITY_BANDS.md](COMPATIBILITY_BANDS.md), [fixture_runner.py](../scripts/fixture_runner.py)
 
 ---
@@ -101,4 +101,4 @@ The runner reads `lockstep_runner_config.json` (or uses defaults):
 - [COMPATIBILITY_MODE_POLICY.md](COMPATIBILITY_MODE_POLICY.md) — Mode enforcement
 - [DIVERGENCE_LEDGER.json](DIVERGENCE_LEDGER.json) — Known divergences
 - [fixture_runner.py](../scripts/fixture_runner.py) — Fixture loading and canonicalization
-- [PLAN_TO_CREATE_FRANKEN_NODE.md](../PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2
+- [PLAN_TO_CREATE_FRANKEN_NODE.md](plans/PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2

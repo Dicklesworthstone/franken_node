@@ -2,7 +2,7 @@
 
 > Defines the three runtime compatibility modes and their enforcement rules.
 
-**Authority**: [PLAN_TO_CREATE_FRANKEN_NODE.md](../PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2
+**Authority**: [PLAN_TO_CREATE_FRANKEN_NODE.md](plans/PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2
 **Related**: [COMPATIBILITY_BANDS.md](COMPATIBILITY_BANDS.md)
 
 ---
@@ -94,4 +94,4 @@ Priority order: CLI flag > environment variable > config file > default (balance
 
 - [COMPATIBILITY_BANDS.md](COMPATIBILITY_BANDS.md) — Band definitions
 - [DIVERGENCE_LEDGER.json](DIVERGENCE_LEDGER.json) — Known divergences
-- [PLAN_TO_CREATE_FRANKEN_NODE.md](../PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2
+- [PLAN_TO_CREATE_FRANKEN_NODE.md](plans/PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2

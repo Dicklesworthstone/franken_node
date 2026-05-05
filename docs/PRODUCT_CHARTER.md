@@ -6,7 +6,7 @@
 **Charter Version:** 1.1 (ratified)
 **Effective Date:** 2026-02-20
 **Owner:** Repository maintainer (`Dicklesworthstone`)
-**Canonical Plan:** [`PLAN_TO_CREATE_FRANKEN_NODE.md`](../PLAN_TO_CREATE_FRANKEN_NODE.md)
+**Canonical Plan:** [`PLAN_TO_CREATE_FRANKEN_NODE.md`](plans/PLAN_TO_CREATE_FRANKEN_NODE.md)
 **Engine Plan Alignment:** [`PLAN_TO_CREATE_FRANKEN_ENGINE.md`](/dp/franken_engine/PLAN_TO_CREATE_FRANKEN_ENGINE.md)
 
 ### Ratification Log
@@ -285,7 +285,7 @@ The following CI/governance mechanisms ensure the boundary stays consistent:
 
 | Document | Relationship |
 |----------|-------------|
-| [PLAN_TO_CREATE_FRANKEN_NODE.md](../PLAN_TO_CREATE_FRANKEN_NODE.md) | Canonical plan (this charter is derived from it) |
+| [PLAN_TO_CREATE_FRANKEN_NODE.md](plans/PLAN_TO_CREATE_FRANKEN_NODE.md) | Canonical plan (this charter is derived from it) |
 | [PLAN_TO_CREATE_FRANKEN_ENGINE.md](/dp/franken_engine/PLAN_TO_CREATE_FRANKEN_ENGINE.md) | Engine canonical plan (alignment verified in Section 11) |
 | [ENGINE_SPLIT_CONTRACT.md](ENGINE_SPLIT_CONTRACT.md) | Boundary enforcement between repositories |
 | [ROADMAP.md](ROADMAP.md) | Phased delivery plan (supporting summary) |

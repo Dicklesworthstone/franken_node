@@ -3,7 +3,7 @@
 > Validates that franken_engine trust boundaries, capability gates, and policy
 > enforcement remain intact across all compatibility work.
 
-**Authority**: [PLAN_TO_CREATE_FRANKEN_NODE.md](../PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2
+**Authority**: [PLAN_TO_CREATE_FRANKEN_NODE.md](plans/PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2
 **Related**: [ENGINE_SPLIT_CONTRACT.md](ENGINE_SPLIT_CONTRACT.md), [L1_LOCKSTEP_RUNNER.md](L1_LOCKSTEP_RUNNER.md)
 
 ---
@@ -86,4 +86,4 @@ Unlike L1, which has mode-dependent behavior for different bands, **L2 failures 
 - [ENGINE_SPLIT_CONTRACT.md](ENGINE_SPLIT_CONTRACT.md) — Split boundary definition
 - [L1_LOCKSTEP_RUNNER.md](L1_LOCKSTEP_RUNNER.md) — L1 product oracle
 - [COMPATIBILITY_MODE_POLICY.md](COMPATIBILITY_MODE_POLICY.md) — Mode enforcement (L2 is mode-independent)
-- [PLAN_TO_CREATE_FRANKEN_NODE.md](../PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2
+- [PLAN_TO_CREATE_FRANKEN_NODE.md](plans/PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2

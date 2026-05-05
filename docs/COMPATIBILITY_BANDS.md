@@ -3,7 +3,7 @@
 > Defines the four compatibility bands for classifying Node/Bun API surface areas,
 > with policy defaults governing divergence handling per band and compatibility mode.
 
-**Authority**: [PLAN_TO_CREATE_FRANKEN_NODE.md](../PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2
+**Authority**: [PLAN_TO_CREATE_FRANKEN_NODE.md](plans/PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2
 **Related**: [ADR-001: Hybrid Baseline Strategy](adr/ADR-001-hybrid-baseline-strategy.md)
 
 ---
@@ -128,7 +128,7 @@ Band classification is not configurable at runtime — it is determined by the A
 
 ## 6. References
 
-- [PLAN_TO_CREATE_FRANKEN_NODE.md](../PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2 — Compatibility Core
+- [PLAN_TO_CREATE_FRANKEN_NODE.md](plans/PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2 — Compatibility Core
 - [ADR-001: Hybrid Baseline Strategy](adr/ADR-001-hybrid-baseline-strategy.md) — No Bun-first clone
 - [PRODUCT_CHARTER.md](PRODUCT_CHARTER.md) — >= 95% compatibility target
 - [IMPLEMENTATION_GOVERNANCE.md](IMPLEMENTATION_GOVERNANCE.md) — Spec-first extraction discipline

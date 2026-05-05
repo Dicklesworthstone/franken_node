@@ -3,7 +3,7 @@
 > Tracks compatibility pass/fail rates by API family and band,
 > detects regressions, and produces machine-readable reports for CI.
 
-**Authority**: [PLAN_TO_CREATE_FRANKEN_NODE.md](../PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2
+**Authority**: [PLAN_TO_CREATE_FRANKEN_NODE.md](plans/PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2
 **Related**: [COMPATIBILITY_REGISTRY.json](COMPATIBILITY_REGISTRY.json), [DIVERGENCE_LEDGER.json](DIVERGENCE_LEDGER.json)
 
 ---
@@ -115,4 +115,4 @@ The dashboard produces a machine-readable JSON artifact conforming to `schemas/c
 - [COMPATIBILITY_BANDS.md](COMPATIBILITY_BANDS.md) — Band definitions
 - [COMPATIBILITY_REGISTRY.json](COMPATIBILITY_REGISTRY.json) — Behavior registry
 - [L1_LOCKSTEP_RUNNER.md](L1_LOCKSTEP_RUNNER.md) — Oracle runner
-- [PLAN_TO_CREATE_FRANKEN_NODE.md](../PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2
+- [PLAN_TO_CREATE_FRANKEN_NODE.md](plans/PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2

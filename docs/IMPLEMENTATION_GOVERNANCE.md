@@ -81,4 +81,4 @@ No exceptions. The hybrid baseline strategy (ADR-001) is a foundational architec
 
 - [ADR-001: Hybrid Baseline Strategy](adr/ADR-001-hybrid-baseline-strategy.md)
 - [PRODUCT_CHARTER.md](PRODUCT_CHARTER.md)
-- [PLAN_TO_CREATE_FRANKEN_NODE.md](../PLAN_TO_CREATE_FRANKEN_NODE.md) Section 5.4 — Spec-First Essence Extraction Protocol
+- [PLAN_TO_CREATE_FRANKEN_NODE.md](plans/PLAN_TO_CREATE_FRANKEN_NODE.md) Section 5.4 — Spec-First Essence Extraction Protocol

@@ -2,7 +2,7 @@
 
 ## Source Of Truth
 
-- Canonical product plan for this repository: `/dp/franken_node/PLAN_TO_CREATE_FRANKEN_NODE.md`
+- Canonical product plan for this repository: `/dp/franken_node/docs/plans/PLAN_TO_CREATE_FRANKEN_NODE.md`
 - Canonical engine plan: `/dp/franken_engine/PLAN_TO_CREATE_FRANKEN_ENGINE.md`
 
 This roadmap is a supporting summary. If any content here conflicts with either canonical plan, the canonical plan wins.
