@@ -6,6 +6,7 @@ pub mod rch_adapter;
 pub mod telemetry_bridge;
 pub mod tokio_drift_checker;
 pub mod validation_broker;
+pub mod validation_planner;
 
 #[cfg(test)]
 mod ops_conformance_tests;

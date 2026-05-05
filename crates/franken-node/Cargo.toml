@@ -136,6 +136,10 @@ name = "validation_broker"
 path = "tests/validation_broker.rs"
 
 [[test]]
+name = "validation_planner"
+path = "tests/validation_planner.rs"
+
+[[test]]
 name = "cli_arg_validation"
 path = "tests/cli_arg_validation.rs"
 

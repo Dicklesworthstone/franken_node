@@ -1,0 +1,87 @@
+{
+  "schema_version": "franken-node/validation-planner/plan/v1",
+  "bead_id": "bd-7ik2n",
+  "fixtures": [
+    {
+      "name": "single registered test file",
+      "bead_id": "bd-fixture-test",
+      "changed_paths": [
+        "crates/franken-node/tests/rch_adapter_classification.rs"
+      ],
+      "labels": [
+        "testing",
+        "validation"
+      ],
+      "acceptance": "Run the exact registered RCH adapter classification test.",
+      "expect_command_ids": [
+        "source-diff-check",
+        "cargo-test-rch_adapter_classification"
+      ],
+      "expect_shell_contains": [
+        "RCH_REQUIRE_REMOTE=1",
+        "--test rch_adapter_classification"
+      ],
+      "source_only_allowed": false
+    },
+    {
+      "name": "docs plus broker artifact",
+      "bead_id": "bd-fixture-docs",
+      "changed_paths": [
+        "docs/specs/validation_broker.md",
+        "artifacts/validation_broker/validation_broker_fixtures.v1.json"
+      ],
+      "labels": [
+        "validation"
+      ],
+      "acceptance": "Validation broker contract artifact changed.",
+      "expect_command_ids": [
+        "source-diff-check",
+        "python-validation-broker-contract"
+      ],
+      "expect_shell_contains": [
+        "python3 scripts/check_validation_broker_contract.py --json",
+        "python3 -m json.tool artifacts/validation_broker/validation_broker_fixtures.v1.json"
+      ],
+      "source_only_allowed": true
+    },
+    {
+      "name": "feature gated integration test",
+      "bead_id": "bd-fixture-feature",
+      "changed_paths": [
+        "crates/franken-node/tests/fleet_cli_e2e.rs"
+      ],
+      "labels": [
+        "testing"
+      ],
+      "acceptance": "Feature gated fleet CLI coverage changed.",
+      "expect_command_ids": [
+        "source-diff-check",
+        "cargo-test-fleet_cli_e2e"
+      ],
+      "expect_shell_contains": [
+        "--no-default-features --features test-support",
+        "--test fleet_cli_e2e"
+      ],
+      "source_only_allowed": false
+    },
+    {
+      "name": "sibling dependency drift",
+      "bead_id": "bd-fixture-sibling",
+      "changed_paths": [
+        "../franken_engine/crates/franken-engine/src/proof_artifact.rs"
+      ],
+      "labels": [
+        "validation"
+      ],
+      "acceptance": "Sibling franken_engine compile drift blocked default validation.",
+      "expect_command_ids": [
+        "source-diff-check",
+        "cargo-check-sibling-drift"
+      ],
+      "expect_shell_contains": [
+        "cargo +nightly-2026-02-19 check -p frankenengine-node --tests"
+      ],
+      "source_only_allowed": false
+    }
+  ]
+}
