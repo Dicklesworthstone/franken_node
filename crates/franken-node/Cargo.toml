@@ -537,6 +537,10 @@ name = "observability_witness_metamorphic"
 path = "tests/observability_witness_metamorphic.rs"
 
 [[test]]
+name = "exfiltration_sentinel_scenarios"
+path = "../../tests/security/exfiltration_sentinel_scenarios.rs"
+
+[[test]]
 name = "bayesian_risk_quarantine"
 path = "tests/bayesian_risk_quarantine.rs"
 

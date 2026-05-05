@@ -3,10 +3,7 @@
 // Validates the information-flow lineage tracker and exfiltration sentinel
 // from `security::lineage_tracker` against simulated exfiltration scenarios.
 
-#[path = "../../crates/franken-node/src/security/lineage_tracker.rs"]
-pub mod lineage_tracker;
-
-use lineage_tracker::*;
+use frankenengine_node::security::lineage_tracker::*;
 use std::collections::BTreeSet;
 
 fn default_config() -> SentinelConfig {
@@ -31,6 +28,18 @@ fn make_boundary(id: &str, from: &str, to: &str, denied: &[&str]) -> TaintBounda
     }
 }
 
+fn make_edge(edge_id: &str, source: &str, sink: &str, timestamp_ms: u64) -> FlowEdge {
+    FlowEdge {
+        edge_id: edge_id.to_string(),
+        source: source.to_string(),
+        sink: sink.to_string(),
+        operation: "op".to_string(),
+        taint_set: TaintSet::new(),
+        timestamp_ms,
+        quarantined: false,
+    }
+}
+
 // ---- Scenario: PII data exported to external API ----
 
 #[test]
@@ -44,7 +53,9 @@ fn scenario_pii_external_export_detected() {
         .unwrap();
 
     graph.register_label(make_label("PII", 10));
-    sentinel.attach_lineage_tag(&mut graph, "user-record", "PII").unwrap();
+    sentinel
+        .attach_lineage_tag(&mut graph, "user-record", "PII")
+        .unwrap();
 
     let verdict = sentinel
         .track_flow(&mut graph, "user-record", "external-api", "export", 1000)
@@ -257,7 +268,10 @@ fn scenario_recall_below_threshold() {
     let config = default_config();
     let sentinel = ExfiltrationSentinel::new(config);
     let metrics = sentinel.evaluate_metrics(50, 50, 0).unwrap();
-    assert!(!metrics.recall_ok, "50% recall should be below 95% threshold");
+    assert!(
+        !metrics.recall_ok,
+        "50% recall should be below 95% threshold"
+    );
 }
 
 #[test]
@@ -265,7 +279,10 @@ fn scenario_precision_below_threshold() {
     let config = default_config();
     let sentinel = ExfiltrationSentinel::new(config);
     let metrics = sentinel.evaluate_metrics(50, 0, 50).unwrap();
-    assert!(!metrics.precision_ok, "50% precision should be below 90% threshold");
+    assert!(
+        !metrics.precision_ok,
+        "50% precision should be below 90% threshold"
+    );
 }
 
 // ---- Scenario: Covert channel detection ----
@@ -382,6 +399,61 @@ fn scenario_snapshot_captures_full_state() {
     assert!(invariants::verify_snapshot_faithful(&graph, &snap));
 }
 
+#[test]
+fn scenario_snapshot_faithfulness_rejects_edge_content_substitution() {
+    let mut graph = LineageGraph::new(default_config());
+    graph.register_label(make_label("PII", 10));
+    graph
+        .append_edge(make_edge("edge-1", "internal-source", "external-sink", 1))
+        .unwrap();
+
+    let mut snap = graph.snapshot("test-snap", 9999);
+    snap.edges.first_mut().expect("snapshot has one edge").sink =
+        "attacker-controlled-sink".to_string();
+
+    assert_eq!(snap.edge_count, graph.edge_count());
+    assert_eq!(snap.label_count, graph.label_count());
+    assert!(!invariants::verify_snapshot_faithful(&graph, &snap));
+}
+
+#[test]
+fn scenario_snapshot_faithfulness_rejects_edge_reordering() {
+    let mut graph = LineageGraph::new(default_config());
+    graph.register_label(make_label("PII", 10));
+    graph
+        .append_edge(make_edge("edge-1", "internal-a", "external-a", 1))
+        .unwrap();
+    graph
+        .append_edge(make_edge("edge-2", "internal-b", "external-b", 2))
+        .unwrap();
+
+    let mut snap = graph.snapshot("test-snap", 9999);
+    snap.edges.swap(0, 1);
+
+    assert_eq!(snap.edge_count, graph.edge_count());
+    assert_eq!(snap.label_count, graph.label_count());
+    assert!(!invariants::verify_snapshot_faithful(&graph, &snap));
+}
+
+#[test]
+fn scenario_snapshot_faithfulness_rejects_label_content_substitution() {
+    let mut graph = LineageGraph::new(default_config());
+    graph.register_label(make_label("SECRET", 20));
+    graph
+        .append_edge(make_edge("edge-1", "secure-source", "internal-sink", 1))
+        .unwrap();
+
+    let mut snap = graph.snapshot("test-snap", 9999);
+    snap.labels
+        .get_mut("SECRET")
+        .expect("snapshot has SECRET label")
+        .severity = 1;
+
+    assert_eq!(snap.edge_count, graph.edge_count());
+    assert_eq!(snap.label_count, graph.label_count());
+    assert!(!invariants::verify_snapshot_faithful(&graph, &snap));
+}
+
 // ---- Scenario: Event and error code constants are correct ----
 
 #[test]
@@ -390,23 +462,41 @@ fn all_canonical_event_codes_defined() {
     assert_eq!(LINEAGE_FLOW_TRACKED, "LINEAGE_FLOW_TRACKED");
     assert_eq!(SENTINEL_SCAN_START, "SENTINEL_SCAN_START");
     assert_eq!(SENTINEL_EXFIL_DETECTED, "SENTINEL_EXFIL_DETECTED");
-    assert_eq!(SENTINEL_CONTAINMENT_TRIGGERED, "SENTINEL_CONTAINMENT_TRIGGERED");
+    assert_eq!(
+        SENTINEL_CONTAINMENT_TRIGGERED,
+        "SENTINEL_CONTAINMENT_TRIGGERED"
+    );
 }
 
 #[test]
 fn all_canonical_error_codes_defined() {
     assert_eq!(ERR_LINEAGE_TAG_MISSING, "ERR_LINEAGE_TAG_MISSING");
     assert_eq!(ERR_LINEAGE_FLOW_BROKEN, "ERR_LINEAGE_FLOW_BROKEN");
-    assert_eq!(ERR_SENTINEL_RECALL_BELOW_THRESHOLD, "ERR_SENTINEL_RECALL_BELOW_THRESHOLD");
-    assert_eq!(ERR_SENTINEL_PRECISION_BELOW_THRESHOLD, "ERR_SENTINEL_PRECISION_BELOW_THRESHOLD");
-    assert_eq!(ERR_SENTINEL_CONTAINMENT_FAILED, "ERR_SENTINEL_CONTAINMENT_FAILED");
+    assert_eq!(
+        ERR_SENTINEL_RECALL_BELOW_THRESHOLD,
+        "ERR_SENTINEL_RECALL_BELOW_THRESHOLD"
+    );
+    assert_eq!(
+        ERR_SENTINEL_PRECISION_BELOW_THRESHOLD,
+        "ERR_SENTINEL_PRECISION_BELOW_THRESHOLD"
+    );
+    assert_eq!(
+        ERR_SENTINEL_CONTAINMENT_FAILED,
+        "ERR_SENTINEL_CONTAINMENT_FAILED"
+    );
     assert_eq!(ERR_SENTINEL_COVERT_CHANNEL, "ERR_SENTINEL_COVERT_CHANNEL");
 }
 
 #[test]
 fn all_canonical_invariants_defined() {
     assert_eq!(INV_LINEAGE_TAG_PERSISTENCE, "INV-LINEAGE-TAG-PERSISTENCE");
-    assert_eq!(INV_SENTINEL_RECALL_THRESHOLD, "INV-SENTINEL-RECALL-THRESHOLD");
-    assert_eq!(INV_SENTINEL_PRECISION_THRESHOLD, "INV-SENTINEL-PRECISION-THRESHOLD");
+    assert_eq!(
+        INV_SENTINEL_RECALL_THRESHOLD,
+        "INV-SENTINEL-RECALL-THRESHOLD"
+    );
+    assert_eq!(
+        INV_SENTINEL_PRECISION_THRESHOLD,
+        "INV-SENTINEL-PRECISION-THRESHOLD"
+    );
     assert_eq!(INV_SENTINEL_AUTO_CONTAIN, "INV-SENTINEL-AUTO-CONTAIN");
 }

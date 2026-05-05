@@ -1815,7 +1815,7 @@ pub mod invariants {
         FlowVerdict::Pass
     }
 
-    /// Verify INV-IFL-SNAPSHOT-FAITHFUL: snapshot edge count matches graph.
+    /// Verify INV-IFL-SNAPSHOT-FAITHFUL: snapshot contents match graph.
     ///
     /// # Examples
     ///
@@ -1829,8 +1829,12 @@ pub mod invariants {
     /// ```
     pub fn verify_snapshot_faithful(graph: &LineageGraph, snapshot: &LineageSnapshot) -> bool {
         snapshot.edge_count == graph.edge_count()
+            && snapshot.edge_count == snapshot.edges.len()
             && snapshot.label_count == graph.label_count()
+            && snapshot.label_count == snapshot.labels.len()
             && snapshot.schema_version == SCHEMA_VERSION
+            && snapshot.edges.iter().eq(graph.edges.values())
+            && snapshot.labels == graph.labels
     }
 
     /// Verify INV-IFL-BOUNDARY-ENFORCED: all violating edges are quarantined.
