@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 
 use frankenengine_node::connector::activation_pipeline::{
-    ActivationInput, ActivationStage, StageError, StageExecutor, activate,
+    ActivationInput, ActivationStage, StageExecutor, activate,
 };
 
 const TEST_ITERATIONS: usize = 100;
@@ -215,7 +215,7 @@ fn mr_duplicate_inputs_identical_transcripts() {
 #[test]
 fn mr_secret_reordering_preserves_progression() {
     for seed in 0..TEST_ITERATIONS {
-        let mut input = generate_test_input(seed as u64);
+        let input = generate_test_input(seed as u64);
 
         // Only test when we have multiple secrets to reorder
         if input.secret_refs.len() < 2 {
@@ -272,7 +272,7 @@ fn mr_secret_reordering_preserves_progression() {
 #[test]
 fn mr_capability_subset_stage_inclusion() {
     for seed in 0..TEST_ITERATIONS {
-        let mut input_full = generate_test_input(seed as u64);
+        let input_full = generate_test_input(seed as u64);
 
         // Only test when we have multiple capabilities
         if input_full.capabilities.len() < 2 {
@@ -332,7 +332,7 @@ fn mr_failure_cleanup_idempotent() {
         let input = generate_test_input(seed as u64);
 
         // Test each failure mode
-        let failure_configs = vec![
+        let failure_configs = [
             ConfigurableExecutor {
                 fail_sandbox: true,
                 ..Default::default()
@@ -511,7 +511,7 @@ fn mr_composite_state_machine_invariants() {
         let input = generate_test_input(seed as u64);
 
         // Test multiple executor configurations
-        let executors = vec![
+        let executors = [
             ConfigurableExecutor::default(),
             ConfigurableExecutor {
                 fail_capability: true,
@@ -519,6 +519,14 @@ fn mr_composite_state_machine_invariants() {
             },
             ConfigurableExecutor {
                 secret_mount_behavior: SecretMountBehavior::Reordered,
+                ..Default::default()
+            },
+            ConfigurableExecutor {
+                secret_mount_behavior: SecretMountBehavior::Partial(1),
+                ..Default::default()
+            },
+            ConfigurableExecutor {
+                secret_mount_behavior: SecretMountBehavior::Extra(vec!["extra-secret".to_string()]),
                 ..Default::default()
             },
         ];

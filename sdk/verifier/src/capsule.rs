@@ -1305,7 +1305,7 @@ mod tests {
         // Create a 64-char hex string that differs from the real signature
         forged.signature = "a".repeat(64);
         assert_ne!(forged.signature, capsule.signature);
-        match verify_signature(&forged) {
+        match verify_signature(&test_verifying_key(), &forged) {
             Err(CapsuleError::SignatureInvalid(_)) => {}
             other => panic!("expected SignatureInvalid for forged sig, got {other:?}"),
         }
@@ -1372,7 +1372,7 @@ mod tests {
             compute_replay_hash(&capsule_b.payload, &capsule_b.inputs);
         // Reuse capsule_a's signature
         capsule_b.signature = capsule_a.signature.clone();
-        match verify_signature(&capsule_b) {
+        match verify_signature(&test_verifying_key(), &capsule_b) {
             Err(CapsuleError::SignatureInvalid(_)) => {}
             other => panic!("expected SignatureInvalid for cross-claim replay, got {other:?}"),
         }

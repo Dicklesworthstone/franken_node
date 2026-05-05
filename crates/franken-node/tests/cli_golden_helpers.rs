@@ -4,6 +4,8 @@
 //! proper scrubbing of non-deterministic values like timestamps, UUIDs,
 //! file paths, and memory addresses.
 
+#![allow(dead_code)]
+
 use assert_cmd::Command;
 use insta::{Settings, assert_snapshot};
 use serde_json::Value;

@@ -3089,7 +3089,7 @@ mod tests {
         let capsule = capsule::build_reference_capsule();
 
         let err = sdk
-            .verify_claim(&test_verifying_key(), &capsule)
+            .verify_claim(&default_verifying_key(), &capsule)
             .expect_err("whitespace-only verifier identity must be rejected");
 
         assert!(matches!(

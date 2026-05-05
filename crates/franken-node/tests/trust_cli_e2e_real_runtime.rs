@@ -17,7 +17,7 @@ use std::process::{Command, Output};
 use std::sync::Once;
 use std::time::Instant;
 use tempfile::TempDir;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 static TEST_TRACING_INIT: Once = Once::new();
 
@@ -399,7 +399,19 @@ mod real_runtime_structured_logging_tests {
 
         test_harness.log_phase("validation", true, test_details.clone());
 
-        // If we get here, JSON serialization worked
-        assert!(true, "Structured logging JSON serialization succeeded");
+        let serialized_log = serde_json::to_value(TestPhaseLog {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            test_name: test_harness.test_name.clone(),
+            phase: "validation".to_string(),
+            duration_ms: 0,
+            success: true,
+            details: test_details.clone(),
+        })
+        .expect("structured logging JSON serialization should succeed");
+
+        assert_eq!(serialized_log["test_name"], "structured_logging_validation");
+        assert_eq!(serialized_log["phase"], "validation");
+        assert_eq!(serialized_log["success"], true);
+        assert_eq!(serialized_log["details"], test_details);
     }
 }

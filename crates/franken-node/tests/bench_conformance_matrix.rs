@@ -236,11 +236,7 @@ fn bench_conformance_matrix() -> Result<(), Box<dyn Error>> {
         let test_name = format!(
             "test_{:02}_{}",
             idx + 1,
-            config
-                .scenario
-                .as_deref()
-                .unwrap_or("default")
-                .replace('-', "_")
+            config.scenario.unwrap_or("default").replace('-', "_")
         );
 
         println!("Running bench conformance test: {}", config.description);
@@ -407,10 +403,7 @@ fn bench_deterministic_output_stability() -> Result<(), Box<dyn Error>> {
 fn bench_scenario_coverage() {
     // Verify that our conformance matrix covers expected scenarios
     let matrix = bench_conformance_cases();
-    let tested_scenarios: Vec<_> = matrix
-        .iter()
-        .filter_map(|config| config.scenario.as_deref())
-        .collect();
+    let tested_scenarios: Vec<_> = matrix.iter().filter_map(|config| config.scenario).collect();
 
     let expected_scenarios = [
         "secure-extension-heavy",

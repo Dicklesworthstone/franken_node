@@ -13,22 +13,18 @@ use frankenengine_node::{
     ops::engine_dispatcher::EngineDispatcher,
 };
 
-#[cfg(feature = "engine")]
-use frankenengine_engine::{
-    execution_orchestrator::{LossMatrixPreset, OrchestratorConfig},
-    runtime_config::{
-        ExecutionConfig, ExtensionHostConfig, GuardplaneConfig, OptimizationConfig,
-        RuntimeConfig as EngineRuntimeConfig,
-    },
-    security_epoch::SecurityEpoch,
-};
+fn config_with_profile(profile: Profile) -> Config {
+    Config {
+        profile,
+        ..Config::default()
+    }
+}
 
 /// Conformance test: Strict profile must produce conservative security settings
 #[test]
 #[cfg(feature = "engine")]
 fn conformance_strict_profile_config_values() {
-    let mut config = Config::default();
-    config.profile = Profile::Strict;
+    let config = config_with_profile(Profile::Strict);
 
     // Test RuntimeConfig mapping
     let runtime_config = EngineDispatcher::map_config_to_runtime_config_for_tests(&config);
@@ -154,8 +150,7 @@ fn conformance_strict_profile_config_values() {
 #[test]
 #[cfg(feature = "engine")]
 fn conformance_balanced_profile_config_values() {
-    let mut config = Config::default();
-    config.profile = Profile::Balanced;
+    let config = config_with_profile(Profile::Balanced);
 
     // Test RuntimeConfig mapping
     let runtime_config = EngineDispatcher::map_config_to_runtime_config_for_tests(&config);
@@ -256,8 +251,7 @@ fn conformance_balanced_profile_config_values() {
 #[test]
 #[cfg(feature = "engine")]
 fn conformance_legacy_risky_profile_config_values() {
-    let mut config = Config::default();
-    config.profile = Profile::LegacyRisky;
+    let config = config_with_profile(Profile::LegacyRisky);
 
     // Test RuntimeConfig mapping
     let runtime_config = EngineDispatcher::map_config_to_runtime_config_for_tests(&config);
@@ -386,8 +380,7 @@ fn conformance_optimization_extension_host_structure() {
     let profiles = [Profile::Strict, Profile::Balanced, Profile::LegacyRisky];
 
     for profile in &profiles {
-        let mut config = Config::default();
-        config.profile = *profile;
+        let config = config_with_profile(*profile);
 
         let runtime_config = EngineDispatcher::map_config_to_runtime_config_for_tests(&config);
 
@@ -475,8 +468,7 @@ fn generate_profile_conformance_report() {
     let mut passing_assertions = 0;
 
     for profile in &profiles {
-        let mut config = Config::default();
-        config.profile = *profile;
+        let config = config_with_profile(*profile);
 
         let runtime_config = EngineDispatcher::map_config_to_runtime_config_for_tests(&config);
         let orchestrator_config =

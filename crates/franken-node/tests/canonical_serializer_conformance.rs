@@ -242,7 +242,7 @@ fn test_canonical_serializer_conformance() {
             domain_tag_valid = domain_tag != [0, 0];
 
             let payload_portion = &preimage_bytes[3..];
-            payload_matches = payload_portion == &fixture.canonical_bytes;
+            payload_matches = payload_portion == fixture.canonical_bytes.as_slice();
         }
 
         let preimage_valid =
@@ -299,7 +299,7 @@ fn test_canonical_serializer_conformance() {
     ));
 
     // Generate structured JSON output for CI integration
-    for (id, description, passed, details) in &test_results {
+    for (id, _description, passed, details) in &test_results {
         let status = if *passed { "PASS" } else { "FAIL" };
         eprintln!(
             "{{\"id\":\"{}\",\"status\":\"{}\",\"level\":\"Must\",\"details\":\"{}\"}}",
@@ -338,6 +338,10 @@ fn test_canonical_serializer_conformance() {
         if determinism_pass { "PASS" } else { "FAIL" }
     );
     eprintln!(
+        "- **INV-CAN-ROUND-TRIP**: {}",
+        if round_trip_pass { "PASS" } else { "FAIL" }
+    );
+    eprintln!(
         "- **INV-CAN-NO-FLOAT**: {}",
         if float_rejection_pass {
             "PASS (test present)"
@@ -349,10 +353,7 @@ fn test_canonical_serializer_conformance() {
         "- **INV-CAN-DOMAIN-TAG**: {}",
         if preimage_pass { "PASS" } else { "FAIL" }
     );
-    eprintln!(
-        "- **INV-CAN-NO-BYPASS**: {} (static analysis required)",
-        "MANUAL_CHECK"
-    );
+    eprintln!("- **INV-CAN-NO-BYPASS**: MANUAL_CHECK (static analysis required)");
 
     // Fail test if any conformance requirements fail
     assert_eq!(

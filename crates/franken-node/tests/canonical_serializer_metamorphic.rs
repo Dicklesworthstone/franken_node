@@ -31,7 +31,7 @@ enum ArbitraryJsonValue {
 }
 
 impl ArbitraryJsonValue {
-    fn to_json_value(self) -> Value {
+    fn into_json_value(self) -> Value {
         match self {
             ArbitraryJsonValue::Null => Value::Null,
             ArbitraryJsonValue::Bool(b) => Value::Bool(b),
@@ -47,12 +47,12 @@ impl ArbitraryJsonValue {
             }
             ArbitraryJsonValue::String(s) => Value::String(s),
             ArbitraryJsonValue::Array(items) => {
-                Value::Array(items.into_iter().map(|x| x.to_json_value()).collect())
+                Value::Array(items.into_iter().map(|x| x.into_json_value()).collect())
             }
             ArbitraryJsonValue::Object(pairs) => {
                 let mut map = Map::new();
                 for (key, value) in pairs {
-                    map.insert(key, value.to_json_value());
+                    map.insert(key, value.into_json_value());
                 }
                 Value::Object(map)
             }
@@ -251,7 +251,7 @@ fn canonical_serializer_idempotence_property() {
 
         // Generate arbitrary JSON value
         if let Ok(arbitrary_json) = ArbitraryJsonValue::arbitrary(&mut unstructured) {
-            let json_value = arbitrary_json.to_json_value();
+            let json_value = arbitrary_json.into_json_value();
 
             // Test idempotence: canonicalize(canonicalize(x)) == canonicalize(x)
             if let (Ok(first_canonical), Ok(second_canonical)) = (
@@ -471,7 +471,7 @@ fn canonical_serialization_preserves_semantics() {
 /// Test canonical serialization with pathological JSON structures
 #[test]
 fn canonical_serialization_handles_edge_cases() {
-    let edge_cases = vec![
+    let edge_cases = [
         // Empty structures
         serde_json::json!({}),
         serde_json::json!([]),
@@ -496,7 +496,7 @@ fn canonical_serialization_handles_edge_cases() {
             "large_int": 9007199254740991i64, // Max safe integer in JSON
             "zero": 0,
             "negative": -123,
-            "decimal": 3.14159
+            "decimal": std::f64::consts::PI
         }),
         // Unicode and special characters
         serde_json::json!({
@@ -579,8 +579,8 @@ fn connector_payload_pair(seed: u64, object_type: TrustObjectType) -> (String, S
             "right": seed % 17,
             "left": format!("left-{label}"),
             "flags": {
-                "enabled": seed % 2 == 0,
-                "reviewed": seed % 3 == 0
+                "enabled": seed.is_multiple_of(2),
+                "reviewed": seed.is_multiple_of(3)
             }
         }),
         serde_json::json!([

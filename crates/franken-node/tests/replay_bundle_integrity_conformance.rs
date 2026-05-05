@@ -7,7 +7,6 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tempfile::TempDir;
 
 const REPLAY_BUNDLE_INTEGRITY_VECTORS_JSON: &str =
     include_str!("../../../artifacts/conformance/replay_bundle_integrity_vectors.json");

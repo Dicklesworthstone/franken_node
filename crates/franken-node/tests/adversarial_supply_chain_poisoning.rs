@@ -51,8 +51,10 @@ fn registry_with_trusted_key_and_cap(
     key_ring.add_key(verifying_key);
     let mut provenance_policy = VerificationPolicy::development_profile();
     provenance_policy.add_trusted_signer_key("pub-001", &verifying_key);
-    let mut config = RegistryConfig::default();
-    config.max_extensions = max_extensions;
+    let config = RegistryConfig {
+        max_extensions,
+        ..RegistryConfig::default()
+    };
     SignedExtensionRegistry::new(
         config,
         AdmissionKernel {

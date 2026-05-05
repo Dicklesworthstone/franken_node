@@ -13,14 +13,14 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 
 /// Reorders events that have the same timestamp
-fn reorder_concurrent_events(mut events: Vec<RawEvent>, seed: u64) -> Vec<RawEvent> {
+fn reorder_concurrent_events(events: Vec<RawEvent>, seed: u64) -> Vec<RawEvent> {
     // Group events by timestamp
     let mut timestamp_groups: HashMap<String, Vec<(usize, RawEvent)>> = HashMap::new();
 
     for (idx, event) in events.into_iter().enumerate() {
         timestamp_groups
             .entry(event.timestamp.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push((idx, event));
     }
 

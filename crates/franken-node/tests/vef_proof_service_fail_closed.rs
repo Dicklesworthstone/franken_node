@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 fn sha256_fill(digit: char) -> String {
     format!(
         "sha256:{}",
-        std::iter::repeat(digit).take(64).collect::<String>()
+        std::iter::repeat_n(digit, 64).collect::<String>()
     )
 }
 
