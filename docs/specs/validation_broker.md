@@ -197,5 +197,6 @@ explicitly accepted source-only/blocker class for that gate.
 | Spec contract | `docs/specs/validation_broker.md` |
 | Schema catalog | `artifacts/validation_broker/validation_broker_contract.schema.json` |
 | Golden fixtures | `artifacts/validation_broker/validation_broker_fixtures.v1.json` |
+| E2E/stress harness matrix | `artifacts/validation_broker/bd-tdoga/validation_broker_e2e_harness.v1.json` |
 | Gate script | `scripts/check_validation_broker_contract.py` |
 | Gate tests | `tests/test_check_validation_broker_contract.py` |

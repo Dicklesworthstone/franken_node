@@ -1,0 +1,77 @@
+{
+  "schema_version": "franken-node/validation-broker/e2e-harness/v1",
+  "bead_id": "bd-tdoga",
+  "test_target": "validation_broker",
+  "canonical_artifact_root": "artifacts/validation_broker/bd-tdoga",
+  "purpose": "Mock-free validation broker E2E and stress harness coverage matrix.",
+  "required_cases": [
+    {
+      "case": "happy_path_source_only_validation",
+      "covered_by": "stress_harness_covers_backpressure_contention_and_fail_closed_paths",
+      "evidence": "source-only ValidationReceipt validates, renders source-only proof status, and produces source-only closeout summary"
+    },
+    {
+      "case": "rch_success_receipt",
+      "covered_by": "mock_free_e2e_links_queue_receipt_readiness_closeout_and_cli",
+      "evidence": "RCH success output is classified as remote green, written to receipt JSON, consumed by readiness and closeout paths"
+    },
+    {
+      "case": "worker_timeout_classification",
+      "covered_by": "stress_harness_covers_backpressure_contention_and_fail_closed_paths",
+      "evidence": "RCH-E104 timeout output maps to worker_timeout and ssh_command"
+    },
+    {
+      "case": "duplicate_request_dedupe",
+      "covered_by": "mock_free_e2e_links_queue_receipt_readiness_closeout_and_cli",
+      "evidence": "second enqueue of identical request reuses the first queue_id without increasing queue depth"
+    },
+    {
+      "case": "stale_receipt_rejection",
+      "covered_by": "stale_receipt_is_rejected",
+      "evidence": "expired freshness_expires_at returns ERR_VB_STALE_RECEIPT"
+    },
+    {
+      "case": "contention_deferred_decision",
+      "covered_by": "stress_harness_covers_backpressure_contention_and_fail_closed_paths",
+      "evidence": "RCH adapter reports RCH-CONTENTION-DEFERRED and resource governor reports RG_SOURCE_ONLY_CONTENTION"
+    },
+    {
+      "case": "malformed_receipt_fail_closed",
+      "covered_by": "stress_harness_covers_backpressure_contention_and_fail_closed_paths",
+      "evidence": "empty input_digests receipt fails with ERR_VB_MALFORMED_RECEIPT"
+    },
+    {
+      "case": "doctor_ops_report_pass_warn_fail",
+      "covered_by": "stress_harness_covers_backpressure_contention_and_fail_closed_paths",
+      "evidence": "validation-readiness reports pass for success, warn for worker timeout, and fail for product test failure"
+    },
+    {
+      "case": "beads_closeout_summary_generation",
+      "covered_by": "mock_free_e2e_links_queue_receipt_readiness_closeout_and_cli",
+      "evidence": "ops validation-closeout CLI renders JSON ready status with bounded stdout/stderr excerpts"
+    },
+    {
+      "case": "queue_cap_backpressure",
+      "covered_by": "stress_harness_covers_backpressure_contention_and_fail_closed_paths",
+      "evidence": "queue depth 8 rejects the ninth unique request with QueueFull"
+    }
+  ],
+  "structured_log_fields": [
+    "trace_id",
+    "event_code",
+    "reason_code",
+    "command_digest",
+    "receipt_id",
+    "artifact_stdout_path",
+    "artifact_stderr_path",
+    "artifact_summary_path",
+    "artifact_receipt_path"
+  ],
+  "canonical_paths": {
+    "stdout": "artifacts/validation_broker/bd-tdoga/stdout.txt",
+    "stderr": "artifacts/validation_broker/bd-tdoga/stderr.txt",
+    "summary": "artifacts/validation_broker/bd-tdoga/summary.md",
+    "receipt": "artifacts/validation_broker/bd-tdoga/receipt.json",
+    "readiness_input": "artifacts/validation_broker/bd-tdoga/readiness-input.json"
+  }
+}
