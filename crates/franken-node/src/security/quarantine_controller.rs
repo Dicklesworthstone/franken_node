@@ -1,7 +1,7 @@
 //! bd-274s: Automated quarantine controller for Bayesian adversary risk.
 //!
-//! Applies deterministic thresholds to posterior risk values and emits signed
-//! evidence entries for reproducible control actions:
+//! Applies deterministic thresholds to posterior risk values and emits fresh,
+//! signed evidence entries for reproducible control actions:
 //! `throttle`, `isolate`, `quarantine`, `revoke`.
 
 use std::{cmp::Ordering, fmt};
@@ -10,6 +10,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 #[allow(unused_imports)]
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::security::adversary_graph::AdversaryPosterior;
@@ -19,6 +20,7 @@ pub const EVD_QUAR_CTRL_001: &str = "EVD-QUAR-CTRL-001";
 pub const EVD_QUAR_CTRL_002: &str = "EVD-QUAR-CTRL-002";
 pub const QUARANTINE_POLICY_VERSION: &str = "quarantine-threshold-policy-v1";
 pub const DEFAULT_QUARANTINE_SCOPE: &str = "global";
+const QUARANTINE_CONTROL_DECISION_MAC_DOMAIN: &[u8] = b"quarantine_control_decision_v3:";
 
 #[cfg(test)]
 const TEST_EVIDENCE_HASH: &str =
@@ -68,6 +70,17 @@ fn update_len_prefixed_mac(mac: &mut Hmac<Sha256>, field: &[u8]) {
 
 fn update_f64_mac(mac: &mut Hmac<Sha256>, value: f64) {
     mac.update(&value.to_le_bytes());
+}
+
+fn current_epoch_ms() -> u64 {
+    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default()
+}
+
+fn valid_decision_id(value: &str) -> bool {
+    matches!(
+        Uuid::parse_str(value),
+        Ok(uuid) if uuid.get_version() == Some(uuid::Version::SortRand)
+    )
 }
 
 fn finite_signed_posterior(posterior: f64, revoke_threshold: f64) -> f64 {
@@ -163,6 +176,8 @@ impl QuarantineThresholdPolicy {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SignedEvidenceEntry {
     pub event_code: String,
+    pub decision_id: String,
+    pub issued_at_ms: u64,
     pub principal_id: String,
     pub action: ControlAction,
     pub posterior: f64,
@@ -302,6 +317,8 @@ impl QuarantineController {
         let policy_version = QUARANTINE_POLICY_VERSION.to_string();
         let mut signed_evidence = SignedEvidenceEntry {
             event_code: EVD_QUAR_CTRL_001.to_string(),
+            decision_id: Uuid::now_v7().to_string(),
+            issued_at_ms: current_epoch_ms(),
             principal_id: principal_id.to_string(),
             action,
             posterior: signed_posterior,
@@ -377,6 +394,8 @@ impl QuarantineController {
         let mut is_valid = true;
 
         is_valid &= constant_time::ct_eq(&entry.event_code, EVD_QUAR_CTRL_001);
+        is_valid &= valid_decision_id(&entry.decision_id);
+        is_valid &= entry.issued_at_ms > 0;
         is_valid &= constant_time::ct_eq(&entry.policy_version, QUARANTINE_POLICY_VERSION);
         is_valid &= constant_time::ct_eq(&entry.policy_hash, &self.policy_hash());
 
@@ -398,6 +417,22 @@ impl QuarantineController {
         is_valid &= constant_time::ct_eq(&entry.signature, &expected);
 
         is_valid
+    }
+
+    #[must_use]
+    pub fn verify_signed_decision(
+        &self,
+        entry: &SignedEvidenceEntry,
+        now_ms: u64,
+        max_age_ms: u64,
+    ) -> bool {
+        if entry.issued_at_ms == 0 || entry.issued_at_ms > now_ms {
+            return false;
+        }
+        if now_ms.saturating_sub(entry.issued_at_ms) >= max_age_ms {
+            return false;
+        }
+        self.verify_signature(entry)
     }
 
     #[must_use]
@@ -444,8 +479,10 @@ impl QuarantineController {
     fn sign_evidence(&self, entry: &SignedEvidenceEntry) -> String {
         let mut mac = Hmac::<Sha256>::new_from_slice(self.signing_key.as_bytes())
             .expect("HMAC accepts arbitrary signing key lengths");
-        mac.update(b"quarantine_control_decision_v2:");
+        mac.update(QUARANTINE_CONTROL_DECISION_MAC_DOMAIN);
         update_len_prefixed_mac(&mut mac, EVD_QUAR_CTRL_001.as_bytes());
+        update_len_prefixed_mac(&mut mac, entry.decision_id.as_bytes());
+        mac.update(&entry.issued_at_ms.to_le_bytes());
         update_len_prefixed_mac(&mut mac, entry.principal_id.as_bytes());
         update_len_prefixed_mac(&mut mac, entry.action.as_str().as_bytes());
         update_f64_mac(&mut mac, entry.posterior);
@@ -661,12 +698,18 @@ mod tests {
     }
 
     #[test]
-    fn signed_evidence_is_deterministic() {
+    fn signed_evidence_has_fresh_unique_decision_identity() {
         let controller = QuarantineController::new(QuarantineThresholdPolicy::default(), "salt")
             .expect("controller");
         let a = signed_test_decision(&controller, "ext:a", 0.91, "trace-a");
         let b = signed_test_decision(&controller, "ext:a", 0.91, "trace-a");
-        assert_eq!(a.signed_evidence.signature, b.signed_evidence.signature);
+
+        assert_ne!(a.signed_evidence.decision_id, b.signed_evidence.decision_id);
+        assert_ne!(a.signed_evidence.signature, b.signed_evidence.signature);
+        assert!(valid_decision_id(&a.signed_evidence.decision_id));
+        assert!(valid_decision_id(&b.signed_evidence.decision_id));
+        assert!(a.signed_evidence.issued_at_ms > 0);
+        assert!(b.signed_evidence.issued_at_ms > 0);
         assert_eq!(a.evidence_hash, TEST_EVIDENCE_HASH);
     }
 
@@ -779,7 +822,7 @@ mod tests {
             "fixture should collide under delimiter-only transcript"
         );
 
-        let signature_a = controller
+        let decision_a = controller
             .decide_for_posterior_with_context(
                 principal_a,
                 0.45,
@@ -789,10 +832,8 @@ mod tests {
                 trace_a,
             )
             .expect("valid evidence context")
-            .expect("decision a")
-            .signed_evidence
-            .signature;
-        let signature_b = controller
+            .expect("decision a");
+        let decision_b = controller
             .decide_for_posterior_with_context(
                 principal_b,
                 0.91,
@@ -802,9 +843,12 @@ mod tests {
                 trace_b,
             )
             .expect("valid evidence context")
-            .expect("decision b")
-            .signed_evidence
-            .signature;
+            .expect("decision b");
+        let signature_a = decision_a.signed_evidence.signature.clone();
+        let mut signed_b = decision_b.signed_evidence;
+        signed_b.decision_id = decision_a.signed_evidence.decision_id.clone();
+        signed_b.issued_at_ms = decision_a.signed_evidence.issued_at_ms;
+        let signature_b = controller.sign_evidence(&signed_b);
 
         assert_ne!(signature_a, signature_b);
     }
@@ -924,6 +968,73 @@ mod tests {
         decision.signed_evidence.principal_id = "ext:b".to_string();
 
         assert!(!controller.verify_signature(&decision.signed_evidence));
+    }
+
+    #[test]
+    fn signature_verification_detects_decision_id_tampering() {
+        let controller = QuarantineController::new(QuarantineThresholdPolicy::default(), "salt")
+            .expect("controller");
+        let mut decision = signed_test_decision(&controller, "ext:a", 0.91, "trace-a");
+
+        decision.signed_evidence.decision_id = Uuid::now_v7().to_string();
+
+        assert!(!controller.verify_signature(&decision.signed_evidence));
+    }
+
+    #[test]
+    fn signature_verification_detects_issued_at_tampering() {
+        let controller = QuarantineController::new(QuarantineThresholdPolicy::default(), "salt")
+            .expect("controller");
+        let mut decision = signed_test_decision(&controller, "ext:a", 0.91, "trace-a");
+
+        decision.signed_evidence.issued_at_ms =
+            decision.signed_evidence.issued_at_ms.saturating_add(1);
+
+        assert!(!controller.verify_signature(&decision.signed_evidence));
+    }
+
+    #[test]
+    fn signature_verification_rejects_non_v7_decision_id_even_if_signed() {
+        let controller = QuarantineController::new(QuarantineThresholdPolicy::default(), "salt")
+            .expect("controller");
+        let mut decision = signed_test_decision(&controller, "ext:a", 0.91, "trace-a");
+        decision.signed_evidence.decision_id = Uuid::nil().to_string();
+        decision.signed_evidence.signature = controller.sign_evidence(&decision.signed_evidence);
+
+        assert!(!controller.verify_signature(&decision.signed_evidence));
+    }
+
+    #[test]
+    fn signed_decision_verification_rejects_expired_replay() {
+        let controller = QuarantineController::new(QuarantineThresholdPolicy::default(), "salt")
+            .expect("controller");
+        let decision = signed_test_decision(&controller, "ext:a", 0.91, "trace-a");
+        let issued_at_ms = decision.signed_evidence.issued_at_ms;
+
+        assert!(controller.verify_signed_decision(
+            &decision.signed_evidence,
+            issued_at_ms.saturating_add(999),
+            1_000
+        ));
+        assert!(!controller.verify_signed_decision(
+            &decision.signed_evidence,
+            issued_at_ms.saturating_add(1_000),
+            1_000
+        ));
+    }
+
+    #[test]
+    fn signed_decision_verification_rejects_future_issued_entry() {
+        let controller = QuarantineController::new(QuarantineThresholdPolicy::default(), "salt")
+            .expect("controller");
+        let decision = signed_test_decision(&controller, "ext:a", 0.91, "trace-a");
+        let issued_at_ms = decision.signed_evidence.issued_at_ms;
+
+        assert!(!controller.verify_signed_decision(
+            &decision.signed_evidence,
+            issued_at_ms.saturating_sub(1),
+            1_000
+        ));
     }
 
     #[test]

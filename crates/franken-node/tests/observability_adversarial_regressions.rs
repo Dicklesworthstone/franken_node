@@ -52,6 +52,59 @@ fn quarantine_controller_debug_redacts_hmac_signing_key() {
 }
 
 #[test]
+fn quarantine_controller_signed_evidence_binds_fresh_identity_and_age() {
+    let controller = quarantine_controller();
+    let first = quarantine_decision(&controller, "ext:fresh", 0.91, "trace-fresh");
+    let second = quarantine_decision(&controller, "ext:fresh", 0.91, "trace-fresh");
+
+    let decision_id = uuid::Uuid::parse_str(&first.signed_evidence.decision_id)
+        .expect("decision id should be a UUID");
+    assert_eq!(decision_id.get_version(), Some(uuid::Version::SortRand));
+    assert_ne!(
+        first.signed_evidence.decision_id,
+        second.signed_evidence.decision_id
+    );
+    assert_ne!(
+        first.signed_evidence.signature,
+        second.signed_evidence.signature
+    );
+    assert!(first.signed_evidence.issued_at_ms > 0);
+    assert!(controller.verify_signature(&first.signed_evidence));
+
+    let issued_at_ms = first.signed_evidence.issued_at_ms;
+    assert!(controller.verify_signed_decision(
+        &first.signed_evidence,
+        issued_at_ms.saturating_add(999),
+        1_000
+    ));
+    assert!(!controller.verify_signed_decision(
+        &first.signed_evidence,
+        issued_at_ms.saturating_add(1_000),
+        1_000
+    ));
+    assert!(!controller.verify_signed_decision(
+        &first.signed_evidence,
+        issued_at_ms.saturating_sub(1),
+        1_000
+    ));
+}
+
+#[test]
+fn quarantine_controller_signed_evidence_rejects_freshness_field_tampering() {
+    let controller = quarantine_controller();
+    let mut decision = quarantine_decision(&controller, "ext:tamper", 0.91, "trace-tamper");
+
+    assert!(controller.verify_signature(&decision.signed_evidence));
+
+    decision.signed_evidence.decision_id = uuid::Uuid::now_v7().to_string();
+    assert!(!controller.verify_signature(&decision.signed_evidence));
+
+    let mut decision = quarantine_decision(&controller, "ext:tamper", 0.91, "trace-tamper");
+    decision.signed_evidence.issued_at_ms = decision.signed_evidence.issued_at_ms.saturating_add(1);
+    assert!(!controller.verify_signature(&decision.signed_evidence));
+}
+
+#[test]
 fn observability_adversarial_regressions_locator_injection_attacks_fail_closed() {
     for locator in malicious_replay_bundle_locators() {
         let entry = obs_entry("obs-locator-injection", DecisionKind::Quarantine);
