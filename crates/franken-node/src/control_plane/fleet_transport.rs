@@ -10,7 +10,7 @@ use std::{
     fs::{self, File, OpenOptions, TryLockError},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{Condvar, Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
@@ -974,42 +974,63 @@ impl Drop for TempFileGuard {
     }
 }
 
-fn fleet_action_compaction_registry() -> &'static Mutex<BTreeSet<String>> {
-    static REGISTRY: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(BTreeSet::new()))
+fn fleet_action_compaction_registry() -> &'static (Mutex<BTreeSet<PathBuf>>, Condvar) {
+    static REGISTRY: OnceLock<(Mutex<BTreeSet<PathBuf>>, Condvar)> = OnceLock::new();
+    REGISTRY.get_or_init(|| (Mutex::new(BTreeSet::new()), Condvar::new()))
 }
 
-fn fleet_action_compaction_root_key(root_dir: &Path) -> String {
-    root_dir.to_string_lossy().into_owned()
+fn fleet_action_compaction_root_key(root_dir: &Path) -> Result<PathBuf, FleetTransportError> {
+    if let Ok(canonical_root) = root_dir.canonicalize() {
+        return Ok(canonical_root);
+    }
+
+    let parent = root_dir.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = root_dir.file_name().ok_or_else(|| {
+        FleetTransportError::io(format!(
+            "fleet action compaction root has no final path component: {}",
+            root_dir.display()
+        ))
+    })?;
+    let canonical_parent = parent.canonicalize().map_err(|err| {
+        FleetTransportError::io(format!(
+            "failed canonicalizing fleet action compaction root parent {} for {}: {err}",
+            parent.display(),
+            root_dir.display()
+        ))
+    })?;
+    Ok(canonical_parent.join(Path::new(file_name)))
 }
 
 /// RAII guard for fleet action compaction process coordination
 struct FleetActionCompactionGuard {
-    root_key: String,
+    root_key: PathBuf,
 }
 
 impl Drop for FleetActionCompactionGuard {
     fn drop(&mut self) {
-        let mut registry = fleet_action_compaction_registry()
+        let (registry, ready) = fleet_action_compaction_registry();
+        let mut registry = registry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         registry.remove(&self.root_key);
+        ready.notify_all();
     }
 }
 
 fn lock_fleet_action_compaction_process(
     root_dir: &Path,
 ) -> Result<FleetActionCompactionGuard, FleetTransportError> {
-    let root_key = fleet_action_compaction_root_key(root_dir);
-    let mut registry = fleet_action_compaction_registry()
+    let root_key = fleet_action_compaction_root_key(root_dir)?;
+    let (registry, ready) = fleet_action_compaction_registry();
+    let mut registry = registry
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if !registry.insert(root_key.clone()) {
-        return Err(FleetTransportError::lock_contention(format!(
-            "fleet action compaction already in progress for {}",
-            root_dir.display()
-        )));
+    while registry.contains(&root_key) {
+        registry = ready
+            .wait(registry)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
     }
+    registry.insert(root_key.clone());
     Ok(FleetActionCompactionGuard { root_key })
 }
 
@@ -1810,7 +1831,8 @@ mod tests {
         FleetTransportError, FleetTransportLayout, MAX_ACTION_LOG_ENTRIES, MAX_ACTION_RECORD_BYTES,
         MAX_ACTION_RECORD_LINE_BYTES, MAX_NODE_ID_LEN, MAX_NODES_CAP, NodeHealth, NodeStatus,
         TempFileGuard, canonical_fleet_convergence_receipt_payload,
-        fleet_convergence_receipt_verdict, lock_retry_base_backoffs, parse_jsonl_records,
+        fleet_action_compaction_root_key, fleet_convergence_receipt_verdict,
+        lock_fleet_action_compaction_process, lock_retry_base_backoffs, parse_jsonl_records,
         push_bounded, sign_fleet_convergence_receipt_payload, validate_node_id, validate_zone_id,
         wait_until_fleet_converged_or_timeout,
     };
@@ -3092,19 +3114,35 @@ mod tests {
         let tempdir = tempdir().expect("tempdir");
         let root_a = tempdir.path().join("fleet-a");
         let root_b = tempdir.path().join("fleet-b");
+        let equivalent_root_a_parent = root_a.join("nested");
+        fs::create_dir_all(&equivalent_root_a_parent).expect("create equivalent parent");
+        let equivalent_root_a = equivalent_root_a_parent.join("..");
         let mut transport_a = FileFleetTransport::new(&root_a);
         let mut transport_b = FileFleetTransport::new(&root_b);
         transport_a.initialize().expect("initialize root a");
         transport_b.initialize().expect("initialize root b");
 
-        let _guard_a = lock_fleet_action_compaction_process(transport_a.layout.root_dir())
+        assert_eq!(
+            fleet_action_compaction_root_key(transport_a.layout.root_dir())
+                .expect("canonical root a"),
+            fleet_action_compaction_root_key(&equivalent_root_a).expect("equivalent root a")
+        );
+
+        let guard_a = lock_fleet_action_compaction_process(transport_a.layout.root_dir())
             .expect("first root guard");
-        let same_root_error = lock_fleet_action_compaction_process(transport_a.layout.root_dir())
-            .expect_err("same root must still contend");
-        assert!(matches!(
-            same_root_error,
-            FleetTransportError::LockContention { .. }
-        ));
+        let (sender, receiver) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let _guard = lock_fleet_action_compaction_process(&equivalent_root_a)
+                .expect("equivalent root guard should wait then acquire");
+            sender.send(()).expect("send equivalent acquisition");
+        });
+        assert!(
+            matches!(
+                receiver.recv_timeout(Duration::from_millis(100)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "equivalent root spelling must block behind the existing process guard"
+        );
 
         transport_b
             .publish_action(&release_action_record(
@@ -3117,6 +3155,12 @@ mod tests {
         let actions = transport_b.list_actions().expect("list actions");
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].action_id, "fleet-action-independent-root");
+
+        drop(guard_a);
+        receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("equivalent root guard should acquire after first guard drops");
+        waiter.join().expect("equivalent root waiter join");
     }
 
     #[test]
