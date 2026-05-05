@@ -1,0 +1,214 @@
+{
+  "schema_version": "franken-node/validation-broker/fixtures/v1",
+  "validation_time": "2026-05-05T14:00:00Z",
+  "valid_receipts": [
+    {
+      "schema_version": "franken-node/validation-broker/receipt/v1",
+      "receipt_id": "vbrcpt-bd-1khdi-0001",
+      "request_id": "vbreq-bd-1khdi-0001",
+      "bead_id": "bd-1khdi",
+      "thread_id": "bd-1khdi",
+      "request_ref": {
+        "request_id": "vbreq-bd-1khdi-0001",
+        "bead_id": "bd-1khdi",
+        "thread_id": "bd-1khdi",
+        "dedupe_key": {
+          "algorithm": "sha256",
+          "hex": "85250e3abcefebbd96632e02cae7078b51cdfb38cad42a3e33c9af08c4ad336e"
+        }
+      },
+      "command": {
+        "program": "cargo",
+        "argv": [
+          "+nightly-2026-02-19",
+          "test",
+          "-p",
+          "frankenengine-node",
+          "--test",
+          "migrate_cli_e2e",
+          "migrate_audit_sarif_out_writes_artifact_without_stdout_payload",
+          "--",
+          "--nocapture"
+        ],
+        "cwd": "/data/projects/franken_node",
+        "environment_policy_id": "validation-broker/env-policy/v1",
+        "target_dir_policy_id": "validation-broker/target-dir/off-repo/v1"
+      },
+      "command_digest": {
+        "algorithm": "sha256",
+        "hex": "76280eee21aa0a33ba0a575929ba0ddf71becdd36530eb0b82151f389d370f98",
+        "canonical_material": "program=cargo\u0000argv=+nightly-2026-02-19 test -p frankenengine-node --test migrate_cli_e2e migrate_audit_sarif_out_writes_artifact_without_stdout_payload -- --nocapture\u0000cwd=/data/projects/franken_node\u0000env_policy=validation-broker/env-policy/v1"
+      },
+      "environment_policy": {
+        "policy_id": "validation-broker/env-policy/v1",
+        "allowed_env": [
+          "RCH_REQUIRE_REMOTE",
+          "RCH_VISIBILITY",
+          "RCH_PRIORITY",
+          "RCH_TEST_TIMEOUT_SEC",
+          "RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS",
+          "CARGO_TARGET_DIR",
+          "CARGO_INCREMENTAL",
+          "CARGO_BUILD_JOBS"
+        ],
+        "redacted_env": [],
+        "remote_required": true,
+        "network_policy": "rch-only"
+      },
+      "target_dir_policy": {
+        "policy_id": "validation-broker/target-dir/off-repo/v1",
+        "kind": "off_repo",
+        "path": "/data/tmp/franken_node-pinkfern-bd-1khdi-target",
+        "path_digest": {
+          "algorithm": "sha256",
+          "hex": "85250e3abcefebbd96632e02cae7078b51cdfb38cad42a3e33c9af08c4ad336e"
+        },
+        "cleanup": "best_effort_after_receipt"
+      },
+      "input_digests": [
+        {
+          "path": "crates/franken-node/tests/migrate_cli_e2e.rs",
+          "algorithm": "sha256",
+          "hex": "c3031b499a5b90a73fb622350728f9d660fd22bd23bcbf506b9919d7e81ea588",
+          "source": "git-or-worktree"
+        }
+      ],
+      "rch": {
+        "mode": "remote",
+        "worker_id": "vmi1293453",
+        "require_remote": true,
+        "capability_observation_id": "vbobs-bd-1khdi-vmi1293453",
+        "worker_pool": "default"
+      },
+      "timing": {
+        "started_at": "2026-05-05T13:30:00Z",
+        "finished_at": "2026-05-05T13:52:00Z",
+        "duration_ms": 1320000,
+        "freshness_expires_at": "2026-05-06T13:52:00Z"
+      },
+      "exit": {
+        "kind": "success",
+        "code": 0,
+        "signal": null,
+        "timeout_class": "none",
+        "error_class": "none",
+        "retryable": false
+      },
+      "artifacts": {
+        "stdout_path": "artifacts/validation_broker/examples/bd-1khdi/stdout.txt",
+        "stderr_path": "artifacts/validation_broker/examples/bd-1khdi/stderr.txt",
+        "summary_path": "artifacts/validation_broker/examples/bd-1khdi/summary.md",
+        "receipt_path": "artifacts/validation_broker/examples/bd-1khdi/receipt.json",
+        "stdout_digest": {
+          "algorithm": "sha256",
+          "hex": "91c83dc33efac370fbe1168f1f5620e70e2f61df6a39758bc4481ae3b5e5bf57"
+        },
+        "stderr_digest": {
+          "algorithm": "sha256",
+          "hex": "2da76113302b37e648c800addca9ceb1edbe6102234240fa9ba3dfcbc08ee35a"
+        }
+      },
+      "trust": {
+        "generated_by": "validation-broker",
+        "agent_name": "PinkFern",
+        "git_commit": "eb0a4481",
+        "dirty_worktree": false,
+        "freshness": "fresh",
+        "signature_status": "unsigned-fixture"
+      },
+      "classifications": {
+        "source_only_fallback": false,
+        "source_only_reason": null,
+        "doctor_readiness": "ready",
+        "ci_consumable": true
+      }
+    }
+  ],
+  "invalid_receipts": [
+    {
+      "case": "malformed_receipt",
+      "expected_error": "ERR_VB_MALFORMED_RECEIPT",
+      "receipt": [
+        "not",
+        "an",
+        "object"
+      ]
+    },
+    {
+      "case": "missing_command_digest",
+      "expected_error": "ERR_VB_MISSING_COMMAND_DIGEST",
+      "patch": {
+        "remove": [
+          "command_digest"
+        ]
+      }
+    },
+    {
+      "case": "stale_timestamp",
+      "expected_error": "ERR_VB_STALE_RECEIPT",
+      "patch": {
+        "set": {
+          "timing.freshness_expires_at": "2026-05-04T13:52:00Z"
+        }
+      }
+    },
+    {
+      "case": "mismatched_beads_id",
+      "expected_error": "ERR_VB_BEAD_MISMATCH",
+      "patch": {
+        "set": {
+          "bead_id": "bd-wrong",
+          "thread_id": "bd-wrong"
+        }
+      }
+    },
+    {
+      "case": "invalid_timeout_class",
+      "expected_error": "ERR_VB_INVALID_TIMEOUT_CLASS",
+      "patch": {
+        "set": {
+          "exit.kind": "timeout",
+          "exit.timeout_class": "made_up_timeout"
+        }
+      }
+    }
+  ],
+  "timeout_class_examples": [
+    {
+      "timeout_class": "none",
+      "exit_kind": "success"
+    },
+    {
+      "timeout_class": "queue_wait",
+      "exit_kind": "timeout"
+    },
+    {
+      "timeout_class": "rch_dispatch",
+      "exit_kind": "timeout"
+    },
+    {
+      "timeout_class": "ssh_command",
+      "exit_kind": "timeout"
+    },
+    {
+      "timeout_class": "cargo_test_timeout",
+      "exit_kind": "timeout"
+    },
+    {
+      "timeout_class": "process_idle",
+      "exit_kind": "timeout"
+    },
+    {
+      "timeout_class": "process_wall",
+      "exit_kind": "timeout"
+    },
+    {
+      "timeout_class": "worker_unreachable",
+      "exit_kind": "timeout"
+    },
+    {
+      "timeout_class": "unknown",
+      "exit_kind": "timeout"
+    }
+  ]
+}
