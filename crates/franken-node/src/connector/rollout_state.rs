@@ -348,14 +348,15 @@ fn persist_lock_registry() -> &'static Mutex<BTreeMap<PathBuf, Weak<Mutex<()>>>>
 /// Serialize concurrent rollout `persist()` calls targeting the same state file.
 ///
 /// Canonical lifecycle: callers first acquire the path-scoped cross-process
-/// flock file, then acquire this process-local mutex keyed by the canonical lock
-/// path before reading the current state, reserving the obligation, writing the
-/// temp file, renaming it into place, and committing the obligation. The guard
-/// releases on every return path after any temp-file orphaning attempt. No
-/// other module persist lock may be acquired before this lock pair. If either
-/// lock is left held or poisoned, rollout state version checks and obligation
-/// commits for that same persisted path stall or fail before a new temp file is
-/// written, but unrelated rollout files should keep making progress.
+/// flock file, then acquire this process-local mutex keyed by the canonical
+/// parent directory plus lock filename before reading the current state,
+/// reserving the obligation, writing the temp file, renaming it into place, and
+/// committing the obligation. The guard releases on every return path after any
+/// temp-file orphaning attempt. No other module persist lock may be acquired
+/// before this lock pair. If either lock is left held or poisoned, rollout state
+/// version checks and obligation commits for that same persisted path stall or
+/// fail before a new temp file is written, but unrelated rollout files should
+/// keep making progress.
 fn persist_lock_path(path: &Path) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let file_name = path
@@ -365,10 +366,29 @@ fn persist_lock_path(path: &Path) -> PathBuf {
     parent.join(format!("{file_name}.lock"))
 }
 
-fn persist_lock(path: &Path) -> Result<Arc<Mutex<()>>, PersistError> {
-    let lock_key = persist_lock_path(path)
+fn persist_lock_registry_key(path: &Path) -> Result<PathBuf, PersistError> {
+    let lock_path = persist_lock_path(path);
+    let lock_parent = lock_path.parent().unwrap_or_else(|| Path::new("."));
+    let canonical_parent = lock_parent
         .canonicalize()
-        .unwrap_or_else(|_| persist_lock_path(path));
+        .map_err(|err| PersistError::IoError {
+            message: format!(
+                "failed canonicalizing rollout persist lock parent {} for {}: {err}",
+                lock_parent.display(),
+                path.display()
+            ),
+        })?;
+    let lock_file_name = lock_path.file_name().ok_or_else(|| PersistError::IoError {
+        message: format!(
+            "rollout persist lock path has no file name: {}",
+            lock_path.display()
+        ),
+    })?;
+    Ok(canonical_parent.join(Path::new(lock_file_name)))
+}
+
+fn persist_lock(path: &Path) -> Result<Arc<Mutex<()>>, PersistError> {
+    let lock_key = persist_lock_registry_key(path)?;
     persist_lock_registry()
         .lock()
         .map_err(|_| PersistError::IoError {
@@ -697,6 +717,11 @@ fn persist_error_with_orphan_result(
             message: format!("{primary_message}; temp orphan failed with {other}"),
         },
     }
+}
+
+#[cfg(feature = "test-support")]
+pub fn persist_lock_registry_key_for_test(path: &Path) -> Result<PathBuf, PersistError> {
+    persist_lock_registry_key(path)
 }
 
 #[cfg(feature = "test-support")]
@@ -1078,6 +1103,38 @@ mod tests {
             .expect("path A persist thread should complete")
             .expect("persist for path A should succeed after rename resumes");
         assert_eq!(load(&path_a).unwrap(), state_a);
+    }
+
+    #[test]
+    fn persist_lock_registry_key_is_stable_before_lock_file_exists() {
+        let dir = TempDir::new().unwrap();
+        let rollout_dir = dir.path().join("rollouts").join("primary");
+        std::fs::create_dir_all(&rollout_dir).expect("create rollout dir");
+        let path = rollout_dir.join("state.json");
+        let equivalent_path = rollout_dir.join("..").join("primary").join("state.json");
+        let canonical_path = rollout_dir
+            .canonicalize()
+            .expect("canonicalize rollout dir")
+            .join("state.json");
+
+        assert!(
+            !persist_lock_path(&equivalent_path).exists(),
+            "regression must derive one registry key before the lock file exists"
+        );
+
+        let via_equivalent =
+            persist_lock(&equivalent_path).expect("process mutex through equivalent path");
+        let via_canonical =
+            persist_lock(&canonical_path).expect("process mutex through canonical path");
+
+        assert!(
+            Arc::ptr_eq(&via_equivalent, &via_canonical),
+            "equivalent rollout-state paths must share one process mutex before the lock file exists"
+        );
+        assert!(
+            !path.exists(),
+            "test must not depend on the state file existing"
+        );
     }
 
     #[test]

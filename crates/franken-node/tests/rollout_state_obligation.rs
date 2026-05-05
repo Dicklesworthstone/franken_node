@@ -5,7 +5,7 @@ use frankenengine_node::connector::obligation_tracker::{
 };
 use frankenengine_node::connector::region_ownership::{RegionError, atomic_next_for_test};
 use frankenengine_node::connector::rollout_state::{
-    PersistError, RolloutPhase, RolloutState,
+    PersistError, RolloutPhase, RolloutState, persist_lock_registry_key_for_test,
     persist_with_obligation_tracker_and_rename_and_orphan_for_test,
     persist_with_obligation_tracker_and_rename_for_test, persist_with_obligation_tracker_for_test,
 };
@@ -75,6 +75,36 @@ fn rollout_persist_commits_two_phase_obligation() {
     let audit = tracker.export_audit_log_jsonl();
     assert!(audit.contains(event_codes::OBL_RESERVED));
     assert!(audit.contains(event_codes::OBL_COMMITTED));
+}
+
+#[test]
+fn rollout_persist_lock_key_is_stable_before_lock_file_exists() {
+    let dir = TempDir::new().unwrap();
+    let rollout_dir = dir.path().join("rollouts").join("primary");
+    std::fs::create_dir_all(&rollout_dir).expect("create rollout dir");
+    let equivalent_path = rollout_dir.join("..").join("primary").join("state.json");
+    let canonical_path = rollout_dir
+        .canonicalize()
+        .expect("canonicalize rollout dir")
+        .join("state.json");
+
+    assert!(
+        !rollout_dir.join("state.json.lock").exists(),
+        "regression must derive the registry key before the lock file exists"
+    );
+
+    let equivalent_key =
+        persist_lock_registry_key_for_test(&equivalent_path).expect("equivalent key");
+    let canonical_key = persist_lock_registry_key_for_test(&canonical_path).expect("canonical key");
+
+    assert_eq!(equivalent_key, canonical_key);
+    assert_eq!(
+        equivalent_key,
+        rollout_dir
+            .canonicalize()
+            .expect("canonicalize expected key dir")
+            .join("state.json.lock")
+    );
 }
 
 #[test]
