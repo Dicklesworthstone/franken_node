@@ -15,6 +15,48 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     crate::security::constant_time::ct_eq(a, b)
 }
 
+fn update_decimal(hasher: &mut Sha256, mut value: u128) {
+    if value == 0 {
+        hasher.update(b"0");
+        return;
+    }
+
+    let mut buffer = [0u8; 39];
+    let mut cursor = buffer.len();
+    while value != 0 {
+        cursor -= 1;
+        let digit = match value % 10 {
+            0 => b'0',
+            1 => b'1',
+            2 => b'2',
+            3 => b'3',
+            4 => b'4',
+            5 => b'5',
+            6 => b'6',
+            7 => b'7',
+            8 => b'8',
+            _ => b'9',
+        };
+        if let Some(slot) = buffer.get_mut(cursor) {
+            *slot = digit;
+        }
+        value /= 10;
+    }
+    if let Some(digits) = buffer.get(cursor..) {
+        hasher.update(digits);
+    }
+}
+
+fn update_len_prefixed_text(hasher: &mut Sha256, value: &str) {
+    update_decimal(hasher, value.len() as u128);
+    hasher.update(b":");
+    hasher.update(value.as_bytes());
+}
+
+fn update_u64_text(hasher: &mut Sha256, value: u64) {
+    update_decimal(hasher, u128::from(value));
+}
+
 use super::fork_detection::{
     DetectionResult, DivergenceDetector, DivergenceLogEvent, MarkerProofVerifier, RollbackProof,
     StateVector,
@@ -485,24 +527,21 @@ impl OperatorAuthorization {
     ) -> String {
         let mut hasher = Sha256::new();
         hasher.update(b"divergence_gate_auth_v3:");
-        let canonical = format!(
-            "{}:{}|{}:{}|{}:{}|{}|{}|{}:{}|{}:{}|{}:{}",
-            operator_id.len(),
-            operator_id,
-            key_id.len(),
-            key_id,
-            operator_key_fingerprint.len(),
-            operator_key_fingerprint,
-            resync_checkpoint_epoch,
-            timestamp,
-            nonce.len(),
-            nonce,
-            divergence_fingerprint.len(),
-            divergence_fingerprint,
-            reason.len(),
-            reason
-        );
-        hasher.update(canonical.as_bytes());
+        update_len_prefixed_text(&mut hasher, operator_id);
+        hasher.update(b"|");
+        update_len_prefixed_text(&mut hasher, key_id);
+        hasher.update(b"|");
+        update_len_prefixed_text(&mut hasher, operator_key_fingerprint);
+        hasher.update(b"|");
+        update_u64_text(&mut hasher, resync_checkpoint_epoch);
+        hasher.update(b"|");
+        update_u64_text(&mut hasher, timestamp);
+        hasher.update(b"|");
+        update_len_prefixed_text(&mut hasher, nonce);
+        hasher.update(b"|");
+        update_len_prefixed_text(&mut hasher, divergence_fingerprint);
+        hasher.update(b"|");
+        update_len_prefixed_text(&mut hasher, reason);
         hex::encode(hasher.finalize())
     }
 
@@ -690,18 +729,15 @@ impl ActiveDivergence {
     pub fn authorization_fingerprint(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(b"divergence_gate_active_v1:");
-        let canonical = format!(
-            "{}:{}|{}|{}:{}|{}:{}|{}",
-            self.detection_result.len(),
-            self.detection_result,
-            self.fork_epoch,
-            self.local_hash.len(),
-            self.local_hash,
-            self.remote_hash.len(),
-            self.remote_hash,
-            self.detected_at
-        );
-        hasher.update(canonical.as_bytes());
+        update_len_prefixed_text(&mut hasher, &self.detection_result);
+        hasher.update(b"|");
+        update_u64_text(&mut hasher, self.fork_epoch);
+        hasher.update(b"|");
+        update_len_prefixed_text(&mut hasher, &self.local_hash);
+        hasher.update(b"|");
+        update_len_prefixed_text(&mut hasher, &self.remote_hash);
+        hasher.update(b"|");
+        update_u64_text(&mut hasher, self.detected_at);
         hex::encode(hasher.finalize())
     }
 }
@@ -1349,8 +1385,9 @@ impl Default for ControlPlaneDivergenceGate {
 #[cfg(test)]
 mod tests {
     use super::{
-        ControlPlaneDivergenceGate, DetectionResult, DivergenceGateError, GateState, MutationKind,
-        OperatorAuthorization, OperatorAuthorizationKeyRecord, StateVector, event_codes,
+        ActiveDivergence, ControlPlaneDivergenceGate, DetectionResult, DivergenceGateError,
+        GateState, MutationKind, OperatorAuthorization, OperatorAuthorizationKeyRecord,
+        StateVector, event_codes,
     };
 
     fn make_sv(epoch: u64, state: &str, parent: &str, node: &str) -> StateVector {
@@ -1924,6 +1961,52 @@ mod tests {
     fn test_operator_authorization_verify() {
         let auth = OperatorAuthorization::new("op-1", 50, 3000, "reason", b"test-key");
         assert!(auth.verify(&auth_key(&auth, b"test-key")));
+    }
+
+    #[test]
+    fn test_operator_authorization_hash_contract_is_stable() {
+        let auth = OperatorAuthorization::new_with_divergence_fingerprint(
+            "op-1",
+            "operator-key-a",
+            50,
+            3000,
+            "nonce-0001".to_string(),
+            "divergence-abc".to_string(),
+            "reason",
+            b"test-key",
+        );
+
+        assert_eq!(
+            auth.operator_key_fingerprint,
+            "66aadc917939f8cc0052d1e9788dabd9934614ca66cce0a635574376054146ad"
+        );
+        assert_eq!(
+            auth.authorization_hash,
+            "a19873004d55ef2c859b6b7535310f78d3ce25e6702d9d662a18b416ba11d70a"
+        );
+        assert_eq!(
+            auth.signature,
+            "6dbf0b5b0649c9ff4ada2ebf9b0e2766c5117dfc22a80f4f1212c0ef9a3f9fed"
+        );
+        assert!(auth.verify(&auth_key(&auth, b"test-key")));
+    }
+
+    #[test]
+    fn test_active_divergence_fingerprint_contract_is_stable() {
+        let active = ActiveDivergence {
+            detection_result: "FORKED".to_string(),
+            fork_epoch: 10,
+            local_hash: "local-hash".to_string(),
+            remote_hash: "remote-hash".to_string(),
+            detected_at: 2000,
+            proof: None,
+            response_mode: None,
+        };
+
+        assert_eq!(
+            active.authorization_fingerprint(),
+            "020e6248ac2585e089fd29c2b7b22096cd5a10a7c0a14e53eed7c3c67d001b73"
+        );
     }
 
     #[test]

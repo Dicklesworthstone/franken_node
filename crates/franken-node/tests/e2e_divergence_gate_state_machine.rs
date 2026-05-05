@@ -38,7 +38,9 @@ use frankenengine_node::control_plane::divergence_gate::{
 };
 use frankenengine_node::control_plane::fork_detection::{DetectionResult, StateVector};
 use frankenengine_node::control_plane::marker_stream::{MarkerEventType, MarkerStream};
+use hmac::{Hmac, KeyInit, Mac};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{error, info};
 
 static TEST_TRACING_INIT: Once = Once::new();
@@ -140,6 +142,58 @@ fn recovery_auth(
 
 fn auth_key(auth: &OperatorAuthorization) -> OperatorAuthorizationKeyRecord {
     OperatorAuthorizationKeyRecord::for_authorization(auth, SIGNING_KEY.to_vec())
+}
+
+fn expected_active_divergence_fingerprint(gate: &ControlPlaneDivergenceGate) -> String {
+    let active = gate.active_divergence().expect("active divergence");
+    let canonical = format!(
+        "{}:{}|{}|{}:{}|{}:{}|{}",
+        active.detection_result.len(),
+        active.detection_result,
+        active.fork_epoch,
+        active.local_hash.len(),
+        active.local_hash,
+        active.remote_hash.len(),
+        active.remote_hash,
+        active.detected_at
+    );
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"divergence_gate_active_v1:");
+    hasher.update(canonical.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn expected_authorization_hash(auth: &OperatorAuthorization) -> String {
+    let canonical = format!(
+        "{}:{}|{}:{}|{}:{}|{}|{}|{}:{}|{}:{}|{}:{}",
+        auth.operator_id.len(),
+        auth.operator_id,
+        auth.key_id.len(),
+        auth.key_id,
+        auth.operator_key_fingerprint.len(),
+        auth.operator_key_fingerprint,
+        auth.resync_checkpoint_epoch,
+        auth.timestamp,
+        auth.nonce.len(),
+        auth.nonce,
+        auth.divergence_fingerprint.len(),
+        auth.divergence_fingerprint,
+        auth.reason.len(),
+        auth.reason
+    );
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"divergence_gate_auth_v3:");
+    hasher.update(canonical.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn expected_authorization_signature(auth: &OperatorAuthorization) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(SIGNING_KEY).expect("HMAC key is valid");
+    mac.update(b"divergence_gate_sign_v1:");
+    mac.update(auth.authorization_hash.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
 }
 
 #[test]
@@ -369,6 +423,39 @@ fn e2e_divergence_gate_recover_with_authorized_operator() {
 }
 
 #[test]
+fn e2e_divergence_gate_authorization_hash_uses_stable_canonical_text_contract() {
+    let h =
+        Harness::new("e2e_divergence_gate_authorization_hash_uses_stable_canonical_text_contract");
+
+    let mut gate = ControlPlaneDivergenceGate::new("node-A");
+    let local = sv("node-A", 4, "payload-4", "parent-4");
+    let remote = sv("node-B", 5, "payload-5", "WRONG-parent-not-matching-4");
+    let (result, _, _) = gate.check_propagation(&local, &remote, 1_745_750_004, "trace-r0");
+    assert_eq!(result, DetectionResult::RollbackDetected);
+    assert_eq!(gate.state(), GateState::Diverged);
+
+    let active = gate.active_divergence().expect("active divergence");
+    assert_eq!(
+        active.authorization_fingerprint(),
+        expected_active_divergence_fingerprint(&gate)
+    );
+    h.log_phase("active_divergence_fingerprint_stable", true, json!({}));
+
+    let auth = recovery_auth(
+        &gate,
+        "operator-prod-1",
+        12,
+        1_745_750_100,
+        "operator-approved-recovery",
+    );
+
+    assert_eq!(auth.authorization_hash, expected_authorization_hash(&auth));
+    assert_eq!(auth.signature, expected_authorization_signature(&auth));
+    assert!(auth.verify(&auth_key(&auth)));
+    h.log_phase("authorization_hash_and_signature_stable", true, json!({}));
+}
+
+#[test]
 fn e2e_divergence_gate_rejects_mismatched_authorization_key_id() {
     let h = Harness::new("e2e_divergence_gate_rejects_mismatched_authorization_key_id");
 
@@ -418,7 +505,12 @@ fn e2e_divergence_gate_recover_rejects_tampered_authorization() -> Result<(), St
     let mut auth = recovery_auth(&gate, "operator-rogue", 12, 1_745_750_100, "rogue-recovery");
     // Tamper a hex char in the authorization_hash.
     let mut chars: Vec<char> = auth.authorization_hash.chars().collect();
-    chars[0] = if chars[0] == '0' { '1' } else { '0' };
+    if let Some(first) = chars.first_mut() {
+        *first = match *first {
+            '0' => '1',
+            _ => '0',
+        };
+    }
     auth.authorization_hash = chars.into_iter().collect();
     assert!(
         !auth.verify(&auth_key(&auth)),
