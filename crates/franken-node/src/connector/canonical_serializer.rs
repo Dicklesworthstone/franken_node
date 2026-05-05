@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
 
 use super::trust_object_id::DomainPrefix;
@@ -130,6 +130,38 @@ pub struct CanonicalSchema {
     pub version: u8,
     /// Whether floating-point fields are explicitly forbidden.
     pub no_float: bool,
+}
+
+#[derive(Debug, Clone)]
+struct RegisteredCanonicalSchema {
+    schema: CanonicalSchema,
+    field_lookup: BTreeSet<String>,
+    min_object_capacity: usize,
+}
+
+impl RegisteredCanonicalSchema {
+    fn new(schema: CanonicalSchema) -> Self {
+        let field_lookup = schema.field_order.iter().cloned().collect();
+        let min_object_capacity = estimate_canonical_object_capacity(&schema.field_order);
+        Self {
+            schema,
+            field_lookup,
+            min_object_capacity,
+        }
+    }
+
+    fn contains_field(&self, field: &str) -> bool {
+        self.field_lookup.contains(field)
+    }
+}
+
+fn estimate_canonical_object_capacity(field_order: &[String]) -> usize {
+    let comma_count = field_order.len().saturating_sub(1);
+    field_order
+        .iter()
+        .fold(2usize.saturating_add(comma_count), |capacity, field| {
+            capacity.saturating_add(field.len()).saturating_add(3) // two quotes plus one colon
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -320,7 +352,7 @@ impl std::fmt::Display for SerializerError {
 /// Serialization uses sorted keys, fixed-width integers in big-endian,
 /// length-prefixed byte strings, and no optional whitespace.
 pub struct CanonicalSerializer {
-    schemas: BTreeMap<TrustObjectType, CanonicalSchema>,
+    schemas: BTreeMap<TrustObjectType, RegisteredCanonicalSchema>,
     events: Vec<SerializerEvent>,
 }
 
@@ -344,7 +376,8 @@ impl CanonicalSerializer {
 
     /// Register a schema for a trust object type.
     pub fn register_schema(&mut self, schema: CanonicalSchema) {
-        self.schemas.insert(schema.object_type, schema);
+        self.schemas
+            .insert(schema.object_type, RegisteredCanonicalSchema::new(schema));
     }
 
     /// Number of registered schemas.
@@ -354,7 +387,9 @@ impl CanonicalSerializer {
 
     /// Get schema for a type.
     pub fn get_schema(&self, object_type: TrustObjectType) -> Option<&CanonicalSchema> {
-        self.schemas.get(&object_type)
+        self.schemas
+            .get(&object_type)
+            .map(|registered| &registered.schema)
     }
 
     /// Get all recorded events.
@@ -376,12 +411,13 @@ impl CanonicalSerializer {
         payload: &[u8],
         trace_id: &str,
     ) -> Result<Vec<u8>, SerializerError> {
-        let schema =
+        let registered_schema =
             self.schemas
                 .get(&object_type)
                 .ok_or_else(|| SerializerError::SchemaNotFound {
                     object_type: object_type.label().to_string(),
                 })?;
+        let schema = &registered_schema.schema;
 
         // INV-CAN-NO-FLOAT: reject payloads containing float indicators
         if contains_float_marker(payload) {
@@ -426,15 +462,15 @@ impl CanonicalSerializer {
         value: &Value,
         trace_id: &str,
     ) -> Result<Vec<u8>, SerializerError> {
-        let schema =
+        let registered_schema =
             self.schemas
                 .get(&object_type)
                 .ok_or_else(|| SerializerError::SchemaNotFound {
                     object_type: object_type.label().to_string(),
                 })?;
 
-        let domain_tag = schema.domain_tag;
-        let canonical_payload = canonicalize_schema_value(schema, value)?;
+        let domain_tag = registered_schema.schema.domain_tag;
+        let canonical_payload = canonicalize_schema_value(registered_schema, value)?;
         let canonical = canonical_encode(&canonical_payload)?;
 
         let hash_prefix = content_hash_prefix(&canonical);
@@ -512,15 +548,15 @@ impl CanonicalSerializer {
         payload: &[u8],
         trace_id: &str,
     ) -> Result<SignaturePreimage, SerializerError> {
-        let schema =
+        let registered_schema =
             self.schemas
                 .get(&object_type)
                 .ok_or_else(|| SerializerError::SchemaNotFound {
                     object_type: object_type.label().to_string(),
                 })?;
 
-        let version = schema.version;
-        let domain_tag = schema.domain_tag;
+        let version = registered_schema.schema.version;
+        let domain_tag = registered_schema.schema.domain_tag;
         let canonical = self.serialize(object_type, payload, trace_id)?;
 
         let preimage = SignaturePreimage::build(version, domain_tag, canonical);
@@ -707,9 +743,10 @@ fn canonical_decode(bytes: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 fn canonicalize_schema_value(
-    schema: &CanonicalSchema,
+    registered_schema: &RegisteredCanonicalSchema,
     value: &Value,
 ) -> Result<Vec<u8>, SerializerError> {
+    let schema = &registered_schema.schema;
     let object = value
         .as_object()
         .ok_or_else(|| SerializerError::NonCanonicalInput {
@@ -718,7 +755,7 @@ fn canonicalize_schema_value(
         })?;
 
     for field in object.keys() {
-        if !schema.field_order.iter().any(|expected| expected == field) {
+        if !registered_schema.contains_field(field) {
             return Err(SerializerError::NonCanonicalInput {
                 object_type: schema.object_type.label().to_string(),
                 reason: format!("unknown field `{field}` outside canonical schema"),
@@ -726,7 +763,7 @@ fn canonicalize_schema_value(
         }
     }
 
-    let mut canonical = Vec::new();
+    let mut canonical = Vec::with_capacity(registered_schema.min_object_capacity);
     canonical.push(b'{');
     for (index, field) in schema.field_order.iter().enumerate() {
         let field_value = object

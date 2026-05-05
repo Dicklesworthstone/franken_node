@@ -1,7 +1,8 @@
 use frankenengine_node::connector::canonical_serializer::{
-    CanonicalSerializationRequest, TrustObjectType, canonical_serialization_round_trips,
-    error_codes,
+    CanonicalSchema, CanonicalSerializationRequest, CanonicalSerializer, TrustObjectType,
+    canonical_serialization_round_trips, error_codes,
 };
+use serde_json::{Map, Value};
 
 const POLICY_CHECKPOINT_PREIMAGE_GOLDEN_HEX: &str =
     include_str!("goldens/canonical_serializer/policy_checkpoint_preimage.hex");
@@ -60,6 +61,52 @@ fn canonical_serializer_propagates_noncanonical_input_error() {
     let err = canonical_serialization_round_trips(&[request]).unwrap_err();
 
     assert_eq!(err.code(), error_codes::ERR_CAN_NON_CANONICAL);
+}
+
+#[test]
+fn canonical_serializer_round_trips_large_registered_schema() {
+    let fields: Vec<String> = (0..128).map(|index| format!("field_{index:03}")).collect();
+    let schema = CanonicalSchema {
+        object_type: TrustObjectType::PolicyCheckpoint,
+        field_order: fields.clone(),
+        domain_tag: TrustObjectType::PolicyCheckpoint.domain_tag(),
+        version: 1,
+        no_float: true,
+    };
+    let mut serializer = CanonicalSerializer::new();
+    serializer.register_schema(schema);
+
+    let mut object = Map::new();
+    for field in &fields {
+        object.insert(field.clone(), Value::String("value".to_string()));
+    }
+
+    let canonical = serializer
+        .serialize_value(
+            TrustObjectType::PolicyCheckpoint,
+            &Value::Object(object.clone()),
+            "large-schema",
+        )
+        .expect("large registered schema should serialize");
+    let decoded = decode_len_prefixed(&canonical);
+    let decoded_text = std::str::from_utf8(decoded).expect("canonical JSON should be UTF-8");
+    let expected_body = fields
+        .iter()
+        .map(|field| format!(r#""{field}":"value""#))
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(decoded_text, format!("{{{expected_body}}}"));
+
+    object.insert("zz_unknown".to_string(), Value::Bool(true));
+    let err = serializer
+        .serialize_value(
+            TrustObjectType::PolicyCheckpoint,
+            &Value::Object(object),
+            "large-schema-unknown",
+        )
+        .expect_err("unknown fields outside the cached schema should be rejected");
+    assert_eq!(err.code(), error_codes::ERR_CAN_NON_CANONICAL);
+    assert!(err.to_string().contains("unknown field `zz_unknown`"));
 }
 
 #[test]
