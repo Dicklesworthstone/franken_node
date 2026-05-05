@@ -740,12 +740,14 @@ fn prepared_event_sort_key(
 fn compute_same_timestamp_causal_depths(prepared: &[PreparedEvent]) -> Vec<u64> {
     let mut depths = vec![None; prepared.len()];
     let mut visiting_epoch = vec![0_usize; prepared.len()];
+    let mut computed = Vec::with_capacity(prepared.len());
     for index in 0..prepared.len() {
         let epoch = index.saturating_add(1);
-        let _ =
+        let depth =
             same_timestamp_causal_depth(index, prepared, &mut depths, &mut visiting_epoch, epoch);
+        computed.push(depth);
     }
-    depths.into_iter().map(|depth| depth.unwrap_or(0)).collect()
+    computed
 }
 
 fn same_timestamp_causal_depth(

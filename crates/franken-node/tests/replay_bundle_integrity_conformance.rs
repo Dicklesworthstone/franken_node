@@ -325,6 +325,43 @@ fn replay_bundle_preserves_last_original_causal_parent_after_timestamp_sort() ->
 }
 
 #[test]
+fn replay_bundle_orders_same_timestamp_forward_parent_before_child() -> TestResult {
+    let events = vec![
+        RawEvent::new(
+            "2026-02-20T10:00:00.000100Z",
+            EventType::PolicyEval,
+            json!({"decision":"quarantine"}),
+        )
+        .with_causal_parent(2),
+        RawEvent::new(
+            "2026-02-20T10:00:00.000100Z",
+            EventType::ExternalSignal,
+            json!({"signal":"anomaly"}),
+        ),
+    ];
+
+    let bundle = generate_replay_bundle("INC-SAME-TIMESTAMP-FORWARD-PARENT", &events)
+        .map_err(|err| format!("same-timestamp forward parent bundle must build: {err}"))?;
+
+    let [parent, child] = bundle.timeline.as_slice() else {
+        return Err(format!(
+            "expected two timeline events, got {}",
+            bundle.timeline.len()
+        ));
+    };
+    assert_eq!(parent.payload, json!({"signal":"anomaly"}));
+    assert_eq!(parent.causal_parent, None);
+    assert_eq!(child.payload, json!({"decision":"quarantine"}));
+    assert_eq!(child.causal_parent, Some(1));
+    assert!(
+        validate_bundle_integrity(&bundle)
+            .map_err(|err| format!("same-timestamp forward parent bundle must validate: {err}"))?,
+        "same-timestamp forward parent bundle must pass integrity validation"
+    );
+    Ok(())
+}
+
+#[test]
 fn replay_bundle_integrity_vectors_fail_closed_on_tampering() -> TestResult {
     let vectors = conformance_vectors()?;
 
