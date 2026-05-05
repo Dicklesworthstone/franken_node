@@ -4,12 +4,13 @@
 //! evidence entries for reproducible control actions:
 //! `throttle`, `isolate`, `quarantine`, `revoke`.
 
-use std::cmp::Ordering;
+use std::{cmp::Ordering, fmt};
 
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 #[allow(unused_imports)]
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use crate::security::adversary_graph::AdversaryPosterior;
 use crate::security::constant_time;
@@ -189,10 +190,18 @@ pub struct ControlDecision {
     pub signed_evidence: SignedEvidenceEntry,
 }
 
-#[derive(Debug, Clone)]
 pub struct QuarantineController {
     policy: QuarantineThresholdPolicy,
-    signing_key: String,
+    signing_key: Zeroizing<String>,
+}
+
+impl fmt::Debug for QuarantineController {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QuarantineController")
+            .field("policy", &self.policy)
+            .field("signing_key", &"<redacted>")
+            .finish()
+    }
 }
 
 impl QuarantineController {
@@ -207,7 +216,7 @@ impl QuarantineController {
         }
         Ok(Self {
             policy,
-            signing_key,
+            signing_key: Zeroizing::new(signing_key),
         })
     }
 
@@ -514,6 +523,21 @@ mod tests {
         let err = QuarantineController::new(QuarantineThresholdPolicy::default(), "")
             .expect_err("must reject empty signing key");
         assert_eq!(err, QuarantineControllerError::InvalidSigningKey);
+    }
+
+    #[test]
+    fn debug_redacts_signing_key() {
+        let signing_key = "super-secret-quarantine-hmac-key";
+        let controller =
+            QuarantineController::new(QuarantineThresholdPolicy::default(), signing_key)
+                .expect("controller");
+
+        let debug = format!("{controller:?}");
+
+        assert!(debug.contains("QuarantineController"));
+        assert!(debug.contains("signing_key"));
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains(signing_key));
     }
 
     #[test]

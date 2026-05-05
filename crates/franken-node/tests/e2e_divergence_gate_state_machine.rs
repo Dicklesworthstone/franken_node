@@ -34,7 +34,7 @@ use std::time::Instant;
 
 use frankenengine_node::control_plane::divergence_gate::{
     ControlPlaneDivergenceGate, DivergenceGateError, GateState, MutationKind,
-    OperatorAuthorization, event_codes,
+    OperatorAuthorization, OperatorAuthorizationKeyRecord, event_codes,
 };
 use frankenengine_node::control_plane::fork_detection::{DetectionResult, StateVector};
 use frankenengine_node::control_plane::marker_stream::{MarkerEventType, MarkerStream};
@@ -118,6 +118,7 @@ fn sv(node: &str, epoch: u64, payload: &str, parent_hash: &str) -> StateVector {
 }
 
 const SIGNING_KEY: &[u8] = b"e2e-divergence-gate-hmac-key-v1";
+const SIGNING_KEY_ID: &str = "e2e-operator-key-v1";
 
 fn recovery_auth(
     gate: &ControlPlaneDivergenceGate,
@@ -126,14 +127,19 @@ fn recovery_auth(
     timestamp: u64,
     reason: &str,
 ) -> OperatorAuthorization {
-    OperatorAuthorization::new_for_active_divergence(
+    OperatorAuthorization::new_for_active_divergence_with_key_id(
         operator_id,
+        SIGNING_KEY_ID,
         gate.active_divergence().expect("active divergence"),
         checkpoint_epoch,
         timestamp,
         reason,
         SIGNING_KEY,
     )
+}
+
+fn auth_key(auth: &OperatorAuthorization) -> OperatorAuthorizationKeyRecord {
+    OperatorAuthorizationKeyRecord::for_authorization(auth, SIGNING_KEY.to_vec())
 }
 
 #[test]
@@ -338,14 +344,14 @@ fn e2e_divergence_gate_recover_with_authorized_operator() {
         "operator-approved-recovery",
     );
     assert!(
-        auth.verify(SIGNING_KEY),
+        auth.verify(&auth_key(&auth)),
         "freshly minted authorization must verify under same key"
     );
     h.log_phase("auth_built", true, json!({"operator": "operator-prod-1"}));
 
     // Recover succeeds → Normal.
     let recovery = gate
-        .respond_recover(&auth, SIGNING_KEY, 100, 1_745_750_120, "trace-rec")
+        .respond_recover(&auth, &auth_key(&auth), 100, 1_745_750_120, "trace-rec")
         .expect("recovery ok");
     assert!(recovery.success);
     assert_eq!(recovery.authorizing_operator, "operator-prod-1");
@@ -360,6 +366,41 @@ fn e2e_divergence_gate_recover_with_authorized_operator() {
     gate.check_mutation(&MutationKind::EpochTransition, 1_745_750_121, "trace-post")
         .expect("mutations allowed again post-recovery");
     h.log_phase("post_recovery_mutations_allowed", true, json!({}));
+}
+
+#[test]
+fn e2e_divergence_gate_rejects_mismatched_authorization_key_id() {
+    let h = Harness::new("e2e_divergence_gate_rejects_mismatched_authorization_key_id");
+
+    let mut gate = ControlPlaneDivergenceGate::new("node-A");
+    let local = sv("node-A", 4, "payload-4", "parent-4");
+    let remote = sv("node-B", 5, "payload-5", "WRONG-parent-not-matching-4");
+    let (result, _, _) = gate.check_propagation(&local, &remote, 1_745_750_004, "trace-key-r0");
+    assert_eq!(result, DetectionResult::RollbackDetected);
+
+    let auth = recovery_auth(
+        &gate,
+        "operator-prod-1",
+        12,
+        1_745_750_100,
+        "operator-approved-recovery",
+    );
+    let wrong_key_id = OperatorAuthorizationKeyRecord::new(
+        "operator-prod-1",
+        "e2e-operator-key-v2",
+        SIGNING_KEY.to_vec(),
+    );
+
+    assert!(!auth.verify(&wrong_key_id));
+    let err = gate
+        .respond_recover(&auth, &wrong_key_id, 100, 1_745_750_120, "trace-key-rec")
+        .expect_err("mismatched key id must reject recovery");
+    assert!(matches!(
+        err,
+        DivergenceGateError::UnauthorizedRecovery { .. }
+    ));
+    assert_eq!(gate.state(), GateState::Diverged);
+    h.log_phase("mismatched_key_id_rejected", true, json!({}));
 }
 
 #[test]
@@ -379,11 +420,17 @@ fn e2e_divergence_gate_recover_rejects_tampered_authorization() -> Result<(), St
     let mut chars: Vec<char> = auth.authorization_hash.chars().collect();
     chars[0] = if chars[0] == '0' { '1' } else { '0' };
     auth.authorization_hash = chars.into_iter().collect();
-    assert!(!auth.verify(SIGNING_KEY), "tampered auth must NOT verify");
+    assert!(!auth.verify(&auth_key(&auth)), "tampered auth must NOT verify");
     h.log_phase("auth_tampered", true, json!({}));
 
     let err = gate
-        .respond_recover(&auth, SIGNING_KEY, 100, 1_745_750_120, "trace-rec-bad")
+        .respond_recover(
+            &auth,
+            &auth_key(&auth),
+            100,
+            1_745_750_120,
+            "trace-rec-bad",
+        )
         .expect_err("tampered auth rejected");
     match err {
         DivergenceGateError::UnauthorizedRecovery { reason } => {

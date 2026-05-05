@@ -1349,7 +1349,7 @@ impl Default for ControlPlaneDivergenceGate {
 mod tests {
     use super::{
         ControlPlaneDivergenceGate, DetectionResult, DivergenceGateError, GateState, MutationKind,
-        OperatorAuthorization, StateVector, event_codes,
+        OperatorAuthorization, OperatorAuthorizationKeyRecord, StateVector, event_codes,
     };
 
     fn make_sv(epoch: u64, state: &str, parent: &str, node: &str) -> StateVector {
@@ -3532,7 +3532,8 @@ mod tests {
                         match parse_result {
                             Ok(tampered_auth) => {
                                 // If parsing succeeds, verify the auth is still validated properly
-                                let verify_result = tampered_auth.verify(b"test-key");
+                                let verify_result =
+                                    tampered_auth.verify(&auth_key(&tampered_auth, b"test-key"));
                                 // Most tampering should cause verification to fail
                                 assert!(
                                     !verify_result || tampered_auth.operator_id.contains("test"),
@@ -3668,8 +3669,8 @@ mod tests {
 
             // Verify cryptographic properties are preserved
             assert_eq!(
-                consistency_auth.verify(b"consistency-key"),
-                deserialized.verify(b"consistency-key"),
+                consistency_auth.verify(&auth_key(&consistency_auth, b"consistency-key")),
+                deserialized.verify(&auth_key(&deserialized, b"consistency-key")),
                 "Verification result should be consistent after round-trip {}",
                 round_trip
             );
@@ -3783,7 +3784,7 @@ mod tests {
 
             for _ in 0..timing_samples {
                 let start_time = std::time::Instant::now();
-                let _verify_result = timing_auth.verify(b"timing-key");
+                let _verify_result = timing_auth.verify(&auth_key(&timing_auth, b"timing-key"));
                 let verification_time = start_time.elapsed();
                 verification_times.push(verification_time);
             }
@@ -3897,7 +3898,7 @@ mod tests {
         for (malicious_auth, attack_name) in error_disclosure_attacks {
             let recovery_result = gate.respond_recover(
                 &malicious_auth,
-                b"test-key",
+                &auth_key(&malicious_auth, b"test-key"),
                 75,
                 13001,
                 &format!("error-disclosure-{}", attack_name),
@@ -3964,8 +3965,8 @@ mod tests {
             );
 
             // Test verification with same key
-            let verify_same = auth_result.verify(&test_key);
-            let verify_different = auth_result.verify(b"different-key");
+            let verify_same = auth_result.verify(&auth_key(&auth_result, &test_key));
+            let verify_different = auth_result.verify(&auth_key(&auth_result, b"different-key"));
 
             // Verification behavior should be consistent
             if test_key.is_empty() {
