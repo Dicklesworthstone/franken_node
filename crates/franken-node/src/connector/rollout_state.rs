@@ -5,7 +5,6 @@
 //! Supports versioned writes for conflict detection and deterministic
 //! recovery replay.
 
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
