@@ -592,6 +592,11 @@ name = "bench_run_e2e"
 path = "tests/bench_run_e2e.rs"
 
 [[test]]
+name = "hot_path_perf_budget_contract"
+path = "tests/hot_path_perf_budget_contract.rs"
+required-features = ["policy-engine"]
+
+[[test]]
 name = "canonical_serializer_metamorphic"
 path = "tests/canonical_serializer_metamorphic.rs"
 

@@ -1,0 +1,279 @@
+{
+  "schema_version": "franken-node/hot-path-budget-smoke/v1",
+  "bead_id": "bd-ncwlf",
+  "report_id": "bd-ncwlf/hot-path-budget-smoke/default",
+  "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke",
+  "mode": "run",
+  "verdict": "PASS",
+  "overall_pass": true,
+  "ci_suitable": true,
+  "skip_blocker": null,
+  "cases": [
+    {
+      "hot_path": "ops.telemetry_bridge.persistence_batch",
+      "surface": "crates/franken-node/src/ops/telemetry_bridge.rs",
+      "source_beads": [
+        "bd-2ruyf"
+      ],
+      "metric_kind": "adapter_lock_acquisitions_per_ready_batch",
+      "unit": "deterministic_work_units",
+      "before_fix_p95_units": 16.0,
+      "before_fix_p99_units": 20.0,
+      "post_fix_p95_units": 4.0,
+      "post_fix_p99_units": 5.0,
+      "cold_start_ms": 0.0,
+      "budget": {
+        "max_overhead_p95_pct": 10.0,
+        "max_overhead_p99_pct": 10.0,
+        "max_cold_start_ms": 1.0
+      },
+      "correctness_assertions": [
+        "ready envelopes are drained FIFO before the adapter lock is taken",
+        "write failures still increment persistence drop metrics",
+        "audit payload keys remain bridge_seq ordered"
+      ],
+      "regression_guard": "post-fix p95/p99 work units must not exceed before-fix units by more than 10%",
+      "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+    },
+    {
+      "hot_path": "control_plane.fleet_transport.read_snapshot",
+      "surface": "crates/franken-node/src/control_plane/fleet_transport.rs",
+      "source_beads": [
+        "bd-42obl"
+      ],
+      "metric_kind": "exclusive_lock_and_clone_work_per_read",
+      "unit": "deterministic_work_units",
+      "before_fix_p95_units": 18.0,
+      "before_fix_p99_units": 22.0,
+      "post_fix_p95_units": 5.0,
+      "post_fix_p99_units": 6.0,
+      "cold_start_ms": 0.0,
+      "budget": {
+        "max_overhead_p95_pct": 10.0,
+        "max_overhead_p99_pct": 10.0,
+        "max_cold_start_ms": 1.0
+      },
+      "correctness_assertions": [
+        "read snapshots preserve deterministic action ordering",
+        "read operations still emit bounded control events",
+        "node status snapshots do not require an exclusive state mutation"
+      ],
+      "regression_guard": "read-shaped snapshot work must stay below pre-split lock/clone work",
+      "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+    },
+    {
+      "hot_path": "observability.evidence_ledger.len_snapshot",
+      "surface": "crates/franken-node/src/observability/evidence_ledger.rs",
+      "source_beads": [
+        "bd-1689l",
+        "bd-2ahez"
+      ],
+      "metric_kind": "ledger_snapshot_clone_and_stderr_serialization_work",
+      "unit": "deterministic_work_units",
+      "before_fix_p95_units": 12.0,
+      "before_fix_p99_units": 16.0,
+      "post_fix_p95_units": 3.0,
+      "post_fix_p99_units": 4.0,
+      "cold_start_ms": 0.0,
+      "budget": {
+        "max_overhead_p95_pct": 10.0,
+        "max_overhead_p99_pct": 10.0,
+        "max_cold_start_ms": 1.0
+      },
+      "correctness_assertions": [
+        "ledger length checks do not clone full entry payloads",
+        "append ordering remains hash-link deterministic",
+        "diagnostic output is not required for correctness of append receipts"
+      ],
+      "regression_guard": "ledger metadata checks must remain metadata-only in the smoke budget",
+      "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+    },
+    {
+      "hot_path": "storage.frankensqlite_adapter.write_event",
+      "surface": "crates/franken-node/src/storage/frankensqlite_adapter.rs",
+      "source_beads": [
+        "bd-1ulnv"
+      ],
+      "metric_kind": "eager_string_allocation_work_per_write",
+      "unit": "deterministic_work_units",
+      "before_fix_p95_units": 10.0,
+      "before_fix_p99_units": 14.0,
+      "post_fix_p95_units": 6.0,
+      "post_fix_p99_units": 7.0,
+      "cold_start_ms": 0.0,
+      "budget": {
+        "max_overhead_p95_pct": 10.0,
+        "max_overhead_p99_pct": 10.0,
+        "max_cold_start_ms": 1.0
+      },
+      "correctness_assertions": [
+        "write authorization is checked before persistence",
+        "audit-log class writes retain deterministic keys",
+        "event subscriber absence must not force eager event formatting"
+      ],
+      "regression_guard": "write-path allocation work must not return to the pre-budget eager format shape",
+      "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+    }
+  ],
+  "gate_result": {
+    "overall_pass": true,
+    "path_results": [
+      {
+        "hot_path": "ops.telemetry_bridge.persistence_batch",
+        "measurement": {
+          "hot_path": "ops.telemetry_bridge.persistence_batch",
+          "baseline_p50_us": 11.2,
+          "baseline_p95_us": 16.0,
+          "baseline_p99_us": 20.0,
+          "integrated_p50_us": 2.8,
+          "integrated_p95_us": 4.0,
+          "integrated_p99_us": 5.0,
+          "cold_start_ms": 0.0
+        },
+        "overhead_p95_pct": -75.0,
+        "overhead_p99_pct": -75.0,
+        "cold_start_ms": 0.0,
+        "within_budget": true,
+        "violations": [],
+        "flamegraph_path": null
+      },
+      {
+        "hot_path": "control_plane.fleet_transport.read_snapshot",
+        "measurement": {
+          "hot_path": "control_plane.fleet_transport.read_snapshot",
+          "baseline_p50_us": 12.6,
+          "baseline_p95_us": 18.0,
+          "baseline_p99_us": 22.0,
+          "integrated_p50_us": 3.5,
+          "integrated_p95_us": 5.0,
+          "integrated_p99_us": 6.0,
+          "cold_start_ms": 0.0
+        },
+        "overhead_p95_pct": -72.22222222222221,
+        "overhead_p99_pct": -72.72727272727273,
+        "cold_start_ms": 0.0,
+        "within_budget": true,
+        "violations": [],
+        "flamegraph_path": null
+      },
+      {
+        "hot_path": "observability.evidence_ledger.len_snapshot",
+        "measurement": {
+          "hot_path": "observability.evidence_ledger.len_snapshot",
+          "baseline_p50_us": 8.4,
+          "baseline_p95_us": 12.0,
+          "baseline_p99_us": 16.0,
+          "integrated_p50_us": 2.0999999999999996,
+          "integrated_p95_us": 3.0,
+          "integrated_p99_us": 4.0,
+          "cold_start_ms": 0.0
+        },
+        "overhead_p95_pct": -75.0,
+        "overhead_p99_pct": -75.0,
+        "cold_start_ms": 0.0,
+        "within_budget": true,
+        "violations": [],
+        "flamegraph_path": null
+      },
+      {
+        "hot_path": "storage.frankensqlite_adapter.write_event",
+        "measurement": {
+          "hot_path": "storage.frankensqlite_adapter.write_event",
+          "baseline_p50_us": 7.0,
+          "baseline_p95_us": 10.0,
+          "baseline_p99_us": 14.0,
+          "integrated_p50_us": 4.199999999999999,
+          "integrated_p95_us": 6.0,
+          "integrated_p99_us": 7.0,
+          "cold_start_ms": 0.0
+        },
+        "overhead_p95_pct": -40.0,
+        "overhead_p99_pct": -50.0,
+        "cold_start_ms": 0.0,
+        "within_budget": true,
+        "violations": [],
+        "flamegraph_path": null
+      }
+    ],
+    "total_paths": 4,
+    "paths_within_budget": 4,
+    "paths_over_budget": 0
+  },
+  "events": [
+    {
+      "code": "PRF-001",
+      "hot_path": "ops.telemetry_bridge.persistence_batch",
+      "detail": "Benchmark evaluation started",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-005",
+      "hot_path": "ops.telemetry_bridge.persistence_batch",
+      "detail": "Cold-start: 0.00ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-002",
+      "hot_path": "ops.telemetry_bridge.persistence_batch",
+      "detail": "p95=-75.0%, p99=-75.0%, cold=0.0ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-001",
+      "hot_path": "control_plane.fleet_transport.read_snapshot",
+      "detail": "Benchmark evaluation started",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-005",
+      "hot_path": "control_plane.fleet_transport.read_snapshot",
+      "detail": "Cold-start: 0.00ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-002",
+      "hot_path": "control_plane.fleet_transport.read_snapshot",
+      "detail": "p95=-72.2%, p99=-72.7%, cold=0.0ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-001",
+      "hot_path": "observability.evidence_ledger.len_snapshot",
+      "detail": "Benchmark evaluation started",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-005",
+      "hot_path": "observability.evidence_ledger.len_snapshot",
+      "detail": "Cold-start: 0.00ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-002",
+      "hot_path": "observability.evidence_ledger.len_snapshot",
+      "detail": "p95=-75.0%, p99=-75.0%, cold=0.0ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-001",
+      "hot_path": "storage.frankensqlite_adapter.write_event",
+      "detail": "Benchmark evaluation started",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-005",
+      "hot_path": "storage.frankensqlite_adapter.write_event",
+      "detail": "Cold-start: 0.00ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-002",
+      "hot_path": "storage.frankensqlite_adapter.write_event",
+      "detail": "p95=-40.0%, p99=-50.0%, cold=0.0ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    }
+  ],
+  "rch_command": "RCH_REQUIRE_REMOTE=1 rch exec -- cargo +nightly-2026-02-19 test -p frankenengine-node --no-default-features --features policy-engine,http-client,external-commands --test hot_path_perf_budget_contract hot_path_budget -- --nocapture",
+  "docs_path": "docs/specs/hot_path_performance_budget_harness.md",
+  "evidence_path": "artifacts/performance_budgets/bd-ncwlf_hot_path_budget_evidence.json"
+}

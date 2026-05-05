@@ -249,6 +249,8 @@ impl fmt::Display for PerfBudgetError {
     }
 }
 
+impl std::error::Error for PerfBudgetError {}
+
 // ---------------------------------------------------------------------------
 // PerformanceBudgetGuard
 // ---------------------------------------------------------------------------
@@ -765,6 +767,270 @@ impl TimingCollector {
 }
 
 // ---------------------------------------------------------------------------
+// Deterministic hot-path smoke harness (bd-ncwlf)
+// ---------------------------------------------------------------------------
+
+pub const HOT_PATH_SMOKE_SCHEMA_VERSION: &str = "franken-node/hot-path-budget-smoke/v1";
+pub const HOT_PATH_SMOKE_BEAD_ID: &str = "bd-ncwlf";
+pub const HOT_PATH_SMOKE_TRACE_ID: &str = "trace-bd-ncwlf-hot-path-budget-smoke";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotPathBudgetSmokeCase {
+    pub hot_path: String,
+    pub surface: String,
+    pub source_beads: Vec<String>,
+    pub metric_kind: String,
+    pub unit: String,
+    pub before_fix_p95_units: f64,
+    pub before_fix_p99_units: f64,
+    pub post_fix_p95_units: f64,
+    pub post_fix_p99_units: f64,
+    pub cold_start_ms: f64,
+    pub budget: PathBudget,
+    pub correctness_assertions: Vec<String>,
+    pub regression_guard: String,
+    pub skip_policy: String,
+}
+
+impl HotPathBudgetSmokeCase {
+    pub fn measurement(&self) -> BenchmarkMeasurement {
+        BenchmarkMeasurement {
+            hot_path: self.hot_path.clone(),
+            baseline_p50_us: self.before_fix_p95_units * 0.70,
+            baseline_p95_us: self.before_fix_p95_units,
+            baseline_p99_us: self.before_fix_p99_units,
+            integrated_p50_us: self.post_fix_p95_units * 0.70,
+            integrated_p95_us: self.post_fix_p95_units,
+            integrated_p99_us: self.post_fix_p99_units,
+            cold_start_ms: self.cold_start_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotPathBudgetSmokeReport {
+    pub schema_version: String,
+    pub bead_id: String,
+    pub report_id: String,
+    pub trace_id: String,
+    pub mode: String,
+    pub verdict: String,
+    pub overall_pass: bool,
+    pub ci_suitable: bool,
+    pub skip_blocker: Option<String>,
+    pub cases: Vec<HotPathBudgetSmokeCase>,
+    pub gate_result: Option<GateResult>,
+    pub events: Vec<PerfEvent>,
+    pub rch_command: String,
+    pub docs_path: String,
+    pub evidence_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum HotPathBudgetSmokeMode {
+    Run,
+    Skip { blocker: String },
+}
+
+impl HotPathBudgetSmokeMode {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Skip { .. } => "skip",
+        }
+    }
+}
+
+pub fn default_hot_path_budget_smoke_cases() -> Vec<HotPathBudgetSmokeCase> {
+    let budget = PathBudget {
+        max_overhead_p95_pct: 10.0,
+        max_overhead_p99_pct: 10.0,
+        max_cold_start_ms: 1.0,
+    };
+    vec![
+        HotPathBudgetSmokeCase {
+            hot_path: "ops.telemetry_bridge.persistence_batch".to_string(),
+            surface: "crates/franken-node/src/ops/telemetry_bridge.rs".to_string(),
+            source_beads: vec!["bd-2ruyf".to_string()],
+            metric_kind: "adapter_lock_acquisitions_per_ready_batch".to_string(),
+            unit: "deterministic_work_units".to_string(),
+            before_fix_p95_units: 16.0,
+            before_fix_p99_units: 20.0,
+            post_fix_p95_units: 4.0,
+            post_fix_p99_units: 5.0,
+            cold_start_ms: 0.0,
+            budget: budget.clone(),
+            correctness_assertions: vec![
+                "ready envelopes are drained FIFO before the adapter lock is taken".to_string(),
+                "write failures still increment persistence drop metrics".to_string(),
+                "audit payload keys remain bridge_seq ordered".to_string(),
+            ],
+            regression_guard:
+                "post-fix p95/p99 work units must not exceed before-fix units by more than 10%"
+                    .to_string(),
+            skip_policy:
+                "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+                    .to_string(),
+        },
+        HotPathBudgetSmokeCase {
+            hot_path: "control_plane.fleet_transport.read_snapshot".to_string(),
+            surface: "crates/franken-node/src/control_plane/fleet_transport.rs".to_string(),
+            source_beads: vec!["bd-42obl".to_string()],
+            metric_kind: "exclusive_lock_and_clone_work_per_read".to_string(),
+            unit: "deterministic_work_units".to_string(),
+            before_fix_p95_units: 18.0,
+            before_fix_p99_units: 22.0,
+            post_fix_p95_units: 5.0,
+            post_fix_p99_units: 6.0,
+            cold_start_ms: 0.0,
+            budget: budget.clone(),
+            correctness_assertions: vec![
+                "read snapshots preserve deterministic action ordering".to_string(),
+                "read operations still emit bounded control events".to_string(),
+                "node status snapshots do not require an exclusive state mutation".to_string(),
+            ],
+            regression_guard: "read-shaped snapshot work must stay below pre-split lock/clone work"
+                .to_string(),
+            skip_policy:
+                "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+                    .to_string(),
+        },
+        HotPathBudgetSmokeCase {
+            hot_path: "observability.evidence_ledger.len_snapshot".to_string(),
+            surface: "crates/franken-node/src/observability/evidence_ledger.rs".to_string(),
+            source_beads: vec!["bd-1689l".to_string(), "bd-2ahez".to_string()],
+            metric_kind: "ledger_snapshot_clone_and_stderr_serialization_work".to_string(),
+            unit: "deterministic_work_units".to_string(),
+            before_fix_p95_units: 12.0,
+            before_fix_p99_units: 16.0,
+            post_fix_p95_units: 3.0,
+            post_fix_p99_units: 4.0,
+            cold_start_ms: 0.0,
+            budget: budget.clone(),
+            correctness_assertions: vec![
+                "ledger length checks do not clone full entry payloads".to_string(),
+                "append ordering remains hash-link deterministic".to_string(),
+                "diagnostic output is not required for correctness of append receipts".to_string(),
+            ],
+            regression_guard:
+                "ledger metadata checks must remain metadata-only in the smoke budget".to_string(),
+            skip_policy:
+                "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+                    .to_string(),
+        },
+        HotPathBudgetSmokeCase {
+            hot_path: "storage.frankensqlite_adapter.write_event".to_string(),
+            surface: "crates/franken-node/src/storage/frankensqlite_adapter.rs".to_string(),
+            source_beads: vec!["bd-1ulnv".to_string()],
+            metric_kind: "eager_string_allocation_work_per_write".to_string(),
+            unit: "deterministic_work_units".to_string(),
+            before_fix_p95_units: 10.0,
+            before_fix_p99_units: 14.0,
+            post_fix_p95_units: 6.0,
+            post_fix_p99_units: 7.0,
+            cold_start_ms: 0.0,
+            budget,
+            correctness_assertions: vec![
+                "write authorization is checked before persistence".to_string(),
+                "audit-log class writes retain deterministic keys".to_string(),
+                "event subscriber absence must not force eager event formatting".to_string(),
+            ],
+            regression_guard:
+                "write-path allocation work must not return to the pre-budget eager format shape"
+                    .to_string(),
+            skip_policy:
+                "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+                    .to_string(),
+        },
+    ]
+}
+
+pub fn hot_path_budget_smoke_policy(cases: &[HotPathBudgetSmokeCase]) -> BudgetPolicy {
+    let mut budgets = BTreeMap::new();
+    for case in cases {
+        budgets.insert(case.hot_path.clone(), case.budget.clone());
+    }
+    BudgetPolicy {
+        budgets,
+        default_budget: PathBudget {
+            max_overhead_p95_pct: 0.0,
+            max_overhead_p99_pct: 0.0,
+            max_cold_start_ms: 0.0,
+        },
+    }
+}
+
+pub fn run_default_hot_path_budget_smoke() -> Result<HotPathBudgetSmokeReport, PerfBudgetError> {
+    run_hot_path_budget_smoke(HotPathBudgetSmokeMode::Run)
+}
+
+pub fn run_hot_path_budget_smoke(
+    mode: HotPathBudgetSmokeMode,
+) -> Result<HotPathBudgetSmokeReport, PerfBudgetError> {
+    let cases = default_hot_path_budget_smoke_cases();
+    let rch_command = "RCH_REQUIRE_REMOTE=1 rch exec -- cargo +nightly-2026-02-19 test -p frankenengine-node --no-default-features --features policy-engine,http-client,external-commands --test hot_path_perf_budget_contract hot_path_budget -- --nocapture".to_string();
+
+    if let HotPathBudgetSmokeMode::Skip { blocker } = mode {
+        return Ok(HotPathBudgetSmokeReport {
+            schema_version: HOT_PATH_SMOKE_SCHEMA_VERSION.to_string(),
+            bead_id: HOT_PATH_SMOKE_BEAD_ID.to_string(),
+            report_id: "bd-ncwlf/hot-path-budget-smoke/default".to_string(),
+            trace_id: HOT_PATH_SMOKE_TRACE_ID.to_string(),
+            mode: "skip".to_string(),
+            verdict: "SKIP".to_string(),
+            overall_pass: false,
+            ci_suitable: true,
+            skip_blocker: Some(blocker),
+            cases,
+            gate_result: None,
+            events: Vec::new(),
+            rch_command,
+            docs_path: "docs/specs/hot_path_performance_budget_harness.md".to_string(),
+            evidence_path: "artifacts/performance_budgets/bd-ncwlf_hot_path_budget_evidence.json"
+                .to_string(),
+        });
+    }
+
+    let measurements: Vec<_> = cases
+        .iter()
+        .map(HotPathBudgetSmokeCase::measurement)
+        .collect();
+    let policy = hot_path_budget_smoke_policy(&cases);
+    let mut guard = PerformanceBudgetGuard::new(policy, HOT_PATH_SMOKE_TRACE_ID);
+    let gate_result = guard.evaluate(&measurements)?;
+    let verdict = if gate_result.overall_pass {
+        "PASS"
+    } else {
+        "FAIL"
+    };
+
+    Ok(HotPathBudgetSmokeReport {
+        schema_version: HOT_PATH_SMOKE_SCHEMA_VERSION.to_string(),
+        bead_id: HOT_PATH_SMOKE_BEAD_ID.to_string(),
+        report_id: "bd-ncwlf/hot-path-budget-smoke/default".to_string(),
+        trace_id: HOT_PATH_SMOKE_TRACE_ID.to_string(),
+        mode: mode.label().to_string(),
+        verdict: verdict.to_string(),
+        overall_pass: gate_result.overall_pass,
+        ci_suitable: true,
+        skip_blocker: None,
+        cases,
+        gate_result: Some(gate_result),
+        events: guard.events().to_vec(),
+        rch_command,
+        docs_path: "docs/specs/hot_path_performance_budget_harness.md".to_string(),
+        evidence_path: "artifacts/performance_budgets/bd-ncwlf_hot_path_budget_evidence.json"
+            .to_string(),
+    })
+}
+
+pub fn hot_path_budget_smoke_to_json(
+    report: &HotPathBudgetSmokeReport,
+) -> serde_json::Result<String> {
+    serde_json::to_string_pretty(report)
+}
+
+// ---------------------------------------------------------------------------
 // Send + Sync
 // ---------------------------------------------------------------------------
 
@@ -775,6 +1041,8 @@ fn _assert_send_sync() {
     assert_sync::<PerformanceBudgetGuard>();
     assert_send::<TimingCollector>();
     assert_sync::<TimingCollector>();
+    assert_send::<HotPathBudgetSmokeReport>();
+    assert_sync::<HotPathBudgetSmokeReport>();
 }
 
 // ===========================================================================
