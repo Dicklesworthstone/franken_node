@@ -410,9 +410,17 @@ fn publish_lock_registry() -> &'static Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>> 
     LOCKS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
+fn publication_lock_registry_key(dir: &Path) -> Result<PathBuf, RootPointerError> {
+    let canonical_dir = dir.canonicalize().map_err(|source| RootPointerError::Io {
+        step: "canonicalize_publication_dir",
+        path: dir.display().to_string(),
+        source,
+    })?;
+    Ok(canonical_dir.join(ROOT_POINTER_LOCK_FILE))
+}
+
 fn publish_lock(dir: &Path) -> Result<Arc<Mutex<()>>, RootPointerError> {
-    let lock_path = root_publication_lock_path(dir);
-    let lock_key = lock_path.canonicalize().unwrap_or(lock_path);
+    let lock_key = publication_lock_registry_key(dir)?;
     let mut registry = publish_lock_registry()
         .lock()
         .map_err(|_| RootPointerError::LockPoisoned)?;
@@ -1175,6 +1183,30 @@ mod tests {
             "second publish should wait behind first (elapsed: {elapsed:?})"
         );
         assert_eq!(t2_outcome.event.event_code, ROOT_PUBLISH_COMPLETE);
+    }
+
+    #[test]
+    fn publish_lock_registry_key_is_stable_before_lock_file_exists() {
+        let base = TempDir::new().expect("tempdir");
+        let root_dir = base.path().join("roots").join("primary");
+        fs::create_dir_all(&root_dir).expect("create root dir");
+        let equivalent_dir = root_dir.join("..").join("primary");
+        let canonical_dir = root_dir.canonicalize().expect("canonicalize root dir");
+
+        assert!(
+            !root_publication_lock_path(&equivalent_dir).exists(),
+            "regression must exercise key derivation before the lock file exists"
+        );
+
+        let via_equivalent =
+            publish_lock(&equivalent_dir).expect("process mutex through equivalent path");
+        let via_canonical =
+            publish_lock(&canonical_dir).expect("process mutex through canonical path");
+
+        assert!(
+            std::sync::Arc::ptr_eq(&via_equivalent, &via_canonical),
+            "equivalent directory spellings must share one process mutex before the lock file exists"
+        );
     }
 
     #[test]
