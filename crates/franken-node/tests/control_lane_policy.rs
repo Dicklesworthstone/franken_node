@@ -121,6 +121,30 @@ fn deadline_aware_tick_schedules_timed_by_earliest_deadline() {
 }
 
 #[test]
+fn assign_task_records_canonical_lane_and_audit_log() {
+    let mut policy = ControlLanePolicy::new();
+
+    let lane = policy
+        .assign_task(
+            ControlTaskClass::HealthCheck,
+            "health-check-task",
+            "trace-assign",
+            1_234,
+        )
+        .expect("canonical assignment should succeed");
+
+    assert_eq!(lane, ControlLane::Timed);
+    assert!(policy.audit_log().iter().any(|record| {
+        record.event_code == event_codes::LAN_001
+            && record.task_class == ControlTaskClass::HealthCheck.as_str()
+            && record.lane == ControlLane::Timed.as_str()
+            && record.budget_remaining_ms
+                == ControlLanePolicy::canonical_timeout(ControlTaskClass::HealthCheck).unwrap_or(0)
+            && record.trace_id == "trace-assign"
+    }));
+}
+
+#[test]
 fn cancellation_records_fail_closed_when_all_active_slots_are_full() {
     let mut protocol = CancellationProtocol::default();
 

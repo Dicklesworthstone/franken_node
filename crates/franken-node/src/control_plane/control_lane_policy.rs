@@ -59,6 +59,8 @@ pub const DEFAULT_MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 
 /// Default maximum queued deadline-aware tasks retained.
 pub const DEFAULT_MAX_DEADLINE_QUEUE_ENTRIES: usize = 4096;
+/// Number of schedulable control-plane task classes in the canonical policy table.
+pub const CONTROL_TASK_CLASS_COUNT: usize = 19;
 const MAX_TASK_ID_BYTES: usize = 256;
 
 fn invalid_task_id_reason(task_id: &str) -> Option<String> {
@@ -387,7 +389,7 @@ pub struct DeadlineAwareTick {
 /// detects starvation, and tracks scheduling metrics.
 #[derive(Debug)]
 pub struct ControlLanePolicy {
-    assignments: [LaneAssignment; 19],
+    assignments: [LaneAssignment; CONTROL_TASK_CLASS_COUNT],
     budgets: BTreeMap<ControlLane, LaneBudget>,
     lane_consecutive_zero: BTreeMap<ControlLane, u32>,
     lane_run_counts: BTreeMap<ControlLane, u32>,
@@ -426,7 +428,7 @@ impl ControlLanePolicy {
 
         // Wire canonical lane assignments as array for O(1) lookups
         let assignments = {
-            let mut temp = [None; 19];
+            let mut temp = [None; CONTROL_TASK_CLASS_COUNT];
             for tc in ControlTaskClass::all() {
                 let lane = Self::canonical_lane(*tc);
                 let timeout_ms = Self::canonical_timeout(*tc);
@@ -519,15 +521,52 @@ impl ControlLanePolicy {
         }
     }
 
+    fn assignment_is_canonical(
+        assignment: &LaneAssignment,
+        expected_task_class: ControlTaskClass,
+    ) -> bool {
+        let canonical_lane = Self::canonical_lane(expected_task_class);
+        assignment.task_class == expected_task_class
+            && assignment.lane == canonical_lane
+            && assignment.timeout_ms == Self::canonical_timeout(expected_task_class)
+            && assignment.preemptible == matches!(canonical_lane, ControlLane::Ready)
+    }
+
+    fn assignment_for(&self, tc: ControlTaskClass) -> Result<LaneAssignment, String> {
+        let assignment = self.assignments.get(tc.as_index()).ok_or_else(|| {
+            format!(
+                "{}: no lane assignment for task class {}",
+                error_codes::ERR_CLP_UNKNOWN_TASK,
+                tc
+            )
+        })?;
+
+        if !Self::assignment_is_canonical(assignment, tc) {
+            return Err(format!(
+                "{}: assignment table mismatch for task class {}",
+                error_codes::ERR_CLP_POLICY_MISMATCH,
+                tc
+            ));
+        }
+
+        Ok(*assignment)
+    }
+
     /// Look up the lane assignment for a task class.
     pub fn lookup(&self, tc: ControlTaskClass) -> Option<&LaneAssignment> {
-        Some(&self.assignments[tc.as_index()])
+        self.assignments
+            .get(tc.as_index())
+            .filter(|assignment| Self::assignment_is_canonical(assignment, tc))
     }
 
     /// Check that every task class has a lane assignment (INV-CLP-LANE-ASSIGNED).
     pub fn verify_all_assigned(&self) -> bool {
-        // With array implementation, all task classes are always assigned
-        true
+        self.assignments.len() == ControlTaskClass::all().len()
+            && ControlTaskClass::all().iter().all(|tc| {
+                self.assignments
+                    .get(tc.as_index())
+                    .is_some_and(|assignment| Self::assignment_is_canonical(assignment, *tc))
+            })
     }
 
     /// Check that budgets sum to 100% (INV-CLP-BUDGET-SUM).
@@ -558,7 +597,7 @@ impl ControlLanePolicy {
                 error_codes::ERR_CLP_INVALID_TASK_ID
             ));
         }
-        let assignment = &self.assignments[tc.as_index()];
+        let assignment = self.assignment_for(tc)?;
         let lane = assignment.lane;
 
         Self::push_bounded(
@@ -601,7 +640,7 @@ impl ControlLanePolicy {
             ));
         }
 
-        let assignment = &self.assignments[task_class.as_index()];
+        let assignment = self.assignment_for(task_class)?;
         let lane = assignment.lane;
         let timeout_ms = assignment.timeout_ms;
         let task = QueuedControlTask {
@@ -1054,10 +1093,10 @@ impl ControlLanePolicySnapshot {
 #[cfg(test)]
 mod tests {
     use super::{
-        CANCEL_LANE_BUDGET_PCT, CANCEL_MAX_STARVE_TICKS, ControlLane, ControlLanePolicy,
-        ControlLanePolicySnapshot, ControlTaskClass, DEFAULT_STARVATION_THRESHOLD_TICKS,
-        LaneBudget, MAX_TASK_ID_BYTES, READY_LANE_BUDGET_PCT, SCHEMA_VERSION,
-        TIMED_LANE_BUDGET_PCT, error_codes, event_codes,
+        CANCEL_LANE_BUDGET_PCT, CANCEL_MAX_STARVE_TICKS, CONTROL_TASK_CLASS_COUNT, ControlLane,
+        ControlLanePolicy, ControlLanePolicySnapshot, ControlTaskClass,
+        DEFAULT_STARVATION_THRESHOLD_TICKS, LaneAssignment, LaneBudget, MAX_TASK_ID_BYTES,
+        READY_LANE_BUDGET_PCT, SCHEMA_VERSION, TIMED_LANE_BUDGET_PCT, error_codes, event_codes,
     };
 
     fn make_policy_with_capacities(
@@ -1087,17 +1126,22 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_all_assigned_rejects_missing_assignment() {
+    fn test_verify_all_assigned_rejects_corrupted_assignment() {
         let mut policy = ControlLanePolicy::new();
-        policy
-            .assignments
-            .remove(&ControlTaskClass::CancellationHandler);
+        policy.assignments[ControlTaskClass::CancellationHandler.as_index()] = LaneAssignment {
+            task_class: ControlTaskClass::HealthCheck,
+            lane: ControlLane::Timed,
+            timeout_ms: ControlLanePolicy::canonical_timeout(ControlTaskClass::HealthCheck),
+            preemptible: false,
+        };
 
         assert!(!policy.verify_all_assigned());
-        assert_eq!(
-            policy.total_task_classes(),
-            ControlTaskClass::all().len() - 1
+        assert!(
+            policy
+                .lookup(ControlTaskClass::CancellationHandler)
+                .is_none()
         );
+        assert_eq!(policy.total_task_classes(), CONTROL_TASK_CLASS_COUNT);
     }
 
     #[test]
@@ -1253,7 +1297,7 @@ mod tests {
     #[test]
     fn test_ready_preemptible() {
         let policy = ControlLanePolicy::new();
-        for a in policy.assignments.values() {
+        for a in policy.assignments.iter() {
             if a.lane == ControlLane::Ready {
                 assert!(a.preemptible, "Ready lane tasks should be preemptible");
             }
@@ -1263,7 +1307,7 @@ mod tests {
     #[test]
     fn test_cancel_not_preemptible() {
         let policy = ControlLanePolicy::new();
-        for a in policy.assignments.values() {
+        for a in policy.assignments.iter() {
             if a.lane == ControlLane::Cancel {
                 assert!(!a.preemptible, "Cancel lane tasks must not be preemptible");
             }
@@ -1374,13 +1418,20 @@ mod tests {
                 10,
             )
             .unwrap();
-        policy.assignments.remove(&ControlTaskClass::HealthCheck);
+        policy.assignments[ControlTaskClass::HealthCheck.as_index()] = LaneAssignment {
+            task_class: ControlTaskClass::BackgroundMaintenance,
+            lane: ControlLane::Ready,
+            timeout_ms: ControlLanePolicy::canonical_timeout(
+                ControlTaskClass::BackgroundMaintenance,
+            ),
+            preemptible: true,
+        };
 
         let err = policy
             .assign_task(ControlTaskClass::HealthCheck, "task-bad", "trace-bad", 20)
-            .expect_err("removed assignment must reject");
+            .expect_err("corrupted assignment must reject");
 
-        assert!(err.contains(error_codes::ERR_CLP_UNKNOWN_TASK));
+        assert!(err.contains(error_codes::ERR_CLP_POLICY_MISMATCH));
         assert_eq!(policy.audit_log().len(), 1);
         assert_eq!(policy.audit_log()[0].trace_id, "trace-good");
     }
@@ -1640,7 +1691,7 @@ mod tests {
         let json = serde_json::to_string(&snap).unwrap();
         let restored: ControlLanePolicySnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.schema_version, SCHEMA_VERSION);
-        assert_eq!(restored.task_class_count, 19);
+        assert_eq!(restored.task_class_count, CONTROL_TASK_CLASS_COUNT);
         assert_eq!(restored.lane_count, 3);
     }
 
