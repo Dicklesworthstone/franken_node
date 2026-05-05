@@ -12,12 +12,13 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const PERSIST_QUEUE_CAPACITY: usize = 256;
+const PERSIST_BATCH_MAX: usize = 64;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_RECENT_EVENTS: usize = 256;
 const MAX_RUNTIME_EVENTS: usize = 256;
@@ -240,6 +241,14 @@ struct PersistEnvelope {
     connection_id: u64,
     bridge_seq: u64,
     payload: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct PersistWriteOutcome {
+    connection_id: u64,
+    bridge_seq: u64,
+    key: String,
+    error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1297,54 +1306,131 @@ impl TelemetryBridge {
                 break;
             }
 
+            let batch = Self::recv_persistence_batch(envelope, &receiver, &abort_flag);
+            if abort_flag.load(Ordering::SeqCst) {
+                Self::abort_pending_persistence_batch(batch, &receiver, &state);
+                break;
+            }
+
+            let batch_len = batch.len();
             Self::with_state(&state, |metrics| {
-                metrics.queue_depth = metrics.queue_depth.saturating_sub(1);
+                metrics.queue_depth = metrics.queue_depth.saturating_sub(batch_len);
             });
 
-            let key = format!("telemetry_{:020}", envelope.bridge_seq);
-            let write_result = match adapter.lock() {
-                Ok(mut db) => {
-                    let caller = CallerContext::service("observability::telemetry_bridge", &key);
-                    db.write(&caller, PersistenceClass::AuditLog, &key, &envelope.payload)
-                }
+            let write_outcomes = match adapter.lock() {
+                Ok(mut db) => Self::write_persistence_batch(&mut db, batch),
                 Err(_) => {
-                    Self::with_state(&state, |metrics| {
-                        metrics.dropped_total = metrics.dropped_total.saturating_add(1);
-                        metrics.record_event(
-                            event_codes::PERSIST_FAILURE,
-                            Some(envelope.connection_id),
-                            Some(envelope.bridge_seq),
-                            Some(reason_codes::PERSIST_FAILED),
-                            format!("failed to persist audit event {key}: adapter lock poisoned"),
-                        );
-                    });
+                    Self::record_persistence_lock_failure(&state, batch);
                     continue;
                 }
             };
-
-            match write_result {
-                Ok(_) => Self::with_state(&state, |metrics| {
-                    metrics.persisted_total = metrics.persisted_total.saturating_add(1);
-                    metrics.record_event(
-                        event_codes::PERSIST_SUCCESS,
-                        Some(envelope.connection_id),
-                        Some(envelope.bridge_seq),
-                        Some(reason_codes::ALLOWED),
-                        format!("persisted audit event with key {key}"),
-                    );
-                }),
-                Err(err) => Self::with_state(&state, |metrics| {
-                    metrics.dropped_total = metrics.dropped_total.saturating_add(1);
-                    metrics.record_event(
-                        event_codes::PERSIST_FAILURE,
-                        Some(envelope.connection_id),
-                        Some(envelope.bridge_seq),
-                        Some(reason_codes::PERSIST_FAILED),
-                        format!("failed to persist audit event {key}: {err}"),
-                    );
-                }),
-            };
+            Self::record_persistence_outcomes(&state, write_outcomes);
         }
+    }
+
+    fn recv_persistence_batch(
+        first: PersistEnvelope,
+        receiver: &Receiver<PersistEnvelope>,
+        abort_flag: &AtomicBool,
+    ) -> Vec<PersistEnvelope> {
+        let mut batch = Vec::with_capacity(PERSIST_BATCH_MAX.min(PERSIST_QUEUE_CAPACITY));
+        batch.push(first);
+
+        while batch.len() < PERSIST_BATCH_MAX {
+            if abort_flag.load(Ordering::SeqCst) {
+                break;
+            }
+
+            match receiver.try_recv() {
+                Ok(envelope) => batch.push(envelope),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
+        }
+
+        batch
+    }
+
+    fn persistence_key(bridge_seq: u64) -> String {
+        format!("telemetry_{bridge_seq:020}")
+    }
+
+    fn write_persistence_batch(
+        db: &mut FrankensqliteAdapter,
+        batch: Vec<PersistEnvelope>,
+    ) -> Vec<PersistWriteOutcome> {
+        let mut outcomes = Vec::with_capacity(batch.len());
+        for envelope in batch {
+            let key = Self::persistence_key(envelope.bridge_seq);
+            let caller = CallerContext::service("observability::telemetry_bridge", &key);
+            let error = db
+                .write(
+                    &caller,
+                    PersistenceClass::AuditLog,
+                    &key,
+                    &envelope.payload,
+                )
+                .err()
+                .map(|err| err.to_string());
+
+            outcomes.push(PersistWriteOutcome {
+                connection_id: envelope.connection_id,
+                bridge_seq: envelope.bridge_seq,
+                key,
+                error,
+            });
+        }
+        outcomes
+    }
+
+    fn record_persistence_lock_failure(
+        state: &Arc<Mutex<TelemetryBridgeState>>,
+        batch: Vec<PersistEnvelope>,
+    ) {
+        Self::with_state(state, |metrics| {
+            for envelope in batch {
+                metrics.dropped_total = metrics.dropped_total.saturating_add(1);
+                let key = Self::persistence_key(envelope.bridge_seq);
+                metrics.record_event(
+                    event_codes::PERSIST_FAILURE,
+                    Some(envelope.connection_id),
+                    Some(envelope.bridge_seq),
+                    Some(reason_codes::PERSIST_FAILED),
+                    format!("failed to persist audit event {key}: adapter lock poisoned"),
+                );
+            }
+        });
+    }
+
+    fn record_persistence_outcomes(
+        state: &Arc<Mutex<TelemetryBridgeState>>,
+        outcomes: Vec<PersistWriteOutcome>,
+    ) {
+        Self::with_state(state, |metrics| {
+            for outcome in outcomes {
+                match outcome.error {
+                    Some(err) => {
+                        metrics.dropped_total = metrics.dropped_total.saturating_add(1);
+                        metrics.record_event(
+                            event_codes::PERSIST_FAILURE,
+                            Some(outcome.connection_id),
+                            Some(outcome.bridge_seq),
+                            Some(reason_codes::PERSIST_FAILED),
+                            format!("failed to persist audit event {}: {err}", outcome.key),
+                        );
+                    }
+                    None => {
+                        metrics.persisted_total = metrics.persisted_total.saturating_add(1);
+                        metrics.record_event(
+                            event_codes::PERSIST_SUCCESS,
+                            Some(outcome.connection_id),
+                            Some(outcome.bridge_seq),
+                            Some(reason_codes::ALLOWED),
+                            format!("persisted audit event with key {}", outcome.key),
+                        );
+                    }
+                }
+            }
+        });
     }
 
     fn abort_pending_persistence(
@@ -1356,7 +1442,22 @@ impl TelemetryBridge {
             .into_iter()
             .chain(receiver.try_iter())
             .fold(0usize, |count, _| count.saturating_add(1));
+        Self::record_aborted_persistence(dropped, state);
+    }
 
+    fn abort_pending_persistence_batch(
+        batch: Vec<PersistEnvelope>,
+        receiver: &Receiver<PersistEnvelope>,
+        state: &Arc<Mutex<TelemetryBridgeState>>,
+    ) {
+        let queued = receiver
+            .try_iter()
+            .fold(0usize, |count, _| count.saturating_add(1));
+        let dropped = batch.len().saturating_add(queued);
+        Self::record_aborted_persistence(dropped, state);
+    }
+
+    fn record_aborted_persistence(dropped: usize, state: &Arc<Mutex<TelemetryBridgeState>>) {
         if dropped == 0 {
             return;
         }
