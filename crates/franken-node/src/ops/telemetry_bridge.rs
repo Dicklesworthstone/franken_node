@@ -4295,9 +4295,10 @@ mod tests {
         // Wait for workers to complete and verify no handles are left orphaned
         let start = std::time::Instant::now();
         while !workers_completed.load(Ordering::SeqCst) || !final_completed.load(Ordering::SeqCst) {
-            if start.elapsed() > Duration::from_secs(1) {
-                panic!("Workers did not complete within timeout - possible handle leak");
-            }
+            assert!(
+                start.elapsed() <= Duration::from_secs(1),
+                "Workers did not complete within timeout - possible handle leak"
+            );
             thread::sleep(Duration::from_millis(1));
         }
 
