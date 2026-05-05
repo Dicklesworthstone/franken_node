@@ -875,7 +875,7 @@ fn validate_endpoint_prefix(prefix: &str) -> Result<(), String> {
     let _scheme = validate_endpoint_prefix_lexical(prefix)?;
     let parsed = Url::parse(prefix)
         .map_err(|source| format!("endpoint prefix '{}' is not a valid URL: {source}", prefix))?;
-    if parsed.host_str().map_or(true, str::is_empty) {
+    if parsed.host_str().is_none_or(str::is_empty) {
         return Err(format!(
             "endpoint prefix '{}' has no domain after scheme",
             prefix
@@ -2235,43 +2235,41 @@ impl CapabilityGate {
             return Err(err);
         }
 
-        if !consume_single_use {
-            if let Some(replay_key) = replay_key.as_deref() {
-                match self.replay_store.contains_consumed(replay_key) {
-                    Ok(false) => {}
-                    Ok(true) => {
-                        let err = RemoteCapError::ReplayDetected {
-                            token_id: cap.token_id.clone(),
-                        };
-                        self.push_audit(build_audit_event(
-                            "REMOTECAP_DENIED",
-                            "RC_CHECK_DENIED",
-                            Some(cap.token_id.clone()),
-                            Some(cap.issuer_identity.clone()),
-                            Some(operation),
-                            Some(endpoint.to_string()),
-                            trace_id.to_string(),
-                            now_epoch_secs,
-                            false,
-                            Some(err.code().to_string()),
-                        ));
-                        return Err(err);
-                    }
-                    Err(err) => {
-                        self.push_audit(build_audit_event(
-                            "REMOTECAP_DENIED",
-                            "RC_CHECK_DENIED",
-                            Some(cap.token_id.clone()),
-                            Some(cap.issuer_identity.clone()),
-                            Some(operation),
-                            Some(endpoint.to_string()),
-                            trace_id.to_string(),
-                            now_epoch_secs,
-                            false,
-                            Some(err.code().to_string()),
-                        ));
-                        return Err(err);
-                    }
+        if !consume_single_use && let Some(replay_key) = replay_key.as_deref() {
+            match self.replay_store.contains_consumed(replay_key) {
+                Ok(false) => {}
+                Ok(true) => {
+                    let err = RemoteCapError::ReplayDetected {
+                        token_id: cap.token_id.clone(),
+                    };
+                    self.push_audit(build_audit_event(
+                        "REMOTECAP_DENIED",
+                        "RC_CHECK_DENIED",
+                        Some(cap.token_id.clone()),
+                        Some(cap.issuer_identity.clone()),
+                        Some(operation),
+                        Some(endpoint.to_string()),
+                        trace_id.to_string(),
+                        now_epoch_secs,
+                        false,
+                        Some(err.code().to_string()),
+                    ));
+                    return Err(err);
+                }
+                Err(err) => {
+                    self.push_audit(build_audit_event(
+                        "REMOTECAP_DENIED",
+                        "RC_CHECK_DENIED",
+                        Some(cap.token_id.clone()),
+                        Some(cap.issuer_identity.clone()),
+                        Some(operation),
+                        Some(endpoint.to_string()),
+                        trace_id.to_string(),
+                        now_epoch_secs,
+                        false,
+                        Some(err.code().to_string()),
+                    ));
+                    return Err(err);
                 }
             }
         }
@@ -2548,7 +2546,7 @@ fn uses_known_weak_secret_material(secret: &str) -> bool {
 fn is_repeated_secret_pattern(secret: &str, pattern: &str) -> bool {
     !pattern.is_empty()
         && secret.len() > pattern.len()
-        && secret.len() % pattern.len() == 0
+        && secret.len().is_multiple_of(pattern.len())
         && secret
             .as_bytes()
             .chunks(pattern.len())

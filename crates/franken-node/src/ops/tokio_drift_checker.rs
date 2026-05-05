@@ -168,10 +168,10 @@ fn is_in_test_context(lines: &[&str], line_idx: usize) -> bool {
         }
 
         depth = depth.saturating_add(brace_delta(line)).max(0);
-        if let Some(test_depth) = test_context_depth {
-            if depth < test_depth {
-                test_context_depth = None;
-            }
+        if let Some(test_depth) = test_context_depth
+            && depth < test_depth
+        {
+            test_context_depth = None;
         }
     }
     false

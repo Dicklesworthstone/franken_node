@@ -1098,11 +1098,11 @@ impl LaneScheduler {
         let mut removed: Option<QueuedTaskAssignment> = None;
 
         for queue in self.queued_tasks.values_mut() {
-            if let Some(position) = queue.iter().position(|queued| queued.task_id == task_id) {
-                if let Some(queued) = queue.remove(position) {
-                    removed = Some(queued);
-                    break;
-                }
+            if let Some(position) = queue.iter().position(|queued| queued.task_id == task_id)
+                && let Some(queued) = queue.remove(position)
+            {
+                removed = Some(queued);
+                break;
             }
         }
 

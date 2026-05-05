@@ -1089,22 +1089,22 @@ impl CancellationRuntime {
         // INV-CXT-NESTED-PROPAGATION: propagate to children
         let mut propagated_events = Vec::new();
         for child_id in &child_ids {
-            if let Some(child) = self.tasks.get_mut(child_id) {
-                if child.phase == TaskPhase::Running {
-                    child.phase = TaskPhase::CancelRequested;
-                    child.cancel_requested_ms = Some(timestamp_ms);
+            if let Some(child) = self.tasks.get_mut(child_id)
+                && child.phase == TaskPhase::Running
+            {
+                child.phase = TaskPhase::CancelRequested;
+                child.cancel_requested_ms = Some(timestamp_ms);
 
-                    propagated_events.push(CancellableTaskAuditEvent {
-                        event_code: event_codes::FN_CX_009.to_string(),
-                        task_id: child_id.clone(),
-                        from_phase: TaskPhase::Running,
-                        to_phase: TaskPhase::CancelRequested,
-                        timestamp_ms,
-                        trace_id: trace_id.to_string(),
-                        detail: format!("cancel propagated from parent {}", task_id),
-                        schema_version: SCHEMA_VERSION.to_string(),
-                    });
-                }
+                propagated_events.push(CancellableTaskAuditEvent {
+                    event_code: event_codes::FN_CX_009.to_string(),
+                    task_id: child_id.clone(),
+                    from_phase: TaskPhase::Running,
+                    to_phase: TaskPhase::CancelRequested,
+                    timestamp_ms,
+                    trace_id: trace_id.to_string(),
+                    detail: format!("cancel propagated from parent {}", task_id),
+                    schema_version: SCHEMA_VERSION.to_string(),
+                });
             }
         }
         for event in propagated_events {

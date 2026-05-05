@@ -543,15 +543,13 @@ impl Drop for TempFileGuard {
     fn drop(&mut self) {
         if let Some(path) = self.0.take()
             && path.is_file()
+            && let Err(error) = Self::orphan_path_with(&path, |from, to| std::fs::rename(from, to))
         {
-            if let Err(error) = Self::orphan_path_with(&path, |from, to| std::fs::rename(from, to))
-            {
-                tracing::warn!(
-                    error = %error,
-                    path = %path.display(),
-                    "failed to orphan abandoned rollout temp file"
-                );
-            }
+            tracing::warn!(
+                error = %error,
+                path = %path.display(),
+                "failed to orphan abandoned rollout temp file"
+            );
         }
     }
 }

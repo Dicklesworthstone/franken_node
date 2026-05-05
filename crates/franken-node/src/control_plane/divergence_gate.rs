@@ -464,6 +464,7 @@ impl OperatorAuthorization {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_with_divergence_fingerprint(
         operator_id: impl Into<String>,
         key_id: impl Into<String>,
@@ -513,6 +514,7 @@ impl OperatorAuthorization {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn authorization_hash(
         operator_id: &str,
         key_id: &str,

@@ -142,7 +142,6 @@ impl ValidationPlan {
             .find(|command| command.command_id == command_id)
     }
 
-    #[must_use]
     pub fn rch_commands(&self) -> impl Iterator<Item = &PlannedCommand> {
         self.commands
             .iter()

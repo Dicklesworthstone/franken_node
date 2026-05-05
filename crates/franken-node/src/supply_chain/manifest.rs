@@ -505,7 +505,7 @@ fn max_base64_encoded_len(decoded_len: usize) -> usize {
 }
 
 fn looks_like_base64(value: &str) -> bool {
-    if value.len() < 4 || value.len() % 4 != 0 {
+    if value.len() < 4 || !value.len().is_multiple_of(4) {
         return false;
     }
     value

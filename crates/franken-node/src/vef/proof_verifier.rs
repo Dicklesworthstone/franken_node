@@ -725,7 +725,7 @@ impl VerificationGate {
         // Run verification
         let mut verifier = ProofVerifier::new(self.config.clone());
         let (decision, evidence) =
-            verifier.validate_proof(&request.proof, &predicate, request.now_millis, trace_id)?;
+            verifier.validate_proof(&request.proof, predicate, request.now_millis, trace_id)?;
 
         // Propagate verifier events (via emit_event to respect push_bounded)
         for event in verifier.events().iter().cloned() {

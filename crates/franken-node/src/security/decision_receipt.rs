@@ -356,6 +356,7 @@ impl Receipt {
     /// 1. Requiring the new timestamp to be strictly after the previous receipt's timestamp
     /// 2. Setting up the hash chain linkage via previous_receipt_hash
     /// 3. Preventing chronological manipulation attacks
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_monotonic_timestamp(
         action_name: &str,
         actor_identity: &str,
@@ -504,13 +505,13 @@ pub fn verify_receipt_with_audience(
     validate_timestamp_freshness(&signed.receipt.timestamp)?;
 
     // Check audience binding to prevent cross-context abuse (fail-closed)
-    if let Some(expected_aud) = expected_audience {
-        if !crate::security::constant_time::ct_eq(&signed.receipt.audience, expected_aud) {
-            return Err(ReceiptError::AudienceMismatch {
-                expected: expected_aud.to_string(),
-                actual: signed.receipt.audience.clone(),
-            });
-        }
+    if let Some(expected_aud) = expected_audience
+        && !crate::security::constant_time::ct_eq(&signed.receipt.audience, expected_aud)
+    {
+        return Err(ReceiptError::AudienceMismatch {
+            expected: expected_aud.to_string(),
+            actual: signed.receipt.audience.clone(),
+        });
     }
 
     let expected_key_id = signing_key_id(public_key);

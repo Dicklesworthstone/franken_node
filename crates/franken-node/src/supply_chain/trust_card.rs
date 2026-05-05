@@ -896,7 +896,7 @@ impl TrustCardRegistry {
                 SnapshotSourceContext::UntrustedNetwork => {
                     // Eager validation: verify signature first, comprehensive checks
                     verify_signature_before_parsing(&raw, DEFAULT_REGISTRY_KEY)
-                        .map_err(|err| sanitize_error_for_untrusted(err))?;
+                        .map_err(sanitize_error_for_untrusted)?;
 
                     let snapshot = serde_json::from_str::<TrustCardRegistrySnapshot>(&raw)
                         .map_err(|err| {
@@ -907,7 +907,7 @@ impl TrustCardRegistry {
                         })?;
 
                     validate_comprehensive(&snapshot, DEFAULT_REGISTRY_KEY)
-                        .map_err(|err| sanitize_error_for_untrusted(err))?;
+                        .map_err(sanitize_error_for_untrusted)?;
                     snapshot
                 }
             };
@@ -966,7 +966,7 @@ impl TrustCardRegistry {
                 SnapshotSourceContext::UntrustedNetwork => {
                     // Eager validation: verify signature first, comprehensive checks
                     verify_signature_before_parsing(&raw, &registry_key)
-                        .map_err(|err| sanitize_error_for_untrusted(err))?;
+                        .map_err(sanitize_error_for_untrusted)?;
 
                     let snapshot = serde_json::from_str::<TrustCardRegistrySnapshot>(&raw)
                         .map_err(|err| {
@@ -977,7 +977,7 @@ impl TrustCardRegistry {
                         })?;
 
                     validate_comprehensive(&snapshot, &registry_key)
-                        .map_err(|err| sanitize_error_for_untrusted(err))?;
+                        .map_err(sanitize_error_for_untrusted)?;
                     snapshot
                 }
             };

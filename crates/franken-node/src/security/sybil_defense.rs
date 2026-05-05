@@ -312,7 +312,7 @@ impl TrustAggregator {
         sorted.sort_by(|a, b| a.total_cmp(b));
 
         let n = sorted.len();
-        let median = if n % 2 == 0 {
+        let median = if n.is_multiple_of(2) {
             let lower = sorted[(n / 2).saturating_sub(1)];
             let upper = sorted[n / 2];
             lower / 2.0 + upper / 2.0
@@ -393,8 +393,8 @@ impl StakeWeighter {
             return self.base_weight;
         }
 
-        let history_len_f64 = u64::try_from(node.verified_history_len).unwrap_or(u64::MAX) as f64;
-        let threshold_f64 = u64::try_from(self.established_threshold).unwrap_or(u64::MAX) as f64;
+        let history_len_f64 = node.verified_history_len as f64;
+        let threshold_f64 = self.established_threshold as f64;
         let progress = (history_len_f64 / threshold_f64).min(1.0);
 
         // Logarithmic growth: monotonically increasing, slow start, fast middle

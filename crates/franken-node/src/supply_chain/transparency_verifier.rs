@@ -151,7 +151,7 @@ pub fn recompute_root(proof: &InclusionProof) -> String {
     let mut index = proof.leaf_index;
 
     for sibling in &proof.audit_path {
-        if index % 2 == 0 {
+        if index.is_multiple_of(2) {
             current = hash_pair(&current, sibling);
         } else {
             current = hash_pair(sibling, &current);

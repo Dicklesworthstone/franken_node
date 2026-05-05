@@ -534,49 +534,49 @@ fn compute_entry_hash_bytes_with_payload_bytes(
     let mut hasher = Sha256::new();
     hasher.update(b"evidence_entry_v1:");
     hasher.update(
-        &u64::try_from(entry.schema_version.len())
+        u64::try_from(entry.schema_version.len())
             .unwrap_or(u64::MAX)
             .to_le_bytes(),
     );
     hasher.update(entry.schema_version.as_bytes());
     if let Some(entry_id) = &entry.entry_id {
-        hasher.update(&[1]);
+        hasher.update([1]);
         hasher.update(
-            &u64::try_from(entry_id.len())
+            u64::try_from(entry_id.len())
                 .unwrap_or(u64::MAX)
                 .to_le_bytes(),
         );
         hasher.update(entry_id.as_bytes());
     } else {
-        hasher.update(&[0]);
+        hasher.update([0]);
     }
     hasher.update(
-        &u64::try_from(entry.decision_id.len())
+        u64::try_from(entry.decision_id.len())
             .unwrap_or(u64::MAX)
             .to_le_bytes(),
     );
     hasher.update(entry.decision_id.as_bytes());
     let decision_kind = entry.decision_kind.label();
     hasher.update(
-        &u64::try_from(decision_kind.len())
+        u64::try_from(decision_kind.len())
             .unwrap_or(u64::MAX)
             .to_le_bytes(),
     );
     hasher.update(decision_kind.as_bytes());
     hasher.update(
-        &u64::try_from(entry.decision_time.len())
+        u64::try_from(entry.decision_time.len())
             .unwrap_or(u64::MAX)
             .to_le_bytes(),
     );
     hasher.update(entry.decision_time.as_bytes());
-    hasher.update(&entry.timestamp_ms.to_le_bytes());
+    hasher.update(entry.timestamp_ms.to_le_bytes());
     hasher.update(
-        &u64::try_from(entry.trace_id.len())
+        u64::try_from(entry.trace_id.len())
             .unwrap_or(u64::MAX)
             .to_le_bytes(),
     );
     hasher.update(entry.trace_id.as_bytes());
-    hasher.update(&entry.epoch_id.to_le_bytes());
+    hasher.update(entry.epoch_id.to_le_bytes());
 
     // Hash the serialized payload for deterministic content representation.
     // Reuse pre-serialized payload bytes when available to avoid duplicate payload serialization
@@ -587,9 +587,9 @@ fn compute_entry_hash_bytes_with_payload_bytes(
         hasher.update(0_u64.to_le_bytes());
     }
 
-    hasher.update(&entry.size_bytes.to_le_bytes());
+    hasher.update(entry.size_bytes.to_le_bytes());
     hasher.update(
-        &u64::try_from(entry.signature.len())
+        u64::try_from(entry.signature.len())
             .unwrap_or(u64::MAX)
             .to_le_bytes(),
     );
@@ -1161,16 +1161,16 @@ impl EvidenceLedger {
             .unwrap_or_default();
 
         // SECURITY: Validate hash chain integrity if client provided prev_entry_hash
-        if !entry.prev_entry_hash.is_empty() {
-            if !crate::security::constant_time::ct_eq(
+        if !entry.prev_entry_hash.is_empty()
+            && !crate::security::constant_time::ct_eq(
                 expected_prev_hash.as_str(),
                 &entry.prev_entry_hash,
-            ) {
-                return Err(LedgerError::HashChainBroken {
-                    expected_hash: expected_prev_hash,
-                    provided_hash: entry.prev_entry_hash.clone(),
-                });
-            }
+            )
+        {
+            return Err(LedgerError::HashChainBroken {
+                expected_hash: expected_prev_hash,
+                provided_hash: entry.prev_entry_hash.clone(),
+            });
         }
 
         let epoch_id = entry.epoch_id;

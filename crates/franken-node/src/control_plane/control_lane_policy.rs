@@ -764,14 +764,12 @@ impl ControlLanePolicy {
         self.current_tick = self.current_tick.saturating_add(1);
 
         // Allocate slots by budget
-        let cancel_slots = u32::try_from(
-            u64::try_from(total_slots).unwrap_or(u64::MAX) * CANCEL_LANE_BUDGET_PCT as u64 / 100,
-        )
-        .unwrap_or(u32::MAX);
-        let timed_slots = u32::try_from(
-            u64::try_from(total_slots).unwrap_or(u64::MAX) * TIMED_LANE_BUDGET_PCT as u64 / 100,
-        )
-        .unwrap_or(u32::MAX);
+        let cancel_slots =
+            u32::try_from(u64::from(total_slots) * CANCEL_LANE_BUDGET_PCT as u64 / 100)
+                .unwrap_or(u32::MAX);
+        let timed_slots =
+            u32::try_from(u64::from(total_slots) * TIMED_LANE_BUDGET_PCT as u64 / 100)
+                .unwrap_or(u32::MAX);
         let ready_slots = total_slots
             .saturating_sub(cancel_slots)
             .saturating_sub(timed_slots);

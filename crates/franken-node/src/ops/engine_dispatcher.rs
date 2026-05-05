@@ -2034,7 +2034,7 @@ impl EngineDispatcher {
             "Starting external engine process"
         );
 
-        let result = match run_command_capture_output(cmd) {
+        match run_command_capture_output(cmd) {
             Ok(output) => {
                 let exec_duration = exec_start.elapsed();
                 tracing::info!(
@@ -2089,9 +2089,7 @@ impl EngineDispatcher {
                     }),
                 }
             }
-        };
-
-        result
+        }
     }
 
     /// Test helper: expose map_config_to_runtime_config for conformance testing

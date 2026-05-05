@@ -317,7 +317,7 @@ impl SsrfPolicyTemplate {
         let normalized_host = normalize_host_for_allowlist_match(host);
         self.allowlist.iter().find(|e| {
             normalize_host_for_allowlist_match(&e.host) == normalized_host
-                && e.port.map_or(true, |p| p == port)
+                && e.port.is_none_or(|p| p == port)
         })
     }
 

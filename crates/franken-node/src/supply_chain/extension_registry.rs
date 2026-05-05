@@ -1392,25 +1392,24 @@ impl SignedExtensionRegistry {
             .get(extension_id)
             .and_then(|ext| ext.versions.last())
             .map(|entry| entry.version.clone())
+            && let Err(detail) = validate_monotonic_version(&previous_version, &version.version)
         {
-            if let Err(detail) = validate_monotonic_version(&previous_version, &version.version) {
-                self.log(
-                    event_codes::SER_ERR_INVALID_INPUT,
-                    extension_id,
-                    trace_id,
-                    serde_json::json!({
-                        "previous_version": previous_version,
-                        "candidate_version": &version.version,
-                        "reason": "non_monotonic_version",
-                    }),
-                );
-                return RegistryResult {
-                    success: false,
-                    extension_id: Some(extension_id.to_string()),
-                    error_code: Some(event_codes::SER_ERR_INVALID_INPUT.to_string()),
-                    detail,
-                };
-            }
+            self.log(
+                event_codes::SER_ERR_INVALID_INPUT,
+                extension_id,
+                trace_id,
+                serde_json::json!({
+                    "previous_version": previous_version,
+                    "candidate_version": &version.version,
+                    "reason": "non_monotonic_version",
+                }),
+            );
+            return RegistryResult {
+                success: false,
+                extension_id: Some(extension_id.to_string()),
+                error_code: Some(event_codes::SER_ERR_INVALID_INPUT.to_string()),
+                detail,
+            };
         }
 
         let Some(ext) = self.extensions.get_mut(extension_id) else {
@@ -1599,7 +1598,7 @@ impl SignedExtensionRegistry {
     pub fn list(&self, status_filter: Option<ExtensionStatus>) -> Vec<&SignedExtension> {
         self.extensions
             .values()
-            .filter(|e| status_filter.map_or(true, |s| e.status == s))
+            .filter(|e| status_filter.is_none_or(|s| e.status == s))
             .collect()
     }
 

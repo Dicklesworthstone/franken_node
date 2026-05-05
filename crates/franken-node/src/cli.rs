@@ -46,6 +46,7 @@ fn validate_user_content_path(path: &str) -> Result<&Path> {
 /// Rejects paths containing:
 /// - `..` segments (directory traversal)
 /// - Null bytes (path injection)
+///
 /// Allows absolute paths (system binaries often in /usr/bin/, /usr/local/bin/, etc.)
 fn validate_system_binary_path(path: &str) -> Result<&Path> {
     // Reject null bytes (path injection)

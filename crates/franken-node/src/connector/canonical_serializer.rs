@@ -887,7 +887,7 @@ fn write_canonical_value(
         Value::Object(values) => {
             out.push(b'{');
             let mut entries: Vec<_> = values.iter().collect();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_by_key(|(key, _)| *key);
             for (index, (key, nested_value)) in entries.iter().enumerate() {
                 if index > 0 {
                     out.push(b',');
@@ -945,7 +945,7 @@ fn contains_float_marker(payload: &[u8]) -> bool {
                         backslashes = backslashes.saturating_add(1);
                         j -= 1;
                     }
-                    if backslashes % 2 == 0 {
+                    if backslashes.is_multiple_of(2) {
                         // Unescaped quote — toggle string state
                         in_string = !in_string;
                     }

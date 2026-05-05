@@ -129,7 +129,7 @@ impl LaneMetrics {
         let mut values = self.queue_wait_samples_ms.clone();
         // Use nearest-rank quantile: ceil(0.99 * n), then convert to 0-based index.
         // This avoids underestimating p99 on small sample sets.
-        let idx = ((99 * values.len()) + 99) / 100;
+        let idx = (99 * values.len()).div_ceil(100);
         let idx = idx.saturating_sub(1);
         let target_idx = idx.min(values.len().saturating_sub(1));
         let (_, val, _) = values.select_nth_unstable(target_idx);

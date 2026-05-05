@@ -637,12 +637,12 @@ impl<'de> Visitor<'de> for BoundedAudienceVisitor {
     where
         A: SeqAccess<'de>,
     {
-        if let Some(size_hint) = seq.size_hint() {
-            if size_hint > MAX_AUDIENCES_PER_TOKEN {
-                return Err(de::Error::custom(format!(
-                    "audience has {size_hint} entries, cap is {MAX_AUDIENCES_PER_TOKEN}"
-                )));
-            }
+        if let Some(size_hint) = seq.size_hint()
+            && size_hint > MAX_AUDIENCES_PER_TOKEN
+        {
+            return Err(de::Error::custom(format!(
+                "audience has {size_hint} entries, cap is {MAX_AUDIENCES_PER_TOKEN}"
+            )));
         }
 
         let capacity = seq.size_hint().unwrap_or(0).min(MAX_AUDIENCES_PER_TOKEN);
@@ -683,12 +683,12 @@ impl<'de> Visitor<'de> for BoundedTokenVecVisitor {
     where
         A: SeqAccess<'de>,
     {
-        if let Some(size_hint) = seq.size_hint() {
-            if size_hint > MAX_TOKENS {
-                return Err(de::Error::custom(format!(
-                    "token chain has {size_hint} tokens, cap is {MAX_TOKENS}"
-                )));
-            }
+        if let Some(size_hint) = seq.size_hint()
+            && size_hint > MAX_TOKENS
+        {
+            return Err(de::Error::custom(format!(
+                "token chain has {size_hint} tokens, cap is {MAX_TOKENS}"
+            )));
         }
 
         let capacity = seq.size_hint().unwrap_or(0).min(MAX_TOKENS);

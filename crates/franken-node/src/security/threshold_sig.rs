@@ -430,6 +430,7 @@ fn build_signing_message(artifact_id: &str, connector_id: &str, content_hash: &s
     msg
 }
 
+#[allow(clippy::large_enum_variant)]
 enum SigningMessage {
     Inline {
         bytes: [u8; INLINE_SIGNING_MESSAGE_BYTES],
@@ -904,12 +905,10 @@ fn verify_threshold_with_validated_artifact(
     } else {
         first_failure
             .map(PendingFailure::into_failure_reason)
-            .or_else(|| {
-                Some(FailureReason::BelowThreshold {
-                    have: valid_count,
-                    need: threshold,
-                })
-            })
+            .or(Some(FailureReason::BelowThreshold {
+                have: valid_count,
+                need: threshold,
+            }))
     };
 
     VerificationResult {

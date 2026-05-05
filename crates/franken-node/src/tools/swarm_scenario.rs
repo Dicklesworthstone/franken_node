@@ -784,6 +784,7 @@ fn expected_gap_for_fault(fault: SwarmScenarioFault) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_log(
     logs: &mut Vec<SwarmScenarioLog>,
     base_timestamp: DateTime<Utc>,

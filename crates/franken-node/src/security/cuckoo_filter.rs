@@ -6,7 +6,7 @@
 //! memory efficiency.
 
 use std::collections::hash_map::RandomState;
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::hash::BuildHasher;
 
 /// Maximum number of cuckoo evictions before declaring filter full
 const MAX_CUCKOO_EVICTIONS: usize = 500;
@@ -57,9 +57,7 @@ impl CuckooFilter {
     /// Uses high-quality hash function and ensures fingerprint is never zero
     /// (zero is used as empty marker).
     fn hash_and_fingerprint(&self, key: &str) -> (u64, u16) {
-        let mut hasher = self.hash_builder.build_hasher();
-        key.hash(&mut hasher);
-        let hash = hasher.finish();
+        let hash = self.hash_builder.hash_one(key);
 
         // Ensure fingerprint is never 0 (used as empty marker)
         let fingerprint = ((hash & FINGERPRINT_MASK as u64) as u16) | 1;
@@ -75,9 +73,7 @@ impl CuckooFilter {
         let i1 = (hash as usize) % self.bucket_count;
 
         // XOR-based alternate bucket (critical for deletion support)
-        let mut fp_hasher = self.hash_builder.build_hasher();
-        fingerprint.hash(&mut fp_hasher);
-        let fp_hash = fp_hasher.finish();
+        let fp_hash = self.hash_builder.hash_one(fingerprint);
         let i2 = (i1 ^ (fp_hash as usize)) % self.bucket_count;
 
         (i1, i2)
@@ -139,9 +135,7 @@ impl CuckooFilter {
             std::mem::swap(&mut fingerprint, &mut self.buckets[bucket_idx][slot_idx]);
 
             // Find alternate bucket for evicted fingerprint
-            let mut fp_hasher = self.hash_builder.build_hasher();
-            fingerprint.hash(&mut fp_hasher);
-            let fp_hash = fp_hasher.finish();
+            let fp_hash = self.hash_builder.hash_one(fingerprint);
             bucket_idx = (bucket_idx ^ (fp_hash as usize)) % self.bucket_count;
 
             // Try to place evicted fingerprint in alternate bucket

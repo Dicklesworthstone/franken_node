@@ -1146,63 +1146,61 @@ impl ReplayEngine {
             // Extract timestamp from side effects if present
             if let Some(original_clock_effect) =
                 step.side_effects.iter().find(|e| e.kind == "clock_read")
-            {
-                if let Some(replayed_clock_effect) =
+                && let Some(replayed_clock_effect) =
                     replayed_effects.iter().find(|e| e.kind == "clock_read")
+            {
+                // Verify exact payload length for timestamp safety
+                if original_clock_effect.payload.len() == 8
+                    && replayed_clock_effect.payload.len() == 8
                 {
-                    // Verify exact payload length for timestamp safety
-                    if original_clock_effect.payload.len() == 8
-                        && replayed_clock_effect.payload.len() == 8
-                    {
-                        let original_timestamp = u64::from_le_bytes(
-                            original_clock_effect.payload[0..8]
-                                .try_into()
-                                .unwrap_or([0; 8]),
+                    let original_timestamp = u64::from_le_bytes(
+                        original_clock_effect.payload[0..8]
+                            .try_into()
+                            .unwrap_or([0; 8]),
+                    );
+                    let replayed_timestamp = u64::from_le_bytes(
+                        replayed_clock_effect.payload[0..8]
+                            .try_into()
+                            .unwrap_or([0; 8]),
+                    );
+
+                    // Handle wraparound-aware drift calculation
+                    // Consider both forward and backward differences to handle u64 wraparound
+                    let forward_diff = replayed_timestamp.wrapping_sub(original_timestamp);
+                    let backward_diff = original_timestamp.wrapping_sub(replayed_timestamp);
+                    let drift_ns = forward_diff.min(backward_diff);
+
+                    if drift_ns > CLOCK_DRIFT_TOLERANCE_NS {
+                        clock_drift_detected = true;
+                        let explanation = format!(
+                            "Clock drift detected: {}ns exceeds tolerance {}ns",
+                            drift_ns, CLOCK_DRIFT_TOLERANCE_NS
                         );
-                        let replayed_timestamp = u64::from_le_bytes(
-                            replayed_clock_effect.payload[0..8]
-                                .try_into()
-                                .unwrap_or([0; 8]),
+
+                        // TTR-006: Clock drift detected
+                        push_bounded(
+                            &mut self.audit_log,
+                            AuditEntry::new(
+                                event_codes::TTR_006,
+                                trace_id,
+                                &explanation,
+                                step.timestamp_ns,
+                            ),
+                            MAX_AUDIT_LOG_ENTRIES,
                         );
 
-                        // Handle wraparound-aware drift calculation
-                        // Consider both forward and backward differences to handle u64 wraparound
-                        let forward_diff = replayed_timestamp.wrapping_sub(original_timestamp);
-                        let backward_diff = original_timestamp.wrapping_sub(replayed_timestamp);
-                        let drift_ns = forward_diff.min(backward_diff);
-
-                        if drift_ns > CLOCK_DRIFT_TOLERANCE_NS {
-                            clock_drift_detected = true;
-                            let explanation = format!(
-                                "Clock drift detected: {}ns exceeds tolerance {}ns",
-                                drift_ns, CLOCK_DRIFT_TOLERANCE_NS
-                            );
-
-                            // TTR-006: Clock drift detected
-                            push_bounded(
-                                &mut self.audit_log,
-                                AuditEntry::new(
-                                    event_codes::TTR_006,
-                                    trace_id,
-                                    &explanation,
-                                    step.timestamp_ns,
-                                ),
-                                MAX_AUDIT_LOG_ENTRIES,
-                            );
-
-                            clock_drift_divergence = Some(Divergence {
-                                step_seq: step.seq,
-                                kind: DivergenceKind::ClockDrift {
-                                    expected_ns: original_timestamp,
-                                    actual_ns: replayed_timestamp,
-                                    drift_ns,
-                                    tolerance_ns: CLOCK_DRIFT_TOLERANCE_NS,
-                                },
-                                expected_digest: format!("timestamp_{}", original_timestamp),
-                                actual_digest: format!("timestamp_{}", replayed_timestamp),
-                                explanation,
-                            });
-                        }
+                        clock_drift_divergence = Some(Divergence {
+                            step_seq: step.seq,
+                            kind: DivergenceKind::ClockDrift {
+                                expected_ns: original_timestamp,
+                                actual_ns: replayed_timestamp,
+                                drift_ns,
+                                tolerance_ns: CLOCK_DRIFT_TOLERANCE_NS,
+                            },
+                            expected_digest: format!("timestamp_{}", original_timestamp),
+                            actual_digest: format!("timestamp_{}", replayed_timestamp),
+                            explanation,
+                        });
                     }
                 }
             }
@@ -1222,12 +1220,11 @@ impl ReplayEngine {
             } else {
                 divergence_count = divergence_count.saturating_add(1);
 
-                if clock_drift_detected {
-                    if let Some(drift_divergence) = clock_drift_divergence {
-                        if divergences.len() < MAX_DIVERGENCES {
-                            divergences.push(drift_divergence);
-                        }
-                    }
+                if clock_drift_detected
+                    && let Some(drift_divergence) = clock_drift_divergence
+                    && divergences.len() < MAX_DIVERGENCES
+                {
+                    divergences.push(drift_divergence);
                 }
 
                 if !output_match || !effects_match {

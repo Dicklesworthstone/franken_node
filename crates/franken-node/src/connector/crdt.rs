@@ -233,7 +233,7 @@ impl OrSet {
                 let removed_tags = self.removes.get(element);
                 add_tags
                     .iter()
-                    .any(|tag| removed_tags.map_or(true, |removed| !removed.contains(tag)))
+                    .any(|tag| removed_tags.is_none_or(|removed| !removed.contains(tag)))
                     .then_some(element)
             })
             .collect()

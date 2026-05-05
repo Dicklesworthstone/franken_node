@@ -754,19 +754,19 @@ fn engine_dependency_paths(content: &str, crate_name: &str) -> Vec<String> {
     // Check dependencies sections
     let sections = ["dependencies", "dev-dependencies", "build-dependencies"];
     for section in sections {
-        if let Some(deps) = parsed.get(section).and_then(|v| v.as_table()) {
-            if let Some(dep) = deps.get(crate_name) {
-                let path_value = match dep {
-                    // Handle both string and table forms:
-                    // crate_name = { path = "...", ... }
-                    toml::Value::Table(table) => table.get("path").and_then(|v| v.as_str()),
-                    // Simple string paths are not valid for engine dependencies
-                    _ => None,
-                };
+        if let Some(deps) = parsed.get(section).and_then(|v| v.as_table())
+            && let Some(dep) = deps.get(crate_name)
+        {
+            let path_value = match dep {
+                // Handle both string and table forms:
+                // crate_name = { path = "...", ... }
+                toml::Value::Table(table) => table.get("path").and_then(|v| v.as_str()),
+                // Simple string paths are not valid for engine dependencies
+                _ => None,
+            };
 
-                if let Some(path) = path_value {
-                    paths.push(path.to_string());
-                }
+            if let Some(path) = path_value {
+                paths.push(path.to_string());
             }
         }
     }
@@ -881,7 +881,7 @@ pub fn canonical_json_value(value: &Value) -> String {
         }
         Value::Object(map) => {
             let mut entries = map.iter().collect::<Vec<_>>();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_by_key(|(key, _)| *key);
             let rendered = entries
                 .into_iter()
                 .map(|(key, value)| {

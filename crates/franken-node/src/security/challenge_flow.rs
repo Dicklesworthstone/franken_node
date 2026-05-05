@@ -570,7 +570,7 @@ impl ChallengeFlowController {
         {
             return Err(ChallengeError::new(
                 ERR_PROOF_INVALID,
-                &format!(
+                format!(
                     "Proof type {:?} not required for this challenge",
                     proof.proof_type.label()
                 ),
@@ -636,7 +636,7 @@ impl ChallengeFlowController {
         if duplicate_exists {
             return Err(ChallengeError::new(
                 ERR_PROOF_INVALID,
-                &format!(
+                format!(
                     "Proof of type {} already submitted for this challenge",
                     proof.proof_type.label()
                 ),
@@ -736,7 +736,7 @@ impl ChallengeFlowController {
                 if !type_submitted {
                     return Err(ChallengeError::new(
                         ERR_PROOF_INVALID,
-                        &format!(
+                        format!(
                             "Required proof type {} has not been submitted",
                             required_type.label()
                         ),
@@ -772,7 +772,7 @@ impl ChallengeFlowController {
                 if proof_age_ms >= challenge.timeout_ms {
                     return Err(ChallengeError::new(
                         ERR_PROOF_INVALID,
-                        &format!(
+                        format!(
                             "Proof for type {} is too old (age: {}ms)",
                             proof.proof_type.label(),
                             proof_age_ms

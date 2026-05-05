@@ -283,14 +283,7 @@ fn check_authorization(
         }
         CallerRole::ReadOnly => {
             // Read-only role can only read, and not from audit logs
-            if operation != "read" {
-                Err(AuthorizationError::AccessDenied {
-                    caller_id: caller.caller_id.clone(),
-                    role: caller.role,
-                    operation: operation.to_string(),
-                    class: class.label().to_string(),
-                })
-            } else if class == PersistenceClass::AuditLog {
+            if operation != "read" || class == PersistenceClass::AuditLog {
                 Err(AuthorizationError::AccessDenied {
                     caller_id: caller.caller_id.clone(),
                     role: caller.role,

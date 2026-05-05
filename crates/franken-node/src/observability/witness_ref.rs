@@ -69,10 +69,10 @@ fn is_valid_witness_structure(witness: &WitnessRef) -> bool {
     }
 
     // If locator is present, it must pass basic safety checks
-    if let Some(ref locator) = witness.replay_bundle_locator {
-        if !strict_replay_bundle_locator_is_safe(locator) {
-            return false;
-        }
+    if let Some(ref locator) = witness.replay_bundle_locator
+        && !strict_replay_bundle_locator_is_safe(locator)
+    {
+        return false;
     }
 
     // Reject all-zero integrity hashes (likely garbage/uninitialized)

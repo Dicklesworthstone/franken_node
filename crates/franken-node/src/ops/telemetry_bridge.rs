@@ -38,6 +38,7 @@ impl SocketLockGuard {
         let lock_file = OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(false)
             .mode(0o600)
             .open(&lock_path)
             .map_err(|e| anyhow::anyhow!("failed to create lock file {}: {}", lock_path, e))?;

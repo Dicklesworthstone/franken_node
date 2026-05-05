@@ -612,7 +612,7 @@ fn inclusion_root_from_proof(proof: &InclusionProof) -> Hash {
     let mut current = proof.leaf_hash.clone();
     let mut index = u64_to_usize(proof.leaf_index);
     for sibling in &proof.audit_path {
-        current = if index % 2 == 0 {
+        current = if index.is_multiple_of(2) {
             hash_pair_legacy(&current, sibling)
         } else {
             hash_pair_legacy(sibling, &current)
@@ -627,7 +627,7 @@ fn inclusion_root_from_proof_raw(proof: &InclusionProof) -> Option<RawHash> {
     let mut index = u64_to_usize(proof.leaf_index);
     for sibling in &proof.audit_path {
         let sibling = raw_hash_from_lower_hex(sibling)?;
-        current = if index % 2 == 0 {
+        current = if index.is_multiple_of(2) {
             hash_pair_raw(&current, &sibling)
         } else {
             hash_pair_raw(&sibling, &current)
@@ -651,7 +651,11 @@ fn merkle_audit_path_raw(leaf_hashes: &[RawHash], leaf_index: usize) -> Option<V
             level.push(*level.last()?);
         }
 
-        let sibling_idx = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
+        let sibling_idx = if idx.is_multiple_of(2) {
+            idx + 1
+        } else {
+            idx - 1
+        };
         path.push(level[sibling_idx]);
 
         let mut next = Vec::with_capacity(level.len() / 2);

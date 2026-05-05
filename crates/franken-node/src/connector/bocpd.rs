@@ -243,7 +243,7 @@ impl GaussianSuffStats {
             }
         };
         let delta = x - self.mean;
-        self.mean = self.mean + (delta / self.n);
+        self.mean += delta / self.n;
         if !self.mean.is_finite() {
             self.mean = 0.0;
         }
@@ -385,7 +385,7 @@ fn ln_gamma(x: f64) -> f64 {
     let mut a: f64 = coefficients[0];
     let t = x + 7.5;
     for (i, &coeff) in coefficients.iter().enumerate().skip(1) {
-        a = a + (coeff / (x + i as f64));
+        a += coeff / (x + i as f64);
     }
     0.5 * (2.0 * PI).ln() + (t).ln() * (x + 0.5) - t + a.ln()
 }
