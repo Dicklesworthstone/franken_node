@@ -1257,6 +1257,7 @@ pub mod federation;
 #[cfg(any(test, feature = "admin-tools"))]
 pub mod migration;
 pub mod observability;
+pub mod operator_json_contracts;
 pub mod ops;
 #[cfg(feature = "advanced-features")]
 pub mod perf;

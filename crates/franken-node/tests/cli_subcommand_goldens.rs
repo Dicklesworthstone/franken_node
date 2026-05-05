@@ -17,6 +17,8 @@ use tempfile::TempDir;
 
 #[path = "cli_golden_helpers.rs"]
 mod cli_golden_helpers;
+#[path = "operator_json_contract_registry.rs"]
+mod operator_json_contract_registry;
 
 use cli_golden_helpers::{pretty_json_stdout, with_scrubbed_snapshot_settings};
 

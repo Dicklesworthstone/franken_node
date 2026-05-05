@@ -115,6 +115,7 @@ pub const LAB_RUNTIME: &str = "lab-v1.0";
 
 // ── Tools ──────────────────────────────────────────────────────────
 pub const MIGRATION_INCIDENT_DATASETS: &str = "rds-v1.0";
+pub const OPERATOR_JSON_CONTRACT_REGISTRY: &str = "operator-json-contract-registry-v1.0";
 pub const REPORT_OUTPUT_CONTRACT: &str = "roc-v1.0";
 pub const SECURITY_TRUST_METRICS: &str = "secm-v1";
 pub const BENCHMARK_SUITE_SCORING: &str = "sf-v1";
@@ -259,6 +260,10 @@ pub fn all_versions() -> Vec<(&'static str, &'static str)> {
         ("lab_runtime", LAB_RUNTIME),
         // Tools
         ("migration_incident_datasets", MIGRATION_INCIDENT_DATASETS),
+        (
+            "operator_json_contract_registry",
+            OPERATOR_JSON_CONTRACT_REGISTRY,
+        ),
         ("report_output_contract", REPORT_OUTPUT_CONTRACT),
         ("security_trust_metrics", SECURITY_TRUST_METRICS),
         ("benchmark_suite_scoring", BENCHMARK_SUITE_SCORING),
