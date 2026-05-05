@@ -14,7 +14,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -405,9 +405,9 @@ struct PublishOptions {
     delay_after_lock: Option<Duration>,
 }
 
-fn publish_lock_registry() -> &'static Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>> {
-    static LOCKS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
-    LOCKS.get_or_init(|| Mutex::new(BTreeMap::new()))
+fn publish_lock_registry() -> &'static RwLock<BTreeMap<PathBuf, Arc<Mutex<()>>>> {
+    static LOCKS: OnceLock<RwLock<BTreeMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    LOCKS.get_or_init(|| RwLock::new(BTreeMap::new()))
 }
 
 fn publication_lock_registry_key(dir: &Path) -> Result<PathBuf, RootPointerError> {
@@ -421,8 +421,18 @@ fn publication_lock_registry_key(dir: &Path) -> Result<PathBuf, RootPointerError
 
 fn publish_lock(dir: &Path) -> Result<Arc<Mutex<()>>, RootPointerError> {
     let lock_key = publication_lock_registry_key(dir)?;
+
+    {
+        let registry = publish_lock_registry()
+            .read()
+            .map_err(|_| RootPointerError::LockPoisoned)?;
+        if let Some(lock) = registry.get(&lock_key) {
+            return Ok(Arc::clone(lock));
+        }
+    }
+
     let mut registry = publish_lock_registry()
-        .lock()
+        .write()
         .map_err(|_| RootPointerError::LockPoisoned)?;
     Ok(Arc::clone(
         registry
