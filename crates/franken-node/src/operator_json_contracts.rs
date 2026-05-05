@@ -486,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn validator_allows_additive_optional_fields() {
+    fn validator_allows_additive_optional_fields() -> Result<(), Box<dyn std::error::Error>> {
         let mut value = serde_json::json!({
             "release_path": "/tmp/release",
             "manifest_signature_ok": true,
@@ -495,12 +495,20 @@ mod tests {
             "unlisted_artifact_count": 0,
             "future_optional_field": {"kept": true}
         });
-        validate_operator_json_value(OperatorJsonSurface::VerifyReleaseReport, &value)
-            .expect("additive optional field should not break contract");
+        assert!(
+            validate_operator_json_value(OperatorJsonSurface::VerifyReleaseReport, &value).is_ok(),
+            "additive optional field should not break contract"
+        );
 
-        value.as_object_mut().unwrap().remove("overall_pass");
-        let errors = validate_operator_json_value(OperatorJsonSurface::VerifyReleaseReport, &value)
-            .expect_err("missing required field should fail");
+        let Some(object) = value.as_object_mut() else {
+            return Err("verify release fixture should be an object".into());
+        };
+        object.remove("overall_pass");
+        let Err(errors) =
+            validate_operator_json_value(OperatorJsonSurface::VerifyReleaseReport, &value)
+        else {
+            return Err("missing required field should fail".into());
+        };
         assert_eq!(
             errors,
             vec![OperatorJsonContractError::MissingRequiredField {
@@ -508,5 +516,6 @@ mod tests {
                 field_path: "overall_pass".to_string(),
             }]
         );
+        Ok(())
     }
 }
