@@ -2,8 +2,8 @@
   "bead_id": "bd-12n3",
   "section": "10.14",
   "title": "Idempotency key derivation from request bytes with epoch binding",
-  "generated_at": "2026-05-03T02:04:11Z",
-  "status": "contract_gates_pass_with_remote_dependency_compile_blocked",
+  "generated_at": "2026-05-05T18:40:31Z",
+  "status": "blocked_by_current_all_target_clippy_warning_debt",
   "checks": [
     {
       "name": "implementation_surface_present",
@@ -49,27 +49,25 @@
     },
     {
       "name": "cargo_check_all_targets_via_rch",
-      "command": "RCH_VISIBILITY=verbose rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_franken_node_pane11 cargo check -p frankenengine-node --all-targets",
-      "exit_code": 101,
-      "status": "FAIL_DEPENDENCY",
-      "output_path": "artifacts/section_10_14/bd-12n3/rch_cargo_check_all_targets.log",
-      "note": "Remote cargo check reached dependency compilation and failed in sibling sqlmodel-frankensqlite at /dp/sqlmodel_rust/crates/sqlmodel-frankensqlite/src/connection.rs:79:41 because fsqlite::Connection::open_with_page_size is not available in fsqlite-core 0.1.2."
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_VISIBILITY=summary RCH_PRIORITY=low RCH_TEST_TIMEOUT_SEC=1800 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=2400 rch exec -- env CARGO_TARGET_DIR=/data/tmp/franken_node-rusticplateau-bd-177e4-check-target CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo +nightly-2026-02-19 check -p frankenengine-node --all-targets",
+      "exit_code": 0,
+      "status": "PASS_RECORDED_IN_BEADS_COMMENT",
+      "note": "RusticPlateau recorded this remote pass in the bd-177e4 Beads thread at 2026-05-05 16:04 UTC: [RCH] remote vmi1293453 (803.3s). The persisted artifact log for this check remains the 2026-05-03 stale dependency failure and must be refreshed before bd-177e4 can close cleanly."
     },
     {
       "name": "cargo_clippy_all_targets_via_rch",
-      "command": "RCH_VISIBILITY=verbose rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_franken_node_pane11 cargo clippy -p frankenengine-node --all-targets -- -D warnings",
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_VISIBILITY=summary RCH_PRIORITY=low RCH_TEST_TIMEOUT_SEC=1800 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=2400 rch exec -- env CARGO_TARGET_DIR=/data/tmp/franken_node-pinkfern-bd-177e4-clippy-target CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo +nightly-2026-02-19 clippy -p frankenengine-node --all-targets -- -D warnings",
       "exit_code": 101,
-      "status": "FAIL_DEPENDENCY",
+      "status": "FAIL_CURRENT_REPO_CLIPPY_WARNING_DEBT",
       "output_path": "artifacts/section_10_14/bd-12n3/rch_cargo_clippy_all_targets.log",
-      "note": "After verifier SDK clippy cleanup, remote clippy reached dependency compilation and failed on the same sibling sqlmodel-frankensqlite open_with_page_size API mismatch."
+      "note": "PinkFern refreshed this proof on 2026-05-05. The stale sqlmodel open_with_page_size blocker is gone; clippy reaches frankenengine-node on remote ts2 and fails with 187 warning-as-error errors across existing all-target warning debt. First blockers include engine_dispatcher.rs unused variables/functions, rollout_state.rs dead code, divergence_gate.rs dead constants, cli.rs doc-lazy-continuation, and config.rs needless-borrow warnings."
     },
     {
       "name": "focused_idempotency_tests_via_rch",
-      "command": "RCH_VISIBILITY=verbose rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_franken_node_pane11 cargo test -p frankenengine-node idempotency -- --nocapture",
-      "exit_code": 101,
-      "status": "FAIL_DEPENDENCY",
-      "output_path": "artifacts/section_10_14/bd-12n3/rch_cargo_test_idempotency_key_derivation.log",
-      "note": "Focused idempotency/collision cargo test proof could not reach test execution because sibling sqlmodel-frankensqlite failed to compile with the same open_with_page_size API mismatch."
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_VISIBILITY=summary RCH_PRIORITY=low RCH_TEST_TIMEOUT_SEC=1800 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=2400 rch exec -- env CARGO_TARGET_DIR=/data/tmp/franken_node-rusticplateau-bd-177e4-idempotency-target CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo +nightly-2026-02-19 test -p frankenengine-node --features extended-surfaces --test idempotency_key_derivation -- --nocapture",
+      "exit_code": 0,
+      "status": "PASS_RECORDED_IN_BEADS_COMMENT",
+      "note": "RusticPlateau recorded this focused remote pass in the bd-177e4 Beads thread at 2026-05-05 16:04 UTC: 6/6 tests passed on vmi1293453. The persisted artifact log for this focused test remains the 2026-05-03 stale dependency failure and must be refreshed before bd-177e4 can close cleanly."
     },
     {
       "name": "section_10_14_gate",
@@ -94,9 +92,9 @@
     "spec": "docs/specs/section_10_14/bd-12n3_contract.md"
   },
   "remaining_blocker": {
-    "kind": "remote_dependency_compile_failure",
-    "path": "/dp/sqlmodel_rust/crates/sqlmodel-frankensqlite/src/connection.rs",
-    "line": 79,
-    "message": "no associated function or constant named open_with_page_size found for struct fsqlite::Connection"
+    "kind": "current_repo_all_target_clippy_warning_debt",
+    "path": "artifacts/section_10_14/bd-12n3/rch_cargo_clippy_all_targets.log",
+    "line": null,
+    "message": "cargo +nightly-2026-02-19 clippy -p frankenengine-node --all-targets -- -D warnings reaches frankenengine-node and fails with 187 warning-as-error errors; fresh persisted cargo check and focused-test pass logs are still needed before bd-177e4 closeout."
   }
 }
