@@ -305,6 +305,10 @@ name = "incident_bundle_integrity_conformance"
 path = "tests/incident_bundle_integrity_conformance.rs"
 
 [[test]]
+name = "incident_timeline_report"
+path = "tests/incident_timeline_report.rs"
+
+[[test]]
 name = "replay_coverage_gate_conformance"
 path = "tests/replay_coverage_gate_conformance.rs"
 
