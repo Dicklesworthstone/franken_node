@@ -34,6 +34,7 @@ pub mod redteam_evaluations;
 pub mod replay_bundle;
 #[path = "replay_bundle_adversarial_fuzz.rs"]
 pub mod replay_bundle_adversarial_fuzz;
+pub mod swarm_scenario;
 #[cfg(feature = "advanced-features")]
 pub mod replay_determinism_metrics;
 #[cfg(feature = "advanced-features")]

@@ -309,6 +309,10 @@ name = "incident_timeline_report"
 path = "tests/incident_timeline_report.rs"
 
 [[test]]
+name = "deterministic_swarm_scenario_runner"
+path = "tests/deterministic_swarm_scenario_runner.rs"
+
+[[test]]
 name = "replay_coverage_gate_conformance"
 path = "tests/replay_coverage_gate_conformance.rs"
 
