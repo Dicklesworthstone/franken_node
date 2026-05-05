@@ -311,6 +311,7 @@ required-features = ["test-support"]
 [[test]]
 name = "migration_e2e_gate_artifacts"
 path = "tests/migration_e2e_gate_artifacts.rs"
+required-features = ["test-support"]
 
 [[test]]
 name = "policy_e2e_evidence_matrix"

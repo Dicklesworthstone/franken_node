@@ -4,13 +4,10 @@
 //! through the actual migration gate state machines. No mocks or synthetic
 //! gate substitutes are used.
 
-#[path = "../src/migration/bpet_migration_gate.rs"]
-mod bpet_gate;
-#[path = "../src/migration/dgis_migration_gate.rs"]
-mod dgis_gate;
-
 use std::{fs, path::PathBuf};
 
+use frankenengine_node::migration::bpet_migration_gate as bpet_gate;
+use frankenengine_node::migration::dgis_migration_gate as dgis_gate;
 use serde_json::{Value, json};
 
 const FLOAT_EPSILON: f64 = 1e-9;
