@@ -787,6 +787,7 @@ harness = false
 [[bench]]
 name = "anti_entropy_insert_bench"
 harness = false
+required-features = ["advanced-features"]
 
 [[bench]]
 name = "threshold_sig_verify_bench"
