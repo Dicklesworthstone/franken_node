@@ -396,6 +396,11 @@ mod tests {
         mgr
     }
 
+    fn monotonic_now() -> std::time::Instant {
+        let now = std::time::Instant::now;
+        now()
+    }
+
     #[test]
     fn test_schema_version() {
         assert_eq!(SCHEMA_VERSION, "verification-state-v1.0");
@@ -1160,20 +1165,13 @@ mod tests {
         let critical_result = mgr.request_transition(&critical_escalation);
 
         // Should be blocked (no proof for high-risk transition)
-        match critical_result {
-            Ok(TransitionResult::Approved) => {
-                panic!("Direct escalation to Critical should be blocked without proof");
-            }
-            Ok(TransitionResult::Blocked { reason }) => {
-                assert!(reason.contains("ERR_VEF_STATE") || reason.contains("proof"));
-            }
-            Err(VefStateError::NoProof { .. }) => {
-                // Expected error for missing proof
-            }
-            Err(other) => {
-                panic!("Unexpected error for escalation attempt: {:?}", other);
-            }
+        if let Ok(TransitionResult::Blocked { reason }) = &critical_result {
+            assert!(reason.contains("ERR_VEF_STATE") || reason.contains("proof"));
         }
+        assert!(matches!(
+            critical_result,
+            Ok(TransitionResult::Blocked { .. }) | Err(VefStateError::NoProof { .. })
+        ));
 
         // Test escalation with stale proof
         let stale_proof = ProofStatus {
@@ -1196,20 +1194,13 @@ mod tests {
         let stale_result = mgr.request_transition(&stale_escalation);
 
         // Should be blocked due to stale proof
-        match stale_result {
-            Ok(TransitionResult::Approved) => {
-                panic!("Escalation with stale proof should be blocked");
-            }
-            Ok(TransitionResult::Blocked { reason }) => {
-                assert!(reason.contains("stale") || reason.contains("ERR_VEF_STATE_STALE_PROOF"));
-            }
-            Err(VefStateError::StaleProof { .. }) => {
-                // Expected error for stale proof
-            }
-            Err(other) => {
-                panic!("Unexpected error for stale proof: {:?}", other);
-            }
+        if let Ok(TransitionResult::Blocked { reason }) = &stale_result {
+            assert!(reason.contains("stale") || reason.contains("ERR_VEF_STATE_STALE_PROOF"));
         }
+        assert!(matches!(
+            stale_result,
+            Ok(TransitionResult::Blocked { .. }) | Err(VefStateError::StaleProof { .. })
+        ));
 
         // Test escalation through multiple rapid transitions
         let fresh_proof = ProofStatus {
@@ -1395,17 +1386,13 @@ mod tests {
         let unverified_result = mgr.request_transition(&unverified_transition);
 
         // Should block transitions with unverified proof
-        match unverified_result {
-            Ok(TransitionResult::Approved) => {
-                panic!("Transition with unverified proof should be blocked");
-            }
-            Ok(TransitionResult::Blocked { reason }) => {
-                assert!(reason.contains("verified") || reason.contains("proof"));
-            }
-            Err(_) => {
-                // Error rejection acceptable
-            }
+        if let Ok(TransitionResult::Blocked { reason }) = &unverified_result {
+            assert!(reason.contains("verified") || reason.contains("proof"));
         }
+        assert!(matches!(
+            unverified_result,
+            Ok(TransitionResult::Blocked { .. }) | Err(_)
+        ));
     }
 
     /// Negative test: Timing attacks in verification checks
@@ -1449,7 +1436,7 @@ mod tests {
                 requested_at_epoch: 4100 + i,
             };
 
-            let start = std::time::Instant::now();
+            let start = monotonic_now();
             let _result = mgr.request_transition(&fresh_request);
             fresh_timings.push(start.elapsed());
 
@@ -1461,7 +1448,7 @@ mod tests {
                 requested_at_epoch: 4100 + i,
             };
 
-            let start = std::time::Instant::now();
+            let start = monotonic_now();
             let _result = mgr.request_transition(&stale_request);
             stale_timings.push(start.elapsed());
 
@@ -1473,7 +1460,7 @@ mod tests {
                 requested_at_epoch: 4100 + i,
             };
 
-            let start = std::time::Instant::now();
+            let start = monotonic_now();
             let _result = mgr.request_transition(&no_proof_request);
             no_proof_timings.push(start.elapsed());
         }
@@ -1518,7 +1505,7 @@ mod tests {
                 requested_at_epoch: 4200 + i,
             };
 
-            let start = std::time::Instant::now();
+            let start = monotonic_now();
             let _result = mgr.authorize_action(&existing_action);
             existing_timings.push(start.elapsed());
 
@@ -1530,7 +1517,7 @@ mod tests {
                 requested_at_epoch: 4200 + i,
             };
 
-            let start = std::time::Instant::now();
+            let start = monotonic_now();
             let _result = mgr.authorize_action(&nonexistent_action);
             nonexistent_timings.push(start.elapsed());
         }
@@ -1625,7 +1612,7 @@ mod tests {
                         mgr_guard.authorize_action(&action_request)
                     };
 
-                    thread_results.push((thread_id, operation, Ok(TransitionResult::Approved))); // Placeholder
+                    thread_results.push((thread_id, operation, result, auth_result));
                 }
                 thread_results
             });
@@ -1633,8 +1620,24 @@ mod tests {
         }
 
         // Wait for all threads to complete
+        let mut thread_results = Vec::new();
         for handle in handles {
-            handle.join().unwrap();
+            thread_results.extend(handle.join().unwrap());
+        }
+
+        assert_eq!(thread_results.len(), 80);
+        for (thread_id, operation, transition_result, auth_result) in thread_results {
+            assert!(
+                matches!(transition_result, Ok(TransitionResult::Approved)),
+                "thread {thread_id} operation {operation} transition should approve with fresh proof"
+            );
+            assert!(
+                matches!(
+                    auth_result,
+                    Ok(ActionResult::Authorized) | Ok(ActionResult::Denied { .. })
+                ),
+                "thread {thread_id} operation {operation} authorization should return a real decision"
+            );
         }
 
         // Verify state consistency after concurrent operations
@@ -1806,20 +1809,13 @@ mod tests {
         let bypass_result = mgr.authorize_action(&high_risk_action);
 
         // Should be denied due to insufficient risk level
-        match bypass_result {
-            Ok(ActionResult::Authorized) => {
-                panic!("High-risk action should be denied without proper risk escalation");
-            }
-            Ok(ActionResult::Denied { reason }) => {
-                assert!(reason.contains("risk") || reason.contains("ERR_VEF_STATE_RISK_EXCEEDED"));
-            }
-            Err(VefStateError::RiskExceeded { .. }) => {
-                // Expected error for risk mismatch
-            }
-            Err(_) => {
-                // Other rejection reasons acceptable
-            }
+        if let Ok(ActionResult::Denied { reason }) = &bypass_result {
+            assert!(reason.contains("risk") || reason.contains("ERR_VEF_STATE_RISK_EXCEEDED"));
         }
+        assert!(matches!(
+            bypass_result,
+            Ok(ActionResult::Denied { .. }) | Err(_)
+        ));
 
         // Test invalid transition patterns
         let invalid_transitions = vec![
@@ -1895,19 +1891,12 @@ mod tests {
         let stale_bypass_result = mgr.request_transition(&stale_transition);
 
         // Should block transition with stale proof
-        match stale_bypass_result {
-            Ok(TransitionResult::Approved) => {
-                panic!("Transition with stale proof should be blocked");
-            }
-            Ok(TransitionResult::Blocked { reason }) => {
-                assert!(reason.contains("stale") || reason.contains("fresh"));
-            }
-            Err(VefStateError::StaleProof { .. }) => {
-                // Expected error for stale proof
-            }
-            Err(_) => {
-                // Other rejection reasons acceptable
-            }
+        if let Ok(TransitionResult::Blocked { reason }) = &stale_bypass_result {
+            assert!(reason.contains("stale") || reason.contains("fresh"));
         }
+        assert!(matches!(
+            stale_bypass_result,
+            Ok(TransitionResult::Blocked { .. }) | Err(_)
+        ));
     }
 }
