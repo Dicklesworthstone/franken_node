@@ -37,6 +37,7 @@ use frankenengine_node::claims::claim_compiler::{
 };
 
 use frankenengine_node::security::constant_time;
+use hex::FromHex;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -212,8 +213,7 @@ impl SupplyChainE2EHarness {
                 // Step 4: Verify registry audit trail
                 let audit_entries = {
                     let registry = self.registry.read().await;
-                    // Note: This would require accessing the audit log, implementation depends on actual API
-                    0 // Placeholder count
+                    registry.audit_log().len()
                 };
 
                 info!(
@@ -235,7 +235,7 @@ impl SupplyChainE2EHarness {
                     bytes_processed: Some(serde_json::to_string(&registration_request)?.len()),
                     error: None,
                     context,
-                    ..Default::default()
+                    ..empty_operation_log(start_time)
                 })
                 .await;
             } else {
@@ -262,7 +262,7 @@ impl SupplyChainE2EHarness {
                 success: false,
                 error: Some(submission_result.detail.clone()),
                 context,
-                ..Default::default()
+                ..empty_operation_log(start_time)
             })
             .await;
 
@@ -385,7 +385,7 @@ impl SupplyChainE2EHarness {
                                     bytes_processed: Some(serde_json::to_string(&external_claim)?.len()),
                                     error: None,
                                     context,
-                                    ..Default::default()
+                                    ..empty_operation_log(start_time)
                                 }).await;
                             }
                             None => {
@@ -400,7 +400,7 @@ impl SupplyChainE2EHarness {
                                     success: false,
                                     error: Some("Snapshot build failed".to_string()),
                                     context,
-                                    ..Default::default()
+                                    ..empty_operation_log(start_time)
                                 }).await;
 
                                 return Err("Snapshot build failed".into());
@@ -427,12 +427,12 @@ impl SupplyChainE2EHarness {
                             job_id,
                             duration_ms: start_time.elapsed().as_millis() as u64,
                             success: false,
-                            error: Some(format!("Publication rejected: sanitized error")),
+                            error: Some("Publication rejected: sanitized error".to_string()),
                             context,
-                            ..Default::default()
+                            ..empty_operation_log(start_time)
                         }).await;
 
-                        return Err(format!("Scoreboard publication failed: sanitized error").into());
+                        return Err("Scoreboard publication failed: sanitized error".into());
                     }
                 }
             }
@@ -461,13 +461,13 @@ impl SupplyChainE2EHarness {
                     job_id,
                     duration_ms: start_time.elapsed().as_millis() as u64,
                     success: false,
-                    error: Some(format!("Compilation rejected: sanitized error")),
+                    error: Some("Compilation rejected: sanitized error".to_string()),
                     context,
-                    ..Default::default()
+                    ..empty_operation_log(start_time)
                 })
                 .await;
 
-                return Err(format!("Claim compilation failed: sanitized error").into());
+                return Err("Claim compilation failed: sanitized error".into());
             }
         }
 
@@ -601,7 +601,7 @@ impl SupplyChainE2EHarness {
         contract: &CompiledContract,
     ) -> Result<bool, Box<dyn std::error::Error>> {
         // Real signature verification using the key ring
-        let signature_bytes = hex::decode(&contract.signature)?;
+        let signature_bytes = Vec::<u8>::from_hex(&contract.signature)?;
         let content_hash = {
             let mut hasher = Sha256::new();
             hasher.update(b"contract_sig_v1:");
@@ -681,95 +681,73 @@ impl SupplyChainE2EHarness {
     }
 }
 
-impl Default for E2EOperationLog {
-    fn default() -> Self {
-        Self {
-            operation: String::new(),
-            component: String::new(),
-            timestamp: Instant::now(),
-            job_id: String::new(),
-            duration_ms: 0,
-            success: false,
-            registry_entries: None,
-            claims_compiled: None,
-            signatures_verified: None,
-            provenance_chains: None,
-            bytes_processed: None,
-            error: None,
-            context: BTreeMap::new(),
-        }
+fn empty_operation_log(timestamp: Instant) -> E2EOperationLog {
+    E2EOperationLog {
+        operation: String::new(),
+        component: String::new(),
+        timestamp,
+        job_id: String::new(),
+        duration_ms: 0,
+        success: false,
+        registry_entries: None,
+        claims_compiled: None,
+        signatures_verified: None,
+        provenance_chains: None,
+        bytes_processed: None,
+        error: None,
+        context: BTreeMap::new(),
     }
 }
 
 // === E2E INTEGRATION TESTS ===
 
 #[tokio::test]
-async fn e2e_registry_admission_real_services() {
-    tracing_subscriber::fmt::init();
+async fn e2e_registry_admission_real_services() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = tracing_subscriber::fmt::try_init();
 
     let mut harness = SupplyChainE2EHarness::new().await;
-    let result = harness.test_registry_admission_e2e().await;
+    let admitted = harness.test_registry_admission_e2e().await?;
+    assert!(!admitted.is_empty(), "Should admit at least one extension");
+    info!(
+        admitted_count = admitted.len(),
+        "Registry admission e2e test passed"
+    );
 
-    match result {
-        Ok(admitted) => {
-            assert!(!admitted.is_empty(), "Should admit at least one extension");
-            info!(
-                admitted_count = admitted.len(),
-                "Registry admission e2e test passed"
-            );
-        }
-        Err(e) => {
-            error!(error = %e, "Registry admission e2e test failed");
-            panic!("Registry admission e2e test failed: {}", e);
-        }
-    }
+    Ok(())
 }
 
 #[tokio::test]
-async fn e2e_claims_envelope_lifecycle_real_services() {
-    tracing_subscriber::fmt::init();
+async fn e2e_claims_envelope_lifecycle_real_services() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = tracing_subscriber::fmt::try_init();
 
     let mut harness = SupplyChainE2EHarness::new().await;
-    let result = harness.test_claims_envelope_lifecycle_e2e().await;
+    let compiled = harness.test_claims_envelope_lifecycle_e2e().await?;
+    assert!(!compiled.is_empty(), "Should compile at least one claim");
+    info!(
+        compiled_count = compiled.len(),
+        "Claims envelope lifecycle e2e test passed"
+    );
 
-    match result {
-        Ok(compiled) => {
-            assert!(!compiled.is_empty(), "Should compile at least one claim");
-            info!(
-                compiled_count = compiled.len(),
-                "Claims envelope lifecycle e2e test passed"
-            );
-        }
-        Err(e) => {
-            error!(error = %e, "Claims envelope lifecycle e2e test failed");
-            panic!("Claims envelope lifecycle e2e test failed: {}", e);
-        }
-    }
+    Ok(())
 }
 
 #[tokio::test]
-async fn e2e_full_supply_chain_integration_real_services() {
-    tracing_subscriber::fmt::init();
+async fn e2e_full_supply_chain_integration_real_services() -> Result<(), Box<dyn std::error::Error>>
+{
+    let _ = tracing_subscriber::fmt::try_init();
 
     let mut harness = SupplyChainE2EHarness::new().await;
-    let result = harness.test_full_supply_chain_integration_e2e().await;
+    harness.test_full_supply_chain_integration_e2e().await?;
+    info!("Full supply chain integration e2e test passed");
 
-    match result {
-        Ok(()) => {
-            info!("Full supply chain integration e2e test passed");
-        }
-        Err(e) => {
-            error!(error = %e, "Full supply chain integration e2e test failed");
-            panic!("Full supply chain integration e2e test failed: {}", e);
-        }
-    }
+    Ok(())
 }
 
 #[tokio::test]
 async fn e2e_registry_admission_error_paths_real_services() {
-    tracing_subscriber::fmt::init();
+    let _ = tracing_subscriber::fmt::try_init();
 
-    let mut harness = SupplyChainE2EHarness::new().await;
+    let _harness = SupplyChainE2EHarness::new().await;
 
     // Test invalid signature rejection
     // Implementation would test various error conditions with real services
@@ -779,9 +757,9 @@ async fn e2e_registry_admission_error_paths_real_services() {
 
 #[tokio::test]
 async fn e2e_claims_compilation_error_paths_real_services() {
-    tracing_subscriber::fmt::init();
+    let _ = tracing_subscriber::fmt::try_init();
 
-    let mut harness = SupplyChainE2EHarness::new().await;
+    let _harness = SupplyChainE2EHarness::new().await;
 
     // Test claim rejection scenarios
     // Implementation would test various error conditions with real services
@@ -791,18 +769,18 @@ async fn e2e_claims_compilation_error_paths_real_services() {
 
 #[tokio::test]
 async fn e2e_supply_chain_performance_under_load() {
-    tracing_subscriber::fmt::init();
+    let _ = tracing_subscriber::fmt::try_init();
 
-    let mut harness = SupplyChainE2EHarness::new().await;
+    let _harness = SupplyChainE2EHarness::new().await;
 
     // Test system performance under concurrent load
     let concurrent_operations = 10;
     let start_time = Instant::now();
 
-    let mut tasks = Vec::new();
-    for i in 0..concurrent_operations {
+    for operation_index in 0..concurrent_operations {
         // Implementation would spawn concurrent registry admissions and claims compilations
         // to test real service performance under load
+        debug!(operation_index = operation_index, "Observed load-test slot");
     }
 
     // Wait for all tasks to complete and verify timing/throughput
